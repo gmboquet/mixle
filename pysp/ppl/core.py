@@ -570,6 +570,45 @@ def ne(lhs, rhs) -> Constraint:
     return _make_constraint(lhs, "!=", rhs)
 
 
+class _Potential:
+    """A custom additive log-factor on the joint: ``fn(*values)`` evaluated at the current values of
+    ``vars`` and added to ``log p(data, theta)``. The PPL counterpart of Stan's ``target +=`` /
+    NumPyro's ``factor`` -- an arbitrary log-weight the standard distribution slots can't express
+    (a soft coupling, a custom log-prior, a regularizer)."""
+
+    __slots__ = ("fn", "vars", "name")
+
+    def __init__(self, fn, vars, name=None):
+        if not callable(fn):
+            raise TypeError("potential(fn, *vars): fn must be callable.")
+        self.fn = fn
+        self.vars = tuple(vars)
+        self.name = name
+
+    def __repr__(self) -> str:
+        return f"_Potential({self.name or '<fn>'}, vars={[getattr(v, 'name', v) for v in self.vars]})"
+
+
+def potential(fn, *vars, name=None) -> _Potential:
+    """Add a custom log-factor ``fn(*values)`` to a model's joint log-density.
+
+    ``vars`` are random-variable parameters of the model (named priors, or ``param(...)`` vector/matrix
+    handles) -- exactly the references a :func:`constrain`/:func:`eq` constraint may use. At each
+    inference evaluation they are resolved to their current values and passed to ``fn`` positionally;
+    ``fn`` returns a scalar log-weight that is added to ``log p(data, theta)``. Use it for anything the
+    distribution slots can't say directly: a soft coupling between two latents, a bespoke log-prior, a
+    penalty/regularizer::
+
+        a = Normal(0, 10, name="a"); b = Normal(0, 10, name="b")
+        m = Normal(a, 1.0).fit(data, potentials=potential(lambda av, bv: -0.5 * (av - bv) ** 2, a, b))
+
+    Pass one potential or a list via ``fit(..., potentials=...)``. Potentials route inference through the
+    numerical target (``how`` in ``map`` / ``mcmc`` / ``hmc`` / ``nuts`` / ``ensemble``; ``auto`` picks
+    ``map``); like constraints, every referenced variable must be a parameter of the fitted model.
+    """
+    return _Potential(fn, vars, name)
+
+
 # ----------------------------------------------------- differential / shape constraints
 # Constraints on the *shape* of a vector-valued RV / expression (a discretized function),
 # expressed through finite differences: the first difference governs monotonicity / smoothness,
@@ -1531,7 +1570,13 @@ class RandomVariable:
             and not all(_is_free(a) for a in self._args)
         )
         has_constraints = kw.get("constraints") is not None
+        has_potentials = kw.get("potentials") is not None
         struct_param = self._has_struct_param()
+        if has_potentials and how in ("em", "conjugate", "conjugate_mixture", "vi", "vmp"):
+            raise ValueError(
+                f"how={how!r} cannot apply a custom potential; use 'map', 'mcmc', 'hmc', 'nuts', or "
+                "'ensemble' (or how='auto')."
+            )
         if has_constraints and how in ("em", "conjugate", "conjugate_mixture", "vi", "vmp"):
             raise ValueError(
                 f"how={how!r} cannot honor inequality constraints; use 'map', 'mcmc', 'hmc', "
@@ -1540,8 +1585,8 @@ class RandomVariable:
         if how == "auto":
             if grouped:
                 how = "hierarchical"
-            elif has_constraints:
-                how = "map"  # constraints truncate the region; the conjugate paths can't
+            elif has_constraints or has_potentials:
+                how = "map"  # constraints/potentials need the numerical joint; the conjugate paths can't
             elif self._has_priors():
                 from pysp.ppl import inference as _inf
 

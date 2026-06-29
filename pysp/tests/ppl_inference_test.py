@@ -93,6 +93,52 @@ class PPLDeterministicExpressionTestCase(unittest.TestCase):
         self.assertAlmostEqual(pa.mean() + pb.mean(), 3.0, delta=0.3)
 
 
+class PPLPotentialTestCase(unittest.TestCase):
+    """A custom potential adds an arbitrary log-factor fn(*values) to the joint (Stan `target +=`)."""
+
+    def test_potential_pulls_map_estimate(self):
+        from pysp.ppl import potential
+
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(2.0, 1.0, 20))  # data alone -> mean ~2.6
+        a, b = Normal(0, 10, name="a"), Normal(8, 0.5, name="b")
+        base = Normal(a, 1.0).fit(data, how="map").params["mean"]
+        pulled = (
+            Normal(a, 1.0)
+            .fit(data, how="map", potentials=potential(lambda av, bv: -50.0 * (av - bv) ** 2, a, b))
+            .params["mean"]
+        )
+        self.assertGreater(pulled, base + 0.5)  # a strong coupling to b=8 drags the estimate up
+
+    def test_potential_introduces_auxiliary_latent(self):
+        from pysp.ppl import potential
+
+        rng = np.random.RandomState(1)
+        data = list(rng.normal(2.0, 1.0, 400))  # a is pinned near 2 by the data
+        a, b = Normal(0, 10, name="a"), Normal(5, 1, name="b")  # b appears ONLY in the potential
+        m = Normal(a, 1.0).fit(
+            data,
+            how="mcmc",
+            draws=2000,
+            burn=1000,
+            rng=np.random.RandomState(2),
+            potentials=potential(lambda av, bv: -8.0 * (av - bv) ** 2, a, b),
+        )
+        # b is a real auxiliary latent with its own posterior, pulled from its prior mean (5) toward a (~2)
+        pb = m.posterior(b)
+        self.assertEqual(len(pb), 2000)
+        self.assertLess(float(np.mean(pb)), 4.0)
+        self.assertGreater(float(np.mean(pb)), 2.0)
+
+    def test_potential_rejected_for_closed_form_how(self):
+        from pysp.ppl import potential
+
+        data = list(np.random.RandomState(3).normal(0.0, 1.0, 100))
+        a = Normal(0, 10, name="a")
+        with self.assertRaises(ValueError):
+            Normal(a, 1.0).fit(data, how="conjugate", potentials=potential(lambda av: -(av**2), a))
+
+
 class PPLHMCTestCase(unittest.TestCase):
     def test_hmc_recovers_and_mixes(self):
         rng = np.random.RandomState(0)

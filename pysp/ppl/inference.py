@@ -41,6 +41,7 @@ from pysp.ppl.core import (
     _eval_expr,
     _expr_leaves,
     _OrderedSpec,
+    _Potential,
     _row_mask,
     _SimplexSpec,
     _VectorSpec,
@@ -193,13 +194,18 @@ def _require_flat(rv: RandomVariable):
     return rv._family
 
 
-def _slots_of(rv: RandomVariable, fam) -> tuple[list[_Slot], dict[int, tuple]]:
+def _slots_of(rv: RandomVariable, fam, extra_latents=()) -> tuple[list[_Slot], dict[int, tuple]]:
     """Collect the latent slots of a flat model, plus deterministic-expression bindings.
 
     Returns ``(slots, det_bindings)``. ``det_bindings`` maps a family arg position whose argument is a
     *deterministic expression* over latents (``Normal(a + b, sigma)``) to ``(expr, [(leaf, slot_index)])``:
     the leaves are sampled as ordinary slots and the arg's value is recomputed from them via
     ``_eval_expr`` at build time. Positions absent from ``det_bindings`` are ordinary prior/free slots.
+
+    ``extra_latents`` are random variables that participate in the joint only through a custom
+    :func:`~pysp.ppl.core.potential` (an auxiliary latent the likelihood does not touch). Each that is
+    not already a model parameter is added as a sampled slot (real support) so the potential can
+    reference it.
     """
     slots: list[_Slot] = []
     nested = [len(rv._args)]  # synthetic, build-ignored indices for hierarchical hyperparameters
@@ -256,6 +262,11 @@ def _slots_of(rv: RandomVariable, fam) -> tuple[list[_Slot], dict[int, tuple]]:
             add_prior(a, i, fam.support[i])
         elif a is free:
             slots.append(_Slot(i, None, fam.positive[i], f"arg{i}", None, fam.support[i]))
+    # Auxiliary latents that enter only through a custom potential: add any not already a slot handle.
+    present = {id(s.handle) for s in slots if s.handle is not None}
+    for lv in extra_latents:
+        if id(lv) not in present and id(lv) not in leaf_slot:
+            add_leaf(lv, "real")
     if not slots:
         raise ValueError("model has no `free`/prior parameters to infer.")
     return slots, det_bindings
@@ -499,16 +510,33 @@ def _composite_target_parts(rv: RandomVariable, data):
     return None, slots, build, unpack, (dmean, dstd)
 
 
-def _target_parts(rv: RandomVariable, data):
+def _potential_latents(potentials) -> tuple:
+    """Unique RVs referenced by ``potentials`` (an auxiliary latent may appear only here)."""
+    if potentials is None:
+        return ()
+    if isinstance(potentials, _Potential):
+        potentials = [potentials]
+    out, seen = [], set()
+    for p in potentials:
+        for v in p.vars:
+            if id(v) not in seen:
+                seen.add(id(v))
+                out.append(v)
+    return tuple(out)
+
+
+def _target_parts(rv: RandomVariable, data, extra_latents=()):
     """Encoder-free pieces shared by the numerical and autograd targets:
     (fam, slots, build, unpack, (dmean, dstd)). Building the pysp encoder is deferred to
     callers that need it (the autograd path scores the raw data tensor and never does)."""
     if rv._kind == "sample" and (isinstance(rv._family, CompositeFamily) or any(_is_struct_spec(a) for a in rv._args)):
         # composites, and flat leaves with a vector/matrix parameter (Dirichlet alpha,
         # Categorical probs), use the general collect/rebuild target.
+        if extra_latents:
+            raise NotImplementedError("custom potentials are supported on flat models only (not composites) for now.")
         return _composite_target_parts(rv, data)
     fam = _require_flat(rv)
-    slots, det_bindings = _slots_of(rv, fam)
+    slots, det_bindings = _slots_of(rv, fam, extra_latents)
     arr = np.asarray(data, dtype=float)
     _fin = arr[np.isfinite(arr)]  # ignore NaN (missing) when seeding the init point
     dmean = float(_fin.mean()) if _fin.size else 0.0
@@ -538,9 +566,9 @@ def _target_parts(rv: RandomVariable, data):
     return fam, slots, build, unpack, (dmean, dstd)
 
 
-def _build_target(rv: RandomVariable, data):
+def _build_target(rv: RandomVariable, data, extra_latents=()):
     """Return (log_target(u), slots, fam, build, unpack, (dmean,dstd)) for unconstrained u."""
-    fam, slots, build, unpack, (dmean, dstd) = _target_parts(rv, data)
+    fam, slots, build, unpack, (dmean, dstd) = _target_parts(rv, data, extra_latents)
     if fam is not None:
         enc = _encoder_for(fam).seq_encode(list(data))
     else:  # composite: encode through a concrete instance built at the initial point
@@ -1017,6 +1045,46 @@ def _soft_penalty(constraints, slots, weight):
     return penalty
 
 
+def _potential_term(potentials, slots):
+    """Compile custom potentials into an additive ``term(u) -> float`` over the model's parameter slots.
+
+    Each :class:`~pysp.ppl.core._Potential` resolves its ``vars`` (named prior RVs or ``param(...)``
+    handles, exactly like constraint leaves) to their current values and adds ``fn(*values)`` to the
+    joint log-target -- the same wrapping shape as :func:`_soft_penalty`, so the late-bound numerical
+    gradient picks it up too. Returns ``None`` when there are no potentials.
+    """
+    if potentials is None:
+        return None
+    if isinstance(potentials, _Potential):
+        potentials = [potentials]
+    potentials = list(potentials)
+    if not potentials:
+        return None
+    groups = _handle_groups(slots)
+    for p in potentials:
+        for v in p.vars:
+            if id(v) not in groups:
+                raise ValueError(
+                    "a potential references an RV that is not a parameter of this model; reference a "
+                    "scalar prior (a slot with a prior) or a param(...) handle that is also passed to the "
+                    "model -- as with constraints."
+                )
+
+    def term(u):
+        vals = _vals_from_u(slots, u)
+        total = 0.0
+        for p in potentials:
+            args = []
+            for v in p.vars:
+                handle, idxs = groups[id(v)]
+                spec = _spec_of(handle)
+                args.append(_spec_assemble(spec, [vals[i] for i in idxs]) if spec is not None else vals[idxs[0]])
+            total += float(p.fn(*args))
+        return total
+
+    return term
+
+
 def _penalize_target(log_target, penalty):
     """Add a smooth penalty term to a log-target (soft constraints)."""
     if penalty is None:
@@ -1204,7 +1272,7 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
 
 
 # ----------------------------- sampler setup + the general how= drivers (MCMC, MAP, VI)
-def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=False, missing="error"):
+def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=False, missing="error", potentials=None):
     """Shared sampler setup: build the joint log-target (analytic-Torch when available, else the
     numeric encoder target), optionally its gradient, then layer on constraints/penalty.
 
@@ -1221,8 +1289,15 @@ def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=Fal
         feasible = None if soft is not None else _feasibility(constraints, slots)
         log_target = _constrain_target(log_target, feasible)
         log_target = _penalize_target(log_target, soft)
+        log_target = _penalize_target(log_target, _potential_term(potentials, slots))
         return log_target, grad, slots, build, dmean, dstd, feasible
-    ag = None if (numpy_only or eff is not None) else _ag.grad_target(rv, data, missing=missing)
+    # A custom potential is scored on the numerical target (no autograd graph for an arbitrary fn), so
+    # force the encoder target when one is present -- exactly as a soft penalty does.
+    ag = (
+        None
+        if (numpy_only or eff is not None or potentials is not None)
+        else _ag.grad_target(rv, data, missing=missing)
+    )
     if ag is None and missing == "marginalize":
         raise NotImplementedError(
             "missing='marginalize' on this path needs the Torch autograd target (flat model, no "
@@ -1233,7 +1308,7 @@ def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=Fal
         log_target = ag.log_target
         grad = ag.grad if want_grad else None
     else:
-        log_target, slots, _fam, build, _unpack, (dmean, dstd) = _build_target(rv, data)
+        log_target, slots, _fam, build, _unpack, (dmean, dstd) = _build_target(rv, data, _potential_latents(potentials))
         grad = None
         if want_grad:
             eps = 1e-5 * np.maximum(np.abs(_init_u(slots, dmean, dstd)), 1.0)
@@ -1253,6 +1328,7 @@ def _prepare_target(rv, data, constraints, penalty, *, want_grad, numpy_only=Fal
     feasible = None if soft is not None else _feasibility(constraints, slots)
     log_target = _constrain_target(log_target, feasible)
     log_target = _penalize_target(log_target, soft)
+    log_target = _penalize_target(log_target, _potential_term(potentials, slots))
     return log_target, grad, slots, build, dmean, dstd, feasible
 
 
@@ -1266,6 +1342,7 @@ def ensemble_fit(
     walkers: int | None = None,
     constraints=None,
     penalty=None,
+    potentials=None,
     rng=None,
     chains: int = 1,
     parallel: bool = False,
@@ -1285,15 +1362,15 @@ def ensemble_fit(
     if rng is None:
         rng = np.random.RandomState()
     log_target, _grad, slots, build, dmean, dstd, feasible = _prepare_target(
-        rv, data, constraints, penalty, want_grad=False, numpy_only=True
+        rv, data, constraints, penalty, want_grad=False, numpy_only=True, potentials=potentials
     )
     d = len(slots)
     if walkers is None:
         walkers = max(2 * (d + 1), 8)
     if walkers % 2:
         walkers += 1
-    if constraints is not None:
-        parallel = False  # process workers rebuild the target without the constraint/penalty closure
+    if constraints is not None or potentials is not None:
+        parallel = False  # process workers rebuild the target without the constraint/penalty/potential closure
 
     def run_one(seed):
         crng = np.random.RandomState(seed)
@@ -1325,6 +1402,7 @@ def mcmc_fit(
     parallel: bool = False,
     constraints=None,
     penalty=None,
+    potentials=None,
     missing: str = "error",
 ) -> RandomVariable:
     from pysp.inference.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
@@ -1332,13 +1410,13 @@ def mcmc_fit(
     if rng is None:
         rng = np.random.RandomState()
     log_target, _grad, slots, build, dmean, dstd, feasible = _prepare_target(
-        rv, data, constraints, penalty, want_grad=False, missing=missing
+        rv, data, constraints, penalty, want_grad=False, missing=missing, potentials=potentials
     )
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)
-    if constraints is not None:
-        parallel = False  # constraint/penalty closures do not survive process pickling
+    if constraints is not None or potentials is not None:
+        parallel = False  # constraint/penalty/potential closures do not survive process pickling
     init_scale = (scale * np.ones(len(u0))) if scale is not None else _init_scale(slots, dstd, len(data))
 
     def run_one(seed):
@@ -1368,6 +1446,7 @@ def hmc_fit(
     parallel: bool = False,
     constraints=None,
     penalty=None,
+    potentials=None,
     missing: str = "error",
 ) -> RandomVariable:
     """Hamiltonian Monte Carlo over the parameter posterior.
@@ -1383,13 +1462,13 @@ def hmc_fit(
     if rng is None:
         rng = np.random.RandomState()
     log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
-        rv, data, constraints, penalty, want_grad=True, missing=missing
+        rv, data, constraints, penalty, want_grad=True, missing=missing, potentials=potentials
     )
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)
-    if constraints is not None:
-        parallel = False  # constraint/penalty closures do not survive process pickling
+    if constraints is not None or potentials is not None:
+        parallel = False  # constraint/penalty/potential closures do not survive process pickling
     mass = 1.0 / (_init_scale(slots, dstd, len(data)) ** 2)  # precondition: M ~ inverse posterior cov
     if step_size is None:
         step_size = 2.5 / num_steps  # tuned: acc~0.98, near-max ESS (preconditioned)
@@ -1429,6 +1508,7 @@ def nuts_fit(
     parallel: bool = False,
     constraints=None,
     penalty=None,
+    potentials=None,
     missing: str = "error",
 ) -> RandomVariable:
     """No-U-Turn Sampler over the parameter posterior — auto-tuned HMC (trajectory length +
@@ -1443,13 +1523,13 @@ def nuts_fit(
     if rng is None:
         rng = np.random.RandomState()
     log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
-        rv, data, constraints, penalty, want_grad=True, missing=missing
+        rv, data, constraints, penalty, want_grad=True, missing=missing, potentials=potentials
     )
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)
-    if constraints is not None:
-        parallel = False  # constraint/penalty closures do not survive process pickling
+    if constraints is not None or potentials is not None:
+        parallel = False  # constraint/penalty/potential closures do not survive process pickling
     mass = 1.0 / (_init_scale(slots, dstd, len(data)) ** 2)  # precondition ~ inverse posterior cov
 
     def run_one(seed):
@@ -1483,13 +1563,15 @@ def sample_fit(rv: RandomVariable, data, **kw) -> RandomVariable:
     return ensemble_fit(rv, data, **kw) if d <= 12 else nuts_fit(rv, data, **kw)
 
 
-def map_fit(rv: RandomVariable, data, *, rng=None, constraints=None, penalty=None, missing="error") -> RandomVariable:
+def map_fit(
+    rv: RandomVariable, data, *, rng=None, constraints=None, penalty=None, potentials=None, missing="error"
+) -> RandomVariable:
     from scipy.optimize import minimize
 
     from pysp.ppl import autograd as _ag
 
-    g = _ag.grad_target(rv, data, missing=missing)
-    if g is None and missing == "marginalize":
+    g = None if potentials is not None else _ag.grad_target(rv, data, missing=missing)
+    if g is None and missing == "marginalize" and potentials is None:
         raise NotImplementedError(
             "missing='marginalize' needs the Torch autograd target (flat model, no constraints); for this "
             "model build it with pysp.stats.marginalized() leaves."
@@ -1507,11 +1589,12 @@ def map_fit(rv: RandomVariable, data, *, rng=None, constraints=None, penalty=Non
         return RandomVariable._bound(g.build(vals), name=rv._name)
 
     # derivative-free path (no Torch, an unsupported family, or a constrained / penalized region)
-    log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+    log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data, _potential_latents(potentials))
     soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
     # penalty=... enforces the constraints softly (a log-joint term), so it replaces hard rejection.
     feasible = None if soft is not None else _feasibility(constraints, slots)
     log_target = _penalize_target(log_target, soft)
+    log_target = _penalize_target(log_target, _potential_term(potentials, slots))
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, np.random.RandomState() if rng is None else rng)
