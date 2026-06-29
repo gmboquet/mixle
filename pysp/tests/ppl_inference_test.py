@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from pysp.ppl import Bernoulli, Beta, Exponential, Gamma, Normal, Poisson, free
+from pysp.ppl import Bernoulli, Beta, Exponential, Field, Gamma, Normal, Poisson, free
 from pysp.ppl.inference import ConjugatePosterior
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
@@ -159,6 +159,41 @@ class PPLPotentialTestCase(unittest.TestCase):
         a = Normal(0, 10, name="a")
         with self.assertRaises(ValueError):
             Normal(a, 1.0).fit(data, how="conjugate", potentials=potential(lambda av: -(av**2), a))
+
+
+class PPLIndexedLatentTestCase(unittest.TestCase):
+    """A data-indexed latent vector theta[Field('g')] is fit per-observation (MAP)."""
+
+    def test_recovers_latent_vector(self):
+        rng = np.random.RandomState(0)
+        K = 6
+        theta_true = rng.normal(0.0, 5.0, K)
+        labels = rng.randint(0, K, 500)
+        y = rng.normal(theta_true[labels], 0.7)
+        theta = free(K, name="theta")
+        m = Normal(theta[Field("g")], free).fit(y, given={"g": labels})
+        est = m.result.latents["theta"]
+        self.assertEqual(est.shape, (K,))
+        self.assertLess(float(np.max(np.abs(est - theta_true))), 0.6)
+        np.testing.assert_array_equal(m.result.group_means, est)  # single-vector alias
+
+    def test_gather_in_expression(self):
+        rng = np.random.RandomState(1)
+        K = 5
+        theta_true = rng.normal(0.0, 3.0, K)
+        labels = rng.randint(0, K, 400)
+        y = rng.normal(theta_true[labels] + 10.0, 0.7)  # gather composed with a constant offset
+        theta = free(K, name="theta")
+        m = Normal(theta[Field("g")] + 10.0, free).fit(y, given={"g": labels})
+        self.assertLess(float(np.max(np.abs(m.result.latents["theta"] - theta_true))), 0.6)
+
+    def test_requires_index_covariate(self):
+        rng = np.random.RandomState(2)
+        labels = rng.randint(0, 3, 30)
+        y = rng.normal(0.0, 1.0, 30)
+        theta = free(3, name="theta")
+        with self.assertRaises(ValueError):
+            Normal(theta[Field("g")], free).fit(y)  # no given
 
 
 class PPLHMCTestCase(unittest.TestCase):
