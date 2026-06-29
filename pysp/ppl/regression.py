@@ -203,8 +203,12 @@ def _design(columns, given):
         if field is not None:
             n = len(np.asarray(given[field.name]).reshape(-1))
             break
+    if n is None:  # intercept-only fixed part (e.g. a random-effects-only model): size from given
+        for arr in (given or {}).values():
+            n = len(np.asarray(arr).reshape(-1))
+            break
     if n is None:
-        raise ValueError("need at least one covariate to size the design matrix.")
+        raise ValueError("need at least one covariate or a given= array to size the design matrix.")
     mat = []
     for _, field in est:
         mat.append(np.ones(n) if field is None else np.asarray(given[field.name], float).reshape(-1))
