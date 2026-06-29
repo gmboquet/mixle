@@ -10,7 +10,7 @@ import ast
 import unittest
 from pathlib import Path
 
-PYSP_ROOT = Path(__file__).resolve().parent.parent  # .../mixle
+MIXLE_ROOT = Path(__file__).resolve().parent.parent  # .../mixle
 
 
 def _imports_ppl(path: Path) -> bool:
@@ -27,8 +27,8 @@ def _imports_ppl(path: Path) -> bool:
 class PplSeparationTest(unittest.TestCase):
     def test_no_core_module_imports_ppl(self):
         offenders = []
-        for path in PYSP_ROOT.rglob("*.py"):
-            rel = path.relative_to(PYSP_ROOT)
+        for path in MIXLE_ROOT.rglob("*.py"):
+            rel = path.relative_to(MIXLE_ROOT)
             parts = rel.parts
             if parts[0] in ("ppl", "tests"):  # the PPL layer and the tests may import ppl
                 continue

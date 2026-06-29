@@ -32,9 +32,9 @@ jobs:
           python -m pip install -e ".[lint]"
       # ruff is enforced: the tree is formatted and lint-clean under the rules in pyproject.toml.
       - name: ruff format --check
-        run: ruff format --check pysp
+        run: ruff format --check mixle
       - name: ruff check
-        run: ruff check pysp
+        run: ruff check mixle
       # mypy stays advisory until the type-checking backlog is addressed (config in pyproject.toml).
       - name: mypy
         continue-on-error: true
@@ -97,4 +97,4 @@ jobs:
       - name: Run optional tests
         run: python -m pytest -m "optional or torch or numba or jax" -n auto
       - name: Run gated two-rank torchrun smoke
-        run: PYSPARKPLUG_RUN_TORCHRUN_SMOKE=1 python -m pytest pysp/tests/torchrun_encoded_data_test.py -q
+        run: MIXLE_RUN_TORCHRUN_SMOKE=1 python -m pytest mixle/tests/torchrun_encoded_data_test.py -q

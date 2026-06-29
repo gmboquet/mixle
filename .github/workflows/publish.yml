@@ -4,13 +4,13 @@ name: Publish
 # stored as secrets. Publishing to PyPI runs only when a GitHub Release is published; a manual
 # workflow_dispatch can build-and-check (and optionally push to TestPyPI) without touching PyPI.
 #
-# The PyPI distribution name is "pysp-learn" (the import package is still `pysp`); the GitHub repo
-# is gmboquet/pysparkplug.
+# The PyPI distribution name is "mixle" (the import package is still `mixle`); the GitHub repo
+# is gmboquet/mixle.
 # One-time setup (PyPI side, done by the maintainer):
-#   1. Confirm the project name "pysp-learn" is available or owned by you (https://pypi.org/project/pysp-learn/).
-#   2. On PyPI, add a Trusted Publisher for the "pysp-learn" project (a "pending" publisher if it
+#   1. Confirm the project name "mixle" is available or owned by you (https://pypi.org/project/mixle/).
+#   2. On PyPI, add a Trusted Publisher for the "mixle" project (a "pending" publisher if it
 #      does not exist yet):
-#        Owner: gmboquet   Repository: pysparkplug
+#        Owner: gmboquet   Repository: mixle
 #        Workflow: publish.yml   Environment: pypi
 #      and likewise a TestPyPI pending publisher with Environment: testpypi if you want the test path.
 #   3. (Optional) Create GitHub Environments named "pypi" and "testpypi" with any protection rules.
