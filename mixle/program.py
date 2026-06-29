@@ -183,11 +183,11 @@ class Program:
 def _as_program(p: Any) -> Program:
     if isinstance(p, Program):
         return p
-    if isinstance(p, (Move, EMMove)):
-        return Program([p])
     if isinstance(p, (list, tuple)):
         return Program(list(p))
-    raise TypeError("expected a Move / EMMove / Program / list, got %r" % type(p))
+    if hasattr(p, "_step"):  # any move: Move / EMMove / StreamingEMMove / ParetoMove
+        return Program([p])
+    raise TypeError("expected a Move / Program / list, got %r" % type(p))
 
 
 def alternate(*items: Any) -> Program:
@@ -308,7 +308,7 @@ def fit(
             if isinstance(m, Move):
                 if m.params:
                     m._step(optimizers[id(m)])
-            elif isinstance(m, EMMove):
+            else:  # EMMove / StreamingEMMove and any other stats move
                 m._step()
 
     if data is None:
@@ -434,3 +434,133 @@ def fisher_diagonal(net: Any, batches: Iterable, kind: str = "classification") -
             f += p.grad.detach() ** 2
         n += int(out.shape[0]) if hasattr(out, "shape") and out.dim() > 0 else 1
     return [f / max(n, 1) for f in fisher]
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Meta-learning: bilevel (the inner adaptation is differentiated through -- MAML).
+# ---------------------------------------------------------------------------------------------------------
+def bilevel(
+    model: Any,
+    inner_loss: Callable[[Callable, Any], Any],
+    outer_loss: Callable[[Callable, Any], Any],
+    sample_tasks: Callable[[], Iterable[tuple]],
+    inner_steps: int = 1,
+    inner_lr: float = 0.01,
+) -> Move:
+    """Meta-learning (MAML): meta-learn ``model``'s params so a few inner gradient steps adapt to a task.
+
+    ``sample_tasks()`` yields ``(support, query)`` batches; ``inner_loss(forward, support)`` and
+    ``outer_loss(forward, query)`` return scalars, where ``forward(x)`` runs the model with the *current*
+    (adapted) parameters. The returned move's objective differentiates **through** the inner adaptation
+    (second-order), so ``fit(bilevel(...), steps=N)`` is MAML; ``fit`` minimizes the query loss over the
+    meta-parameters.
+    """
+    torch = _torch()
+    from torch.func import functional_call
+
+    names = [n for n, p in model.named_parameters() if p.requires_grad]
+
+    def outer_objective() -> Any:
+        meta = {n: p for n, p in model.named_parameters() if p.requires_grad}
+        total = None
+        count = 0
+        for support, query in sample_tasks():
+            adapted = dict(meta)
+            for _ in range(int(inner_steps)):
+                loss = inner_loss(lambda x, a=adapted: functional_call(model, a, x), support)
+                grads = torch.autograd.grad(loss, list(adapted.values()), create_graph=True)
+                adapted = {n: adapted[n] - inner_lr * g for n, g in zip(names, grads)}
+            q = outer_loss(lambda x, a=adapted: functional_call(model, a, x), query)
+            total = q if total is None else total + q
+            count += 1
+        return total / max(count, 1)
+
+    return minimize(outer_objective, over=trainable(model))
+
+
+# ---------------------------------------------------------------------------------------------------------
+# True multi-objective: MGDA -- step along the minimum-norm common-descent direction (Pareto).
+# ---------------------------------------------------------------------------------------------------------
+def _mgda_weights(grads: list, torch: Any) -> list:
+    """Frank-Wolfe for the min-norm point in the convex hull of the per-objective gradients (MGDA)."""
+    n = len(grads)
+    if n == 1:
+        return [1.0]
+    flat = [torch.cat([g.flatten() for g in gi]) for gi in grads]
+    gram = torch.stack([torch.stack([(a * b).sum() for b in flat]) for a in flat])  # (n, n)
+    alpha = torch.ones(n) / n
+    for _ in range(50):
+        t = int(torch.argmin(gram @ alpha))  # vertex with steepest descent of alpha^T M alpha
+        e = torch.zeros(n)
+        e[t] = 1.0
+        d = e - alpha
+        denom = float(d @ gram @ d)
+        gamma = float(torch.clamp(-(alpha @ gram @ d) / (denom + 1e-12), 0.0, 1.0)) if denom > 1e-12 else 0.0
+        if gamma <= 1e-9:
+            break
+        alpha = alpha + gamma * d
+    return [float(a) for a in alpha]
+
+
+class ParetoMove(Move):
+    """A move that steps along the MGDA common-descent direction -- decreases every objective at once."""
+
+    def __init__(self, objectives: Sequence[Callable[[], Any]], params: Iterable, lr: float | None = None) -> None:
+        super().__init__(objective=lambda: None, params=params, sign=+1.0, lr=lr)
+        self.objectives = list(objectives)
+
+    def _step(self, optimizer: Any) -> float:
+        torch = _torch()
+        grads = []
+        for obj in self.objectives:
+            optimizer.zero_grad()
+            obj().backward()
+            grads.append([(p.grad.detach().clone() if p.grad is not None else torch.zeros_like(p)) for p in self.params])
+        alpha = _mgda_weights(grads, torch)
+        optimizer.zero_grad()
+        for j, p in enumerate(self.params):
+            p.grad = sum(alpha[i] * grads[i][j] for i in range(len(grads)))
+        optimizer.step()
+        return 0.0
+
+
+def pareto(objectives: Sequence[Callable[[], Any]], over: Iterable, lr: float | None = None) -> Program:
+    """Multi-objective optimization with NO fixed weights: each step descends all objectives at once (MGDA)."""
+    return Program([ParetoMove(objectives, over, lr)])
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Streaming EM: a stats model that continually adapts over a chunk stream (alongside neural moves).
+# ---------------------------------------------------------------------------------------------------------
+class StreamingEMMove:
+    """Online EM over a :class:`Stream`: each round, warm-started EM iterations on the current chunk.
+
+    Composes in ``fit(data=stream)`` next to gradient moves, so a stats model and a neural net adapt to the
+    same stream together (the LLM<->stats continual-coupling case). ``move.model`` is the current fit.
+    """
+
+    def __init__(self, estimator: Any, stream: Stream, init: Any, iters_per_chunk: int = 1) -> None:
+        self.estimator = estimator
+        self.stream = stream
+        self.iters_per_chunk = int(iters_per_chunk)
+        self._state = _ModelState(init)
+
+    @property
+    def model(self) -> Any:
+        return self._state.model
+
+    def _step(self) -> None:
+        from mixle.inference import estimate
+
+        chunk = self.stream.current
+        if chunk is None:
+            return
+        m = self._state.model
+        for _ in range(self.iters_per_chunk):
+            m = estimate(chunk, self.estimator, m)
+        self._state.model = m
+
+
+def streaming_em(estimator: Any, stream: Stream, init: Any, iters_per_chunk: int = 1) -> StreamingEMMove:
+    """A stats EM move that continually adapts over a chunk stream (use inside ``fit(data=stream)``)."""
+    return StreamingEMMove(estimator, stream, init, iters_per_chunk)

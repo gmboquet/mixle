@@ -12,6 +12,7 @@ import numpy as np
 from mixle.program import (
     Stream,
     alternate,
+    bilevel,
     constrain,
     em,
     ewc,
@@ -20,8 +21,10 @@ from mixle.program import (
     lora,
     maximize,
     minimize,
+    pareto,
     reinforce,
     snapshot,
+    streaming_em,
     trainable,
     weighted,
 )
@@ -178,7 +181,60 @@ class ContinuousPretrainingTest(unittest.TestCase):
         self.assertLess(mse(ewc_net, xat, yat), 0.7 * mse(naive, xat, yat))  # EWC retains A much better
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class MetaAndMultiObjectiveTest(unittest.TestCase):
+    def test_bilevel_meta_learns_the_optimal_init(self):
+        # MAML on a trivial model: meta-learn theta so ONE inner step solves "reach target c". Optimum = mean(c).
+        torch.manual_seed(0)
+
+        class Scalar(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.theta = torch.nn.Parameter(torch.zeros(1))
+
+            def forward(self, x):
+                return self.theta
+
+        model = Scalar()
+        dummy = torch.zeros(1, 1)
+        targets = [torch.tensor([1.0]), torch.tensor([3.0]), torch.tensor([8.0])]  # mean 4.0
+
+        def sample_tasks():
+            return [((dummy, c), (dummy, c)) for c in targets]
+
+        loss = lambda forward, batch: ((forward(batch[0]) - batch[1]) ** 2).mean()
+        fit(bilevel(model, loss, loss, sample_tasks, inner_steps=1, inner_lr=0.1), steps=400, lr=0.1)
+        self.assertAlmostEqual(model.theta.item(), 4.0, places=1)  # grad-through-grad found the meta-optimal init
+
+    def test_pareto_mgda_descends_every_objective(self):
+        # MGDA: no fixed weights -- step decreases BOTH ||theta-a||^2 and ||theta-b||^2 from a dominated start.
+        torch.manual_seed(0)
+        theta = torch.zeros(2, requires_grad=True)
+        a = torch.tensor([1.0, 1.0])
+        b = torch.tensor([4.0, 0.0])
+        f1, f2 = lambda: ((theta - a) ** 2).sum(), lambda: ((theta - b) ** 2).sum()
+        v1_0, v2_0 = f1().item(), f2().item()
+        fit(pareto([f1, f2], over=[theta]), steps=600, lr=0.05)
+        self.assertLess(f1().item(), v1_0)  # both objectives reduced
+        self.assertLess(f2().item(), v2_0)
+        self.assertTrue(0.9 <= theta[0].item() <= 4.1)  # landed on the Pareto segment between a and b
+
+
 class ProgramEMBridgeTest(unittest.TestCase):
+    def test_streaming_em_continually_adapts_over_a_stream(self):
+        from mixle.stats import MixtureDistribution, MixtureEstimator
+        from mixle.stats import MultivariateGaussianDistribution as MVN
+
+        rng = np.random.RandomState(0)
+        chunk = lambda: [list(rng.randn(2)) for _ in range(50)] + [list(rng.randn(2) + 6.0) for _ in range(50)]
+        stream = Stream([chunk() for _ in range(8)])
+        est = MixtureEstimator([MVN(np.zeros(2), np.eye(2)).estimator() for _ in range(2)])
+        init = MixtureDistribution([MVN(np.array([1.0, 1.0]), np.eye(2)), MVN(np.array([3.0, 3.0]), np.eye(2))], [0.5, 0.5])
+        move = streaming_em(est, stream, init, iters_per_chunk=2)
+        fit(move, data=stream, steps_per_chunk=1)  # consume the stream; the stats model adapts online
+        held = chunk()
+        self.assertGreater(sum(move.model.log_density(x) for x in held), sum(init.log_density(x) for x in held))
+
     def test_em_step_is_a_move(self):
         from mixle.stats import MixtureDistribution, MixtureEstimator
         from mixle.stats import MultivariateGaussianDistribution as MVN
