@@ -1599,6 +1599,8 @@ class RandomVariable:
                 return "conjugate", "a registered conjugate prior -> exact closed-form posterior"
             if _inf.conjugate_mixture_spec(self) is not None:
                 return "conjugate_mixture", "a mixture of conjugate priors -> exact closed-form posterior"
+            if _inf.stats_conjugate_supported(self):
+                return "conjugate", "a closed-form conjugate exponential family -> exact posterior"
             return "map", "priors present but no registered closed form -> MAP (a point estimate)"
         if partial_free or struct_param:
             return "map", "a structural vector/matrix parameter or a fixed+free mix -> MAP"

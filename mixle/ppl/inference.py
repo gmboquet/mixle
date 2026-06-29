@@ -2102,11 +2102,121 @@ def _nig_conjugate_fit(rv, data, *, mu0=0.0, kappa=0.0, alpha=1.0, beta=0.0) -> 
     return RandomVariable._bound(fitted, name=rv._name, result=cpost)
 
 
+# ------------------------------------------------ general exp-family conjugate bridge
+# Rather than hand-code each posterior, delegate to mixle.stats.bayes.conjugate.conjugate_posterior --
+# the exp-family-map-derived machinery that already gives closed-form posteriors for ~19 likelihood
+# families (Bernoulli/Binomial/Geometric/Poisson/Exponential/Categorical/Gaussian/Gamma/InverseGamma/
+# InverseGaussian/Pareto/NegativeBinomial/VonMises/Rayleigh/HalfNormal/...). The PPL side only has to
+# (a) recognize the "one prior slot, the rest known" shape, (b) translate the prior RV's params into the
+# family's hyperparameter dict, and (c) wrap the returned posterior. New conjugate families become
+# available in how='auto' with no new posterior math here -- the derivation lives in the exp-family map.
+
+# prior RV family -> its natural-hyperparameter dict (keyed as the stats builders read them)
+_PRIOR_DICT_BUILDERS = {
+    "Beta": lambda a: {"a": float(a[0]), "b": float(a[1])},
+    "Gamma": lambda a: {"shape": float(a[0]), "rate": float(a[1])},
+    "InverseGamma": lambda a: {"a": float(a[0]), "b": float(a[1])},
+}
+
+
+def _prior_to_dict(prior_rv):
+    builder = _PRIOR_DICT_BUILDERS.get(prior_rv._family.name)
+    try:
+        return builder(prior_rv._args) if builder is not None else None
+    except Exception:
+        return None
+
+
+def _prior_placeholder(prior_rv):
+    """A valid value for the likelihood's target slot (only the dist *type* + known params matter to
+    conjugate_posterior; this just has to let make_dist succeed). A draw from the prior is in-domain."""
+    try:
+        d = prior_rv._family.make_dist(tuple(prior_rv._args), prior_rv._name)
+        return float(np.ravel(d.sampler(seed=0).sample(1))[0])
+    except Exception:
+        return 1.0
+
+
+def _stats_conjugate_probe(rv):
+    """Return (slot_index, prior_rv, stats_likelihood) when ``rv`` is a single-prior-slot conjugate the
+    stats machinery recognizes, with a known prior->hyperparameter mapping; else None. No data needed."""
+    if rv._kind != "sample" or isinstance(rv._family, CompositeFamily):
+        return None
+    prior_slots = [(i, a) for i, a in enumerate(rv._args) if isinstance(a, RandomVariable)]
+    if len(prior_slots) != 1 or any(a is free for a in rv._args):
+        return None
+    idx, prior_rv = prior_slots[0]
+    if prior_rv._kind != "sample" or isinstance(prior_rv._family, CompositeFamily):
+        return None
+    if _prior_to_dict(prior_rv) is None:
+        return None
+    try:
+        ph = _prior_placeholder(prior_rv)
+        probe_args = tuple(ph if i == idx else rv._args[i] for i in range(len(rv._args)))
+        stats_dist = rv._family.make_dist(probe_args, rv._name)
+    except Exception:
+        return None
+    from mixle.stats.bayes.conjugate import is_conjugate_family
+
+    return (idx, prior_rv, stats_dist) if is_conjugate_family(stats_dist) else None
+
+
+def stats_conjugate_supported(rv) -> bool:
+    """True if the general exp-family conjugate bridge can fit ``rv`` (used by how='auto' routing)."""
+    return _stats_conjugate_probe(rv) is not None
+
+
+def _stats_conjugate_fit(rv: RandomVariable, data, *, prior_override=None):
+    probe = _stats_conjugate_probe(rv)
+    if probe is None:
+        return None
+    idx, prior_rv, stats_dist = probe
+    from mixle.stats.bayes.conjugate import conjugate_posterior
+
+    prior_dict = prior_override if prior_override else _prior_to_dict(prior_rv)
+    arr = np.asarray(data, dtype=float)
+    try:
+        sp = conjugate_posterior(stats_dist, arr, prior=prior_dict)
+        mean_dict = sp.mean()
+    except Exception:
+        return None
+    if len(mean_dict) != 1:  # single-target conjugates only (joint NIG / NIW handled elsewhere)
+        return None
+    key = next(iter(mean_dict))
+    name = prior_rv.name or f"arg{idx}"
+    entry = {
+        "index": idx,
+        "handle": prior_rv,
+        "name": getattr(sp, "family", "conjugate"),
+        "mean": float(np.ravel(mean_dict[key])[0]),
+        "hyper": sp.hyper() if hasattr(sp, "hyper") else {},
+        "sample": lambda k, rng: np.ravel(sp.sample(int(k), rng)[key]),
+    }
+    cpost = ConjugatePosterior({name: entry})
+
+    def predictive(n, rng):
+        vals = np.ravel(sp.sample(int(n), rng)[key])
+        out = []
+        for v in vals:
+            args = [v if i == idx else rv._args[i] for i in range(len(rv._args))]
+            d = rv._family.make_dist(tuple(args), rv._name)
+            out.append(d.sampler(seed=int(rng.randint(1, 2**31))).sample())
+        return np.asarray(out)
+
+    cpost.predictive = predictive
+    return RandomVariable._bound(sp.point_estimate(), name=rv._name, result=cpost)
+
+
 def conjugate_fit(rv: RandomVariable, data, *, prior=None, **_) -> RandomVariable:
     if _is_all_free_normal(rv):  # Normal(free, free) -> Normal-Inverse-Gamma (mean + variance unknown)
         return _nig_conjugate_fit(rv, data, **(prior or {}))
     spec = conjugate_spec(rv)
     if spec is None:
+        # not in the hand-written table -> try the general exp-family bridge (delegates to the
+        # exp-family-map-derived stats conjugate machinery, covering many more families)
+        bridged = _stats_conjugate_fit(rv, data, prior_override=prior)
+        if bridged is not None:
+            return bridged
         raise NotImplementedError("model is not a registered conjugate pair.")
     builder, idx, prior_rv = spec
     fam = rv._family
