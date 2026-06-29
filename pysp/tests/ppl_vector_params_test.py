@@ -79,9 +79,20 @@ class LeafVectorParameterTestCase(unittest.TestCase):
         self.assertAlmostEqual(float(p.sum()), 1.0, places=6)  # on the simplex
         self.assertTrue(np.allclose(p, [0.5, 0.3, 0.2], atol=0.05))
 
-    def test_categorical_free_needs_dim(self):
-        with self.assertRaises(ValueError):
-            Categorical(free)
+    def test_categorical_free_infers_categories_from_data(self):
+        # Categorical(free) needs no dim=: CategoricalEstimator discovers the categories (and their
+        # count) from the data by maximum likelihood.
+        data = ["a", "b", "a", "c", "a", "b", "b", "c", "a", "a"]
+        m = Categorical(free).fit(data)
+        p = m.dist.pmap
+        self.assertAlmostEqual(sum(p.values()), 1.0, places=6)
+        self.assertEqual(set(p), {"a", "b", "c"})
+        self.assertAlmostEqual(p["a"], 0.5, places=6)
+
+    def test_categorical_free_dim_keeps_simplex_param(self):
+        # dim= still selects the explicit simplex-parameter treatment for the Bayesian routes.
+        data = [0, 1, 2, 1, 0, 0, 2, 1, 0, 0]
+        Categorical(free, dim=3).fit(data, how="map")  # constructs the simplex spec; must not raise
 
     def test_dirichlet_alpha_vector(self):
         rng = np.random.RandomState(0)

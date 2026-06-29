@@ -60,7 +60,9 @@ def Dirichlet(
 ) -> RandomVariable:
     """Dirichlet over a simplex; used as a prior on Categorical probabilities (VMP). The
     concentration ``alpha`` is also an inferable parameter: ``Dirichlet(free, dim=K)`` estimates
-    a positive ``K``-vector from observed simplex data via ``how='mcmc'|'ensemble'|'map'``."""
+    a positive ``K``-vector from observed simplex data via ``how='mcmc'|'ensemble'|'map'``. Unlike
+    ``Categorical``, the dimension is required -- ``DirichletEstimator`` is defined over a fixed
+    ``K``-simplex, so it cannot be inferred from the data the way category labels can."""
     if alpha is free:
         if dim is None:
             raise ValueError("Dirichlet(free, dim=K) needs the dimension dim.")
@@ -186,11 +188,11 @@ def Categorical(
     probs: Any, *, dim: int | None = None, name: str | None = None, keys: str | None = None
 ) -> RandomVariable:
     """Categorical from a probability dict {value: p} or a list of probabilities. The probability
-    vector is also an inferable simplex parameter: ``Categorical(free, dim=K)`` estimates the K
-    category probabilities (on the simplex) via ``how='mcmc'|'ensemble'|'map'``."""
-    if probs is free:
-        if dim is None:
-            raise ValueError("Categorical(free, dim=K) needs the number of categories dim.")
+    vector is also an inferable parameter. ``Categorical(free)`` learns the category probabilities
+    by maximum likelihood, discovering the categories (and their count) from the data -- no ``dim=``
+    needed; pass ``dim=K`` to request the explicit simplex-parameter treatment for
+    ``how='mcmc'|'ensemble'|'map'``."""
+    if probs is free and dim is not None:
         probs = _SimplexSpec(np.ones(int(dim)), rows=1, name="p")
     return RandomVariable._sample("Categorical", (probs,), name=name, keys=keys)
 
