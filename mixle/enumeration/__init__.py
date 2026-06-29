@@ -44,11 +44,14 @@ from mixle.enumeration.algorithms import (
     sound_top_k,
     supports_enumeration,
 )
+
+# --- count / threshold / unrank for arbitrary autoregressive (next_logprobs) models ---
+from mixle.enumeration.autoregressive import AutoregressiveEnumerable, autoregressive_count_index
 from mixle.enumeration.density_rank import DensityRankResult, density_rank
 
 # --- exact descending-probability enumeration of HMM state paths (list-Viterbi / A*) ---
 from mixle.enumeration.hmm_paths import hmm_best_paths
-from mixle.enumeration.model_enumeration import quantized_best_first_decode
+from mixle.enumeration.model_enumeration import best_first_decode, quantized_best_first_decode
 
 # --- the count-budget seek / unrank index + the count semiring (rank-by-index machinery) ---
 from mixle.enumeration.quantization.core import count_budget_index
@@ -89,6 +92,10 @@ __all__ = [
     "ProductEnumerator",
     "sound_top_k",
     "quantized_best_first_decode",
+    "best_first_decode",
+    # autoregressive (next_logprobs) models: count / threshold / unrank
+    "AutoregressiveEnumerable",
+    "autoregressive_count_index",
     # HMM path enumeration (non-decomposable family, served by A* not the count index)
     "hmm_best_paths",
 ]
