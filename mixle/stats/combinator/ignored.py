@@ -32,9 +32,13 @@ class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
     """Distribution wrapper that assigns zero log-density while preserving an estimator interface."""
 
     def compute_capabilities(self):
-        from mixle.stats.compute.capabilities import capabilities_for
+        from dataclasses import replace
 
-        return capabilities_for(self.dist)
+        from mixle.stats.compute.capabilities import capabilities_for, delegated_engine_ready
+
+        child = capabilities_for(self.dist)
+        # cap delegated caps to composition-safe engines (kernel verified on numpy/torch only)
+        return replace(child, engine_ready=delegated_engine_ready(child.engine_ready))
 
     def compute_declaration(self):
         from mixle.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for

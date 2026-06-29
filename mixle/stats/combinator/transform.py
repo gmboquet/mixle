@@ -194,11 +194,17 @@ class TransformDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def compute_capabilities(self):
-        from mixle.stats.compute.capabilities import DistributionCapabilities, capabilities_for
+        from mixle.stats.compute.capabilities import (
+            DistributionCapabilities,
+            capabilities_for,
+            delegated_engine_ready,
+        )
 
         child = capabilities_for(self.dist)
+        # cap delegated caps to composition-safe engines: a leaf-only engine (e.g. jax) does not
+        # propagate through the transform kernel until it is verified there
         return DistributionCapabilities(
-            engine_ready=child.engine_ready,
+            engine_ready=delegated_engine_ready(child.engine_ready),
             kernel_status=child.kernel_status,
             numpy_only_reason=child.numpy_only_reason,
         )

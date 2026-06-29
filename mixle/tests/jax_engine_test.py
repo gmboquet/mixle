@@ -96,5 +96,54 @@ class JaxEngineTest(unittest.TestCase):
         self.assertTrue(np.allclose(self.je.to_numpy(grad), [2.0, 4.0, 6.0]))
 
 
+@unittest.skipUnless(_HAS_JAX, "jax not installed")
+class JaxLeafFittingParityTest(unittest.TestCase):
+    """The leaf families that declare jax (engine_ready=(...,'jax')) fit on JaxEngine with a result
+    identical to the host numpy fit: scoring runs on jax (jit-able), the E-step accumulation round-trips
+    through host numpy, so parity is exact. Guards both the declarations and the parity contract."""
+
+    def _parity(self, proto, data, grid):
+        from mixle.inference import optimize
+
+        jf = optimize(data, proto.estimator(), engine=JaxEngine(), max_its=15, out=None)
+        nf = optimize(data, proto.estimator(), max_its=15, out=None)
+        je = jf.dist_to_encoder().seq_encode(grid)
+        ne = nf.dist_to_encoder().seq_encode(grid)
+        diff = float(np.max(np.abs(np.asarray(jf.seq_log_density(je)) - np.asarray(nf.seq_log_density(ne)))))
+        self.assertLess(diff, 1e-6)
+
+    def test_declared_leaf_families_fit_on_jax_with_parity(self):
+        import mixle.stats as S
+
+        rng = np.random.RandomState(0)
+        self._parity(S.GaussianDistribution(0, 1), list(rng.normal(3, 2, 4000)), list(np.linspace(-2, 8, 40)))
+        self._parity(S.PoissonDistribution(1.0), list(rng.poisson(4, 4000).astype(float)), list(np.arange(0, 15.0)))
+        self._parity(S.ExponentialDistribution(1.0), list(rng.exponential(2, 4000)), list(np.linspace(0.1, 10, 40)))
+        self._parity(S.GammaDistribution(1, 1), list(rng.gamma(3, 2, 4000)), list(np.linspace(0.1, 20, 40)))
+        self._parity(S.BernoulliDistribution(0.5), list(rng.binomial(1, 0.3, 4000).astype(float)), [0.0, 1.0])
+        self._parity(S.LogGaussianDistribution(0, 1), list(rng.lognormal(1, 0.5, 4000)), list(np.linspace(0.1, 20, 40)))
+
+    def test_jit_scoring_matches_numpy(self):
+        # JaxEngine(compile=True) jit-compiles the scoring kernel; the jit'd result must match numpy.
+        import mixle.stats as S
+
+        eng = JaxEngine(compile=True)
+        x = np.random.RandomState(1).randn(2000)
+        f = eng.compile(
+            lambda xx: S.GaussianDistribution.backend_log_density_from_params(
+                xx, eng.asarray(0.5), eng.asarray(2.0), eng
+            )
+        )
+        got = np.asarray(eng.to_numpy(f(eng.asarray(x))))
+        ref = np.asarray(
+            NUMPY_ENGINE.to_numpy(
+                S.GaussianDistribution.backend_log_density_from_params(
+                    NUMPY_ENGINE.asarray(x), NUMPY_ENGINE.asarray(0.5), NUMPY_ENGINE.asarray(2.0), NUMPY_ENGINE
+                )
+            )
+        )
+        self.assertTrue(np.allclose(got, ref, atol=1e-6))
+
+
 if __name__ == "__main__":
     unittest.main()
