@@ -19,9 +19,7 @@ class BlackboxLaplaceTest(unittest.TestCase):
         comp = S.CompositeDistribution((S.GaussianDistribution(1.5, 4.0), S.PoissonDistribution(3.0)))
         u0, rebuild = _flatten(comp)
         back, _ = rebuild(u0)
-        self.assertTrue(
-            np.allclose([back.dists[0].mu, back.dists[0].sigma2, back.dists[1].lam], [1.5, 4.0, 3.0])
-        )
+        self.assertTrue(np.allclose([back.dists[0].mu, back.dists[0].sigma2, back.dists[1].lam], [1.5, 4.0, 3.0]))
 
     def test_calibrated_on_gaussian_mean(self):
         rng = np.random.RandomState(0)

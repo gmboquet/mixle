@@ -33,9 +33,7 @@ except ImportError:  # networkx is an optional extra; the module stays importabl
 
 def _require_networkx() -> None:
     if nx is None:
-        raise ImportError(
-            "The graph-grammar models require networkx. Install it with `pip install mixle[grammar]`."
-        )
+        raise ImportError("The graph-grammar models require networkx. Install it with `pip install mixle[grammar]`.")
 
 
 from mixle.engines.arithmetic import *

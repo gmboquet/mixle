@@ -61,11 +61,7 @@ def freeze(module: Any) -> Any:
 
 def subset(module: Any, *name_substrings: str) -> list:
     """Trainable parameters whose name contains any of ``name_substrings`` (partial fine-tuning)."""
-    return [
-        p
-        for n, p in module.named_parameters()
-        if p.requires_grad and any(s in n for s in name_substrings)
-    ]
+    return [p for n, p in module.named_parameters() if p.requires_grad and any(s in n for s in name_substrings)]
 
 
 class LoRALinear:
@@ -515,7 +511,9 @@ class ParetoMove(Move):
         for obj in self.objectives:
             optimizer.zero_grad()
             obj().backward()
-            grads.append([(p.grad.detach().clone() if p.grad is not None else torch.zeros_like(p)) for p in self.params])
+            grads.append(
+                [(p.grad.detach().clone() if p.grad is not None else torch.zeros_like(p)) for p in self.params]
+            )
         alpha = _mgda_weights(grads, torch)
         optimizer.zero_grad()
         for j, p in enumerate(self.params):

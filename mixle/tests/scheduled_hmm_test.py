@@ -83,8 +83,10 @@ class ScheduledHMMTest(unittest.TestCase):
         truth = SHMM(
             np.array([[0.7, 0.3], [0.5, 0.5]]),
             np.array([[[0.8, 0.2], [0.3, 0.7]], [[0.6, 0.4], [0.4, 0.6]]]),
-            [[Cat(0, [0.7, 0.1, 0.1, 0.1]), Cat(0, [0.1, 0.7, 0.1, 0.1])],
-             [Cat(0, [0.1, 0.1, 0.7, 0.1]), Cat(0, [0.1, 0.1, 0.1, 0.7])]],
+            [
+                [Cat(0, [0.7, 0.1, 0.1, 0.1]), Cat(0, [0.1, 0.7, 0.1, 0.1])],
+                [Cat(0, [0.1, 0.1, 0.7, 0.1]), Cat(0, [0.1, 0.1, 0.1, 0.7])],
+            ],
             ByRelativePosition(2),
             len_dist=DCat({6: 0.5, 8: 0.5}),
         )
@@ -92,7 +94,9 @@ class ScheduledHMMTest(unittest.TestCase):
         held = truth.sampler(99).sample(200)
 
         def fit(schedule, iters=12):
-            est = ScheduledHMMEstimator(k, schedule, Cat(0, [0.25] * v).estimator(), DCat({6: 0.5, 8: 0.5}).estimator(), pseudo_count=0.2)
+            est = ScheduledHMMEstimator(
+                k, schedule, Cat(0, [0.25] * v).estimator(), DCat({6: 0.5, 8: 0.5}).estimator(), pseudo_count=0.2
+            )
             acc = est.accumulator_factory().make()
             acc.seq_initialize(data, np.ones(len(data)), np.random.RandomState(1))
             model, lls = est.estimate(None, acc.value()), []
@@ -111,17 +115,29 @@ class ScheduledHMMTest(unittest.TestCase):
     def test_length_conditional_beats_homogeneous(self):
         # Short and long sequences have different emission alphabets -> a ByLength schedule captures it.
         k, v = 2, 4
-        short = SHMM(np.array([[0.5, 0.5]]), np.array([[[0.5, 0.5], [0.5, 0.5]]]),
-                     [[Cat(0, [0.8, 0.1, 0.05, 0.05]), Cat(0, [0.1, 0.8, 0.05, 0.05])]], Homogeneous(), len_dist=DCat({3: 1.0}))
-        long = SHMM(np.array([[0.5, 0.5]]), np.array([[[0.5, 0.5], [0.5, 0.5]]]),
-                    [[Cat(0, [0.05, 0.05, 0.8, 0.1]), Cat(0, [0.05, 0.05, 0.1, 0.8])]], Homogeneous(), len_dist=DCat({9: 1.0}))
+        short = SHMM(
+            np.array([[0.5, 0.5]]),
+            np.array([[[0.5, 0.5], [0.5, 0.5]]]),
+            [[Cat(0, [0.8, 0.1, 0.05, 0.05]), Cat(0, [0.1, 0.8, 0.05, 0.05])]],
+            Homogeneous(),
+            len_dist=DCat({3: 1.0}),
+        )
+        long = SHMM(
+            np.array([[0.5, 0.5]]),
+            np.array([[[0.5, 0.5], [0.5, 0.5]]]),
+            [[Cat(0, [0.05, 0.05, 0.8, 0.1]), Cat(0, [0.05, 0.05, 0.1, 0.8])]],
+            Homogeneous(),
+            len_dist=DCat({9: 1.0}),
+        )
         rng = np.random.RandomState(3)
         data = short.sampler(0).sample(200) + long.sampler(1).sample(200)
         rng.shuffle(data)
         held = short.sampler(5).sample(100) + long.sampler(6).sample(100)
 
         def fit(schedule, iters=10):
-            est = ScheduledHMMEstimator(k, schedule, Cat(0, [0.25] * v).estimator(), DCat({3: 0.5, 9: 0.5}).estimator(), pseudo_count=0.2)
+            est = ScheduledHMMEstimator(
+                k, schedule, Cat(0, [0.25] * v).estimator(), DCat({3: 0.5, 9: 0.5}).estimator(), pseudo_count=0.2
+            )
             acc = est.accumulator_factory().make()
             acc.seq_initialize(data, np.ones(len(data)), np.random.RandomState(2))
             model = est.estimate(None, acc.value())
