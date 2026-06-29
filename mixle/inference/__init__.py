@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from mixle.capability import ConjugateUpdatable
 from mixle.inference import production
+from mixle.inference.blackbox import LaplacePosterior, laplace_posterior
 
 # calibration diagnostics — "is my probability / interval actually calibrated?"
 from mixle.inference.calibration import (
@@ -225,6 +226,8 @@ __all__ = [
     "jit_seq_log_density",
     "jit_em_mixture",
     "JittedScorer",
+    "laplace_posterior",
+    "LaplacePosterior",
     "fit",
     "EMStep",
     "best_of",
