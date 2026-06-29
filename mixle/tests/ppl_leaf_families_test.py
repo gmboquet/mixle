@@ -175,6 +175,17 @@ class ConjugatePairsTestCase(unittest.TestCase):
         self.assertIsInstance(m.result, ConjugatePosterior)
         self.assertAlmostEqual(float(m.result.mean("rate")), 2.0, delta=0.1)
 
+    def test_negbinomial_beta(self):
+        from mixle.ppl import NegativeBinomial
+
+        rng = np.random.RandomState(6)
+        data = list(rng.negative_binomial(5, 0.4, 4000).astype(float))  # r=5 successes, success prob 0.4
+        from mixle.ppl.inference import ConjugatePosterior
+
+        m = NegativeBinomial(5, Beta(2.0, 2.0, name="p")).fit(data)  # known r, Beta prior on p -> conjugate
+        self.assertIsInstance(m.result, ConjugatePosterior)
+        self.assertAlmostEqual(float(m.result.mean("p")), 0.4, delta=0.03)
+
     def test_categorical_dirichlet(self):
         rng = np.random.RandomState(2)
         true = np.array([0.2, 0.3, 0.5])

@@ -1935,6 +1935,23 @@ def _conj_categorical_dirichlet(prior_args, fixed, stats, handle, index):
     }
 
 
+def _conj_negbinomial_beta(prior_args, fixed, stats, handle, index):
+    # NegativeBinomial(r known, p) with p ~ Beta(a, b); x = failure counts. Likelihood ~ p^(r n)(1-p)^(sum x)
+    # -> posterior p ~ Beta(a + r*n, b + sum_x).
+    a, b = float(prior_args[0]), float(prior_args[1])
+    r = float(fixed[0])  # known successes (slot 0)
+    n, sx = stats["n"], stats["sum"]
+    A, B = a + r * n, b + sx
+    return {
+        "index": index,
+        "handle": handle,
+        "name": "Beta",
+        "mean": A / (A + B),
+        "hyper": {"a": A, "b": B},
+        "sample": lambda k, rng: rng.beta(A, B, k),
+    }
+
+
 def _conj_gamma_rate(prior_args, fixed, stats, handle, index):
     # Gamma(shape=k known, rate=r) with r ~ Gamma(a, b) [shape a, rate b]; sufficient stat = sum_x.
     # Posterior rate ~ Gamma(a + n*k, b + sum_x).
@@ -1995,6 +2012,7 @@ _CONJUGATE = {
     ("Geometric", 0, "Beta"): _conj_geometric_beta,
     ("Categorical", 0, "Dirichlet"): _conj_categorical_dirichlet,  # K-category counts -> Dirichlet posterior
     ("Gamma", 1, "Gamma"): _conj_gamma_rate,  # known shape, Gamma prior on the rate
+    ("NegativeBinomial", 1, "Beta"): _conj_negbinomial_beta,  # known r, Beta prior on success prob
 }
 
 
