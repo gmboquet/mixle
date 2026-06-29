@@ -15,6 +15,7 @@ import unittest
 import numpy as np
 
 from mixle.enumeration import AutoregressiveEnumerable, autoregressive_count_index
+from mixle.enumeration.autoregressive import _ar_count_index_fast
 from mixle.enumeration.quantization.core import Quantizer, count_budget_index
 
 
@@ -191,6 +192,34 @@ class AutoregressiveEnumerableTest(unittest.TestCase):
         )
         self.assertFalse(truncated)
         self.assertEqual(index.total(), self.N)
+
+    def test_fast_path_matches_reference_bit_for_bit(self):
+        # The numpy/int64 fast path is identical to the arbitrary-precision Python reference: same histogram
+        # counts and the same unranked value at every (fine bucket, offset).
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, oversample=16)
+        self.assertTrue(ar._use_fast())
+        q = Quantizer(oversample=16)
+        ref, rt = autoregressive_count_index(
+            lambda p: sorted(self.next_logprobs(p), key=lambda u: -u[1]), (), _LEN, q, 10**9
+        )
+        fast, ft = _ar_count_index_fast(ar._steps_np, (), _LEN, q, 10**9)
+        self.assertEqual((ref.total(), rt), (fast.total(), ft))
+        for fb in range(fast.hist.base, fast.hist.base + len(fast.hist.data)):
+            self.assertEqual(ref.hist.count_at(fb), fast.hist.count_at(fb))
+            for off in range(fast.hist.count_at(fb)):
+                self.assertEqual(ref.get_in_bucket(fb, off), fast.get_in_bucket(fb, off))
+
+    def test_batched_prefetch_matches_unbatched(self):
+        # Batched forward prefetch yields an identical index (same forwards, same unrank) to one-at-a-time.
+        def batch(prefixes):
+            return [self.next_logprobs(p) for p in prefixes]
+
+        plain = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, oversample=64)
+        batched = AutoregressiveEnumerable(
+            self.next_logprobs, max_len=_LEN, oversample=64, batch_next_logprobs=batch, batch_size=4
+        )
+        self.assertEqual([plain.unrank(i) for i in range(self.N)], [batched.unrank(i) for i in range(self.N)])
+        self.assertEqual(len(plain._cache), len(batched._cache))
 
 
 if __name__ == "__main__":
