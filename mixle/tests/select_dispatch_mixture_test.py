@@ -14,7 +14,7 @@ import numpy as np
 
 import mixle.stats as stats
 from mixle.inference import estimate
-from mixle.stats.combinator.select import SelectDistribution
+from mixle.stats.combinator.select import SelectDistribution, TypeDispatch
 from mixle.stats.latent.mixture import MixtureDistribution
 from mixle.utils.serialization import register_serializable_callable
 
@@ -115,6 +115,80 @@ class SelectDispatchMixtureTestCase(unittest.TestCase):
         self.assertIs(loaded.choice_function, _route_by_type)
         self.assertAlmostEqual(loaded.log_density("a"), sel.log_density("a"))
         self.assertAlmostEqual(loaded.log_density(5), sel.log_density(5))
+
+
+class ByTypeAutoRoutingTestCase(unittest.TestCase):
+    """SelectDistribution.by_type derives the routing from each child's type -- no hand-written
+    (and registered) choice function needed."""
+
+    def test_by_type_routes_and_scores_without_a_hand_written_router(self):
+        sel = SelectDistribution.by_type(
+            [(str, stats.CategoricalDistribution({"a": 0.6, "b": 0.4})), (int, stats.PoissonDistribution(3.0))]
+        )
+        pois = stats.PoissonDistribution(3.0)
+        # default 'auto' weights are uniform, so each branch carries log(0.5)
+        self.assertAlmostEqual(sel.log_density("a"), math.log(0.5) + math.log(0.6))
+        self.assertAlmostEqual(sel.log_density(5), math.log(0.5) + pois.log_density(5))
+
+    def test_numpy_scalars_route_correctly(self):
+        # isinstance(np.int64(5), int) is False; the router must still send it to the int child.
+        sel = SelectDistribution.by_type(
+            [(str, stats.CategoricalDistribution({"a": 1.0})), (int, stats.PoissonDistribution(3.0))]
+        )
+        self.assertEqual(sel.choice_function(np.int64(5)), 1)
+        self.assertEqual(sel.choice_function(np.str_("a")), 0)
+
+    def test_friendly_number_name_catches_int_and_float(self):
+        sel = SelectDistribution.by_type(
+            [("str", stats.CategoricalDistribution({"x": 1.0})), ("number", stats.GaussianDistribution(0.0, 1.0))]
+        )
+        self.assertEqual(sel.choice_function(3), 1)
+        self.assertEqual(sel.choice_function(3.5), 1)
+        self.assertEqual(sel.choice_function(np.float64(2.0)), 1)
+        self.assertEqual(sel.choice_function("x"), 0)
+
+    def test_by_type_fit_is_zero_ceremony(self):
+        rng = np.random.RandomState(0)
+        train = list(rng.choice(["a", "b", "c"], size=700, p=[0.5, 0.3, 0.2]))
+        train += list(rng.poisson(4.0, size=300).astype(int))
+        rng.shuffle(train)
+        sel = SelectDistribution.by_type(
+            [
+                (str, stats.CategoricalDistribution({"a": 0.34, "b": 0.33, "c": 0.33})),
+                (int, stats.PoissonDistribution(1.0)),
+            ]
+        )
+        fit = estimate(train, sel.estimator())  # estimate_weights defaults on because weights are set
+        self.assertTrue(np.allclose(fit.weights, [0.7, 0.3], atol=0.03))
+        self.assertAlmostEqual(fit.dists[1].lam, 4.0, delta=0.2)
+
+    def test_by_type_serializes_without_manual_registration(self):
+        sel = SelectDistribution.by_type(
+            [(str, stats.CategoricalDistribution({"a": 0.6, "b": 0.4})), (int, stats.PoissonDistribution(3.0))],
+            weights=[0.7, 0.3],
+        )
+        loaded = SelectDistribution.from_json(sel.to_json())
+        self.assertEqual(loaded.choice_function, sel.choice_function)
+        self.assertTrue(np.allclose(loaded.weights, [0.7, 0.3]))
+        self.assertAlmostEqual(loaded.log_density("a"), sel.log_density("a"))
+        self.assertAlmostEqual(loaded.log_density(7), sel.log_density(7))
+
+    def test_typedispatch_unknown_type_and_no_match_raise(self):
+        with self.assertRaises(ValueError):
+            TypeDispatch([dict])  # unsupported type object
+        with self.assertRaises(ValueError):
+            TypeDispatch(["frobnicate"])  # unknown alias name
+        router = TypeDispatch([str, int])
+        with self.assertRaises(ValueError):
+            router(3.5)  # a float matches neither str nor (integral) int
+
+    def test_weightless_by_type(self):
+        sel = SelectDistribution.by_type(
+            [(str, stats.CategoricalDistribution({"a": 1.0})), (int, stats.PoissonDistribution(3.0))],
+            weights=None,
+        )
+        self.assertIsNone(sel.weights)
+        self.assertAlmostEqual(sel.log_density("a"), 0.0)  # log p(a)=log 1, no weight offset
 
 
 class MixtureDisjointTypeGuardTestCase(unittest.TestCase):

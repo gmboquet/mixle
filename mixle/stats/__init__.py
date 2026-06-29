@@ -470,6 +470,7 @@ __all__ = [
     "PointMassEnumerator",
     "SelectDistribution",
     "SelectEstimator",
+    "TypeDispatch",
     "SelectEnumerator",
     "SequenceDistribution",
     "SequenceSampler",
@@ -893,7 +894,7 @@ from mixle.stats.combinator.record import (
     record,
     record_estimator,
 )
-from mixle.stats.combinator.select import SelectDistribution, SelectEnumerator, SelectEstimator
+from mixle.stats.combinator.select import SelectDistribution, SelectEnumerator, SelectEstimator, TypeDispatch
 from mixle.stats.combinator.sequence import (
     SequenceDataEncoder,
     SequenceDistribution,

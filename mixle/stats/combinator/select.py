@@ -17,6 +17,8 @@ the observations routed to it.
 
 from __future__ import annotations
 
+import functools
+import numbers
 from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
@@ -36,11 +38,100 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.utils.serialization import register_serializable_class
 
 T = TypeVar("T")
 
 
 from mixle.inference.fisher import EmpiricalMetricFixedFisherView, to_fisher
+
+# Friendly type-name aliases -> numpy-aware isinstance predicate tuples, so routing a "number" also
+# catches numpy scalars (isinstance(np.int64(5), int) is False, but it is a numbers.Number).
+_TYPE_ALIASES: dict[str, tuple[type, ...]] = {
+    "str": (str, np.str_),
+    "string": (str, np.str_),
+    "bytes": (bytes, np.bytes_),
+    "bool": (bool, np.bool_),
+    "int": (numbers.Integral,),
+    "integer": (numbers.Integral,),
+    "float": (float, np.floating),
+    "real": (numbers.Real,),
+    "complex": (complex, np.complexfloating),
+    "number": (numbers.Number,),
+    "numeric": (numbers.Number,),
+}
+# Canonical alias name for the common Python type objects, so by_type([(str, ...), (int, ...)]) works.
+_TYPE_OBJECT_NAMES: dict[type, str] = {
+    str: "str",
+    bytes: "bytes",
+    bool: "bool",
+    int: "int",
+    float: "float",
+    complex: "complex",
+}
+
+
+def _normalize_type_spec(spec: Any) -> tuple[str, ...]:
+    """Normalize one child's type spec (a type, an alias name, or a tuple thereof) to alias names."""
+    items = spec if isinstance(spec, (tuple, list)) else (spec,)
+    names: list[str] = []
+    for it in items:
+        if isinstance(it, str):
+            key = it.lower()
+            if key not in _TYPE_ALIASES:
+                raise ValueError("unknown type name %r; known names: %s" % (it, sorted(_TYPE_ALIASES)))
+            names.append(key)
+        elif isinstance(it, type) and it in _TYPE_OBJECT_NAMES:
+            names.append(_TYPE_OBJECT_NAMES[it])
+        else:
+            raise ValueError(
+                "type spec entries must be a known type (%s) or a type name (%s); got %r -- pass an "
+                "explicit choice_function for anything else"
+                % (", ".join(t.__name__ for t in _TYPE_OBJECT_NAMES), ", ".join(sorted(_TYPE_ALIASES)), it)
+            )
+    return tuple(names)
+
+
+@functools.cache
+def _resolve_alias_group(names: tuple[str, ...]) -> tuple[type, ...]:
+    out: tuple[type, ...] = ()
+    for n in names:
+        out += _TYPE_ALIASES[n]
+    return out
+
+
+@register_serializable_class
+class TypeDispatch:
+    """Serializable choice function that routes an observation to a child by its Python type.
+
+    ``specs[i]`` declares the type(s) that child ``i`` emits; an observation routes to the FIRST child
+    it is an instance of. Specs are friendly names ('str', 'int', 'float', 'number', 'bytes', 'bool',
+    'complex') or the matching Python type objects, with numpy scalar types handled automatically.
+    Because its state is just those names, it round-trips through JSON with no manual registration --
+    unlike a hand-written lambda choice function. Order matters: put more specific types first (e.g.
+    'bool' before 'int', since a bool is also an integer).
+    """
+
+    def __init__(self, specs: Sequence[Any]) -> None:
+        self.specs = tuple(_normalize_type_spec(s) for s in specs)
+
+    def __call__(self, x: Any) -> int:
+        for i, names in enumerate(self.specs):
+            if isinstance(x, _resolve_alias_group(names)):
+                return i
+        raise ValueError(
+            "TypeDispatch: observation of type %r matches none of the child type specs %r"
+            % (type(x).__name__, self.specs)
+        )
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, TypeDispatch) and other.specs == self.specs
+
+    def __hash__(self) -> int:
+        return hash(self.specs)
+
+    def __str__(self) -> str:
+        return "TypeDispatch(" + ", ".join("|".join(g) for g in self.specs) + ")"
 
 
 def _child_accumulator_factory(estimator: ParameterEstimator) -> StatisticAccumulatorFactory:
@@ -122,6 +213,42 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
             self.weights = w / total
             with np.errstate(divide="ignore"):
                 self.log_weights = np.log(self.weights)
+
+    @classmethod
+    def by_type(
+        cls,
+        children: Sequence[tuple[Any, SequenceEncodableProbabilityDistribution]],
+        weights: Any = "auto",
+    ) -> SelectDistribution:
+        """Build a dispatch mixture that routes observations to children by their Python type.
+
+        The friendly constructor for heterogeneous-typed data: instead of hand-writing (and
+        registering) a choice function, pass each child with the type(s) it emits and the routing is
+        derived automatically via a serializable :class:`TypeDispatch`.
+
+        Example -- a mixture of strings and counts::
+
+            sel = SelectDistribution.by_type([(str, cat), (int, poisson)])
+            fitted = estimate(mixed_data, sel.estimator())   # learns branch weights + each child
+
+        Args:
+            children: Sequence of ``(type_spec, distribution)`` pairs. ``type_spec`` is a type
+                (``str``, ``int``, ``float``, ...), a friendly name (``'str'``, ``'number'``,
+                ``'float'``, ``'bytes'``, ``'bool'``, ``'complex'``), or a tuple of these.
+                Observations route to the FIRST matching child, so order more specific types first.
+            weights: ``'auto'`` (default) seeds uniform branch weights, giving a fittable generative
+                dispatch mixture whose ``.estimator()`` learns the true proportions; ``None`` gives the
+                weightless conditional density; or pass an explicit weight sequence.
+
+        Returns:
+            SelectDistribution routing by a TypeDispatch choice function.
+        """
+        specs = [c[0] for c in children]
+        dists = [c[1] for c in children]
+        router = TypeDispatch(specs)
+        if isinstance(weights, str) and weights == "auto":
+            weights = [1.0 / len(dists)] * len(dists)
+        return cls(dists, router, weights=weights)
 
     def compute_capabilities(self):
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
