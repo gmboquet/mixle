@@ -884,7 +884,7 @@ import sys  # noqa: E402
 import tempfile  # noqa: E402
 import threading  # noqa: E402
 
-_CACHE_DIR = os.environ.get("PYSP_FUSED_CACHE_DIR") or os.path.join(tempfile.gettempdir(), "pysp_fused_cache")
+_CACHE_DIR = os.environ.get("MIXLE_FUSED_CACHE_DIR") or os.path.join(tempfile.gettempdir(), "mixle_fused_cache")
 _NJIT_LOCK = threading.Lock()
 
 

@@ -78,8 +78,8 @@ class TorchRunEncodedDataTestCase(unittest.TestCase):
         self.assertTrue(all(device.engine == "torch" for device in resources.devices))
 
     def test_torchrun_two_rank_smoke(self):
-        if os.environ.get("PYSPARKPLUG_RUN_TORCHRUN_SMOKE") != "1":
-            self.skipTest("set PYSPARKPLUG_RUN_TORCHRUN_SMOKE=1 to launch a local two-rank torchrun smoke test")
+        if os.environ.get("MIXLE_RUN_TORCHRUN_SMOKE") != "1":
+            self.skipTest("set MIXLE_RUN_TORCHRUN_SMOKE=1 to launch a local two-rank torchrun smoke test")
         script = r"""
 import io
 import os
