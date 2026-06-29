@@ -564,3 +564,56 @@ class StreamingEMMove:
 def streaming_em(estimator: Any, stream: Stream, init: Any, iters_per_chunk: int = 1) -> StreamingEMMove:
     """A stats EM move that continually adapts over a chunk stream (use inside ``fit(data=stream)``)."""
     return StreamingEMMove(estimator, stream, init, iters_per_chunk)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Inverse RL: learn the OBJECTIVE (reward) from demonstrations -- compositions of the combinators above.
+# ---------------------------------------------------------------------------------------------------------
+def gail(
+    discriminator: Callable[[Any], Any],
+    sample_expert: Callable[[], Any],
+    sample_policy: Callable[[], tuple],
+    disc_params: Iterable,
+    policy_params: Iterable,
+) -> Program:
+    """GAIL / adversarial inverse RL = ``alternate(minimize(disc_loss), maximize(reinforce(policy)))``.
+
+    Recover an expert's behavior (and a reward) from demonstrations alone. ``discriminator(features) -> logits``
+    (high = expert; **this logit is the recovered reward**). ``sample_expert() -> features`` is a batch of
+    expert transition features; ``sample_policy() -> (features, action_logprobs)`` is a policy rollout. The
+    discriminator separates expert from policy transitions while the policy is reinforced to fool it.
+    """
+    torch = _torch()
+    f = torch.nn.functional
+
+    def disc_loss() -> Any:
+        d_e = discriminator(sample_expert())
+        d_p = discriminator(sample_policy()[0].detach())
+        return -(f.logsigmoid(d_e).mean() + f.logsigmoid(-d_p).mean())
+
+    def policy_return() -> tuple:
+        feats, logp = sample_policy()
+        return logp, discriminator(feats).detach()
+
+    return alternate(minimize(disc_loss, disc_params), maximize(reinforce(policy_return), policy_params))
+
+
+def maxent_irl(
+    reward: Callable[[Any], Any],
+    reward_params: Iterable,
+    expert_features: Any,
+    policy_features: Callable[[], Any],
+) -> Move:
+    """Maximum-entropy inverse RL by feature matching (Ziebart et al.).
+
+    ``reward(features) -> scalar`` (e.g. ``w·φ``). ``expert_features`` is the expert's expected feature vector
+    (from demonstrations). ``policy_features() -> features`` returns the expected features under the
+    **maxent-optimal policy for the current reward** -- the inner forward / soft-value solve, recomputed each
+    step. For *structured* dynamics that inner solve is exactly mixle's forward (soft-value) pass, so the
+    partition function is computed without sampling. The move's gradient matches expert to policy features.
+    """
+
+    def objective() -> Any:
+        return -(reward(expert_features) - reward(policy_features().detach()))
+
+    return minimize(objective, over=reward_params)
