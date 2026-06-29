@@ -223,7 +223,6 @@ class JitEmMixtureTest(unittest.TestCase):
 
     def test_unsupported_structure_raises(self):
         import mixle.stats as S
-
         from mixle.inference import jit_em_mixture
 
         mixed = S.MixtureDistribution([S.GaussianDistribution(0, 1), S.PoissonDistribution(3.0)], [0.5, 0.5])

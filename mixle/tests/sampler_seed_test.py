@@ -144,7 +144,13 @@ def _stats_public_distribution_catalog():
     scheduled_hmm = stats.ScheduledHiddenMarkovModelDistribution(
         np.array([[0.6, 0.4], [0.5, 0.5]]),
         np.array([[[0.7, 0.3], [0.2, 0.8]], [[0.6, 0.4], [0.3, 0.7]]]),
-        [[stats.IntegerCategoricalDistribution(0, [0.5, 0.3, 0.2]), stats.IntegerCategoricalDistribution(0, [0.2, 0.3, 0.5])] for _ in range(2)],
+        [
+            [
+                stats.IntegerCategoricalDistribution(0, [0.5, 0.3, 0.2]),
+                stats.IntegerCategoricalDistribution(0, [0.2, 0.3, 0.5]),
+            ]
+            for _ in range(2)
+        ],
         _sched,
         len_dist=stats.IntegerCategoricalDistribution(0, [0.0, 0.0, 0.0, 0.0, 1.0]),
     )
