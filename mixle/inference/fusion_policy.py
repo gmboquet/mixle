@@ -32,6 +32,12 @@ def has_fusion_benefit(model: Any) -> bool:
 def should_auto_fuse(model: Any, enc_data: Any, max_its: int) -> bool:
     """True if the default-engine local MLE path should switch to the fused numba kernel for ``model``."""
     try:
+        from mixle.utils.optional_deps import HAS_NUMBA
+
+        # Fusion compiles a numba kernel (lazily, deep in fused_codegen), so a missing numba would only
+        # surface as a crash mid-fit. Decline here and stay on the host path -- identical result, no numba.
+        if not HAS_NUMBA:
+            return False
         from mixle.stats.compute.fused_codegen import fusible, fusible_estep
 
         if not (has_fusion_benefit(model) and fusible(model) and fusible_estep(model)):
