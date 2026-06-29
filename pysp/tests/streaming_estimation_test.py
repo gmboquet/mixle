@@ -227,15 +227,15 @@ class StreamingEstimatorTestCase(unittest.TestCase):
         chunk_b = np.asarray([1.0, 2.0])
         chunk_a_new = np.asarray([-3.0, -2.0])
 
-        model_a = inc.update("a", chunk_a)
+        model_a = inc.update(chunk_a, chunk_id="a")
         expected = _batch_accumulator(estimator, start, chunk_a)
         _assert_suff_close(self, inc.value(), expected.value())
 
-        inc.update("b", chunk_b)
+        inc.update(chunk_b, chunk_id="b")
         expected.combine(_batch_accumulator(estimator, model_a, chunk_b).value())
         _assert_suff_close(self, inc.value(), expected.value())
 
-        inc.update("a", chunk_a_new)
+        inc.update(chunk_a_new, chunk_id="a")
         expected = _batch_accumulator(estimator, inc.model, chunk_b)
         expected.combine(_batch_accumulator(estimator, inc.model, chunk_a_new).value())
         _assert_suff_close(self, inc.value(), expected.value())
@@ -251,7 +251,7 @@ class StreamingEstimatorTestCase(unittest.TestCase):
         with self.assertRaises(KeyError):
             inc.chunk_value("missing")
         with self.assertRaises(ValueError):
-            inc.update(None, chunk_a)
+            inc.update(chunk_a, chunk_id=None)
 
     def test_incremental_update_accepts_local_encoded_data_handle(self):
         estimator = GaussianEstimator()
@@ -261,11 +261,11 @@ class StreamingEstimatorTestCase(unittest.TestCase):
         chunk_a = [-2.0, -1.0, 0.0]
         chunk_b = [1.0, 2.0]
         with LocalEncodedData(chunk_a, model=start, estimator=estimator, resources=Resources.local(num_cpus=2)) as enc:
-            model_a = inc.update("a", enc_data=enc)
+            model_a = inc.update(enc_data=enc, chunk_id="a")
         with LocalEncodedData(
             chunk_b, model=model_a, estimator=estimator, resources=Resources.local(num_cpus=2)
         ) as enc:
-            inc.update("b", enc_data=enc)
+            inc.update(enc_data=enc, chunk_id="b")
 
         expected = _batch_accumulator(estimator, start, chunk_a)
         expected.combine(_batch_accumulator(estimator, model_a, chunk_b).value())

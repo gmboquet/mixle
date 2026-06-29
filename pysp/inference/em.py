@@ -495,7 +495,7 @@ class IncrementalEM:
         """Replace one named chunk's sufficient statistics and update the model."""
         incremental = self._ensure_incremental(estimator, model)
         incremental.model = model
-        candidate = incremental.update(chunk_id, enc_data=enc_data)
+        candidate = incremental.update(enc_data=enc_data, chunk_id=chunk_id)
         value = None if objective is None else objective(candidate)
         return EMStepResult(
             candidate,

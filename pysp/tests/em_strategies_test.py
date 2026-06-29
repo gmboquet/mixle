@@ -205,7 +205,7 @@ class EMStrategiesTestCase(unittest.TestCase):
         for chunk_id, data in chunks:
             enc = seq_encode(data, model=current)
             result = strategy.step_chunk(chunk_id, enc, estimator, current)
-            expected = incremental.update(chunk_id, enc_data=enc)
+            expected = incremental.update(enc_data=enc, chunk_id=chunk_id)
             current = result.model
 
         self.assertAlmostEqual(current.mu, expected.mu, places=12)
