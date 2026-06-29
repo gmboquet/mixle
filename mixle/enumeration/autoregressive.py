@@ -32,11 +32,18 @@ Example (transformer-style next-token decoding)::
         lp = logits - logsumexp(logits)                 # log_softmax (<= 0)
         return list(enumerate(lp))                       # [(token_id, log_prob), ...]
 
-    ar = AutoregressiveEnumerable(next_logprobs, max_len=2)
+    ar = AutoregressiveEnumerable(next_logprobs, max_len=2)   # fixed-length: support = all length-2 sequences
     ar.threshold(10**8)        # log-prob of the 100,000,000-th most probable length-2 sequence
     ar.count(min_log_prob)     # how many length-2 sequences are at least that probable
     ar.unrank(10**6)           # the millionth most probable sequence, without listing the first 1e6
     ar.top_k(5)                # the 5 most probable (exact best-first; for small k)
+
+    ar = AutoregressiveEnumerable(next_logprobs, eos=EOS)    # terminating: support = ONLY eos-terminated
+    ar.unrank(10**6)           # the millionth most probable COMPLETE sequence (ends in eos), of any length
+
+Support: a fixed-length model (``max_len``) has support on every length-``max_len`` sequence; a terminating
+model (``eos``) has support ONLY on eos-terminated sequences, of any length, bounded by the probability budget
+rather than a length cap. An un-terminated truncation has zero mass as an output and is never counted.
 """
 
 from __future__ import annotations
@@ -58,9 +65,10 @@ from mixle.enumeration.quantization.core import (
 )
 
 _NEG_INF = -math.inf
-# The numpy fast path accumulates counts in int64; it is exact while the worst-case count V**max_len stays
-# below this many bits (~2**62). Deeper / larger-vocab problems fall back to the arbitrary-precision Python path.
-_INT64_SAFE_BITS = 62.0
+# The numpy fast path accumulates counts in int64. The number of sequences within a probability budget of B
+# bits is <= 2**B (their probabilities sum to <= 1), so the fast path is exact while the requested budget stays
+# below this; deeper budgets fall back to the arbitrary-precision Python recursion (identical results).
+_INT64_SAFE_BITS = 60.0
 
 
 def _raise_index(fb: int, off: int) -> tuple[Any, float]:
@@ -87,9 +95,16 @@ def autoregressive_count_index(
     ``steps`` are taken in descending probability, once a token's own bits exceed the remaining budget every
     later token does too, so the loop can stop -- this is what bounds the work to the live prefixes.
     """
-    # Complete: the empty completion sits in bucket 0 with log-prob 0 (multiplicative identity).
-    if depth <= 0 or (eos is not None and prefix and prefix[-1] == eos):
+    # A sequence ending in eos is a complete element of a terminating model's support (bucket 0, log-prob 0).
+    if eos is not None and prefix and prefix[-1] == eos:
         return CountIndex(CountHistogram.delta(0, 1), lambda fb, off: ((), 0.0)), False
+    if depth <= 0:
+        # Depth bound reached without terminating. For a fixed-length model (eos is None) the length IS the
+        # support, so this is a complete sequence; for a terminating model the truncation is NOT in the support
+        # -- contribute nothing, and flag truncation so the caller raises the bit budget (not the length).
+        if eos is None:
+            return CountIndex(CountHistogram.delta(0, 1), lambda fb, off: ((), 0.0)), False
+        return CountIndex(CountHistogram.empty(), _raise_index), True
 
     truncated = False
     by_token: list[tuple[Any, float, int, CountIndex]] = []
@@ -152,8 +167,12 @@ def _ar_count_index_fast(
     must ensure the worst-case count stays below ~``2**62`` (see :data:`_INT64_SAFE_BITS`); deeper problems use
     the arbitrary-precision Python path.
     """
-    if depth <= 0 or (eos is not None and prefix and prefix[-1] == eos):
+    if eos is not None and prefix and prefix[-1] == eos:
         return CountIndex(CountHistogram.delta(0, 1), lambda fb, off: ((), 0.0)), False
+    if depth <= 0:
+        if eos is None:  # fixed-length model: the length is the support, so this completes
+            return CountIndex(CountHistogram.delta(0, 1), lambda fb, off: ((), 0.0)), False
+        return CountIndex(CountHistogram.empty(), _raise_index), True  # terminating: truncation not in support
 
     tokens, lps = steps_np(prefix)
     sb = np.floor(np.maximum(0.0, -lps / _LOG2) * (quantizer.oversample / quantizer.bin_width_bits) + _TOL).astype(
@@ -165,8 +184,10 @@ def _ar_count_index_fast(
     if tokens.size == 0:
         return CountIndex(CountHistogram.empty(), _raise_index), truncated
 
-    if depth == 1:
-        # Each kept token is a length-1 completion sitting in fine bucket sb; bincount is the histogram.
+    if depth == 1 and eos is None:
+        # Fixed-length leaf: each kept token is a length-1 completion in fine bucket sb; bincount is the
+        # histogram. (A terminating model has no fixed leaf depth -- only eos completes -- so it falls through
+        # to the general recursion, where the eos base case supplies the variable-depth leaves.)
         order = np.argsort(sb, kind="stable")  # group by bucket, descending-lp order preserved within a bucket
         sb_s, tok_s, lp_s = sb[order], tokens[order], lps[order]
         base = int(sb_s[0])
@@ -233,7 +254,7 @@ class _ARSampler:
         out = []
         for _ in range(n):
             prefix: tuple = ()
-            for _ in range(self._model.max_len):
+            for _ in range(self._model._depth):
                 items = self._model._steps(prefix)
                 toks = [t for t, _ in items]
                 lps = np.array([lp for _, lp in items], dtype=float)
@@ -250,13 +271,25 @@ class _ARSampler:
 class AutoregressiveEnumerable:
     """Adapter: an autoregressive ``next_logprobs(prefix)`` model as a count-/rank-/unrank-able object.
 
+    The support depends on the model. A **fixed-length** model (``max_len`` set, no ``eos``) has support on
+    every length-``max_len`` sequence. A **terminating** model (``eos`` set) has support *only* on sequences
+    that end in ``eos`` -- so the enumeration counts/ranks/unranks exactly those, of any length, bounded by the
+    probability budget (a tight terminating model has finitely many sequences above any threshold). A length
+    bound is NOT the support boundary there: an un-terminated truncation has zero mass as an output and is
+    never counted. ``max_depth`` is only a safety cap on recursion for non-tight models.
+
     Args:
         next_logprobs: ``next_logprobs(prefix) -> [(token, log_prob), ...]`` -- the next-token log-probabilities
             (``<= 0``) given a prefix tuple, e.g. the ``log_softmax`` of a transformer's next-token logits. For
             speed it may instead return the ``(tokens, log_probs)`` numpy-array pair (skips per-token boxing).
-        max_len: sequence length to enumerate (every path is completed at this many tokens; with ``eos`` a
-            path may complete earlier).
-        eos: optional end-of-sequence token; a prefix ending in ``eos`` is complete and not extended.
+            For a terminating model ``eos`` must be one of the tokens it can return.
+        max_len: for a fixed-length model, the sequence length (the support is all length-``max_len`` sequences).
+            Omit for a terminating model (or pass it as a hard length cap, but un-terminated truncations are
+            still dropped).
+        eos: end-of-sequence token. When given, the model is terminating: only sequences ending in ``eos`` are
+            in the support.
+        max_depth: safety bound on recursion depth for a terminating model (the probability budget is the real
+            bound). Raise it if a tight model legitimately produces very long sequences.
         bin_width_bits, oversample: quantization resolution of the count index (finer = exacter ordering,
             more memory). The defaults match the distribution count-DP.
         batch_next_logprobs: optional ``batch_next_logprobs([prefix, ...]) -> [result, ...]`` scoring many
@@ -266,26 +299,34 @@ class AutoregressiveEnumerable:
         batch_size: prefixes per batched forward.
 
     The model is queried lazily and **memoized by prefix**, so deepening the index (or recomputing a
-    log-density) never re-runs a forward pass it has already seen. With integer tokens and a count that fits
-    int64 (``max_len * log2(vocab) < 62``) the histogram build is the numpy fast path; otherwise it falls back
-    to an arbitrary-precision Python recursion with identical results.
+    log-density) never re-runs a forward pass it has already seen. With integer tokens and a budget under
+    ``2**60`` sequences the histogram build is the numpy fast path; otherwise it falls back to an
+    arbitrary-precision Python recursion with identical results.
     """
 
     def __init__(
         self,
         next_logprobs: Callable[[tuple], Iterable[tuple[Any, float]]],
-        max_len: int,
+        max_len: int | None = None,
         eos: Any = None,
+        max_depth: int = 1024,
         bin_width_bits: float = 1.0,
         oversample: int = 8,
         batch_next_logprobs: Callable[[list[tuple]], list[Any]] | None = None,
         batch_size: int = 256,
     ) -> None:
-        if max_len is None or int(max_len) < 1:
-            raise ValueError("max_len must be a positive integer (the sequence length to enumerate).")
+        if eos is None and max_len is None:
+            raise ValueError("give max_len (a fixed-length model) or eos (a terminating model).")
+        if max_len is not None and int(max_len) < 1:
+            raise ValueError("max_len must be a positive integer.")
         self.next_logprobs = next_logprobs
-        self.max_len = int(max_len)
         self.eos = eos
+        self.terminating = eos is not None
+        self.max_len = None if max_len is None else int(max_len)
+        self.max_depth = int(max_depth)
+        # depth bound passed to the recursion: a fixed-length model completes at max_len; a terminating model
+        # completes only at eos and uses max_len (if given) or max_depth purely as a safety cap.
+        self._depth = self.max_len if not self.terminating else (self.max_len or self.max_depth)
         self.bin_width_bits = float(bin_width_bits)
         self.oversample = int(oversample)
         self.batch_next_logprobs = batch_next_logprobs
@@ -320,15 +361,12 @@ class AutoregressiveEnumerable:
         return list(zip(tokens.tolist(), lps.tolist()))
 
     def _use_fast(self) -> bool:
-        # The numpy/int64 path is exact and used when tokens are integers and the worst-case count V**max_len
-        # fits int64; otherwise fall back to the arbitrary-precision Python recursion (identical results).
+        # The fast path needs integer tokens; int64-safety is enforced per call by the bit budget in
+        # quantized_count_index (the count within a B-bit budget is <= 2**B), so it does not depend on depth.
         if self._fast is None:
             try:
                 tokens, _ = self._steps_np(())
-                v = int(tokens.size)
-                self._fast = (
-                    tokens.dtype.kind in "iu" and v > 0 and self.max_len * math.log2(max(v, 2)) < _INT64_SAFE_BITS
-                )
+                self._fast = bool(tokens.dtype.kind in "iu" and tokens.size > 0)
             except (TypeError, ValueError):
                 self._fast = False
         return self._fast
@@ -346,18 +384,20 @@ class AutoregressiveEnumerable:
             return
         scale = quantizer.oversample / quantizer.bin_width_bits
         frontier: list[tuple[tuple, int]] = [((), 0)]
-        for length in range(self.max_len):
+        for length in range(self._depth):
             need = [
                 pfx
                 for pfx, _ in frontier
                 if pfx not in self._cache and not (self.eos is not None and pfx and pfx[-1] == self.eos)
             ]
+            if not need and length > 0:
+                break  # budget pruned the frontier to nothing -- no deeper forwards needed
             for i in range(0, len(need), self.batch_size):
                 chunk = need[i : i + self.batch_size]
                 for pfx, raw in zip(chunk, self.batch_next_logprobs(chunk)):
                     if pfx not in self._cache:
                         self._cache[pfx] = self._parse_steps(raw)
-            if length == self.max_len - 1:
+            if length == self._depth - 1:
                 break  # deepest forward done; no further expansion needed
             nxt: list[tuple[tuple, int]] = []
             for pfx, cum in frontier:
@@ -374,11 +414,13 @@ class AutoregressiveEnumerable:
 
     # -- the count-index contract (this is all the existing drivers need) ---------------------------------
     def quantized_count_index(self, quantizer: Quantizer, max_fine_bucket: int) -> tuple[CountIndex, bool]:
-        """Count index over all length-``max_len`` (or eos-terminated) sequences, bounded by depth bits."""
-        if self._use_fast():
+        """Count index over the model's support (length-``max_len`` sequences, or all eos-terminated
+        sequences), bounded by the bit budget ``max_fine_bucket``."""
+        budget_bits = max_fine_bucket * quantizer.bin_width_bits / quantizer.oversample
+        if self._use_fast() and budget_bits < _INT64_SAFE_BITS:
             self._prefetch(quantizer, max_fine_bucket)
-            return _ar_count_index_fast(self._steps_np, (), self.max_len, quantizer, max_fine_bucket, self.eos)
-        return autoregressive_count_index(self._steps, (), self.max_len, quantizer, max_fine_bucket, self.eos)
+            return _ar_count_index_fast(self._steps_np, (), self._depth, quantizer, max_fine_bucket, self.eos)
+        return autoregressive_count_index(self._steps, (), self._depth, quantizer, max_fine_bucket, self.eos)
 
     def log_density(self, sequence: Iterable[Any]) -> float:
         """Exact total log-probability of a sequence (``-inf`` if any token is off-support given its prefix)."""
@@ -399,8 +441,11 @@ class AutoregressiveEnumerable:
         return _ARSampler(self, seed)
 
     def enumerator(self):
-        """A descending-probability iterator (lazy best-first); use ``top_k`` for the head."""
-        return best_first_decode(lambda prefix: self._steps(prefix), eos=self.eos, max_len=self.max_len)
+        """A descending-probability iterator over the support (lazy best-first); use ``top_k`` for the head."""
+        stream = best_first_decode(lambda prefix: self._steps(prefix), eos=self.eos, max_len=self._depth)
+        if self.terminating:  # only eos-terminated sequences are in a terminating model's support
+            return ((s, lp) for s, lp in stream if s and s[-1] == self.eos)
+        return stream
 
     # -- convenience surface (self-contained, via the core count-budget driver) ---------------------------
     def _quantizer(self) -> Quantizer:
@@ -461,14 +506,16 @@ class AutoregressiveEnumerable:
         lo = hi = 0.0
         per_bit = q.fine_per_bit()
         # A joint fine bucket is the SUM of per-step floor-quantized buckets, so accumulated rounding can put a
-        # sequence's exact information anywhere in [fb / per_bit, (fb + max_len) / per_bit) bits -- the spread
-        # grows with the number of steps, not 1/oversample. Bound the bucket's probability over that range.
+        # sequence's exact information anywhere in [fb / per_bit, (fb + L) / per_bit) bits, where L is the
+        # number of steps. Bound L by the deepest sequence the index could hold (the upper bound is tight; the
+        # lower bound loosens for long terminating sequences -- sum the head exactly if you need tight mass).
+        steps_bound = self._depth if self.terminating else self.max_len
         for j, c in enumerate(hist.data):
             if not c:
                 continue
             fb = hist.base + j
             lo_bits = fb / per_bit  # least information in the bucket -> most probable edge
-            hi_bits = (fb + self.max_len) / per_bit  # most information after up to max_len roundings
+            hi_bits = (fb + steps_bound) / per_bit  # most information after up to steps_bound roundings
             hi += c * 2.0 ** (-lo_bits)
             lo += c * 2.0 ** (-hi_bits)
         return lo, hi
