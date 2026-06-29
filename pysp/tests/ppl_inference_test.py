@@ -50,6 +50,49 @@ class PPLInferenceTestCase(unittest.TestCase):
         self.assertIn("q2.5", s["mu"])
 
 
+class PPLDeterministicExpressionTestCase(unittest.TestCase):
+    """A parameter slot may be a deterministic expression over named latents (a + b, exp(a), ...);
+    the leaves are sampled and the slot value is recomputed from them each evaluation."""
+
+    def test_sum_of_two_latents_in_mean(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(3.0, 1.0, 600))  # a + b should recover ~3
+        a, b = Normal(0, 10, name="a"), Normal(0, 10, name="b")
+        m = Normal(a + b, 1.0).fit(data, how="map")
+        self.assertAlmostEqual(m.dist.mu, 3.0, delta=0.2)
+
+    def test_linear_combination(self):
+        rng = np.random.RandomState(1)
+        data = list(rng.normal(5.0, 1.0, 600))  # 2a - b
+        a, b = Normal(0, 10, name="a"), Normal(0, 10, name="b")
+        m = Normal(2.0 * a - b, 1.0).fit(data, how="map")
+        self.assertAlmostEqual(m.dist.mu, 5.0, delta=0.3)
+
+    def test_deterministic_transform_as_scale(self):
+        rng = np.random.RandomState(2)
+        data = list(rng.normal(0.0, np.exp(0.5), 1500))  # scale = exp(a), a ~ 0.5
+        a = Normal(0, 10, name="a")
+        m = Normal(0.0, a.exp()).fit(data, how="map")
+        self.assertAlmostEqual(np.sqrt(m.dist.sigma2), np.exp(0.5), delta=0.25)
+
+    def test_shared_latent_across_slots(self):
+        rng = np.random.RandomState(3)
+        data = list(rng.normal(1.0, np.exp(1.0), 1500))  # mean = a, scale = exp(a), a ~ 1
+        a = Normal(0, 10, name="a")
+        m = Normal(a, a.exp()).fit(data, how="map")
+        self.assertAlmostEqual(m.dist.mu, 1.0, delta=0.3)
+
+    def test_mcmc_posterior_over_expression_leaves(self):
+        rng = np.random.RandomState(4)
+        data = list(rng.normal(3.0, 1.0, 600))
+        a, b = Normal(0, 10, name="a"), Normal(0, 10, name="b")
+        m = Normal(a + b, 1.0).fit(data, how="mcmc", draws=1200, burn=600, rng=np.random.RandomState(5))
+        # each leaf is addressable in the posterior, and their sum recovers the mean
+        pa, pb = m.posterior(a), m.posterior(b)
+        self.assertEqual(len(pa), 1200)
+        self.assertAlmostEqual(pa.mean() + pb.mean(), 3.0, delta=0.3)
+
+
 class PPLHMCTestCase(unittest.TestCase):
     def test_hmc_recovers_and_mixes(self):
         rng = np.random.RandomState(0)
