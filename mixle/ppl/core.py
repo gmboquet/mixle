@@ -495,7 +495,9 @@ _ROUTE_CAVEATS = {
     "lmm": ["linear mixed model by EM; exact for the Gaussian response"],
     "glmm": ["GLMM by penalized quasi-likelihood (PQL) -- mildly biased for sparse binary / low-count data"],
     "regression": ["GLM point estimate with a Laplace coefficient covariance; not a full posterior"],
-    "indexed": ["per-observation MAP over the latent vector; MCMC over the indexed vector is not yet wired"],
+    "indexed": [
+        "per-observation fit; how='map' (default) gives point latents, how='mcmc' a full posterior over the vector"
+    ],
     "state-space": ["bespoke Kalman/RTS + EM fitter for the composite family"],
     "mcmc": ["posterior samples via adaptive random-walk Metropolis"],
     "hmc": ["posterior samples via Hamiltonian Monte Carlo"],
