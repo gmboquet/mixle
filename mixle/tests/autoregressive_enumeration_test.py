@@ -145,44 +145,64 @@ class AutoregressiveEnumerableTest(unittest.TestCase):
         self.assertLessEqual(len(ar._cache), distinct_prefixes)
         self.assertLess(len(ar._cache), self.N)  # fewer queries than sequences
 
-    def test_eos_gives_correct_variable_length_enumeration(self):
-        # EOS=2 over vocab {0,1,2}: sequences terminate at the first EOS, so the support is variable-length.
+    def test_terminating_model_enumerates_only_its_support(self):
+        # A terminating model's support is ONLY eos-terminated sequences (any length, bounded by probability,
+        # NOT by a length cap). Verify count / unrank / top_k over exactly that support vs brute force.
         eos = 2
-        trans = {None: [0.5, 0.4, 0.1], 0: [0.3, 0.5, 0.2], 1: [0.6, 0.2, 0.2], 2: [0.0, 0.0, 1.0]}
-        logt = {k: np.log(np.array(v) + 1e-12) for k, v in trans.items()}
+        P = {None: [0.4, 0.3, 0.3], 0: [0.3, 0.3, 0.4], 1: [0.4, 0.2, 0.4], 2: [0.0, 0.0, 1.0]}
+        logt = {k: np.log(np.array(v) + 1e-30) for k, v in P.items()}
 
         def nlp(prefix):
             last = prefix[-1] if prefix else None
             return [(t, float(lp)) for t, lp in enumerate(logt[last])]
 
-        max_len = 4
-
-        def brute_eos():
-            out = {}
-            for length in range(1, max_len + 1):
-                for seq in itertools.product(range(3), repeat=length):
-                    if eos in seq[:-1] or seq[-1] != eos and length < max_len:
-                        continue  # only first-eos-terminated, or full-length non-eos
-                    if eos in seq[:-1]:
-                        continue
-                    lp, prefix, ok = 0.0, (), True
+        def brute_terminating(max_body=14):
+            out = {}  # all (body of 0/1s) + eos -- the entire terminating support up to max_body
+            for body_len in range(max_body + 1):
+                for body in itertools.product((0, 1), repeat=body_len):
+                    seq, lp, prefix = body + (eos,), 0.0, ()
                     for t in seq:
-                        d = dict(nlp(prefix))
-                        if t not in d:
-                            ok = False
-                            break
-                        lp += d[t]
+                        lp += dict(nlp(prefix))[t]
                         prefix += (t,)
-                    if ok and math.isfinite(lp):
-                        out[seq] = lp
+                    out[seq] = lp
             return sorted(out.items(), key=lambda u: -u[1])
 
-        ar = AutoregressiveEnumerable(nlp, max_len=max_len, eos=eos, oversample=4096)
-        bt = brute_eos()
-        got = ar.top_k(6)
-        for (s, lp), (bs, blp) in zip(got, bt[:6]):
+        ar = AutoregressiveEnumerable(nlp, eos=eos, oversample=4096, max_depth=40)
+        bt = brute_terminating()
+        # top-k are the most probable COMPLETE sentences, in order (each ends in eos, varying length)
+        for (s, lp), (bs, blp) in zip(ar.top_k(10), bt[:10]):
             self.assertEqual(s, bs)
             self.assertAlmostEqual(lp, blp, places=8)
+        # every unranked sequence is in the support (ends in eos) and matches the brute order -- no truncations
+        for i in range(40):
+            seq, lp = ar.unrank(i)
+            self.assertEqual(seq[-1], eos)
+            self.assertEqual(seq, bt[i][0])
+            self.assertAlmostEqual(lp, bt[i][1], places=8)
+        # count above a threshold matches the brute terminating-support count (at the same quantization)
+        q = ar._quantizer()
+        fb_tau = q.fine_bucket(bt[20][1])
+        self.assertEqual(ar.count(bt[20][1]), sum(1 for _, lp in bt if q.fine_bucket(lp) <= fb_tau))
+
+    def test_terminating_support_excludes_truncations(self):
+        # The index over a terminating model must NEVER contain a non-eos (truncated) sequence, at any rank.
+        eos = 2
+        P = {None: [0.4, 0.3, 0.3], 0: [0.3, 0.3, 0.4], 1: [0.4, 0.2, 0.4], 2: [0.0, 0.0, 1.0]}
+        logt = {k: np.log(np.array(v) + 1e-30) for k, v in P.items()}
+
+        def nlp(prefix):
+            last = prefix[-1] if prefix else None
+            return [(t, float(lp)) for t, lp in enumerate(logt[last])]
+
+        idx = AutoregressiveEnumerable(nlp, eos=eos, oversample=64, max_depth=20).budget_index(budget_bits=10.0)
+        self.assertGreater(len(idx), 100)
+        for i in range(len(idx)):
+            seq, _ = idx.get(i)
+            self.assertEqual(seq[-1], eos)  # in the support: terminated, never a length-capped truncation
+
+    def test_constructor_requires_max_len_or_eos(self):
+        with self.assertRaises(ValueError):
+            AutoregressiveEnumerable(self.next_logprobs)  # neither a length nor a terminator -> no support
 
     def test_raw_count_index_function(self):
         # The underlying tree-recursive builder returns a count index whose total == full support size.
