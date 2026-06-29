@@ -183,5 +183,53 @@ class JitSeqLogDensityTest(unittest.TestCase):
         self.assertTrue(np.allclose(score(data2), ref2, atol=1e-9))
 
 
+@unittest.skipUnless(_HAS_JAX, "jax not installed")
+class JitEmMixtureTest(unittest.TestCase):
+    """A2 bullet 1: the whole EM loop compiled to one XLA program (lax.scan), param-threaded. The fitted
+    params match the host (numpy) EM run from the SAME init for the SAME number of iterations."""
+
+    def _agrees_with_host(self, proto, data, key, its=200, tol=1e-4):
+        from mixle.inference import jit_em_mixture, optimize
+
+        host = optimize(data, proto.estimator(), prev_estimate=proto, max_its=its, out=None)
+        jit = jit_em_mixture(proto, data, max_its=its)
+        hm = sorted(key(c) for c in host.components)
+        jm = sorted(key(c) for c in jit.components)
+        self.assertLess(max(abs(a - b) for a, b in zip(hm, jm)), tol)
+
+    def test_gaussian_mixture_matches_host_em(self):
+        import mixle.stats as S
+
+        rng = np.random.RandomState(0)
+        data = list(np.concatenate([rng.normal(-4, 1, 800), rng.normal(4, 1.5, 800)]))
+        proto = S.MixtureDistribution([S.GaussianDistribution(-2.5, 1), S.GaussianDistribution(2.5, 1)], [0.5, 0.5])
+        self._agrees_with_host(proto, data, key=lambda c: c.mu)
+
+    def test_poisson_mixture_matches_host_em(self):
+        import mixle.stats as S
+
+        rng = np.random.RandomState(1)
+        data = list(np.concatenate([rng.poisson(2, 800), rng.poisson(12, 800)]).astype(float))
+        proto = S.MixtureDistribution([S.PoissonDistribution(3.0), S.PoissonDistribution(8.0)], [0.5, 0.5])
+        self._agrees_with_host(proto, data, key=lambda c: c.lam, tol=1e-3)
+
+    def test_exponential_mixture_matches_host_em(self):
+        import mixle.stats as S
+
+        rng = np.random.RandomState(2)
+        data = list(np.concatenate([rng.exponential(2.0, 800), rng.exponential(0.33, 800)]))
+        proto = S.MixtureDistribution([S.ExponentialDistribution(1.0), S.ExponentialDistribution(2.0)], [0.5, 0.5])
+        self._agrees_with_host(proto, data, key=lambda c: c.beta, tol=1e-3)
+
+    def test_unsupported_structure_raises(self):
+        import mixle.stats as S
+
+        from mixle.inference import jit_em_mixture
+
+        mixed = S.MixtureDistribution([S.GaussianDistribution(0, 1), S.PoissonDistribution(3.0)], [0.5, 0.5])
+        with self.assertRaises(NotImplementedError):
+            jit_em_mixture(mixed, [0.0, 1.0, 2.0], max_its=2)
+
+
 if __name__ == "__main__":
     unittest.main()

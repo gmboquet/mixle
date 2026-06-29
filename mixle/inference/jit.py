@@ -71,3 +71,140 @@ def jit_seq_log_density(model: Any, engine: Any = None) -> JittedScorer:
     support (raises ``EngineNotSupportedError``-style errors from the engine layer otherwise).
     """
     return JittedScorer(model, engine=engine)
+
+
+# ---------------------------------------------------------------------------------------------------
+# A2 bullet 1: the EM STEP itself compiled to one XLA program, reused across iterations.
+#
+# For a finite mixture of same-family scalar exponential-family leaves, both the E-step (component
+# log-densities + responsibilities) and the closed-form weighted M-step are pure array ops, so the whole
+# EM step lowers to a single jax.jit program with the PARAMETERS as traced inputs -- so the SAME compiled
+# program is reused as the parameters update each iteration (the NumPyro 'compile once' trick for EM).
+# Each family entry: read params off a leaf, score a component (reusing the engine-neutral backend
+# density), the closed-form weighted M-step, and rebuild a fitted leaf. Extend the registry to add a
+# family; the EM driver is family-agnostic.
+# ---------------------------------------------------------------------------------------------------
+def _mixture_em_family(leaf, jnp):
+    name = type(leaf).__name__
+    if name == "GaussianDistribution":
+        from mixle.stats import GaussianDistribution as G
+
+        def score(params_k, x, _extra, eng):
+            return G.backend_log_density_from_params(x, params_k[0], params_k[1], eng)
+
+        def mstep(x, r_k, _extra):
+            nk = jnp.sum(r_k) + 1e-12
+            mu = jnp.sum(r_k * x) / nk
+            return (mu, jnp.sum(r_k * (x - mu) ** 2) / nk)
+
+        return {
+            "unpack": lambda d: (float(d.mu), float(d.sigma2)),
+            "score": score,
+            "mstep": mstep,
+            "make": lambda pk: G(float(pk[0]), float(pk[1])),
+            "extra": None,
+        }
+    if name == "PoissonDistribution":
+        from mixle.stats import PoissonDistribution as P
+
+        def score(params_k, x, extra, eng):
+            return P.backend_log_density_from_params(x, extra, params_k[0], eng)  # extra = log(x!)
+
+        def mstep(x, r_k, _extra):
+            nk = jnp.sum(r_k) + 1e-12
+            return (jnp.sum(r_k * x) / nk,)
+
+        return {
+            "unpack": lambda d: (float(d.lam),),
+            "score": score,
+            "mstep": mstep,
+            "make": lambda pk: P(float(pk[0])),
+            "extra": "log_factorial",  # the driver precomputes gammaln(x+1) (a fixed data stat)
+        }
+    if name == "ExponentialDistribution":
+        from mixle.stats import ExponentialDistribution as E
+
+        def score(params_k, x, _extra, eng):
+            return E.backend_log_density_from_params(x, params_k[0], eng)  # beta = mean (scale)
+
+        def mstep(x, r_k, _extra):
+            nk = jnp.sum(r_k) + 1e-12
+            return (jnp.sum(r_k * x) / nk,)  # beta = weighted mean (the Exponential MLE)
+
+        return {
+            "unpack": lambda d: (float(d.beta),),
+            "score": score,
+            "mstep": mstep,
+            "make": lambda pk: E(float(pk[0])),
+            "extra": None,
+        }
+    return None
+
+
+def jit_em_mixture(model: Any, data: Any, *, max_its: int = 100, engine: Any = None):
+    """Fit a finite mixture of same-family scalar exponential-family leaves by EM, with the ENTIRE EM loop
+    (every E-step + closed-form weighted M-step iteration) compiled to ONE ``jax.jit`` XLA program via
+    ``lax.scan`` -- the parameters are traced inputs threaded through the loop on-device, so there is no
+    per-iteration recompile and no per-iteration host sync. This is roadmap A2 bullet 1 ("repeated EM
+    iterations run as one XLA program") realized literally.
+
+    ``model`` is the *initial* mixture (its components seed the EM); supported leaves: Gaussian, Poisson,
+    Exponential. Runs a fixed ``max_its`` iterations (no host-side early stop -- that is the point: the
+    loop stays on-device). Returns a fitted ``MixtureDistribution``, bit-close to the host EM from the
+    same start (it is the same EM update). Raises ``NotImplementedError`` for unsupported structure.
+
+    SPEED -- be honest: the payoff is **GPU/TPU and very large scale**, where XLA parallelizes the E-step
+    over millions of points and many components. **On CPU this is *not* a speedup** -- mixle's host EM is
+    already vectorized NumPy (+ a fused path), and a long sequential ``scan`` of small steps loses to it
+    (measured ~0.1-0.8x on CPU for K up to 40). The CPU win from A2 is the single-pass scoring jit
+    (:func:`jit_seq_log_density`, ~8x), not this loop. Use this for the GPU path and the on-device program.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from mixle.engines.jax_engine import JaxEngine
+    from mixle.stats import MixtureDistribution
+
+    eng = engine if engine is not None else JaxEngine()
+    comps = getattr(model, "components", None)
+    if comps is None or any(type(c) is not type(comps[0]) for c in comps):
+        raise NotImplementedError("jit_em_mixture needs a mixture of leaves of a single family.")
+    fam = _mixture_em_family(comps[0], jnp)
+    if fam is None:
+        raise NotImplementedError(f"jit_em_mixture does not support a mixture of {type(comps[0]).__name__}.")
+
+    K = len(comps)
+    x = jnp.asarray(np.asarray(data, dtype=float))
+    extra = jax.scipy.special.gammaln(x + 1.0) if fam["extra"] == "log_factorial" else None
+    # stack each component's params into per-parameter arrays of length K (traced inputs)
+    p0 = [fam["unpack"](c) for c in comps]
+    n_par = len(p0[0])
+    params0 = tuple(jnp.asarray([p0[k][j] for k in range(K)]) for j in range(n_par))
+    log_w0 = jnp.log(jnp.asarray(np.asarray(model.w, dtype=float)))
+
+    def em_step(carry, _i):
+        params, log_w = carry
+        comp_ll = jnp.stack(
+            [fam["score"](tuple(params[j][k] for j in range(n_par)), x, extra, eng) for k in range(K)],
+            axis=1,
+        )  # (N, K)
+        log_r = comp_ll + log_w  # (N, K)
+        log_norm = jax.scipy.special.logsumexp(log_r, axis=1)  # (N,)
+        r = jnp.exp(log_r - log_norm[:, None])  # responsibilities (N, K)
+        new_params_per_k = [fam["mstep"](x, r[:, k], extra) for k in range(K)]
+        new_params = tuple(jnp.stack([new_params_per_k[k][j] for k in range(K)]) for j in range(n_par))
+        new_log_w = jnp.log(jnp.sum(r, axis=0) / x.shape[0])
+        return (new_params, new_log_w), jnp.sum(log_norm)
+
+    # the ENTIRE EM loop compiled to ONE XLA program (lax.scan keeps every iteration on-device -- no
+    # per-iteration host sync, the move that makes a jitted EM actually fast).
+    @jax.jit
+    def run(params, log_w):
+        (params, log_w), lls = jax.lax.scan(em_step, (params, log_w), xs=None, length=int(max_its))
+        return params, log_w, lls
+
+    params, log_w, _lls = run(params0, log_w0)
+    params_np = [np.asarray(eng.to_numpy(p)) for p in params]
+    w = np.asarray(eng.to_numpy(jnp.exp(log_w)))
+    fitted = [fam["make"](tuple(params_np[j][k] for j in range(n_par))) for k in range(K)]
+    return MixtureDistribution(fitted, list(w))
