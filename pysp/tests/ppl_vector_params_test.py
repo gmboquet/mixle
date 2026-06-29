@@ -102,6 +102,15 @@ class LeafVectorParameterTestCase(unittest.TestCase):
         self.assertTrue(np.all(alpha > 0))  # positive vector
         self.assertTrue(np.allclose(alpha, [2.0, 3.0, 5.0], atol=0.6))
 
+    def test_dirichlet_free_infers_dim_from_data(self):
+        # Dirichlet(free) needs no dim=: the estimator reads K off the simplex data.
+        rng = np.random.RandomState(0)
+        data = [list(x) for x in rng.dirichlet([1.0, 2.0, 3.0, 4.0], size=3000)]
+        m = Dirichlet(free).fit(data)
+        alpha = np.asarray(m.params["alpha"])
+        self.assertEqual(alpha.shape, (4,))
+        self.assertTrue(np.allclose(alpha, [1.0, 2.0, 3.0, 4.0], atol=0.6))
+
 
 class MVNParameterInferenceTestCase(unittest.TestCase):
     def setUp(self):
