@@ -73,6 +73,13 @@ def _fit_map(rv, data, **kw):
     return _inf.map_fit(rv, data, **kw)
 
 
+@register_fitter("laplace")
+def _fit_laplace(rv, data, **kw):
+    from mixle.ppl import inference as _inf
+
+    return _inf.laplace_fit(rv, data, **kw)
+
+
 @register_fitter("mcmc")
 def _fit_mcmc(rv, data, **kw):
     from mixle.ppl import inference as _inf
@@ -482,7 +489,9 @@ _ROUTE_CAVEATS = {
         "for a posterior, pass how='laplace' (quick Gaussian approx) or how='mcmc'/'nuts'/'hmc'",
     ],
     "laplace": ["Gaussian posterior approximation at the MAP (inverse-Hessian covariance); cheap but local"],
-    "hierarchical": ["random-effects fit; non-Normal pairs use PQL, which is mildly biased for sparse/low-count groups"],
+    "hierarchical": [
+        "random-effects fit; non-Normal pairs use PQL, which is mildly biased for sparse/low-count groups"
+    ],
     "lmm": ["linear mixed model by EM; exact for the Gaussian response"],
     "glmm": ["GLMM by penalized quasi-likelihood (PQL) -- mildly biased for sparse binary / low-count data"],
     "regression": ["GLM point estimate with a Laplace coefficient covariance; not a full posterior"],
@@ -1608,7 +1617,10 @@ class RandomVariable:
         elif self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
             lp = next(a for a in self._args if isinstance(a, _LinearPredictor))
             if getattr(lp, "groups", None) and self._family.name != "Normal":
-                route, reason = "glmm", "a Group random effect + non-Normal response -> GLMM by penalized quasi-likelihood"
+                route, reason = (
+                    "glmm",
+                    "a Group random effect + non-Normal response -> GLMM by penalized quasi-likelihood",
+                )
             elif getattr(lp, "groups", None):
                 route, reason = "lmm", "a Group random effect (Normal response) -> linear mixed model (EM)"
             else:
