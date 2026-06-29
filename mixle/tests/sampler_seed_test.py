@@ -137,6 +137,18 @@ def _stats_public_distribution_catalog():
         len_dist=stats.IntegerCategoricalDistribution(2, [1.0]),
     )
 
+    # phase-indexed (length-/position-conditional) HMM: inits/transitions are per-phase
+    from mixle.stats.latent.scheduled_hidden_markov_model import ByRelativePosition
+
+    _sched = ByRelativePosition(2)
+    scheduled_hmm = stats.ScheduledHiddenMarkovModelDistribution(
+        np.array([[0.6, 0.4], [0.5, 0.5]]),
+        np.array([[[0.7, 0.3], [0.2, 0.8]], [[0.6, 0.4], [0.3, 0.7]]]),
+        [[stats.IntegerCategoricalDistribution(0, [0.5, 0.3, 0.2]), stats.IntegerCategoricalDistribution(0, [0.2, 0.3, 0.5])] for _ in range(2)],
+        _sched,
+        len_dist=stats.IntegerCategoricalDistribution(0, [0.0, 0.0, 0.0, 0.0, 1.0]),
+    )
+
     sparse_assoc = stats.SparseMarkovAssociationDistribution(
         [0.5, 0.3, 0.2],
         csr_matrix(_normalize_rows([[0.7, 0.2, 0.1], [0.1, 0.7, 0.2], [0.2, 0.3, 0.5]])),
@@ -379,6 +391,7 @@ def _stats_public_distribution_catalog():
             len_dist=stats.CategoricalDistribution({2: 0.4, 3: 0.6}),
         ),
         "SegmentalHiddenMarkovModelDistribution": segmental,
+        "ScheduledHiddenMarkovModelDistribution": scheduled_hmm,
         "SegmentalHiddenMarkovDistribution": stats.SegmentalHiddenMarkovDistribution(
             [
                 stats.GaussianDistribution(-2.0, 1.0),
