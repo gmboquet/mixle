@@ -13,6 +13,8 @@ from mixle.ppl import (
     Bernoulli,
     Beta,
     Binomial,
+    Categorical,
+    Dirichlet,
     Gamma,
     Geometric,
     Laplace,
@@ -139,6 +141,25 @@ class ConjugatePairsTestCase(unittest.TestCase):
         m = Geometric(Beta(2, 2, name="p")).fit(data)
         self.assertIsInstance(m.result, ConjugatePosterior)
         self.assertAlmostEqual(float(m.result.mean("p")), 0.3, delta=0.02)
+
+    def test_categorical_dirichlet(self):
+        rng = np.random.RandomState(2)
+        true = np.array([0.2, 0.3, 0.5])
+        data = list(rng.choice(3, size=4000, p=true))
+        from mixle.ppl.inference import ConjugatePosterior
+
+        rv = Categorical(Dirichlet([1.0, 1.0, 1.0], name="p"))
+        self.assertEqual(rv.explain_fit()["route"], "conjugate")
+        m = rv.fit(data)  # auto -> conjugate (closed-form Dirichlet posterior over the K-vector)
+        self.assertIsInstance(m.result, ConjugatePosterior)
+        post_mean = np.asarray(m.result.mean("p"))
+        self.assertEqual(post_mean.shape, (3,))
+        self.assertTrue(np.allclose(post_mean, true, atol=0.03))
+        # the fitted Categorical's pmap matches the posterior-mean probabilities
+        self.assertTrue(np.allclose([m.dist.pmap[k] for k in range(3)], post_mean, atol=1e-9))
+        # posterior-predictive draws are valid categories
+        pp = np.asarray(m.result.predictive(20, np.random.RandomState(3))).ravel()
+        self.assertTrue(set(np.unique(pp)).issubset({0, 1, 2}))
 
 
 class ConjugateMixturePriorTestCase(unittest.TestCase):
