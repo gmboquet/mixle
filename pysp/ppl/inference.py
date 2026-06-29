@@ -38,6 +38,8 @@ from pysp.ppl.core import (
     Constraint,
     RandomVariable,
     _CholeskySpec,
+    _eval_expr,
+    _expr_leaves,
     _OrderedSpec,
     _row_mask,
     _SimplexSpec,
@@ -45,6 +47,16 @@ from pysp.ppl.core import (
     free,
     lower,
 )
+
+# Deterministic-expression node kinds: an arg slot that is an arithmetic function of other latents
+# (e.g. ``Normal(a + b, sigma)``) rather than a single prior/free. Its leaves are sampled; the slot's
+# value is recomputed from them by ``_eval_expr`` at each evaluation.
+_DET_EXPR_KINDS = frozenset({"sum", "prod", "pow", "apply", "select"})
+
+
+def _is_det_expr(a: Any) -> bool:
+    return isinstance(a, RandomVariable) and a._kind in _DET_EXPR_KINDS
+
 
 _NEG_INF = -1e300
 
@@ -181,9 +193,18 @@ def _require_flat(rv: RandomVariable):
     return rv._family
 
 
-def _slots_of(rv: RandomVariable, fam) -> list[_Slot]:
+def _slots_of(rv: RandomVariable, fam) -> tuple[list[_Slot], dict[int, tuple]]:
+    """Collect the latent slots of a flat model, plus deterministic-expression bindings.
+
+    Returns ``(slots, det_bindings)``. ``det_bindings`` maps a family arg position whose argument is a
+    *deterministic expression* over latents (``Normal(a + b, sigma)``) to ``(expr, [(leaf, slot_index)])``:
+    the leaves are sampled as ordinary slots and the arg's value is recomputed from them via
+    ``_eval_expr`` at build time. Positions absent from ``det_bindings`` are ordinary prior/free slots.
+    """
     slots: list[_Slot] = []
     nested = [len(rv._args)]  # synthetic, build-ignored indices for hierarchical hyperparameters
+    leaf_slot: dict[int, int] = {}  # id(leaf RV) -> slot index, dedups a latent shared across expressions
+    det_bindings: dict[int, tuple] = {}
 
     def add_prior(handle: RandomVariable, index: int, support: str) -> None:
         """Add a slot for prior RV ``handle`` at ``index``; recurse into any random hyperparameters.
@@ -211,14 +232,33 @@ def _slots_of(rv: RandomVariable, fam) -> list[_Slot]:
         else:
             slots.append(_Slot(index, lower(handle, target="dist"), support == "positive", nm, handle, support))
 
+    def add_leaf(leaf: Any, support: str) -> int:
+        """Register one latent leaf of a deterministic expression (deduped by identity); return its slot index."""
+        key = id(leaf)
+        if key in leaf_slot:
+            return leaf_slot[key]
+        idx = nested[0]
+        nested[0] += 1
+        if leaf is free:
+            slots.append(_Slot(idx, None, False, f"arg{idx}", None, support))
+        elif isinstance(leaf, RandomVariable) and leaf._kind == "sample":
+            add_prior(leaf, idx, support)  # a prior leaf (possibly itself hierarchical)
+        else:
+            slots.append(_Slot(idx, None, False, getattr(leaf, "name", None) or f"arg{idx}", leaf, support))
+        leaf_slot[key] = idx
+        return idx
+
     for i, a in enumerate(rv._args):
-        if isinstance(a, RandomVariable):
+        if _is_det_expr(a):
+            binding = [(leaf, add_leaf(leaf, fam.support[i])) for leaf in _expr_leaves(a)]
+            det_bindings[i] = (a, binding)
+        elif isinstance(a, RandomVariable):
             add_prior(a, i, fam.support[i])
         elif a is free:
             slots.append(_Slot(i, None, fam.positive[i], f"arg{i}", None, fam.support[i]))
     if not slots:
         raise ValueError("model has no `free`/prior parameters to infer.")
-    return slots
+    return slots, det_bindings
 
 
 def _encoder_for(fam):
@@ -468,7 +508,7 @@ def _target_parts(rv: RandomVariable, data):
         # Categorical probs), use the general collect/rebuild target.
         return _composite_target_parts(rv, data)
     fam = _require_flat(rv)
-    slots = _slots_of(rv, fam)
+    slots, det_bindings = _slots_of(rv, fam)
     arr = np.asarray(data, dtype=float)
     _fin = arr[np.isfinite(arr)]  # ignore NaN (missing) when seeding the init point
     dmean = float(_fin.mean()) if _fin.size else 0.0
@@ -486,7 +526,13 @@ def _target_parts(rv: RandomVariable, data):
         return vals, logj
 
     def build(vals):
-        args = [vals.get(i, rv._args[i]) for i in range(len(rv._args))]
+        args = []
+        for i in range(len(rv._args)):
+            if i in det_bindings:  # arg is a deterministic function of latents -> recompute from them
+                expr, binding = det_bindings[i]
+                args.append(_eval_expr(expr, {leaf: vals[sidx] for leaf, sidx in binding}))
+            else:
+                args.append(vals.get(i, rv._args[i]))
         return fam.make_dist(tuple(args), rv._name)
 
     return fam, slots, build, unpack, (dmean, dstd)
