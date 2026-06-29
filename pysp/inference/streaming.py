@@ -53,13 +53,17 @@ def streaming_accumulate(
     return nobs, acc
 
 
-class StreamingEstimator:
-    """Decay-mode online estimator built from accumulator scaling and M-steps."""
+class _StreamingBase:
+    """Shared plumbing for the online estimators: construction, batch encoding, lazy model init.
+
+    Subclasses differ only in how :meth:`update` folds a batch into the running statistics
+    (decayed step schedule vs. Neal-Hinton chunk replacement). Everything else -- the estimator/
+    model/encoder state, ``value``, ``reset`` -- is common and lives here.
+    """
 
     def __init__(
         self,
         estimator: ParameterEstimator,
-        schedule=None,
         model: SequenceEncodableProbabilityDistribution | None = None,
         init_estimator: ParameterEstimator | None = None,
         init_p: float = 0.1,
@@ -70,7 +74,6 @@ class StreamingEstimator:
         validate_estimator_keys(estimator)
         self.estimator = estimator
         self.init_estimator = estimator if init_estimator is None else init_estimator
-        self.schedule = harmonic(0.7) if schedule is None else schedule
         self.model = model
         self.init_p = init_p
         self.rng = RandomState() if rng is None else rng
@@ -86,7 +89,7 @@ class StreamingEstimator:
                 return [enc_data.as_seq_chunk()]
             return enc_data
         if data is None:
-            raise ValueError("StreamingEstimator.update requires data or enc_data.")
+            raise ValueError("%s.update requires data or enc_data." % type(self).__name__)
         if self.encoder is None:
             self.encoder = (
                 self.model.dist_to_encoder()
@@ -101,8 +104,45 @@ class StreamingEstimator:
             self.model = seq_initialize(enc_data, self.init_estimator, self.rng, p)
             self.encoder = self.model.dist_to_encoder()
 
+    def value(self):
+        """Return the running sufficient-statistic payload."""
+        return None if self.running_accumulator is None else self.running_accumulator.value()
+
+    def reset(self) -> None:
+        """Drop running statistics and fitted model state."""
+        self.running_accumulator = None
+        self.model = None
+        self.nobs = 0.0
+        self.step = 0
+
+
+class StreamingEstimator(_StreamingBase):
+    """Decay-mode online estimator built from accumulator scaling and M-steps."""
+
+    def __init__(
+        self,
+        estimator: ParameterEstimator,
+        schedule=None,
+        model: SequenceEncodableProbabilityDistribution | None = None,
+        init_estimator: ParameterEstimator | None = None,
+        init_p: float = 0.1,
+        rng: RandomState | None = None,
+        encoder=None,
+        num_chunks: int = 1,
+    ) -> None:
+        super().__init__(
+            estimator,
+            model=model,
+            init_estimator=init_estimator,
+            init_p=init_p,
+            rng=rng,
+            encoder=encoder,
+            num_chunks=num_chunks,
+        )
+        self.schedule = harmonic(0.7) if schedule is None else schedule
+
     def update(
-        self, data: Sequence[T] | None = None, enc_data: list[tuple[int, E0]] | None = None
+        self, data: Sequence[T] | None = None, *, enc_data: list[tuple[int, E0]] | None = None
     ) -> SequenceEncodableProbabilityDistribution:
         """Consume one batch and return the updated model."""
         enc_batch = self._encode_batch(data, enc_data)
@@ -125,19 +165,8 @@ class StreamingEstimator:
         self.step += 1
         return self.model
 
-    def value(self):
-        """Return the running sufficient-statistic payload."""
-        return None if self.running_accumulator is None else self.running_accumulator.value()
 
-    def reset(self) -> None:
-        """Drop running statistics and fitted model state."""
-        self.running_accumulator = None
-        self.model = None
-        self.nobs = 0.0
-        self.step = 0
-
-
-class IncrementalEstimator:
+class IncrementalEstimator(_StreamingBase):
     """Neal-Hinton style incremental EM over replaceable data chunks.
 
     Each chunk contributes a sufficient-statistic payload computed under the
@@ -157,47 +186,33 @@ class IncrementalEstimator:
         encoder=None,
         num_chunks: int = 1,
     ) -> None:
-        validate_estimator_keys(estimator)
-        self.estimator = estimator
-        self.init_estimator = estimator if init_estimator is None else init_estimator
-        self.model = model
-        self.init_p = init_p
-        self.rng = RandomState() if rng is None else rng
-        self.encoder = encoder if encoder is not None else (model.dist_to_encoder() if model is not None else None)
-        self.num_chunks = num_chunks
-        self.running_accumulator = None
+        super().__init__(
+            estimator,
+            model=model,
+            init_estimator=init_estimator,
+            init_p=init_p,
+            rng=rng,
+            encoder=encoder,
+            num_chunks=num_chunks,
+        )
         self.chunk_values = dict()
         self.nobs_by_chunk = dict()
-        self.nobs = 0.0
-        self.step = 0
-
-    def _encode_batch(self, data, enc_data):
-        if enc_data is not None:
-            if hasattr(enc_data, "as_seq_chunk"):
-                return [enc_data.as_seq_chunk()]
-            return enc_data
-        if data is None:
-            raise ValueError("IncrementalEstimator.update requires data or enc_data.")
-        if self.encoder is None:
-            self.encoder = (
-                self.model.dist_to_encoder()
-                if self.model is not None
-                else self.init_estimator.accumulator_factory().make().acc_to_encoder()
-            )
-        return seq_encode(data, encoder=self.encoder, num_chunks=self.num_chunks)
-
-    def _ensure_model(self, enc_data):
-        if self.model is None:
-            p = min(max(self.init_p, 0.0), 1.0) if self.init_p > 0.0 else 0.1
-            self.model = seq_initialize(enc_data, self.init_estimator, self.rng, p)
-            self.encoder = self.model.dist_to_encoder()
 
     def update(
-        self, chunk_id: Any, data: Sequence[T] | None = None, enc_data: list[tuple[int, E0]] | None = None
+        self,
+        data: Sequence[T] | None = None,
+        *,
+        enc_data: list[tuple[int, E0]] | None = None,
+        chunk_id: Any = None,
     ) -> SequenceEncodableProbabilityDistribution:
-        """Replace one chunk contribution and return the updated model."""
+        """Replace one chunk contribution and return the updated model.
+
+        ``chunk_id`` is keyword-only so this matches :meth:`StreamingEstimator.update`'s
+        ``(data, *, enc_data)`` shape across the streaming surface; it is required (a ``None``
+        ``chunk_id`` raises) because the Neal-Hinton update keys each batch's contribution by it.
+        """
         if chunk_id is None:
-            raise ValueError("IncrementalEstimator.update requires a non-None chunk_id.")
+            raise ValueError("IncrementalEstimator.update requires a non-None chunk_id (pass chunk_id=...).")
         enc_batch = self._encode_batch(data, enc_data)
         self._ensure_model(enc_batch)
         batch_nobs, batch_acc = streaming_accumulate(enc_batch, self.estimator, self.model)
@@ -220,10 +235,6 @@ class IncrementalEstimator:
         self.step += 1
         return self.model
 
-    def value(self):
-        """Return the current pooled sufficient-statistic payload."""
-        return None if self.running_accumulator is None else self.running_accumulator.value()
-
     def chunk_value(self, chunk_id: Any):
         """Return a copy of one stored chunk contribution."""
         if chunk_id not in self.chunk_values:
@@ -232,9 +243,6 @@ class IncrementalEstimator:
 
     def reset(self) -> None:
         """Drop all chunk contributions and fitted model state."""
-        self.running_accumulator = None
+        super().reset()
         self.chunk_values = dict()
         self.nobs_by_chunk = dict()
-        self.model = None
-        self.nobs = 0.0
-        self.step = 0
