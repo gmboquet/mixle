@@ -10,14 +10,18 @@ import unittest
 import numpy as np
 
 from mixle.program import (
+    Stream,
     alternate,
     constrain,
     em,
+    ewc,
+    fisher_diagonal,
     fit,
     lora,
     maximize,
     minimize,
     reinforce,
+    snapshot,
     trainable,
     weighted,
 )
@@ -124,6 +128,54 @@ class ProgramGradientTest(unittest.TestCase):
         train(naive, lambda: ((naive(xb) - yb) ** 2).mean())  # continue on B (forgets A)
         train(replay, lambda: ((replay(xb) - yb) ** 2).mean() + ((replay(xa) - ya) ** 2).mean())  # B + replay(A)
         self.assertLess(mse(replay, xat, yat), 0.5 * mse(naive, xat, yat))  # replay retains A far better
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class ContinuousPretrainingTest(unittest.TestCase):
+    def test_streaming_fit_tracks_a_shifting_stream(self):
+        # CPT loop: data arrives as chunks from a shifting target; the model adapts to each (warm-started).
+        torch.manual_seed(0)
+        net = _mlp([1, 32, 1])
+
+        def chunks():
+            for c in range(5):
+                x = torch.linspace(c, c + 1, 64)[:, None]
+                yield (x, torch.sin(2 * x))
+
+        s = Stream(chunks())
+        cur = lambda: ((net(s.current[0]) - s.current[1]) ** 2).mean()
+        losses = []
+        fit(minimize(cur, over=trainable(net)), data=s, steps_per_chunk=150, lr=0.02, callback=lambda i, p: losses.append(cur().item()))
+        self.assertEqual(len(losses), 5)  # consumed every chunk
+        self.assertLess(max(losses), 0.1)  # tracked each one
+
+    def test_ewc_with_model_fisher_prevents_forgetting(self):
+        # EWC as a program term, with the proper MODEL-sampled Fisher -- retains the old task far better than naive.
+        torch.manual_seed(0)
+        np.random.seed(0)
+        f = lambda x: np.sin(2 * x)
+
+        def region(lo, hi, n=400):
+            x = np.random.uniform(lo, hi, n).astype("float32")
+            return torch.tensor(x[:, None]), torch.tensor(f(x)[:, None].astype("float32"))
+
+        xa, ya = region(-3, 0)
+        xb, yb = region(0, 3)
+        xat, yat = region(-3, 0, 1500)
+        mse = lambda net, x, y: ((net(x) - y) ** 2).mean().item()
+
+        import copy
+
+        net = _mlp([1, 64, 64, 1])
+        fit(minimize(lambda: ((net(xa) - ya) ** 2).mean(), over=trainable(net)), steps=500, lr=0.01)  # pretrain A
+        fisher = fisher_diagonal(net, [xa], kind="regression")
+        anchor = snapshot(trainable(net))
+        naive = copy.deepcopy(net)
+        ewc_net = copy.deepcopy(net)
+        fit(minimize(lambda: ((naive(xb) - yb) ** 2).mean(), over=trainable(naive)), steps=500, lr=0.01)  # naive
+        p = trainable(ewc_net)
+        fit(weighted([(lambda: ((ewc_net(xb) - yb) ** 2).mean(), 1.0), (ewc(p, fisher, anchor, 1.0), 1.0)], over=p), steps=500, lr=0.01)
+        self.assertLess(mse(ewc_net, xat, yat), 0.7 * mse(naive, xat, yat))  # EWC retains A much better
 
 
 class ProgramEMBridgeTest(unittest.TestCase):

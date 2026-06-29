@@ -278,12 +278,19 @@ def fit(
     lr: float = 1e-3,
     constraints: Sequence[Constraint] | None = None,
     callback: Callable[[int, Program], None] | None = None,
+    data: Stream | None = None,
+    steps_per_chunk: int = 1,
 ) -> Program:
-    """Run an optimization program for ``steps`` rounds; each round runs every move once, in order.
+    """Run an optimization program; each round runs every move once, in order.
 
     Gradient moves take one optimizer step (Adam, per-move learning rate ``move.lr`` or the global ``lr``);
-    ``em`` moves take one EM step. ``constraints`` add dual-ascent multiplier moves (primal-dual). Returns the
-    program with its parameters/models updated in place.
+    ``em`` moves take one EM step. ``constraints`` add dual-ascent multiplier moves (primal-dual).
+
+    Fixed mode (``data`` is None): run ``steps`` rounds. **Streaming mode** (``data`` is a :class:`Stream`):
+    advance through the data chunks -- the parameters/optimizers persist across chunks (warm-started), running
+    ``steps_per_chunk`` rounds per chunk; objectives read ``stream.current``. This is the continuous-pretraining
+    loop (combine the task loss with an anti-forget term via :func:`weighted`). Returns the program updated in
+    place.
     """
     prog = _as_program(program)
     moves = list(prog.moves)
@@ -295,13 +302,135 @@ def fit(
     if grad_moves:
         torch = _torch()
         optimizers = {id(m): torch.optim.Adam(m.params, lr=(m.lr or lr)) for m in grad_moves}
-    for step in range(int(steps)):
+
+    def run_round() -> None:
         for m in moves:
             if isinstance(m, Move):
                 if m.params:
                     m._step(optimizers[id(m)])
             elif isinstance(m, EMMove):
                 m._step()
-        if callback is not None:
-            callback(step, prog)
+
+    if data is None:
+        for step in range(int(steps)):
+            run_round()
+            if callback is not None:
+                callback(step, prog)
+    else:
+        chunk = 0
+        while steps is None or chunk < int(steps):  # consume the stream (params persist across chunks)
+            data.advance()
+            if data.done:
+                break
+            for _ in range(int(steps_per_chunk)):
+                run_round()
+            if callback is not None:
+                callback(chunk, prog)
+            chunk += 1
     return prog
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Continuous pre-training (CPT): a streaming program with anti-forgetting terms.
+# ---------------------------------------------------------------------------------------------------------
+class Stream:
+    """A holder over an iterable of data chunks. ``fit(data=stream)`` advances it each round; objectives read
+    ``stream.current`` (the active chunk). The model's parameters persist across chunks (warm-started)."""
+
+    def __init__(self, chunks: Iterable) -> None:
+        self._it = iter(chunks)
+        self.current: Any = None
+        self.done = False
+        self.index = -1
+
+    def advance(self) -> None:
+        try:
+            self.current = next(self._it)
+            self.index += 1
+        except StopIteration:
+            self.done = True
+
+
+class ReplayBuffer:
+    """Fixed-capacity FIFO of past chunks, for replay-based anti-forgetting."""
+
+    def __init__(self, capacity: int = 16) -> None:
+        self.capacity = int(capacity)
+        self.items: list = []
+
+    def add(self, item: Any) -> ReplayBuffer:
+        self.items.append(item)
+        if len(self.items) > self.capacity:
+            self.items.pop(0)
+        return self
+
+    def all(self) -> list:
+        return list(self.items)
+
+
+def snapshot(params: Iterable) -> list:
+    """Detached clones of ``params`` -- the anchor for :func:`ewc` / L2-SP regularization."""
+    return [p.detach().clone() for p in params]
+
+
+def replay(loss_fn: Callable[[Any], Any], buffer: ReplayBuffer) -> Callable[[], Any]:
+    """An objective averaging ``loss_fn(chunk)`` over the replay buffer -- a term for :func:`weighted`."""
+
+    def obj() -> Any:
+        chunks = buffer.all()
+        if not chunks:
+            return _torch().zeros(())
+        total = None
+        for c in chunks:
+            v = loss_fn(c)
+            total = v if total is None else total + v
+        return total / len(chunks)
+
+    return obj
+
+
+def distill(student_out: Callable[[], Any], teacher_out: Callable[[], Any]) -> Callable[[], Any]:
+    """MSE distillation: keep student outputs near a frozen teacher's (logit/feature matching anti-forget)."""
+
+    def obj() -> Any:
+        return ((student_out() - teacher_out().detach()) ** 2).mean()
+
+    return obj
+
+
+def ewc(params: Iterable, fisher: Sequence, anchor: Sequence, weight: float = 1.0) -> Callable[[], Any]:
+    """Elastic Weight Consolidation penalty ``weight · Σ Fᵢ (θᵢ - anchorᵢ)²`` -- anchors params important to the
+    old task. Pair with :func:`fisher_diagonal` (a torch net) or a mixle leaf's ``to_fisher``."""
+    plist = list(params)
+
+    def obj() -> Any:
+        return float(weight) * sum((f * (p - a) ** 2).sum() for f, p, a in zip(fisher, plist, anchor))
+
+    return obj
+
+
+def fisher_diagonal(net: Any, batches: Iterable, kind: str = "classification") -> list:
+    """Diagonal Fisher information for EWC, using MODEL-sampled labels so it does NOT vanish at convergence.
+
+    ``kind='classification'`` (``net`` returns logits) or ``'regression'`` (``net`` returns a Gaussian mean).
+    Returns one tensor per trainable parameter. (The naive data-label Fisher is ~0 at a converged optimum --
+    sampling the label from the model is what makes EWC actually anchor.)
+    """
+    torch = _torch()
+    params = [p for p in net.parameters() if p.requires_grad]
+    fisher = [torch.zeros_like(p) for p in params]
+    n = 0
+    for x in batches:
+        out = net(x)
+        if kind == "classification":
+            y = torch.distributions.Categorical(logits=out).sample()
+            ll = -torch.nn.functional.cross_entropy(out, y, reduction="sum")
+        else:
+            y = out.detach() + torch.randn_like(out)
+            ll = -0.5 * ((y - out) ** 2).sum()
+        net.zero_grad()
+        ll.backward()
+        for f, p in zip(fisher, params):
+            f += p.grad.detach() ** 2
+        n += int(out.shape[0]) if hasattr(out, "shape") and out.dim() > 0 else 1
+    return [f / max(n, 1) for f in fisher]
