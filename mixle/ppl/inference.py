@@ -1935,6 +1935,23 @@ def _conj_categorical_dirichlet(prior_args, fixed, stats, handle, index):
     }
 
 
+def _conj_gamma_rate(prior_args, fixed, stats, handle, index):
+    # Gamma(shape=k known, rate=r) with r ~ Gamma(a, b) [shape a, rate b]; sufficient stat = sum_x.
+    # Posterior rate ~ Gamma(a + n*k, b + sum_x).
+    a, b = float(prior_args[0]), float(prior_args[1])
+    k = float(fixed[0])  # known shape (slot 0)
+    n, sx = stats["n"], stats["sum"]
+    A, B = a + n * k, b + sx
+    return {
+        "index": index,
+        "handle": handle,
+        "name": "Gamma",
+        "mean": A / B,  # posterior mean of the rate
+        "hyper": {"a": A, "b": B},
+        "sample": lambda kk, rng: rng.gamma(A, 1.0 / B, kk),
+    }
+
+
 def _conj_binomial_beta(prior_args, fixed, stats, handle, index):
     # Binomial(n, p) with p ~ Beta(a, b); n known (fixed slot 0). successes = sum_x,
     # failures = n*N - sum_x -> posterior Beta(a + successes, b + failures).
@@ -1977,6 +1994,7 @@ _CONJUGATE = {
     ("Binomial", 1, "Beta"): _conj_binomial_beta,
     ("Geometric", 0, "Beta"): _conj_geometric_beta,
     ("Categorical", 0, "Dirichlet"): _conj_categorical_dirichlet,  # K-category counts -> Dirichlet posterior
+    ("Gamma", 1, "Gamma"): _conj_gamma_rate,  # known shape, Gamma prior on the rate
 }
 
 
