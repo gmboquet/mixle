@@ -1769,7 +1769,18 @@ class MixtureDataEncoder(DataSequenceEncoder):
         """
         if self.homogeneous:
             return self.encoder.seq_encode(x)
-        return _HeteroMixtureEncoded(tuple(e.seq_encode(x) for e in self.encoders))
+        try:
+            return _HeteroMixtureEncoded(tuple(e.seq_encode(x) for e in self.encoders))
+        except (TypeError, ValueError) as e:
+            raise TypeError(
+                "MixtureDistribution could not encode the data with all of its component encoders. A "
+                "finite mixture treats the component as LATENT, so every component must accept the same "
+                "observation type and be able to score every observation. For data of DISJOINT types -- "
+                "e.g. a mix of strings and numbers where the type already identifies the component -- the "
+                "component is OBSERVED, not latent: use a weighted SelectDistribution (a dispatch "
+                "mixture) whose choice function routes each observation to the matching child. "
+                "Original error: %s" % e
+            ) from e
 
 
 # --- Fisher view(s) co-located with this family ---
