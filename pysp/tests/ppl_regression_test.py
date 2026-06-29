@@ -97,6 +97,46 @@ class MixedEffectsTestCase(unittest.TestCase):
         # intercept absorbs the sample mean of the random effects
         self.assertAlmostEqual(r.coefficients["intercept"]["mean"] + ge.mean() - u.mean(), 1.0, delta=0.15)
 
+    def test_poisson_glmm(self):
+        # non-Normal mixed model: log-rate = b0 + b1 x + u_g, u_g ~ N(0, tau^2), via PQL
+        rng = np.random.RandomState(0)
+        G, n_per = 40, 40
+        b0, b1, tau = 0.2, 0.5, 0.6
+        u = rng.normal(0, tau, G)
+        ys, xs, subj = [], [], []
+        for gi in range(G):
+            x = rng.normal(0, 1, n_per)
+            ys += list(rng.poisson(np.exp(b0 + b1 * x + u[gi])))
+            xs += list(x)
+            subj += [gi] * n_per
+        m = Poisson(free * Field("x") + free + Group("g")).fit(ys, given={"x": xs, "g": subj})
+        r = m.result
+        self.assertEqual(r.link, "log")
+        self.assertAlmostEqual(r.coefficients["x"]["mean"], b1, delta=0.15)
+        self.assertAlmostEqual(r.tau, tau, delta=0.2)
+        ge = np.array([r.group_effects[i] for i in range(G)])
+        self.assertGreater(np.corrcoef(ge, u)[0, 1], 0.95)
+
+    def test_bernoulli_glmm(self):
+        rng = np.random.RandomState(0)
+        G, n_per = 60, 60
+        b0, b1, tau = -0.3, 0.8, 0.7
+        u = rng.normal(0, tau, G)
+        ys, xs, subj = [], [], []
+        for gi in range(G):
+            x = rng.normal(0, 1, n_per)
+            p = 1.0 / (1.0 + np.exp(-(b0 + b1 * x + u[gi])))
+            ys += list((rng.random(n_per) < p).astype(float))
+            xs += list(x)
+            subj += [gi] * n_per
+        m = Bernoulli(free * Field("x") + free + Group("g")).fit(ys, given={"x": xs, "g": subj})
+        r = m.result
+        self.assertEqual(r.link, "logit")
+        self.assertAlmostEqual(r.coefficients["x"]["mean"], b1, delta=0.2)
+        self.assertAlmostEqual(r.tau, tau, delta=0.25)
+        ge = np.array([r.group_effects[i] for i in range(G)])
+        self.assertGreater(np.corrcoef(ge, u)[0, 1], 0.85)
+
     def test_random_intercept_only_no_fixed_covariate(self):
         # intercept-only fixed part (no fixed covariate) used to fail to size the design matrix.
         rng = np.random.RandomState(0)
