@@ -50,6 +50,28 @@ class PPLInferenceTestCase(unittest.TestCase):
         self.assertIn("q2.5", s["mu"])
 
 
+class PPLSummaryDiagnosticsTestCase(unittest.TestCase):
+    """summary() folds per-parameter convergence diagnostics (R-hat, ESS) into each row."""
+
+    def test_multichain_summary_has_per_param_rhat_and_ess(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(5.0, 2.0, 1500))
+        m = Normal(Normal(0, 10, name="mu"), free).fit(data, how="mcmc", draws=1200, burn=600, chains=4)
+        row = m.result.summary()["mu"]
+        for key in ("mean", "std", "q2.5", "q97.5", "r_hat", "ess_bulk", "ess_tail", "split_r_hat"):
+            self.assertIn(key, row)
+        self.assertLess(row["r_hat"], 1.1)  # converged
+        self.assertGreater(row["ess_bulk"], 100)
+
+    def test_single_chain_summary_back_compat(self):
+        rng = np.random.RandomState(1)
+        data = list(rng.normal(5.0, 2.0, 800))
+        m = Normal(Normal(0, 10, name="mu"), free).fit(data, how="mcmc", draws=600, burn=300)
+        row = m.result.summary()["mu"]
+        self.assertIn("mean", row)
+        self.assertIn("q2.5", row)  # the original keys are untouched
+
+
 class PPLDeterministicExpressionTestCase(unittest.TestCase):
     """A parameter slot may be a deterministic expression over named latents (a + b, exp(a), ...);
     the leaves are sampled and the slot value is recomputed from them each evaluation."""

@@ -163,12 +163,24 @@ class Posterior:
         out = {}
         for k, s in enumerate(self._slots):
             col = self._samples[:, k]
-            out[s.name] = {
+            row = {
                 "mean": float(col.mean()),
                 "std": float(col.std()),
                 "q2.5": float(np.percentile(col, 2.5)),
                 "q97.5": float(np.percentile(col, 97.5)),
             }
+            # Fold the per-parameter convergence diagnostics into the same row (ArviZ-style one table),
+            # when a multi-chain fit produced them. The aggregate ``_rhat``/``_ess`` keys below stay for
+            # back-compat.
+            if isinstance(self.rhat, dict) and s.name in self.rhat:
+                row["r_hat"] = float(self.rhat[s.name])
+            if isinstance(self.split_rhat, dict) and s.name in self.split_rhat:
+                row["split_r_hat"] = float(self.split_rhat[s.name])
+            if isinstance(self.bulk_ess, dict) and s.name in self.bulk_ess:
+                row["ess_bulk"] = float(self.bulk_ess[s.name])
+            if isinstance(self.tail_ess, dict) and s.name in self.tail_ess:
+                row["ess_tail"] = float(self.tail_ess[s.name])
+            out[s.name] = row
         out["_acceptance_rate"] = self.acceptance_rate
         if self.rhat is not None:
             out["_rhat"] = self.rhat
