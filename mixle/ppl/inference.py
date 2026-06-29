@@ -1632,6 +1632,72 @@ def map_fit(
     return RandomVariable._bound(build(vals), name=rv._name)
 
 
+# ----------------------------------------------------- Laplace: a cheap Gaussian posterior at the MAP
+class _LaplaceRaw:
+    """Minimal raw-result holder so a Laplace fit flows through the shared :func:`_finalize` path."""
+
+    def __init__(self, samples):
+        self.samples = samples  # (draws, d) unconstrained
+        self.acceptance_rate = None
+        self.num_divergences = 0
+
+
+def _fd_hessian(f, x, eps=1.0e-4):
+    """Symmetric finite-difference Hessian of scalar ``f`` at ``x`` (small parameter vectors only)."""
+    x = np.asarray(x, dtype=float)
+    d = x.size
+    h = np.maximum(np.abs(x), 1.0) * eps
+    H = np.zeros((d, d))
+    for i in range(d):
+        for j in range(i, d):
+            xpp, xpm, xmp, xmm = x.copy(), x.copy(), x.copy(), x.copy()
+            xpp[i] += h[i]
+            xpp[j] += h[j]
+            xpm[i] += h[i]
+            xpm[j] -= h[j]
+            xmp[i] -= h[i]
+            xmp[j] += h[j]
+            xmm[i] -= h[i]
+            xmm[j] -= h[j]
+            H[i, j] = H[j, i] = (f(xpp) - f(xpm) - f(xmp) + f(xmm)) / (4.0 * h[i] * h[j])
+    return H
+
+
+def _psd_cov(prec):
+    """Invert a (negative-log-posterior) precision into a PSD covariance, robust to finite-diff noise."""
+    d = prec.shape[0]
+    prec = 0.5 * (prec + prec.T) + 1.0e-8 * np.eye(d)
+    try:
+        cov = np.linalg.inv(prec)
+    except np.linalg.LinAlgError:
+        cov = np.linalg.pinv(prec)
+    cov = 0.5 * (cov + cov.T)
+    w, V = np.linalg.eigh(cov)  # clip to PSD so sampling is well-defined
+    w = np.clip(w, 1.0e-12, None)
+    return (V * w) @ V.T
+
+
+def laplace_fit(rv: RandomVariable, data, *, rng=None, draws: int = 2000, missing="error", **_) -> RandomVariable:
+    """Gaussian (Laplace) posterior approximation at the MAP -- the cheap uncertainty rung above ``map``.
+
+    Finds the posterior mode, takes the Gaussian whose precision is the Hessian of the negative joint
+    log-density there, and draws from it in the unconstrained space (so positivity/simplex supports are
+    respected after the link transform). Returns a full :class:`Posterior` (summary / intervals /
+    predictive), so ``how='laplace'`` gives credible intervals where ``how='map'`` gives only a point.
+    """
+    from scipy.optimize import minimize
+
+    rng = np.random.RandomState() if rng is None else rng
+    log_target, slots, _fam, build, unpack, (dmean, dstd) = _build_target(rv, data)
+    neg = lambda u: -log_target(u)  # noqa: E731
+    u0 = _init_u(slots, dmean, dstd)
+    res = minimize(neg, u0, method="L-BFGS-B", options={"maxiter": 2000})
+    u_star = np.asarray(res.x, dtype=float)
+    cov = _psd_cov(_fd_hessian(neg, u_star))
+    Z = rng.multivariate_normal(u_star, cov, size=int(draws))
+    return _finalize(rv, slots, _LaplaceRaw(Z), build)
+
+
 class _VIResult:
     """Lightweight raw-result holder for a variational fit (mirrors MCMCResult's role)."""
 
