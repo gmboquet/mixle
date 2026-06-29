@@ -762,7 +762,19 @@ def describe(obj: Any) -> str:
     is_dist = is_instance and hasattr(obj, "log_density") and hasattr(obj, "estimator")
     if not is_dist:
         have = sorted(s.name for s in CAPABILITY_CATALOG if _safe_supports(obj, s.name))
-        return "%s — %s" % (name, ("supports: " + " · ".join(have)) if have else "no catalogued capability detected")
+        base = "%s — %s" % (name, ("supports: " + " · ".join(have)) if have else "no catalogued capability detected")
+        # A mixle.ppl model knows how it will be fit -- surface the auto-selected inference route and its
+        # honest caveats (duck-typed on explain_fit, so the kernel needs no dependency on mixle.ppl).
+        explain = getattr(obj, "explain_fit", None)
+        if callable(explain):
+            try:
+                plan = explain()
+                lines = [base, "  fit route: %s — %s" % (plan["route"], plan["reason"])]
+                lines += ["             · %s" % c for c in plan.get("caveats", [])]
+                return "\n".join(lines)
+            except Exception:
+                pass
+        return base
 
     have = capabilities(obj)
     can = (
