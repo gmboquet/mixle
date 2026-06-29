@@ -19,6 +19,7 @@ estimator that fits it have the same shape — so **what you can express, you ca
 ## Contents
 
 [Installation](#installation) · [Quickstart](#quickstart) · [Core concepts](#core-concepts) ·
+[When to reach for mixle](#when-to-reach-for-mixle) ·
 [Distribution catalog](#distribution-catalog) · [Probabilistic programming](#probabilistic-programming-mixleppl) ·
 [Frequentist & Bayesian](#frequentist--bayesian) · [Engines & orchestration](#engines--orchestration) ·
 [Enumeration & ranking](#enumeration--ranking) · [Beyond fitting](#beyond-fitting) ·
@@ -117,6 +118,29 @@ Families live in `mixle.stats`; operations on them are grouped by concern:
 - `mixle.describe(x)` — report what any object supports
 
 Drawing is a method, not a concern: `dist.sampler(seed).sample(n)`.
+
+## When to reach for mixle
+
+mixle is built for one shape of problem: **a heterogeneous observation modelled as one composable
+distribution, where the inference should follow from the structure.** Reach for it when —
+
+- a single record mixes *kinds* of data — a category, a real, a count, a sequence, a set, a tree — and
+  you want to model the whole record jointly, not column-by-column;
+- you'd rather **declare the model and let `fit` choose the algorithm family** (closed-form / EM / MAP /
+  hierarchical / state-space) than wire a sampler by hand;
+- you need the *same* model to also **rank, enumerate, or unrank** its support, or to scale out by a
+  `backend=` argument rather than a rewrite.
+
+Reach for something else when —
+
+- you want a single-family Bayesian regression with best-in-class **NUTS** and a deep diagnostics
+  ecosystem — **Stan / NumPyro / PyMC** are more mature there, and faster (compiled / JIT);
+- you need a custom likelihood as free-form array code with autodiff — that's **Pyro / NumPyro / TFP**;
+- you only need one off-the-shelf estimator (a GMM, an HMM) with no composition — **scikit-learn /
+  hmmlearn / pomegranate** are simpler.
+
+Honest framing: mixle's edge is the **composition + automatic cross-family inference** combination, not
+raw sampler speed. Use `m.explain_fit()` to see exactly which route it will take, and why.
 
 ## Distribution catalog
 
