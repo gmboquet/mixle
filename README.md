@@ -179,8 +179,12 @@ a, b = Normal(0, 10, name="a"), Normal(0, 10, name="b")
 Mix([Normal(a, 1), Normal(b, 1)]).fit(data, constraints=a < b)    # ordered means break label-switching
 ```
 
-- **`how=`** selects the route: `auto` takes an exact path when one exists, else
-  `conjugate | em | map | vi | vmp | mcmc | hmc | nuts | ensemble`.
+- **`how=`** selects the route: `auto` reads the model's *structure* and picks the algorithm **family**
+  — `conjugate | em | map | laplace | vi | vmp | mcmc | hmc | nuts | ensemble` — crossing the
+  closed-form ↔ EM ↔ MAP ↔ hierarchical ↔ state-space boundary that other "auto" knobs stay inside.
+- **See the choice before you fit:** `m.explain_fit()` (or `mixle.describe(m)`) reports the route `auto`
+  will take, *why*, and its honest caveats; `how='laplace'` adds a cheap Gaussian posterior where
+  `how='map'` gives only a point.
 - **Constraints** among named variables are plain comparisons (combine with `& | ~`) and shape both
   inference and sampling.
 - **Closed form:** for conjugate / exponential-family / mixture models, `.fit(...)` returns the exact
