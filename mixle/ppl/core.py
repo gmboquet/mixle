@@ -1771,13 +1771,25 @@ class RandomVariable:
                 "or 'ensemble' (or how='auto')."
             )
         if how == "auto":
-            how, _ = self._resolve_auto(
+            how, _auto_reason = self._resolve_auto(
                 has_constraints=has_constraints,
                 has_potentials=has_potentials,
                 grouped=grouped,
                 partial_free=partial_free,
                 struct_param=struct_param,
             )
+            if how == "map" and "no registered closed form" in _auto_reason:
+                # Honest fallback: a prior is present but there is no closed-form posterior for this
+                # model, so auto returns a *point estimate*. Don't let the user mistake it for a posterior.
+                import warnings as _warnings
+
+                _warnings.warn(
+                    "how='auto' selected MAP -- a point estimate, not a posterior: a prior is present but "
+                    "this model has no registered closed-form (conjugate) posterior. For posterior "
+                    "uncertainty pass how='laplace' (cheap Gaussian at the MAP), 'vi', or 'mcmc'.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         elif how == "em" and (partial_free or struct_param):
             how = "map"  # EM can't hold params fixed / infer a structural vector param
         # Pure ``how`` -> fitter dispatch (everything except the EM/MLE fall-through below). The
