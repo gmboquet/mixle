@@ -39,7 +39,7 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
     def compute_capabilities(cls):
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
-        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+        return DistributionCapabilities(engine_ready=("numpy", "torch", "jax"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):

@@ -5,6 +5,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+# Engines that compose safely through combinators and wrappers: every combinator/wrapper kernel is
+# verified on these. A leaf may additionally declare a scoring-only engine (e.g. 'jax') for direct
+# fitting, but composition does NOT propagate it -- combinators (via intersect_engine_ready) and
+# delegating wrappers (via delegated_engine_ready) cap to this set so a model never *claims* an engine
+# its kernel does not actually support. Widen this only after verifying the new engine on every
+# combinator/wrapper kernel.
+COMPOSITION_ENGINES: tuple[str, ...] = ("numpy", "torch")
+
+
+def delegated_engine_ready(child_engine_ready: tuple[str, ...]) -> tuple[str, ...]:
+    """Engines a delegating wrapper (Weighted/Ignored/Transform) may report: the child's engines capped
+    to the composition-safe set. A no-op for numpy/torch children; it only drops leaf-only engines the
+    wrapper kernel has not been verified to support."""
+    have = set(child_engine_ready)
+    return tuple(name for name in COMPOSITION_ENGINES if name in have)
+
 
 @dataclass(frozen=True)
 class DistributionCapabilities:
@@ -86,7 +102,7 @@ def capabilities_for(x: Any) -> DistributionCapabilities:
 
 
 def intersect_engine_ready(
-    children: tuple[Any, ...], preferred_order: tuple[str, ...] = ("numpy", "torch")
+    children: tuple[Any, ...], preferred_order: tuple[str, ...] = COMPOSITION_ENGINES
 ) -> tuple[str, ...]:
     """Return the engine names supported by every child distribution."""
     if not children:

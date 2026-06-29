@@ -166,9 +166,26 @@ class ComputeMetadataTestCase(unittest.TestCase):
 
     def test_backend_scoring_family_capabilities_are_registered(self):
         caps = capabilities_for(GaussianDistribution)
-        self.assertEqual(caps.engine_ready, ("numpy", "torch"))
+        # Gaussian also declares the (verified) jax scoring engine; composition does NOT propagate it
+        # (combinators/wrappers cap to COMPOSITION_ENGINES -- see the combinator/wrapper tests below).
+        self.assertEqual(caps.engine_ready, ("numpy", "torch", "jax"))
         self.assertEqual(caps.kernel_status, "numba_adapter")
         self.assertFalse(caps.is_permanently_numpy_only)
+
+    def test_leaf_only_jax_engine_does_not_propagate_through_composition(self):
+        # A leaf may declare a scoring-only engine (jax) for direct fitting, but a model that *wraps* or
+        # *combines* it must not claim jax unless its own kernel supports it. This guards the
+        # delegated_engine_ready / intersect_engine_ready caps against a false-capability regression.
+        self.assertIn("jax", capabilities_for(GaussianDistribution).engine_ready)
+        combos = [
+            CompositeDistribution((GaussianDistribution(0.0, 1.0), PoissonDistribution(2.0))),
+            MixtureDistribution([GaussianDistribution(-1.0, 1.0), GaussianDistribution(1.0, 1.0)], [0.5, 0.5]),
+            WeightedDistribution(GaussianDistribution(0.0, 1.0)),
+            IgnoredDistribution(GaussianDistribution(0.0, 1.0)),
+            TransformDistribution(GaussianDistribution(0.0, 1.0), transform=AffineTransform(loc=2.0, scale=3.0)),
+        ]
+        for d in combos:
+            self.assertNotIn("jax", capabilities_for(d).engine_ready, f"{type(d).__name__} over-claims jax")
 
     def test_object_valued_categorical_supports_torch_lookup_scoring(self):
         caps = capabilities_for(CategoricalDistribution)
