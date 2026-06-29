@@ -127,7 +127,7 @@ from mixle.ppl.field import (
     joint,
     multistart,
 )
-from mixle.ppl.guide import Guide, StructuredVIPosterior, structured_vi
+from mixle.ppl.guide import AdmixturePosterior, Guide, StructuredVIPosterior, admixture, structured_vi
 from mixle.ppl.predictive import (
     posterior_predictive_check,
     prior_predictive,
@@ -146,6 +146,8 @@ __all__ = [
     "Guide",
     "StructuredVIPosterior",
     "structured_vi",
+    "admixture",
+    "AdmixturePosterior",
     "Normal",
     "Poisson",
     "Gamma",
