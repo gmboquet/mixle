@@ -672,6 +672,34 @@ class RestartEM:
         return best_model
 
 
+def _resolve_run_em_objective(
+    objective: str | Callable[[Any], float] | None,
+    enc_data: Any,
+    estimator: ParameterEstimator,
+    initial_model: SequenceEncodableProbabilityDistribution,
+    engine: Any | None,
+) -> Callable[[Any], float]:
+    """Resolve ``run_em``'s ``objective`` into a ``model -> float`` scorer.
+
+    Accepts the same spellings the high-level verbs do, so ``objective='map'`` means the same thing in
+    ``run_em`` as in :func:`~pysp.inference.estimation.optimize`:
+
+      * ``None`` -- observed-data log-likelihood (MLE), the historical default;
+      * a selection string ``'auto'`` / ``'mle'`` / ``'map'`` / ``'vb'`` -- resolved against the
+        estimator's prior exactly like ``optimize`` / ``fit`` and bound over ``enc_data``;
+      * a ready ``model -> float`` callable -- used as-is (the power-user escape hatch).
+    """
+    if objective is None:
+        return observed_log_likelihood(enc_data, engine=engine)
+    if callable(objective):
+        return objective
+    from pysp.inference.estimation import _objective_scorer, _resolve_objective
+
+    resolved = _resolve_objective(objective, estimator, initial_model)
+    scorer = _objective_scorer(resolved, estimator, engine)
+    return lambda model: scorer(enc_data, model)[1]
+
+
 def run_em(
     enc_data: Any,
     estimator: ParameterEstimator,
@@ -680,17 +708,20 @@ def run_em(
     max_its: int = 10,
     delta: float | None = 1.0e-9,
     engine: Any | None = None,
-    objective: Callable[[Any], float] | None = None,
+    objective: str | Callable[[Any], float] | None = None,
     max_iter: int | None = None,
 ) -> SequenceEncodableProbabilityDistribution:
     """Run an EM-family strategy until convergence or ``max_its``.
 
-    ``max_iter`` is the preferred spelling of ``max_its``; when given it overrides ``max_its``.
+    ``objective`` takes the same values as :func:`~pysp.inference.estimation.optimize`: ``None`` (MLE),
+    a selection string (``'auto'`` / ``'mle'`` / ``'map'`` / ``'vb'``), or a ready ``model -> float``
+    callable. ``max_its`` is the canonical iteration-cap spelling (matching ``optimize`` / ``fit`` /
+    ``best_of``); ``max_iter`` is accepted as a back-compat alias and overrides ``max_its`` when given.
     """
     if max_iter is not None:
         max_its = max_iter
     strategy = StandardEM() if strategy is None else strategy
-    objective = observed_log_likelihood(enc_data, engine=engine) if objective is None else objective
+    objective = _resolve_run_em_objective(objective, enc_data, estimator, initial_model, engine)
     model = initial_model
     last_good = model
     old_value = objective(model)
