@@ -310,6 +310,102 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
     return RandomVariable._bound(None, name=rv._name, result=result)
 
 
+class GLMMResult:
+    """Generalized linear mixed model: fixed-effect coefficients (on the link scale) + the
+    random-effects covariance + per-group effects. No residual scale (the family sets dispersion)."""
+
+    def __init__(self, family, link, names, beta, cov, Sigma, b, group_levels, re_names):
+        self.family = family
+        self.link = link
+        self.names = names
+        self.beta = beta
+        self.cov = cov
+        self.random_cov = np.asarray(Sigma)
+        self.random_names = re_names
+        self.tau = float(np.sqrt(Sigma[0, 0]))  # random-intercept sd
+        self.group_effects = {lv: float(b[i, 0]) for i, lv in enumerate(group_levels)}
+        self.group_effects_full = {lv: b[i] for i, lv in enumerate(group_levels)}
+        self.coefficients = {
+            names[i]: {"mean": float(beta[i]), "sd": float(np.sqrt(max(cov[i, i], 0.0)))} for i in range(len(names))
+        }
+        self.acceptance_rate = None
+        self.predictive = None
+
+    def summary(self):
+        return {
+            "coefficients": self.coefficients,
+            "random_cov": self.random_cov,
+            "link": self.link,
+            "n_groups": len(self.group_effects),
+        }
+
+
+def _glmm_fit(rv, y, given, linpred, link, max_iter, tol):
+    """Generalized linear mixed model with one grouping factor, by penalized quasi-likelihood (PQL).
+
+    ``eta = X beta + Z b_g``, ``b_g ~ N(0, Sigma)``, ``y ~ Family(link^-1(eta))`` (Poisson log /
+    Bernoulli logit). Alternates IRLS over the fixed effects, a per-group penalized-IRLS update of the
+    random effects (ridge ``Sigma^-1``), and an EM update of ``Sigma`` from the group-effect second
+    moments + Laplace posterior covariances. PQL is the standard GLMM estimator; it is mildly biased
+    for binary data with very few observations per group (use more obs/group there).
+    """
+    gname, slopes = linpred.groups[0]
+    if gname not in given:
+        raise ValueError(f"group column {gname!r} not in given=.")
+    columns = _columns_of(linpred)
+    est, _fixed = columns
+    X, offset = _design(columns, given) if (est or _fixed) else (np.zeros((y.size, 0)), np.zeros(y.size))
+    names = [f.name if f is not None else "intercept" for _, f in est]
+    if not names:
+        X = np.ones((y.size, 1))
+        names = ["intercept"]
+    N, p = X.shape
+
+    re_names = ["intercept"] + list(slopes)
+    zcols = [np.ones(N)] + [np.asarray(given[s], dtype=float).reshape(-1) for s in slopes]
+    Z = np.column_stack(zcols)
+    q = Z.shape[1]
+    levels, g = np.unique(np.asarray(given[gname]), return_inverse=True)
+    G = levels.size
+    groups = [np.where(g == gi)[0] for gi in range(G)]
+
+    beta = np.zeros(p)
+    b = np.zeros((G, q))
+    Sigma = np.eye(q) * 0.5
+    cov = np.eye(p)
+    for _ in range(max_iter):
+        Sinv = np.linalg.inv(Sigma)
+        beta_prev = beta.copy()
+        # inner PQL: alternate IRLS fixed-effect and penalized random-effect updates to the joint mode
+        for _inner in range(100):
+            eta = np.clip(offset + X @ beta + np.einsum("nq,nq->n", Z, b[g]), -30, 30)
+            mu = _link_inv(link, eta)
+            w = _irls_weight(link, mu)
+            zwork = (eta - offset) + (y - mu) / w  # working response in predictor space
+            zb = np.einsum("nq,nq->n", Z, b[g])
+            WX = X * w[:, None]
+            A = X.T @ WX + 1e-8 * np.eye(p)
+            cov = np.linalg.inv(A)
+            beta_new = cov @ (X.T @ (w * (zwork - zb)))
+            cov_groups = []
+            for gi, idx in enumerate(groups):
+                Zg, wg = Z[idx], w[idx]
+                zg = zwork[idx] - X[idx] @ beta_new
+                cov_g = np.linalg.inv(Zg.T @ (wg[:, None] * Zg) + Sinv)
+                b[gi] = cov_g @ (Zg.T @ (wg * zg))
+                cov_groups.append(cov_g)
+            if np.max(np.abs(beta_new - beta)) < tol:
+                beta = beta_new
+                break
+            beta = beta_new
+        Sigma = (sum(np.outer(b[gi], b[gi]) + cov_groups[gi] for gi in range(G))) / G  # M-step
+        if np.max(np.abs(beta - beta_prev)) < tol:
+            break
+
+    result = GLMMResult(rv._family.name, link, names, beta, cov, Sigma, b, list(levels), re_names)
+    return RandomVariable._bound(None, name=rv._name, result=result)
+
+
 def _slot_design(slot, given, n):
     """Design pieces for one parameter slot.
 
@@ -553,9 +649,15 @@ def regression_fit(
     if quantile is not None:  # pinball-loss quantile regression (same linear-predictor syntax)
         return _quantile_fit(rv, data, given or {}, float(quantile))
     if linpred0 is not None and linpred0.groups:  # mixed-effects model
-        if rv._family.name != "Normal":
-            raise NotImplementedError("mixed-effects models require a Normal response.")
-        return _lmm_fit(rv, np.asarray(data, float).reshape(-1), given or {}, linpred0, max_iter, tol)
+        y = np.asarray(data, float).reshape(-1)
+        if rv._family.name == "Normal":
+            return _lmm_fit(rv, y, given or {}, linpred0, max_iter, tol)
+        glmm_link = _LINK.get(rv._family.name)
+        if glmm_link is None:
+            raise NotImplementedError(
+                f"mixed-effects models support {sorted(_LINK)} responses (got {rv._family.name!r})."
+            )
+        return _glmm_fit(rv, y, given or {}, linpred0, glmm_link, max(max_iter, 100), tol)
     fam = rv._family.name
     # heteroskedastic location-scale: a linear predictor in the *scale* slot (log link)
     if fam in ("Normal", "LogNormal") and isinstance(rv._args[1], _LinearPredictor):
