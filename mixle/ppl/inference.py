@@ -2019,7 +2019,74 @@ def conjugate_spec(rv: RandomVariable):
     return builder, i, prior_rv
 
 
-def conjugate_fit(rv: RandomVariable, data) -> RandomVariable:
+def _is_all_free_normal(rv: RandomVariable) -> bool:
+    """Normal(free, free) -- both mean and variance unknown, the Normal-Inverse-Gamma conjugate case."""
+    return (
+        rv._kind == "sample"
+        and not isinstance(rv._family, CompositeFamily)
+        and rv._family.name == "Normal"
+        and len(rv._args) == 2
+        and all(a is free for a in rv._args)
+    )
+
+
+def _nig_conjugate_fit(rv, data, *, mu0=0.0, kappa=0.0, alpha=1.0, beta=0.0) -> RandomVariable:
+    """Closed-form Normal-Inverse-Gamma (NormalGamma) posterior for ``Normal(free, free)`` -- the most
+    common Bayesian model: unknown mean AND variance, jointly conjugate.
+
+    Prior ``(mu, tau) ~ NormalGamma(mu0, kappa, alpha, beta)`` (default weakly-informative); the posterior
+    is exact in one pass. Returns a Gaussian at the posterior mean with a :class:`ConjugatePosterior`
+    exposing the joint posterior over ``mu`` and ``sigma`` (sampled from the NIG).
+    """
+    from mixle.stats import GaussianDistribution
+    from mixle.stats.bayes.normal_gamma import NormalGammaDistribution
+
+    arr = np.asarray(data, dtype=float)
+    n = float(arr.size)
+    xbar = float(arr.mean()) if n else 0.0
+    S = float(((arr - xbar) ** 2).sum())
+    lam_n = kappa + n
+    mu_n = (kappa * mu0 + n * xbar) / lam_n if lam_n > 0 else xbar
+    a_n = alpha + n / 2.0
+    b_n = beta + 0.5 * S + (0.5 * kappa * n / lam_n * (xbar - mu0) ** 2 if lam_n > 0 else 0.0)
+    nig = NormalGammaDistribution(mu_n, lam_n, a_n, b_n)
+
+    def _draw(k, rng):
+        return np.asarray(nig.sampler(seed=int(rng.randint(1, 2**31))).sample(k), dtype=float).reshape(k, 2)
+
+    mean_sigma2 = b_n / (a_n - 1.0) if a_n > 1.0 else b_n / a_n  # E[sigma^2] under the inverse-gamma marginal
+    entries = {
+        "mu": {
+            "index": 0,
+            "handle": None,
+            "name": "StudentT",
+            "mean": mu_n,
+            "hyper": {"mu_n": mu_n, "kappa_n": lam_n, "df": 2.0 * a_n},
+            "sample": lambda k, rng: _draw(k, rng)[:, 0],
+        },
+        "sigma": {
+            "index": 1,
+            "handle": None,
+            "name": "sqrt-InverseGamma",
+            "mean": float(np.sqrt(mean_sigma2)),
+            "hyper": {"alpha_n": a_n, "beta_n": b_n},
+            "sample": lambda k, rng: 1.0 / np.sqrt(_draw(k, rng)[:, 1]),
+        },
+    }
+    fitted = GaussianDistribution(mu_n, mean_sigma2)
+    cpost = ConjugatePosterior(entries)
+
+    def predictive(k, rng):  # posterior predictive: draw (mu, tau) then x ~ Normal(mu, 1/tau)
+        draws = _draw(k, rng)
+        return np.array([rng.normal(mu, 1.0 / np.sqrt(tau)) for mu, tau in draws])
+
+    cpost.predictive = predictive
+    return RandomVariable._bound(fitted, name=rv._name, result=cpost)
+
+
+def conjugate_fit(rv: RandomVariable, data, *, prior=None, **_) -> RandomVariable:
+    if _is_all_free_normal(rv):  # Normal(free, free) -> Normal-Inverse-Gamma (mean + variance unknown)
+        return _nig_conjugate_fit(rv, data, **(prior or {}))
     spec = conjugate_spec(rv)
     if spec is None:
         raise NotImplementedError("model is not a registered conjugate pair.")

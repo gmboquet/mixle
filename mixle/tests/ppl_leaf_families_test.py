@@ -142,6 +142,30 @@ class ConjugatePairsTestCase(unittest.TestCase):
         self.assertIsInstance(m.result, ConjugatePosterior)
         self.assertAlmostEqual(float(m.result.mean("p")), 0.3, delta=0.02)
 
+    def test_normal_mean_and_variance_nig(self):
+        # Normal(free, free): mean AND variance unknown -> Normal-Inverse-Gamma closed form (the most
+        # common Bayesian model). Verified bit-for-bit against the stats-layer conjugate path.
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(5.0, 2.0, 2000))
+        from mixle.ppl.inference import ConjugatePosterior
+
+        m = Normal(free, free).fit(data, how="conjugate")
+        self.assertIsInstance(m.result, ConjugatePosterior)
+        self.assertAlmostEqual(float(m.result.mean("mu")), 5.0, delta=0.15)
+        self.assertAlmostEqual(float(m.result.mean("sigma")), 2.0, delta=0.15)
+        # oracle: the stats GaussianEstimator(prior=NormalGammaPrior()) closed form
+        from mixle.inference import optimize
+        from mixle.inference.priors import NormalGammaPrior
+        from mixle.stats import GaussianEstimator
+
+        ref = optimize(data, GaussianEstimator(prior=NormalGammaPrior()), max_its=1, out=None)
+        self.assertAlmostEqual(float(m.result.mean("mu")), ref.mu, places=9)
+        self.assertAlmostEqual(float(m.result.mean("sigma")), float(np.sqrt(ref.sigma2)), delta=0.02)
+        # a real posterior: credible interval over mu + posterior predictive
+        mus = m.result.samples("mu", n=3000, rng=np.random.RandomState(1))
+        self.assertLess(np.percentile(mus, 2.5), 5.0)
+        self.assertGreater(np.percentile(mus, 97.5), 5.0)
+
     def test_gamma_rate_gamma(self):
         rng = np.random.RandomState(5)
         data = list(rng.gamma(3.0, 1.0 / 2.0, 4000))  # Gamma(shape=3, rate=2)
