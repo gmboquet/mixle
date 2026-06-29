@@ -59,9 +59,10 @@ def case_gaussian_mixture_em(n, rng):
     from mixle.stats import GaussianDistribution, MixtureDistribution
 
     data = list(np.concatenate([rng.normal(-3, 1, n // 2), rng.normal(3, 1, n - n // 2)]))
-    # separated init breaks EM's symmetric fixed point (a real init concern, not a benchmark fudge)
+    # deterministic, separated warm-start (prev_estimate) -> reproducible timing + correct recovery
+    # (a random init is non-deterministic and can collapse to EM's symmetric fixed point)
     proto = MixtureDistribution([GaussianDistribution(-2.5, 1), GaussianDistribution(2.5, 1)], [0.5, 0.5])
-    secs, m = _time(lambda: optimize(data, proto, max_its=200, out=None))
+    secs, m = _time(lambda: optimize(data, proto.estimator(), prev_estimate=proto, max_its=200, out=None))
     mus = sorted(c.mu for c in m.components)
     return [("2-comp Gaussian mixture (EM)", secs, max(abs(mus[0] + 3), abs(mus[1] - 3)))]
 
@@ -82,11 +83,11 @@ def case_hmm_em(n, rng):
             s = rng.choice(2, p=A[s])
         seqs.append(seq)
     proto = HiddenMarkovModelDistribution(
-        [GaussianDistribution(-1, 1), GaussianDistribution(1, 1)],
+        [GaussianDistribution(-2.0, 1), GaussianDistribution(2.0, 1)],
         w=[0.5, 0.5],
-        transitions=[[0.5, 0.5], [0.5, 0.5]],
+        transitions=[[0.6, 0.4], [0.4, 0.6]],
     )
-    secs, _ = _time(lambda: optimize(seqs, proto, max_its=50, out=None), repeats=1)
+    secs, _ = _time(lambda: optimize(seqs, proto.estimator(), prev_estimate=proto, max_its=50, out=None), repeats=1)
     return [("2-state Gaussian HMM (Baum-Welch EM)", secs, float("nan"))]
 
 
@@ -115,7 +116,7 @@ def case_heterogeneous_record(n, rng):
             SequenceDistribution(PoissonDistribution(1.0)),
         )
     )
-    secs, _ = _time(lambda: optimize(data, proto, max_its=50, out=None), repeats=1)
+    secs, _ = _time(lambda: optimize(data, proto.estimator(), prev_estimate=proto, max_its=50, out=None), repeats=1)
     return [("(category, real, count-seq) record (EM) — no rival expresses this", secs, float("nan"))]
 
 
