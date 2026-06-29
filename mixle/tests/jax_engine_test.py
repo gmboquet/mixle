@@ -145,5 +145,43 @@ class JaxLeafFittingParityTest(unittest.TestCase):
         self.assertTrue(np.allclose(got, ref, atol=1e-6))
 
 
+@unittest.skipUnless(_HAS_JAX, "jax not installed")
+class JitSeqLogDensityTest(unittest.TestCase):
+    """A2: the whole composite tree lowers to one jax.jit XLA program (jit_seq_log_density), bit-identical
+    to model.seq_log_density and reused across calls with the same data shape."""
+
+    def _model_and_data(self, n, seed=0):
+        import mixle.stats as S
+
+        rng = np.random.RandomState(seed)
+        m = S.MixtureDistribution(
+            [
+                S.CompositeDistribution((S.GaussianDistribution(-2, 1), S.PoissonDistribution(2.0))),
+                S.CompositeDistribution((S.GaussianDistribution(2, 1), S.PoissonDistribution(9.0))),
+            ],
+            [0.5, 0.5],
+        )
+        data = [(float(rng.normal(0, 2)), float(rng.poisson(5))) for _ in range(n)]
+        return m, data
+
+    def test_whole_tree_jit_matches_numpy(self):
+        from mixle.inference import jit_seq_log_density
+
+        m, data = self._model_and_data(3000)
+        ref = np.asarray(m.seq_log_density(m.dist_to_encoder().seq_encode(data)))
+        score = jit_seq_log_density(m)
+        self.assertTrue(np.allclose(score(data), ref, atol=1e-9))
+
+    def test_compiled_program_reused_across_calls(self):
+        from mixle.inference import jit_seq_log_density
+
+        m, data = self._model_and_data(2000, seed=1)
+        score = jit_seq_log_density(m)
+        score(data)  # first call compiles
+        m2, data2 = self._model_and_data(2000, seed=2)  # same model + same shape -> reuse
+        ref2 = np.asarray(m.seq_log_density(m.dist_to_encoder().seq_encode(data2)))
+        self.assertTrue(np.allclose(score(data2), ref2, atol=1e-9))
+
+
 if __name__ == "__main__":
     unittest.main()

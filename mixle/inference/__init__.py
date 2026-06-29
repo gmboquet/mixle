@@ -78,6 +78,7 @@ from mixle.inference.glm import (
     ridge_regression,
     robust_regression,
 )
+from mixle.inference.jit import JittedScorer, jit_seq_log_density
 
 # model comparison: paired score differences + non-nested (Vuong/Clarke) tests
 from mixle.inference.model_comparison import (
@@ -221,6 +222,8 @@ __all__ = [
     "seq_estimate",
     "seq_initialize",
     "optimize",
+    "jit_seq_log_density",
+    "JittedScorer",
     "fit",
     "EMStep",
     "best_of",
