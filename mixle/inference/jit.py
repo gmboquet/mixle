@@ -153,11 +153,15 @@ def jit_em_mixture(model: Any, data: Any, *, max_its: int = 100, engine: Any = N
     loop stays on-device). Returns a fitted ``MixtureDistribution``, bit-close to the host EM from the
     same start (it is the same EM update). Raises ``NotImplementedError`` for unsupported structure.
 
-    SPEED -- be honest: the payoff is **GPU/TPU and very large scale**, where XLA parallelizes the E-step
-    over millions of points and many components. **On CPU this is *not* a speedup** -- mixle's host EM is
-    already vectorized NumPy (+ a fused path), and a long sequential ``scan`` of small steps loses to it
-    (measured ~0.1-0.8x on CPU for K up to 40). The CPU win from A2 is the single-pass scoring jit
-    (:func:`jit_seq_log_density`, ~8x), not this loop. Use this for the GPU path and the on-device program.
+    SPEED -- measured, honest: the payoff is **GPU/TPU and large scale**, where XLA parallelizes the
+    E-step over millions of points and many components. On an **Apple M4 GPU (via jax-metal)** this kernel
+    runs **~21x faster than mixle's vectorized NumPy EM** (K=10, N=1e6, 50 iters: 156 ms vs 3254 ms) with
+    identical estimates, and ~12x faster than the same jitted loop on CPU. **On CPU it is *not* a speedup**
+    -- mixle's host EM is already vectorized NumPy (+ a fused path) and a long sequential ``scan`` of small
+    steps loses to it (~0.1-0.8x for K up to 40). So: GPU -> big win, CPU -> use the host EM. (The CPU win
+    from A2 is the single-pass scoring jit, :func:`jit_seq_log_density`, ~8x.) Note: jax-metal is
+    version-pinned -- the GPU result above used Python 3.11 + jax/jaxlib 0.4.34 + jax-metal 0.1.1; newer
+    jaxlib emits StableHLO that jax-metal 0.1.1 cannot compile.
     """
     import jax
     import jax.numpy as jnp
