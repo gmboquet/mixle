@@ -18,7 +18,9 @@ from mixle.program import (
     ewc,
     fisher_diagonal,
     fit,
+    gail,
     lora,
+    maxent_irl,
     maximize,
     minimize,
     pareto,
@@ -218,6 +220,44 @@ class MetaAndMultiObjectiveTest(unittest.TestCase):
         self.assertLess(f1().item(), v1_0)  # both objectives reduced
         self.assertLess(f2().item(), v2_0)
         self.assertTrue(0.9 <= theta[0].item() <= 4.1)  # landed on the Pareto segment between a and b
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class InverseRLTest(unittest.TestCase):
+    def test_gail_recovers_expert_behavior_from_demos(self):
+        # No reward given -- only expert demonstrations. GAIL = alternate(disc, reinforce(policy)).
+        torch.manual_seed(0)
+        expert = torch.tensor([0.05, 0.7, 0.1, 0.15])  # the (unknown) expert action preferences
+        demos = torch.multinomial(expert, 2000, replacement=True)
+        policy = torch.zeros(4, requires_grad=True)
+        disc = torch.nn.Linear(4, 1)
+        onehot = lambda a: torch.nn.functional.one_hot(a, 4).float()
+
+        def sample_expert():
+            return onehot(demos[torch.randint(0, len(demos), (256,))])
+
+        def sample_policy():
+            a = torch.multinomial(torch.softmax(policy, 0), 256, replacement=True)
+            return onehot(a), torch.log_softmax(policy, 0)[a]
+
+        prog = gail(lambda f: disc(f).squeeze(-1), sample_expert, sample_policy, list(disc.parameters()), [policy])
+        fit(prog, steps=2500, lr=0.02)
+        self.assertEqual(int(torch.softmax(policy, 0).argmax()), int(expert.argmax()))  # recovered the preference
+
+    def test_maxent_irl_matches_expert_feature_expectations(self):
+        # MaxEnt IRL feature matching: learn reward weights so the soft policy's features match the expert's.
+        torch.manual_seed(0)
+        phi = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])  # 3 actions x 2 features
+        w_true = torch.tensor([2.0, -1.0])
+        expert_features = (torch.softmax(phi @ w_true, 0) @ phi).detach()  # from a known soft policy
+        w = torch.zeros(2, requires_grad=True)
+        reward = lambda feats: feats @ w
+
+        def policy_features():
+            return torch.softmax(phi @ w, 0) @ phi  # expected features under the maxent policy for current w
+
+        fit(maxent_irl(reward, [w], expert_features, policy_features), steps=3000, lr=0.05)
+        self.assertTrue(torch.allclose(policy_features().detach(), expert_features, atol=0.03))
 
 
 class ProgramEMBridgeTest(unittest.TestCase):

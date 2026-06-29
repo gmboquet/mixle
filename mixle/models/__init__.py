@@ -35,6 +35,7 @@ from mixle.models.neural import (
     PoissonRegressionNeuralNetwork,
     make_mlp,
 )
+from mixle.models.neural_leaf import NeuralLeaf
 from mixle.models.partially_observable_markov_decision_process import (
     PartiallyObservableMarkovDecisionProcessFilterResult,
     PartiallyObservableMarkovDecisionProcessFitResult,
@@ -61,6 +62,7 @@ __all__ = [
     "ErdosRenyiGraphModel",
     "GaussianProcessRegressor",
     "GaussianRegressionNeuralNetwork",
+    "NeuralLeaf",
     "GrammarLearningResult",
     "HardEMResult",
     "KnowledgeGraphFitResult",
