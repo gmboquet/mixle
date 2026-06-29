@@ -170,6 +170,36 @@ class PPLHierarchicalTestCase(unittest.TestCase):
         self.assertGreater(corr, 0.95)
         self.assertEqual(fit.result.group_means.size, G)
 
+    def test_indexed_flat_varying_intercepts(self):
+        # 8-schools idiom: a flat observation array + a group-index covariate, fit with each(by=...).
+        rng = np.random.RandomState(0)
+        G = 8
+        theta_true = rng.normal(5.0, 4.0, G)
+        labels, y = [], []
+        for g in range(G):
+            n = rng.randint(20, 40)
+            labels += [g] * n
+            y += list(rng.normal(theta_true[g], 1.0, n))
+        labels, y = np.array(labels), np.array(y)
+        fit = Normal(Normal(0, 100).each(by="school"), free).fit(y, given={"school": labels})
+        h = fit.result.hyper
+        self.assertAlmostEqual(h["m"], float(theta_true.mean()), delta=0.6)  # mean of the group draws
+        self.assertAlmostEqual(h["tau"], 4.0, delta=1.5)
+        self.assertAlmostEqual(h["sigma"], 1.0, delta=0.2)
+        # per-group latents recovered in sorted-label order
+        gm = np.asarray(fit.result.summary()["group_means"])
+        self.assertEqual(gm.shape, (G,))
+        self.assertLess(float(np.max(np.abs(gm - theta_true))), 0.6)
+
+    def test_indexed_flat_requires_and_checks_the_index(self):
+        rng = np.random.RandomState(1)
+        y = list(rng.normal(0.0, 1.0, 30))
+        labels = np.array([0, 1] * 15)
+        with self.assertRaises(ValueError):  # missing given
+            Normal(Normal(0, 100).each(by="g"), free).fit(y)
+        with self.assertRaises(ValueError):  # index length mismatch
+            Normal(Normal(0, 100).each(by="g"), free).fit(y, given={"g": labels[:5]})
+
     def test_gamma_poisson_random_effects(self):
         rng = np.random.RandomState(0)
         G = 300

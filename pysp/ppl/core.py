@@ -1003,15 +1003,26 @@ class RandomVariable:
         fam = _FAMILIES[family_name]
         return cls("sample", family=fam, args=args, name=name, keys=keys, scope=scope)
 
-    def each(self) -> RandomVariable:
-        """Mark this prior as per-group (a random effect / local latent). Used in a
-        parameter slot: ``Normal(Normal(m, t).each(), s)`` is a hierarchical model.
+    def each(self, by: str | None = None) -> RandomVariable:
+        """Mark this prior as per-group (a random effect / local latent). Used in a parameter slot:
+        ``Normal(Normal(m, t).each(), s)`` is a hierarchical model.
+
+        Two data layouts are supported:
+
+        * **nested** -- ``each()`` with no argument: ``.fit(groups)`` where ``groups`` is a list of
+          per-group observation lists (one list per group).
+        * **indexed-flat** -- ``each(by="g")``: ``.fit(y, given={"g": labels})`` where ``y`` is one flat
+          observation array and ``labels[i]`` is observation ``i``'s group. This is the varying-intercepts
+          / 8-schools idiom; groups are taken in sorted order of the unique labels.
         """
         if self._kind != "sample":
             raise TypeError("each() applies to a distribution used as a prior.")
-        return RandomVariable(
+        rv = RandomVariable(
             "sample", family=self._family, args=self._args, name=self._name, keys=self._keys, scope="grouped"
         )
+        if by is not None:
+            rv._cache["group_by"] = str(by)  # read by fit() to reshape indexed-flat data into groups
+        return rv
 
     def noncentered(self) -> RandomVariable:
         """Sample this location-scale prior in non-centered form (offset/multiplier).
@@ -1555,6 +1566,30 @@ class RandomVariable:
         # is registered in pysp.ppl.statespace; PDEStateSpace by the pysparkplug-pde plugin.
         if self._kind == "sample" and isinstance(self._family, CompositeFamily) and self._family.fit_fn is not None:
             return self._family.fit_fn(self, data, **kw)
+
+        # Indexed-flat hierarchical: Normal(Normal(m, t).each(by="g"), s).fit(y, given={"g": labels}).
+        # Reshape the flat observation array into per-group lists (sorted unique labels) so the existing
+        # nested grouped path handles it -- the model is identical, only the data layout differs.
+        if self._kind == "sample":
+            _gby = next(
+                (
+                    a._cache.get("group_by")
+                    for a in self._args
+                    if isinstance(a, RandomVariable) and a._scope == "grouped"
+                ),
+                None,
+            )
+            if _gby is not None:
+                given = kw.pop("given", None)
+                if not given or _gby not in given:
+                    raise ValueError(f"each(by={_gby!r}) needs the group index: fit(..., given={{{_gby!r}: labels}}).")
+                labels = np.asarray(given[_gby])
+                if len(labels) != len(data):
+                    raise ValueError(f"given[{_gby!r}] has length {len(labels)} but data has length {len(data)}.")
+                if any(k != _gby for k in given):
+                    raise NotImplementedError("indexed-flat hierarchical with extra covariates is not supported yet.")
+                yarr = np.asarray(data, dtype=float)
+                data = [yarr[labels == g].tolist() for g in sorted(set(labels.tolist()))]
 
         grouped = self._kind == "sample" and any(
             isinstance(a, RandomVariable) and a._scope == "grouped" for a in self._args
