@@ -369,6 +369,22 @@ def _glmm_fit(rv, y, given, linpred, link, max_iter, tol):
     G = levels.size
     groups = [np.where(g == gi)[0] for gi in range(G)]
 
+    # Honesty (C3): PQL is mildly biased for binary data with few observations per group. Warn so the
+    # user reads the estimates as approximate rather than treating them as a clean posterior.
+    if link == "logit":
+        min_per_group = min((ix.size for ix in groups), default=0)
+        if min_per_group < 5:
+            import warnings
+
+            warnings.warn(
+                "GLMM fit by penalized quasi-likelihood (PQL), which is mildly biased for binary (logit) "
+                f"data with few observations per group (smallest group has {min_per_group}). Treat these "
+                "estimates as approximate; use more observations per group, or how='mcmc'/'nuts' for a "
+                "less-biased posterior.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     beta = np.zeros(p)
     b = np.zeros((G, q))
     Sigma = np.eye(q) * 0.5

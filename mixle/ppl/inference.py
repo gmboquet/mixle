@@ -2119,6 +2119,27 @@ _PRIOR_DICT_BUILDERS = {
 }
 
 
+# Soundness guard for the bridge: a likelihood is only a conjugate pair with the *right* prior family.
+# This maps each single-target conjugate likelihood (the bridge handles these) to the PPL prior family
+# its conjugate posterior expects, so e.g. Normal(Beta, sd) (a Beta on a Gaussian mean -- NOT conjugate)
+# is rejected here rather than routed to conjugate and crashing. Multi-parameter likelihoods
+# (Gaussian/MVN/LogGaussian: joint NIG/NIW) are deliberately absent -- those are the hand table / NIG path.
+_EXPECTED_PRIOR_FAMILY = {
+    "BernoulliDistribution": "Beta",
+    "BinomialDistribution": "Beta",
+    "GeometricDistribution": "Beta",
+    "NegativeBinomialDistribution": "Beta",
+    "PoissonDistribution": "Gamma",
+    "ExponentialDistribution": "Gamma",
+    "GammaDistribution": "Gamma",
+    "InverseGammaDistribution": "Gamma",
+    "InverseGaussianDistribution": "Gamma",
+    "ParetoDistribution": "Gamma",
+    "CategoricalDistribution": "Dirichlet",
+    "IntegerCategoricalDistribution": "Dirichlet",
+}
+
+
 def _prior_to_dict(prior_rv):
     builder = _PRIOR_DICT_BUILDERS.get(prior_rv._family.name)
     try:
@@ -2158,7 +2179,12 @@ def _stats_conjugate_probe(rv):
         return None
     from mixle.stats.bayes.conjugate import is_conjugate_family
 
-    return (idx, prior_rv, stats_dist) if is_conjugate_family(stats_dist) else None
+    # sound only when the likelihood is a conjugate family AND the prior is the family its conjugate
+    # posterior expects (a single-target pair the bridge actually handles)
+    expected = _EXPECTED_PRIOR_FAMILY.get(type(stats_dist).__name__)
+    if expected is None or prior_rv._family.name != expected or not is_conjugate_family(stats_dist):
+        return None
+    return (idx, prior_rv, stats_dist)
 
 
 def stats_conjugate_supported(rv) -> bool:
