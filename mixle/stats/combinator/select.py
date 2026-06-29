@@ -59,11 +59,30 @@ def _child_accumulator_factory(estimator: ParameterEstimator) -> StatisticAccumu
 class SelectDistribution(SequenceEncodableProbabilityDistribution):
     """SelectDistribution routes each observation to one child distribution via a choice function.
 
-    The density of an observation x is dists[choice_function(x)].density(x).
+    Two modes, set by ``weights``:
+
+    * **Conditional** (``weights is None``, the default) -- the density is ``p(x) = p_{c(x)}(x)``:
+      the choice function selects which child scores ``x`` and the result is that child's density.
+      There is no branch distribution, so this is a density *conditioned on the branch* and cannot be
+      sampled as a standalone generative model.
+    * **Dispatch mixture** (``weights`` given) -- the density is ``p(x) = w_{c(x)} * p_{c(x)}(x)``,
+      a normalized mixture over the union of the child supports in which the choice function plays the
+      role of an **observed** component label. This is the right model for data of *disjoint* types
+      (e.g. a mix of strings and numbers, where the type identifies the component): unlike
+      :class:`~mixle.stats.latent.mixture.MixtureDistribution` the component is observed, so fitting is
+      closed-form (the weights are the branch proportions, each child is fit on its routed subset --
+      no EM) and sampling draws a branch from ``weights`` then a value from that child.
+
+    For the dispatch-mixture density to be normalized the choice function must partition the
+    observation space consistently with the children, i.e. every value a child can emit must route
+    back to that child (``choice_function(x) == k`` for ``x`` in child ``k``'s support).
     """
 
     def __init__(
-        self, dists: Sequence[SequenceEncodableProbabilityDistribution], choice_function: Callable[[T], int]
+        self,
+        dists: Sequence[SequenceEncodableProbabilityDistribution],
+        choice_function: Callable[[T], int],
+        weights: Sequence[float] | None = None,
     ) -> None:
         """SelectDistribution object for observations routed to child distributions.
 
@@ -72,16 +91,37 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
                 compatible with the observations the choice function routes to it.
             choice_function (Callable[[T], int]): Maps an observation to the index of the child
                 distribution that models it. Must return values in {0, ..., len(dists)-1}.
+            weights (Optional[Sequence[float]]): Branch (mixing) weights, one per child. ``None``
+                (default) gives the conditional density ``p(x) = p_{c(x)}(x)``; a non-negative
+                sequence summing to a positive value (normalized internally) gives the dispatch
+                mixture ``p(x) = w_{c(x)} * p_{c(x)}(x)``.
 
         Attributes:
             dists (Sequence[SequenceEncodableProbabilityDistribution]): Child distributions.
             choice_function (Callable[[T], int]): Observation-to-child routing function.
             count (int): Number of child distributions.
+            weights (Optional[np.ndarray]): Normalized branch weights, or ``None`` in conditional mode.
+            log_weights (Optional[np.ndarray]): ``log(weights)``, or ``None`` in conditional mode.
 
         """
         self.dists = dists
         self.choice_function = choice_function
         self.count = len(dists)
+        if weights is None:
+            self.weights = None
+            self.log_weights = None
+        else:
+            w = np.asarray(weights, dtype=float)
+            if w.shape != (self.count,):
+                raise ValueError("weights must have one entry per child distribution (%d)" % self.count)
+            if np.any(w < 0.0):
+                raise ValueError("weights must be non-negative")
+            total = float(w.sum())
+            if total <= 0.0:
+                raise ValueError("weights must sum to a positive value")
+            self.weights = w / total
+            with np.errstate(divide="ignore"):
+                self.log_weights = np.log(self.weights)
 
     def compute_capabilities(self):
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
@@ -106,10 +146,15 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self) -> str:
         """Returns string representation of SelectDistribution object."""
-        return "SelectDistribution(" + ",".join([str(u) for u in self.dists]) + ")"
+        body = ",".join([str(u) for u in self.dists])
+        if self.weights is None:
+            return "SelectDistribution(" + body + ")"
+        return "SelectDistribution(" + body + ", weights=[" + ",".join("%r" % float(w) for w in self.weights) + "])"
 
     def density(self, x: T) -> float:
         """Density of the child distribution selected for observation x.
+
+        In dispatch-mixture mode the selected child's density is scaled by its branch weight.
 
         Args:
             x (T): Observation compatible with the child selected by the choice function.
@@ -119,10 +164,13 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         idx = self.choice_function(x)
-        return self.dists[idx].density(x)
+        d = self.dists[idx].density(x)
+        return d if self.weights is None else float(self.weights[idx]) * d
 
     def log_density(self, x: T) -> float:
         """Log-density of the child distribution selected for observation x.
+
+        In dispatch-mixture mode the selected child's log-density is offset by ``log(weight)``.
 
         Args:
             x (T): Observation compatible with the child selected by the choice function.
@@ -132,7 +180,8 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         idx = self.choice_function(x)
-        return self.dists[idx].log_density(x)
+        lp = self.dists[idx].log_density(x)
+        return lp if self.log_weights is None else float(self.log_weights[idx]) + lp
 
     def seq_log_density(self, x: tuple[tuple[np.ndarray, ...], tuple[int, ...], tuple[Any, ...]]) -> np.ndarray:
         """Vectorized evaluation of the log-density on sequence encoded data x.
@@ -153,7 +202,10 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         sz = sum(len(u) for u in xi)
         rv = np.zeros(sz)
         for i in range(len(idx)):
-            rv[xi[i]] = self.dists[idx[i]].seq_log_density(enc_tuple[i])
+            scores = self.dists[idx[i]].seq_log_density(enc_tuple[i])
+            if self.log_weights is not None:
+                scores = scores + float(self.log_weights[idx[i]])
+            rv[xi[i]] = scores
         return rv
 
     def backend_seq_log_density(
@@ -167,6 +219,8 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         rv = engine.zeros(sz)
         for i in range(len(idx)):
             child_scores = backend_seq_log_density(self.dists[idx[i]], enc_tuple[i], engine)
+            if self.log_weights is not None:
+                child_scores = child_scores + float(self.log_weights[idx[i]])
             rv = engine.index_add(rv, engine.asarray(xi[i]), child_scores)
         return rv
 
@@ -179,6 +233,8 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         choice_function = dists[0].choice_function
         if any(d.count != count or d.choice_function is not choice_function for d in dists):
             raise ValueError("Stacked SelectDistribution components require matching choice routing.")
+        if any(getattr(d, "weights", None) is not None for d in dists):
+            raise ValueError("Stacked SelectDistribution does not support branch weights (dispatch mixture).")
         children = []
         for i in range(count):
             child_dists = [d.dists[i] for d in dists]
@@ -284,17 +340,26 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         """
         return SelectSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> SelectEstimator:
+    def estimator(self, pseudo_count: float | None = None, estimate_weights: bool | None = None) -> SelectEstimator:
         """Creates a SelectEstimator with one child estimator per child distribution.
 
         Args:
             pseudo_count (Optional[float]): Passed through to each child estimator.
+            estimate_weights (Optional[bool]): Whether the fitted distribution carries branch weights
+                (the dispatch-mixture model). When ``None`` (default) this follows the current mode --
+                a weighted distribution re-fits weights, a conditional one stays conditional.
 
         Returns:
             SelectEstimator object.
 
         """
-        return SelectEstimator([d.estimator(pseudo_count=pseudo_count) for d in self.dists], self.choice_function)
+        if estimate_weights is None:
+            estimate_weights = self.weights is not None
+        return SelectEstimator(
+            [d.estimator(pseudo_count=pseudo_count) for d in self.dists],
+            self.choice_function,
+            estimate_weights=estimate_weights,
+        )
 
     def dist_to_encoder(self) -> SelectDataEncoder:
         """Creates a SelectDataEncoder object for encoding sequences of SelectDistribution data.
@@ -370,23 +435,35 @@ class SelectSampler(DistributionSampler):
         self.dist_samplers = [d.sampler(seed=self.rng.randint(maxint)) for d in dist.dists]
 
     def sample(self, size: int | None = None):
-        """Draw one sample from every child distribution.
+        """Draw from the select distribution.
 
-        Note: this samples each child independently and groups the draws, returning a tuple with
-        one entry per child (or a list of such tuples when size is given). It is not a draw from
-        the select density itself, since the select density conditions on the choice function.
+        Dispatch-mixture mode (``weights`` set): a branch is drawn from the weights and a single
+        value is drawn from that child -- a true draw from ``p(x) = w_{c(x)} p_{c(x)}(x)``.
+
+        Conditional mode (``weights is None``): there is no branch distribution to draw from, so this
+        falls back to sampling each child independently and grouping the draws, returning a tuple with
+        one entry per child (or a list of such tuples when size is given). That is NOT a draw from the
+        select density; provide ``weights`` to sample a dispatch mixture.
 
         Args:
-            size (Optional[int]): Number of grouped draws. If None a single tuple is returned.
+            size (Optional[int]): Number of draws. If None a single draw is returned.
 
         Returns:
-            Tuple with one sample per child if size is None, else a list of 'size' such tuples.
+            In dispatch-mixture mode a single value (or a list of ``size`` values); in conditional
+            mode a tuple with one sample per child (or a list of such tuples).
 
         """
-        if size is None:
-            return tuple([d.sample(size=size) for d in self.dist_samplers])
-        else:
+        if self.dist.weights is None:
+            if size is None:
+                return tuple([d.sample(size=size) for d in self.dist_samplers])
             return list(zip(*[d.sample(size=size) for d in self.dist_samplers]))
+
+        weights = self.dist.weights
+        if size is None:
+            j = int(self.rng.choice(self.dist.count, p=weights))
+            return self.dist_samplers[j].sample(size=None)
+        branches = self.rng.choice(self.dist.count, size=size, p=weights)
+        return [self.dist_samplers[int(j)].sample(size=None) for j in branches]
 
 
 class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
@@ -655,22 +732,32 @@ class SelectEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
 class SelectEstimator(ParameterEstimator):
     """SelectEstimator estimates a SelectDistribution from child sufficient statistics."""
 
-    def __init__(self, estimators: Sequence[ParameterEstimator], choice_function: Callable[[T], int]) -> None:
+    def __init__(
+        self,
+        estimators: Sequence[ParameterEstimator],
+        choice_function: Callable[[T], int],
+        estimate_weights: bool = False,
+    ) -> None:
         """SelectEstimator object.
 
         Args:
             estimators (Sequence[ParameterEstimator]): One estimator per child distribution.
             choice_function (Callable[[T], int]): Observation-to-child routing function.
+            estimate_weights (bool): When True the estimate carries branch weights set to the
+                routed-weight proportions (the dispatch-mixture model); when False (default) the
+                estimate is the conditional select density with no weights.
 
         Attributes:
             estimators (Sequence[ParameterEstimator]): One estimator per child distribution.
             choice_function (Callable[[T], int]): Observation-to-child routing function.
             count (int): Number of child estimators.
+            estimate_weights (bool): Whether to set branch weights from the routed-weight proportions.
 
         """
         self.estimators = estimators
         self.choice_function = choice_function
         self.count = len(estimators)
+        self.estimate_weights = estimate_weights
 
     def accumulator_factory(self) -> SelectEstimatorAccumulatorFactory:
         """Creates a SelectEstimatorAccumulatorFactory from the child estimators.
@@ -693,9 +780,15 @@ class SelectEstimator(ParameterEstimator):
             SelectDistribution object.
 
         """
-        return SelectDistribution(
-            [est.estimate(ss[0], ss[1]) for est, ss in zip(self.estimators, suff_stat)], self.choice_function
-        )
+        dists = [est.estimate(ss[0], ss[1]) for est, ss in zip(self.estimators, suff_stat)]
+        if not self.estimate_weights:
+            return SelectDistribution(dists, self.choice_function)
+        # The branch is observed via the choice function, so the MLE weights are simply the routed
+        # weight proportions -- no EM. Fall back to uniform if no observations were routed anywhere.
+        counts = np.asarray([float(ss[0]) for ss in suff_stat], dtype=float)
+        total = float(counts.sum())
+        weights = counts / total if total > 0.0 else np.full(self.count, 1.0 / self.count)
+        return SelectDistribution(dists, self.choice_function, weights=weights)
 
 
 class SelectDataEncoder(DataSequenceEncoder):
