@@ -476,6 +476,12 @@ __all__ = [
     "SequenceEstimator",
     "SequenceDataEncoder",
     "SequenceEnumerator",
+    "ScheduledHiddenMarkovModelDistribution",
+    "ScheduledHMMEstimator",
+    "Homogeneous",
+    "ByPosition",
+    "ByRelativePosition",
+    "ByLength",
     "SegmentalHiddenMarkovModelDistribution",
     "SegmentalHiddenMarkovDistribution",
     "SegmentalHiddenMarkovSampler",
@@ -779,7 +785,12 @@ from mixle.stats.bayes.conjugate import (
     mixture_conjugate_posterior,
 )
 from mixle.stats.bayes.dict_dirichlet import DictDirichletDistribution, DictDirichletSampler
-from mixle.stats.bayes.dirichlet import DirichletDataEncoder, DirichletDistribution, DirichletEstimator, DirichletSampler
+from mixle.stats.bayes.dirichlet import (
+    DirichletDataEncoder,
+    DirichletDistribution,
+    DirichletEstimator,
+    DirichletSampler,
+)
 from mixle.stats.bayes.dirichlet_process_mixture import (
     DirichletProcessMixtureDistribution,
     DirichletProcessMixtureEstimator,
@@ -1207,6 +1218,14 @@ from mixle.stats.latent.responsibility_attention import (
     ResponsibilityAttentionEstimator,
     ResponsibilityAttentionSampler,
     sequence_to_triples,
+)
+from mixle.stats.latent.scheduled_hidden_markov_model import (
+    ByLength,
+    ByPosition,
+    ByRelativePosition,
+    Homogeneous,
+    ScheduledHiddenMarkovModelDistribution,
+    ScheduledHMMEstimator,
 )
 from mixle.stats.latent.segmental_hidden_markov_model import (
     SegmentalHiddenMarkovDataEncoder,

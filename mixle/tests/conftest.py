@@ -31,6 +31,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "hyperedge_replacement_grammar_test.py": ("graph", "pcfg", "slow"),
     "hawkes_process_test.py": ("distribution", "stochastic", "slow"),
     "hmm_terminal_states_test.py": ("hmm", "integration", "slow"),
+    "scheduled_hmm_test.py": ("hmm", "integration", "slow"),
     "infer_backends_test.py": ("numba", "integration", "slow"),
     "kent_test.py": ("distribution", "stochastic", "slow"),
     "knowledge_graph_test.py": ("graph", "stochastic", "slow"),
