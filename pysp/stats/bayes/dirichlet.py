@@ -579,15 +579,17 @@ class DirichletSampler(DistributionSampler):
 class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
     """DirichletAccumulator object for aggregating sufficient statistics from iid observations."""
 
-    def __init__(self, dim: int, keys: str | None = None) -> None:
+    def __init__(self, dim: int | None = None, keys: str | None = None) -> None:
         """DirichletAccumulator object.
 
         Args:
-            dim (int): Dimension of the Dirichlet distribution.
+            dim (Optional[int]): Dimension of the Dirichlet distribution. ``None`` defers allocation until
+                the first observation reveals the dimension (lets ``DirichletEstimator()`` infer ``K`` from
+                data).
             keys (Optional[str]): Set keys for merging sufficient statistics.
 
         Attributes:
-            dim (int): Dimension of the Dirichlet distribution.
+            dim (Optional[int]): Dimension of the Dirichlet distribution (``None`` until first sized).
             sum_of_logs (np.ndarray): Weighted sum of the log of observation vectors.
             sum (np.ndarray): Weighted sum of observation vectors.
             sum2 (np.ndarray): Weighted sum of squared observation vectors.
@@ -596,11 +598,19 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         self.dim = dim
-        self.sum_of_logs = np.zeros(dim)
-        self.sum = np.zeros(dim)
-        self.sum2 = np.zeros(dim)
+        self.sum_of_logs = None if dim is None else np.zeros(dim)
+        self.sum = None if dim is None else np.zeros(dim)
+        self.sum2 = None if dim is None else np.zeros(dim)
         self.counts = 0
         self.keys = keys
+
+    def _ensure_dim(self, dim: int) -> None:
+        """Allocate the moment accumulators once the data reveals the dimension."""
+        if self.dim is None:
+            self.dim = int(dim)
+            self.sum_of_logs = np.zeros(self.dim)
+            self.sum = np.zeros(self.dim)
+            self.sum2 = np.zeros(self.dim)
 
     def update(self, x: np.ndarray | list[float], weight: float, estimate: Optional["DirichletDistribution"]) -> None:
         """Update sufficient statistics with a single weighted observation.
@@ -618,6 +628,7 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         xx = np.asarray(x)
+        self._ensure_dim(xx.size)
         z = xx > 0
         if np.all(z):
             self.sum_of_logs += log(xx) * weight
@@ -667,6 +678,7 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        self._ensure_dim(np.asarray(x[0]).shape[1])
         self.sum_of_logs += np.dot(weights, x[0])
         self.counts += weights.sum()
         self.sum += np.dot(weights, x[1])
@@ -684,6 +696,7 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
         The weighted vector moments (sum of logs, sum, sum of squares) are reduced via a
         weight-vector / observation-matrix product on the active engine. Matches seq_update.
         """
+        self._ensure_dim(np.asarray(x[0]).shape[1])
         weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         w = engine.asarray(weights_np)
         log_x = engine.asarray(np.asarray(x[0], dtype=np.float64))
@@ -723,6 +736,11 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
             DirichletAccumulator object.
 
         """
+        # An empty (never-sized) accumulator contributes nothing -- skip so partition merges where one
+        # shard saw no data don't force a dimension.
+        if suff_stat[1] is None:
+            return self
+        self._ensure_dim(len(suff_stat[1]))
         self.sum_of_logs += suff_stat[1]
         self.sum += suff_stat[2]
         self.sum2 += suff_stat[3]
@@ -748,6 +766,8 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum_of_logs = x[1]
         self.sum = x[2]
         self.sum2 = x[3]
+        if x[1] is not None:
+            self.dim = len(x[1])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -788,15 +808,15 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
 class DirichletAccumulatorFactory(StatisticAccumulatorFactory):
     """DirichletAccumulatorFactory object for creating DirichletAccumulator objects."""
 
-    def __init__(self, dim: int, keys: str | None = None) -> None:
+    def __init__(self, dim: int | None = None, keys: str | None = None) -> None:
         """DirichletAccumulatorFactory object.
 
         Args:
-            dim (int): Dimension of the Dirichlet distribution.
+            dim (Optional[int]): Dimension of the Dirichlet distribution (``None`` defers to data).
             keys (Optional[str]): Set keys for merging sufficient statistics.
 
         Attributes:
-            dim (int): Dimension of the Dirichlet distribution.
+            dim (Optional[int]): Dimension of the Dirichlet distribution.
             keys (Optional[str]): Keys for merging sufficient statistics.
 
         """
@@ -813,7 +833,7 @@ class DirichletEstimator(ParameterEstimator):
 
     def __init__(
         self,
-        dim: int,
+        dim: int | None = None,
         pseudo_count: float | None = None,
         suff_stat: np.ndarray | None = None,
         delta: float | None = 1.0e-8,
@@ -824,7 +844,12 @@ class DirichletEstimator(ParameterEstimator):
         """DirichletEstimator object.
 
         Args:
-            dim (int): Dimension of the Dirichlet distribution.
+            dim (Optional[int]): Dimension of the Dirichlet distribution. ``None`` (the default) lets the
+                accumulator discover the dimension from the first observation -- so ``DirichletEstimator()``
+                fits any simplex data without being told ``K`` up front (the estimate's ``K`` is read off
+                the data, exactly like the per-coordinate sufficient statistics). Pass ``dim`` only when
+                using ``pseudo_count``/``suff_stat`` regularization, which needs the dimension to size the
+                prior.
             pseudo_count (Optional[float]): Used to re-weight the sufficient statistics in estimation.
             suff_stat (Optional[np.ndarray]): Mean-log-probability sufficient statistic used with
                 pseudo_count to regularize the estimate.
