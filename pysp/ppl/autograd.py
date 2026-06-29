@@ -501,7 +501,7 @@ def grad_target(rv: RandomVariable, data, missing: str = "error"):
             except Exception:
                 return None
         return None
-    from pysp.ppl.inference import _require_flat, _target_parts
+    from pysp.ppl.inference import _is_det_expr, _require_flat, _target_parts
 
     if rv._family.name not in scorers:
         return None
@@ -512,6 +512,10 @@ def grad_target(rv: RandomVariable, data, missing: str = "error"):
         return all(_prior_ok(z) for z in a._args if isinstance(z, RandomVariable))
 
     for a in rv._args:
+        # Deterministic-expression slots (a + b, exp(a), ...) have no single prior family to score; there
+        # is no autograd target for them yet, so bail out -- the gradient-free numerical MH path handles them.
+        if _is_det_expr(a):
+            return None
         if isinstance(a, RandomVariable) and not _prior_ok(a):
             return None
     _require_flat(rv)
