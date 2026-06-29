@@ -120,6 +120,28 @@ def case_heterogeneous_record(n, rng):
     return [("(category, real, count-seq) record (EM) — no rival expresses this", secs, float("nan"))]
 
 
+def case_fused_vs_unfused(n, rng):
+    """Single-pass fused numba kernel vs per-leaf dispatch on a composite mixture (warm, post-compile).
+
+    Quantifies the A1 fusion win that the cost model should exploit. Parity (fused == non-fused) is
+    covered by the fused_* test suite; here we only time the warm path.
+    """
+    from mixle.stats import CompositeDistribution as Comp
+    from mixle.stats import GaussianDistribution as G
+    from mixle.stats import MixtureDistribution as Mix
+    from mixle.stats import PoissonDistribution as P
+    from mixle.stats.compute.fused_codegen import fused_seq_log_density
+
+    m = Mix([Comp((G(-2, 1), P(2.0))), Comp((G(2, 1), P(9.0)))], [0.5, 0.5])
+    data = [(float(rng.normal(0, 2)), float(rng.poisson(5))) for _ in range(n)]
+    enc = m.dist_to_encoder().seq_encode(data)
+    fused_seq_log_density(m, enc)  # warm up the numba compile
+    secs_u, _ = _time(lambda: m.seq_log_density(enc), repeats=5)
+    secs_f, _ = _time(lambda: fused_seq_log_density(m, enc), repeats=5)
+    speed = secs_u / secs_f if secs_f else float("nan")
+    return [(f"composite-mixture seq_log_density: fused vs per-leaf ({speed:.2f}x)", secs_f, float("nan"))]
+
+
 # --------------------------------------------------------------------------- optional rivals
 def case_rivals(n, rng):
     rows = []
@@ -158,6 +180,7 @@ def main():
         case_gaussian_mixture_em,
         case_hmm_em,
         case_heterogeneous_record,
+        case_fused_vs_unfused,
         case_rivals,
     ):
         try:
