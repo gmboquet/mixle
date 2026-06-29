@@ -45,8 +45,12 @@ import math
 from collections.abc import Callable, Iterable
 from typing import Any
 
+import numpy as np
+
 from mixle.enumeration.model_enumeration import best_first_decode
 from mixle.enumeration.quantization.core import (
+    _LOG2,
+    _TOL,
     CountHistogram,
     CountIndex,
     Quantizer,
@@ -54,6 +58,13 @@ from mixle.enumeration.quantization.core import (
 )
 
 _NEG_INF = -math.inf
+# The numpy fast path accumulates counts in int64; it is exact while the worst-case count V**max_len stays
+# below this many bits (~2**62). Deeper / larger-vocab problems fall back to the arbitrary-precision Python path.
+_INT64_SAFE_BITS = 62.0
+
+
+def _raise_index(fb: int, off: int) -> tuple[Any, float]:
+    raise IndexError("empty autoregressive count index")
 
 
 def autoregressive_count_index(
@@ -124,6 +135,88 @@ def autoregressive_count_index(
     return CountIndex(joint, getter), truncated
 
 
+def _ar_count_index_fast(
+    steps_np: Callable[[tuple], tuple[np.ndarray, np.ndarray]],
+    prefix: tuple,
+    depth: int,
+    quantizer: Quantizer,
+    max_fine_bucket: int,
+    eos: Any = None,
+) -> tuple[CountIndex, bool]:
+    """numpy-vectorized :func:`autoregressive_count_index` (int64 counts).
+
+    Identical results to the reference implementation, but the per-prefix work is vectorized: the V step
+    log-probs are binned with one :func:`numpy.floor` + :func:`numpy.bincount` instead of a Python loop over
+    the vocabulary, and child histograms are pooled with numpy slice-adds. ``steps_np(prefix)`` returns
+    ``(tokens, log_probs)`` as numpy arrays sorted by descending log-prob. Counts are int64, so the caller
+    must ensure the worst-case count stays below ~``2**62`` (see :data:`_INT64_SAFE_BITS`); deeper problems use
+    the arbitrary-precision Python path.
+    """
+    if depth <= 0 or (eos is not None and prefix and prefix[-1] == eos):
+        return CountIndex(CountHistogram.delta(0, 1), lambda fb, off: ((), 0.0)), False
+
+    tokens, lps = steps_np(prefix)
+    sb = np.floor(np.maximum(0.0, -lps / _LOG2) * (quantizer.oversample / quantizer.bin_width_bits) + _TOL).astype(
+        np.int64
+    )
+    keep = sb <= max_fine_bucket
+    truncated = not bool(keep.all())
+    tokens, lps, sb = tokens[keep], lps[keep], sb[keep]
+    if tokens.size == 0:
+        return CountIndex(CountHistogram.empty(), _raise_index), truncated
+
+    if depth == 1:
+        # Each kept token is a length-1 completion sitting in fine bucket sb; bincount is the histogram.
+        order = np.argsort(sb, kind="stable")  # group by bucket, descending-lp order preserved within a bucket
+        sb_s, tok_s, lp_s = sb[order], tokens[order], lps[order]
+        base = int(sb_s[0])
+        hist = CountHistogram(base, np.bincount(sb_s - base).tolist())
+
+        def leaf_getter(fb: int, off: int, _sb=sb_s, _tok=tok_s, _lp=lp_s) -> tuple[Any, float]:
+            start = int(np.searchsorted(_sb, int(fb), side="left"))
+            j = start + int(off)
+            if off < 0 or j >= _sb.size or int(_sb[j]) != int(fb):
+                raise IndexError("offset %d outside leaf bucket %d" % (off, fb))
+            return (_tok[j].item(),), float(_lp[j])
+
+        return CountIndex(hist, leaf_getter), truncated
+
+    # depth > 1: recurse into each token's subtree, then pool the shifted child histograms with numpy.
+    by_token: list[tuple[Any, float, int, CountIndex]] = []
+    shifted: list[tuple[int, np.ndarray]] = []
+    for tok, lp, s in zip(tokens.tolist(), lps.tolist(), sb.tolist()):
+        child, child_trunc = _ar_count_index_fast(
+            steps_np, prefix + (tok,), depth - 1, quantizer, max_fine_bucket - s, eos
+        )
+        truncated = truncated or child_trunc
+        if not child.hist.data:
+            continue
+        shifted.append((child.hist.base + s, np.asarray(child.hist.data, dtype=np.int64)))
+        by_token.append((tok, float(lp), int(s), child))
+
+    if not shifted:
+        return CountIndex(CountHistogram.empty(), _raise_index), truncated
+    lo = min(s for s, _ in shifted)
+    hi = max(s + d.size - 1 for s, d in shifted)
+    buf = np.zeros(hi - lo + 1, dtype=np.int64)
+    for s, d in shifted:
+        buf[s - lo : s - lo + d.size] += d
+    joint = CountHistogram(lo, buf.tolist())
+
+    def getter(fb: int, off: int) -> tuple[Any, float]:
+        o = int(off)
+        for tok, lp, s, child in by_token:
+            cfb = int(fb) - s
+            c = child.hist.count_at(cfb)
+            if o < c:
+                cval, clp = child.get_in_bucket(cfb, o)
+                return (tok,) + cval, lp + clp
+            o -= c
+        raise IndexError("offset %d outside autoregressive bucket %d" % (off, fb))
+
+    return CountIndex(joint, getter), truncated
+
+
 class _ARSampler:
     """Ancestral sampler over the model -- token by token from ``next_logprobs`` (for the rank tail fallback)."""
 
@@ -159,15 +252,23 @@ class AutoregressiveEnumerable:
 
     Args:
         next_logprobs: ``next_logprobs(prefix) -> [(token, log_prob), ...]`` -- the next-token log-probabilities
-            (``<= 0``) given a prefix tuple, e.g. the ``log_softmax`` of a transformer's next-token logits.
+            (``<= 0``) given a prefix tuple, e.g. the ``log_softmax`` of a transformer's next-token logits. For
+            speed it may instead return the ``(tokens, log_probs)`` numpy-array pair (skips per-token boxing).
         max_len: sequence length to enumerate (every path is completed at this many tokens; with ``eos`` a
             path may complete earlier).
         eos: optional end-of-sequence token; a prefix ending in ``eos`` is complete and not extended.
         bin_width_bits, oversample: quantization resolution of the count index (finer = exacter ordering,
             more memory). The defaults match the distribution count-DP.
+        batch_next_logprobs: optional ``batch_next_logprobs([prefix, ...]) -> [result, ...]`` scoring many
+            prefixes in one (padded) forward. When given, the count index warms its forward cache breadth-first
+            in ``batch_size`` chunks -- the large speed-up for transformers, where one-at-a-time forwards
+            dominate (e.g. distilGPT-2 length-2 to rank 1e5: ~25 s one-at-a-time -> ~1 s batched).
+        batch_size: prefixes per batched forward.
 
     The model is queried lazily and **memoized by prefix**, so deepening the index (or recomputing a
-    log-density) never re-runs a forward pass it has already seen.
+    log-density) never re-runs a forward pass it has already seen. With integer tokens and a count that fits
+    int64 (``max_len * log2(vocab) < 62``) the histogram build is the numpy fast path; otherwise it falls back
+    to an arbitrary-precision Python recursion with identical results.
     """
 
     def __init__(
@@ -177,6 +278,8 @@ class AutoregressiveEnumerable:
         eos: Any = None,
         bin_width_bits: float = 1.0,
         oversample: int = 8,
+        batch_next_logprobs: Callable[[list[tuple]], list[Any]] | None = None,
+        batch_size: int = 256,
     ) -> None:
         if max_len is None or int(max_len) < 1:
             raise ValueError("max_len must be a positive integer (the sequence length to enumerate).")
@@ -185,22 +288,96 @@ class AutoregressiveEnumerable:
         self.eos = eos
         self.bin_width_bits = float(bin_width_bits)
         self.oversample = int(oversample)
-        self._cache: dict[tuple, list[tuple[Any, float]]] = {}
+        self.batch_next_logprobs = batch_next_logprobs
+        self.batch_size = int(batch_size)
+        self._cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}  # prefix -> (tokens, log_probs), desc by lp
+        self._fast: bool | None = None
 
-    # -- the model oracle, sorted-descending and memoized -------------------------------------------------
-    def _steps(self, prefix: tuple) -> list[tuple[Any, float]]:
+    # -- the model oracle, descending by log-prob and memoized (one forward per prefix) -------------------
+    def _parse_steps(self, raw: Any) -> tuple[np.ndarray, np.ndarray]:
+        # Accept the fast ``(tokens, log_probs)`` numpy form or a ``[(token, log_prob), ...]`` list.
+        if isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[0], np.ndarray):
+            tokens, lps = np.asarray(raw[0]), np.asarray(raw[1], dtype=float)
+        else:
+            items = [(t, lp) for t, lp in raw if lp != _NEG_INF]
+            tokens = np.array([t for t, _ in items])
+            lps = np.array([float(lp) for _, lp in items], dtype=float)
+        finite = np.isfinite(lps)
+        if not finite.all():
+            tokens, lps = tokens[finite], lps[finite]
+        order = np.argsort(-lps, kind="stable")  # descending by log-prob
+        return tokens[order], lps[order]
+
+    def _steps_np(self, prefix: tuple) -> tuple[np.ndarray, np.ndarray]:
         cached = self._cache.get(prefix)
         if cached is None:
-            cached = sorted(
-                ((t, float(lp)) for t, lp in self.next_logprobs(prefix) if lp != _NEG_INF),
-                key=lambda u: -u[1],
-            )
+            cached = self._parse_steps(self.next_logprobs(prefix))
             self._cache[prefix] = cached
         return cached
+
+    def _steps(self, prefix: tuple) -> list[tuple[Any, float]]:
+        tokens, lps = self._steps_np(prefix)
+        return list(zip(tokens.tolist(), lps.tolist()))
+
+    def _use_fast(self) -> bool:
+        # The numpy/int64 path is exact and used when tokens are integers and the worst-case count V**max_len
+        # fits int64; otherwise fall back to the arbitrary-precision Python recursion (identical results).
+        if self._fast is None:
+            try:
+                tokens, _ = self._steps_np(())
+                v = int(tokens.size)
+                self._fast = (
+                    tokens.dtype.kind in "iu" and v > 0 and self.max_len * math.log2(max(v, 2)) < _INT64_SAFE_BITS
+                )
+            except (TypeError, ValueError):
+                self._fast = False
+        return self._fast
+
+    def _prefetch(self, quantizer: Quantizer, max_fine_bucket: int, frontier_cap: int = 500_000) -> None:
+        """Warm the forward cache breadth-first, scoring whole levels of live prefixes in batched forwards.
+
+        The count index needs a forward for every live prefix (length 0..max_len-1); doing them one at a time
+        is the transformer bottleneck. With ``batch_next_logprobs`` we score each level's uncached prefixes in
+        ``batch_size`` chunks (one padded forward each), pruning to prefixes whose cumulative bits stay within
+        ``max_fine_bucket``. If a level grows past ``frontier_cap`` we stop prefetching and let the recursion
+        fetch the deep remainder lazily -- so deep/wide trees degrade gracefully instead of materializing.
+        """
+        if self.batch_next_logprobs is None:
+            return
+        scale = quantizer.oversample / quantizer.bin_width_bits
+        frontier: list[tuple[tuple, int]] = [((), 0)]
+        for length in range(self.max_len):
+            need = [
+                pfx
+                for pfx, _ in frontier
+                if pfx not in self._cache and not (self.eos is not None and pfx and pfx[-1] == self.eos)
+            ]
+            for i in range(0, len(need), self.batch_size):
+                chunk = need[i : i + self.batch_size]
+                for pfx, raw in zip(chunk, self.batch_next_logprobs(chunk)):
+                    if pfx not in self._cache:
+                        self._cache[pfx] = self._parse_steps(raw)
+            if length == self.max_len - 1:
+                break  # deepest forward done; no further expansion needed
+            nxt: list[tuple[tuple, int]] = []
+            for pfx, cum in frontier:
+                if self.eos is not None and pfx and pfx[-1] == self.eos:
+                    continue
+                tokens, lps = self._steps_np(pfx)
+                sb = np.floor(np.maximum(0.0, -lps / _LOG2) * scale + _TOL).astype(np.int64)
+                live = (cum + sb) <= max_fine_bucket
+                for tok, s in zip(tokens[live].tolist(), (cum + sb[live]).tolist()):
+                    nxt.append((pfx + (tok,), int(s)))
+                if len(nxt) > frontier_cap:
+                    return  # too wide to prefetch; the recursion forwards the rest lazily
+            frontier = nxt
 
     # -- the count-index contract (this is all the existing drivers need) ---------------------------------
     def quantized_count_index(self, quantizer: Quantizer, max_fine_bucket: int) -> tuple[CountIndex, bool]:
         """Count index over all length-``max_len`` (or eos-terminated) sequences, bounded by depth bits."""
+        if self._use_fast():
+            self._prefetch(quantizer, max_fine_bucket)
+            return _ar_count_index_fast(self._steps_np, (), self.max_len, quantizer, max_fine_bucket, self.eos)
         return autoregressive_count_index(self._steps, (), self.max_len, quantizer, max_fine_bucket, self.eos)
 
     def log_density(self, sequence: Iterable[Any]) -> float:
