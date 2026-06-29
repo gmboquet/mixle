@@ -231,6 +231,37 @@ class PPLHierarchicalTestCase(unittest.TestCase):
         self.assertAlmostEqual(fit.result.hyper["mean"], 2.0, delta=0.3)
         self.assertGreater(np.corrcoef(fit.result.group_means, lam)[0, 1], 0.85)
 
+    def test_poisson_indexed_flat(self):
+        # non-Normal varying intercepts on a flat array: y[i] ~ Poisson(lam[g[i]]), lam_g ~ Gamma
+        rng = np.random.RandomState(0)
+        G = 200
+        lam = rng.gamma(4.0, 1 / 2.0, G)
+        labels, y = [], []
+        for g in range(G):
+            n = rng.randint(5, 20)
+            labels += [g] * n
+            y += list(rng.poisson(lam[g], n).astype(float))
+        labels, y = np.array(labels), np.array(y)
+        fit = Poisson(Gamma(1, 1).each(by="g")).fit(y, given={"g": labels})
+        self.assertAlmostEqual(fit.result.hyper["mean"], 2.0, delta=0.3)
+        gm = np.asarray(fit.result.summary()["group_means"])
+        self.assertEqual(gm.shape, (G,))
+        self.assertGreater(np.corrcoef(gm, lam)[0, 1], 0.85)
+
+    def test_bernoulli_indexed_flat(self):
+        rng = np.random.RandomState(0)
+        G = 200
+        p = rng.beta(2.0, 5.0, G)
+        labels, y = [], []
+        for g in range(G):
+            n = rng.randint(10, 40)
+            labels += [g] * n
+            y += list((rng.random(n) < p[g]).astype(float))
+        labels, y = np.array(labels), np.array(y)
+        fit = Bernoulli(Beta(1, 1).each(by="g")).fit(y, given={"g": labels})
+        self.assertAlmostEqual(fit.result.hyper["mean"], 0.286, delta=0.06)
+        self.assertGreater(np.corrcoef(np.asarray(fit.result.summary()["group_means"]), p)[0, 1], 0.8)
+
     def test_beta_bernoulli_random_effects(self):
         rng = np.random.RandomState(0)
         G = 300
