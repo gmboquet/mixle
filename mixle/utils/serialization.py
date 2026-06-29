@@ -334,9 +334,13 @@ def _encode(value: Any, active: set[int]) -> Any:
         return _encode_sequence("set", sorted(value, key=_sort_key), active)
     if isinstance(value, dict):
         return _encode_dict(value, active)
-    if callable(value):
-        return _encode_callable(value)
-    if hasattr(value, "__dict__"):
+    if callable(value) or hasattr(value, "__dict__"):
+        # Instances of a registered serializable class encode via their object state even when they
+        # are callable (e.g. a data-carrying routing object), so they round-trip from their __dict__
+        # without needing a process-local callable id. Plain functions/lambdas still need one.
+        ensure_pysp_serialization_registry()
+        if callable(value) and value.__class__ not in _CLASS_IDS:
+            return _encode_callable(value)
         return _encode_object(value, active)
     raise SerializationError("objects of type %s are not JSON serializable by mixle" % _type_id(value.__class__))
 
