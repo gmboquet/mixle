@@ -610,3 +610,39 @@ class DispatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutoFusionCostModelTest(unittest.TestCase):
+    """optimize(engine=None) auto-switches a large fusible composite fit to the fused kernel — and the
+    result is parity-identical to the host path (the cost model only changes speed, never the answer)."""
+
+    def _mix(self):
+        G, P, Mix, Comp = (
+            stats.GaussianDistribution,
+            stats.PoissonDistribution,
+            stats.MixtureDistribution,
+            stats.CompositeDistribution,
+        )
+        return Mix([Comp((G(-2, 1), P(2.0))), Comp((G(2, 1), P(9.0)))], [0.5, 0.5])
+
+    def test_gate(self):
+        from mixle.inference.estimation import _should_auto_fuse
+
+        mix = self._mix()
+        self.assertTrue(_should_auto_fuse(mix, [(60000, None)], 30))  # large composite-mixture -> fuse
+        self.assertFalse(_should_auto_fuse(mix, [(2000, None)], 30))  # small -> stay on host
+        self.assertFalse(_should_auto_fuse(stats.GaussianDistribution(0, 1), [(10**7, None)], 100))  # bare leaf
+
+    def test_auto_fusion_is_parity_identical(self):
+        from mixle.engines import NUMPY_ENGINE
+        from mixle.inference import optimize
+
+        rng = np.random.RandomState(0)
+        m = self._mix()
+        data = [(float(rng.normal(0, 2)), float(rng.poisson(5))) for _ in range(60000)]  # 60k*30 >= 1.5e6
+        auto = optimize(data, m.estimator(), prev_estimate=m, max_its=30, out=None)  # auto-fuse
+        host = optimize(data, m.estimator(), prev_estimate=m, max_its=30, engine=NUMPY_ENGINE, out=None)
+        self.assertTrue(np.allclose(sorted(auto.w), sorted(host.w), atol=1e-8))
+        am = sorted(c.dists[0].mu for c in auto.components)
+        hm = sorted(c.dists[0].mu for c in host.components)
+        self.assertTrue(np.allclose(am, hm, atol=1e-8))
