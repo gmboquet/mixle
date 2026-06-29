@@ -97,6 +97,41 @@ class MixedEffectsTestCase(unittest.TestCase):
         # intercept absorbs the sample mean of the random effects
         self.assertAlmostEqual(r.coefficients["intercept"]["mean"] + ge.mean() - u.mean(), 1.0, delta=0.15)
 
+    def test_random_intercept_only_no_fixed_covariate(self):
+        # intercept-only fixed part (no fixed covariate) used to fail to size the design matrix.
+        rng = np.random.RandomState(0)
+        G, n_per = 40, 30
+        u = rng.normal(0, 1.5, G)
+        ys, subj = [], []
+        for gi in range(G):
+            ys += list(3.0 + u[gi] + rng.normal(0, 0.6, n_per))
+            subj += [gi] * n_per
+        m = Normal(Group("subject") + free, free).fit(ys, given={"subject": subj})
+        r = m.result
+        ge = np.array([r.group_effects[i] for i in range(G)])
+        # fixed intercept absorbs the grand mean; random effects are mean-zero BLUPs around it
+        self.assertAlmostEqual(r.coefficients["intercept"]["mean"] + ge.mean(), 3.0 + u.mean(), delta=0.2)
+        self.assertGreater(np.corrcoef(ge, u)[0, 1], 0.95)
+        self.assertAlmostEqual(r.sigma, 0.6, delta=0.1)
+
+    def test_random_slope_only_no_fixed_covariate(self):
+        rng = np.random.RandomState(1)
+        G, n_per = 60, 40
+        u0 = rng.normal(0, 1.0, G)
+        u1 = rng.normal(0, 0.8, G)
+        ys, xs, subj = [], [], []
+        for gi in range(G):
+            x = rng.normal(0, 1, n_per)
+            ys += list(2.0 + u0[gi] + (1.5 + u1[gi]) * x + rng.normal(0, 0.5, n_per))
+            xs += list(x)
+            subj += [gi] * n_per
+        # fixed part is intercept-only; the slope lives entirely in the random effect
+        m = Normal(Group("subject", slopes=["x"]) + free, free).fit(ys, given={"x": xs, "subject": subj})
+        r = m.result
+        bslope = np.array([r.group_effects_full[i][1] for i in range(G)])
+        self.assertGreater(np.corrcoef(bslope, u1)[0, 1], 0.9)  # per-group slope deviations recovered
+        self.assertAlmostEqual(r.sigma, 0.5, delta=0.1)
+
     def test_random_slopes_lmm(self):
         rng = np.random.RandomState(0)
         G, n_per = 60, 40
