@@ -3,8 +3,8 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# PyPI distribution name; the import package is `pysp` (cf. scikit-learn -> sklearn).
-name = "pysp-learn"
+# PyPI distribution name; the import package is `mixle` (cf. scikit-learn -> sklearn).
+name = "mixle"
 version = "0.5.2"
 description = "A package for estimating heterogeneous probability density functions."
 readme = "README.md"
@@ -29,7 +29,7 @@ classifiers = [
 ]
 # Base install covers all distributions and local (numpy) estimation; acceleration,
 # distribution, and embedding back-ends are opt-in extras (see [project.optional-dependencies]).
-# Lower bounds reflect the oldest releases that carry every API pysp calls and that are routinely
+# Lower bounds reflect the oldest releases that carry every API mixle calls and that are routinely
 # tested (numpy >=1.26 for the stable ndarray/linalg/errstate surface; scipy >=1.10 for
 # special.logsumexp + stats.binomtest/kstwo used by the inference layer; mpmath >=1.3). They are
 # floors, not pins -- newer majors are allowed.
@@ -41,19 +41,19 @@ dependencies = [
 
 [project.optional-dependencies]
 # Extras are opt-in; the lower bounds are conservative floors (oldest releases with Python 3.10-3.12
-# wheels and the APIs pysp uses), not pins -- newer majors are allowed. numba >= 0.59 is the first
+# wheels and the APIs mixle uses), not pins -- newer majors are allowed. numba >= 0.59 is the first
 # series with 3.10-3.12 wheels and the njit features the kernels use.
 numba = ["numba>=0.59", "tbb>=2021.6"]
 # pandas is only used by the DataFrame data adapter (which duck-types and never imports pandas);
 # it is optional so the base install stays lean.
 pandas = ["pandas>=2.0"]
-# data-layer connectors (pysp.data.sources) -- each lazy + optional.
+# data-layer connectors (mixle.data.sources) -- each lazy + optional.
 arrow = ["pyarrow>=14"]
 sql = ["sqlalchemy>=2.0"]
 mongo = ["pymongo>=4.3"]
 hadoop = ["pyarrow>=14", "fsspec>=2023.1.0"]
 data = ["pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "pymongo>=4.3", "fsspec>=2023.1.0"]
-# graph-grammar models (pysp.stats.sequences.grammar) are the only networkx user; lazy + optional.
+# graph-grammar models (mixle.stats.sequences.grammar) are the only networkx user; lazy + optional.
 grammar = ["networkx>=3.0"]
 # GMP-backed (FFT) big-integer multiply for the structural count-DP's large histogram convolutions.
 gmpy2 = ["gmpy2>=2.1"]
@@ -74,14 +74,14 @@ lint = ["ruff==0.15.17", "mypy>=1.0"]
 all = ["numba>=0.59", "tbb>=2021.6", "pyspark>=3.4", "dask>=2023.5.0", "distributed>=2023.5.0", "torch>=2.0", "mpi4py>=3.1", "umap-learn>=0.5.4", "pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "networkx>=3.0"]
 
 [project.urls]
-Homepage = "https://github.com/gmboquet/pysparkplug"
-Repository = "https://github.com/gmboquet/pysparkplug"
+Homepage = "https://github.com/gmboquet/mixle"
+Repository = "https://github.com/gmboquet/mixle"
 
 [tool.setuptools.packages.find]
-include = ["pysp*"]
+include = ["mixle*"]
 
 [tool.pytest.ini_options]
-testpaths = ["pysp/tests"]
+testpaths = ["mixle/tests"]
 python_files = ["*_test.py"]
 python_classes = ["*Test", "*TestCase"]
 python_functions = ["test_*"]
@@ -138,8 +138,8 @@ extend-exclude = ["examples"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
 ignore = [
-    "F403", # `from pysp.engines.arithmetic import *` is an intentional dispatch namespace
-    "F405", #   (pysp.engines.arithmetic defines __all__); the star is deliberate, not accidental.
+    "F403", # `from mixle.engines.arithmetic import *` is an intentional dispatch namespace
+    "F405", #   (mixle.engines.arithmetic defines __all__); the star is deliberate, not accidental.
     "E501", # line length is governed by the formatter, not flagged by the linter.
     "B008", # immutable sentinel instances as defaults (e.g. NullDistribution()) are intentional.
     # The rules below are deliberately not enforced over this scientific codebase; they are
@@ -156,7 +156,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.10"
-files = ["pysp"]
+files = ["mixle"]
 # Strictness is intentionally relaxed for a large, partially-typed scientific codebase;
 # tighten incrementally (e.g. per-module overrides) as annotations are completed.
 ignore_missing_imports = true
@@ -164,5 +164,5 @@ warn_redundant_casts = true
 no_implicit_optional = true
 
 [[tool.mypy.overrides]]
-module = "pysp.tests.*"
+module = "mixle.tests.*"
 ignore_errors = true
