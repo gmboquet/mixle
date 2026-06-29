@@ -2539,21 +2539,46 @@ def _indexed_target(rv: RandomVariable, data, given: dict):
     return log_target, slots, extract, rep, (dmean, dstd)
 
 
-def indexed_fit(rv: RandomVariable, data, *, given=None, how="map", rng=None, **_) -> RandomVariable:
-    """Fit a flat model with a data-indexed latent vector (``theta[Field("g")]``) by per-observation MAP.
+def indexed_fit(
+    rv: RandomVariable, data, *, given=None, how="map", rng=None, draws=2000, burn=1000, thin=1, **_
+) -> RandomVariable:
+    """Fit a flat model with a data-indexed latent vector (``theta[Field("g")]``).
 
-    The latent vector(s) and scalar parameters maximize the per-observation joint; the result exposes the
-    fitted vectors via ``.result`` (``latents`` / ``group_means``). MCMC over the latent vector is a later
-    step; ``how`` other than ``map``/``auto`` raises.
+    ``how='map'`` (the default) maximizes the per-observation joint and returns the fitted vectors on
+    ``.result`` (``latents`` / ``group_means``). ``how='mcmc'`` samples the joint by adaptive random-walk
+    Metropolis and returns a full :class:`Posterior` (per-latent summary / credible intervals). Other
+    ``how`` values (hmc/nuts) are not yet wired for the indexed target.
     """
-    from scipy.optimize import minimize
+    log_target, slots, extract, rep, (dmean, dstd) = _indexed_target(rv, data, given)
+
+    if how == "mcmc":
+        from mixle.inference.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
+
+        rng = np.random.RandomState() if rng is None else rng
+        u0 = _init_u(slots, dmean, dstd)
+        res = metropolis_hastings(
+            log_target,
+            u0,
+            AdaptiveRandomWalkProposal(_init_scale(slots, dstd, len(data)).copy()),
+            num_samples=draws,
+            burn_in=burn,
+            thin=thin,
+            rng=rng,
+        )
+        u = np.asarray(res.samples, dtype=float).reshape(len(res.samples), -1)
+        vals = _u_to_vals(slots, u)
+        post = Posterior(slots, vals, res)
+        _attach_convergence(post, slots, u[None, :, :], [res])
+        pop = rv._family.make_dist(tuple(rep(u.mean(axis=0))), rv._name)  # bound at the posterior mean
+        return RandomVariable._bound(pop, name=rv._name, result=post)
 
     if how not in ("map", "auto"):
-        raise NotImplementedError(f"data-indexed latents support how='map' for now (got {how!r}).")
-    log_target, slots, extract, rep, (dmean, dstd) = _indexed_target(rv, data, given)
+        raise NotImplementedError(f"data-indexed latents support how='map'/'mcmc' (got {how!r}).")
+
+    from scipy.optimize import minimize
+
     u0 = _init_u(slots, dmean, dstd)
     res = minimize(lambda u: -log_target(u), u0, method="L-BFGS-B", options={"maxiter": 2000})
     latents, scalars = extract(res.x)
-    rep_args = rep(res.x)
-    pop = rv._family.make_dist(tuple(rep_args), rv._name)
+    pop = rv._family.make_dist(tuple(rep(res.x)), rv._name)
     return RandomVariable._bound(pop, name=rv._name, result=IndexedPosterior(latents, scalars))

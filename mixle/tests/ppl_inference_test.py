@@ -255,6 +255,23 @@ class PPLIndexedLatentTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             Normal(theta[Field("g")], free).fit(y)  # no given
 
+    def test_mcmc_posterior_over_latent_vector(self):
+        rng = np.random.RandomState(0)
+        K = 5
+        theta_true = rng.normal(0.0, 3.0, K)
+        labels = rng.randint(0, K, 600)
+        y = rng.normal(theta_true[labels], 0.8)
+        theta = free(K, name="theta")
+        m = Normal(theta[Field("g")], free).fit(
+            y, given={"g": labels}, how="mcmc", draws=1500, burn=800, rng=np.random.RandomState(1)
+        )
+        s = m.result.summary()
+        means = np.array([s[f"theta[{k}]"]["mean"] for k in range(K)])
+        self.assertLess(float(np.max(np.abs(means - theta_true))), 0.6)
+        # each latent has a credible interval (a posterior, not just a point)
+        self.assertIn("q2.5", s["theta[0]"])
+        self.assertLess(s["theta[0]"]["q2.5"], s["theta[0]"]["q97.5"])
+
 
 class PPLHMCTestCase(unittest.TestCase):
     def test_hmc_recovers_and_mixes(self):
