@@ -443,7 +443,7 @@ def _expr_leaves(rv) -> list:
     """The leaf (sample/bound) RVs an expression RV depends on, in left-to-right order."""
     if not isinstance(rv, RandomVariable):
         return []
-    if rv._kind in ("apply", "pow", "select"):
+    if rv._kind in ("apply", "pow", "select", "gather"):
         return _expr_leaves(rv._args[0])
     if rv._kind in ("sum", "prod"):
         out = _expr_leaves(rv._args[0])
@@ -454,6 +454,19 @@ def _expr_leaves(rv) -> list:
                 seen.add(id(lv))
         return out
     return [rv]  # sample / bound / given: an atomic leaf
+
+
+def _expr_has_gather(rv) -> bool:
+    """True if a deterministic expression contains a data-indexed gather (theta[Field(...)])."""
+    if not isinstance(rv, RandomVariable):
+        return False
+    if rv._kind == "gather":
+        return True
+    if rv._kind in ("apply", "pow", "select"):
+        return _expr_has_gather(rv._args[0])
+    if rv._kind in ("sum", "prod"):
+        return _expr_has_gather(rv._args[0]) or _expr_has_gather(rv._args[1])
+    return False
 
 
 def _eval_expr(rv, env):
@@ -475,6 +488,10 @@ def _eval_expr(rv, env):
     if rv._kind == "select":
         base, index = rv._args
         return np.asarray(_eval_expr(base, env))[..., index]
+    if rv._kind == "gather":
+        base, field = rv._args
+        idx = np.asarray(env[("field", field.name)])
+        return np.asarray(_eval_expr(base, env))[..., idx]
     if rv not in env:
         raise KeyError(f"no value supplied for {rv!r} when evaluating a constraint.")
     return env[rv]
@@ -707,6 +724,8 @@ def _expr_desc(rv) -> str:
         return f"({_expr_desc(rv._args[0])} ** {rv._args[1]})"
     if rv._kind == "select":
         return f"{_expr_desc(rv._args[0])}[{rv._args[1]}]"
+    if rv._kind == "gather":
+        return f"{_expr_desc(rv._args[0])}[{rv._args[1].name}]"
     return rv._name or "rv"
 
 
@@ -1081,9 +1100,18 @@ class RandomVariable:
         # constraint / solver expressions and as a derived RV (sample/mean).
         return cls("select", args=(base, int(index)))
 
+    @classmethod
+    def _gather(cls, base, field) -> RandomVariable:
+        # Data-indexed gather base[Field("g")]: picks, per observation i, entry ``g[i]`` of a latent
+        # vector. Yields a per-observation value, so a model using it is fit by the per-observation
+        # (indexed) target.
+        return cls("gather", args=(base, field))
+
     def __getitem__(self, index) -> RandomVariable:
+        if isinstance(index, Field):  # data-indexed latent: theta[Field("g")] -> per-observation gather
+            return RandomVariable._gather(self, index)
         if not isinstance(index, int):
-            raise TypeError("RandomVariable indexing selects a single integer entry, e.g. v[0].")
+            raise TypeError("RandomVariable indexing takes an int entry (v[0]) or a Field (theta[Field('g')]).")
         return RandomVariable._select(self, index)
 
     # -- algebra (deterministic transforms + convolution) -------------------
@@ -1554,6 +1582,15 @@ class RandomVariable:
             raise ValueError(f"unknown how={how!r}; choose from {sorted(valid_how)}.")
         if hasattr(data, "__len__") and len(data) == 0:
             raise ValueError("fit() received empty data.")
+
+        if self._kind == "sample" and any(_expr_has_gather(a) for a in self._args):
+            # A data-indexed latent (theta[Field("g")]) makes the parameter per-observation, which needs
+            # the per-observation (indexed) target. The node is built and usable in expressions; fitting
+            # is wired in a following step.
+            raise NotImplementedError(
+                "fitting a model with a data-indexed latent (theta[Field(...)]) is not wired yet; "
+                "use each(by=...) for a hierarchical group effect, or Group(...) in a regression predictor."
+            )
 
         # regression / GLM: a linear predictor (covariates) in a parameter slot
         if self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
