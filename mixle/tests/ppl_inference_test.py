@@ -72,6 +72,30 @@ class PPLSummaryDiagnosticsTestCase(unittest.TestCase):
         self.assertIn("q2.5", row)  # the original keys are untouched
 
 
+class PPLLaplaceTestCase(unittest.TestCase):
+    """how='laplace' — a cheap Gaussian posterior at the MAP (the uncertainty rung above 'map')."""
+
+    def test_laplace_recovers_and_quantifies(self):
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(5.0, 2.0, 400))  # posterior sd of the mean ~ 2/sqrt(400) = 0.1
+        mu = Normal(0, 10, name="mu")
+        m = Normal(mu, free).fit(data, how="laplace", rng=np.random.RandomState(1))
+        s = m.result.summary()["mu"]
+        self.assertAlmostEqual(s["mean"], 5.0, delta=0.25)
+        self.assertAlmostEqual(s["std"], 0.1, delta=0.05)  # Hessian-based uncertainty is calibrated
+        self.assertIn("q2.5", s)
+        post = m.posterior(mu)
+        self.assertLess(float(np.percentile(post, 2.5)), 5.0)
+        self.assertGreater(float(np.percentile(post, 97.5)), 5.0)
+
+    def test_laplace_mean_matches_map_point(self):
+        rng = np.random.RandomState(2)
+        data = list(rng.normal(-1.0, 1.5, 600))
+        lap = Normal(Normal(0, 10), free).fit(data, how="laplace", rng=np.random.RandomState(3))
+        mp = Normal(Normal(0, 10), free).fit(data, how="map")
+        self.assertAlmostEqual(lap.posterior(0).mean(), mp.dist.mu, delta=0.1)
+
+
 class PPLExplainFitTestCase(unittest.TestCase):
     """explain_fit() reports the route .fit(how='auto') will take, with honest caveats."""
 
