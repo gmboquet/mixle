@@ -1584,13 +1584,11 @@ class RandomVariable:
             raise ValueError("fit() received empty data.")
 
         if self._kind == "sample" and any(_expr_has_gather(a) for a in self._args):
-            # A data-indexed latent (theta[Field("g")]) makes the parameter per-observation, which needs
-            # the per-observation (indexed) target. The node is built and usable in expressions; fitting
-            # is wired in a following step.
-            raise NotImplementedError(
-                "fitting a model with a data-indexed latent (theta[Field(...)]) is not wired yet; "
-                "use each(by=...) for a hierarchical group effect, or Group(...) in a regression predictor."
-            )
+            # A data-indexed latent (theta[Field("g")]) makes the parameter per-observation -> the
+            # per-observation (indexed) target.
+            from pysp.ppl import inference as _inf
+
+            return _inf.indexed_fit(self, data, how=how, **kw)
 
         # regression / GLM: a linear predictor (covariates) in a parameter slot
         if self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):

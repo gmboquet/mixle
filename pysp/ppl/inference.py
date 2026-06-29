@@ -2232,3 +2232,224 @@ def hierarchical_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float
     pop, group_means, group_vars, hyper = impl(rv, n_i, sum_i, sumsq_i, max_its, tol)
     post = HierarchicalPosterior(group_means, group_vars, hyper)
     return RandomVariable._bound(pop, name=rv._name, result=post)
+
+
+# ----------------------------- data-indexed latent vectors: theta[Field("g")] (per-observation target)
+class _NPShim:
+    """numpy stand-in for the ``t`` module the autograd ``_scorers`` ``prep`` callbacks expect."""
+
+    @staticmethod
+    def lgamma(x):
+        from scipy.special import gammaln
+
+        return gammaln(np.asarray(x, dtype=float))
+
+    log = staticmethod(np.log)
+    log1p = staticmethod(np.log1p)
+
+
+class IndexedPosterior:
+    """Result of an indexed-latent fit: the fitted latent vector(s) and scalar parameters.
+
+    ``latents`` maps each ``free(K)`` vector's name to its fitted ``K``-vector; ``group_means`` aliases
+    the single-vector case (mirrors :class:`HierarchicalPosterior`).
+    """
+
+    def __init__(self, latents: dict, scalars: dict):
+        self.latents = {k: np.asarray(v) for k, v in latents.items()}
+        self.scalars = scalars
+        vecs = list(self.latents.values())
+        self.group_means = vecs[0] if len(vecs) == 1 else None
+        self.acceptance_rate = None
+
+    def samples(self, param=None):
+        return self.group_means
+
+    def summary(self) -> dict:
+        out = {"latents": self.latents, "scalars": self.scalars}
+        if self.group_means is not None:
+            out["group_means"] = self.group_means
+            out["n_groups"] = int(self.group_means.size)
+        return out
+
+
+def _rep_eval(node, means: dict) -> float:
+    """A representative scalar value for a slot expression (gather -> the latent vector's mean), used
+    only to build a stand-in 'population' distribution for the bound result."""
+    if not isinstance(node, RandomVariable):
+        return float(node)
+    if node._kind == "gather":
+        return float(means[id(node._args[0])])
+    if node._kind == "sum":
+        return _rep_eval(node._args[0], means) + _rep_eval(node._args[1], means)
+    if node._kind == "prod":
+        return _rep_eval(node._args[0], means) * _rep_eval(node._args[1], means)
+    if node._kind == "pow":
+        return _rep_eval(node._args[0], means) ** node._args[1]
+    if node._kind == "apply":
+        x = _rep_eval(node._args[0], means)
+        tr = node._args[1]
+        nm = type(tr).__name__
+        if nm == "ExpTransform":
+            return float(np.exp(x))
+        if nm == "LogTransform":
+            return float(np.log(x))
+        return tr.loc + tr.scale * x  # AffineTransform
+    if node._kind == "param":
+        return float(means.get(id(node), 0.0))
+    return 0.0
+
+
+def _indexed_target(rv: RandomVariable, data, given: dict):
+    """Per-observation numerical target for a flat model with a data-indexed latent vector.
+
+    Each observation ``i`` is scored against its own parameters, where a gathered latent contributes
+    ``theta[g[i]]``. Latent vectors are ``free(K)`` handles (entries on the vector's support); other slots
+    are ``free`` tokens or constants (scalar priors / hierarchical priors on the vector are a later step).
+    Reuses the autograd ``_scorers`` with the numpy engine. Returns ``(log_target, slots, extract, rep)``.
+    """
+    from pysp.engines import NumpyEngine
+    from pysp.ppl.autograd import _scorers
+    from pysp.ppl.core import _eval_expr, _expr_leaves
+
+    fam = rv._family
+    if isinstance(fam, CompositeFamily):
+        raise NotImplementedError("data-indexed latents are supported on flat families only.")
+    scorers = _scorers()
+    if fam.name not in scorers:
+        raise NotImplementedError(f"data-indexed fitting needs a Torch/numpy scorer for {fam.name!r}.")
+    eng = NumpyEngine()
+    given = given or {}
+    y = np.asarray(data, dtype=float).reshape(-1)
+
+    # discover latent vectors (the bases of gather nodes) and validate their index covariates
+    vec_handles: dict = {}  # id -> (handle, spec)
+    field_names: set = set()
+
+    def _scan(node):
+        if not isinstance(node, RandomVariable):
+            return
+        if node._kind == "gather":
+            base, field = node._args
+            spec = _spec_of(base)
+            if not isinstance(spec, _VectorSpec):
+                raise NotImplementedError("a data-indexed gather requires a free(K) vector latent.")
+            if field.name not in given:
+                raise ValueError(f"data-indexed latent needs the index covariate: given={{{field.name!r}: labels}}.")
+            if len(np.asarray(given[field.name]).reshape(-1)) != len(y):
+                raise ValueError(f"given[{field.name!r}] length must match the data ({len(y)}).")
+            vec_handles[id(base)] = (base, spec)
+            field_names.add(field.name)
+            return
+        for a in node._args:
+            _scan(a)
+
+    for a in rv._args:
+        _scan(a)
+    if not vec_handles:
+        raise NotImplementedError("no data-indexed latent (theta[Field(...)]) found in the model.")
+
+    # only free tokens / constants are allowed in the non-gather slots for now
+    for a in rv._args:
+        if isinstance(a, RandomVariable):
+            for leaf in _expr_leaves(a):
+                if id(leaf) not in vec_handles and isinstance(leaf, RandomVariable) and leaf._kind == "sample":
+                    raise NotImplementedError(
+                        "scalar priors combined with a data-indexed latent are a later step; "
+                        "use free / constant scalar slots for now."
+                    )
+
+    # slots: vector entries, then free-token positional slots
+    slots: list[_Slot] = []
+    meta: list = []  # parallel: ('vec', id(handle), j) | ('free', position)
+    vec_cols: dict = {}
+    for hid, (h, spec) in vec_handles.items():
+        cols = []
+        for j in range(spec.dim):
+            slots.append(
+                _Slot(len(slots), None, spec.support == "positive", f"{h.name or 'theta'}[{j}]", None, spec.support)
+            )
+            meta.append(("vec", hid, j))
+            cols.append(len(slots) - 1)
+        vec_cols[hid] = cols
+    for i, a in enumerate(rv._args):
+        if a is free:
+            slots.append(_Slot(len(slots), None, fam.positive[i], f"arg{i}", None, fam.support[i]))
+            meta.append(("free", i))
+
+    prep, apply = scorers[fam.name]
+    data_terms = prep(y, _NPShim)
+    fin = y[np.isfinite(y)]
+    dmean = float(fin.mean()) if fin.size else 0.0
+    dstd = float(fin.std() or 1.0) if fin.size else 1.0
+    fields = {nm: np.asarray(given[nm]).reshape(-1).astype(int) for nm in field_names}
+
+    def _unpack(u):
+        theta = {hid: np.empty(spec.dim) for hid, (h, spec) in vec_handles.items()}
+        pos: dict = {}
+        logj = 0.0
+        for k, s in enumerate(slots):
+            v, lj = _to_value(s.support, u[k])
+            logj += lj
+            tag = meta[k]
+            if tag[0] == "vec":
+                theta[tag[1]][tag[2]] = v
+            else:
+                pos[tag[1]] = v
+        return theta, pos, logj
+
+    def _args_for(theta, pos, evaluator):
+        env = {h: theta[hid] for hid, (h, _s) in vec_handles.items()}
+        env.update({("field", nm): fields[nm] for nm in field_names})
+        out = []
+        for i, a in enumerate(rv._args):
+            if a is free:
+                out.append(pos[i])
+            elif isinstance(a, RandomVariable):
+                out.append(evaluator(a, env))
+            else:
+                out.append(float(a))
+        return out
+
+    def log_target(u):
+        theta, pos, logj = _unpack(u)
+        args = _args_for(theta, pos, _eval_expr)
+        lp = apply(args, data_terms, y, eng)
+        rv_sum = float(np.sum(lp))
+        return rv_sum + logj if math.isfinite(rv_sum) else _NEG_INF
+
+    def extract(u):
+        theta, pos, _ = _unpack(u)
+        latents = {(h.name or f"theta{n}"): theta[hid] for n, (hid, (h, _s)) in enumerate(vec_handles.items())}
+        scalars = {f"arg{i}": pos[i] for i in pos}
+        return latents, scalars
+
+    def rep(u):
+        theta, pos, _ = _unpack(u)
+        means = {hid: float(np.mean(theta[hid])) for hid in vec_handles}
+        out = []
+        for i, a in enumerate(rv._args):
+            out.append(pos[i] if a is free else (_rep_eval(a, means) if isinstance(a, RandomVariable) else float(a)))
+        return out
+
+    return log_target, slots, extract, rep, (dmean, dstd)
+
+
+def indexed_fit(rv: RandomVariable, data, *, given=None, how="map", rng=None, **_) -> RandomVariable:
+    """Fit a flat model with a data-indexed latent vector (``theta[Field("g")]``) by per-observation MAP.
+
+    The latent vector(s) and scalar parameters maximize the per-observation joint; the result exposes the
+    fitted vectors via ``.result`` (``latents`` / ``group_means``). MCMC over the latent vector is a later
+    step; ``how`` other than ``map``/``auto`` raises.
+    """
+    from scipy.optimize import minimize
+
+    if how not in ("map", "auto"):
+        raise NotImplementedError(f"data-indexed latents support how='map' for now (got {how!r}).")
+    log_target, slots, extract, rep, (dmean, dstd) = _indexed_target(rv, data, given)
+    u0 = _init_u(slots, dmean, dstd)
+    res = minimize(lambda u: -log_target(u), u0, method="L-BFGS-B", options={"maxiter": 2000})
+    latents, scalars = extract(res.x)
+    rep_args = rep(res.x)
+    pop = rv._family.make_dist(tuple(rep_args), rv._name)
+    return RandomVariable._bound(pop, name=rv._name, result=IndexedPosterior(latents, scalars))
