@@ -64,6 +64,35 @@ class GeneralizedGaussianDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.keys),
         )
 
+    @classmethod
+    def compute_declaration(cls):
+        from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+
+        # declaring the engine-neutral density lets the symbolic->numba lowering compile a scalar kernel
+        # for this non-exponential-family leaf (parity with Laplace/Logistic/Weibull/...).
+        return DistributionDeclaration(
+            name="generalized_gaussian",
+            distribution_type=cls,
+            parameters=(
+                ParameterSpec("mu"),
+                ParameterSpec("alpha", constraint="positive"),
+                ParameterSpec("beta", constraint="positive"),
+            ),
+            statistics=(
+                StatisticSpec("values", kind="raw_observations", scales=False),
+                StatisticSpec("weights", kind="weights"),
+            ),
+            support="real",
+        )
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, mu: Any, alpha: Any, beta: Any, engine: Any) -> Any:
+        """Engine-neutral generalized-Gaussian log-density: log_norm - (|x-mu|/alpha)**beta."""
+        log_norm = (
+            engine.log(beta) - engine.log(engine.asarray(2.0) * alpha) - engine.gammaln(engine.asarray(1.0) / beta)
+        )
+        return log_norm - (engine.abs(x - mu) / alpha) ** beta
+
     def density(self, x: float) -> float:
         """Return the probability density at ``x``."""
         return math.exp(self.log_density(x))
