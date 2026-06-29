@@ -53,6 +53,7 @@ from pysp.ppl.core import (
     ne,
     ode_residual,
     ordered,
+    potential,
 )
 from pysp.ppl.diagnostics import loo_stack, loo_stacking_weights
 from pysp.ppl.distributions import (
@@ -203,6 +204,7 @@ __all__ = [
     "eq",
     "equal",
     "ne",
+    "potential",
     "increasing",
     "decreasing",
     "monotone",
