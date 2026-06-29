@@ -1912,6 +1912,29 @@ def _conj_bernoulli_beta(prior_args, fixed, stats, handle, index):
     }
 
 
+def _conj_categorical_dirichlet(prior_args, fixed, stats, handle, index):
+    # Categorical over K integer categories 0..K-1 with probs ~ Dirichlet(alpha); posterior is
+    # Dirichlet(alpha + counts). Returns the posterior-mean probability vector (not a scalar).
+    alpha = np.asarray(prior_args[0], dtype=float).reshape(-1)
+    K = alpha.size
+    labels = np.asarray(stats["data"]).round().astype(int)
+    if labels.size and (labels.min() < 0 or labels.max() >= K):
+        raise ValueError(
+            f"Categorical-Dirichlet conjugacy expects integer categories in [0, {K}); got values outside that "
+            f"range. Build the prior with the right dimension, e.g. Categorical(Dirichlet(np.ones(K)))."
+        )
+    counts = np.bincount(labels, minlength=K)[:K].astype(float)
+    post = alpha + counts
+    return {
+        "index": index,
+        "handle": handle,
+        "name": "Dirichlet",
+        "mean": post / post.sum(),  # the K-vector of posterior-mean category probabilities
+        "hyper": {"alpha": post},
+        "sample": lambda k, rng: rng.dirichlet(post, k),
+    }
+
+
 def _conj_binomial_beta(prior_args, fixed, stats, handle, index):
     # Binomial(n, p) with p ~ Beta(a, b); n known (fixed slot 0). successes = sum_x,
     # failures = n*N - sum_x -> posterior Beta(a + successes, b + failures).
@@ -1953,6 +1976,7 @@ _CONJUGATE = {
     ("Bernoulli", 0, "Beta"): _conj_bernoulli_beta,
     ("Binomial", 1, "Beta"): _conj_binomial_beta,
     ("Geometric", 0, "Beta"): _conj_geometric_beta,
+    ("Categorical", 0, "Dirichlet"): _conj_categorical_dirichlet,  # K-category counts -> Dirichlet posterior
 }
 
 
@@ -1984,7 +2008,9 @@ def conjugate_fit(rv: RandomVariable, data) -> RandomVariable:
     builder, idx, prior_rv = spec
     fam = rv._family
     arr = np.asarray(data, dtype=float)
-    stats = {"n": float(arr.size), "sum": float(arr.sum()), "sum2": float((arr * arr).sum())}
+    # n/sum/sum2 serve the continuous scalar pairs; `data` lets a discrete builder (Categorical-Dirichlet)
+    # take per-category counts. A vector posterior parameter (a Dirichlet probs slot) is supported below.
+    stats = {"n": float(arr.size), "sum": float(arr.sum()), "sum2": float((arr * arr).sum()), "data": arr}
     fixed = {i: rv._args[i] for i in range(len(rv._args)) if i != idx}
     entry = builder(prior_rv._args, fixed, stats, prior_rv, idx)
     name = prior_rv.name or f"arg{idx}"
@@ -1997,7 +2023,8 @@ def conjugate_fit(rv: RandomVariable, data) -> RandomVariable:
         pvals = np.atleast_1d(entry["sample"](n, rng))
         out = []
         for v in pvals:
-            args = [float(v) if i == idx else rv._args[i] for i in range(len(rv._args))]
+            # v is a scalar for scalar conjugates, a probability vector for Categorical-Dirichlet
+            args = [v if i == idx else rv._args[i] for i in range(len(rv._args))]
             d = fam.make_dist(tuple(args), rv._name)
             out.append(d.sampler(seed=int(rng.randint(1, 2**31))).sample())
         return np.asarray(out)
