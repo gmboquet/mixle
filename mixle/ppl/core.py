@@ -1647,7 +1647,18 @@ class RandomVariable:
                 partial_free=partial_free,
                 struct_param=self._has_struct_param(),
             )
-        return {"route": route, "reason": reason, "caveats": list(_ROUTE_CAVEATS.get(route, []))}
+        caveats = list(_ROUTE_CAVEATS.get(route, []))
+        # discoverability: an all-free Normal can get an exact Bayesian (Normal-Inverse-Gamma) posterior
+        if (
+            route == "em"
+            and self._kind == "sample"
+            and getattr(self._family, "name", None) == "Normal"
+            and all(_is_free(a) for a in self._args)
+        ):
+            caveats.append(
+                "for a Bayesian posterior over mean+variance, fit(how='conjugate') is exact (Normal-Inverse-Gamma)"
+            )
+        return {"route": route, "reason": reason, "caveats": caveats}
 
     def fit(
         self,
