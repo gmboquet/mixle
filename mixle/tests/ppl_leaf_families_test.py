@@ -142,6 +142,15 @@ class ConjugatePairsTestCase(unittest.TestCase):
         self.assertIsInstance(m.result, ConjugatePosterior)
         self.assertAlmostEqual(float(m.result.mean("p")), 0.3, delta=0.02)
 
+    def test_gamma_rate_gamma(self):
+        rng = np.random.RandomState(5)
+        data = list(rng.gamma(3.0, 1.0 / 2.0, 4000))  # Gamma(shape=3, rate=2)
+        from mixle.ppl.inference import ConjugatePosterior
+
+        m = Gamma(3.0, Gamma(2.0, 1.0, name="rate")).fit(data)  # known shape, Gamma prior on rate -> conjugate
+        self.assertIsInstance(m.result, ConjugatePosterior)
+        self.assertAlmostEqual(float(m.result.mean("rate")), 2.0, delta=0.1)
+
     def test_categorical_dirichlet(self):
         rng = np.random.RandomState(2)
         true = np.array([0.2, 0.3, 0.5])
