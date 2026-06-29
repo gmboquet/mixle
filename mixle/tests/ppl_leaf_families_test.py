@@ -186,6 +186,38 @@ class ConjugatePairsTestCase(unittest.TestCase):
         self.assertIsInstance(m.result, ConjugatePosterior)
         self.assertAlmostEqual(float(m.result.mean("p")), 0.4, delta=0.03)
 
+    def test_general_bridge_new_families(self):
+        # families with NO hand-coded posterior in the PPL: the general exp-family bridge delegates to the
+        # exp-family-map-derived stats conjugate machinery, so how='auto' picks 'conjugate' and the
+        # closed-form posterior recovers truth -- no posterior math written in the PPL for these.
+        from mixle.ppl import InverseGamma, InverseGaussian
+        from mixle.ppl.inference import ConjugatePosterior, stats_conjugate_supported
+
+        rng = np.random.RandomState(7)
+
+        def weak(nm):
+            return Gamma(1e-3, 1e-3, name=nm)  # weak Gamma prior on the target parameter
+
+        # InverseGamma(shape known, scale ~ prior): posterior mean of scale recovers truth
+        ig_rv = InverseGamma(4.0, weak("beta"))
+        self.assertTrue(stats_conjugate_supported(ig_rv))
+        self.assertEqual(ig_rv.explain_fit()["route"], "conjugate")
+        m = ig_rv.fit(list(1.0 / rng.gamma(4.0, 1 / 3.0, 4000)))
+        self.assertIsInstance(m.result, ConjugatePosterior)
+        self.assertAlmostEqual(float(m.result.mean("beta")), 3.0, delta=0.4)
+
+        # Pareto(scale known, tail index alpha ~ prior)
+        p_rv = Pareto(1.0, weak("alpha"))
+        self.assertEqual(p_rv.explain_fit()["route"], "conjugate")
+        m = p_rv.fit(list(1.0 + rng.pareto(3.0, 4000)))
+        self.assertAlmostEqual(float(m.result.mean("alpha")), 3.0, delta=0.4)
+
+        # InverseGaussian(mean known, shape lambda ~ prior)
+        igauss_rv = InverseGaussian(2.0, weak("lam"))
+        self.assertEqual(igauss_rv.explain_fit()["route"], "conjugate")
+        m = igauss_rv.fit(list(rng.wald(2.0, 3.0, 4000)))
+        self.assertAlmostEqual(float(m.result.mean("lam")), 3.0, delta=0.5)
+
     def test_categorical_dirichlet(self):
         rng = np.random.RandomState(2)
         true = np.array([0.2, 0.3, 0.5])
