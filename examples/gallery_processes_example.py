@@ -7,7 +7,7 @@ and birth-death sampler draw i.i.d. observations directly. Random data only.
 
 import numpy as np
 
-from pysp.stats import (
+from mixle.stats import (
     BirthDeathSamplingDistribution,
     ChineseRestaurantProcessDistribution,
     GammaDistribution,
@@ -15,7 +15,7 @@ from pysp.stats import (
     InhomogeneousPoissonProcessDistribution,
     RenewalProcessDistribution,
 )
-from pysp.inference import estimate
+from mixle.inference import estimate
 
 if __name__ == '__main__':
     print('# RenewalProcess (Gamma inter-arrival times on [0, window))')

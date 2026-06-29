@@ -9,9 +9,9 @@ Self-contained random data only.
 """
 import numpy as np
 
-from pysp.stats import *
-from pysp.stats.combinator.transform import AffineTransform
-from pysp.inference import estimate, initialize, optimize
+from mixle.stats import *
+from mixle.stats.combinator.transform import AffineTransform
+from mixle.inference import estimate, initialize, optimize
 
 if __name__ == '__main__':
     print('# Composite: a record of (Gaussian, Categorical, Poisson)')

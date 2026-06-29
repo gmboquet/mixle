@@ -1,6 +1,6 @@
 """Scaling a fit across backends: the same ``optimize`` call, distributed by ``backend=``.
 
-pysparkplug separates *what* you fit from *where* it runs. You write one model + estimator and the EM
+mixle separates *what* you fit from *where* it runs. You write one model + estimator and the EM
 fit distributes over the chosen backend with an identical result -- only the data placement changes.
 
 This script runs the two backends that need no external cluster:
@@ -15,8 +15,8 @@ We fit a CompositeDistribution (a Gaussian + a Categorical + a Poisson per recor
 record whose MLE is closed-form, so the fit is deterministic and local/mp recovery is bit-for-bit the same.
 """
 
-from pysp.inference import optimize
-from pysp.stats import (
+from mixle.inference import optimize
+from mixle.stats import (
     CategoricalDistribution,
     CategoricalEstimator,
     CompositeDistribution,
@@ -59,4 +59,4 @@ if __name__ == "__main__":
     #
     # Spark -- data lives in an RDD partitioned across the cluster:
     #     optimize(None, est, enc_data=<encoded RDD>, backend='spark')
-    #   (see pysp.data.sources.spark_source for building the encoded RDD from a SparkContext).
+    #   (see mixle.data.sources.spark_source for building the encoded RDD from a SparkContext).

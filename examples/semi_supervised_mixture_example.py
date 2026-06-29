@@ -1,9 +1,9 @@
 """Example of semi-supervised mixture example. Note that None is included for obs with no known labels."""
 
-from pysp.stats import *
+from mixle.stats import *
 import numpy as np
-from pysp.stats import SemiSupervisedMixtureDistribution, SemiSupervisedMixtureEstimator
-from pysp.inference import best_of
+from mixle.stats import SemiSupervisedMixtureDistribution, SemiSupervisedMixtureEstimator
+from mixle.inference import best_of
 
 if __name__ == '__main__':
     seq_samp = 10

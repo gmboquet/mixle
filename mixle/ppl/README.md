@@ -1,24 +1,24 @@
-# pysp.ppl — probabilistic programming, the pysparkplug way
+# mixle.ppl — probabilistic programming, the mixle way
 
-An elegant, fast PPL surface over pysparkplug's distribution + sufficient-statistic
+An elegant, fast PPL surface over mixle's distribution + sufficient-statistic
 engine. **EM / variational-Bayes at the core, exact where structure allows, MCMC when
 you want it** — and a one-line modeling surface.
 
 ```python
-from pysp.ppl import Normal, free
+from mixle.ppl import Normal, free
 m = Normal(free, free).fit(data)     # fit by EM
 m.sample(100); m.log_prob(x)         # query
 ```
 
-There is one rule: a model is plain pysparkplug construction where a parameter slot may
+There is one rule: a model is plain mixle construction where a parameter slot may
 hold a **value** (fixed), the token **`free`** (estimate it), or **another distribution**
-(make it random). That's the whole language. The 86 `pysp.stats` distributions are
+(make it random). That's the whole language. The 86 `mixle.stats` distributions are
 untouched; this is a thin, optional dialect. Design: [../../notes/ppl-syntax-spec.md](../../notes/ppl-syntax-spec.md).
 
 ## Install / import
 
 ```python
-from pysp.ppl import (
+from mixle.ppl import (
     Normal, Poisson, Gamma, Exponential, Bernoulli, Geometric, Beta, Categorical,
     StudentT, LogNormal, NegativeBinomial, Dirichlet,   # heavy-tailed / positive / count / simplex
     MVN, DiagGaussian,                            # multivariate (vector data)
@@ -34,12 +34,12 @@ Normal(free, free).fit(data)          # estimate mean & sd
 Poisson(free).fit(counts)
 ```
 
-`fit` runs pysparkplug's EM. It threads the **parallel / distributed** backends straight
+`fit` runs mixle's EM. It threads the **parallel / distributed** backends straight
 through — nothing else to change:
 
 ```python
 Normal(free, free).fit(data, backend="mp", num_workers=8)     # multiprocess EM
-# backend="mpi" / "dask" also supported (see pysp.utils.estimation.optimize)
+# backend="mpi" / "dask" also supported (see mixle.utils.estimation.optimize)
 ```
 
 ## Regression & GLMs (covariates with `Field`)
@@ -47,7 +47,7 @@ Normal(free, free).fit(data, backend="mp", num_workers=8)     # multiprocess EM
 A linear predictor in a parameter slot makes a regression; the **outer family sets the link**:
 
 ```python
-from pysp.ppl import Normal, Bernoulli, Poisson, Field, free
+from mixle.ppl import Normal, Bernoulli, Poisson, Field, free
 
 Normal(free*Field("x") + free, free)    # linear regression  (identity link)
 Bernoulli(free*Field("x") + free)       # logistic regression (logit link)
@@ -324,7 +324,7 @@ message-passing core.
 | `"map"` | maximize joint (scipy) | priors, point estimate |
 | `"vi"` | ADVI — `family='meanfield'|'fullrank'`, tilted Renyi `alpha=`, `batch_size=` (SGVB) | non-conjugate priors, scalable approximate posterior |
 | `"vmp"` | variational message passing (closed-form, ELBO) | conjugate-exponential models (e.g. Gaussian mean+precision) |
-| `"mcmc"` | adaptive Metropolis (`pysp.utils.mcmc`) | full posterior, fast throughput |
+| `"mcmc"` | adaptive Metropolis (`mixle.utils.mcmc`) | full posterior, fast throughput |
 | `"hmc"` | Hamiltonian MC, preconditioned (fixed step) | full posterior |
 | `"nuts"` | No-U-Turn Sampler (auto-tuned HMC, dual-averaging) | correlated / higher-dim posteriors |
 | `"ensemble"` | affine-invariant ensemble (Goodman & Weare) | low/medium-dim, highest ESS/sec |
@@ -350,7 +350,7 @@ Whatever the method, the fitted RandomVariable answers the same verbs:
 m.params          # fitted params in the SAME parameterization you built with: {'mean':.., 'sd':..}
                   #   composites recurse: {'components': [{'mean':..,'sd':..}, ...], 'weights': [..]}
 m.components      # composite sub-models as RandomVariables (query each: c.params, c.sample, ...)
-m.dist            # the underlying pysp distribution (full original API — escape hatch)
+m.dist            # the underlying mixle distribution (full original API — escape hatch)
 m.sample(n)       # draw
 m.mean(); m.var() # moments (Monte-Carlo; works for any RV)
 m.log_prob(x)     # density (scalar or vectorized)
@@ -382,12 +382,12 @@ and invariants.
 
 ## Performance & execution stack
 
-The PPL is a thin lowering layer — it inherits pysparkplug's full execution stack rather
+The PPL is a thin lowering layer — it inherits mixle's full execution stack rather
 than reimplementing scoring. Nothing in the hot path is a Python per-element loop.
 
 - **NumPy vectorization** — `log_prob`/`fit` run the vectorized `seq_log_density` /
   `seq_update` kernels (a 200k-point Gaussian EM fits in <20 ms).
-- **Numba** — inherited through the distribution kernels pysp already JIT-compiles.
+- **Numba** — inherited through the distribution kernels mixle already JIT-compiles.
 - **Torch engine** — `fit(..., engine=TorchEngine())` runs the E-step/scoring on the torch
   ComputeEngine (GPU-capable); verified to match the NumPy result.
 - **Parallel / distributed EM** — `fit(..., backend="mp"|"mpi"|"dask", num_workers=…,

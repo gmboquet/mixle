@@ -1,4 +1,4 @@
-"""pysp.doe: design of experiments, Bayesian optimization, and sensitivity analysis.
+"""mixle.doe: design of experiments, Bayesian optimization, and sensitivity analysis.
 
 Three staples on one objective: a space-filling Latin-hypercube design, Bayesian optimization that
 minimizes a function in a handful of evaluations, and Sobol indices that attribute output variance
@@ -7,7 +7,7 @@ to each input.
 
 import numpy as np
 
-from pysp.doe import latin_hypercube, minimize, sobol_indices
+from mixle.doe import latin_hypercube, minimize, sobol_indices
 
 if __name__ == '__main__':
     bounds = [(-5.0, 5.0), (-5.0, 5.0)]

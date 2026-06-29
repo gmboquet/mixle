@@ -4,10 +4,10 @@
 
 import numpy as np
 
-from pysp.stats import *
-from pysp.stats import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
-from pysp.stats.latent.lookback_hidden_markov_model import LookbackHiddenMarkovModelDistribution, LookbackHiddenMarkovModelEstimator
-from pysp.inference import optimize
+from mixle.stats import *
+from mixle.stats import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
+from mixle.stats.latent.lookback_hidden_markov_model import LookbackHiddenMarkovModelDistribution, LookbackHiddenMarkovModelEstimator
+from mixle.inference import optimize
 
 if __name__ == '__main__':
 

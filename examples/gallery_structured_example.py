@@ -6,13 +6,13 @@ features, a quantized HMM (theta^k parameterization), a tree-structured HMM, a s
 named-field Record / DictRecord models. Self-contained random data only. Other model groups have
 their own focused scripts (hidden_markov, lda, lookback_hmm, association, set_edit, ...) or galleries
 (gallery_graphs for the random-graph families); the grammar (HeterogeneousPCFG) and sparse-association
-(SparseMarkovAssociation) models are exercised in pysp/tests.
+(SparseMarkovAssociation) models are exercised in mixle/tests.
 """
 import numpy as np
 
-from pysp.stats import *
-from pysp.stats import IntegerChowLiuTreeEstimator
-from pysp.inference import optimize
+from mixle.stats import *
+from mixle.stats import IntegerChowLiuTreeEstimator
+from mixle.inference import optimize
 
 RNG = lambda: np.random.RandomState(1)
 

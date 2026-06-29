@@ -6,8 +6,8 @@ and the integer uniform-spike model. Self-contained random data only.
 """
 import numpy as np
 
-from pysp.stats import *
-from pysp.inference import estimate
+from mixle.stats import *
+from mixle.inference import estimate
 
 if __name__ == '__main__':
     print('# MultivariateGaussian')

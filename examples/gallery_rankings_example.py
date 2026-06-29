@@ -7,8 +7,8 @@ and Matching (a Gibbs model over bipartite matchings). Each exposes a matching e
 
 import numpy as np
 
-from pysp.stats import MallowsDistribution, MatchingDistribution, PlackettLuceDistribution
-from pysp.inference import estimate
+from mixle.stats import MallowsDistribution, MatchingDistribution, PlackettLuceDistribution
+from mixle.inference import estimate
 
 CASES = [
     ('Mallows',      MallowsDistribution([2, 0, 1, 3], theta=0.8)),
