@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from mixle.ppl import Bernoulli, Beta, Exponential, Field, Gamma, Normal, Poisson, free
+from mixle.ppl import Bernoulli, Beta, Exponential, Field, Gamma, Group, Normal, Poisson, free
 from mixle.ppl.inference import ConjugatePosterior
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
@@ -70,6 +70,42 @@ class PPLSummaryDiagnosticsTestCase(unittest.TestCase):
         row = m.result.summary()["mu"]
         self.assertIn("mean", row)
         self.assertIn("q2.5", row)  # the original keys are untouched
+
+
+class PPLExplainFitTestCase(unittest.TestCase):
+    """explain_fit() reports the route .fit(how='auto') will take, with honest caveats."""
+
+    def test_routes_match_intent(self):
+        self.assertEqual(Normal(free, free).explain_fit()["route"], "em")
+        self.assertEqual(Normal(Normal(0, 10), 1.0).explain_fit()["route"], "conjugate")
+        self.assertEqual(Poisson(Gamma(1, 1)).explain_fit()["route"], "conjugate")
+        self.assertEqual(Normal(Normal(0, 10), free).explain_fit()["route"], "map")
+        self.assertEqual(Normal(Normal(0, 5).each(), free).explain_fit()["route"], "hierarchical")
+        self.assertEqual(Poisson(free * Field("x") + Group("g")).explain_fit()["route"], "glmm")
+        self.assertEqual(Normal(free(3)[Field("g")], free).explain_fit()["route"], "indexed")
+        # honest caveats are attached
+        self.assertTrue(any("point estimate" in c for c in Normal(Normal(0, 10), free).explain_fit()["caveats"]))
+        self.assertTrue(
+            any("PQL" in c or "biased" in c for c in Poisson(free * Field("x") + Group("g")).explain_fit()["caveats"])
+        )
+
+    def test_explanation_matches_actual_fit_behavior(self):
+        rng = np.random.RandomState(0)
+        conj = Poisson(Gamma(2.0, 1.0))
+        self.assertEqual(conj.explain_fit()["route"], "conjugate")
+        m = conj.fit(list(rng.poisson(3.0, 500)))
+        self.assertIsInstance(m.result, ConjugatePosterior)  # conjugate route -> closed-form posterior
+
+        em = Normal(free, free)
+        self.assertEqual(em.explain_fit()["route"], "em")
+        m2 = em.fit(list(rng.normal(5.0, 2.0, 800)))
+        self.assertTrue(m2.is_bound)
+        self.assertAlmostEqual(m2.dist.mu, 5.0, delta=0.3)
+
+    def test_explicit_how_reported_verbatim(self):
+        p = Normal(free, free).explain_fit(how="nuts")
+        self.assertEqual(p["route"], "nuts")
+        self.assertIn("nuts", p["reason"])
 
 
 class PPLDeterministicExpressionTestCase(unittest.TestCase):

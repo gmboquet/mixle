@@ -469,6 +469,32 @@ def _expr_has_gather(rv) -> bool:
     return False
 
 
+# Honest, per-route caveats surfaced by RandomVariable.explain_fit -- the "what are the limits of this
+# automatic choice?" half of the teaching surface. Kept here so the auto-selector and its explanation
+# share one vocabulary.
+_ROUTE_CAVEATS = {
+    "conjugate": ["exact closed-form posterior; returns a ConjugatePosterior you can sample / mean / interval"],
+    "conjugate_mixture": ["exact closed-form posterior over a mixture of conjugate priors"],
+    "em": ["maximum-likelihood point estimate; no priors and no posterior uncertainty"],
+    "map": [
+        "MAP point estimate -- no posterior uncertainty",
+        "uses analytic-gradient L-BFGS when torch is available, else a slower derivative-free optimizer",
+        "for a posterior, pass how='laplace' (quick Gaussian approx) or how='mcmc'/'nuts'/'hmc'",
+    ],
+    "laplace": ["Gaussian posterior approximation at the MAP (inverse-Hessian covariance); cheap but local"],
+    "hierarchical": ["random-effects fit; non-Normal pairs use PQL, which is mildly biased for sparse/low-count groups"],
+    "lmm": ["linear mixed model by EM; exact for the Gaussian response"],
+    "glmm": ["GLMM by penalized quasi-likelihood (PQL) -- mildly biased for sparse binary / low-count data"],
+    "regression": ["GLM point estimate with a Laplace coefficient covariance; not a full posterior"],
+    "indexed": ["per-observation MAP over the latent vector; MCMC over the indexed vector is not yet wired"],
+    "state-space": ["bespoke Kalman/RTS + EM fitter for the composite family"],
+    "mcmc": ["posterior samples via adaptive random-walk Metropolis"],
+    "hmc": ["posterior samples via Hamiltonian Monte Carlo"],
+    "nuts": ["posterior samples via the No-U-Turn Sampler"],
+    "vi": ["variational (Gaussian) posterior approximation"],
+}
+
+
 def _eval_expr(rv, env):
     """Numerically evaluate an expression RV given ``env`` (leaf RV -> value)."""
     if not isinstance(rv, RandomVariable):
@@ -1544,6 +1570,71 @@ class RandomVariable:
                 stack.extend(a)
         return False
 
+    def _resolve_auto(self, *, has_constraints, has_potentials, grouped, partial_free, struct_param):
+        """Resolve ``how='auto'`` to a concrete route + a one-line reason for the *flat* decision tree.
+
+        Single source of the auto decision (``fit`` and :meth:`explain_fit` both call it, so the
+        explanation can never drift from what actually runs). Does NOT cover the early structural
+        short-circuits (gather / regression / state-space) -- those are handled by their callers.
+        """
+        if grouped:
+            return "hierarchical", "a .each() group prior -> random-effects (hierarchical) fit"
+        if has_constraints or has_potentials:
+            return "map", "constraints/potentials need the numerical joint -> MAP (a point estimate)"
+        if self._has_priors():
+            from mixle.ppl import inference as _inf
+
+            if _inf.conjugate_spec(self) is not None:
+                return "conjugate", "a registered conjugate prior -> exact closed-form posterior"
+            if _inf.conjugate_mixture_spec(self) is not None:
+                return "conjugate_mixture", "a mixture of conjugate priors -> exact closed-form posterior"
+            return "map", "priors present but no registered closed form -> MAP (a point estimate)"
+        if partial_free or struct_param:
+            return "map", "a structural vector/matrix parameter or a fixed+free mix -> MAP"
+        return "em", "all-free parameters, no priors -> maximum-likelihood EM"
+
+    def explain_fit(self, *, how="auto", constraints=None, potentials=None, **_) -> dict:
+        """Report which inference route ``.fit(how=...)`` will take, and why -- *without* fitting.
+
+        Returns ``{'route', 'reason', 'caveats'}``. This is the teaching surface for mixle's automatic
+        cross-family inference selection: ``rv.explain_fit()`` answers "how will this be fit, and what
+        are the honest limits of that choice?". The route mirrors :meth:`fit` exactly (it shares
+        :meth:`_resolve_auto` for the flat tree and re-checks the same structural short-circuits).
+        """
+        if how != "auto":
+            route, reason = how, f"explicit how={how!r}"
+        elif self._kind == "sample" and any(_expr_has_gather(a) for a in self._args):
+            route, reason = "indexed", "a data-indexed latent theta[Field(...)] -> per-observation MAP"
+        elif self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
+            lp = next(a for a in self._args if isinstance(a, _LinearPredictor))
+            if getattr(lp, "groups", None) and self._family.name != "Normal":
+                route, reason = "glmm", "a Group random effect + non-Normal response -> GLMM by penalized quasi-likelihood"
+            elif getattr(lp, "groups", None):
+                route, reason = "lmm", "a Group random effect (Normal response) -> linear mixed model (EM)"
+            else:
+                route, reason = "regression", "a linear predictor over covariates -> GLM/regression"
+        elif self._kind == "sample" and isinstance(self._family, CompositeFamily) and self._family.fit_fn is not None:
+            route, reason = "state-space", "a composite family with a bespoke fitter (Kalman/RTS+EM, PDE)"
+        else:
+            grouped = self._kind == "sample" and any(
+                isinstance(a, RandomVariable) and a._scope == "grouped" for a in self._args
+            )
+            flat = self._kind == "sample" and not isinstance(self._family, CompositeFamily)
+            partial_free = (
+                flat
+                and not self._has_priors()
+                and any(_is_free(a) for a in self._args)
+                and not all(_is_free(a) for a in self._args)
+            )
+            route, reason = self._resolve_auto(
+                has_constraints=constraints is not None,
+                has_potentials=potentials is not None,
+                grouped=grouped,
+                partial_free=partial_free,
+                struct_param=self._has_struct_param(),
+            )
+        return {"route": route, "reason": reason, "caveats": list(_ROUTE_CAVEATS.get(route, []))}
+
     def fit(
         self,
         data: Sequence[Any],
@@ -1653,23 +1744,13 @@ class RandomVariable:
                 "or 'ensemble' (or how='auto')."
             )
         if how == "auto":
-            if grouped:
-                how = "hierarchical"
-            elif has_constraints or has_potentials:
-                how = "map"  # constraints/potentials need the numerical joint; the conjugate paths can't
-            elif self._has_priors():
-                from mixle.ppl import inference as _inf
-
-                if _inf.conjugate_spec(self) is not None:
-                    how = "conjugate"
-                elif _inf.conjugate_mixture_spec(self) is not None:
-                    how = "conjugate_mixture"
-                else:
-                    how = "map"
-            elif partial_free or struct_param:
-                how = "map"  # a vector/matrix parameter needs inference, not the EM estimator
-            else:
-                how = "em"
+            how, _ = self._resolve_auto(
+                has_constraints=has_constraints,
+                has_potentials=has_potentials,
+                grouped=grouped,
+                partial_free=partial_free,
+                struct_param=struct_param,
+            )
         elif how == "em" and (partial_free or struct_param):
             how = "map"  # EM can't hold params fixed / infer a structural vector param
         # Pure ``how`` -> fitter dispatch (everything except the EM/MLE fall-through below). The

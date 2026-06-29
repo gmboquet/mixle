@@ -1583,6 +1583,17 @@ def map_fit(
     from mixle.ppl import autograd as _ag
 
     g = None if potentials is not None else _ag.grad_target(rv, data, missing=missing)
+    if g is None and constraints is None and penalty is None and potentials is None and not _ag.torch_available():
+        # Honest fallback: with no Torch we lose the analytic-gradient L-BFGS path and drop to a slower
+        # derivative-free optimizer. Tell the user once rather than silently degrading.
+        import warnings as _warnings
+
+        _warnings.warn(
+            "MAP is using a derivative-free optimizer because PyTorch is not installed; install torch for "
+            "faster, more accurate analytic-gradient MAP (pip install 'mixle[torch]').",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     if g is None and missing == "marginalize" and potentials is None:
         raise NotImplementedError(
             "missing='marginalize' needs the Torch autograd target (flat model, no constraints); for this "
