@@ -18,8 +18,13 @@ Phase 1 surface:
 * **drive** -- :func:`improve` + :class:`ImprovementResult`, :func:`auto_select`, and the
   :class:`EvolutionLedger` telemetry.
 
-``search`` / ``Space`` / ``Population`` / ``OperatorBandit`` and the ``Recompose`` / ``Mutate`` operators
-are Phase 2-4 and are deliberately not exported here.
+Phase 2-3 surface:
+
+* **search** -- :func:`search` over a typed :class:`Space` (:class:`Real` / :class:`Integer` /
+  :class:`Categorical`), ``method='evolutionary'`` / ``'bandit'`` / ``'bo'``, returning a :class:`SearchResult`.
+* **meta-search** -- :class:`Population` + :class:`OperatorBandit` (the policy that learns which operators help).
+
+The ``Recompose`` / ``Mutate`` structural operators (Phase 4) are not built.
 """
 
 from __future__ import annotations
@@ -47,7 +52,9 @@ from mixle.evolve.operators import (
     registered_operators,
     unregister_operator,
 )
-from mixle.evolve.search import auto_select
+from mixle.evolve.population import OperatorBandit, Population
+from mixle.evolve.search import SearchResult, auto_select, search
+from mixle.evolve.space import Categorical, Integer, Real, Space
 from mixle.evolve.verify import Verdict, challenger_beats_champion
 
 __all__ = [
@@ -80,4 +87,13 @@ __all__ = [
     "default_operators",
     # telemetry
     "EvolutionLedger",
+    # Phase 2-3: search over a typed space + the meta-search that learns which operators help
+    "search",
+    "SearchResult",
+    "Space",
+    "Real",
+    "Integer",
+    "Categorical",
+    "Population",
+    "OperatorBandit",
 ]
