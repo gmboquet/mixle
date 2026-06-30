@@ -41,6 +41,7 @@ from mixle.task.model import (
     adapter_from_spec,
     register_adapter,
 )
+from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
 from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
 
 __all__ = [
@@ -51,7 +52,9 @@ __all__ = [
     "CascadeStats",
     "CostModel",
     "DensityGate",
+    "FieldChoice",
     "HashedNGram",
+    "ModelRecommendation",
     "RecipeSpace",
     "RoutePlan",
     "TaskManifest",
@@ -64,6 +67,7 @@ __all__ = [
     "cascade_cost_per_request",
     "distill",
     "get_builder",
+    "recommend_model",
     "recommend_route",
     "load_json",
     "load_module",
