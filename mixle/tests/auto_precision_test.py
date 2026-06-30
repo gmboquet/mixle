@@ -84,5 +84,34 @@ class AutoPrecisionTestCase(unittest.TestCase):
         self.assertEqual(s.size, 4)
 
 
+class PrecisionNameHygieneTestCase(unittest.TestCase):
+    """Sub-byte / FP8 / microscaling / codebook names are rejected with an actionable error rather
+    than a cryptic numpy TypeError -- there is no native CPU arithmetic for them (numba cannot compile
+    below float32). Supported compute precisions are float32 (reduced) and float64 (default)."""
+
+    def test_supported_compute_precisions_normalize(self):
+        from mixle.engines.precision import normalize_numpy_dtype
+
+        self.assertIsNone(normalize_numpy_dtype(None))
+        self.assertEqual(normalize_numpy_dtype("float32"), np.dtype(np.float32))
+        self.assertEqual(normalize_numpy_dtype("fp32"), np.dtype(np.float32))
+        self.assertEqual(normalize_numpy_dtype("float64"), np.dtype(np.float64))
+        self.assertEqual(normalize_numpy_dtype(np.float32), np.dtype(np.float32))
+
+    def test_subbyte_and_quant_formats_are_rejected(self):
+        from mixle.engines.precision import normalize_numpy_dtype
+
+        for name in ("fp8", "e4m3", "e5m2", "fp6", "fp4", "e2m1", "float4", "float2", "float3", "mxfp4", "nf4", "int8"):
+            with self.assertRaises(ValueError) as ctx:
+                normalize_numpy_dtype(name)
+            self.assertIn("float32", str(ctx.exception))  # the message must point at what IS supported
+
+    def test_bfloat16_rejected_on_numpy(self):
+        from mixle.engines.precision import normalize_numpy_dtype
+
+        with self.assertRaises(ValueError):
+            normalize_numpy_dtype("bf16")
+
+
 if __name__ == "__main__":
     unittest.main()
