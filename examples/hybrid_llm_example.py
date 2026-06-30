@@ -1,15 +1,15 @@
-"""A hybrid model: a Transformer language model and a classical Gamma, composed and fit *together*.
+"""A hybrid model with a real job: anomaly detection on an event stream.
 
-Each event pairs text with a number -- here a short token context plus the next token (the "message"),
-and a positive latency (how long the event took). One mixle model captures the whole event: a causal
-Transformer scores the text, a Gamma models the latency, and a mixture puts a few latent event *types*
-over the pair. EM trains every Transformer and every Gamma jointly -- the language model and the classical
-density are the same kind of object (a distribution), so they fit through the same call, and the joint
-log-density of an event is just transformer(text) + gamma(latency).
+Each event in a log / activity stream has a TYPE (what happened) and a TIME (seconds since the previous
+event). mixle models both at once as a *neural marked point process*: a causal Transformer predicts the
+next event type from recent history, and a Gamma models the wait time. The two compose into a single
+distribution and fit in one EM call -- the language model and the classical timing law are the same kind
+of object -- so an event's anomaly score is a single joint log-density that drops when an event is unusual
+in *what* happened, in *when* it happened, or both. A sequence model alone would miss the timing; a timing
+model alone would miss the content.
 
-Self-contained (no downloads): it builds two synthetic event regimes, fits the hybrid mixture, and reports
-the joint log-density it assigns to events. Swap GammaEstimator for any of ~90 families to change the
-numeric side; swap the leaf for any other model to change the text side.
+Self-contained (no downloads): a synthetic stream whose event types cycle and whose wait times scale with
+the type. After fitting, a normal event scores high; corrupting either the type or the timing drops it.
 """
 from __future__ import annotations
 
@@ -17,40 +17,46 @@ import numpy as np
 
 from mixle.inference import optimize
 from mixle.models import LM, StreamingTransformerLeaf
-from mixle.stats import CompositeEstimator, GammaEstimator, MixtureEstimator
+from mixle.stats import CompositeEstimator, GammaEstimator
 
-VOCAB, BLOCK = 64, 16
-
-
-def expert() -> CompositeEstimator:
-    """One event 'type': a small causal Transformer over the text, x a Gamma over the latency."""
-    lm = LM(vocab=VOCAB, d_model=64, n_layer=2, n_head=4, block=BLOCK)
-    text = StreamingTransformerLeaf(lm.module).estimator()  # the LLM as a generative leaf
-    return CompositeEstimator((text, GammaEstimator()))     # text x latency, one mixture component
+K, B = 16, 16  # number of event types, history-window length
 
 
-def synth_events(parity: int, latency_scale: float, n: int, rng: np.random.RandomState) -> list:
-    """Events of one regime: a token window of a given parity, plus a Gamma(2, scale) latency."""
-    out = []
+def synth_stream(n: int, rng: np.random.RandomState) -> list:
+    """Events ((history window, next type), seconds since last): the type cycles, the wait scales with it."""
+    out, t, hist = [], 0, [0.0] * B
     for _ in range(n):
-        ctx = ((rng.randint(0, VOCAB // 2, BLOCK) * 2 + parity) % VOCAB).astype(float)
-        nxt = int((rng.randint(0, VOCAB // 2) * 2 + parity) % VOCAB)
-        out.append(((ctx, nxt), float(rng.gamma(2.0, latency_scale))))
+        nxt = (t + 1) % K if rng.rand() < 0.97 else rng.randint(0, K)  # a near-deterministic cycle
+        wait = float(rng.gamma(2.0, 0.3 + 0.25 * t))                   # timing depends on the event type
+        out.append(((np.array(hist[-B:], dtype=float), nxt), wait))
+        hist.append(float(nxt))
+        t = nxt
     return out
 
 
 def main() -> None:
     rng = np.random.RandomState(0)
-    events = synth_events(0, 0.5, 120, rng) + synth_events(1, 4.0, 120, rng)
+    data = synth_stream(800, rng)
 
-    # One fit trains the Transformers and the Gammas together (responsibility-weighted EM).
-    model = optimize(events, MixtureEstimator([expert(), expert()]), max_its=6)
+    # One fit trains the Transformer (next event | history) and the Gamma (wait time) together.
+    model = optimize(
+        data,
+        CompositeEstimator((
+            StreamingTransformerLeaf(LM(vocab=K, d_model=96, n_layer=3, n_head=4, block=B).module).estimator(),
+            GammaEstimator(),
+        )),
+        max_its=20,
+    )
 
-    # The fitted hybrid scores each event jointly: transformer(text) + gamma(latency).
-    ll = np.asarray(model.seq_log_density(model.dist_to_encoder().seq_encode(events)))
-    print("hybrid (Transformer LM x Gamma) mixture fit by EM")
-    print("  events: %d   mean joint log-density: %.2f   (all finite: %s)" % (len(ll), ll.mean(), np.isfinite(ll).all()))
-    print("  mixing weights:", [round(float(w), 3) for w in model.w])
+    # Joint anomaly score = transformer(type | history) + gamma(wait). Corrupt either channel, it drops.
+    (hist, typ), wait = data[200]
+    print("neural marked point process (Transformer 'what' x Gamma 'when'), one fit")
+    for label, event in [
+        ("normal event", ((hist, typ), wait)),
+        ("anomalous timing (40x wait)", ((hist, typ), wait * 40.0)),
+        ("anomalous next event", ((hist, (typ + 7) % K), wait)),
+    ]:
+        print(f"  {label:30s} joint log-density: {model.log_density(event):8.2f}")
 
 
 if __name__ == "__main__":
