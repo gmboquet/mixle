@@ -101,14 +101,28 @@ class TextClassifierIO:
     def features(self, raw_inputs: list[str]) -> np.ndarray:
         return self.featurizer.transform(raw_inputs)
 
-    def predict_batch(self, module: Any, raw_inputs: list[str]) -> list[str]:
+    def logits_batch(self, module: Any, raw_inputs: list[str]) -> np.ndarray:
         import torch
 
         feats = self.features(raw_inputs)
         module.eval()
         with torch.no_grad():
-            logits = module(torch.from_numpy(feats)).cpu().numpy()
-        idx = np.asarray(logits).reshape(len(raw_inputs), -1).argmax(axis=1)
+            out = module(torch.from_numpy(feats)).cpu().numpy()
+        return np.asarray(out).reshape(len(raw_inputs), -1)
+
+    def proba_batch(self, module: Any, raw_inputs: list[str]) -> np.ndarray:
+        """Row-stochastic class scores ``(m, K)`` (softmax of the logits) -- the conformal nonconformity input.
+
+        These sum to 1 but are *not* a describable random process; conformal calibration is what turns them
+        into a coverage guarantee (see :mod:`mixle.task.calibrate`).
+        """
+        z = self.logits_batch(module, raw_inputs)
+        z = z - z.max(axis=1, keepdims=True)
+        e = np.exp(z)
+        return e / e.sum(axis=1, keepdims=True)
+
+    def predict_batch(self, module: Any, raw_inputs: list[str]) -> list[str]:
+        idx = self.logits_batch(module, raw_inputs).argmax(axis=1)
         return [self.labels[i] for i in idx]
 
     def predict(self, module: Any, raw_input: str) -> str:

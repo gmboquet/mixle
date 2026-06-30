@@ -23,6 +23,7 @@ from mixle.task.artifact import (
     save_json,
     save_module,
 )
+from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 from mixle.task.distill import agreement, distill
 from mixle.task.model import (
     HashedNGram,
@@ -34,7 +35,9 @@ from mixle.task.model import (
 from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
 
 __all__ = [
+    "ESCALATE",
     "SCHEMA_VERSION",
+    "CalibratedTaskModel",
     "HashedNGram",
     "RecipeSpace",
     "TaskManifest",
