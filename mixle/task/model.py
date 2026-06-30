@@ -61,6 +61,52 @@ class HashedNGram:
         return cls(n=spec["n"], dim=spec["dim"], seed=spec["seed"])
 
 
+class HashedRecord:
+    """Map a heterogeneous record (tuple or dict) to a fixed vector by the hashing trick -- tabular tasks.
+
+    Each field is hashed by ``key``: a categorical/string/bool value contributes a 1 at ``hash("key=value")``; a
+    numeric value contributes a bounded ``tanh(value)`` at ``hash("num:key")`` (and its presence at a second
+    bucket). Stateless and deterministic -- no fitted encoder or vocabulary -- so it serializes as two numbers and
+    rebuilds identically. The shape of a "classify this record / route this ticket / flag this transaction" model.
+    """
+
+    def __init__(self, dim: int = 256, seed: int = 0) -> None:
+        self.dim = int(dim)
+        self.seed = int(seed)
+
+    def _bucket(self, token: str) -> int:
+        h = hashlib.blake2b(f"{self.seed}:{token}".encode(), digest_size=8).digest()
+        return int.from_bytes(h, "little") % self.dim
+
+    def _items(self, record: Any) -> list[tuple[str, Any]]:
+        if isinstance(record, dict):
+            return [(str(k), v) for k, v in record.items()]
+        if isinstance(record, (list, tuple)):
+            return [(str(i), v) for i, v in enumerate(record)]
+        return [("0", record)]  # a bare scalar/string record
+
+    def transform(self, records: list[Any]) -> np.ndarray:
+        out = np.zeros((len(records), self.dim), dtype=np.float32)
+        for i, record in enumerate(records):
+            for key, value in self._items(record):
+                if isinstance(value, bool) or value is None or isinstance(value, str):
+                    out[i, self._bucket(f"{key}={value}")] += 1.0
+                elif isinstance(value, (int, float)):
+                    out[i, self._bucket(f"num:{key}")] += float(np.tanh(float(value)))
+                    out[i, self._bucket(f"has:{key}")] += 1.0
+                else:
+                    out[i, self._bucket(f"{key}={value!r}")] += 1.0
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        return out / np.where(norms > 0, norms, 1.0)
+
+    def to_spec(self) -> dict[str, Any]:
+        return {"dim": self.dim, "seed": self.seed}
+
+    @classmethod
+    def from_spec(cls, spec: dict[str, Any]) -> HashedRecord:
+        return cls(dim=spec["dim"], seed=spec["seed"])
+
+
 # --- I/O adapters: raw <-> model, self-describing -----------------------------------------------------------
 
 _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {}
@@ -87,21 +133,28 @@ def adapter_from_spec(spec: dict[str, Any]) -> Any:
 def _register_builtin_adapters() -> None:
     if "text_classifier" not in _ADAPTERS:
         register_adapter("text_classifier", TextClassifierIO.from_spec)
+    if "record_classifier" not in _ADAPTERS:
+        register_adapter("record_classifier", RecordClassifierIO.from_spec)
 
 
-class TextClassifierIO:
-    """``str -> label``: hashed n-gram features into a small classifier, argmax indexed against a label list."""
+class _ClassifierIO:
+    """Shared ``raw -> label`` plumbing: featurize, run the module, argmax/softmax over a stored label list.
 
-    kind = "text_classifier"
+    Subclasses set ``kind`` and the featurizer type; the module-running logic (logits/proba/predict) is common,
+    so conformal calibration, density gating, and the cascade work identically for text and record classifiers.
+    """
 
-    def __init__(self, featurizer: HashedNGram, labels: list[str]) -> None:
+    kind = "classifier"
+    _featurizer_cls: type = HashedNGram
+
+    def __init__(self, featurizer: Any, labels: list[str]) -> None:
         self.featurizer = featurizer
         self.labels = list(labels)
 
-    def features(self, raw_inputs: list[str]) -> np.ndarray:
+    def features(self, raw_inputs: list[Any]) -> np.ndarray:
         return self.featurizer.transform(raw_inputs)
 
-    def logits_batch(self, module: Any, raw_inputs: list[str]) -> np.ndarray:
+    def logits_batch(self, module: Any, raw_inputs: list[Any]) -> np.ndarray:
         import torch
 
         feats = self.features(raw_inputs)
@@ -110,7 +163,7 @@ class TextClassifierIO:
             out = module(torch.from_numpy(feats)).cpu().numpy()
         return np.asarray(out).reshape(len(raw_inputs), -1)
 
-    def proba_batch(self, module: Any, raw_inputs: list[str]) -> np.ndarray:
+    def proba_batch(self, module: Any, raw_inputs: list[Any]) -> np.ndarray:
         """Row-stochastic class scores ``(m, K)`` (softmax of the logits) -- the conformal nonconformity input.
 
         These sum to 1 but are *not* a describable random process; conformal calibration is what turns them
@@ -121,19 +174,39 @@ class TextClassifierIO:
         e = np.exp(z)
         return e / e.sum(axis=1, keepdims=True)
 
-    def predict_batch(self, module: Any, raw_inputs: list[str]) -> list[str]:
+    def predict_batch(self, module: Any, raw_inputs: list[Any]) -> list[str]:
         idx = self.logits_batch(module, raw_inputs).argmax(axis=1)
         return [self.labels[i] for i in idx]
 
-    def predict(self, module: Any, raw_input: str) -> str:
+    def predict(self, module: Any, raw_input: Any) -> str:
         return self.predict_batch(module, [raw_input])[0]
 
     def to_spec(self) -> dict[str, Any]:
         return {"kind": self.kind, "featurizer": self.featurizer.to_spec(), "labels": self.labels}
 
     @classmethod
-    def from_spec(cls, spec: dict[str, Any]) -> TextClassifierIO:
-        return cls(HashedNGram.from_spec(spec["featurizer"]), spec["labels"])
+    def from_spec(cls, spec: dict[str, Any]) -> Any:
+        return cls(cls._featurizer_cls.from_spec(spec["featurizer"]), spec["labels"])
+
+
+class TextClassifierIO(_ClassifierIO):
+    """``str -> label``: hashed character n-gram features into a small classifier."""
+
+    kind = "text_classifier"
+    _featurizer_cls = HashedNGram
+
+    def __init__(self, featurizer: HashedNGram, labels: list[str]) -> None:
+        super().__init__(featurizer, labels)
+
+
+class RecordClassifierIO(_ClassifierIO):
+    """``record -> label``: hashed-record features into a small classifier (tuples/dicts of mixed fields)."""
+
+    kind = "record_classifier"
+    _featurizer_cls = HashedRecord
+
+    def __init__(self, featurizer: HashedRecord, labels: list[str]) -> None:
+        super().__init__(featurizer, labels)
 
 
 # --- the task model: a callable raw -> result, durable through the artifact ----------------------------------
