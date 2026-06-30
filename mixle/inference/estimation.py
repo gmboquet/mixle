@@ -97,7 +97,12 @@ def _engine_seq_estimate(
     for sz, enc in chunks:
         nobs += sz
         accumulator.combine(kernel.accumulate(enc, np.ones(sz, dtype=np.float64)))
-    return estimator.estimate(nobs, accumulator.value())
+    # Activate the engine so device-aware M-steps (e.g. NeuralLeaf) follow its device. The context
+    # wraps nested component estimates too (a MixtureEstimator's per-leaf estimate runs inside it).
+    from mixle.engines.base import using_active_engine
+
+    with using_active_engine(engine):
+        return estimator.estimate(nobs, accumulator.value())
 
 
 def _engine_fused_step(
