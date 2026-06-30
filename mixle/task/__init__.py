@@ -23,6 +23,7 @@ from mixle.task.artifact import (
     save_json,
     save_module,
 )
+from mixle.task.distill import agreement, distill
 from mixle.task.model import (
     HashedNGram,
     TaskModel,
@@ -38,6 +39,8 @@ __all__ = [
     "TaskModel",
     "TextClassifierIO",
     "adapter_from_spec",
+    "agreement",
+    "distill",
     "get_builder",
     "load_json",
     "load_module",
