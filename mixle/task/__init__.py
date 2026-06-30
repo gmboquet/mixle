@@ -12,6 +12,7 @@ This module's public surface re-exports the artifact contract; the model/distill
 
 from __future__ import annotations
 
+from mixle.task.active import ActiveResult, acquisition_scores, active_distill
 from mixle.task.artifact import (
     SCHEMA_VERSION,
     TaskManifest,
@@ -26,7 +27,7 @@ from mixle.task.artifact import (
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 from mixle.task.cascade import Cascade, CascadeStats
 from mixle.task.density import DensityGate
-from mixle.task.distill import agreement, distill
+from mixle.task.distill import agreement, distill, distill_from_labels
 from mixle.task.economics import (
     CostModel,
     RoutePlan,
@@ -47,6 +48,7 @@ from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
 __all__ = [
     "ESCALATE",
     "SCHEMA_VERSION",
+    "ActiveResult",
     "CalibratedTaskModel",
     "Cascade",
     "CascadeStats",
@@ -61,11 +63,14 @@ __all__ = [
     "TaskModel",
     "TextClassifierIO",
     "TuneResult",
+    "acquisition_scores",
+    "active_distill",
     "adapter_from_spec",
     "agreement",
     "break_even_volume",
     "cascade_cost_per_request",
     "distill",
+    "distill_from_labels",
     "get_builder",
     "recommend_model",
     "recommend_route",
