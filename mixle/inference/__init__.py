@@ -61,9 +61,12 @@ from mixle.inference.cross_validation import (
     stratified_kfold,
     time_series_split,
 )
+
+# Bayes-optimal decisions under a fitted posterior (decision-theoretic action + tail risk)
+from mixle.inference.decision import RiskProfile, bayes_action
 from mixle.inference.em import EMStrategy, run_em
 from mixle.inference.errors_in_variables import DemingFit, deming_regression, propagate_uncertainty, simex
-from mixle.inference.estimation import EMStep, best_of, fit, optimize
+from mixle.inference.estimation import BayesianStreamingEstimator, EMStep, best_of, fit, optimize
 from mixle.inference.fisher import FisherView, FixedFisherView, to_fisher
 
 # generalized linear models + penalized / robust / quantile regression on plain arrays
@@ -168,6 +171,9 @@ from mixle.inference.scoring import (
     winkler_score,
 )
 
+# online / streaming estimators (single discoverable surface for the streaming drivers)
+from mixle.inference.streaming import IncrementalEstimator, StreamingEstimator
+
 # survival / time-to-event estimators and hazard regression
 from mixle.inference.survival import (
     CoxResult,
@@ -233,6 +239,13 @@ __all__ = [
     "best_of",
     "run_em",
     "EMStrategy",
+    # online / streaming estimators (single discoverable surface for the streaming drivers)
+    "StreamingEstimator",
+    "IncrementalEstimator",
+    "BayesianStreamingEstimator",
+    # Bayes-optimal decisions under a fitted posterior (action + tail-risk profile)
+    "bayes_action",
+    "RiskProfile",
     # MLOps / production layer (provenance, drift, registry, serving, monitor) lives in the
     # mixle.inference.production subpackage -- imported as `from mixle.inference.production import ...`.
     "production",
