@@ -12,6 +12,8 @@ from mixle.stats.latent.structured_hmm import (
     LowRankTransition,
     StructuredHMM,
     _row_normalize,
+    chunked_state_posteriors,
+    fit_chunked,
 )
 
 
@@ -119,6 +121,44 @@ class CombinatorTest(unittest.TestCase):
         )
         self.assertEqual(kt.n_states, 15)
         self.assertTrue(np.allclose(kt.as_matrix().sum(axis=1), 1.0))
+
+
+class ForgettingParallelTest(unittest.TestCase):
+    def _ergodic_hmm(self):
+        a = np.array([[0.8, 0.15, 0.05], [0.1, 0.8, 0.1], [0.05, 0.15, 0.8]])
+        emis = [S.GaussianDistribution(-4, 1), S.GaussianDistribution(0, 1), S.GaussianDistribution(4, 1)]
+        return StructuredHMM(emis, np.array([1 / 3, 1 / 3, 1 / 3]), DenseTransition(a))
+
+    def test_chunked_posteriors_converge_to_exact_with_overlap(self):
+        hmm = self._ergodic_hmm()
+        seq = hmm.sampler(seed=1).sample(1200)
+        exact = hmm._forward_backward(hmm._log_b(seq))[4]
+        err0 = np.max(np.abs(chunked_state_posteriors(hmm, seq, chunk=150, overlap=0) - exact))
+        err20 = np.max(np.abs(chunked_state_posteriors(hmm, seq, chunk=150, overlap=20) - exact))
+        self.assertGreater(err0, 1e-3)  # no overlap -> visible boundary error
+        self.assertLess(err20, 1e-9)  # forgetting absorbs it -> ~exact
+
+    def test_chunked_em_recovers_chain_and_parallel_matches_serial(self):
+        rng = np.random.RandomState(0)
+        hmm = self._ergodic_hmm()
+        seqs = [hmm.sampler(seed=s).sample(400) for s in range(20)]
+
+        def init():
+            return StructuredHMM(
+                [S.GaussianDistribution(m + rng.uniform(-1, 1), 1) for m in (-4, 0, 4)],
+                np.ones(3) / 3,
+                DenseTransition(_row_normalize(rng.rand(3, 3) + np.eye(3))),
+            )
+
+        h_serial = init()
+        fit_chunked(h_serial, seqs, chunk=120, overlap=40, max_its=25, workers=0)
+        h_par = init()  # same init stream consumed identically
+        fit_chunked(h_par, seqs, chunk=120, overlap=40, max_its=25, workers=4)
+        means = sorted(e.mu for e in h_serial.emissions)
+        self.assertLess(max(abs(m - t) for m, t in zip(means, [-4, 0, 4])), 0.5)
+        self.assertTrue(
+            np.allclose(means, sorted(e.mu for e in h_par.emissions), atol=1e-9)
+        )  # chunks are independent -> parallel is exact
 
 
 if __name__ == "__main__":

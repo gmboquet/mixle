@@ -157,14 +157,14 @@ class StructuredHMM:
     def _log_b(self, seq) -> np.ndarray:
         return np.array([[float(e.log_density(x)) for e in self.emissions] for x in seq])
 
-    def _forward_backward(self, log_b):
+    def _forward_backward(self, log_b, pi=None):
         T, _ = log_b.shape
         op = self.transition
         mx = log_b.max(axis=1, keepdims=True)
         b = np.exp(log_b - mx)  # (T,K) scaled emissions
         alpha = np.zeros((T, self.K))
         c = np.zeros(T)
-        alpha[0] = self.pi * b[0]
+        alpha[0] = (self.pi if pi is None else pi) * b[0]
         c[0] = alpha[0].sum()
         alpha[0] /= c[0]
         for t in range(1, T):
@@ -324,3 +324,93 @@ class KroneckerTransition(TransitionOperator):
 
     def estimate(self, acc):
         return KroneckerTransition(DenseTransition(_row_normalize(acc[0])), DenseTransition(_row_normalize(acc[1])))
+
+
+def _chunk_spans(t_len: int, chunk: int, overlap: int):
+    """Yield (ctx_lo, ctx_hi, keep_lo, keep_hi): a window [ctx_lo:ctx_hi] whose interior [keep_lo:keep_hi]
+    (relative to the window) is kept; the ``overlap`` context on each side is run only to forget the
+    boundary, then discarded."""
+    for start in range(0, t_len, chunk):
+        end = min(start + chunk, t_len)
+        ctx_lo, ctx_hi = max(0, start - overlap), min(t_len, end + overlap)
+        yield ctx_lo, ctx_hi, start - ctx_lo, end - ctx_lo
+
+
+def chunked_state_posteriors(hmm: StructuredHMM, seq, *, chunk: int, overlap: int) -> np.ndarray:
+    """State posteriors gamma for one long sequence via overlapping chunks, each run INDEPENDENTLY
+    (embarrassingly parallel). The first chunk uses the model's pi; interior chunks start from the uniform
+    belief and the ``overlap`` context lets the chain *forget* that wrong boundary -- so the kept interior
+    matches the exact forward-backward up to an error that decays at the mixing rate in ``overlap``."""
+    log_b_full = hmm._log_b(seq)
+    t_len = len(seq)
+    out = np.zeros((t_len, hmm.K))
+    uniform = np.ones(hmm.K) / hmm.K
+    for ctx_lo, ctx_hi, keep_lo, keep_hi in _chunk_spans(t_len, chunk, overlap):
+        pi = hmm.pi if ctx_lo == 0 else uniform
+        _, _, _, _, gamma, _ = hmm._forward_backward(log_b_full[ctx_lo:ctx_hi], pi=pi)
+        out[ctx_lo + keep_lo : ctx_lo + keep_hi] = gamma[keep_lo:keep_hi]
+    return out
+
+
+def fit_chunked(
+    hmm: StructuredHMM, seqs, *, chunk: int, overlap: int, max_its: int = 50, workers: int = 0, tol: float = 1e-6
+):
+    """Baum-Welch where each long sequence's forward-backward is split into overlapping chunks run in
+    PARALLEL (the forgetting property bounds the boundary error). ``workers>0`` runs the per-chunk E-steps
+    on a thread pool (NumPy releases the GIL in its array kernels); ``workers=0`` runs them serially. The
+    interior suff-statistics are accumulated exactly as in :meth:`StructuredHMM.fit`; this only changes
+    *how* the E-step is computed, trading a small, overlap-controlled approximation for intra-sequence
+    parallelism. Returns ``(fitted_hmm, loglik_trace)`` (LL is the chunk-summed approximation)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    seqs = [list(s) for s in seqs]
+    uniform = np.ones(hmm.K) / hmm.K
+    ll_trace = []
+
+    def chunk_estep(args):
+        seq, ctx_lo, ctx_hi, keep_lo, keep_hi = args
+        log_b = hmm._log_b(seq)[ctx_lo:ctx_hi]
+        pi = hmm.pi if ctx_lo == 0 else uniform
+        alpha, beta, c, b, gamma, ll = hmm._forward_backward(log_b, pi=pi)
+        # transition mass over kept interior transitions only
+        contrib_ll = float(np.sum(np.log(c[keep_lo : max(keep_lo + 1, keep_hi)])))
+        return seq, ctx_lo, keep_lo, keep_hi, alpha, beta, c, b, gamma, contrib_ll
+
+    for _ in range(int(max_its)):
+        tasks = [
+            (seq, lo, hi, klo, khi)
+            for seq in seqs
+            if seq
+            for (lo, hi, klo, khi) in _chunk_spans(len(seq), chunk, overlap)
+        ]
+        if workers and workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                results = list(ex.map(chunk_estep, tasks))  # independent chunks -> parallel
+        else:
+            results = [chunk_estep(t) for t in tasks]
+
+        trans_acc = hmm.transition.new_accumulator()
+        pi_acc = np.zeros(hmm.K)
+        emit_accs = [est.accumulator_factory().make() for est in hmm._emit_est]
+        nk = np.zeros(hmm.K)
+        total_ll = 0.0
+        for seq, ctx_lo, keep_lo, keep_hi, alpha, beta, c, b, gamma, contrib_ll in results:
+            total_ll += contrib_ll
+            if ctx_lo == 0:
+                pi_acc += gamma[0]
+            for t in range(keep_lo, keep_hi):  # kept interior transitions
+                if t + 1 < len(c):
+                    hmm.transition.accumulate(trans_acc, alpha[t], b[t + 1] * beta[t + 1], c[t + 1])
+            seg = seq[ctx_lo + keep_lo : ctx_lo + keep_hi]
+            for k in range(hmm.K):
+                enc = hmm.emissions[k].dist_to_encoder().seq_encode(seg)
+                w = gamma[keep_lo:keep_hi, k]
+                emit_accs[k].seq_update(enc, w, hmm.emissions[k])
+                nk[k] += w.sum()
+        hmm.transition = hmm.transition.estimate(trans_acc)
+        hmm.pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else hmm.pi
+        hmm.emissions = [hmm._emit_est[k].estimate(float(nk[k]), emit_accs[k].value()) for k in range(hmm.K)]
+        ll_trace.append(total_ll)
+        if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
+            break
+    return hmm, ll_trace
