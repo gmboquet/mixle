@@ -23,14 +23,26 @@ from mixle.task.artifact import (
     save_json,
     save_module,
 )
+from mixle.task.model import (
+    HashedNGram,
+    TaskModel,
+    TextClassifierIO,
+    adapter_from_spec,
+    register_adapter,
+)
 
 __all__ = [
     "SCHEMA_VERSION",
+    "HashedNGram",
     "TaskManifest",
+    "TaskModel",
+    "TextClassifierIO",
+    "adapter_from_spec",
     "get_builder",
     "load_json",
     "load_module",
     "read_manifest",
+    "register_adapter",
     "register_builder",
     "save_json",
     "save_module",
