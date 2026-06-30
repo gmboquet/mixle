@@ -848,7 +848,7 @@ class InputOutputHMM:
     here emissions depend on state only.)
     """
 
-    def __init__(self, emissions, pi, transitions, emission_estimators=None, name=None) -> None:
+    def __init__(self, emissions, pi, transitions, emission_estimators=None, name=None, terminal_states=None) -> None:
         self.emissions = list(emissions)
         self.pi = np.asarray(pi, dtype=float)
         self.pi = self.pi / self.pi.sum() if self.pi.sum() > 0 else self.pi
@@ -856,6 +856,11 @@ class InputOutputHMM:
         self.K = len(self.emissions)
         self.M = len(self.transitions)
         self.name = name
+        self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
+        self.term_mask = None
+        if self.terminal_states:
+            self.term_mask = np.zeros(self.K, dtype=bool)
+            self.term_mask[list(self.terminal_states)] = True
         if not all(t.n_states == self.K == len(self.pi) for t in self.transitions):
             raise ValueError("every input's transition must have n_states == #emissions == len(pi).")
         self._emit_est = emission_estimators or [e.estimator() for e in self.emissions]
@@ -865,6 +870,8 @@ class InputOutputHMM:
 
     def _forward_backward(self, log_b, inputs):
         t_len, _ = log_b.shape
+        term = self.term_mask
+        nonterm = None if term is None else ~term
         mx = log_b.max(axis=1, keepdims=True)
         b = np.exp(log_b - mx)
         alpha = np.zeros((t_len, self.K))
@@ -873,16 +880,25 @@ class InputOutputHMM:
         c[0] = alpha[0].sum()
         alpha[0] /= c[0]
         for t in range(1, t_len):
-            alpha[t] = self.transitions[inputs[t - 1]].forward(alpha[t - 1]) * b[t]
+            prev = alpha[t - 1] if nonterm is None else np.where(nonterm, alpha[t - 1], 0.0)
+            alpha[t] = self.transitions[inputs[t - 1]].forward(prev) * b[t]
             c[t] = alpha[t].sum()
-            alpha[t] /= c[t]
-        loglik = float(np.sum(np.log(c)) + np.sum(mx))
+            alpha[t] = alpha[t] / c[t] if c[t] > 0 else alpha[t]
+        if term is None:
+            loglik = float(np.sum(np.log(c)) + np.sum(mx))
+        else:
+            tm = float(alpha[t_len - 1][term].sum())
+            loglik = float(np.sum(np.log(c)) + np.sum(mx) + np.log(tm + 1e-300))
         beta = np.zeros((t_len, self.K))
-        beta[t_len - 1] = 1.0
+        beta[t_len - 1] = 1.0 if term is None else np.where(term, 1.0, 0.0)
         for t in range(t_len - 2, -1, -1):
-            beta[t] = self.transitions[inputs[t]].backward(b[t + 1] * beta[t + 1]) / c[t + 1]
+            back = self.transitions[inputs[t]].backward(b[t + 1] * beta[t + 1])
+            beta[t] = (back if nonterm is None else np.where(nonterm, back, 0.0)) / c[t + 1]
         gamma = alpha * beta
-        gamma /= gamma.sum(axis=1, keepdims=True)
+        gs = gamma.sum(axis=1, keepdims=True)
+        gamma = np.divide(gamma, gs, out=np.zeros_like(gamma), where=gs > 0)
+        if nonterm is not None:
+            alpha = alpha * nonterm[None, :]  # mask outgoing transition mass from terminal states
         return alpha, beta, c, b, gamma, loglik
 
     def seq_log_density(self, obs_seqs, input_seqs):
