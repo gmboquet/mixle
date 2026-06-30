@@ -313,6 +313,7 @@ __all__ = [
     "KroneckerTransition",
     "SparseTransition",
     "InputOutputHMM",
+    "ExplicitDurationHMM",
     "stationary_initial",
     "sticky_transition",
     "dirichlet_transition",

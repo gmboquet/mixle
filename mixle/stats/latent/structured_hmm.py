@@ -828,3 +828,165 @@ class InputOutputHMM:
             if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
                 break
         return self, ll_trace
+
+
+class ExplicitDurationHMM:
+    """Hidden semi-Markov model (explicit-duration HMM): each state emits for a random *duration* drawn
+    from a per-state duration distribution, then switches state (the transition matrix has a zero diagonal
+    -- dwell time is modeled explicitly, not as a self-loop). This captures non-geometric state durations a
+    plain HMM cannot.
+
+    ``durations`` is one length-``max_duration`` probability vector per state (over d = 1..max_duration).
+    The forward variable alpha_t(j) = P(obs_1:t, a segment ends at t in state j); the likelihood is
+    sum_j alpha_T(j). Forward/EM are O(T * K * max_duration). Verified against brute-force segmentation.
+    """
+
+    def __init__(self, emissions, pi, transition_matrix, durations, max_duration, name=None) -> None:
+        self.emissions = list(emissions)
+        self.K = len(self.emissions)
+        self.pi = np.asarray(pi, dtype=float)
+        self.pi = self.pi / self.pi.sum()
+        a = np.asarray(transition_matrix, dtype=float).copy()
+        np.fill_diagonal(a, 0.0)  # EDHMM: must switch state after a segment
+        self.a = _row_normalize(a)
+        self.D = int(max_duration)
+        self.dur = _row_normalize(np.asarray(durations, dtype=float))  # (K, D), over d=1..D
+        self.name = name
+        self._emit_est = [e.estimator() for e in self.emissions]
+
+    def _log_b(self, seq):
+        return np.array([[float(e.log_density(x)) for e in self.emissions] for x in seq])
+
+    def _seg_loglik(self, log_b):
+        """seg[t, d, j] = log P(obs_{t-d+1 .. t} | state j) for a length-(d+1) segment ENDING at t."""
+        t_len = log_b.shape[0]
+        csum = np.vstack([np.zeros(self.K), np.cumsum(log_b, axis=0)])  # (T+1, K)
+        seg = np.full((t_len, self.D, self.K), -np.inf)
+        for d in range(self.D):  # duration index d -> actual duration d+1
+            for t in range(d, t_len):
+                seg[t, d] = csum[t + 1] - csum[t - d]
+        return seg
+
+    def _forward(self, log_b):
+        t_len = log_b.shape[0]
+        seg = self._seg_loglik(log_b)
+        log_dur, log_a, log_pi = np.log(self.dur + 1e-300), np.log(self.a + 1e-300), np.log(self.pi + 1e-300)
+        log_alpha = np.full((t_len, self.K), -np.inf)  # segment ends at t in j
+        log_e = np.full((t_len + 1, self.K), -np.inf)  # entry into j at time tau (segment starts at tau)
+        log_e[0] = log_pi
+        for t in range(t_len):
+            for j in range(self.K):
+                terms = [
+                    log_e[t - d, j] + log_dur[j, d] + seg[t, d, j]
+                    for d in range(min(t + 1, self.D))
+                    if np.isfinite(log_e[t - d, j])
+                ]
+                if terms:
+                    log_alpha[t, j] = _logsumexp(terms)
+            for j in range(self.K):
+                log_e[t + 1, j] = _logsumexp(log_alpha[t] + log_a[:, j])
+        return log_alpha, log_e, seg
+
+    def forward_loglik(self, seq):
+        """Total log-likelihood log sum_j alpha_T(j) via the scaled explicit-duration forward."""
+        log_alpha, _, _ = self._forward(self._log_b(seq))
+        return float(_logsumexp(log_alpha[-1]))
+
+    def _backward(self, log_b, seg):
+        t_len = log_b.shape[0]
+        log_dur, log_a = np.log(self.dur + 1e-300), np.log(self.a + 1e-300)
+        log_beta = np.full((t_len, self.K), -np.inf)  # P(obs_{t+1:} | segment ends at t in j)
+        log_bstar = np.full((t_len + 1, self.K), -np.inf)  # P(obs_{tau:} | segment starts at tau in j)
+        log_beta[t_len - 1] = 0.0
+        for tau in range(t_len - 1, -1, -1):
+            for j in range(self.K):
+                terms = [
+                    log_dur[j, d] + seg[tau + d, d, j] + log_beta[tau + d, j] for d in range(min(self.D, t_len - tau))
+                ]
+                log_bstar[tau, j] = _logsumexp(terms) if terms else -np.inf
+            if tau > 0:
+                for j in range(self.K):
+                    log_beta[tau - 1, j] = _logsumexp(log_a[j, :] + log_bstar[tau, :])
+        return log_beta, log_bstar
+
+    def fit(self, seqs, *, max_its: int = 50, tol: float = 1e-6):
+        """Baum-Welch (EM) for the explicit-duration HMM: re-estimates emissions, the per-state duration
+        distributions, the (zero-diagonal) transition, and pi. Returns (fitted_hmm, loglik_trace)."""
+        seqs = [list(s) for s in seqs]
+        ll_trace = []
+        for _ in range(int(max_its)):
+            dur_acc = np.zeros((self.K, self.D))
+            trans_acc = np.zeros((self.K, self.K))
+            pi_acc = np.zeros(self.K)
+            emit_accs = [est.accumulator_factory().make() for est in self._emit_est]
+            nk = np.zeros(self.K)
+            total_ll = 0.0
+            log_dur = np.log(self.dur + 1e-300)
+            log_a = np.log(self.a + 1e-300)
+            log_pi = np.log(self.pi + 1e-300)
+            for seq in seqs:
+                if not seq:
+                    continue
+                log_b = self._log_b(seq)
+                t_len = len(seq)
+                log_alpha, log_e, seg = self._forward(log_b)
+                log_beta, log_bstar = self._backward(log_b, seg)
+                z = _logsumexp(log_alpha[-1])
+                total_ll += float(z)
+                pi_acc += np.exp(log_pi + log_bstar[0] - z)  # first segment's state
+                occ = np.zeros((t_len, self.K))  # state occupancy gamma_s(j)
+                for t in range(t_len):
+                    for j in range(self.K):
+                        for d in range(min(t + 1, self.D)):
+                            lp = log_e[t - d, j] + log_dur[j, d] + seg[t, d, j] + log_beta[t, j] - z
+                            if np.isfinite(lp):
+                                p = np.exp(lp)
+                                dur_acc[j, d] += p
+                                occ[t - d : t + 1, j] += p  # this segment covers positions t-d..t
+                    if t < t_len - 1:  # transition: segment ends at t in i, next starts at t+1 in j
+                        for i in range(self.K):
+                            tr = np.exp(log_alpha[t, i] + log_a[i, :] + log_bstar[t + 1, :] - z)
+                            trans_acc[i] += tr
+                for k in range(self.K):
+                    enc = self.emissions[k].dist_to_encoder().seq_encode(seq)
+                    emit_accs[k].seq_update(enc, occ[:, k], self.emissions[k])
+                    nk[k] += occ[:, k].sum()
+            self.pi = pi_acc / pi_acc.sum()
+            np.fill_diagonal(trans_acc, 0.0)
+            self.a = _row_normalize(trans_acc) if trans_acc.sum() > 0 else self.a
+            self.dur = _row_normalize(dur_acc)
+            self.emissions = [self._emit_est[k].estimate(float(nk[k]), emit_accs[k].value()) for k in range(self.K)]
+            ll_trace.append(total_ll)
+            if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
+                break
+        return self, ll_trace
+
+    def sampler(self, seed=None):
+        return _EDHMMSampler(self, seed)
+
+
+def _logsumexp(v):
+    v = np.asarray(v, dtype=float)
+    m = v.max()
+    if not np.isfinite(m):
+        return -np.inf
+    return float(m + np.log(np.sum(np.exp(v - m))))
+
+
+class _EDHMMSampler:
+    def __init__(self, hmm, seed=None):
+        self.hmm = hmm
+        self.rng = np.random.RandomState(seed)
+
+    def sample(self, length):
+        h = self.hmm
+        out = []
+        s = self.rng.choice(h.K, p=h.pi)
+        while len(out) < length:
+            d = self.rng.choice(h.D, p=h.dur[s]) + 1
+            for _ in range(d):
+                if len(out) >= length:
+                    break
+                out.append(h.emissions[s].sampler(seed=int(self.rng.randint(1, 2**31))).sample())
+            s = self.rng.choice(h.K, p=h.a[s])
+        return out

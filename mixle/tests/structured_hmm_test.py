@@ -325,3 +325,68 @@ class InputOutputHMMTest(unittest.TestCase):
         self.assertTrue(np.all(np.diff(trace) >= -1e-6))
         self.assertGreater(init.transitions[0].as_matrix()[0, 0], 0.8)  # input 0 = sticky
         self.assertGreater(init.transitions[1].as_matrix()[0, 1], 0.8)  # input 1 = flip
+
+
+class ExplicitDurationHMMTest(unittest.TestCase):
+    def test_forward_matches_brute_force_segmentation(self):
+
+        from mixle.stats.latent.structured_hmm import ExplicitDurationHMM, _logsumexp
+
+        rng = np.random.RandomState(0)
+        K, D = 2, 3
+        m = ExplicitDurationHMM(
+            [S.GaussianDistribution(-2, 1), S.GaussianDistribution(2, 1)],
+            [0.6, 0.4],
+            np.array([[0, 1.0], [1.0, 0]]),
+            np.array([[0.2, 0.5, 0.3], [0.5, 0.3, 0.2]]),
+            D,
+        )
+        seq = [float(x) for x in rng.normal(0, 2, 6)]
+
+        def brute(seq):
+            t_len, log_b = len(seq), m._log_b(seq)
+            logd, loga, logpi = np.log(m.dur + 1e-300), np.log(m.a + 1e-300), np.log(m.pi + 1e-300)
+            total = []
+
+            def rec(t, prev, lp):
+                if t == t_len:
+                    total.append(lp)
+                    return
+                for j in range(K):
+                    if prev is not None and m.a[prev, j] == 0:
+                        continue
+                    trans = logpi[j] if prev is None else loga[prev, j]
+                    for d in range(1, min(D, t_len - t) + 1):
+                        seg = sum(log_b[t + s, j] for s in range(d))
+                        rec(t + d, j, lp + trans + logd[j, d - 1] + seg)
+
+            rec(0, None, 0.0)
+            return _logsumexp(total)
+
+        self.assertAlmostEqual(m.forward_loglik(seq), brute(seq), places=8)
+
+    def test_em_recovers_durations(self):
+        from mixle.stats.latent.structured_hmm import ExplicitDurationHMM
+
+        D = 5
+        dur_true = np.array([[0.0, 0.1, 0.2, 0.5, 0.2], [0.4, 0.5, 0.1, 0.0, 0.0]])
+        gen = ExplicitDurationHMM(
+            [S.GaussianDistribution(-5, 0.6), S.GaussianDistribution(5, 0.6)],
+            [0.5, 0.5],
+            np.array([[0, 1.0], [1.0, 0]]),
+            dur_true,
+            D,
+        )
+        seqs = [gen.sampler(seed=s).sample(80) for s in range(50)]
+        init = ExplicitDurationHMM(
+            [S.GaussianDistribution(-2, 1), S.GaussianDistribution(2, 1)],
+            [0.5, 0.5],
+            np.array([[0, 1.0], [1.0, 0]]),
+            np.ones((2, D)) / D,
+            D,
+        )
+        _, trace = init.fit(seqs, max_its=30)
+        self.assertTrue(np.all(np.diff(trace) >= -1e-6))
+        d0 = float((np.arange(1, D + 1) * init.dur[0]).sum())  # mean dwell time, state 0
+        self.assertAlmostEqual(d0, 3.8, delta=0.4)
+        self.assertLess(max(abs(m - t) for m, t in zip(sorted(e.mu for e in init.emissions), [-5, 5])), 0.5)
