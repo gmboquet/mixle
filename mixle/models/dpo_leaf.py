@@ -1,0 +1,204 @@
+"""Direct Preference Optimization (DPO) as a mixle leaf -- alignment as a supervised preference likelihood.
+
+Observation = ``(x, chosen, rejected)``: a context and a preferred vs dispreferred action/completion. The leaf
+carries a POLICY module and a FROZEN REFERENCE module; ``seq_log_density`` returns the DPO log-sigmoid reward
+
+    log sigma( beta * [ (log pi(chosen|x) - log pi_ref(chosen|x)) - (log pi(rejected|x) - log pi_ref(rejected|x)) ] )
+
+(higher = the policy prefers chosen over rejected, relative to the reference). The M-step gradient-steps the
+policy; the reference stays frozen. **No reward model, no RL** -- the alignment stage of the LLM pipeline as a
+likelihood, on the same substrate as pretrain/CPT/SFT.
+
+This is the genuinely-new *paired* leaf the design flagged: it couples two forward passes plus a frozen
+reference, so it does not reduce to a single ``Categorical`` (the ``log_density`` contract is over a *pair*, not
+a single token). It composes through the same ``estimate()`` driver; the M-step owns the policy optimizer.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+
+from mixle.stats.compute.pdist import (
+    DataSequenceEncoder,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
+
+
+def _torch() -> Any:
+    import torch
+
+    return torch
+
+
+def _logp_np(logits: np.ndarray, a: np.ndarray) -> np.ndarray:
+    m = logits.max(axis=1, keepdims=True)
+    logp = logits - m - np.log(np.exp(logits - m).sum(axis=1, keepdims=True))
+    return logp[np.arange(len(a)), a]
+
+
+class DPOLeaf(SequenceEncodableProbabilityDistribution):
+    """DPO over ``(x, chosen, rejected)`` preference triples. ``policy`` is trained, ``ref`` is frozen."""
+
+    def __init__(
+        self, policy: Any, ref: Any, beta: float = 0.1, m_steps: int = 100, lr: float = 1e-3, device: str = "cpu"
+    ) -> None:
+        self.policy = policy
+        self.ref = ref
+        self.beta = float(beta)
+        self.m_steps = int(m_steps)
+        self.lr = float(lr)
+        self.device = device
+
+    def __str__(self) -> str:
+        return "DPOLeaf(beta=%.3g)" % self.beta
+
+    def _logits(self, module: Any, x: np.ndarray) -> np.ndarray:
+        torch = _torch()
+        module.to(self.device)
+        with torch.no_grad():
+            return module(torch.as_tensor(np.atleast_2d(x), dtype=torch.float32).to(self.device)).cpu().numpy()
+
+    def seq_log_density(self, enc: Any) -> np.ndarray:
+        x, ch, rj = enc
+        ch = np.asarray(ch, dtype=int)
+        rj = np.asarray(rj, dtype=int)
+        lp_pol = self._logits(self.policy, x)
+        lp_ref = self._logits(self.ref, x)
+        margin = (_logp_np(lp_pol, ch) - _logp_np(lp_ref, ch)) - (_logp_np(lp_pol, rj) - _logp_np(lp_ref, rj))
+        return -np.logaddexp(0.0, -self.beta * margin)  # log sigmoid(beta * margin)
+
+    def log_density(self, xcr: Any) -> float:
+        x, ch, rj = xcr
+        return float(self.seq_log_density((np.atleast_2d(x), [int(ch)], [int(rj)]))[0])
+
+    def prefers(self, x: Any) -> np.ndarray:
+        """The policy's argmax action at ``x`` -- what the aligned policy now picks."""
+        return self._logits(self.policy, x).argmax(axis=1)
+
+    def sampler(self, seed: int | None = None) -> DPOLeafSampler:
+        return DPOLeafSampler(self, seed)
+
+    def estimator(self, pseudo_count: float | None = None) -> DPOLeafEstimator:
+        return DPOLeafEstimator(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
+
+    def dist_to_encoder(self) -> DPOEncoder:
+        return DPOEncoder()
+
+
+class DPOLeafSampler(DistributionSampler):
+    def __init__(self, dist: DPOLeaf, seed: int | None = None) -> None:
+        self.dist = dist
+        self.rng = np.random.RandomState(seed)
+
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        raise NotImplementedError("DPOLeaf scores preference pairs; it does not generate.")
+
+
+class DPOEncoder(DataSequenceEncoder):
+    def __str__(self) -> str:
+        return "DPOEncoder"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, DPOEncoder)
+
+    def seq_encode(self, data: list) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        x = np.array([np.atleast_1d(np.asarray(d[0], dtype=float)) for d in data])
+        ch = np.array([int(d[1]) for d in data], dtype=int)
+        rj = np.array([int(d[2]) for d in data], dtype=int)
+        return (x, ch, rj)
+
+
+class DPOAccumulator(SequenceEncodableStatisticAccumulator):
+    def __init__(self) -> None:
+        self.x: list = []
+        self.ch: list = []
+        self.rj: list = []
+
+    def update(self, xcr: Any, weight: float, estimate: Any) -> None:
+        self.x.append(np.atleast_1d(np.asarray(xcr[0], dtype=float)))
+        self.ch.append(int(xcr[1]))
+        self.rj.append(int(xcr[2]))
+
+    def seq_update(self, enc: Any, weights: Any, estimate: Any) -> None:
+        x, ch, rj = enc
+        for i in range(len(x)):
+            self.x.append(np.atleast_1d(x[i]))
+            self.ch.append(int(ch[i]))
+            self.rj.append(int(rj[i]))
+
+    def initialize(self, xcr: Any, weight: float, rng: Any) -> None:
+        self.update(xcr, weight, None)
+
+    def seq_initialize(self, enc: Any, weights: Any, rng: Any) -> None:
+        self.seq_update(enc, weights, None)
+
+    def combine(self, other: Any) -> DPOAccumulator:
+        xo, co, ro = other
+        self.x.extend(xo)
+        self.ch.extend(co)
+        self.rj.extend(ro)
+        return self
+
+    def value(self) -> tuple:
+        return (list(self.x), list(self.ch), list(self.rj))
+
+    def from_value(self, v: tuple) -> DPOAccumulator:
+        self.x, self.ch, self.rj = list(v[0]), list(v[1]), list(v[2])
+        return self
+
+    def acc_to_encoder(self) -> DPOEncoder:
+        return DPOEncoder()
+
+
+class DPOAccumulatorFactory(StatisticAccumulatorFactory):
+    def make(self) -> DPOAccumulator:
+        return DPOAccumulator()
+
+
+class DPOLeafEstimator(ParameterEstimator):
+    """DPO M-step: ``m_steps`` of gradient on the POLICY minimizing ``-log sigmoid(beta * margin)``; ref frozen."""
+
+    def __init__(self, policy: Any, ref: Any, beta: float, m_steps: int, lr: float, device: str) -> None:
+        self.policy = policy
+        self.ref = ref
+        self.beta = float(beta)
+        self.m_steps = int(m_steps)
+        self.lr = float(lr)
+        self.device = device
+
+    def accumulator_factory(self) -> DPOAccumulatorFactory:
+        return DPOAccumulatorFactory()
+
+    def estimate(self, nobs: float | None, suff_stat: tuple) -> DPOLeaf:
+        torch = _torch()
+        xs, chs, rjs = suff_stat
+        out = DPOLeaf(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
+        if not xs:
+            return out
+        dev = self.device
+        self.policy.to(dev)
+        self.ref.to(dev)
+        for p in self.ref.parameters():
+            p.requires_grad_(False)  # frozen reference
+        xt = torch.as_tensor(np.array(xs), dtype=torch.float32).to(dev)
+        ct = torch.as_tensor(np.array(chs), dtype=torch.long).to(dev)
+        rt = torch.as_tensor(np.array(rjs), dtype=torch.long).to(dev)
+        ar = torch.arange(len(ct), device=dev)
+        opt = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
+        with torch.no_grad():  # reference log-probs are constant -- compute once
+            lr_all = torch.log_softmax(self.ref(xt), dim=1)
+            lr_ch, lr_rj = lr_all[ar, ct], lr_all[ar, rt]
+        for _ in range(self.m_steps):
+            opt.zero_grad()
+            lp = torch.log_softmax(self.policy(xt), dim=1)
+            margin = (lp[ar, ct] - lr_ch) - (lp[ar, rt] - lr_rj)
+            loss = -torch.nn.functional.logsigmoid(self.beta * margin).mean()
+            loss.backward()
+            opt.step()
+        return out
