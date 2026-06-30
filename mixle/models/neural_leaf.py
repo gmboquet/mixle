@@ -7,7 +7,7 @@ it drops into ``MixtureDistribution`` / ``CompositeDistribution`` / HMM emission
 
 A ``MixtureDistribution`` of ``NeuralLeaf`` components is therefore a **mixture of neural experts**: the E-step
 computes responsibilities, the M-step trains each expert by responsibility-weighted regression. Combined with
-the ``em`` move in :mod:`mixle.program`, the same model fits with EM where conjugate and gradient where neural::
+the ``em`` move in :mod:`mixle.experimental.program`, the same model fits with EM where conjugate and gradient where neural::
 
     from mixle.stats import MixtureEstimator
     experts = MixtureEstimator([NeuralLeaf(mlp_a).estimator(), NeuralLeaf(mlp_b).estimator()])
