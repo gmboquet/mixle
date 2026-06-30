@@ -60,6 +60,15 @@ class TransitionOperator:
     def estimate(self, acc: Any) -> TransitionOperator:
         raise NotImplementedError
 
+    def random_accumulator(self, rng) -> Any:
+        """A randomly-filled accumulator whose ``estimate`` yields a random (structured) transition --
+        used to seed EM when there is no warm start. Fills ``new_accumulator`` shapes (nested) with noise."""
+
+        def fill(a):
+            return a + rng.random(a.shape) if isinstance(a, np.ndarray) else [fill(x) for x in a]
+
+        return fill(self.new_accumulator())
+
 
 def _row_normalize(m: np.ndarray) -> np.ndarray:
     m = np.maximum(m, 0.0)
@@ -147,11 +156,25 @@ class StructuredHMM:
     the emission M-step; default reuses ``emissions[k].estimator()``.
     """
 
-    def __init__(self, emissions, pi, transition: TransitionOperator, emission_estimators=None) -> None:
+    def __init__(
+        self, emissions, pi, transition: TransitionOperator, emission_estimators=None, keys=(None, None), name=None
+    ) -> None:
         self.emissions = list(emissions)
         self.pi = np.asarray(pi, dtype=float)
         self.transition = transition
         self.K = len(self.emissions)
+        self.keys = tuple(keys)  # (init_key, trans_key) for parameter tying across models
+        self.name = name
+        # coupling invariant: emissions[k] <-> pi[k] <-> transition row/col k all index the SAME state k,
+        # so the three counts must agree (for a Kronecker op, n_states == K1*K2 emissions).
+        if not (self.K == len(self.pi) == transition.n_states):
+            raise ValueError(
+                f"state-count mismatch: {self.K} emissions, len(pi)={len(self.pi)}, "
+                f"transition.n_states={transition.n_states} must be equal."
+            )
+        s = self.pi.sum()
+        if s > 0:
+            self.pi = self.pi / s
         self._emit_est = emission_estimators or [e.estimator() for e in self.emissions]
 
     def _log_b(self, seq) -> np.ndarray:
@@ -414,3 +437,176 @@ def fit_chunked(
         if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
             break
     return hmm, ll_trace
+
+
+# ===================================================================================================
+# The 5-part estimator contract: makes StructuredHMM a SequenceEncodableProbabilityDistribution that
+# optimize()/run_em() can fit directly (optimize(seqs, hmm.estimator())). The E-step (forward-backward
+# per sequence) lives in the accumulator; the M-step (pi / transition-operator / emission re-estimation)
+# in the estimator. Keys (init_key, trans_key) let two HMMs TIE their initial / transition parameters.
+# ===================================================================================================
+from mixle.stats.compute.pdist import (  # noqa: E402
+    DataSequenceEncoder,
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
+
+
+def _add_nested(a, b):
+    return a + b if isinstance(a, np.ndarray) else [_add_nested(x, y) for x, y in zip(a, b)]
+
+
+class StructuredHMMDataEncoder(DataSequenceEncoder):
+    """Sequences pass through as lists -- the structured forward-backward scores raw observations through
+    the per-state emission ``log_density`` (no flattened columnar encoding; composability over raw speed)."""
+
+    def seq_encode(self, x):
+        return [list(s) for s in x]
+
+    def __eq__(self, other):
+        return isinstance(other, StructuredHMMDataEncoder)
+
+    def __hash__(self):
+        return hash("StructuredHMMDataEncoder")
+
+
+class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
+    """Baum-Welch E-step accumulator: per-sequence forward-backward, accumulating initial-state mass,
+    transition-operator mass, and per-state weighted emission statistics."""
+
+    def __init__(self, emission_accumulators, transition_proto, keys=(None, None)) -> None:
+        self.emit = list(emission_accumulators)
+        self.K = len(self.emit)
+        self.transition_proto = transition_proto
+        self.pi_acc = np.zeros(self.K)
+        self.trans_acc = transition_proto.new_accumulator()
+        self.nk = np.zeros(self.K)
+        self.init_key, self.trans_key = keys
+
+    def update(self, x, weight, estimate):
+        self.seq_update([x], np.array([weight], dtype=float), estimate)
+
+    def seq_update(self, x, weights, estimate):
+        for seq, w in zip(x, np.asarray(weights, dtype=float)):
+            if not seq:
+                continue
+            log_b = estimate._log_b(seq)
+            alpha, beta, c, b, gamma, _ = estimate._forward_backward(log_b)
+            self.pi_acc += w * gamma[0]
+            for t in range(len(seq) - 1):
+                estimate.transition.accumulate(self.trans_acc, alpha[t], b[t + 1] * beta[t + 1] * w, c[t + 1])
+            for k in range(self.K):
+                enc = estimate.emissions[k].dist_to_encoder().seq_encode(seq)
+                wk = gamma[:, k] * w
+                self.emit[k].seq_update(enc, wk, estimate.emissions[k])
+                self.nk[k] += float(wk.sum())
+
+    def seq_initialize(self, x, weights, rng):
+        # no model yet: seed with random soft responsibilities + a random transition accumulator
+        self.trans_acc = _add_nested(self.trans_acc, self.transition_proto.random_accumulator(rng))
+        for seq, w in zip(x, np.asarray(weights, dtype=float)):
+            if not seq:
+                continue
+            g = rng.dirichlet(np.ones(self.K), len(seq))
+            self.pi_acc += w * g[0]
+            for k in range(self.K):
+                enc = self.emit[k].acc_to_encoder().seq_encode(seq)
+                wk = g[:, k] * w
+                self.emit[k].seq_initialize(enc, wk, rng)
+                self.nk[k] += float(wk.sum())
+
+    def combine(self, suff_stat):
+        pi_acc, trans_acc, emit_vals, nk = suff_stat
+        self.pi_acc += pi_acc
+        self.trans_acc = _add_nested(self.trans_acc, trans_acc)
+        self.nk += nk
+        for k in range(self.K):
+            self.emit[k].combine(emit_vals[k])
+        return self
+
+    def value(self):
+        return (self.pi_acc.copy(), self.trans_acc, [e.value() for e in self.emit], self.nk.copy())
+
+    def from_value(self, x):
+        self.pi_acc, self.trans_acc, emit_vals, self.nk = x[0].copy(), x[1], x[2], x[3].copy()
+        for k in range(self.K):
+            self.emit[k].from_value(emit_vals[k])
+        return self
+
+    def acc_to_encoder(self):
+        return StructuredHMMDataEncoder()
+
+    # parameter tying: pool initial / transition counts across accumulators sharing a key
+    def key_merge(self, store):
+        if self.init_key is not None:
+            store[self.init_key] = self.pi_acc + store[self.init_key] if self.init_key in store else self.pi_acc
+        if self.trans_key is not None:
+            store[self.trans_key] = (
+                _add_nested(store[self.trans_key], self.trans_acc) if self.trans_key in store else self.trans_acc
+            )
+        for e in self.emit:
+            if hasattr(e, "key_merge"):
+                e.key_merge(store)
+
+    def key_replace(self, store):
+        if self.init_key is not None and self.init_key in store:
+            self.pi_acc = store[self.init_key]
+        if self.trans_key is not None and self.trans_key in store:
+            self.trans_acc = store[self.trans_key]
+        for e in self.emit:
+            if hasattr(e, "key_replace"):
+                e.key_replace(store)
+
+
+class StructuredHMMAccumulatorFactory(StatisticAccumulatorFactory):
+    def __init__(self, emission_estimators, transition_proto, keys):
+        self.emission_estimators = emission_estimators
+        self.transition_proto = transition_proto
+        self.keys = keys
+
+    def make(self):
+        emit = [est.accumulator_factory().make() for est in self.emission_estimators]
+        return StructuredHMMAccumulator(emit, self.transition_proto, self.keys)
+
+
+class StructuredHMMEstimator(ParameterEstimator):
+    """Estimator (M-step) for a :class:`StructuredHMM`: re-estimates pi, the transition OPERATOR (any
+    structure -- dense/low-rank/combinator), and each state's emission from the Baum-Welch statistics.
+    ``keys=(init_key, trans_key)`` tie the initial / transition parameters across HMMs that share them."""
+
+    def __init__(self, emission_estimators, transition_proto, keys=(None, None), name=None):
+        self.emission_estimators = list(emission_estimators)
+        self.transition_proto = transition_proto
+        self.keys = tuple(keys)
+        self.name = name
+
+    def accumulator_factory(self):
+        return StructuredHMMAccumulatorFactory(self.emission_estimators, self.transition_proto, self.keys)
+
+    def estimate(self, nobs, suff_stat):
+        pi_acc, trans_acc, emit_vals, nk = suff_stat
+        pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else np.ones(len(pi_acc)) / len(pi_acc)
+        transition = self.transition_proto.estimate(trans_acc)
+        emissions = [self.emission_estimators[k].estimate(float(nk[k]), emit_vals[k]) for k in range(len(emit_vals))]
+        return StructuredHMM(emissions, pi, transition, self.emission_estimators, self.keys, self.name)
+
+
+# --- make StructuredHMM satisfy the distribution side of the contract -------------------------------
+def _structured_hmm_log_density(self, x):
+    return self._forward_backward(self._log_b(x))[5]
+
+
+def _structured_hmm_dist_to_encoder(self):
+    return StructuredHMMDataEncoder()
+
+
+def _structured_hmm_estimator(self, pseudo_count=None):
+    return StructuredHMMEstimator(self._emit_est, self.transition, self.keys, self.name)
+
+
+StructuredHMM.log_density = _structured_hmm_log_density
+StructuredHMM.dist_to_encoder = _structured_hmm_dist_to_encoder
+StructuredHMM.estimator = _structured_hmm_estimator
+SequenceEncodableProbabilityDistribution.register(StructuredHMM)
