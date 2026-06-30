@@ -311,6 +311,7 @@ __all__ = [
     "LowRankTransition",
     "BlockDiagonalTransition",
     "KroneckerTransition",
+    "stationary_initial",
     "HiddenAssociationDataEncoder",
     "HiddenMarkovModelDistribution",
     "HiddenMarkovSampler",
@@ -1261,6 +1262,7 @@ from mixle.stats.latent.structured_hmm import (
     StructuredHMMDataEncoder,
     StructuredHMMEstimator,
     TransitionOperator,
+    stationary_initial,
 )
 from mixle.stats.latent.variational_embedding_attention import (
     VariationalEmbeddingAttentionAccumulator,
