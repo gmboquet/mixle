@@ -25,6 +25,13 @@ from mixle.task.artifact import (
 )
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 from mixle.task.distill import agreement, distill
+from mixle.task.economics import (
+    CostModel,
+    RoutePlan,
+    break_even_volume,
+    cascade_cost_per_request,
+    recommend_route,
+)
 from mixle.task.model import (
     HashedNGram,
     TaskModel,
@@ -38,16 +45,21 @@ __all__ = [
     "ESCALATE",
     "SCHEMA_VERSION",
     "CalibratedTaskModel",
+    "CostModel",
     "HashedNGram",
     "RecipeSpace",
+    "RoutePlan",
     "TaskManifest",
     "TaskModel",
     "TextClassifierIO",
     "TuneResult",
     "adapter_from_spec",
     "agreement",
+    "break_even_volume",
+    "cascade_cost_per_request",
     "distill",
     "get_builder",
+    "recommend_route",
     "load_json",
     "load_module",
     "read_manifest",
