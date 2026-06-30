@@ -13,6 +13,7 @@ documents its **capability signature** — what it requires of its input and wha
     transform(dist, f)        : Distribution + inv. f -> Distribution (Jacobian-corrected)
     tilt(dist, theta)         : ExponentialFamily     -> Distribution
     project(source, target)   : Sampleable x Fittable -> Distribution (forward-KL M-projection)
+    product_of_experts(dists) : tractable family      -> Distribution (geometric/log-linear pool)
 
 See ``docs/ARCHITECTURE.md`` and the operation table in ``docs/CAPABILITIES.md``.
 """
@@ -23,7 +24,17 @@ from typing import Any
 
 from mixle.capability import CapabilityError, Conditionable, ExponentialFamily, Marginalizable, require
 
-__all__ = ["quantize", "truncate", "condition", "marginalize", "mixture", "transform", "tilt", "project"]
+__all__ = [
+    "quantize",
+    "truncate",
+    "condition",
+    "marginalize",
+    "mixture",
+    "transform",
+    "tilt",
+    "project",
+    "product_of_experts",
+]
 
 
 def quantize(
@@ -132,3 +143,87 @@ def project(source: Any, target: Any, *, n_samples: int = 20_000, seed: int = 0,
     estimator = target.estimator() if callable(getattr(target, "estimator", None)) else target
     data = list(source.sampler(seed).sample(int(n_samples)))
     return fit(data, estimator, max_its=max_its, rng=np.random.RandomState(seed), out=None)
+
+
+def product_of_experts(dists: Any, weights: Any = None):
+    """Geometric (log-linear) pooling of densities — a Product of Experts.
+
+    Capability signature: ``tractable family -> Distribution``. Multiplies the expert densities,
+    ``p(x) ∝ ∏_k p_k(x)**w_k`` i.e. ``log p(x) = Σ_k w_k·log p_k(x) − log Z``, with raw exponent
+    weights ``w_k`` (default ``1.0`` each — *not* normalized to sum to one, since PoE weights are
+    exponents). Only the cases with a tractable normalizer are constructed exactly; the general
+    continuous case raises :class:`~mixle.capability.CapabilityError`.
+
+    * **Categorical / finite shared support** (the LLM-vocab fusion case): exact over the intersection
+      of supports — ``new_pmap[x] ∝ ∏_k p_k(x)**w_k`` for ``x`` with positive mass under every expert,
+      then renormalized. Returns a :class:`CategoricalDistribution`.
+    * **Gaussian** (closed form): a Gaussian with precision-weighted combination
+      ``1/σ² = Σ_k w_k/σ_k²`` and ``μ = σ²·Σ_k w_k·μ_k/σ_k²``. Returns a :class:`GaussianDistribution`.
+
+    Args:
+        dists: the experts to pool (an iterable of distributions, all of the same tractable kind).
+        weights: per-expert exponents ``w_k``; ``None`` (default) uses ``1.0`` for each expert.
+
+    Raises:
+        CapabilityError: if the experts have no shared finite support and are not all Gaussian — the
+            PoE normalizer ``Z = ∫ ∏_k p_k(x)**w_k dx`` is then intractable in closed form.
+    """
+    import numpy as np
+
+    from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+    from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
+
+    dists = list(dists)
+    if not dists:
+        raise CapabilityError("product_of_experts needs at least one expert distribution.")
+    if weights is None:
+        weights = [1.0] * len(dists)
+    else:
+        weights = [float(w) for w in weights]
+    if len(weights) != len(dists):
+        raise ValueError("product_of_experts: len(weights) must match len(dists).")
+
+    # --- Categorical / finite shared support: exact PoE over the support intersection ---------------
+    if all(isinstance(d, CategoricalDistribution) for d in dists):
+        if any(d.no_default for d in dists):
+            raise CapabilityError(
+                "product_of_experts requires categoricals with default_value=0 (a closed finite "
+                "support); a non-zero default makes the shared support unbounded."
+            )
+        # the support intersection: labels with strictly positive mass under every expert
+        support = set(k for k, v in dists[0].pmap.items() if v > 0.0)
+        for d in dists[1:]:
+            support &= set(k for k, v in d.pmap.items() if v > 0.0)
+        if not support:
+            raise CapabilityError(
+                "product_of_experts over categoricals has empty support intersection — the pooled "
+                "density is zero everywhere (no label has positive mass under every expert)."
+            )
+        # log p(x) = Σ_k w_k·log p_k(x); normalize on the shared support
+        log_unnorm = {}
+        for x in support:
+            log_unnorm[x] = sum(w * np.log(d.pmap[x]) for w, d in zip(weights, dists))
+        m = max(log_unnorm.values())
+        unnorm = {x: np.exp(lp - m) for x, lp in log_unnorm.items()}
+        total = sum(unnorm.values())
+        pmap = {x: float(v / total) for x, v in unnorm.items()}
+        return CategoricalDistribution(pmap=pmap)
+
+    # --- Gaussian: closed-form precision-weighted combination --------------------------------------
+    if all(isinstance(d, GaussianDistribution) for d in dists):
+        precision = sum(w / d.sigma2 for w, d in zip(weights, dists))
+        if precision <= 0.0 or not np.isfinite(precision):
+            raise CapabilityError(
+                "product_of_experts over Gaussians has non-positive pooled precision "
+                "(Σ_k w_k/σ_k² ≤ 0); the pool is not a proper Gaussian. Use positive weights."
+            )
+        sigma2 = 1.0 / precision
+        mu = sigma2 * sum(w * d.mu / d.sigma2 for w, d in zip(weights, dists))
+        return GaussianDistribution(float(mu), float(sigma2))
+
+    raise CapabilityError(
+        "product_of_experts has no tractable normalizer for these experts: the closed-form pool is "
+        "implemented for categoricals over a shared finite support and for Gaussians. A general "
+        "(non-Gaussian, non-shared-finite-support) continuous pool needs the intractable integral "
+        "Z = ∫ ∏_k p_k(x)**w_k dx; pool via sampling/MCMC instead."
+    )

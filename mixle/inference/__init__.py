@@ -171,6 +171,9 @@ from mixle.inference.scoring import (
     winkler_score,
 )
 
+# verifier-based selection — the generic best-of-N test-time-compute selector
+from mixle.inference.select import SelectionResult, select_best
+
 # online / streaming estimators (single discoverable surface for the streaming drivers)
 from mixle.inference.streaming import IncrementalEstimator, StreamingEstimator
 
@@ -374,6 +377,9 @@ __all__ = [
     "pinball_loss",
     "energy_score",
     "skill_score",
+    # verifier-based selection (best-of-N test-time-compute selector + conformal confidence)
+    "select_best",
+    "SelectionResult",
     # closed-form conjugate Bayes
     "ConjugateUpdatable",
     "conjugate_posterior",
