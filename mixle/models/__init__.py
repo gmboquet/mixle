@@ -1,5 +1,6 @@
 """Objective-driven model helpers for non-iid likelihoods."""
 
+from mixle.models.continual import ewc, fisher_diagonal, snapshot
 from mixle.models.dependence import (
     CausalSkeleton,
     ConditionalIndependenceResult,
@@ -19,6 +20,7 @@ from mixle.models.dirichlet_process_mixture import (
     sample_crp_assignments,
     stick_breaking_weights,
 )
+from mixle.models.dpo_leaf import DPOLeaf
 from mixle.models.gaussian_process import GaussianProcessRegressor
 from mixle.models.grammar import (
     GrammarLearningResult,
@@ -29,6 +31,7 @@ from mixle.models.grammar import (
     viterbi_parse,
 )
 from mixle.models.knowledge_graph import KnowledgeGraphFitResult, TransEKnowledgeGraphModel
+from mixle.models.language_model import LM
 from mixle.models.neural import (
     CategoricalClassificationNeuralNetwork,
     GaussianRegressionNeuralNetwork,
@@ -55,16 +58,26 @@ from mixle.models.random_graph import (
     hard_em_stochastic_block_model,
 )
 from mixle.models.softmax_leaf import SoftmaxNeuralLeaf
+from mixle.models.streaming_transformer_leaf import StreamingTransformerLeaf, stream_fit
+from mixle.models.transformer import build_causal_lm
 
 __all__ = [
+    "LM",
     "CausalSkeleton",
     "CategoricalClassificationNeuralNetwork",
     "ConditionalIndependenceResult",
+    "DPOLeaf",
     "ErdosRenyiGraphModel",
     "GaussianProcessRegressor",
     "GaussianRegressionNeuralNetwork",
     "NeuralLeaf",
     "SoftmaxNeuralLeaf",
+    "StreamingTransformerLeaf",
+    "build_causal_lm",
+    "ewc",
+    "fisher_diagonal",
+    "snapshot",
+    "stream_fit",
     "GrammarLearningResult",
     "HardEMResult",
     "KnowledgeGraphFitResult",
