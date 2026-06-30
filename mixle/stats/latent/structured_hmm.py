@@ -78,11 +78,17 @@ def _row_normalize(m: np.ndarray) -> np.ndarray:
 
 
 class DenseTransition(TransitionOperator):
-    """The usual dense K x K row-stochastic transition (O(K^2) forward-backward)."""
+    """The usual dense K x K row-stochastic transition (O(K^2) forward-backward).
 
-    def __init__(self, a: np.ndarray) -> None:
+    ``prior`` (a K x K pseudocount matrix) is added to the expected counts before each M-step
+    re-normalization -- a Dirichlet/MAP transition. A diagonal prior is a *sticky* self-transition bias
+    (see :func:`sticky_transition`); a flat prior is symmetric-Dirichlet smoothing.
+    """
+
+    def __init__(self, a: np.ndarray, prior: np.ndarray | None = None) -> None:
         self.a = np.asarray(a, dtype=float)
         self.n_states = self.a.shape[0]
+        self.prior = None if prior is None else np.asarray(prior, dtype=float)
 
     def forward(self, alpha):
         return alpha @ self.a
@@ -100,7 +106,26 @@ class DenseTransition(TransitionOperator):
         acc += np.outer(alpha_t, w_next) * (self.a / max(scale, 1e-300))
 
     def estimate(self, acc):
-        return DenseTransition(_row_normalize(acc))
+        return DenseTransition(_row_normalize(acc if self.prior is None else acc + self.prior), self.prior)
+
+
+def sticky_transition(a, kappa: float) -> DenseTransition:
+    """A dense transition with a STICKY self-transition prior: ``kappa`` pseudocounts on the diagonal
+    favor staying in a state (longer dwell times, cleaner segmentation -- the sticky-HMM idea)."""
+    a = np.asarray(a, dtype=float)
+    return DenseTransition(a, prior=float(kappa) * np.eye(a.shape[0]))
+
+
+def dirichlet_transition(a, alpha: float) -> DenseTransition:
+    """A dense transition with a symmetric Dirichlet(``alpha``) smoothing prior on every row (MAP)."""
+    a = np.asarray(a, dtype=float)
+    return DenseTransition(a, prior=np.full((a.shape[0], a.shape[0]), float(alpha)))
+
+
+def kron_initial(pi1, pi2) -> np.ndarray:
+    """Factorized initial distribution ``pi1 (x) pi2`` for a factorial (Kronecker) HMM -- the two chains
+    start independently. Matches a :class:`KroneckerTransition` so the joint initial respects the factors."""
+    return np.kron(np.asarray(pi1, dtype=float), np.asarray(pi2, dtype=float))
 
 
 class LowRankTransition(TransitionOperator):
@@ -144,6 +169,55 @@ class LowRankTransition(TransitionOperator):
 
     def estimate(self, acc):
         return LowRankTransition(_row_normalize(acc[0]), _row_normalize(acc[1]))
+
+
+class SparseTransition(TransitionOperator):
+    """Only the given ``(from, to)`` edges are allowed (left-to-right / banded HMMs). Forward, backward
+    and the M-step are O(#edges) -- transitions outside the edge set stay exactly zero through EM, so the
+    structure is preserved. Build edges yourself or with :func:`left_to_right_edges` / :func:`banded_edges`."""
+
+    def __init__(self, n_states: int, edges, values=None) -> None:
+        from scipy.sparse import csr_matrix
+
+        self.n_states = int(n_states)
+        self.rows = np.asarray([e[0] for e in edges], dtype=int)
+        self.cols = np.asarray([e[1] for e in edges], dtype=int)
+        vals = np.ones(len(self.rows)) if values is None else np.asarray(values, dtype=float)
+        a = csr_matrix((np.maximum(vals, 0.0), (self.rows, self.cols)), shape=(self.n_states, self.n_states))
+        rs = np.asarray(a.sum(axis=1)).ravel()
+        rs[rs == 0] = 1.0
+        from scipy.sparse import diags
+
+        self.a = diags(1.0 / rs) @ a  # row-normalized csr
+        self._edge_vals = np.asarray(self.a[self.rows, self.cols]).ravel()
+
+    def forward(self, alpha):
+        return alpha @ self.a
+
+    def backward(self, v):
+        return self.a @ v
+
+    def as_matrix(self):
+        return np.asarray(self.a.todense())
+
+    def new_accumulator(self):
+        return np.zeros(len(self.rows))  # one expected count per allowed edge
+
+    def accumulate(self, acc, alpha_t, w_next, scale):
+        acc += alpha_t[self.rows] * w_next[self.cols] * self._edge_vals / max(scale, 1e-300)
+
+    def estimate(self, acc):
+        return SparseTransition(self.n_states, list(zip(self.rows.tolist(), self.cols.tolist())), acc)
+
+
+def left_to_right_edges(n_states: int, skip: int = 1):
+    """Edges for a left-to-right (Bakis) HMM: each state may stay or advance up to ``skip`` states."""
+    return [(i, j) for i in range(n_states) for j in range(i, min(n_states, i + skip + 1))]
+
+
+def banded_edges(n_states: int, bandwidth: int = 1):
+    """Edges for a banded transition: state i connects to i-bandwidth .. i+bandwidth (local time-series)."""
+    return [(i, j) for i in range(n_states) for j in range(max(0, i - bandwidth), min(n_states, i + bandwidth + 1))]
 
 
 class StructuredHMM:
