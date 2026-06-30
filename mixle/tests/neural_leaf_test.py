@@ -72,6 +72,25 @@ class NeuralLeafTest(unittest.TestCase):
             )
         self.assertLess(best, 0.2)
 
+    def test_device_resolution_follows_explicit_then_active_engine(self):
+        import torch
+
+        from mixle.engines.base import using_active_engine
+        from mixle.models.neural_leaf import _resolve_device
+
+        # explicit device wins
+        self.assertEqual(_resolve_device("cpu", torch), torch.device("cpu"))
+
+        # otherwise follow the active compute engine's device ("meta" is valid on any host)
+        class _Eng:
+            device = "meta"
+
+        with using_active_engine(_Eng()):
+            self.assertEqual(_resolve_device(None, torch), torch.device("meta"))
+
+        # outside a fit there is no active engine, so the implicit default applies (not "meta")
+        self.assertNotEqual(str(_resolve_device(None, torch)), "meta")
+
 
 if __name__ == "__main__":
     unittest.main()

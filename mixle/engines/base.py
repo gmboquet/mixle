@@ -3,9 +3,33 @@
 from __future__ import annotations
 
 import math
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any
+
+# The compute engine currently driving an EM step, if any. The estimation loop activates it around
+# each ``estimator.estimate(...)`` call so device-aware leaves (e.g. NeuralLeaf, whose M-step trains an
+# arbitrary torch module) can follow the engine's device without the ParameterEstimator.estimate
+# contract having to thread the engine through every subclass.
+_ACTIVE = threading.local()
+
+
+def active_engine() -> ComputeEngine | None:
+    """Return the compute engine driving the current EM step, or ``None`` outside one."""
+    return getattr(_ACTIVE, "engine", None)
+
+
+@contextmanager
+def using_active_engine(engine: Any):
+    """Mark ``engine`` active for the duration of the block (used by the estimation loop)."""
+    prev = getattr(_ACTIVE, "engine", None)
+    _ACTIVE.engine = engine
+    try:
+        yield
+    finally:
+        _ACTIVE.engine = prev
 
 
 class ComputeEngine(ABC):

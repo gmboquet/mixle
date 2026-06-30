@@ -40,12 +40,24 @@ def _torch() -> Any:
 
 
 def _resolve_device(device: Any, torch: Any) -> Any:
-    """Where to run the module. Explicit `device` wins; otherwise CUDA if available, else CPU.
+    """Where to run the module, in priority order:
 
-    Auto-selecting CUDA is what lets a NeuralLeaf train on a GPU box with no code change, while
-    staying on CPU locally (so CPU behaviour and tests are unaffected)."""
+    1. an explicit ``device=`` on the leaf (always wins);
+    2. the device of the **active compute engine** -- so ``optimize(engine=TorchEngine(device="mps"))``
+       (or ``"cuda"``) drives the leaf's M-step onto that device, matching mixle's engine philosophy
+       (set the device once on the engine, the leaf follows);
+    3. otherwise CUDA if available, else CPU -- the implicit default (note: not MPS, so existing local
+       CPU behaviour and tests are unchanged; reach MPS explicitly or via the engine)."""
     if device is not None:
         return torch.device(device)
+    from mixle.engines.base import active_engine
+
+    eng_dev = getattr(active_engine(), "device", None)
+    if eng_dev is not None and str(eng_dev) != "cpu":
+        try:
+            return torch.device(eng_dev)
+        except (TypeError, RuntimeError):
+            pass
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
