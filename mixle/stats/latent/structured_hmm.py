@@ -1116,8 +1116,18 @@ class InputOutputHMM:
             alpha = alpha * nonterm[None, :]  # mask outgoing transition mass from terminal states
         return alpha, beta, c, b, gamma, loglik
 
-    def seq_log_density(self, obs_seqs, input_seqs):
-        return np.array([self._forward_backward(self._log_b(o), list(u))[5] for o, u in zip(obs_seqs, input_seqs)])
+    def seq_log_density(self, x, input_seqs=None):
+        """Per-sequence forward log-likelihood. Two call forms:
+        - ``seq_log_density(obs_seqs, input_seqs)`` -- the explicit two-list API; or
+        - ``seq_log_density(records)`` -- one list of ``(obs, input)``-pair sequences (the 5-part contract)."""
+        if input_seqs is None:
+            out = []
+            for seq in x:
+                obs = [p[0] for p in seq]
+                inputs = [int(p[1]) for p in seq]
+                out.append(self._forward_backward(self._log_b(obs), inputs)[5])
+            return np.array(out)
+        return np.array([self._forward_backward(self._log_b(o), list(u))[5] for o, u in zip(x, input_seqs)])
 
     def fit(self, obs_seqs, input_seqs, *, max_its: int = 50, tol: float = 1e-6):
         obs_seqs = [list(o) for o in obs_seqs]
@@ -1150,6 +1160,132 @@ class InputOutputHMM:
             if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
                 break
         return self, ll_trace
+
+    # --- 5-part contract: a record is one (obs, input) sequence = a list of (observation, input) pairs ---
+    def log_density(self, seq):
+        obs = [p[0] for p in seq]
+        inputs = [int(p[1]) for p in seq]
+        return self._forward_backward(self._log_b(obs), inputs)[5]
+
+    def dist_to_encoder(self):
+        return IOHMMDataEncoder()
+
+    def estimator(self, pseudo_count=None):
+        return IOHMMEstimator(self._emit_est, list(self.transitions), self.name)
+
+
+class IOHMMDataEncoder(DataSequenceEncoder):
+    """An IOHMM record is one ``(obs, input)`` sequence -- a list of ``(observation, input_symbol)`` pairs."""
+
+    def seq_encode(self, x):
+        return [list(s) for s in x]
+
+    def __eq__(self, other):
+        return isinstance(other, IOHMMDataEncoder)
+
+    def __hash__(self):
+        return hash("IOHMMDataEncoder")
+
+
+class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
+    def __init__(self, emission_accumulators, transition_protos):
+        self.emit = list(emission_accumulators)
+        self.K = len(self.emit)
+        self.transition_protos = list(transition_protos)
+        self.M = len(self.transition_protos)
+        self.pi_acc = np.zeros(self.K)
+        self.trans_accs = [t.new_accumulator() for t in self.transition_protos]
+        self.nk = np.zeros(self.K)
+
+    def update(self, x, weight, estimate):
+        self.seq_update([x], np.array([weight], dtype=float), estimate)
+
+    def seq_update(self, x, weights, estimate):
+        for seq, w in zip(x, np.asarray(weights, dtype=float)):
+            if not seq:
+                continue
+            obs = [p[0] for p in seq]
+            inputs = [int(p[1]) for p in seq]
+            log_b = estimate._log_b(obs)
+            alpha, beta, c, b, gamma, _ = estimate._forward_backward(log_b, inputs)
+            self.pi_acc += w * gamma[0]
+            for t in range(len(seq) - 1):
+                m = inputs[t]
+                estimate.transitions[m].accumulate(self.trans_accs[m], alpha[t], b[t + 1] * beta[t + 1] * w, c[t + 1])
+            for k in range(self.K):
+                enc = estimate.emissions[k].dist_to_encoder().seq_encode(obs)
+                wk = gamma[:, k] * w
+                self.emit[k].seq_update(enc, wk, estimate.emissions[k])
+                self.nk[k] += float(wk.sum())
+
+    def seq_initialize(self, x, weights, rng):
+        for m in range(self.M):
+            self.trans_accs[m] = _add_nested(self.trans_accs[m], self.transition_protos[m].random_accumulator(rng))
+        for seq, w in zip(x, np.asarray(weights, dtype=float)):
+            if not seq:
+                continue
+            obs = [p[0] for p in seq]
+            g = rng.dirichlet(np.ones(self.K), len(seq))
+            self.pi_acc += w * g[0]
+            for k in range(self.K):
+                enc = self.emit[k].acc_to_encoder().seq_encode(obs)
+                wk = g[:, k] * w
+                self.emit[k].seq_initialize(enc, wk, rng)
+                self.nk[k] += float(wk.sum())
+
+    def combine(self, suff_stat):
+        pi_acc, trans_accs, emit_vals, nk = suff_stat
+        self.pi_acc += pi_acc
+        self.trans_accs = [_add_nested(a, b) for a, b in zip(self.trans_accs, trans_accs)]
+        self.nk += nk
+        for k in range(self.K):
+            self.emit[k].combine(emit_vals[k])
+        return self
+
+    def value(self):
+        return (self.pi_acc.copy(), self.trans_accs, [e.value() for e in self.emit], self.nk.copy())
+
+    def from_value(self, x):
+        self.pi_acc, self.trans_accs, emit_vals, self.nk = x[0].copy(), x[1], x[2], x[3].copy()
+        for k in range(self.K):
+            self.emit[k].from_value(emit_vals[k])
+        return self
+
+    def acc_to_encoder(self):
+        return IOHMMDataEncoder()
+
+
+class IOHMMAccumulatorFactory(StatisticAccumulatorFactory):
+    def __init__(self, emission_estimators, transition_protos):
+        self.emission_estimators = emission_estimators
+        self.transition_protos = transition_protos
+
+    def make(self):
+        emit = [est.accumulator_factory().make() for est in self.emission_estimators]
+        return IOHMMAccumulator(emit, self.transition_protos)
+
+
+class IOHMMEstimator(ParameterEstimator):
+    """Estimator (M-step) for an :class:`InputOutputHMM`: re-estimates pi, one transition operator per input
+    symbol (from the per-input expected counts), and each state's emission."""
+
+    def __init__(self, emission_estimators, transition_protos, name=None):
+        self.emission_estimators = list(emission_estimators)
+        self.transition_protos = list(transition_protos)
+        self.name = name
+
+    def accumulator_factory(self):
+        return IOHMMAccumulatorFactory(self.emission_estimators, self.transition_protos)
+
+    def estimate(self, nobs, suff_stat):
+        pi_acc, trans_accs, emit_vals, nk = suff_stat
+        pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else np.ones(len(pi_acc)) / len(pi_acc)
+        transitions = [self.transition_protos[m].estimate(trans_accs[m]) for m in range(len(trans_accs))]
+        emissions = [self.emission_estimators[k].estimate(float(nk[k]), emit_vals[k]) for k in range(len(emit_vals))]
+        return InputOutputHMM(emissions, pi, transitions, self.emission_estimators, self.name)
+
+
+SequenceEncodableProbabilityDistribution.register(InputOutputHMM)
 
 
 class ExplicitDurationHMM:
