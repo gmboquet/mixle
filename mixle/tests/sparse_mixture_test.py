@@ -65,5 +65,57 @@ class SparseScoreTest(unittest.TestCase):
         self.assertEqual(sc.n_scored, 2)
 
 
+class CollapseTest(unittest.TestCase):
+    def test_collapse_identical_is_exact(self):
+        from mixle.stats.latent.sparse_mixture import collapse_identical
+
+        # three identical G(0,1) + one G(5,1): collapse to two components, log p(x) unchanged
+        m = st.MixtureDistribution(
+            [
+                st.GaussianDistribution(0.0, 1.0),
+                st.GaussianDistribution(0.0, 1.0),
+                st.GaussianDistribution(0.0, 1.0),
+                st.GaussianDistribution(5.0, 1.0),
+            ],
+            [0.2, 0.3, 0.1, 0.4],
+        )
+        c = collapse_identical(m)
+        self.assertEqual(len(c.components), 2)
+        self.assertAlmostEqual(sum(c.w), 1.0)
+        for x in (-1.0, 0.0, 2.0, 5.0, 7.0):
+            self.assertAlmostEqual(c.log_density(x), m.log_density(x), places=9)
+
+    def test_collapse_gaussian_preserves_global_moments(self):
+        from mixle.stats.latent.sparse_mixture import collapse_gaussian_mixture
+
+        rng = np.random.RandomState(0)
+        comps = [st.GaussianDistribution(float(4 * rng.randn()), float(0.5 + rng.rand())) for _ in range(10)]
+        w = list(rng.dirichlet(np.ones(10)))
+        m = st.MixtureDistribution(comps, w)
+
+        def moments(mix):
+            ws = np.asarray(mix.w)
+            mus = np.array([c.mu for c in mix.components])
+            s2 = np.array([c.sigma2 for c in mix.components])
+            mean = float((ws * mus).sum())
+            var = float((ws * (s2 + mus**2)).sum() - mean**2)
+            return mean, var
+
+        collapsed = collapse_gaussian_mixture(m, max_components=3)
+        self.assertLessEqual(len(collapsed.components), 3)
+        m0, v0 = moments(m)
+        m1, v1 = moments(collapsed)
+        self.assertAlmostEqual(m0, m1, places=6)  # overall mean preserved exactly
+        self.assertAlmostEqual(v0, v1, places=6)  # overall variance preserved exactly
+        self.assertAlmostEqual(sum(collapsed.w), 1.0)
+
+    def test_collapse_gaussian_rejects_non_gaussian(self):
+        from mixle.stats.latent.sparse_mixture import collapse_gaussian_mixture
+
+        m = st.MixtureDistribution([st.GaussianDistribution(0.0, 1.0), st.PoissonDistribution(3.0)], [0.5, 0.5])
+        with self.assertRaises(ValueError):
+            collapse_gaussian_mixture(m, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
