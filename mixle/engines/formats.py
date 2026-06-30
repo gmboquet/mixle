@@ -168,6 +168,28 @@ class CodebookFormat(NumericFormat):
     def dequantize(self, q: Any) -> np.ndarray:
         return self.codebook[np.asarray(q, dtype=np.intp)]
 
+    def _pack_bits(self) -> int:
+        """Power-of-two index width used by :meth:`compress`; rounds ``bits_per_value`` up to {1,2,4,8}."""
+        b = int(self.bits_per_value)
+        return next(w for w in (1, 2, 4, 8) if w >= b) if b <= 8 else 8
+
+    def compress(self, x: Any) -> tuple[np.ndarray, int]:
+        """Quantize ``x`` and bit-pack the indices to bytes: returns ``(packed_uint8, count)``.
+
+        For ``K <= 16`` codes the indices are sub-byte and pack ``8//bits`` per byte, realizing the
+        advertised compression (e.g. 16 codes -> 4-bit indices -> 2 values/byte -> 16x vs float64).
+        """
+        from mixle.engines.packing import pack_bits
+
+        idx = self.quantize(x)
+        return pack_bits(idx, self._pack_bits()), int(np.asarray(x).size)
+
+    def decompress(self, packed: Any, count: int) -> np.ndarray:
+        """Inverse of :meth:`compress`: unpack indices and gather the codebook back to ``float64``."""
+        from mixle.engines.packing import unpack_bits
+
+        return self.dequantize(unpack_bits(packed, self._pack_bits(), count))
+
 
 def min_float_mantissa_bits(target_rel_error: float) -> int:
     """Smallest mantissa-bit count whose round-to-nearest relative error meets ``target_rel_error``.
