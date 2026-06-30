@@ -27,6 +27,7 @@ from mixle.task.artifact import (
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 from mixle.task.cascade import Cascade, CascadeStats
 from mixle.task.density import DensityGate
+from mixle.task.design import DesignedModel, design_model, spec_to_estimator
 from mixle.task.distill import agreement, distill, distill_from_labels
 from mixle.task.economics import (
     CostModel,
@@ -61,6 +62,7 @@ __all__ = [
     "CascadeStats",
     "CostModel",
     "DensityGate",
+    "DesignedModel",
     "FieldChoice",
     "HashedNGram",
     "ModelRecommendation",
@@ -77,6 +79,7 @@ __all__ = [
     "agreement",
     "break_even_volume",
     "cascade_cost_per_request",
+    "design_model",
     "distill",
     "distill_from_labels",
     "get_builder",
@@ -84,6 +87,7 @@ __all__ = [
     "pick_label",
     "recommend_model",
     "recommend_route",
+    "spec_to_estimator",
     "load_json",
     "load_module",
     "read_manifest",
