@@ -14,11 +14,12 @@ import numpy as np
 from numpy.random import RandomState
 
 from mixle.inference import seq_initialize
-from mixle.stats import (
-    seq_encode,
+from mixle.stats.compute.pdist import (
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
     validate_estimator_keys,
 )
-from mixle.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
+from mixle.stats.compute.sequence import seq_encode
 
 T = TypeVar("T")
 E0 = TypeVar("E0")
