@@ -232,3 +232,38 @@ class DecodingTest(unittest.TestCase):
         self.assertGreater((hmm.viterbi(obs) == states).mean(), 0.95)
         self.assertGreater((hmm.posterior_decode(obs) == states).mean(), 0.95)
         self.assertEqual(hmm.state_posteriors(obs).shape, (len(obs), 2))
+
+
+class SparseAndPriorTest(unittest.TestCase):
+    def test_left_to_right_structure_is_preserved(self):
+        from mixle.stats.latent.structured_hmm import SparseTransition, left_to_right_edges
+
+        rng = np.random.RandomState(0)
+        sp = SparseTransition(4, left_to_right_edges(4, skip=1))
+        a = sp.as_matrix()
+        self.assertTrue(np.allclose(np.tril(a, -1), 0))  # left-to-right: no backward transitions
+        self.assertTrue(np.allclose(a.sum(axis=1), 1.0))
+        v = rng.rand(4)
+        self.assertTrue(np.allclose(sp.forward(v), v @ a))  # forward == v @ A
+        acc = sp.new_accumulator()
+        for _ in range(50):
+            sp.accumulate(acc, rng.rand(4), rng.rand(4), 1.0)
+        self.assertTrue(np.allclose(np.tril(sp.estimate(acc).as_matrix(), -1), 0))  # structure survives EM
+
+    def test_sticky_prior_raises_self_transition(self):
+        from mixle.stats.latent.structured_hmm import sticky_transition
+
+        rng = np.random.RandomState(0)
+        st = sticky_transition(np.full((3, 3), 1 / 3), kappa=20.0)
+        acc = st.new_accumulator()
+        for _ in range(30):
+            st.accumulate(acc, rng.rand(3), rng.rand(3), 1.0)
+        self.assertTrue(np.all(np.diag(st.estimate(acc).as_matrix()) > 0.4))
+
+    def test_kron_initial_is_factorized(self):
+        from mixle.stats.latent.structured_hmm import kron_initial
+
+        pi = kron_initial([0.6, 0.4], [0.3, 0.3, 0.4])
+        self.assertEqual(len(pi), 6)
+        self.assertAlmostEqual(pi.sum(), 1.0)
+        self.assertAlmostEqual(pi[0], 0.6 * 0.3)
