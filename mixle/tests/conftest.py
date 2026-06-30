@@ -177,6 +177,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "spearman_rho_test.py": ("distribution",),
     "spark_encoded_data_test.py": ("spark", "optional", "parallel", "slow"),
     "torchrun_encoded_data_test.py": ("torchrun", "torch", "optional", "parallel", "slow"),
+    "torch_neural_test.py": ("torchrun", "torch", "optional", "parallel", "slow"),
     "torch_engine_ext_test.py": ("torch", "optional", "integration", "slow"),
     "torch_engine_test.py": ("torch", "optional", "integration", "slow"),
     "tree_hmm_len_test.py": ("hmm", "numba"),
