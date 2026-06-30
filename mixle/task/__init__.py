@@ -28,7 +28,13 @@ from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 from mixle.task.cascade import Cascade, CascadeStats
 from mixle.task.density import DensityGate
 from mixle.task.design import DesignedModel, design_model, spec_to_estimator
-from mixle.task.distill import agreement, distill, distill_from_labels
+from mixle.task.distill import (
+    agreement,
+    distill,
+    distill_from_labels,
+    distill_records,
+    distill_records_from_labels,
+)
 from mixle.task.economics import (
     CostModel,
     RoutePlan,
@@ -44,6 +50,8 @@ from mixle.task.llm import (
 )
 from mixle.task.model import (
     HashedNGram,
+    HashedRecord,
+    RecordClassifierIO,
     TaskModel,
     TextClassifierIO,
     adapter_from_spec,
@@ -65,9 +73,11 @@ __all__ = [
     "DesignedModel",
     "FieldChoice",
     "HashedNGram",
+    "HashedRecord",
     "ModelRecommendation",
     "OpenAICompatLLM",
     "RecipeSpace",
+    "RecordClassifierIO",
     "RoutePlan",
     "TaskManifest",
     "TaskModel",
@@ -82,6 +92,8 @@ __all__ = [
     "design_model",
     "distill",
     "distill_from_labels",
+    "distill_records",
+    "distill_records_from_labels",
     "get_builder",
     "llm_labeler",
     "pick_label",
