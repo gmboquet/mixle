@@ -85,6 +85,25 @@ class NeuralPPLTest(unittest.TestCase):
         self.assertGreater(fit.score(y, given={"x": imgs}), 0.9)
         self.assertEqual(len(np.atleast_1d(fit.predict(given={"x": imgs[:5]}))), 5)
 
+    def test_declarative_autoregressive_transformer_lm(self):
+        # an autoregressive Transformer LM, trained through the UNCHANGED estimate() loop -- one declarative line
+        from mixle.ppl import Categorical, Transformer
+
+        torch.manual_seed(0)
+        text = "the quick brown fox jumps over the lazy dog. " * 20
+        chars = sorted(set(text))
+        v = len(chars)
+        stoi = {c: i for i, c in enumerate(chars)}
+        ids = np.array([stoi[c] for c in text])
+        b = 16
+        ctx = np.stack([ids[i : i + b] for i in range(len(ids) - b)]).astype("float32")
+        nxt = ids[b:]
+        fit = Categorical(logits=Transformer(out=v, d_model=64, n_layer=2, n_head=4)).fit(
+            nxt, given={"x": ctx}, epochs=40, batch_size=128, lr=0.003
+        )
+        nll = -np.mean(fit.dist.seq_log_density((ctx, nxt)))
+        self.assertLess(nll, 0.5)  # learned next-token prediction (random would be ~log(v) ~ 2.8 nats)
+
 
 if __name__ == "__main__":
     unittest.main()
