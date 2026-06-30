@@ -36,7 +36,6 @@ from mixle.models.neural import (
     make_mlp,
 )
 from mixle.models.neural_leaf import NeuralLeaf
-from mixle.models.softmax_leaf import SoftmaxNeuralLeaf
 from mixle.models.partially_observable_markov_decision_process import (
     PartiallyObservableMarkovDecisionProcessFilterResult,
     PartiallyObservableMarkovDecisionProcessFitResult,
@@ -55,6 +54,7 @@ from mixle.models.random_graph import (
     fit_stochastic_block_mle,
     hard_em_stochastic_block_model,
 )
+from mixle.models.softmax_leaf import SoftmaxNeuralLeaf
 
 __all__ = [
     "CausalSkeleton",
