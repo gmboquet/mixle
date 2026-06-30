@@ -213,7 +213,9 @@ if __name__ == "__main__":
 class DecodingTest(unittest.TestCase):
     def _two_state(self):
         a = np.array([[0.92, 0.08], [0.08, 0.92]])
-        return StructuredHMM([S.GaussianDistribution(-5, 0.5), S.GaussianDistribution(5, 0.5)], [0.5, 0.5], DenseTransition(a))
+        return StructuredHMM(
+            [S.GaussianDistribution(-5, 0.5), S.GaussianDistribution(5, 0.5)], [0.5, 0.5], DenseTransition(a)
+        )
 
     def _gen(self, hmm, n=200, seed=0):
         rng = np.random.RandomState(seed)
@@ -413,7 +415,10 @@ class JitForwardTest(unittest.TestCase):
 
 class EnumerationTest(unittest.TestCase):
     def _hmm(self, transition):
-        emis = [S.CategoricalDistribution({0: 0.7, 1: 0.2, 2: 0.1}), S.CategoricalDistribution({0: 0.1, 1: 0.2, 2: 0.7})]
+        emis = [
+            S.CategoricalDistribution({0: 0.7, 1: 0.2, 2: 0.1}),
+            S.CategoricalDistribution({0: 0.1, 1: 0.2, 2: 0.7}),
+        ]
         ld = S.CategoricalDistribution({2: 0.5, 3: 0.5})
         return StructuredHMM(emis, [0.6, 0.4], transition, len_dist=ld), ld
 
@@ -445,9 +450,7 @@ class EnumerationTest(unittest.TestCase):
     def test_no_len_dist_raises_enumeration_error(self):
         from mixle.enumeration import EnumerationError
 
-        hmm = StructuredHMM(
-            [S.CategoricalDistribution({0: 0.5, 1: 0.5})] * 2, [0.5, 0.5], DenseTransition(np.eye(2))
-        )
+        hmm = StructuredHMM([S.CategoricalDistribution({0: 0.5, 1: 0.5})] * 2, [0.5, 0.5], DenseTransition(np.eye(2)))
         with self.assertRaises(EnumerationError):
             hmm.enumerator()
 
@@ -672,3 +675,37 @@ class HSMMEnumerationTest(unittest.TestCase):
         ld = S.CategoricalDistribution({2: 0.5, 3: 0.5})
         seq, logp = m.enumerator(ld).top_k(1)[0]
         self.assertAlmostEqual(logp, m.forward_loglik(seq) + float(ld.log_density(len(seq))), places=9)
+
+
+class IOHMMContractTest(unittest.TestCase):
+    def test_optimize_fits_iohmm_via_paired_records(self):
+        from mixle.inference import optimize
+        from mixle.stats.latent.structured_hmm import InputOutputHMM
+
+        rng = np.random.RandomState(0)
+        a0, a1 = np.array([[0.95, 0.05], [0.05, 0.95]]), np.array([[0.05, 0.95], [0.95, 0.05]])
+        gen = InputOutputHMM(
+            [S.GaussianDistribution(-5, 0.5), S.GaussianDistribution(5, 0.5)],
+            [0.5, 0.5],
+            [DenseTransition(a0), DenseTransition(a1)],
+        )
+
+        def gen_seq(seed):
+            r = np.random.RandomState(seed)
+            s, rec = 0, []
+            for _ in range(60):
+                m = int(r.randint(2))
+                rec.append((float(r.normal([-5, 5][s], 0.5)), m))  # one record = list of (obs, input) pairs
+                s = r.choice(2, p=gen.transitions[m].as_matrix()[s])
+            return rec
+
+        data = [gen_seq(s) for s in range(40)]
+        proto = InputOutputHMM(
+            [S.GaussianDistribution(-2, 1), S.GaussianDistribution(2, 1)],
+            [0.5, 0.5],
+            [DenseTransition(_row_normalize(rng.rand(2, 2) + np.eye(2))) for _ in range(2)],
+        )
+        fit = optimize(data, proto.estimator(), prev_estimate=proto, max_its=25, out=None)
+        self.assertLess(max(abs(m - t) for m, t in zip(sorted(e.mu for e in fit.emissions), [-5, 5])), 0.5)
+        self.assertGreater(fit.transitions[0].as_matrix()[0, 0], 0.8)  # input 0 = sticky
+        self.assertGreater(fit.transitions[1].as_matrix()[0, 1], 0.8)  # input 1 = flip
