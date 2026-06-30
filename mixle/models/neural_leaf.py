@@ -39,25 +39,44 @@ def _torch() -> Any:
     return torch
 
 
+def _resolve_device(device: Any, torch: Any) -> Any:
+    """Where to run the module. Explicit `device` wins; otherwise CUDA if available, else CPU.
+
+    Auto-selecting CUDA is what lets a NeuralLeaf train on a GPU box with no code change, while
+    staying on CPU locally (so CPU behaviour and tests are unaffected)."""
+    if device is not None:
+        return torch.device(device)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 class NeuralLeaf(SequenceEncodableProbabilityDistribution):
     """``p(y | x) = N(y; module(x), noise^2 I)`` as a mixle leaf. Observation is the pair ``(x, y)``."""
 
     def __init__(
-        self, module: Any, noise: float = 1.0, m_steps: int = 40, lr: float = 0.01, name: str | None = None
+        self,
+        module: Any,
+        noise: float = 1.0,
+        m_steps: int = 40,
+        lr: float = 0.01,
+        name: str | None = None,
+        device: Any = None,
     ) -> None:
         self.module = module
         self.noise = float(noise)
         self.m_steps = int(m_steps)
         self.lr = float(lr)
         self.name = name
+        self.device = device  # None => CUDA if available, else CPU (see _resolve_device)
 
     def __str__(self) -> str:
         return "NeuralLeaf(noise=%.3g)" % self.noise
 
     def _forward(self, x: np.ndarray) -> np.ndarray:
         torch = _torch()
+        dev = _resolve_device(self.device, torch)
+        self.module.to(dev)
         with torch.no_grad():
-            mean = self.module(torch.as_tensor(np.atleast_2d(x), dtype=torch.float32))
+            mean = self.module(torch.as_tensor(np.atleast_2d(x), dtype=torch.float32, device=dev))
         return np.atleast_2d(mean.detach().cpu().numpy())
 
     def log_density(self, xy: Any) -> float:
@@ -76,7 +95,7 @@ class NeuralLeaf(SequenceEncodableProbabilityDistribution):
         return NeuralLeafSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> NeuralLeafEstimator:
-        return NeuralLeafEstimator(self.module, self.noise, self.m_steps, self.lr, self.name)
+        return NeuralLeafEstimator(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
 
     def dist_to_encoder(self) -> NeuralLeafEncoder:
         return NeuralLeafEncoder()
@@ -163,13 +182,20 @@ class NeuralLeafEstimator(ParameterEstimator):
     """
 
     def __init__(
-        self, module: Any, noise: float = 1.0, m_steps: int = 40, lr: float = 0.01, name: str | None = None
+        self,
+        module: Any,
+        noise: float = 1.0,
+        m_steps: int = 40,
+        lr: float = 0.01,
+        name: str | None = None,
+        device: Any = None,
     ) -> None:
         self.module = module
         self.noise = float(noise)
         self.m_steps = int(m_steps)
         self.lr = float(lr)
         self.name = name
+        self.device = device
 
     def accumulator_factory(self) -> NeuralLeafAccumulatorFactory:
         return NeuralLeafAccumulatorFactory()
@@ -178,12 +204,14 @@ class NeuralLeafEstimator(ParameterEstimator):
         torch = _torch()
         xs, ys, ws = suff_stat
         if not xs:
-            return NeuralLeaf(self.module, self.noise, self.m_steps, self.lr, self.name)
-        xt = torch.as_tensor(np.array(xs), dtype=torch.float32)
-        yt = torch.as_tensor(np.array(ys), dtype=torch.float32)
-        wt = torch.as_tensor(np.array(ws), dtype=torch.float32)
+            return NeuralLeaf(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
+        dev = _resolve_device(self.device, torch)
+        self.module.to(dev)
+        xt = torch.as_tensor(np.array(xs), dtype=torch.float32, device=dev)
+        yt = torch.as_tensor(np.array(ys), dtype=torch.float32, device=dev)
+        wt = torch.as_tensor(np.array(ws), dtype=torch.float32, device=dev)
         wsum = float(wt.sum()) + 1e-8
-        log_noise = torch.log(torch.tensor(float(self.noise))).clone().detach().requires_grad_(True)
+        log_noise = torch.log(torch.tensor(float(self.noise), device=dev)).clone().detach().requires_grad_(True)
         opt = torch.optim.Adam(list(self.module.parameters()) + [log_noise], lr=self.lr)
         d = yt.shape[1]
         for _ in range(self.m_steps):
@@ -194,4 +222,4 @@ class NeuralLeafEstimator(ParameterEstimator):
             nll.backward()
             opt.step()
         self.noise = float(torch.exp(log_noise).detach())  # warm-start noise for the next EM iteration
-        return NeuralLeaf(self.module, self.noise, self.m_steps, self.lr, self.name)
+        return NeuralLeaf(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
