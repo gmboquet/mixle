@@ -303,6 +303,14 @@ __all__ = [
     "HiddenAssociationDistribution",
     "HiddenAssociationSampler",
     "HiddenAssociationEstimator",
+    "StructuredHMM",
+    "StructuredHMMEstimator",
+    "StructuredHMMDataEncoder",
+    "TransitionOperator",
+    "DenseTransition",
+    "LowRankTransition",
+    "BlockDiagonalTransition",
+    "KroneckerTransition",
     "HiddenAssociationDataEncoder",
     "HiddenMarkovModelDistribution",
     "HiddenMarkovSampler",
@@ -1243,6 +1251,16 @@ from mixle.stats.latent.semi_supervised_mixture import (
     SemiSupervisedMixtureDistribution,
     SemiSupervisedMixtureEstimator,
     SemiSupervisedMixtureSampler,
+)
+from mixle.stats.latent.structured_hmm import (
+    BlockDiagonalTransition,
+    DenseTransition,
+    KroneckerTransition,
+    LowRankTransition,
+    StructuredHMM,
+    StructuredHMMDataEncoder,
+    StructuredHMMEstimator,
+    TransitionOperator,
 )
 from mixle.stats.latent.variational_embedding_attention import (
     VariationalEmbeddingAttentionAccumulator,
