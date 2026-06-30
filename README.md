@@ -6,11 +6,11 @@
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![tests](https://img.shields.io/badge/tests-2700%2B-brightgreen)
 
-**Compose a Transformer, a Gaussian, and a latent structure into one model — and fit them together.**
-In mixle every model is a *distribution* with the same five-piece contract, so a neural language model, a
-classical density, and a mixture (or HMM) snap into one object you fit with a single call. The inference
-follows from the structure you built — conjugate, EM, MAP, variational, or MCMC — and the same fit runs
-locally on NumPy / Numba / GPU or scales out across Spark, Dask, Ray, or MPI by a `backend=` argument.
+**Automatic inference for composable models of heterogeneous data.** Every model in mixle is a
+*distribution* with the same five-piece contract, so a neural language model, a classical density, and a
+latent structure (a mixture, an HMM) snap into one object you fit with a single call — and the inference
+*follows from the structure you built*: conjugate, EM, MAP, variational, or MCMC, chosen for you. The same
+fit runs locally on NumPy / Numba / GPU or scales out across Spark, Dask, Ray, or MPI by a `backend=` argument.
 
 The unit of composition is the distribution: leaves (a Transformer LM, a Gaussian, a Poisson, …) combine
 into tuples, tuples become mixture components, mixtures become HMM emissions, to any depth. A model and the
