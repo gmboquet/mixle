@@ -104,5 +104,24 @@ class HeterogeneousPrecisionTest(unittest.TestCase):
         self.assertTrue(np.allclose(sorted(fit.w), sorted(serial.w), atol=1e-2))  # close despite mixed precision
 
 
+class MultiProcessExecutorTest(unittest.TestCase):
+    def test_real_worker_processes_match_serial(self):
+        # actual OS processes: sufficient-statistic payloads cross the process boundary by pickling and
+        # combine() folds those freshly-unpickled copies -> result identical to the serial executor.
+        from concurrent.futures import ProcessPoolExecutor
+
+        rng = np.random.RandomState(7)
+        m = _gmm(rng, 3)
+        data = m.sampler(8).sample(2000)
+        est = m.estimator()
+        serial = heterogeneous_em_step(est, m, data, n_shards=4)
+        with ProcessPoolExecutor(max_workers=2) as pool:
+            parallel = heterogeneous_em_step(est, m, data, n_shards=4, pool=pool)
+        self.assertTrue(np.allclose(sorted(serial.w), sorted(parallel.w), atol=1e-9))
+        sm = sorted(c.mu for c in serial.components)
+        pm = sorted(c.mu for c in parallel.components)
+        self.assertTrue(np.allclose(sm, pm, atol=1e-9))
+
+
 if __name__ == "__main__":
     unittest.main()
