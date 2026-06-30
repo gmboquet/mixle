@@ -490,3 +490,28 @@ class TerminalStateTest(unittest.TestCase):
         fit = optimize(seqs, init.estimator(), prev_estimate=init, max_its=15, out=None)
         self.assertEqual(fit.terminal_states, {2})  # retained through the contract
         self.assertLess(max(abs(m - t) for m, t in zip(sorted(e.mu for e in fit.emissions), [-3, 0, 3])), 0.4)
+
+
+class IOHMMTerminalTest(unittest.TestCase):
+    def test_iohmm_terminal_loglik_matches_input_aware_reference(self):
+        from scipy.special import logsumexp
+
+        from mixle.stats.latent.structured_hmm import InputOutputHMM
+
+        rng = np.random.RandomState(0)
+        a0 = _row_normalize(np.array([[0.6, 0.3, 0.1], [0.3, 0.5, 0.2], [0, 0, 1.0]]))
+        a1 = _row_normalize(np.array([[0.4, 0.4, 0.2], [0.2, 0.6, 0.2], [0, 0, 1.0]]))
+        emis = [S.GaussianDistribution(-3, 1), S.GaussianDistribution(0, 1), S.GaussianDistribution(3, 1)]
+        pi = np.array([0.7, 0.3, 0.0])
+        io = InputOutputHMM(emis, pi, [DenseTransition(a0), DenseTransition(a1)], terminal_states={2})
+        obs = [float(x) for x in rng.normal(0, 3, 7)]
+        inp = [int(rng.randint(2)) for _ in range(7)]
+        log_b = io._log_b(obs)
+        term, nonterm = np.array([False, False, True]), np.array([True, True, False])
+        la = np.log(pi + 1e-300) + log_b[0]
+        for t in range(1, len(obs)):
+            a = [a0, a1][inp[t - 1]]
+            prev = np.where(nonterm, la, -np.inf)
+            la = log_b[t] + logsumexp(prev[:, None] + np.log(a + 1e-300), axis=0)
+        ref = float(logsumexp(la[term]))
+        self.assertAlmostEqual(io._forward_backward(log_b, inp)[5], ref, places=8)
