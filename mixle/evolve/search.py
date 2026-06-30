@@ -73,8 +73,13 @@ def auto_select(
             )
         model = _fit_auto(rows, max_its=max_its)
         return ImprovementResult(
-            model, False, "auto_select[bic]", 0.0, None,
-            {"criterion": "bic", "family": type(model).__name__}, None,
+            model,
+            False,
+            "auto_select[bic]",
+            0.0,
+            None,
+            {"criterion": "bic", "family": type(model).__name__},
+            None,
         )
 
     # proper-score Objective: BIC pick + held-out gate.
@@ -82,8 +87,13 @@ def auto_select(
     if not verify:
         model = _fit_auto(rows, max_its=max_its)
         return ImprovementResult(
-            model, False, "auto_select[%s]" % objective.name, 0.0, None,
-            {"criterion": objective.name, "verify": False, "family": type(model).__name__}, None,
+            model,
+            False,
+            "auto_select[%s]" % objective.name,
+            0.0,
+            None,
+            {"criterion": objective.name, "verify": False, "family": type(model).__name__},
+            None,
         )
 
     train, val = _split(rows, holdout, seed)
@@ -92,19 +102,33 @@ def auto_select(
     challenger = Refit(max_its=max_its).propose(champion, rows, ctx={"parent_hash": None}).model
 
     verdict = challenger_beats_champion(
-        champion, challenger, val, objective=objective, seed=seed,
+        champion,
+        challenger,
+        val,
+        objective=objective,
+        seed=seed,
     )
     if verdict.promote:
         return ImprovementResult(
-            challenger, True, "auto_select[%s]" % objective.name, verdict.delta, verdict,
-            {"criterion": objective.name, "family": type(challenger).__name__}, None,
+            challenger,
+            True,
+            "auto_select[%s]" % objective.name,
+            verdict.delta,
+            verdict,
+            {"criterion": objective.name, "family": type(challenger).__name__},
+            None,
         )
     # the full-data fit did not beat the train-only fit out of sample -> keep the more-evidenced full fit
     # but report it as unverified (no out-of-sample improvement over the train-only model).
     full = _fit_auto(rows, max_its=max_its)
     return ImprovementResult(
-        full, False, "auto_select[%s]" % objective.name, verdict.delta, verdict,
-        {"criterion": objective.name, "family": type(full).__name__, "verified_gate": False}, None,
+        full,
+        False,
+        "auto_select[%s]" % objective.name,
+        verdict.delta,
+        verdict,
+        {"criterion": objective.name, "family": type(full).__name__, "verified_gate": False},
+        None,
     )
 
 

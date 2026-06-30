@@ -114,7 +114,11 @@ def improve(
         except Exception as exc:
             if ledger is not None:
                 ledger.record(
-                    operator=op.name, delta=0.0, verdict=None, cost=cost, parent_hash=parent_hash,
+                    operator=op.name,
+                    delta=0.0,
+                    verdict=None,
+                    cost=cost,
+                    parent_hash=parent_hash,
                     meta={"error": str(exc)},
                 )
             continue
@@ -145,8 +149,13 @@ def improve(
 
         if verdict.promote:
             cand_result = ImprovementResult(
-                candidate.model, True, op.name, verdict.delta, verdict,
-                {"candidate_meta": candidate.meta, "cost": cost}, parent_hash,
+                candidate.model,
+                True,
+                op.name,
+                verdict.delta,
+                verdict,
+                {"candidate_meta": candidate.meta, "cost": cost},
+                parent_hash,
             )
             # keep the largest verified delta; ties -> the cheaper operator (already cost-sorted, so
             # the first to reach a given delta is the cheaper one).

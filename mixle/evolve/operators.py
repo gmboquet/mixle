@@ -286,9 +286,7 @@ class Recalibrate:
         best_t, best_err = 1.0, np.inf
         for t in self.grid:
             cand = _RecalibratedModel(model, t, center)
-            f = np.broadcast_to(
-                center + t * (ref - center), (rows.shape[0], ref.shape[0])
-            )
+            f = np.broadcast_to(center + t * (ref - center), (rows.shape[0], ref.shape[0]))
             pit = pit_ensemble(rows, f, seed=self.seed)
             err = pit_calibration_error(pit)
             if err < best_err:
