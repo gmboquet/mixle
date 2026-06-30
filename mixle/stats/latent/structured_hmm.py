@@ -232,3 +232,95 @@ class _StructuredHMMSampler:
             out.append(h.emissions[s].sampler(seed=int(self.rng.randint(1, 2**31))).sample())
             s = self.rng.choice(h.K, p=a[s])
         return out
+
+
+class BlockDiagonalTransition(TransitionOperator):
+    """Independent sub-chains: the states partition into blocks and transitions stay within a block.
+
+    A model whose initial state picks a block and then evolves inside it -- a mixture of regimes that do
+    not switch. Build it from any sub-operators (each block can itself be dense or low-rank). Exact,
+    block-local forward-backward and M-step.
+    """
+
+    def __init__(self, blocks) -> None:
+        self.blocks = list(blocks)
+        self.sizes = [b.n_states for b in self.blocks]
+        self.offsets = np.cumsum([0] + self.sizes)
+        self.n_states = int(self.offsets[-1])
+
+    def _slices(self):
+        return [slice(int(self.offsets[i]), int(self.offsets[i + 1])) for i in range(len(self.blocks))]
+
+    def forward(self, alpha):
+        out = np.zeros(self.n_states)
+        for b, sl in zip(self.blocks, self._slices()):
+            out[sl] = b.forward(alpha[sl])
+        return out
+
+    def backward(self, v):
+        out = np.zeros(self.n_states)
+        for b, sl in zip(self.blocks, self._slices()):
+            out[sl] = b.backward(v[sl])
+        return out
+
+    def as_matrix(self):
+        from scipy.linalg import block_diag
+
+        return block_diag(*[b.as_matrix() for b in self.blocks])
+
+    def new_accumulator(self):
+        return [b.new_accumulator() for b in self.blocks]
+
+    def accumulate(self, acc, alpha_t, w_next, scale):
+        for b, a, sl in zip(self.blocks, acc, self._slices()):
+            b.accumulate(a, alpha_t[sl], w_next[sl], scale)
+
+    def estimate(self, acc):
+        return BlockDiagonalTransition([b.estimate(a) for b, a in zip(self.blocks, acc)])
+
+
+class KroneckerTransition(TransitionOperator):
+    """Factorial HMM: the state is the pair ``(s1, s2)`` of two chains evolving in parallel, with
+    ``A = A1 (x) A2`` (Kronecker). State index is ``i1 * K2 + i2``.
+
+    Forward-backward uses the reshape identity (``alpha @ (A1 (x) A2)`` reshapes to ``A1^T @ M @ A2``),
+    so a step is O(K1 K2 (K1 + K2)) instead of O((K1 K2)^2) -- the whole point of a factorial HMM. The
+    E-step is *exact* over the joint state; the M-step is the standard factorial marginal update (each
+    factor re-estimated from the marginalized joint transition mass), verified to keep EM monotone.
+    """
+
+    def __init__(self, op1: TransitionOperator, op2: TransitionOperator) -> None:
+        self.op1, self.op2 = op1, op2
+        self.k1, self.k2 = op1.n_states, op2.n_states
+        self.n_states = self.k1 * self.k2
+
+    def _a1(self):
+        return self.op1.as_matrix()
+
+    def _a2(self):
+        return self.op2.as_matrix()
+
+    def forward(self, alpha):
+        m = alpha.reshape(self.k1, self.k2)
+        return (self._a1().T @ m @ self._a2()).reshape(-1)  # alpha @ (A1 (x) A2)
+
+    def backward(self, v):
+        m = v.reshape(self.k1, self.k2)
+        return (self._a1() @ m @ self._a2().T).reshape(-1)  # (A1 (x) A2) @ v
+
+    def as_matrix(self):
+        return np.kron(self._a1(), self._a2())
+
+    def new_accumulator(self):
+        return [np.zeros((self.k1, self.k1)), np.zeros((self.k2, self.k2))]  # marginal factor counts
+
+    def accumulate(self, acc, alpha_t, w_next, scale):
+        a1, a2 = self._a1(), self._a2()
+        am = alpha_t.reshape(self.k1, self.k2)
+        wm = w_next.reshape(self.k1, self.k2)
+        inv = 1.0 / max(scale, 1e-300)
+        acc[0] += a1 * (am @ (a2 @ wm.T)) * inv  # n1[i1,j1] = A1[i1,j1] * sum_{i2,j2} xi
+        acc[1] += a2 * (am.T @ (a1 @ wm)) * inv  # n2[i2,j2] = A2[i2,j2] * sum_{i1,j1} xi
+
+    def estimate(self, acc):
+        return KroneckerTransition(DenseTransition(_row_normalize(acc[0])), DenseTransition(_row_normalize(acc[1])))
