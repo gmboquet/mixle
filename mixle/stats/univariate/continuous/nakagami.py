@@ -72,67 +72,6 @@ class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
             out = self._log_const + (2.0 * self.m - 1.0) * np.log(xv) - self._m_over_omega * xv * xv
         return np.where(xv > 0.0, out, -np.inf)
 
-    # --- compute-engine backend (numpy + torch/GPU): scoring + sufficient statistics in engine ops ---
-    @classmethod
-    def compute_capabilities(cls):
-        from mixle.stats.compute.capabilities import DistributionCapabilities
-
-        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
-
-    @classmethod
-    def compute_declaration(cls):
-        from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
-
-        return DistributionDeclaration(
-            name="nakagami",
-            distribution_type=cls,
-            parameters=(ParameterSpec("m", constraint="positive"), ParameterSpec("omega", constraint="positive")),
-            statistics=(StatisticSpec("count"), StatisticSpec("sum_x2"), StatisticSpec("sum_x4")),
-            support="positive",
-            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
-        )
-
-    @staticmethod
-    def backend_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
-        """Per-row Nakagami power sums in accumulator order ``(count, sum x^2, sum x^4)``."""
-        xx = engine.asarray(x)
-        x2 = xx * xx
-        return xx * 0.0 + engine.asarray(1.0), x2, x2 * x2
-
-    @staticmethod
-    def backend_log_density_from_params(x: Any, m: Any, omega: Any, engine: Any) -> Any:
-        """Engine-neutral Nakagami log-density from explicit parameters (``-inf`` for ``x <= 0``)."""
-        log_const = engine.log(engine.asarray(2.0)) + m * engine.log(m) - engine.gammaln(m) - m * engine.log(omega)
-        out = log_const + (2.0 * m - 1.0) * engine.log(x) - (m / omega) * x * x
-        return engine.where(x > 0.0, out, engine.asarray(float("-inf")))
-
-    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
-        """Engine-neutral vectorized log-density for encoded data."""
-        return self.backend_log_density_from_params(
-            engine.asarray(x), engine.asarray(self.m), engine.asarray(self.omega), engine
-        )
-
-    @classmethod
-    def backend_stacked_params(cls, dists: Sequence["NakagamiDistribution"], engine: Any) -> dict[str, Any]:
-        """Stacked Nakagami parameters for a homogeneous mixture kernel."""
-        return {"m": engine.asarray([d.m for d in dists]), "omega": engine.asarray([d.omega for d in dists])}
-
-    @classmethod
-    def backend_stacked_log_density(cls, x: np.ndarray, params: dict[str, Any], engine: Any) -> Any:
-        """Return an ``(n, k)`` matrix of Nakagami log densities."""
-        xx = engine.asarray(x)
-        return cls.backend_log_density_from_params(xx[:, None], params["m"][None, :], params["omega"][None, :], engine)
-
-    @classmethod
-    def backend_stacked_sufficient_statistics(
-        cls, x: np.ndarray, weights: Any, params: dict[str, Any], engine: Any
-    ) -> tuple[Any, Any, Any]:
-        """Stacked Nakagami power sums ``(count, sum x^2, sum x^4)`` using engine-resident arrays."""
-        xx = engine.asarray(x)
-        ww = engine.asarray(weights)
-        x2 = xx * xx
-        return engine.sum(ww, axis=0), engine.sum(ww * x2[:, None], axis=0), engine.sum(ww * (x2 * x2)[:, None], axis=0)
-
     def cdf(self, x: float) -> float:
         """Cumulative distribution function P(X <= x) = P(m, m x^2 / omega) (0 for x <= 0)."""
         xv = float(x)
