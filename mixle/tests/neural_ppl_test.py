@@ -125,6 +125,45 @@ class NeuralPPLTest(unittest.TestCase):
         nll = -np.mean(leaf.seq_log_density((ctx, ids[b : b + 64])))
         self.assertLess(nll, 0.5)  # the streamed model learned next-token prediction
 
+    def test_sft_loss_mask_ignores_masked_observations(self):
+        # SFT-style masking: weight-0 (prompt) observations must not affect the model
+        from mixle.ppl import Categorical, Net
+
+        torch.manual_seed(0)
+        rng = np.random.RandomState(0)
+        x = rng.randn(200, 4).astype("float32")
+        y = (x @ rng.randn(4, 3)).argmax(1)
+        mask = (np.arange(200) % 2 == 0).astype(float)
+        yc = y.copy()
+        yc[mask == 0] = rng.randint(0, 3, (mask == 0).sum())  # masked-out half carries WRONG labels
+        fit = Categorical(logits=Net(hidden=[32], out=3)).fit(yc, given={"x": x}, epochs=250, weights=mask)
+        self.assertGreater(np.mean(fit.predict(given={"x": x})[mask == 1] == y[mask == 1]), 0.9)  # learned the unmasked
+
+    def test_cpt_ewc_retains_the_old_task(self):
+        # continued pretraining with EWC retains task A better than plain continuation does
+        from mixle.models.continual import ewc, fisher_diagonal, snapshot
+        from mixle.ppl import Categorical, Net
+
+        rng = np.random.RandomState(1)
+        xa = rng.randn(300, 4).astype("float32")
+        ya = (xa @ rng.randn(4, 3)).argmax(1)
+        xb = rng.randn(300, 4).astype("float32")
+        yb = (xb @ rng.randn(4, 3)).argmax(1)
+
+        def pre(s):
+            torch.manual_seed(s)
+            return Categorical(logits=Net(hidden=[32], out=3)).fit(ya, given={"x": xa}, epochs=250)
+
+        p1, p2 = pre(0), pre(0)
+        anc, fish = snapshot(p1.dist), fisher_diagonal(p1.dist, xa, ya)
+        no = Categorical(logits=Net(hidden=[32], out=3)).fit(yb, given={"x": xb}, epochs=250, init=p1)
+        yes = Categorical(logits=Net(hidden=[32], out=3)).fit(
+            yb, given={"x": xb}, epochs=250, init=p2, ewc=ewc(anc, fish, lam=3e4)
+        )
+        acc_a_no = np.mean(no.predict(given={"x": xa}) == ya)
+        acc_a_yes = np.mean(yes.predict(given={"x": xa}) == ya)
+        self.assertGreater(acc_a_yes, acc_a_no + 0.08)  # EWC anti-forgetting retains task A
+
 
 if __name__ == "__main__":
     unittest.main()

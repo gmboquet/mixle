@@ -59,12 +59,20 @@ def neural_fit(
     lr: float = 0.01,
     batch_size: int | None = None,
     device: str = "cpu",
+    init: Any = None,
+    weights: Any = None,
+    ewc: Any = None,
     **_: Any,
 ) -> NeuralResult:
     """Fit a neural-headed conditional RV. ``data`` is the response ``y``; ``given`` carries the covariates.
 
     ``epochs`` is the number of passes; ``batch_size`` (None = full batch) + ``device`` ("mps"/"cuda") let a
     conv net train on a real image set on the GPU. The input keeps its natural shape -- (N, D) or (N, C, H, W).
+
+    Multi-stage pipeline (one module across stages):
+    ``init=`` continues a previous fit's module (CPT/SFT) instead of building a fresh one; ``weights=`` are
+    per-observation loss weights (e.g. an SFT prompt mask: 0 on prompt tokens, 1 on the completion); ``ewc=``
+    is an ``(anchor, fisher, lambda)`` EWC penalty for continued pretraining without forgetting.
     """
     from mixle.inference import estimate
 
@@ -73,15 +81,24 @@ def neural_fit(
     if net.field not in given:
         raise ValueError(f"neural fit needs covariates: .fit(y, given={{{net.field!r}: X}})")
     x = np.asarray(given[net.field], dtype="float32")
-    module = net.build(tuple(x.shape[1:]))  # (D,) for an MLP, (C, H, W) for a conv net
+    module = init.dist.module if init is not None else net.build(tuple(x.shape[1:]))  # continue, or build fresh
     fam = rv._family.name
 
     if fam == "Categorical":
-        from mixle.models.softmax_leaf import SoftmaxNeuralLeaf
+        from mixle.models.softmax_leaf import SoftmaxNeuralLeafEstimator
 
         y = np.asarray(data, dtype=int).reshape(-1)
-        leaf = SoftmaxNeuralLeaf(module, m_steps=int(epochs), lr=float(lr), batch_size=batch_size, device=device)
-        fitted = estimate(list(zip(x, y)), leaf.estimator())
+        est = SoftmaxNeuralLeafEstimator(
+            module, m_steps=int(epochs), lr=float(lr), batch_size=batch_size, device=device, ewc=ewc
+        )
+        if weights is None and ewc is None:
+            fitted = estimate(list(zip(x, y)), est)
+        else:  # per-observation loss weights (SFT mask) and/or the EWC penalty -> drive the accumulator directly
+            acc = est.accumulator_factory().make()
+            enc = est.accumulator_factory().make().acc_to_encoder().seq_encode(list(zip(x, y)))
+            w = np.ones(len(y)) if weights is None else np.asarray(weights, dtype=float)
+            acc.seq_update(enc, w, None)
+            fitted = est.estimate(None, acc.value())
         return NeuralResult(fitted, net.field, "categorical")
 
     if fam in ("Normal", "Gaussian"):
