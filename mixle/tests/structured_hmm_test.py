@@ -515,3 +515,29 @@ class IOHMMTerminalTest(unittest.TestCase):
             la = log_b[t] + logsumexp(prev[:, None] + np.log(a + 1e-300), axis=0)
         ref = float(logsumexp(la[term]))
         self.assertAlmostEqual(io._forward_backward(log_b, inp)[5], ref, places=8)
+
+
+class EDHMMDecodingTest(unittest.TestCase):
+    def test_viterbi_segments_recovers_planted_segmentation(self):
+        from mixle.stats.latent.structured_hmm import ExplicitDurationHMM
+
+        D = 6
+        dur = np.zeros((2, D))
+        dur[0, 3] = 1.0  # state 0 always duration 4
+        dur[1, 1] = 1.0  # state 1 always duration 2
+        m = ExplicitDurationHMM(
+            [S.GaussianDistribution(-6, 0.3), S.GaussianDistribution(6, 0.3)],
+            [1.0, 0.0],
+            np.array([[0, 1.0], [1.0, 0]]),
+            dur,
+            D,
+        )
+        rng = np.random.RandomState(0)
+        true_states = [0] * 4 + [1] * 2 + [0] * 4 + [1] * 2
+        seq = [float(rng.normal([-6, 6][s], 0.3)) for s in true_states]
+        segs = m.viterbi_segments(seq)
+        self.assertEqual([d for _, _, d in segs], [4, 2, 4, 2])  # durations recovered
+        recovered = []
+        for st, _, d in segs:
+            recovered += [st] * d
+        self.assertEqual(recovered[: len(true_states)], true_states)  # exact state path
