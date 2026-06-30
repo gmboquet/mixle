@@ -1,4 +1,4 @@
-"""mixle.program -- optimization programs (moves + combinators) covering the validated patterns.
+"""mixle.experimental.program -- optimization programs (moves + combinators) covering the validated patterns.
 
 minimize/maximize + weighted (multi-objective) + alternate (adversarial/coordinate); constraints as a
 primal-dual game; REINFORCE policy gradient; LoRA scoped fine-tuning; continual learning by replay; and the
@@ -9,7 +9,7 @@ import unittest
 
 import numpy as np
 
-from mixle.program import (
+from mixle.experimental.program import (
     Stream,
     alternate,
     bilevel,
