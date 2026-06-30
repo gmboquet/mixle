@@ -516,6 +516,10 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
         children = tuple(self.topics) + (() if supports(self.len_dist, Neutral) else (self.len_dist,))
+        # has_topics (Bayesian emission priors) and terminal_values genuinely lack an engine path. The
+        # numba *encoding* (use_numba) is engine-ready for the E-step (seq_update_engine handles it), but
+        # the engine *scoring* path doesn't yet consume it, so a use_numba model stays numpy-only for now;
+        # build the HMM with use_numba=False to run its E-step + scoring on torch / GPU.
         if self.has_topics or self.terminal_values is not None or self.use_numba:
             return DistributionCapabilities(engine_ready=("numpy",), kernel_status="legacy_numpy")
         ready = intersect_engine_ready(children)
@@ -3472,13 +3476,16 @@ def hmm_engine_forward_backward(engine, log_emit, log_w, log_a, mask, weights=No
     """
     mask_np = np.asarray(mask)
     n, tmax = mask_np.shape[0], mask_np.shape[1]
+    # log_w is either a shared (S,) initial vector or a per-sequence (N, S) vector (SemiSupervised HMM).
+    # Read its shape from the raw (host) input BEFORE moving to the engine: np.asarray on a device tensor
+    # (e.g. MPS/CUDA) raises "can't convert device tensor to numpy".
+    log_w_host = np.asarray(log_w)
+    log_w_2d = log_w_host.ndim == 2
+    num_states = int(log_w_host.shape[-1])
     log_emit = engine.asarray(log_emit)
     log_w = engine.asarray(log_w)
     log_a = engine.asarray(log_a)
     m = engine.asarray(mask)
-    # log_w is either a shared (S,) initial vector or a per-sequence (N, S) vector (SemiSupervised HMM).
-    log_w_2d = np.asarray(log_w).ndim == 2
-    num_states = int(np.asarray(log_w).shape[-1])
 
     # forward pass (freeze alpha at padded steps so ll reads the last valid step)
     init = log_w if log_w_2d else log_w[None, :]
