@@ -6,22 +6,28 @@
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![tests](https://img.shields.io/badge/tests-2700%2B-brightgreen)
 
-**Automatic inference for composable models of heterogeneous data.** A single observation can be a
-tuple of a category, a real, a count sequence, a vector, a set, or a tree — and mixle fits a
-probabilistic model to a dataset of them, *choosing the inference from the model itself* (conjugate /
-EM / MAP / variational / MCMC), locally on vectorized NumPy/Numba or distributed across Spark, Dask,
-Ray, MPI, or Torch (GPU).
+**mixle is a deep model architecture framework.** Neural networks — layers of ReLU units trained by
+gradient descent — are one narrow, special-case model class. mixle builds, fits, and scores the
+broader space: mixtures, hidden Markov models, probabilistic circuits (sum-product networks), graph
+grammars, Bayesian hierarchies, dynamic relational models, and neural regressors, all composable
+with each other under a single contract.
 
-The unit of composition is the distribution: leaves (Gaussian, categorical, Poisson, …) combine into
-tuples, tuples become mixture components, mixtures become HMM emissions, to any depth. A model and the
-estimator that fits it have the same shape — so **what you can express, you can fit**.
+A single observation can be a tuple of a category, a real, a count sequence, a vector, a set, or a
+tree. mixle models the whole record jointly and **chooses the inference algorithm from the model's
+own structure** — closed-form conjugate, EM, MAP, variational, MCMC — locally on NumPy/Numba or
+distributed across Spark, MPI, or multiple processes.
+
+Compute is a first-class concern. The precision layer spans **fp1 through fp1024** — sub-byte packed
+codes, float32/64, double-double extended precision, MPFR arbitrary precision — with automatic
+data-aware allocation and a compiled transcendental-free forward path in the logarithmic number
+system (LNS).
 
 ## Contents
 
 [Installation](#installation) · [Quickstart](#quickstart) · [Core concepts](#core-concepts) ·
-[When to reach for mixle](#when-to-reach-for-mixle) ·
+[Compute & precision](#compute--precision) ·
 [Distribution catalog](#distribution-catalog) · [Probabilistic programming](#probabilistic-programming-mixleppl) ·
-[Frequentist & Bayesian](#frequentist--bayesian) · [Engines & orchestration](#engines--orchestration) ·
+[Frequentist & Bayesian](#frequentist--bayesian) · [Distributed & scale-out](#distributed--scale-out) ·
 [Enumeration & ranking](#enumeration--ranking) · [Beyond fitting](#beyond-fitting) ·
 [Examples](#examples) · [Tests](#tests) · [Maintainers & contributors](#maintainers--contributors) · [License](#license)
 
@@ -34,7 +40,7 @@ pip install mixle          # base (numpy, scipy, mpmath): every distribution + l
 pip install "mixle[all]"   # acceleration, scale-out, and connectors
 ```
 
-The base install fits every distribution locally. Acceleration and scale-out are opt-in extras:
+The base install fits every model locally. Acceleration and scale-out are opt-in extras:
 
 | Extra | Adds |
 | --- | --- |
@@ -119,28 +125,91 @@ Families live in `mixle.stats`; operations on them are grouped by concern:
 
 Drawing is a method, not a concern: `dist.sampler(seed).sample(n)`.
 
-## When to reach for mixle
+## Compute & precision
 
-mixle is built for one shape of problem: **a heterogeneous observation modelled as one composable
-distribution, where the inference should follow from the structure.** Reach for it when —
+The compute layer is explicit and composable. Distributions own the likelihood math; **engines**
+supply array ops, device, and numerical format — so the same model runs at different precision
+levels or on different hardware without touching the model code.
 
-- a single record mixes *kinds* of data — a category, a real, a count, a sequence, a set, a tree — and
-  you want to model the whole record jointly, not column-by-column;
-- you'd rather **declare the model and let `fit` choose the algorithm family** (closed-form / EM / MAP /
-  hierarchical / state-space) than wire a sampler by hand;
-- you need the *same* model to also **rank, enumerate, or unrank** its support, or to scale out by a
-  `backend=` argument rather than a rewrite.
+### Precision spectrum: fp1 through fp1024
 
-Reach for something else when —
+| Layer | What it does |
+| --- | --- |
+| **Sub-byte packing** (`mixle.engines.bitpacked`) | 1-bit binary and 2-bit ternary GEMM via packed `uint64` popcount |
+| **Float32 / float64** | default paths; fused numba kernels on contiguous buffers |
+| **Double-double extended** (`mixle.engines.extended`) | EFT via TwoSum / TwoProd / Veltkamp split; `dd_dot` with compiled FMA kernel (2.95× vs numpy) |
+| **Codebook / VQ** (`mixle.engines.formats`) | 1-D k-means quantization with bit-packed codes; compress / decompress round-trips exactly |
+| **MPFR arbitrary** | mpmath backend for arbitrary-mantissa computation |
+| **Interval + affine error tracing** (`mixle.engines.error_tracing`) | outward-rounding interval arithmetic; `sum_error_bound`; auto-routes to double-double when float64 is not accurate enough |
 
-- you want a single-family Bayesian regression with best-in-class **NUTS** and a deep diagnostics
-  ecosystem — **Stan / NumPyro / PyMC** are more mature there, and faster (compiled / JIT);
-- you need a custom likelihood as free-form array code with autodiff — that's **Pyro / NumPyro / TFP**;
-- you only need one off-the-shelf estimator (a GMM, an HMM) with no composition — **scikit-learn /
-  hmmlearn / pomegranate** are simpler.
+Automatic allocation: `optimize(data, model, precision='minimal')` inspects data magnitude,
+model fusibility, and leaf families, then picks the narrowest format that is provably safe:
 
-Honest framing: mixle's edge is the **composition + automatic cross-family inference** combination, not
-raw sampler speed. Use `m.explain_fit()` to see exactly which route it will take, and why.
+```python
+optimize(data, est, precision='minimal')    # float32 fused when safe, float64 otherwise
+optimize(data, est, precision='auto')       # accumulate in float64, compute in float32
+optimize(data, est, engine=TorchEngine(device="cuda", dtype="float32"))
+```
+
+### Logarithmic number system: transcendental-free integer forward passes
+
+Probabilistic models naturally operate in log-space. mixle exploits this: quantize each
+log-probability as an integer `k = round(log_p / step)` and all arithmetic becomes integer:
+
+- **Products → integer ADD** (no `exp` or `log`)
+- **Log-sum-exp → integer `max + LUT[|Δ|]`** (Gaussian-log lookup, no transcendentals)
+- **All activations → `table[code]`** (sigmoid, tanh, GELU, SiLU, softplus — every nonlinearity
+  is a LUT gather when the operand is quantized)
+
+The compiled Cython kernel (`mixle/engines/_lns_kernel.pyx`) runs a pairwise tree fold.
+On a 4096×50 000 language-model cross-entropy benchmark: **14.4× faster than float64 / 8.4×
+faster than numpy LNS**.
+
+```python
+from mixle.engines.lns import LogNumberSystem
+from mixle.engines.lns_nn import cross_entropy, SumProductCircuit
+
+lns = LogNumberSystem(step=0.005)
+
+# LM head / attention normalizer in integer log-space (~14x vs fp64)
+ce_loss = cross_entropy(logits, targets, lns)
+
+# Entire probabilistic circuit forward in integer log-space (product=add, sum=logadd)
+circuit = SumProductCircuit(nodes)
+log_probs = circuit.evaluate_lns(lns, leaf_log_values)
+```
+
+### Probabilistic circuits (sum-product networks)
+
+`ProbabilisticCircuitDistribution` is a DAG of product nodes (log-space ADD), sum nodes
+(LNS logadd), and typed leaves — with decomposability and smoothness enforced at construction.
+Leaves can be any mixle distribution, so a circuit describes a structured generative model
+over heterogeneous records. The whole forward pass runs in integer log-space when `lns_step=`
+is set; EM uses circuit-flow soft counts.
+
+```python
+from mixle.stats.latent.probabilistic_circuit import leaf, prod, summ, ProbabilisticCircuitDistribution as PC
+
+root = summ([
+    prod([leaf(0, GaussianDistribution(-3, 1)), leaf(1, GaussianDistribution(-3, 1))]),
+    prod([leaf(0, GaussianDistribution( 4, 1)), leaf(1, GaussianDistribution( 4, 1))]),
+], [0.7, 0.3])
+
+pc = PC(root, num_vars=2, lns_step=0.005)   # whole DAG scored in integer log-space
+fit = optimize(data, pc.estimator(), prev_estimate=pc, max_its=40)
+```
+
+### Quantized nonlinearities
+
+`mixle.engines.qlut` replaces any scalar nonlinearity with a nearest-code LUT and
+linear-tail extrapolation for unbounded activations (1.5–8× vs real transcendental):
+
+```python
+from mixle.engines.qlut import quantized_activation, step_for_tolerance
+
+gelu = quantized_activation('gelu', step=step_for_tolerance(1e-4))
+out  = gelu(x)   # table[code] — no transcendental
+```
 
 ## Distribution catalog
 
@@ -156,6 +225,7 @@ heterogeneous record as one distribution**. One observation under each:
 | `SequenceDistribution(Poisson)` | `[5, 4, 6]` (variable length) |
 | `OptionalDistribution(Gaussian)` | `-0.31` or `None` |
 | `MixtureDistribution([...])` / `HiddenMarkovModelDistribution` | a component's shape, with the cluster / state latent |
+| `ProbabilisticCircuitDistribution(root)` | a DAG of product / sum / leaf nodes, scored in integer log-space |
 
 - **Univariate:** Gaussian, Student-t/Cauchy, Logistic, LogGaussian, Laplace, Uniform, Exponential,
   Gamma, Inverse Gamma/Gaussian, Half-Normal, Gumbel, Beta, Weibull, Rayleigh, Pareto, Poisson,
@@ -164,8 +234,9 @@ heterogeneous record as one distribution**. One observation under each:
 - **Combinators:** Composite (tuples), Record (named fields), Sequence, Optional (missing data),
   Transform, Conditional, Weighted.
 - **Latent structure:** mixtures (plain, heterogeneous, hierarchical, joint, semi-supervised), LDA,
-  PLSI, probabilistic PCA, HMMs (standard, segmental, lookback, tree, quantized), PCFGs, Markov chains,
-  hidden associations, IBP, Pitman-Yor processes, Bernoulli sets.
+  PLSI, probabilistic PCA, HMMs (standard, segmental, lookback, tree, quantized), probabilistic
+  circuits (sum-product networks), PCFGs, Markov chains, hidden associations, IBP, Pitman-Yor
+  processes, Bernoulli sets.
 - **Permutations & graphs:** Mallows / Plackett-Luce, matchings, spanning trees, random graphs
   (Erdős–Rényi, stochastic block, random dot-product), Spearman ranking, and graph grammars over
   networks (vertex-replacement / NLC and hyperedge-replacement) — `log_density` is the marginal
@@ -265,25 +336,28 @@ GaussianEstimator(prior=NormalGammaPrior())  # closed-form conjugate posterior �
 - **Honest densities:** `supports(x, ExactDensity)` / `describe(x)` flag when a model's `log_density`
   is a variational bound (e.g. LDA's per-document ELBO) rather than the exact `log p(x)`.
 
-## Engines & orchestration
+## Distributed & scale-out
 
-Distributions own the likelihood and sufficient-statistic math; **compute engines** supply the array
-ops, device, and precision — so **scale-out is a backend argument, not a rewrite**:
+All distributed backends share the same EM contract: workers ship fixed-size sufficient-statistic
+payloads; the root folds with `combine()` and a tree-reduce. Scale-out is a `backend=` argument,
+not a rewrite.
 
 ```python
-from mixle.engines import TorchEngine
-
-optimize(data, est, engine=TorchEngine(device="cuda", dtype="float32"))   # GPU
-optimize(data, est, precision="auto")                                     # stats still accumulate in float64
-optimize(rdd,  est, backend="spark")                                      # also: mp · dask · mpi · ray · lightning
+optimize(rdd,  est, backend="spark")   # Spark RDD.treeReduce — no driver collect
+optimize(data, est, backend="mpi")     # MPI comm.reduce, object-mode tree fold
+optimize(data, est, backend="mp")      # multiprocessing.ProcessPoolExecutor
+optimize(data, est, backend="dask")    # also: ray · lightning
 ```
 
-- The same EM contract runs unchanged on NumPy, Numba, Torch, or a symbolic backend.
-- New frameworks register a factory (`register_encoded_data_backend`) — no dispatch to edit.
-- The planner (`mixle.utils.parallel.planner`) turns a hardware budget into a memory-aware placement
-  (chunking, device assignment, Torch sharding) you compute once and reuse.
-- The `SymbolicEngine` runs a density through SymPy, so a model can emit its closed-form log-density
-  as LaTeX / SymPy / Sage.
+- **Spark** (`mixle.inference.spark_executor`): shards data to an RDD, maps the E-step per shard,
+  and `treeReduce(combine, depth)` on the root. Verified on PySpark 4.1 + Java 17.
+- **MPI** (`mixle.inference.mpi_executor`): each rank E-steps its shard, then
+  `comm.reduce(local, op=combine, root=0)`. Verified under `mpirun -n 3` (Open MPI 5 + mpi4py 4).
+- **Multi-process** (`mixle.inference.heterogeneous_executor`): `ProcessPoolExecutor`; pickles only
+  the shard + estimator, not the full dataset.
+- The **planner** (`mixle.utils.parallel.planner`) turns a hardware budget into a memory-aware
+  placement you compute once and reuse.
+- **Symbolic export:** `SymbolicEngine` emits a model's closed-form log-density as LaTeX / SymPy / Sage.
 
 ## Enumeration & ranking
 
@@ -327,24 +401,30 @@ e.seek(10_000)    # the ~10,000th most probable value, by structural count-DP
 
 ## Examples
 
-Self-contained scripts in [examples/](https://github.com/gmboquet/mixle/tree/main/examples)
-— each samples from a known model, refits, and recovers it (no downloads):
+Self-contained scripts in [examples/](https://github.com/gmboquet/mixle/tree/main/examples):
 
 ```sh
 cd examples
-python gallery_univariate_example.py    # tour the scalar families (also gallery_{multivariate,combinators,…})
-python gallery_structured_example.py    # mixtures / HMMs / LDA / latent-variable models
+python gallery_univariate_example.py    # tour the scalar families
+python gallery_structured_example.py    # mixtures / HMMs / LDA / probabilistic circuits
 python ppl_example.py                   # the equation-style mixle.ppl surface
 python production_example.py            # provenance, registry, serving, drift, checkpoints
-python scaling_example.py               # the same fit distributed by backend= (local / mp / mpi / spark)
+python scaling_example.py               # the same fit distributed (local / mp / mpi / spark)
 ```
 
-**Distributed backends** (see `scaling_example.py`): `local` and `mp` run out of the box; `mpi` and Spark
-need a launcher. Spark also needs a JVM (Java 17/21) with workers on the driver's Python:
+**Distributed backends:** `local` and `mp` run out of the box; `mpi` and Spark need a launcher.
+Spark also needs a JVM (Java 17/21):
 
 ```sh
 export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 export PYSPARK_PYTHON=/path/to/venv/bin/python PYSPARK_DRIVER_PYTHON=$PYSPARK_PYTHON
+```
+
+**Compiled kernels** (optional; pure-numpy fallback always available):
+
+```sh
+python -c "from mixle.engines.build_kernels import compile_lns_kernel; compile_lns_kernel()"
+# _lns_kernel.pyx: 14x LNS cross-entropy    _dd_kernels.pyx: 2.95x double-double dot
 ```
 
 ## Tests
