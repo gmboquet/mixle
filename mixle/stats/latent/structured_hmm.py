@@ -203,6 +203,34 @@ class StructuredHMM:
         gamma /= gamma.sum(axis=1, keepdims=True)
         return alpha, beta, c, b, gamma, loglik
 
+    def viterbi(self, seq):
+        """Most-likely state path (Viterbi / max-product). Uses the transition matrix, so it works for any
+        operator; O(T K^2) -- a read-out, not the EM hot loop."""
+        log_b = self._log_b(seq)
+        log_a = np.log(self.transition.as_matrix() + 1e-300)
+        log_pi = np.log(self.pi + 1e-300)
+        t_len, k = log_b.shape
+        delta = np.zeros((t_len, k))
+        psi = np.zeros((t_len, k), dtype=int)
+        delta[0] = log_pi + log_b[0]
+        for t in range(1, t_len):
+            m = delta[t - 1][:, None] + log_a  # (from, to)
+            psi[t] = np.argmax(m, axis=0)
+            delta[t] = m[psi[t], np.arange(k)] + log_b[t]
+        path = np.zeros(t_len, dtype=int)
+        path[-1] = int(np.argmax(delta[-1]))
+        for t in range(t_len - 2, -1, -1):
+            path[t] = psi[t + 1, path[t + 1]]
+        return path
+
+    def posterior_decode(self, seq):
+        """Per-position MAP state argmax_k P(z_t = k | x) from the forward-backward posteriors gamma."""
+        return np.argmax(self._forward_backward(self._log_b(seq))[4], axis=1)
+
+    def state_posteriors(self, seq):
+        """The full smoothing posteriors gamma[t,k] = P(z_t = k | x)."""
+        return self._forward_backward(self._log_b(seq))[4]
+
     def seq_log_density(self, seqs) -> np.ndarray:
         return np.array([self._forward_backward(self._log_b(s))[5] for s in seqs])
 
