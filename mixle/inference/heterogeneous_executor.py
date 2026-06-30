@@ -60,6 +60,12 @@ def _shard_estep(estimator: Any, model: Any, shard: Any, compute_dtype: Any = No
     return n, acc.value()
 
 
+def _shard_task(payload: tuple[Any, Any, Any, Any]) -> tuple[int, Any]:
+    """Picklable wrapper so a ProcessPoolExecutor can run a shard's E-step in a separate OS process."""
+    estimator, model, shard, compute_dtype = payload
+    return _shard_estep(estimator, model, shard, compute_dtype)
+
+
 def _shard_bounds(n: int, sizes: list[int] | None, n_shards: int) -> list[tuple[int, int]]:
     if sizes is not None:
         bounds, off = [], 0
@@ -79,22 +85,27 @@ def heterogeneous_em_step(
     shard_sizes: list[int] | None = None,
     shard_precisions: list[Any] | None = None,
     branch: int = 2,
+    pool: Any = None,
 ) -> Any:
     """One distributed EM step: shard ``data``, E-step each shard (at its precision), tree-reduce, estimate.
 
     With one shard and no reduced precision this is byte-identical to a plain serial E-step; with many
-    shards the tree-reduced result matches it up to float reassociation of ``combine()``.
+    shards the tree-reduced result matches it up to float reassociation of ``combine()``. ``pool`` is an
+    optional ``concurrent.futures``-style executor (e.g. ``ProcessPoolExecutor``) whose ``map`` runs the
+    shard E-steps on real worker processes -- the sufficient-statistic payloads cross the process boundary
+    by pickling, and ``combine`` operates on those freshly-unpickled copies (never a shared reference).
     """
     bounds = _shard_bounds(len(data), shard_sizes, n_shards)
-    values, total = [], 0
+    tasks = []
     for i, (lo, hi) in enumerate(bounds):
         shard = data[lo:hi]
         if not len(shard):
             continue
         cd = shard_precisions[i] if shard_precisions else None
-        count, val = _shard_estep(estimator, model, shard, cd)
-        values.append(val)
-        total += count
+        tasks.append((estimator, model, shard, cd))
+    results = list(pool.map(_shard_task, tasks)) if pool is not None else [_shard_task(t) for t in tasks]
+    values = [v for _, v in results]
+    total = sum(c for c, _ in results)
     combined = tree_reduce_values(values, estimator.accumulator_factory(), branch)
     return estimator.estimate(float(total), combined)
 
@@ -107,12 +118,13 @@ def heterogeneous_fit(
     shard_sizes: list[int] | None = None,
     shard_precisions: list[Any] | None = None,
     branch: int = 2,
+    pool: Any = None,
 ) -> Any:
     """Run ``max_its`` EM iterations with the distributed heterogeneous executor; returns the fitted model."""
     estimator = model.estimator()
     current = model
     for _ in range(max_its):
-        current = heterogeneous_em_step(estimator, current, data, n_shards, shard_sizes, shard_precisions, branch)
+        current = heterogeneous_em_step(estimator, current, data, n_shards, shard_sizes, shard_precisions, branch, pool)
     return current
 
 
