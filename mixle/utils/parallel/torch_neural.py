@@ -48,9 +48,18 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         shard_by_rank: bool = True,
         init_process_group: bool = True,
         backend: str | None = None,
+        parallel: str = "auto",
+        precision: str = "fp32",
+        activation_checkpointing: bool = False,
     ) -> None:
         self.torch, self.dist = _torch_dist()
         self._owns_pg = False
+        # parallel: "auto" -> FSDP2 (ZeRO-3) on CUDA, DDP on CPU; precision: "fp32"|"bf16" (fp8 = torchao, vendored);
+        # activation_checkpointing: re-materialize block activations in backward (memory for compute) -- all of this
+        # is the CUDA scale-out path, off by default so the validated CPU/gloo (DDP, fp32) path is unchanged.
+        self.parallel = parallel
+        self.precision = precision
+        self.activation_checkpointing = bool(activation_checkpointing)
         self._maybe_init_process_group(init_process_group, backend)
         self.rank = self.dist.get_rank() if self.dist.is_initialized() else 0
         self.world = self.dist.get_world_size() if self.dist.is_initialized() else 1
@@ -76,32 +85,65 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         self.dist.init_process_group(backend=backend)
         self._owns_pg = True
 
+    def _resolve_parallel(self, device: str) -> str:
+        use_dist = self.dist.is_initialized() and self.world > 1
+        if self.parallel != "auto":
+            return self.parallel
+        if not use_dist:
+            return "none"
+        return "fsdp" if device.startswith("cuda") else "ddp"
+
+    def _wrap_for_scale(self, module: Any, device: str) -> Any:
+        """Wrap for distributed training: FSDP2 (ZeRO-3) on CUDA, DDP on CPU. The validated CPU path is DDP/fp32.
+
+        The CUDA branch (FSDP2 ``fully_shard`` per block + root, bf16 ``MixedPrecisionPolicy``, activation
+        checkpointing) is the cluster path -- correct per the torch 2.4+ APIs but only exercised on multi-GPU.
+        """
+        torch = self.torch
+        mode = self._resolve_parallel(device)
+        if self.activation_checkpointing and hasattr(module, "blocks"):
+            from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
+
+            for i, blk in enumerate(module.blocks):
+                module.blocks[i] = checkpoint_wrapper(blk)
+        if mode == "fsdp":  # CUDA: per-parameter sharded ZeRO-3 (the reduce-scatter happens in backward)
+            from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
+
+            kw = {"mp_policy": MixedPrecisionPolicy(param_dtype=torch.bfloat16)} if self.precision == "bf16" else {}
+            if hasattr(module, "blocks"):
+                for blk in module.blocks:
+                    fully_shard(blk, **kw)
+            fully_shard(module, **kw)
+            return module  # FSDP2 shards in place
+        if mode == "ddp":  # CPU/gloo: replicate + in-backward gradient all-reduce (the validated path)
+            from torch.nn.parallel import DistributedDataParallel as DDP
+
+            return DDP(module)
+        return module
+
     def pysp_seq_estimate(self, estimator: Any, prev_estimate: Any) -> Any:
         """SPMD: stream this rank's shard, train the module; the only collective is the in-backward all-reduce."""
-        torch, dist = self.torch, self.dist
+        torch = self.torch
         from mixle.data.stream_token_source import stream_token_source
         from mixle.models.streaming_transformer_leaf import StreamingTransformerLeaf
 
         device = getattr(estimator, "device", "cpu")
         lr = float(getattr(estimator, "lr", 3e-3))
         module = estimator.module.to(device)
-        if dist.is_initialized() and self.world > 1:
-            from torch.nn.parallel import DistributedDataParallel as DDP
-
-            wrapped = DDP(module)  # in-backward gradient all-reduce; on CUDA: fully_shard(module) for ZeRO-3
-        else:
-            wrapped = module
+        wrapped = self._wrap_for_scale(module, device)
         opt = torch.optim.AdamW(wrapped.parameters(), lr=lr)
         ce = torch.nn.CrossEntropyLoss()
+        autocast_dev = "cuda" if device.startswith("cuda") else "cpu"
         src = stream_token_source(
             self._ids, block=self.block, batch_size=self.batch_size, epochs=self.epochs, shuffle=self.shuffle
         )
         for x, y in src:
             opt.zero_grad()
-            loss = ce(
-                wrapped(torch.as_tensor(x, dtype=torch.float32).to(device)),
-                torch.as_tensor(y, dtype=torch.long).to(device),
-            )
+            with torch.autocast(device_type=autocast_dev, dtype=torch.bfloat16, enabled=(self.precision == "bf16")):
+                loss = ce(
+                    wrapped(torch.as_tensor(x, dtype=torch.float32).to(device)),
+                    torch.as_tensor(y, dtype=torch.long).to(device),
+                )
             loss.backward()  # <-- the SOLE cross-rank collective (gradient all-reduce / reduce-scatter)
             opt.step()
         return StreamingTransformerLeaf(module, device)  # consistent across ranks -- no gather, no broadcast
