@@ -224,10 +224,62 @@ def weighted_conformal(
     return test_pred - q, test_pred + q
 
 
+def conformal_label_threshold(cal_prob_true: np.ndarray, *, alpha: float = 0.1) -> float:
+    """Calibrate the LAC (least-ambiguous set-valued classifier) score threshold for ``1 - alpha`` coverage.
+
+    The nonconformity score of a calibration point is ``1 - p_model[true_class]`` -- which needs the model's
+    class scores to *rank* well, **not** to be a true probability (the whole point: a softmax over a ReLU net
+    is not a describable random process, but conformal still gives a finite-sample coverage guarantee from how
+    those scores behave on held-out, exchangeable data). Returns the conformal quantile ``qhat`` of the
+    calibration scores; a class is admitted at test time iff ``1 - p[c] <= qhat`` (see :func:`conformal_label_sets`).
+
+    Args:
+        cal_prob_true: ``(n,)`` model score assigned to the *true* class of each calibration point.
+        alpha: miscoverage level (``1 - alpha`` marginal coverage of the returned sets).
+
+    Returns:
+        ``qhat`` -- the score threshold (``+inf`` when ``n`` is too small for the requested ``alpha``).
+    """
+    scores = 1.0 - np.asarray(cal_prob_true, dtype=float)
+    return _conformal_quantile(scores, alpha)
+
+
+def conformal_label_sets(
+    cal_prob_true: np.ndarray,
+    test_prob: np.ndarray,
+    *,
+    alpha: float = 0.1,
+    qhat: float | None = None,
+) -> tuple[np.ndarray, float]:
+    """Split-conformal prediction *sets* for a classifier: distribution-free ``1 - alpha`` label coverage.
+
+    Calibrates a LAC threshold (:func:`conformal_label_threshold`) on the held-out true-class scores, then
+    admits every class whose score clears it. The returned boolean mask has guaranteed marginal coverage: the
+    true label is in the set with probability ``>= 1 - alpha``. A *singleton* set is a confident prediction; an
+    *empty or multi-label* set is an honest "I'm not sure" -- the signal a cost-aware cascade escalates on.
+
+    Args:
+        cal_prob_true: ``(n,)`` score assigned to the true class of each calibration point.
+        test_prob: ``(m, K)`` model class scores at the test points (rows need not sum to 1).
+        alpha: miscoverage level.
+        qhat: a precomputed threshold (e.g. from an earlier calibration); recomputed if ``None``.
+
+    Returns:
+        ``(sets, qhat)`` -- ``sets`` is an ``(m, K)`` boolean mask, ``qhat`` the threshold used.
+    """
+    if qhat is None:
+        qhat = conformal_label_threshold(cal_prob_true, alpha=alpha)
+    test_prob = np.asarray(test_prob, dtype=float)
+    sets = (1.0 - test_prob) <= qhat
+    return sets, float(qhat)
+
+
 __all__ = [
     "split_conformal",
     "jackknife_plus",
     "cv_plus",
     "mondrian_conformal",
     "weighted_conformal",
+    "conformal_label_threshold",
+    "conformal_label_sets",
 ]
