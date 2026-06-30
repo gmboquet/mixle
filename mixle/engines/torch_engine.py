@@ -36,19 +36,28 @@ class TorchEngine(ComputeEngine):
         if shard not in (None, "components"):
             raise ValueError("TorchEngine shard must be None or 'components'.")
         self.device = torch.device(device or "cpu")
-        self.dtype = normalize_torch_dtype(dtype, torch) if dtype is not None else torch.float64
+        # MPS (Apple-silicon GPU) has no float64 — fall back to its highest supported precision (float32),
+        # both for the default dtype and for an explicit float64 request (which would otherwise crash on MPS).
+        self._no_f64 = self.device.type == "mps"
+        if dtype is not None:
+            self.dtype = normalize_torch_dtype(dtype, torch)
+            if self._no_f64 and self.dtype == torch.float64:
+                self.dtype = torch.float32
+        else:
+            self.dtype = torch.float32 if self._no_f64 else torch.float64
         self.compile_enabled = bool(compile)
         self.mesh = mesh
         self.shard = shard
 
     @property
     def accumulator_dtype(self) -> Any:
-        """High-precision dtype for sufficient-statistic reductions (always float64).
+        """High-precision dtype for sufficient-statistic reductions (float64, or float32 on MPS).
 
         Reductions that aggregate over observations accumulate in float64 even when scoring runs in
-        reduced precision, so a float32 fit does not drift on large N.
+        reduced precision, so a float32 fit does not drift on large N. MPS has no float64, so there the
+        accumulator falls back to float32 (its max precision) — fits on very large N may drift slightly.
         """
-        return torch.float64
+        return torch.float32 if self._no_f64 else torch.float64
 
     def with_precision(self, precision: Any) -> TorchEngine:
         """Return a Torch engine with the same placement and a new dtype policy."""
