@@ -164,6 +164,27 @@ class NeuralPPLTest(unittest.TestCase):
         acc_a_yes = np.mean(yes.predict(given={"x": xa}) == ya)
         self.assertGreater(acc_a_yes, acc_a_no + 0.08)  # EWC anti-forgetting retains task A
 
+    def test_dpo_aligns_policy_to_preferences(self):
+        # DPO: the policy learns to prefer chosen over rejected -- no reward model, no RL
+        import copy
+
+        import torch.nn as nn
+
+        from mixle.inference import estimate
+        from mixle.models.dpo_leaf import DPOLeaf
+
+        rng = np.random.RandomState(0)
+        x = rng.randn(300, 4).astype("float32")
+        good = (x @ rng.randn(4, 3)).argmax(1)  # the preferred action per context
+        rej = (good + rng.randint(1, 3, len(good))) % 3
+        torch.manual_seed(0)
+        policy = nn.Sequential(nn.Linear(4, 16), nn.ReLU(), nn.Linear(16, 3))
+        leaf = DPOLeaf(policy, copy.deepcopy(policy), beta=0.1, m_steps=400, lr=1e-2)  # frozen ref = initial policy
+        before = np.mean(leaf.prefers(x) == good)
+        fit = estimate(list(zip(x, good, rej)), leaf.estimator())  # (x, chosen, rejected) triples
+        after = np.mean(fit.prefers(x) == good)
+        self.assertGreater(after, before + 0.4)  # alignment shifted the policy toward the preferred action
+
 
 if __name__ == "__main__":
     unittest.main()
