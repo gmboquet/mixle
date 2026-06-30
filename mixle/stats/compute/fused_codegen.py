@@ -1045,6 +1045,11 @@ def _data_and_params(
             param_arrays.append(table)
             tab_ctx[i] = (factor_encs[i], table.shape[1])  # (encoding for to_value, C for histogram width)
     if compute_dtype is not None and np.dtype(compute_dtype) != np.float64:
+        if np.dtype(compute_dtype) != np.float32:
+            raise ValueError(
+                "fused kernels support reduced precision only in float32: numba cannot compile float16 / "
+                "bfloat16 or sub-byte formats on CPU. Got %r." % (compute_dtype,)
+            )
         # Down-cast only the FLOATING arrays; integer index/lookup arrays must keep their dtype. The
         # generated kernels promote back to the float64 accumulators on every ``acc += ...``.
         cast = lambda a: np.ascontiguousarray(a, dtype=compute_dtype) if a.dtype.kind == "f" else a  # noqa: E731

@@ -7,7 +7,14 @@ from typing import Any
 
 import numpy as np
 
+# Precision spectrum: extended precision, format codecs, error tracing, and the auto-routing front door.
+# All pure-numpy; the arbitrary-precision (MPFR) tail in mixle.engines.highprec stays lazily imported so
+# the engines package never eagerly requires gmpy2.
+from mixle.engines.affine import AffineForm, allocate_precision
 from mixle.engines.base import ComputeEngine
+from mixle.engines.error_tracing import Interval, float64_sum_is_accurate, sum_error_bound
+from mixle.engines.extended import DoubleDouble, dd_dot, dd_sum
+from mixle.engines.formats import CodebookFormat, FixedPointFormat, FloatFormat
 from mixle.engines.jax_engine import JaxEngine
 from mixle.engines.jax_engine import jax as _jax
 from mixle.engines.numpy_engine import FUSED_NUMPY_ENGINE, NUMPY_ENGINE, NumpyEngine
@@ -18,6 +25,7 @@ from mixle.engines.precision import (
     normalize_torch_dtype,
     precision_name,
 )
+from mixle.engines.spectrum import accurate_sum, cast, sum_certificate
 from mixle.engines.symbolic_engine import SYMBOLIC_ENGINE, SymbolicEngine, SymbolicExpression, is_symbolic_payload
 from mixle.engines.symbolic_export import to_latex, to_sage, to_sympy
 from mixle.engines.torch_engine import TorchEngine, torch
@@ -43,6 +51,21 @@ __all__ = [
     "to_numpy",
     "to_sage",
     "to_sympy",
+    # precision spectrum
+    "DoubleDouble",
+    "dd_sum",
+    "dd_dot",
+    "FloatFormat",
+    "FixedPointFormat",
+    "CodebookFormat",
+    "Interval",
+    "sum_error_bound",
+    "float64_sum_is_accurate",
+    "AffineForm",
+    "allocate_precision",
+    "accurate_sum",
+    "cast",
+    "sum_certificate",
 ]
 
 
