@@ -123,6 +123,51 @@ class CombinatorTest(unittest.TestCase):
         self.assertTrue(np.allclose(kt.as_matrix().sum(axis=1), 1.0))
 
 
+class ContractTest(unittest.TestCase):
+    def test_state_count_mismatch_raises(self):
+        with self.assertRaises(ValueError):  # len(pi) != n_emissions != transition.n_states
+            StructuredHMM([S.GaussianDistribution(0, 1)] * 3, [0.5, 0.5], DenseTransition(np.eye(3)))
+
+    def test_optimize_fits_a_structured_hmm(self):
+        from mixle.inference import optimize
+
+        rng = np.random.RandomState(0)
+        k, r = 6, 2
+        gen = StructuredHMM(
+            [S.GaussianDistribution(4.0 * i, 1) for i in range(k)],
+            np.ones(k) / k,
+            LowRankTransition(_row_normalize(rng.rand(k, r)), _row_normalize(rng.rand(r, k))),
+        )
+        seqs = [gen.sampler(seed=s).sample(50) for s in range(60)]
+        proto = StructuredHMM(
+            [S.GaussianDistribution(4.0 * i + rng.uniform(-1, 1), 1) for i in range(k)],
+            np.ones(k) / k,
+            LowRankTransition(_row_normalize(rng.rand(k, r)), _row_normalize(rng.rand(r, k))),
+        )
+        fit = optimize(seqs, proto.estimator(), prev_estimate=proto, max_its=40, out=None)
+        means = sorted(e.mu for e in fit.emissions)
+        truth = [4.0 * i for i in range(k)]
+        self.assertLess(max(abs(m - t) for m, t in zip(means, truth)), 1.0)
+
+    def test_transition_key_ties_counts(self):
+        from mixle.stats.latent.structured_hmm import StructuredHMMAccumulator
+
+        def emit():
+            return [S.GaussianDistribution(0, 1).estimator().accumulator_factory().make() for _ in range(2)]
+
+        a1 = StructuredHMMAccumulator(emit(), DenseTransition(np.eye(2)), keys=(None, "T"))
+        a2 = StructuredHMMAccumulator(emit(), DenseTransition(np.eye(2)), keys=(None, "T"))
+        a1.trans_acc = np.array([[2.0, 1.0], [0.0, 3.0]])
+        a2.trans_acc = np.array([[1.0, 0.0], [1.0, 1.0]])
+        store = {}
+        a1.key_merge(store)
+        a2.key_merge(store)
+        a1.key_replace(store)
+        a2.key_replace(store)
+        self.assertTrue(np.array_equal(a1.trans_acc, [[3.0, 1.0], [1.0, 4.0]]))  # pooled
+        self.assertTrue(np.array_equal(a1.trans_acc, a2.trans_acc))  # both share the tied pool
+
+
 class ForgettingParallelTest(unittest.TestCase):
     def _ergodic_hmm(self):
         a = np.array([[0.8, 0.15, 0.05], [0.1, 0.8, 0.1], [0.05, 0.15, 0.8]])
