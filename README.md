@@ -51,27 +51,29 @@ Development: `git clone … && pip install -e ".[all]"`.
 
 ## Quickstart
 
-**A hybrid in one fit.** Compose a Transformer language model with a classical Gamma and train them
-*together*. Each event pairs text with a number — say an incident's log message and how long it took to
-resolve — and a mixture puts a few latent event *types* over the whole pair:
+**A hybrid with a real job.** Catch anomalies in an event stream where each event has a *type* (what
+happened) and a *time* (seconds since the last one). Model both at once — a Transformer predicts the next
+event from recent history, a Gamma models the wait time — as a single distribution, a *neural marked point
+process*, fit in one call:
 
 ```python
 from mixle.models import LM, StreamingTransformerLeaf
-from mixle.stats import MixtureEstimator, CompositeEstimator, GammaEstimator
+from mixle.stats import CompositeEstimator, GammaEstimator
 from mixle.inference import optimize
 
-def event_type():                                            # one latent kind of event:
-    lm = LM(vocab=8000, d_model=256, n_layer=6, block=128)   #   a small causal Transformer …
-    text = StreamingTransformerLeaf(lm.module).estimator()   #   … exposed as a generative leaf
-    return CompositeEstimator((text, GammaEstimator()))      #   p(text) × p(latency), one component
+# each event = ((recent history, next event type), seconds since last)
+model = optimize(events, CompositeEstimator((
+    StreamingTransformerLeaf(LM(vocab=500, d_model=128, n_layer=4, block=64).module).estimator(),  # what
+    GammaEstimator(),                                                                              # when
+)))
 
-# One call runs EM: every Transformer and every Gamma trains together, and an event's score
-# is just transformer(text) + gamma(latency). Swap GammaEstimator for any of ~90 families.
-model = optimize(events, MixtureEstimator([event_type(), event_type(), event_type()]))
+model.log_density(event)   # one joint score — drops when an event is odd in WHAT happened, WHEN, or both
 ```
 
-The language model and the classical density are the *same kind of object* — a distribution — so they
-compose and fit through one interface (runnable: [`examples/hybrid_llm_example.py`](https://github.com/gmboquet/mixle/blob/main/examples/hybrid_llm_example.py)).
+The Transformer trains by EM right alongside the Gamma because they are the *same kind of object* — a
+distribution. A sequence model alone misses the timing; a timing model alone misses the content; the
+hybrid scores both at once (swap the Gamma for any of ~90 families, or wrap it in a mixture/HMM for
+regimes). Runnable: [`examples/hybrid_llm_example.py`](https://github.com/gmboquet/mixle/blob/main/examples/hybrid_llm_example.py).
 
 The same machinery fits an ordinary heterogeneous record just as well — each here is a
 `(category, real, variable-length count sequence)`:
