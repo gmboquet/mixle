@@ -13,13 +13,16 @@ from typing import Any, TypeVar
 import numpy as np
 from numpy.random import RandomState
 
-from mixle.inference import seq_initialize
 from mixle.stats.compute.pdist import (
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     validate_estimator_keys,
 )
-from mixle.stats.compute.sequence import seq_encode
+
+# Import seq_initialize from its canonical home rather than the mixle.inference package re-export:
+# streaming.py is itself imported by mixle.inference.__init__, so depending on the package surface here
+# would be a load-order-fragile cycle.
+from mixle.stats.compute.sequence import seq_encode, seq_initialize
 
 T = TypeVar("T")
 E0 = TypeVar("E0")
