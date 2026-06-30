@@ -35,6 +35,12 @@ from mixle.task.economics import (
     cascade_cost_per_request,
     recommend_route,
 )
+from mixle.task.llm import (
+    CallableLLM,
+    OpenAICompatLLM,
+    llm_labeler,
+    pick_label,
+)
 from mixle.task.model import (
     HashedNGram,
     TaskModel,
@@ -50,6 +56,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "ActiveResult",
     "CalibratedTaskModel",
+    "CallableLLM",
     "Cascade",
     "CascadeStats",
     "CostModel",
@@ -57,6 +64,7 @@ __all__ = [
     "FieldChoice",
     "HashedNGram",
     "ModelRecommendation",
+    "OpenAICompatLLM",
     "RecipeSpace",
     "RoutePlan",
     "TaskManifest",
@@ -72,6 +80,8 @@ __all__ = [
     "distill",
     "distill_from_labels",
     "get_builder",
+    "llm_labeler",
+    "pick_label",
     "recommend_model",
     "recommend_route",
     "load_json",
