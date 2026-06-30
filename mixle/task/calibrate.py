@@ -33,12 +33,15 @@ ESCALATE = None  # the sentinel a decision returns when the conformal set is not
 class CalibratedTaskModel:
     """A :class:`TaskModel` plus a conformal threshold: predicts label *sets* and decides answer-vs-escalate."""
 
-    def __init__(self, task: TaskModel, *, alpha: float = 0.1, qhat: float | None = None) -> None:
+    def __init__(
+        self, task: TaskModel, *, alpha: float = 0.1, qhat: float | None = None, density_gate: Any = None
+    ) -> None:
         if not hasattr(task.adapter, "proba_batch"):
             raise TypeError("CalibratedTaskModel needs an adapter exposing proba_batch (e.g. TextClassifierIO)")
         self.task = task
         self.alpha = float(alpha)
         self.qhat = qhat
+        self.density_gate = density_gate  # optional p(x) OOD gate: escalate atypical inputs softmax can't see
 
     @property
     def labels(self) -> list[str]:
@@ -66,28 +69,44 @@ class CalibratedTaskModel:
     def predict_set(self, text: Any) -> list[str]:
         return self.predict_sets([text])[0]
 
+    def _escalate_flags(self, texts: Sequence[Any], sets: list[list[str]]) -> np.ndarray:
+        """Escalate when the conformal set is ambiguous OR (if a density gate is set) the input is OOD."""
+        amb = np.asarray([len(s) != 1 for s in sets])
+        if self.density_gate is None:
+            return amb
+        return amb | self.density_gate.ood_mask(list(texts))
+
     def decide(self, text: Any) -> Any:
-        """Return the label if the conformal set is a confident singleton, else ``ESCALATE`` (``None``)."""
-        s = self.predict_set(text)
-        return s[0] if len(s) == 1 else ESCALATE
+        """Return the label if the input is a confident, in-distribution singleton, else ``ESCALATE`` (``None``)."""
+        return self.batch_decide([text])[0]
 
     def batch_decide(self, texts: Sequence[Any]) -> list[Any]:
-        return [s[0] if len(s) == 1 else ESCALATE for s in self.predict_sets(texts)]
+        sets = self.predict_sets(texts)
+        esc = self._escalate_flags(texts, sets)
+        return [ESCALATE if e else s[0] for s, e in zip(sets, esc)]
 
     def escalation_rate(self, texts: Sequence[Any]) -> float:
-        """Empirical ``p_escalate`` -- the fraction of inputs whose set is not a confident singleton."""
+        """Empirical ``p_escalate`` -- the fraction of inputs escalated (ambiguous set or, if gated, OOD)."""
         sets = self.predict_sets(texts)
-        return float(np.mean([len(s) != 1 for s in sets])) if len(sets) else 0.0
+        return float(np.mean(self._escalate_flags(texts, sets))) if len(sets) else 0.0
 
     def save(self, path: str) -> str:
-        """Persist the underlying model plus the calibration (alpha, qhat) in the artifact metadata."""
+        """Persist the underlying model, the calibration (alpha, qhat), and any density gate in the artifact."""
         q = self.qhat if (self.qhat is not None and np.isfinite(self.qhat)) else None
-        self.task.meta = {**self.task.meta, "calibration": {"alpha": self.alpha, "qhat": q}}
+        cal: dict[str, Any] = {"alpha": self.alpha, "qhat": q}
+        if self.density_gate is not None:
+            cal["density_gate"] = self.density_gate.to_spec()
+        self.task.meta = {**self.task.meta, "calibration": cal}
         return self.task.save(path)
 
     @classmethod
     def load(cls, path: str, *, device: str = "cpu") -> CalibratedTaskModel:
-        """Rebuild a calibrated model from an artifact; decisions match the saving process exactly."""
+        """Rebuild a calibrated model (with its density gate, if any) from an artifact; decisions match exactly."""
         task = TaskModel.load(path, device=device)
         cal = task.meta.get("calibration", {})
-        return cls(task, alpha=cal.get("alpha", 0.1), qhat=cal.get("qhat"))
+        gate = None
+        if cal.get("density_gate") is not None:
+            from mixle.task.density import DensityGate
+
+            gate = DensityGate.from_spec(cal["density_gate"])
+        return cls(task, alpha=cal.get("alpha", 0.1), qhat=cal.get("qhat"), density_gate=gate)
