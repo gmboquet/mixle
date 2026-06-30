@@ -610,3 +610,20 @@ StructuredHMM.log_density = _structured_hmm_log_density
 StructuredHMM.dist_to_encoder = _structured_hmm_dist_to_encoder
 StructuredHMM.estimator = _structured_hmm_estimator
 SequenceEncodableProbabilityDistribution.register(StructuredHMM)
+
+
+def stationary_initial(op: TransitionOperator, *, iters: int = 2000, tol: float = 1e-13) -> np.ndarray:
+    """The transition's stationary distribution (pi @ A == pi), by power iteration through ``op.forward``
+    -- so it is O(K r) for a low-rank op, never forming A. Use it to COUPLE a StructuredHMM's initial
+    state to its transition (``pi = stationary_initial(transition)``): the chain starts in its long-run
+    distribution instead of a free, separately-estimated pi. Answers "do the initial states match the
+    transition?" -- they can, by construction."""
+    pi = np.ones(op.n_states) / op.n_states
+    for _ in range(int(iters)):
+        nxt = np.maximum(op.forward(pi), 0.0)
+        s = nxt.sum()
+        nxt = nxt / s if s > 0 else pi
+        if np.max(np.abs(nxt - pi)) < tol:
+            return nxt
+        pi = nxt
+    return pi
