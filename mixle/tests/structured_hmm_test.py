@@ -709,3 +709,31 @@ class IOHMMContractTest(unittest.TestCase):
         self.assertLess(max(abs(m - t) for m, t in zip(sorted(e.mu for e in fit.emissions), [-5, 5])), 0.5)
         self.assertGreater(fit.transitions[0].as_matrix()[0, 0], 0.8)  # input 0 = sticky
         self.assertGreater(fit.transitions[1].as_matrix()[0, 1], 0.8)  # input 1 = flip
+
+
+class EDHMMContractTest(unittest.TestCase):
+    def test_optimize_fits_edhmm_and_recovers_durations(self):
+        from mixle.inference import optimize
+        from mixle.stats.latent.structured_hmm import ExplicitDurationHMM
+
+        D = 5
+        dur_true = np.array([[0.0, 0.1, 0.2, 0.5, 0.2], [0.4, 0.5, 0.1, 0.0, 0.0]])
+        gen = ExplicitDurationHMM(
+            [S.GaussianDistribution(-5, 0.6), S.GaussianDistribution(5, 0.6)],
+            [0.5, 0.5],
+            np.array([[0, 1.0], [1.0, 0]]),
+            dur_true,
+            D,
+        )
+        seqs = [gen.sampler(seed=s).sample(80) for s in range(50)]
+        proto = ExplicitDurationHMM(
+            [S.GaussianDistribution(-2, 1), S.GaussianDistribution(2, 1)],
+            [0.5, 0.5],
+            np.array([[0, 1.0], [1.0, 0]]),
+            np.ones((2, D)) / D,
+            D,
+        )
+        fit = optimize(seqs, proto.estimator(), prev_estimate=proto, max_its=25, out=None)
+        self.assertLess(max(abs(m - t) for m, t in zip(sorted(e.mu for e in fit.emissions), [-5, 5])), 0.5)
+        d0 = float((np.arange(1, D + 1) * fit.dur[0]).sum())  # mean dwell, state 0
+        self.assertAlmostEqual(d0, 3.8, delta=0.4)
