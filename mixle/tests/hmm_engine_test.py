@@ -189,5 +189,38 @@ class HmmEngineEStepTestCase(unittest.TestCase):
                 self._assert_value_parity(host_value, kernel.accumulate(enc, self.weights), name)
 
 
+class HmmTorchGpuEStepTestCase(unittest.TestCase):
+    """An HMM (use_numba=False) runs its full forward-backward EM on the torch engine — and thus a GPU —
+    converging identically to numpy. Guards the device-portability fix (no np.asarray on a device tensor)."""
+
+    def test_hmm_em_on_torch_matches_numpy(self):
+        from mixle.inference import optimize
+        from mixle.stats import GaussianDistribution, GaussianEstimator, HiddenMarkovEstimator
+
+        rng = np.random.RandomState(0)
+        seqs = []
+        for _ in range(120):
+            s, st = [], rng.randint(0, 2)
+            for _t in range(6):
+                st = st if rng.rand() < 0.85 else 1 - st
+                s.append(float(rng.normal(-4 if st == 0 else 4, 1.0)))
+            seqs.append(s)
+        init = HiddenMarkovModelDistribution(
+            [GaussianDistribution(-1.0, 1.0), GaussianDistribution(1.0, 1.0)],
+            [0.5, 0.5], [[0.8, 0.2], [0.2, 0.8]], use_numba=False,
+        )
+        if _TORCH is not None:
+            self.assertTrue(init.supports_engine(_TORCH))
+
+        est = HiddenMarkovEstimator([GaussianEstimator(), GaussianEstimator()], use_numba=False)
+        ref = optimize(seqs, est, max_its=25, engine=NUMPY_ENGINE, prev_estimate=init)
+        ref_mu = sorted(c.mu for c in ref.topics)
+        self.assertAlmostEqual(ref_mu[0], -4.0, delta=0.6)
+        self.assertAlmostEqual(ref_mu[1], 4.0, delta=0.6)
+        if _TORCH is not None:
+            got = optimize(seqs, est, max_its=25, engine=_TORCH, prev_estimate=init)
+            np.testing.assert_allclose(sorted(c.mu for c in got.topics), ref_mu, atol=5e-3)
+
+
 if __name__ == "__main__":
     unittest.main()
