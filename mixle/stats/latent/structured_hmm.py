@@ -1068,6 +1068,45 @@ class ExplicitDurationHMM:
                 break
         return self, ll_trace
 
+    def viterbi_segments(self, seq):
+        """Most-likely segmentation (max-product over the segment lattice): a list of (state, start,
+        duration) segments covering the sequence, O(T K D). The HSMM analog of Viterbi decoding."""
+        log_b = self._log_b(seq)
+        t_len = len(seq)
+        seg = self._seg_loglik(log_b)
+        log_dur, log_a, log_pi = np.log(self.dur + 1e-300), np.log(self.a + 1e-300), np.log(self.pi + 1e-300)
+        delta = np.full((t_len, self.K), -np.inf)  # best score of a segment ending at t in j
+        bp_d = np.zeros((t_len, self.K), dtype=int)  # chosen duration index
+        entry = np.full((t_len, self.K), -np.inf)  # best score to START a segment at t in j
+        bp_prev = np.full((t_len, self.K), -1, dtype=int)  # previous state at a segment boundary
+        entry[0] = log_pi
+        for t in range(t_len):
+            for j in range(self.K):
+                best, bd = -np.inf, 0
+                for d in range(min(t + 1, self.D)):
+                    e = entry[t - d, j]
+                    if np.isfinite(e):
+                        val = e + log_dur[j, d] + seg[t, d, j]
+                        if val > best:
+                            best, bd = val, d
+                delta[t, j], bp_d[t, j] = best, bd
+            if t + 1 < t_len:
+                for j in range(self.K):
+                    vals = delta[t] + log_a[:, j]
+                    entry[t + 1, j], bp_prev[t + 1, j] = float(vals.max()), int(vals.argmax())
+        j = int(delta[t_len - 1].argmax())
+        segments, t = [], t_len - 1
+        while t >= 0:
+            d = int(bp_d[t, j])
+            start = t - d
+            segments.append((int(j), int(start), d + 1))  # (state, start, duration)
+            if start == 0:
+                break
+            j = int(bp_prev[start, j])
+            t = start - 1
+        segments.reverse()
+        return segments
+
     def sampler(self, seed=None):
         return _EDHMMSampler(self, seed)
 
