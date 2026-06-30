@@ -220,6 +220,87 @@ def banded_edges(n_states: int, bandwidth: int = 1):
     return [(i, j) for i in range(n_states) for j in range(max(0, i - bandwidth), min(n_states, i + bandwidth + 1))]
 
 
+def _final_state_enumerate(hmm, len_dist, max_results=50):
+    """Best-first enumeration of observation sequences in descending marginal probability for a
+    StructuredHMM whose sequences must END in a ``final_states`` state (e.g. an HSMM expansion).
+    Admissible A*: a prefix's forward log-vector + a backward upper bound UB[r][s] (logsumexp of r further
+    steps from s using each state's best emission, ending in a final state) bounds every completion, so a
+    popped complete sequence is in true descending order. Needs discrete (Categorical) emissions + a
+    Categorical-like ``len_dist`` (a .pmap over lengths)."""
+    import heapq
+
+    from scipy.special import logsumexp
+
+    from mixle.enumeration import EnumerationError
+
+    try:
+        symbols = sorted(set().union(*(set(e.pmap.keys()) for e in hmm.emissions)))
+        lengths = sorted(int(x) for x in len_dist.pmap.keys())
+    except AttributeError as exc:
+        raise EnumerationError(hmm, reason="final-state enumeration needs Categorical emissions + len_dist") from exc
+    final_mask = hmm.final_mask
+    log_emit = {v: np.array([float(e.log_density(v)) for e in hmm.emissions]) for v in symbols}
+    max_emit = np.max(np.stack([log_emit[v] for v in symbols]), axis=0)
+    log_pi = np.log(hmm.pi + 1e-300)
+    log_a = np.log(hmm.transition.as_matrix() + 1e-300)
+    log_len = {x: float(len_dist.log_density(x)) for x in lengths}
+    l_max = max(lengths)
+    ub = [np.where(final_mask, 0.0, -np.inf)]
+    for _ in range(1, l_max):
+        ub.append(logsumexp(log_a + (max_emit + ub[-1])[None, :], axis=1))
+
+    def complete_score(fwd, t):
+        return (logsumexp(fwd[final_mask]) + log_len[t]) if (t in log_len and final_mask.any()) else -np.inf
+
+    def extend_ub(fwd, t):
+        best = -np.inf
+        for x in lengths:
+            r = x - t
+            if r == 0:
+                best = max(best, complete_score(fwd, t))
+            elif r > 0:
+                best = max(best, logsumexp(fwd + ub[r]) + log_len[x])
+        return best
+
+    heap = []
+    counter = 0
+    for v in symbols:
+        fwd = log_pi + log_emit[v]
+        pri = extend_ub(fwd, 1)
+        if np.isfinite(pri):
+            heapq.heappush(heap, (-pri, counter, "p", (v,), fwd, 1))
+            counter += 1
+    out = []
+    while heap and len(out) < max_results:
+        neg, _, kind, prefix, fwd, t = heapq.heappop(heap)
+        if kind == "c":
+            out.append((list(prefix), -neg))
+            continue
+        sc = complete_score(fwd, t)
+        if np.isfinite(sc):
+            heapq.heappush(heap, (-sc, counter, "c", prefix, fwd, t))
+            counter += 1
+        if t < l_max:
+            base = logsumexp(fwd[:, None] + log_a, axis=0)
+            for v in symbols:
+                fwd2 = base + log_emit[v]
+                pri = extend_ub(fwd2, t + 1)
+                if np.isfinite(pri):
+                    heapq.heappush(heap, (-pri, counter, "p", prefix + (v,), fwd2, t + 1))
+                    counter += 1
+    return out
+
+
+class FinalStateEnumeration:
+    """Result of :func:`_final_state_enumerate`: ``top_k(k)`` -> [(sequence, log_prob), ...] descending."""
+
+    def __init__(self, hmm, len_dist):
+        self._hmm, self._len_dist = hmm, len_dist
+
+    def top_k(self, k):
+        return _final_state_enumerate(self._hmm, self._len_dist, max_results=int(k))
+
+
 _DENSE_FB_NUMBA = None
 
 
@@ -475,6 +556,10 @@ class StructuredHMM:
 
         if self.len_dist is None:
             raise EnumerationError(self, reason="StructuredHMM needs a len_dist to enumerate sequence length")
+        if self.final_mask is not None:
+            # sequences must end in a final state (e.g. an HSMM expansion) -- the built-in enumerator does
+            # not honor a final-state mask, so use the dedicated final-state best-first enumerator.
+            return FinalStateEnumeration(self, self.len_dist)
         dense = HiddenMarkovModelDistribution(
             self.emissions,
             w=self.pi.tolist(),
@@ -1227,6 +1312,13 @@ class ExplicitDurationHMM:
                     a[idx(k, 1), idx(kp, dp)] = self.a[k, kp] * self.dur[kp, dp - 1]  # switch segment
         final = {idx(k, 1) for k in range(self.K)}
         return StructuredHMM(emissions, pi, DenseTransition(a), len_dist=len_dist, final_states=final)
+
+    def enumerator(self, len_dist):
+        """Enumerate observation sequences in descending marginal probability under this HSMM (complete
+        final segment), given a ``len_dist`` over total sequence length. Built on the exact HMM expansion +
+        the final-state best-first enumerator; ``.top_k(k)`` -> [(sequence, log_prob), ...]. Needs discrete
+        (Categorical) emissions and a Categorical-like ``len_dist``."""
+        return self.to_structured_hmm(len_dist=len_dist).enumerator()
 
     def state_posteriors(self, seq):
         """Per-position smoothing posteriors gamma[t, j] = P(z_t = j | obs), marginalizing the durations
