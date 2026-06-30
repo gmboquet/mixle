@@ -284,6 +284,41 @@ class _LinearPredictor:
         return f"_LinearPredictor({self.terms!r}, intercept={self.intercept!r}, groups={self.groups!r})"
 
 
+class Net:
+    """A neural (MLP) predictor in a parameter slot -- the *nonlinear* sibling of :class:`_LinearPredictor`.
+
+    Put it in an outer family's slot and the outer family sets the link, exactly as a linear predictor makes a
+    GLM::
+
+        Categorical(logits=Net(hidden=[256], out=10))   # softmax link -> neural classification, p(y|x)
+        Normal(Net(hidden=[16], out=1), free)            # identity link + learned noise -> neural regression
+
+    ``Net`` is pure shape-data (no torch in user code); the torch MLP is built lazily at fit. The input width is
+    inferred from the covariates. Fit with the conditional verb, same as a GLM: ``.fit(y, given={"x": X})``.
+    """
+
+    __slots__ = ("field", "hidden", "out")
+
+    def __init__(self, field: Any = "x", *, hidden: Any = (64,), out: int = 1):
+        self.field = field if isinstance(field, str) else getattr(field, "name", "x")
+        self.hidden = tuple(int(h) for h in hidden)
+        self.out = int(out)
+
+    def build(self, in_dim: int) -> Any:
+        import torch.nn as nn
+
+        dims = [int(in_dim), *self.hidden, self.out]
+        layers: list = []
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if i < len(dims) - 2:
+                layers.append(nn.ReLU())
+        return nn.Sequential(*layers)
+
+    def __repr__(self) -> str:
+        return f"Net(field={self.field!r}, hidden={self.hidden!r}, out={self.out})"
+
+
 class _SimplexSpec:
     """A structural simplex-valued parameter of a combinator: mixture weights and an HMM
     initial distribution (``rows=1``, a single K-simplex) or an HMM transition matrix
@@ -1741,6 +1776,12 @@ class RandomVariable:
             from mixle.ppl import regression as _reg
 
             return _reg.regression_fit(self, data, **kw)
+
+        # neural conditional: a Net (nonlinear predictor) in a parameter slot -> a neural-headed leaf
+        if self._kind == "sample" and any(isinstance(a, Net) for a in self._args):
+            from mixle.ppl import neural as _neu
+
+            return _neu.neural_fit(self, data, **kw)
 
         # Composite families with a bespoke fitter (state-space Kalman/RTS+EM, PDE-constrained fields)
         # own their fit through the registered fit_fn hook -- no per-family branch in core. State-space

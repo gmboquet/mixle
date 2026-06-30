@@ -183,13 +183,18 @@ def Rician(nu: Any, sigma: Any, *, name: str | None = None, keys: str | None = N
 
 
 def Categorical(
-    probs: Any, *, dim: int | None = None, name: str | None = None, keys: str | None = None
+    probs: Any = None, *, logits: Any = None, dim: int | None = None, name: str | None = None, keys: str | None = None
 ) -> RandomVariable:
     """Categorical from a probability dict {value: p} or a list of probabilities. The probability
     vector is also an inferable parameter. ``Categorical(free)`` learns the category probabilities
     by maximum likelihood, discovering the categories (and their count) from the data -- no ``dim=``
     needed; pass ``dim=K`` to request the explicit simplex-parameter treatment for
-    ``how='mcmc'|'ensemble'|'map'``."""
+    ``how='mcmc'|'ensemble'|'map'``.
+
+    ``Categorical(logits=Net(out=K))`` is **neural classification**: ``p(y|x) = softmax(Net(x))``, the
+    softmax-link sibling of logistic regression. Fit with the conditional verb ``.fit(y, given={"x": X})``."""
+    if logits is not None:
+        return RandomVariable._sample("Categorical", (logits,), name=name, keys=keys)
     if probs is free and dim is not None:
         probs = _SimplexSpec(np.ones(int(dim)), rows=1, name="p")
     return RandomVariable._sample("Categorical", (probs,), name=name, keys=keys)

@@ -36,6 +36,7 @@ from mixle.models.neural import (
     make_mlp,
 )
 from mixle.models.neural_leaf import NeuralLeaf
+from mixle.models.softmax_leaf import SoftmaxNeuralLeaf
 from mixle.models.partially_observable_markov_decision_process import (
     PartiallyObservableMarkovDecisionProcessFilterResult,
     PartiallyObservableMarkovDecisionProcessFitResult,
@@ -63,6 +64,7 @@ __all__ = [
     "GaussianProcessRegressor",
     "GaussianRegressionNeuralNetwork",
     "NeuralLeaf",
+    "SoftmaxNeuralLeaf",
     "GrammarLearningResult",
     "HardEMResult",
     "KnowledgeGraphFitResult",
