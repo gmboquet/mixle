@@ -366,6 +366,34 @@ class Conv(_NeuralPredictor):
         return f"Conv(field={self.field!r}, channels={self.channels!r}, out={self.out})"
 
 
+class Transformer(_NeuralPredictor):
+    """A causal decoder-only Transformer predictor over a ``(block,)`` context of token ids.
+
+    ``Categorical(logits=Transformer(out=vocab, d_model=256, n_layer=6, n_head=8))`` is autoregressive
+    next-token prediction ``p(token | context)`` -- it lowers to the same ``SoftmaxNeuralLeaf`` as ``Net``/``Conv``
+    (cross-entropy = next-token NLL) and fits through the unchanged ``estimate()`` loop with
+    ``.fit(next_tokens, given={"x": context_windows})``. The context width is the ``block`` inferred from the data.
+    """
+
+    __slots__ = ("field", "out", "d_model", "n_layer", "n_head")
+
+    def __init__(self, field: Any = "x", *, out: int, d_model: int = 128, n_layer: int = 3, n_head: int = 4):
+        self.field = field if isinstance(field, str) else getattr(field, "name", "x")
+        self.out = int(out)
+        self.d_model = int(d_model)
+        self.n_layer = int(n_layer)
+        self.n_head = int(n_head)
+
+    def build(self, in_shape: Any) -> Any:
+        from mixle.models.transformer import build_causal_lm
+
+        block = int(in_shape[0] if not isinstance(in_shape, int) else in_shape)
+        return build_causal_lm(self.out, self.d_model, self.n_layer, self.n_head, block)
+
+    def __repr__(self) -> str:
+        return f"Transformer(out={self.out}, d_model={self.d_model}, n_layer={self.n_layer}, n_head={self.n_head})"
+
+
 class _SimplexSpec:
     """A structural simplex-valued parameter of a combinator: mixture weights and an HMM
     initial distribution (``rows=1``, a single K-simplex) or an HMM transition matrix
