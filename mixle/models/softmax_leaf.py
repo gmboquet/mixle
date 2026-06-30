@@ -191,6 +191,7 @@ class SoftmaxNeuralLeafEstimator(ParameterEstimator):
         name: str | None = None,
         batch_size: int | None = None,
         device: str = "cpu",
+        ewc: Any = None,
     ) -> None:
         self.module = module
         self.m_steps = int(m_steps)
@@ -198,6 +199,8 @@ class SoftmaxNeuralLeafEstimator(ParameterEstimator):
         self.name = name
         self.batch_size = None if batch_size is None else int(batch_size)
         self.device = device
+        # ewc = (anchor_params, fisher_diag, lambda): the EWC anti-forgetting penalty for continued pretraining
+        self.ewc = ewc
 
     def accumulator_factory(self) -> SoftmaxNeuralLeafAccumulatorFactory:
         return SoftmaxNeuralLeafAccumulatorFactory()
@@ -218,6 +221,10 @@ class SoftmaxNeuralLeafEstimator(ParameterEstimator):
         bs = self.batch_size or n
         opt = torch.optim.Adam(self.module.parameters(), lr=self.lr)
         ce = torch.nn.CrossEntropyLoss(reduction="none")
+        ewc = None
+        if self.ewc is not None:  # anchor + Fisher moved to the device once (continued-pretraining anti-forget)
+            anchor, fisher, lam = self.ewc
+            ewc = ([a.to(dev) for a in anchor], [f.to(dev) for f in fisher], float(lam))
         for _ in range(self.m_steps):  # m_steps passes over the data (full-batch when batch_size is None)
             perm = torch.randperm(n) if bs < n else torch.arange(n)
             for k in range(0, n, bs):
@@ -226,6 +233,11 @@ class SoftmaxNeuralLeafEstimator(ParameterEstimator):
                 opt.zero_grad()
                 # responsibility-weighted CE, normalized by the batch's responsibility mass (scale-invariant)
                 loss = (wb * ce(self.module(xb), yb)).sum() / (wb.sum() + 1e-8)
+                if ewc is not None:  # + lambda * sum_i F_i (theta_i - theta*_i)^2 -- pull the important weights back
+                    anchor, fisher, lam = ewc
+                    loss = loss + lam * sum(
+                        (f * (p - a) ** 2).sum() for p, a, f in zip(self.module.parameters(), anchor, fisher)
+                    )
                 loss.backward()
                 opt.step()
         return out
