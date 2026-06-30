@@ -1367,6 +1367,34 @@ class ExplicitDurationHMM:
                     log_beta[tau - 1, j] = _logsumexp(log_a[j, :] + log_bstar[tau, :])
         return log_beta, log_bstar
 
+    def _estep(self, seq):
+        """Per-sequence E-step. Returns (loglik, pi_contrib (K,), trans_contrib (K,K), dur_contrib (K,D),
+        occ (T,K)) -- the segment-posterior statistics that drive the duration/transition/emission M-step."""
+        log_b = self._log_b(seq)
+        t_len = len(seq)
+        log_dur = np.log(self.dur + 1e-300)
+        log_a = np.log(self.a + 1e-300)
+        log_pi = np.log(self.pi + 1e-300)
+        log_alpha, log_e, seg = self._forward(log_b)
+        log_beta, log_bstar = self._backward(log_b, seg)
+        z = _logsumexp(log_alpha[-1])
+        pi_contrib = np.exp(log_pi + log_bstar[0] - z)
+        dur_contrib = np.zeros((self.K, self.D))
+        trans_contrib = np.zeros((self.K, self.K))
+        occ = np.zeros((t_len, self.K))
+        for t in range(t_len):
+            for j in range(self.K):
+                for d in range(min(t + 1, self.D)):
+                    lp = log_e[t - d, j] + log_dur[j, d] + seg[t, d, j] + log_beta[t, j] - z
+                    if np.isfinite(lp):
+                        p = np.exp(lp)
+                        dur_contrib[j, d] += p
+                        occ[t - d : t + 1, j] += p
+            if t < t_len - 1:
+                for i in range(self.K):
+                    trans_contrib[i] += np.exp(log_alpha[t, i] + log_a[i, :] + log_bstar[t + 1, :] - z)
+        return float(z), pi_contrib, trans_contrib, dur_contrib, occ
+
     def fit(self, seqs, *, max_its: int = 50, tol: float = 1e-6):
         """Baum-Welch (EM) for the explicit-duration HMM: re-estimates emissions, the per-state duration
         distributions, the (zero-diagonal) transition, and pi. Returns (fitted_hmm, loglik_trace)."""
@@ -1379,32 +1407,14 @@ class ExplicitDurationHMM:
             emit_accs = [est.accumulator_factory().make() for est in self._emit_est]
             nk = np.zeros(self.K)
             total_ll = 0.0
-            log_dur = np.log(self.dur + 1e-300)
-            log_a = np.log(self.a + 1e-300)
-            log_pi = np.log(self.pi + 1e-300)
             for seq in seqs:
                 if not seq:
                     continue
-                log_b = self._log_b(seq)
-                t_len = len(seq)
-                log_alpha, log_e, seg = self._forward(log_b)
-                log_beta, log_bstar = self._backward(log_b, seg)
-                z = _logsumexp(log_alpha[-1])
-                total_ll += float(z)
-                pi_acc += np.exp(log_pi + log_bstar[0] - z)  # first segment's state
-                occ = np.zeros((t_len, self.K))  # state occupancy gamma_s(j)
-                for t in range(t_len):
-                    for j in range(self.K):
-                        for d in range(min(t + 1, self.D)):
-                            lp = log_e[t - d, j] + log_dur[j, d] + seg[t, d, j] + log_beta[t, j] - z
-                            if np.isfinite(lp):
-                                p = np.exp(lp)
-                                dur_acc[j, d] += p
-                                occ[t - d : t + 1, j] += p  # this segment covers positions t-d..t
-                    if t < t_len - 1:  # transition: segment ends at t in i, next starts at t+1 in j
-                        for i in range(self.K):
-                            tr = np.exp(log_alpha[t, i] + log_a[i, :] + log_bstar[t + 1, :] - z)
-                            trans_acc[i] += tr
+                ll, pic, trc, drc, occ = self._estep(seq)
+                total_ll += ll
+                pi_acc += pic
+                trans_acc += trc
+                dur_acc += drc
                 for k in range(self.K):
                     enc = self.emissions[k].dist_to_encoder().seq_encode(seq)
                     emit_accs[k].seq_update(enc, occ[:, k], self.emissions[k])
@@ -1418,6 +1428,19 @@ class ExplicitDurationHMM:
             if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
                 break
         return self, ll_trace
+
+    # --- 5-part contract: a record is one observation sequence ---
+    def log_density(self, seq):
+        return self.forward_loglik(seq)
+
+    def seq_log_density(self, x):
+        return np.array([self.forward_loglik(list(seq)) for seq in x])
+
+    def dist_to_encoder(self):
+        return EDHMMDataEncoder()
+
+    def estimator(self, pseudo_count=None):
+        return EDHMMEstimator(self._emit_est, self.K, self.D, self.name)
 
     def to_structured_hmm(self, len_dist=None):
         """The HSMM as an EQUIVALENT StructuredHMM via the remaining-duration expansion: K*D sub-states
@@ -1546,6 +1569,134 @@ class _EDHMMSampler:
                 out.append(h.emissions[s].sampler(seed=int(self.rng.randint(1, 2**31))).sample())
             s = self.rng.choice(h.K, p=h.a[s])
         return out
+
+
+class EDHMMDataEncoder(DataSequenceEncoder):
+    """An ExplicitDurationHMM record is one observation sequence (the durations are latent)."""
+
+    def seq_encode(self, x):
+        return [list(s) for s in x]
+
+    def __eq__(self, other):
+        return isinstance(other, EDHMMDataEncoder)
+
+    def __hash__(self):
+        return hash("EDHMMDataEncoder")
+
+
+class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
+    """E-step accumulator for an explicit-duration HMM: per-sequence segment posteriors -> initial /
+    transition / per-state DURATION counts + emission occupancy statistics."""
+
+    def __init__(self, emission_accumulators, k, d):
+        self.emit = list(emission_accumulators)
+        self.K, self.D = int(k), int(d)
+        self.pi_acc = np.zeros(self.K)
+        self.trans_acc = np.zeros((self.K, self.K))
+        self.dur_acc = np.zeros((self.K, self.D))
+        self.nk = np.zeros(self.K)
+
+    def update(self, x, weight, estimate):
+        self.seq_update([x], np.array([weight], dtype=float), estimate)
+
+    def seq_update(self, x, weights, estimate):
+        for seq, w in zip(x, np.asarray(weights, dtype=float)):
+            if not seq:
+                continue
+            _, pic, trc, drc, occ = estimate._estep(list(seq))
+            self.pi_acc += w * pic
+            self.trans_acc += w * trc
+            self.dur_acc += w * drc
+            for k in range(self.K):
+                enc = estimate.emissions[k].dist_to_encoder().seq_encode(seq)
+                wk = occ[:, k] * w
+                self.emit[k].seq_update(enc, wk, estimate.emissions[k])
+                self.nk[k] += float(wk.sum())
+
+    def seq_initialize(self, x, weights, rng):
+        self.trans_acc += rng.random((self.K, self.K))
+        np.fill_diagonal(self.trans_acc, 0.0)
+        self.dur_acc += rng.random((self.K, self.D))
+        for seq, w in zip(x, np.asarray(weights, dtype=float)):
+            if not seq:
+                continue
+            g = rng.dirichlet(np.ones(self.K), len(seq))
+            self.pi_acc += w * g[0]
+            for k in range(self.K):
+                enc = self.emit[k].acc_to_encoder().seq_encode(seq)
+                wk = g[:, k] * w
+                self.emit[k].seq_initialize(enc, wk, rng)
+                self.nk[k] += float(wk.sum())
+
+    def combine(self, suff_stat):
+        pi_acc, trans_acc, dur_acc, emit_vals, nk = suff_stat
+        self.pi_acc += pi_acc
+        self.trans_acc += trans_acc
+        self.dur_acc += dur_acc
+        self.nk += nk
+        for k in range(self.K):
+            self.emit[k].combine(emit_vals[k])
+        return self
+
+    def value(self):
+        return (
+            self.pi_acc.copy(),
+            self.trans_acc.copy(),
+            self.dur_acc.copy(),
+            [e.value() for e in self.emit],
+            self.nk.copy(),
+        )
+
+    def from_value(self, x):
+        self.pi_acc, self.trans_acc, self.dur_acc, emit_vals, self.nk = (
+            x[0].copy(),
+            x[1].copy(),
+            x[2].copy(),
+            x[3],
+            x[4].copy(),
+        )
+        for k in range(self.K):
+            self.emit[k].from_value(emit_vals[k])
+        return self
+
+    def acc_to_encoder(self):
+        return EDHMMDataEncoder()
+
+
+class EDHMMAccumulatorFactory(StatisticAccumulatorFactory):
+    def __init__(self, emission_estimators, k, d):
+        self.emission_estimators = emission_estimators
+        self.k, self.d = k, d
+
+    def make(self):
+        emit = [est.accumulator_factory().make() for est in self.emission_estimators]
+        return EDHMMAccumulator(emit, self.k, self.d)
+
+
+class EDHMMEstimator(ParameterEstimator):
+    """Estimator (M-step) for an :class:`ExplicitDurationHMM`: re-estimates pi, the zero-diagonal transition,
+    the per-state DURATION distributions, and each state's emission from the segment-posterior statistics."""
+
+    def __init__(self, emission_estimators, k, d, name=None):
+        self.emission_estimators = list(emission_estimators)
+        self.k, self.d = int(k), int(d)
+        self.name = name
+
+    def accumulator_factory(self):
+        return EDHMMAccumulatorFactory(self.emission_estimators, self.k, self.d)
+
+    def estimate(self, nobs, suff_stat):
+        pi_acc, trans_acc, dur_acc, emit_vals, nk = suff_stat
+        pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else np.ones(self.k) / self.k
+        a = trans_acc.copy()
+        np.fill_diagonal(a, 0.0)
+        a = _row_normalize(a) if a.sum() > 0 else np.full((self.k, self.k), 1.0 / max(self.k - 1, 1))
+        dur = _row_normalize(dur_acc)
+        emissions = [self.emission_estimators[i].estimate(float(nk[i]), emit_vals[i]) for i in range(self.k)]
+        return ExplicitDurationHMM(emissions, pi, a, dur, self.d, name=self.name)
+
+
+SequenceEncodableProbabilityDistribution.register(ExplicitDurationHMM)
 
 
 def jit_forward_loglik(hmm: StructuredHMM):
