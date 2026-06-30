@@ -54,3 +54,4 @@ audit/
 # Cython-generated C from .pyx (build artifact)
 mixle/engines/_dd_kernels.c
 mixle/engines/_bitpacked.c
+mixle/engines/_lns_kernel.c
