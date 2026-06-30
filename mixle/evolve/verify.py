@@ -133,9 +133,7 @@ def challenger_beats_champion(
         favored = "challenger" if delta > max(min_effect, 0.0) else "champion" if delta < -min_effect else "tie"
         calibrated = True
         if require_calibration:
-            calibrated, cal_ev = _calibration_no_regression(
-                champion, challenger, data, calib_tol=calib_tol, seed=seed
-            )
+            calibrated, cal_ev = _calibration_no_regression(champion, challenger, data, calib_tol=calib_tol, seed=seed)
             evidence["calibration"] = cal_ev
         evidence["scalar_only"] = {"champion": champ_s, "challenger": chal_s}
         return Verdict(favored, float(delta), float("nan"), (float("nan"), float("nan")), calibrated, evidence)
@@ -170,8 +168,10 @@ def challenger_beats_champion(
     favored_paired = paired["favored"] == "B"  # 'B' is the challenger in paired_score_difference
     effect_ok = abs(mean_diff) >= min_effect
 
-    favored = "challenger" if (significant and favored_paired and effect_ok) else (
-        "champion" if (significant and paired["favored"] == "A") else "tie"
+    favored = (
+        "challenger"
+        if (significant and favored_paired and effect_ok)
+        else ("champion" if (significant and paired["favored"] == "A") else "tie")
     )
 
     # non-nested robustness cross-check for family swaps

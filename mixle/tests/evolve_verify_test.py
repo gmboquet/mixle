@@ -43,9 +43,7 @@ class VerifyGateTest(unittest.TestCase):
         # large min_effect floor must refuse it.
         champion = _fit(self.data, 3.0, 2.0)
         challenger = _fit(self.data, 3.0001, 2.0)
-        verdict = challenger_beats_champion(
-            champion, challenger, self.data, objective=nll_objective(), min_effect=10.0
-        )
+        verdict = challenger_beats_champion(champion, challenger, self.data, objective=nll_objective(), min_effect=10.0)
         self.assertFalse(verdict.promote)
 
     def test_worse_challenger_favors_champion(self):
@@ -73,8 +71,11 @@ class VerifyGateTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             challenger_beats_champion(
-                champion, GaussianDistribution(3.0, 2.0), self.data,
-                objective=_RaggedObjective(), require_calibration=False,
+                champion,
+                GaussianDistribution(3.0, 2.0),
+                self.data,
+                objective=_RaggedObjective(),
+                require_calibration=False,
             )
 
     def test_crps_objective_paired_vector(self):
