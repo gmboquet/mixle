@@ -6,17 +6,15 @@
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![tests](https://img.shields.io/badge/tests-2700%2B-brightgreen)
 
-**A composable probabilistic model architecture framework.** Neural networks are one narrow model
-family — a fixed architecture trained by gradient descent on homogeneous tensors. mixle starts from
-a broader premise: observations are structured, heterogeneous, and generative. A single record can
-be a tuple of a category, a count sequence, a real, a graph, a permutation. The model — a mixture,
-an HMM, a probabilistic circuit, a Bayesian hierarchy — is composed from typed leaves and
-combinators to match the data's actual structure.
+**Automatic inference for composable models of heterogeneous data.** A single observation can be a
+tuple of a category, a real, a count sequence, a vector, a set, or a tree — and mixle fits a
+probabilistic model to a dataset of them, *choosing the inference from the model itself* (conjugate /
+EM / MAP / variational / MCMC), locally on vectorized NumPy/Numba or distributed across Spark, Dask,
+Ray, MPI, or Torch (GPU).
 
-The inference follows from the model, not from a fixed training loop. mixle reads the model's
-structure and selects the algorithm family — closed-form conjugate, EM, MAP, variational, MCMC —
-then runs it locally on NumPy/Numba or distributed across Spark, MPI, or GPU. **What you can
-express, you can fit.**
+The unit of composition is the distribution: leaves (Gaussian, categorical, Poisson, …) combine into
+tuples, tuples become mixture components, mixtures become HMM emissions, to any depth. A model and the
+estimator that fits it have the same shape — so **what you can express, you can fit**.
 
 ## Contents
 
@@ -123,18 +121,26 @@ Drawing is a method, not a concern: `dist.sampler(seed).sample(n)`.
 
 ## When to reach for mixle
 
-mixle fits one shape of problem well: **a structured observation that is better described by a
-generative model than by a discriminative one**, where the model's composition should determine
-the inference — not the other way around.
+mixle is built for one shape of problem: **a heterogeneous observation modelled as one composable
+distribution, where the inference should follow from the structure.** Reach for it when —
 
-- Your data has structure — records mix categories, reals, sequences, graphs, permutations — and
-  you want a model that matches that structure, not a feature engineering step that flattens it.
-- You want to declare the model and let `fit` choose the algorithm — closed-form / EM / MAP /
-  hierarchical / state-space — crossing boundaries that most frameworks stay inside.
-- The same model needs to **sample, score, rank, enumerate, or scale out** without a rewrite.
-- The model itself is the artifact: interpretable parameters, exact posteriors, composable pieces.
+- a single record mixes *kinds* of data — a category, a real, a count, a sequence, a set, a tree — and
+  you want to model the whole record jointly, not column-by-column;
+- you'd rather **declare the model and let `fit` choose the algorithm family** (closed-form / EM / MAP /
+  hierarchical / state-space) than wire a sampler by hand;
+- you need the *same* model to also **rank, enumerate, or unrank** its support, or to scale out by a
+  `backend=` argument rather than a rewrite.
 
-Use `m.explain_fit()` to see which route mixle will take for a given model, and why.
+Reach for something else when —
+
+- you want a single-family Bayesian regression with best-in-class **NUTS** and a deep diagnostics
+  ecosystem — **Stan / NumPyro / PyMC** are more mature there, and faster (compiled / JIT);
+- you need a custom likelihood as free-form array code with autodiff — that's **Pyro / NumPyro / TFP**;
+- you only need one off-the-shelf estimator (a GMM, an HMM) with no composition — **scikit-learn /
+  hmmlearn / pomegranate** are simpler.
+
+Honest framing: mixle's edge is the **composition + automatic cross-family inference** combination, not
+raw sampler speed. Use `m.explain_fit()` to see exactly which route it will take, and why.
 
 ## Distribution catalog
 
