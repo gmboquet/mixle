@@ -185,6 +185,21 @@ class NeuralPPLTest(unittest.TestCase):
         after = np.mean(fit.prefers(x) == good)
         self.assertGreater(after, before + 0.4)  # alignment shifted the policy toward the preferred action
 
+    def test_language_model_surface_fit_generate_nll(self):
+        # the LM surface: one object trains (streaming), evaluates, and generates
+        from mixle.models.language_model import LM
+
+        torch.manual_seed(0)
+        text = "the quick brown fox jumps over the lazy dog. " * 25
+        chars = sorted(set(text))
+        stoi = {c: i for i, c in enumerate(chars)}
+        ids = np.array([stoi[c] for c in text])
+        lm = LM(len(chars), d_model=64, n_layer=2, n_head=4, block=16)
+        lm.fit(ids, epochs=30, batch_size=128, lr=3e-3)
+        self.assertLess(lm.nll(ids), 0.5)  # learned next-token prediction
+        gen = lm.generate(ids[:16].tolist(), n=20, greedy=True)
+        self.assertEqual(len(gen), 36)  # generation extends the 16-token prompt by 20
+
 
 if __name__ == "__main__":
     unittest.main()
