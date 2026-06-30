@@ -560,6 +560,10 @@ def _add_nested(a, b):
     return a + b if isinstance(a, np.ndarray) else [_add_nested(x, y) for x, y in zip(a, b)]
 
 
+def _scale_nested(a, f):
+    return a * f if isinstance(a, np.ndarray) else [_scale_nested(x, f) for x in a]
+
+
 class StructuredHMMDataEncoder(DataSequenceEncoder):
     """Sequences pass through as lists -- the structured forward-backward scores raw observations through
     the per-state emission ``log_density`` (no flattened columnar encoding; composability over raw speed)."""
@@ -635,6 +639,18 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
         self.pi_acc, self.trans_acc, emit_vals, self.nk = x[0].copy(), x[1], x[2], x[3].copy()
         for k in range(self.K):
             self.emit[k].from_value(emit_vals[k])
+        return self
+
+    def scale(self, factor):
+        """Multiply the running statistics by ``factor`` -- the decay primitive online/streaming
+        Baum-Welch (StreamingEstimator) uses to fold a new batch into a forgetting running estimate."""
+        f = float(factor)
+        self.pi_acc *= f
+        self.trans_acc = _scale_nested(self.trans_acc, f)
+        self.nk *= f
+        for e in self.emit:
+            if hasattr(e, "scale"):
+                e.scale(f)
         return self
 
     def acc_to_encoder(self):

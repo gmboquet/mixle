@@ -267,3 +267,27 @@ class SparseAndPriorTest(unittest.TestCase):
         self.assertEqual(len(pi), 6)
         self.assertAlmostEqual(pi.sum(), 1.0)
         self.assertAlmostEqual(pi[0], 0.6 * 0.3)
+
+
+class StreamingTest(unittest.TestCase):
+    def test_streaming_estimator_drives_online_baum_welch(self):
+        from mixle.inference import StreamingEstimator
+
+        rng = np.random.RandomState(0)
+        gen = StructuredHMM(
+            [S.GaussianDistribution(-4, 1), S.GaussianDistribution(4, 1)],
+            [0.5, 0.5],
+            DenseTransition(np.array([[0.9, 0.1], [0.1, 0.9]])),
+        )
+        proto = StructuredHMM(
+            [S.GaussianDistribution(-2, 1), S.GaussianDistribution(2, 1)],
+            [0.5, 0.5],
+            DenseTransition(_row_normalize(rng.rand(2, 2) + np.eye(2))),
+        )
+        stream = StreamingEstimator(proto.estimator(), model=proto)
+        model = None
+        for b in range(15):
+            batch = [gen.sampler(seed=b * 10 + i).sample(40) for i in range(8)]
+            model = stream.update(batch)
+        means = sorted(e.mu for e in model.emissions)
+        self.assertLess(max(abs(m - t) for m, t in zip(means, [-4, 4])), 0.5)
