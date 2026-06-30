@@ -17,7 +17,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task.model import HashedNGram, TaskModel, TextClassifierIO
+from mixle.task.model import HashedNGram, HashedRecord, RecordClassifierIO, TaskModel, TextClassifierIO
 
 
 def _as_batched(teacher: Callable[..., Any]) -> Callable[[list[str]], list[Any]]:
@@ -90,22 +90,104 @@ def distill_from_labels(
     which examples were paid for and passes their labels straight in. ``labels`` fixes the label set so a student
     trained on a partial sample still spans every class.
     """
+    texts = [str(t) for t in texts]
+    label_list, y = _encode_labels(teacher_labels, labels)
+    feat = HashedNGram(n=n, dim=dim, seed=seed)
+    module, cfg = _fit_mlp(feat.transform(texts), y, len(label_list), hidden, epochs, lr, seed, device)
+    student = _student(
+        module,
+        cfg,
+        TextClassifierIO(feat, label_list),
+        task or "distilled text classifier",
+        len(texts),
+        label_list,
+        {"n": n, "dim": dim, "hidden": list(cfg["hidden_dims"]), "epochs": epochs, "lr": lr},
+    )
+    student.meta["train_agreement"] = agreement(student, teacher_labels, texts)
+    return student
+
+
+def distill_records(
+    teacher: Callable[..., Any],
+    records: Sequence[Any],
+    *,
+    labels: Sequence[str] | None = None,
+    dim: int = 256,
+    hidden: Sequence[int] = (64,),
+    epochs: int = 200,
+    lr: float = 1e-2,
+    seed: int = 0,
+    task: str = "",
+    device: str = "cpu",
+) -> TaskModel:
+    """Distill a teacher into a record classifier (``record -> label`` over tuples/dicts of mixed fields).
+
+    The structured-data sibling of :func:`distill`: classify a transaction, route a ticket, categorize a record.
+    Uses the hashing-trick :class:`~mixle.task.model.HashedRecord` featurizer, so it needs no fitted encoder.
+    """
+    records = list(records)
+    teacher_labels = _as_batched(teacher)(records)
+    return distill_records_from_labels(
+        records,
+        teacher_labels,
+        labels=labels,
+        dim=dim,
+        hidden=hidden,
+        epochs=epochs,
+        lr=lr,
+        seed=seed,
+        task=task,
+        device=device,
+    )
+
+
+def distill_records_from_labels(
+    records: Sequence[Any],
+    teacher_labels: Sequence[Any],
+    *,
+    labels: Sequence[str] | None = None,
+    dim: int = 256,
+    hidden: Sequence[int] = (64,),
+    epochs: int = 200,
+    lr: float = 1e-2,
+    seed: int = 0,
+    task: str = "",
+    device: str = "cpu",
+) -> TaskModel:
+    """Teacher-free record-classifier training core (mirrors :func:`distill_from_labels` for structured records)."""
+    records = list(records)
+    label_list, y = _encode_labels(teacher_labels, labels)
+    feat = HashedRecord(dim=dim, seed=seed)
+    module, cfg = _fit_mlp(feat.transform(records), y, len(label_list), hidden, epochs, lr, seed, device)
+    student = _student(
+        module,
+        cfg,
+        RecordClassifierIO(feat, label_list),
+        task or "distilled record classifier",
+        len(records),
+        label_list,
+        {"dim": dim, "hidden": list(cfg["hidden_dims"]), "epochs": epochs, "lr": lr},
+    )
+    student.meta["train_agreement"] = agreement(student, teacher_labels, records)
+    return student
+
+
+def _encode_labels(teacher_labels: Sequence[Any], labels: Sequence[str] | None) -> tuple[list[str], np.ndarray]:
+    label_list = list(labels) if labels is not None else sorted({str(y) for y in teacher_labels})
+    index = {y: i for i, y in enumerate(label_list)}
+    return label_list, np.asarray([index[str(t)] for t in teacher_labels], dtype=np.int64)
+
+
+def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, seed, device):
+    """Train a small MLP classifier on features ``x`` and integer labels ``y``; return ``(module, config)``."""
     import torch
 
     from mixle.models.neural import make_mlp
 
-    texts = [str(t) for t in texts]
-    label_list = list(labels) if labels is not None else sorted({str(y) for y in teacher_labels})
-    label_index = {y: i for i, y in enumerate(label_list)}
-    y = np.asarray([label_index[str(t)] for t in teacher_labels], dtype=np.int64)
-
-    feat = HashedNGram(n=n, dim=dim, seed=seed)
-    x = feat.transform(texts)
-
     cfg = {
-        "input_dim": dim,
+        "input_dim": int(x.shape[1]),
         "hidden_dims": [int(h) for h in hidden],
-        "output_dim": len(label_list),
+        "output_dim": int(n_labels),
         "activation": "relu",
     }
     torch.manual_seed(seed)
@@ -120,23 +202,18 @@ def distill_from_labels(
         loss = loss_fn(module(xt), yt)
         loss.backward()
         opt.step()
+    return module, cfg
 
-    adapter = TextClassifierIO(feat, label_list)
-    student = TaskModel(
+
+def _student(module, cfg, adapter, task, n_examples, label_list, recipe) -> TaskModel:
+    return TaskModel(
         module,
         adapter,
         builder="mixle.mlp",
         config=cfg,
-        task=task or "distilled text classifier",
-        meta={
-            "distilled": True,
-            "n_examples": len(texts),
-            "labels": label_list,
-            "recipe": {"n": n, "dim": dim, "hidden": list(cfg["hidden_dims"]), "epochs": epochs, "lr": lr},
-        },
+        task=task,
+        meta={"distilled": True, "n_examples": n_examples, "labels": label_list, "recipe": recipe},
     )
-    student.meta["train_agreement"] = agreement(student, teacher_labels, texts)
-    return student
 
 
 def agreement(student: TaskModel, teacher_labels: Sequence[Any], texts: Sequence[str]) -> float:
