@@ -24,6 +24,7 @@ from mixle.task.artifact import (
     save_module,
 )
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
+from mixle.task.cascade import Cascade, CascadeStats
 from mixle.task.density import DensityGate
 from mixle.task.distill import agreement, distill
 from mixle.task.economics import (
@@ -46,6 +47,8 @@ __all__ = [
     "ESCALATE",
     "SCHEMA_VERSION",
     "CalibratedTaskModel",
+    "Cascade",
+    "CascadeStats",
     "CostModel",
     "DensityGate",
     "HashedNGram",
