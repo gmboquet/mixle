@@ -450,3 +450,43 @@ class EnumerationTest(unittest.TestCase):
         )
         with self.assertRaises(EnumerationError):
             hmm.enumerator()
+
+
+class TerminalStateTest(unittest.TestCase):
+    def _model(self, transition_cls=DenseTransition):
+        a = _row_normalize(np.array([[0.6, 0.3, 0.1], [0.2, 0.6, 0.2], [0.0, 0.0, 1.0]]))
+        emis = [S.GaussianDistribution(-3, 1), S.GaussianDistribution(0, 1), S.GaussianDistribution(3, 1)]
+        return StructuredHMM(emis, np.array([0.7, 0.3, 0.0]), DenseTransition(a), terminal_states={2}), a
+
+    def test_terminal_loglik_matches_dense_reference(self):
+        from mixle.stats.latent.hidden_markov import terminal_forward_loglik
+
+        hmm, a = self._model()
+        rng = np.random.RandomState(0)
+        seq = [float(x) for x in rng.normal(0, 3, 8)]
+        log_b = hmm._log_b(seq)
+        ref = terminal_forward_loglik(
+            np.log(hmm.pi + 1e-300), np.log(a + 1e-300), log_b, np.array([False, False, True])
+        )
+        self.assertAlmostEqual(hmm._forward_backward(log_b)[5], ref, places=8)
+
+    def test_sampler_stops_at_terminal_state(self):
+        hmm, _ = self._model()
+        lengths = [len(hmm.sampler(seed=s).sample(50)) for s in range(40)]
+        self.assertLess(max(lengths), 50)  # terminal stopping -> not the full requested length
+        self.assertGreaterEqual(min(lengths), 1)
+
+    def test_em_increases_likelihood_and_recovers(self):
+        from mixle.inference import optimize
+
+        gen, _ = self._model()
+        seqs = [gen.sampler(seed=s).sample(50) for s in range(200)]
+        init = StructuredHMM(
+            gen.emissions,
+            gen.pi,
+            DenseTransition(_row_normalize(np.array([[0.5, 0.3, 0.2], [0.3, 0.5, 0.2], [0, 0, 1.0]]))),
+            terminal_states={2},
+        )
+        fit = optimize(seqs, init.estimator(), prev_estimate=init, max_its=15, out=None)
+        self.assertEqual(fit.terminal_states, {2})  # retained through the contract
+        self.assertLess(max(abs(m - t) for m, t in zip(sorted(e.mu for e in fit.emissions), [-3, 0, 3])), 0.4)
