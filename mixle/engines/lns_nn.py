@@ -49,8 +49,19 @@ def cross_entropy(logits: Any, targets: Any, lns: LogNumberSystem, axis: int = -
     """
     logits = np.asarray(logits, dtype=np.float64)
     k = lns.quantize(logits)
+    targets = np.asarray(targets)
+    if k.ndim == 2 and axis in (-1, 1):
+        from mixle.engines.lns import _HAS_LNS_KERNEL
+
+        if _HAS_LNS_KERNEL:  # fused one pass: tree log-partition + target gather, no temporaries (~14x vs fp64)
+            from mixle.engines._lns_kernel import cross_entropy_rows
+
+            total = cross_entropy_rows(
+                np.ascontiguousarray(k), np.ascontiguousarray(targets.astype(np.int64)), lns.lut, lns.dmax
+            )
+            return float(total * lns.step / k.shape[0])
     lse_k = lns.logsumexp(k, axis=axis)  # integer log-partition per row
-    tgt_k = np.take_along_axis(k, np.expand_dims(np.asarray(targets), axis), axis=axis).squeeze(axis)
+    tgt_k = np.take_along_axis(k, np.expand_dims(targets, axis), axis=axis).squeeze(axis)
     return float(np.mean((lse_k - tgt_k).astype(np.float64) * lns.step))
 
 
