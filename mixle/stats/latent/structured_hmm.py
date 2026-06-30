@@ -1068,6 +1068,28 @@ class ExplicitDurationHMM:
                 break
         return self, ll_trace
 
+    def state_posteriors(self, seq):
+        """Per-position smoothing posteriors gamma[t, j] = P(z_t = j | obs), marginalizing the durations
+        (sum the posterior of every segment that covers position t). Rows sum to 1."""
+        log_b = self._log_b(seq)
+        t_len = len(seq)
+        log_alpha, log_e, seg = self._forward(log_b)
+        log_beta, _ = self._backward(log_b, seg)
+        z = _logsumexp(log_alpha[-1])
+        log_dur = np.log(self.dur + 1e-300)
+        occ = np.zeros((t_len, self.K))
+        for t in range(t_len):
+            for j in range(self.K):
+                for d in range(min(t + 1, self.D)):
+                    lp = log_e[t - d, j] + log_dur[j, d] + seg[t, d, j] + log_beta[t, j] - z
+                    if np.isfinite(lp):
+                        occ[t - d : t + 1, j] += np.exp(lp)
+        return occ
+
+    def posterior_decode(self, seq):
+        """Per-position MAP state argmax_j P(z_t = j | obs)."""
+        return np.argmax(self.state_posteriors(seq), axis=1)
+
     def viterbi_segments(self, seq):
         """Most-likely segmentation (max-product over the segment lattice): a list of (state, start,
         duration) segments covering the sequence, O(T K D). The HSMM analog of Viterbi decoding."""
