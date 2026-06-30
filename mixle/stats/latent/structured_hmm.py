@@ -745,3 +745,86 @@ def stationary_initial(op: TransitionOperator, *, iters: int = 2000, tol: float 
             return nxt
         pi = nxt
     return pi
+
+
+class InputOutputHMM:
+    """Input-output HMM (IOHMM): an exogenous discrete input ``u_t`` selects which transition governs each
+    step. Holds one :class:`TransitionOperator` per input symbol; the emission is per-state. Data is
+    ``(obs_seq, input_seq)`` pairs where ``input_seq[t]`` in {0..M-1} drives the transition from t to t+1.
+
+    Lets a covariate steer the dynamics -- regime switching driven by an observed control, the difference
+    between a plain HMM and a controlled Markov model. (Input-dependent emissions are a natural extension;
+    here emissions depend on state only.)
+    """
+
+    def __init__(self, emissions, pi, transitions, emission_estimators=None, name=None) -> None:
+        self.emissions = list(emissions)
+        self.pi = np.asarray(pi, dtype=float)
+        self.pi = self.pi / self.pi.sum() if self.pi.sum() > 0 else self.pi
+        self.transitions = list(transitions)  # one operator per input symbol
+        self.K = len(self.emissions)
+        self.M = len(self.transitions)
+        self.name = name
+        if not all(t.n_states == self.K == len(self.pi) for t in self.transitions):
+            raise ValueError("every input's transition must have n_states == #emissions == len(pi).")
+        self._emit_est = emission_estimators or [e.estimator() for e in self.emissions]
+
+    def _log_b(self, seq):
+        return np.array([[float(e.log_density(x)) for e in self.emissions] for x in seq])
+
+    def _forward_backward(self, log_b, inputs):
+        t_len, _ = log_b.shape
+        mx = log_b.max(axis=1, keepdims=True)
+        b = np.exp(log_b - mx)
+        alpha = np.zeros((t_len, self.K))
+        c = np.zeros(t_len)
+        alpha[0] = self.pi * b[0]
+        c[0] = alpha[0].sum()
+        alpha[0] /= c[0]
+        for t in range(1, t_len):
+            alpha[t] = self.transitions[inputs[t - 1]].forward(alpha[t - 1]) * b[t]
+            c[t] = alpha[t].sum()
+            alpha[t] /= c[t]
+        loglik = float(np.sum(np.log(c)) + np.sum(mx))
+        beta = np.zeros((t_len, self.K))
+        beta[t_len - 1] = 1.0
+        for t in range(t_len - 2, -1, -1):
+            beta[t] = self.transitions[inputs[t]].backward(b[t + 1] * beta[t + 1]) / c[t + 1]
+        gamma = alpha * beta
+        gamma /= gamma.sum(axis=1, keepdims=True)
+        return alpha, beta, c, b, gamma, loglik
+
+    def seq_log_density(self, obs_seqs, input_seqs):
+        return np.array([self._forward_backward(self._log_b(o), list(u))[5] for o, u in zip(obs_seqs, input_seqs)])
+
+    def fit(self, obs_seqs, input_seqs, *, max_its: int = 50, tol: float = 1e-6):
+        obs_seqs = [list(o) for o in obs_seqs]
+        input_seqs = [list(u) for u in input_seqs]
+        ll_trace = []
+        for _ in range(int(max_its)):
+            trans_accs = [t.new_accumulator() for t in self.transitions]
+            pi_acc = np.zeros(self.K)
+            emit_accs = [est.accumulator_factory().make() for est in self._emit_est]
+            nk = np.zeros(self.K)
+            total_ll = 0.0
+            for o, u in zip(obs_seqs, input_seqs):
+                if not o:
+                    continue
+                log_b = self._log_b(o)
+                alpha, beta, c, b, gamma, ll = self._forward_backward(log_b, u)
+                total_ll += ll
+                pi_acc += gamma[0]
+                for t in range(len(o) - 1):
+                    m = u[t]
+                    self.transitions[m].accumulate(trans_accs[m], alpha[t], b[t + 1] * beta[t + 1], c[t + 1])
+                for k in range(self.K):
+                    enc = self.emissions[k].dist_to_encoder().seq_encode(o)
+                    emit_accs[k].seq_update(enc, gamma[:, k], self.emissions[k])
+                    nk[k] += gamma[:, k].sum()
+            self.transitions = [self.transitions[m].estimate(trans_accs[m]) for m in range(self.M)]
+            self.pi = pi_acc / pi_acc.sum()
+            self.emissions = [self._emit_est[k].estimate(float(nk[k]), emit_accs[k].value()) for k in range(self.K)]
+            ll_trace.append(total_ll)
+            if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
+                break
+        return self, ll_trace

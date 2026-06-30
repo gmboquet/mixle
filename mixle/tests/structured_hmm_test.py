@@ -291,3 +291,37 @@ class StreamingTest(unittest.TestCase):
             model = stream.update(batch)
         means = sorted(e.mu for e in model.emissions)
         self.assertLess(max(abs(m - t) for m, t in zip(means, [-4, 4])), 0.5)
+
+
+class InputOutputHMMTest(unittest.TestCase):
+    def test_iohmm_recovers_input_dependent_transitions(self):
+        from mixle.stats.latent.structured_hmm import InputOutputHMM
+
+        rng = np.random.RandomState(0)
+        a0, a1 = np.array([[0.95, 0.05], [0.05, 0.95]]), np.array([[0.05, 0.95], [0.95, 0.05]])
+        gen = InputOutputHMM(
+            [S.GaussianDistribution(-5, 0.5), S.GaussianDistribution(5, 0.5)],
+            [0.5, 0.5],
+            [DenseTransition(a0), DenseTransition(a1)],
+        )
+
+        def gen_seq(seed):
+            r = np.random.RandomState(seed)
+            s, obs, inp = 0, [], []
+            for _ in range(60):
+                obs.append(float(r.normal([-5, 5][s], 0.5)))
+                m = r.randint(2)
+                inp.append(m)
+                s = r.choice(2, p=gen.transitions[m].as_matrix()[s])
+            return obs, inp
+
+        data = [gen_seq(s) for s in range(40)]
+        init = InputOutputHMM(
+            [S.GaussianDistribution(-2, 1), S.GaussianDistribution(2, 1)],
+            [0.5, 0.5],
+            [DenseTransition(_row_normalize(rng.rand(2, 2) + np.eye(2))) for _ in range(2)],
+        )
+        _, trace = init.fit([d[0] for d in data], [d[1] for d in data], max_its=30)
+        self.assertTrue(np.all(np.diff(trace) >= -1e-6))
+        self.assertGreater(init.transitions[0].as_matrix()[0, 0], 0.8)  # input 0 = sticky
+        self.assertGreater(init.transitions[1].as_matrix()[0, 1], 0.8)  # input 1 = flip
