@@ -31,13 +31,16 @@ from mixle.task.model import (
     adapter_from_spec,
     register_adapter,
 )
+from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
 
 __all__ = [
     "SCHEMA_VERSION",
     "HashedNGram",
+    "RecipeSpace",
     "TaskManifest",
     "TaskModel",
     "TextClassifierIO",
+    "TuneResult",
     "adapter_from_spec",
     "agreement",
     "distill",
@@ -49,4 +52,5 @@ __all__ = [
     "register_builder",
     "save_json",
     "save_module",
+    "tune_recipe",
 ]
