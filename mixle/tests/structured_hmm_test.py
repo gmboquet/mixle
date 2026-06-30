@@ -208,3 +208,27 @@ class ForgettingParallelTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DecodingTest(unittest.TestCase):
+    def _two_state(self):
+        a = np.array([[0.92, 0.08], [0.08, 0.92]])
+        return StructuredHMM([S.GaussianDistribution(-5, 0.5), S.GaussianDistribution(5, 0.5)], [0.5, 0.5], DenseTransition(a))
+
+    def _gen(self, hmm, n=200, seed=0):
+        rng = np.random.RandomState(seed)
+        a = hmm.transition.as_matrix()
+        s = 0
+        states, obs = [], []
+        for _ in range(n):
+            states.append(s)
+            obs.append(float(rng.normal([-5, 5][s], 0.5)))
+            s = rng.choice(2, p=a[s])
+        return np.array(states), obs
+
+    def test_viterbi_and_posterior_decode_recover_states(self):
+        hmm = self._two_state()
+        states, obs = self._gen(hmm)
+        self.assertGreater((hmm.viterbi(obs) == states).mean(), 0.95)
+        self.assertGreater((hmm.posterior_decode(obs) == states).mean(), 0.95)
+        self.assertEqual(hmm.state_posteriors(obs).shape, (len(obs), 2))
