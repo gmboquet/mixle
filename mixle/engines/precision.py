@@ -25,6 +25,22 @@ _ALIASES = {
 }
 
 
+# Real quantization / sub-byte format names that are NOT a supported COMPUTE precision on the
+# NumPy/numba path: numba cannot compile below float32 and sub-byte formats have no native CPU
+# arithmetic, so they would need packed storage + GPU dequant kernels (see the quantization design).
+# We reject them with an actionable message instead of a cryptic ``np.dtype`` TypeError.
+_UNSUPPORTED_LOW_PRECISION = frozenset(
+    {
+        "fp8", "float8", "e4m3", "e5m2",
+        "fp6", "float6", "e2m3", "e3m2",
+        "fp4", "float4", "e2m1", "nf4",
+        "mxfp", "mxfp4", "mxfp6", "mxfp8",
+        "float2", "float3", "float5", "float7",
+        "int4", "int8",
+    }
+)  # fmt: skip
+
+
 def precision_name(precision: Any) -> str:
     """Return a readable canonical precision name."""
     if precision is None:
@@ -40,8 +56,15 @@ def normalize_numpy_dtype(precision: Any) -> np.dtype | None:
     if precision is None:
         return None
     name = precision_name(precision)
+    if name in _UNSUPPORTED_LOW_PRECISION:
+        raise ValueError(
+            "precision %r is not a supported compute precision. Sub-byte / FP8 / microscaling / "
+            "codebook formats have no native CPU arithmetic (numba cannot compile below float32) and "
+            "would require packed storage + GPU dequant kernels. Supported compute precisions: "
+            "float32 (reduced) and float64 (default); float16/bfloat16 are Torch/GPU-only." % (precision,)
+        )
     if name == "bfloat16":
-        raise ValueError("NumPyEngine does not support bfloat16 precision.")
+        raise ValueError("NumPyEngine does not support bfloat16 precision (Torch/GPU-only).")
     try:
         dtype = np.dtype(name)
     except TypeError:
