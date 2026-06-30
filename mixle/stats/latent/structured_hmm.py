@@ -239,6 +239,7 @@ class StructuredHMM:
         keys=(None, None),
         name=None,
         len_dist=None,
+        terminal_states=None,
     ) -> None:
         self.emissions = list(emissions)
         self.pi = np.asarray(pi, dtype=float)
@@ -247,6 +248,13 @@ class StructuredHMM:
         self.keys = tuple(keys)  # (init_key, trans_key) for parameter tying across models
         self.name = name
         self.len_dist = len_dist  # optional distribution over sequence length (needed for enumeration)
+        # terminal (absorbing) states: when set, the sequence length is a STOPPING TIME -- the chain only
+        # transitions FROM non-terminal states and the sequence must END in a terminal state (no len_dist).
+        self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
+        self.term_mask = None
+        if self.terminal_states:
+            self.term_mask = np.zeros(self.K, dtype=bool)
+            self.term_mask[list(self.terminal_states)] = True
         # coupling invariant: emissions[k] <-> pi[k] <-> transition row/col k all index the SAME state k,
         # so the three counts must agree (for a Kronecker op, n_states == K1*K2 emissions).
         if not (self.K == len(self.pi) == transition.n_states):
@@ -263,6 +271,8 @@ class StructuredHMM:
         return np.array([[float(e.log_density(x)) for e in self.emissions] for x in seq])
 
     def _forward_backward(self, log_b, pi=None):
+        if self.term_mask is not None:
+            return self._terminal_forward_backward(log_b, pi=pi)
         T, _ = log_b.shape
         op = self.transition
         mx = log_b.max(axis=1, keepdims=True)
@@ -284,6 +294,38 @@ class StructuredHMM:
         gamma = alpha * beta
         gamma /= gamma.sum(axis=1, keepdims=True)
         return alpha, beta, c, b, gamma, loglik
+
+    def _terminal_forward_backward(self, log_b, pi=None):
+        """Forward-backward when states are terminal (absorbing): the chain transitions only FROM
+        non-terminal states (mask the belief at terminal states before each step) and the sequence must end
+        in a terminal state. Works through the operator interface, so any transition structure is supported.
+        Returns the SAME tuple as the standard path; the alpha returned is already terminal-masked for the
+        transition accumulate, and the loglik is the terminal-stopping-time likelihood."""
+        T, _ = log_b.shape
+        op = self.transition
+        nonterm = ~self.term_mask
+        mx = log_b.max(axis=1, keepdims=True)
+        b = np.exp(log_b - mx)
+        alpha = np.zeros((T, self.K))
+        c = np.zeros(T)
+        alpha[0] = (self.pi if pi is None else pi) * b[0]
+        c[0] = alpha[0].sum()
+        alpha[0] /= c[0]
+        for t in range(1, T):
+            alpha[t] = op.forward(np.where(nonterm, alpha[t - 1], 0.0)) * b[t]  # only leave non-terminal states
+            c[t] = alpha[t].sum()
+            alpha[t] = alpha[t] / c[t] if c[t] > 0 else alpha[t]
+        term_mass = float(alpha[T - 1][self.term_mask].sum())  # must end in a terminal state
+        loglik = float(np.sum(np.log(c)) + np.sum(mx) + np.log(term_mass + 1e-300))
+        beta = np.zeros((T, self.K))
+        beta[T - 1] = np.where(self.term_mask, 1.0, 0.0)  # only terminal states close a sequence
+        for t in range(T - 2, -1, -1):
+            beta[t] = np.where(nonterm, op.backward(b[t + 1] * beta[t + 1]), 0.0) / c[t + 1]
+        gamma = alpha * beta
+        gs = gamma.sum(axis=1, keepdims=True)
+        gamma = np.divide(gamma, gs, out=np.zeros_like(gamma), where=gs > 0)
+        alpha_masked = alpha * nonterm[None, :]  # terminal states contribute no outgoing transition mass
+        return alpha_masked, beta, c, b, gamma, loglik
 
     def viterbi(self, seq):
         """Most-likely state path (Viterbi / max-product). Uses the transition matrix, so it works for any
@@ -385,7 +427,11 @@ class _StructuredHMMSampler:
         out = []
         for _ in range(int(length)):
             out.append(h.emissions[s].sampler(seed=int(self.rng.randint(1, 2**31))).sample())
-            s = self.rng.choice(h.K, p=a[s])
+            if h.term_mask is not None and h.term_mask[s]:
+                break  # terminal (absorbing) state ends the sequence -- length is the stopping time
+            row = a[s]
+            rs = row.sum()
+            s = self.rng.choice(h.K, p=row / rs) if rs > 0 else s
         return out
 
 
@@ -724,12 +770,15 @@ class StructuredHMMEstimator(ParameterEstimator):
     structure -- dense/low-rank/combinator), and each state's emission from the Baum-Welch statistics.
     ``keys=(init_key, trans_key)`` tie the initial / transition parameters across HMMs that share them."""
 
-    def __init__(self, emission_estimators, transition_proto, keys=(None, None), name=None, len_dist=None):
+    def __init__(
+        self, emission_estimators, transition_proto, keys=(None, None), name=None, len_dist=None, terminal_states=None
+    ):
         self.emission_estimators = list(emission_estimators)
         self.transition_proto = transition_proto
         self.keys = tuple(keys)
         self.name = name
         self.len_dist = len_dist  # carried (not fit) so fitted models retain it for enumeration
+        self.terminal_states = terminal_states
 
     def accumulator_factory(self):
         return StructuredHMMAccumulatorFactory(self.emission_estimators, self.transition_proto, self.keys)
@@ -739,7 +788,16 @@ class StructuredHMMEstimator(ParameterEstimator):
         pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else np.ones(len(pi_acc)) / len(pi_acc)
         transition = self.transition_proto.estimate(trans_acc)
         emissions = [self.emission_estimators[k].estimate(float(nk[k]), emit_vals[k]) for k in range(len(emit_vals))]
-        return StructuredHMM(emissions, pi, transition, self.emission_estimators, self.keys, self.name, self.len_dist)
+        return StructuredHMM(
+            emissions,
+            pi,
+            transition,
+            self.emission_estimators,
+            self.keys,
+            self.name,
+            self.len_dist,
+            self.terminal_states,
+        )
 
 
 # --- make StructuredHMM satisfy the distribution side of the contract -------------------------------
@@ -752,7 +810,9 @@ def _structured_hmm_dist_to_encoder(self):
 
 
 def _structured_hmm_estimator(self, pseudo_count=None):
-    return StructuredHMMEstimator(self._emit_est, self.transition, self.keys, self.name, self.len_dist)
+    return StructuredHMMEstimator(
+        self._emit_est, self.transition, self.keys, self.name, self.len_dist, self.terminal_states
+    )
 
 
 StructuredHMM.log_density = _structured_hmm_log_density
