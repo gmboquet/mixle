@@ -409,3 +409,44 @@ class JitForwardTest(unittest.TestCase):
         )
         seq = [float(x) for x in rng.normal(0, 6, 1500)]
         self.assertAlmostEqual(jit_forward_loglik(hmm)(seq), hmm.seq_log_density([seq])[0], places=5)
+
+
+class EnumerationTest(unittest.TestCase):
+    def _hmm(self, transition):
+        emis = [S.CategoricalDistribution({0: 0.7, 1: 0.2, 2: 0.1}), S.CategoricalDistribution({0: 0.1, 1: 0.2, 2: 0.7})]
+        ld = S.CategoricalDistribution({2: 0.5, 3: 0.5})
+        return StructuredHMM(emis, [0.6, 0.4], transition, len_dist=ld), ld
+
+    def test_top_k_descending_and_prob_matches_density(self):
+        hmm, ld = self._hmm(DenseTransition(np.array([[0.8, 0.2], [0.3, 0.7]])))
+        tk = hmm.enumerator().top_k(8)
+        logps = [lp for _, lp in tk]
+        self.assertTrue(all(a >= b for a, b in zip(logps, logps[1:])))  # descending probability
+        for seq, logp in tk:  # enumerated prob == StructuredHMM density * len_prob
+            own = float(hmm.seq_log_density([seq])[0]) + float(ld.log_density(len(seq)))
+            self.assertAlmostEqual(logp, own, places=9)
+
+    def test_rank_seek_nucleus(self):
+        hmm, _ = self._hmm(DenseTransition(np.array([[0.8, 0.2], [0.3, 0.7]])))
+        en = hmm.enumerator()
+        top = en.top_k(1)[0][0]
+        self.assertEqual(en.rank(top).rank, 0)
+        self.assertTrue(en.rank(top).exact)
+        self.assertGreaterEqual(en.nucleus_size(0.95).covered_mass, 0.95)
+
+    def test_low_rank_operator_enumerates_via_as_matrix(self):
+        hmm, _ = self._hmm(
+            LowRankTransition(
+                _row_normalize(np.array([[0.6, 0.4], [0.3, 0.7]])), _row_normalize(np.array([[0.5, 0.5], [0.2, 0.8]]))
+            )
+        )
+        self.assertEqual(len(hmm.enumerator().top_k(3)), 3)
+
+    def test_no_len_dist_raises_enumeration_error(self):
+        from mixle.enumeration import EnumerationError
+
+        hmm = StructuredHMM(
+            [S.CategoricalDistribution({0: 0.5, 1: 0.5})] * 2, [0.5, 0.5], DenseTransition(np.eye(2))
+        )
+        with self.assertRaises(EnumerationError):
+            hmm.enumerator()

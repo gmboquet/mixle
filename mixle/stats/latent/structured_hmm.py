@@ -231,7 +231,14 @@ class StructuredHMM:
     """
 
     def __init__(
-        self, emissions, pi, transition: TransitionOperator, emission_estimators=None, keys=(None, None), name=None
+        self,
+        emissions,
+        pi,
+        transition: TransitionOperator,
+        emission_estimators=None,
+        keys=(None, None),
+        name=None,
+        len_dist=None,
     ) -> None:
         self.emissions = list(emissions)
         self.pi = np.asarray(pi, dtype=float)
@@ -239,6 +246,7 @@ class StructuredHMM:
         self.K = len(self.emissions)
         self.keys = tuple(keys)  # (init_key, trans_key) for parameter tying across models
         self.name = name
+        self.len_dist = len_dist  # optional distribution over sequence length (needed for enumeration)
         # coupling invariant: emissions[k] <-> pi[k] <-> transition row/col k all index the SAME state k,
         # so the three counts must agree (for a Kronecker op, n_states == K1*K2 emissions).
         if not (self.K == len(self.pi) == transition.n_states):
@@ -300,6 +308,28 @@ class StructuredHMM:
     def posterior_decode(self, seq):
         """Per-position MAP state argmax_k P(z_t = k | x) from the forward-backward posteriors gamma."""
         return np.argmax(self._forward_backward(self._log_b(seq))[4], axis=1)
+
+    def enumerator(self):
+        """Enumerate observation sequences in descending marginal probability (top_k / rank / seek /
+        nucleus / certified estimates). Enumeration depends only on pi, the transition MATRIX, the
+        emissions and a length distribution -- not on the operator's internal structure -- so it reuses
+        the built-in HMM enumerator (an A*-style best-first search over the trellis) on the dense matrix.
+        Requires ``len_dist`` (a distribution over sequence length) and enumerable (discrete) emissions."""
+        from mixle.enumeration import EnumerationError
+        from mixle.stats.latent.hidden_markov import HiddenMarkovModelDistribution
+
+        if self.len_dist is None:
+            raise EnumerationError(self, reason="StructuredHMM needs a len_dist to enumerate sequence length")
+        dense = HiddenMarkovModelDistribution(
+            self.emissions,
+            w=self.pi.tolist(),
+            transitions=self.transition.as_matrix().tolist(),
+            len_dist=self.len_dist,
+        )
+        return dense.enumerator()
+
+    def dist_to_enumerator(self):
+        return self.enumerator()
 
     def state_posteriors(self, seq):
         """The full smoothing posteriors gamma[t,k] = P(z_t = k | x)."""
@@ -694,11 +724,12 @@ class StructuredHMMEstimator(ParameterEstimator):
     structure -- dense/low-rank/combinator), and each state's emission from the Baum-Welch statistics.
     ``keys=(init_key, trans_key)`` tie the initial / transition parameters across HMMs that share them."""
 
-    def __init__(self, emission_estimators, transition_proto, keys=(None, None), name=None):
+    def __init__(self, emission_estimators, transition_proto, keys=(None, None), name=None, len_dist=None):
         self.emission_estimators = list(emission_estimators)
         self.transition_proto = transition_proto
         self.keys = tuple(keys)
         self.name = name
+        self.len_dist = len_dist  # carried (not fit) so fitted models retain it for enumeration
 
     def accumulator_factory(self):
         return StructuredHMMAccumulatorFactory(self.emission_estimators, self.transition_proto, self.keys)
@@ -708,7 +739,7 @@ class StructuredHMMEstimator(ParameterEstimator):
         pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else np.ones(len(pi_acc)) / len(pi_acc)
         transition = self.transition_proto.estimate(trans_acc)
         emissions = [self.emission_estimators[k].estimate(float(nk[k]), emit_vals[k]) for k in range(len(emit_vals))]
-        return StructuredHMM(emissions, pi, transition, self.emission_estimators, self.keys, self.name)
+        return StructuredHMM(emissions, pi, transition, self.emission_estimators, self.keys, self.name, self.len_dist)
 
 
 # --- make StructuredHMM satisfy the distribution side of the contract -------------------------------
@@ -721,7 +752,7 @@ def _structured_hmm_dist_to_encoder(self):
 
 
 def _structured_hmm_estimator(self, pseudo_count=None):
-    return StructuredHMMEstimator(self._emit_est, self.transition, self.keys, self.name)
+    return StructuredHMMEstimator(self._emit_est, self.transition, self.keys, self.name, self.len_dist)
 
 
 StructuredHMM.log_density = _structured_hmm_log_density
