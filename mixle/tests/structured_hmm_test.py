@@ -390,3 +390,22 @@ class ExplicitDurationHMMTest(unittest.TestCase):
         d0 = float((np.arange(1, D + 1) * init.dur[0]).sum())  # mean dwell time, state 0
         self.assertAlmostEqual(d0, 3.8, delta=0.4)
         self.assertLess(max(abs(m - t) for m, t in zip(sorted(e.mu for e in init.emissions), [-5, 5])), 0.5)
+
+
+class JitForwardTest(unittest.TestCase):
+    def test_jit_forward_matches_numpy(self):
+        try:
+            import jax  # noqa: F401
+        except Exception:
+            self.skipTest("jax not installed")
+        from mixle.stats.latent.structured_hmm import jit_forward_loglik
+
+        rng = np.random.RandomState(0)
+        k = 6
+        hmm = StructuredHMM(
+            [S.GaussianDistribution(3 * i, 1) for i in range(k)],
+            np.ones(k) / k,
+            DenseTransition(_row_normalize(rng.rand(k, k) + np.eye(k))),
+        )
+        seq = [float(x) for x in rng.normal(0, 6, 1500)]
+        self.assertAlmostEqual(jit_forward_loglik(hmm)(seq), hmm.seq_log_density([seq])[0], places=5)

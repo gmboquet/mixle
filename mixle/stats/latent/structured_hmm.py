@@ -990,3 +990,35 @@ class _EDHMMSampler:
                 out.append(h.emissions[s].sampler(seed=int(self.rng.randint(1, 2**31))).sample())
             s = self.rng.choice(h.K, p=h.a[s])
         return out
+
+
+def jit_forward_loglik(hmm: StructuredHMM):
+    """Compile the scaled forward log-likelihood recursion to a single jax.jit XLA program (lax.scan over
+    time). Returns a callable ``score(seq) -> float``: emission log-densities are evaluated on the host
+    (arbitrary emissions), then the forward scan runs jitted on the transition matrix. Works for any
+    operator (uses ``as_matrix()``); the win is large T / K. Requires the JAX optional extra."""
+    import jax
+    import jax.numpy as jnp
+
+    a_mat = jnp.asarray(hmm.transition.as_matrix())
+    pi = jnp.asarray(hmm.pi)
+
+    @jax.jit
+    def _fwd(log_b):
+        mx = log_b.max(axis=1, keepdims=True)
+        b = jnp.exp(log_b - mx)
+        a0 = pi * b[0]
+        c0 = a0.sum()
+
+        def step(alpha, bt):
+            a2 = (alpha @ a_mat) * bt
+            c = a2.sum()
+            return a2 / c, jnp.log(c)
+
+        _, logc = jax.lax.scan(step, a0 / c0, b[1:])
+        return jnp.sum(logc) + jnp.log(c0) + jnp.sum(mx)
+
+    def score(seq):
+        return float(_fwd(jnp.asarray(hmm._log_b(seq))))
+
+    return score
