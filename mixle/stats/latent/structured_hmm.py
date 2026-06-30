@@ -314,6 +314,7 @@ class StructuredHMM:
         name=None,
         len_dist=None,
         terminal_states=None,
+        final_states=None,
     ) -> None:
         self.emissions = list(emissions)
         self.pi = np.asarray(pi, dtype=float)
@@ -329,6 +330,14 @@ class StructuredHMM:
         if self.terminal_states:
             self.term_mask = np.zeros(self.K, dtype=bool)
             self.term_mask[list(self.terminal_states)] = True
+        # final states: the sequence may END only in one of these (a NON-absorbing boundary -- unlike
+        # terminal_states, the chain still transitions through them mid-sequence). Used by the HSMM->HMM
+        # expansion to require the final segment to complete. terminal_states takes precedence if both set.
+        self.final_states = None if final_states is None else set(int(s) for s in final_states)
+        self.final_mask = None
+        if self.final_states:
+            self.final_mask = np.zeros(self.K, dtype=bool)
+            self.final_mask[list(self.final_states)] = True
         # coupling invariant: emissions[k] <-> pi[k] <-> transition row/col k all index the SAME state k,
         # so the three counts must agree (for a Kronecker op, n_states == K1*K2 emissions).
         if not (self.K == len(self.pi) == transition.n_states):
@@ -347,6 +356,8 @@ class StructuredHMM:
     def _forward_backward(self, log_b, pi=None):
         if self.term_mask is not None:
             return self._terminal_forward_backward(log_b, pi=pi)
+        if self.final_mask is not None:
+            return self._final_forward_backward(log_b, pi=pi)
         T, _ = log_b.shape
         op = self.transition
         mx = log_b.max(axis=1, keepdims=True)
@@ -367,6 +378,34 @@ class StructuredHMM:
             beta[t] = op.backward(b[t + 1] * beta[t + 1]) / c[t + 1]
         gamma = alpha * beta
         gamma /= gamma.sum(axis=1, keepdims=True)
+        return alpha, beta, c, b, gamma, loglik
+
+    def _final_forward_backward(self, log_b, pi=None):
+        """Standard forward, but the sequence may end only in a ``final_states`` state (non-absorbing): the
+        likelihood sums the FINAL position over final_states and the backward boundary is the final mask.
+        Transitions are unrestricted (the chain passes through final states normally mid-sequence)."""
+        T, _ = log_b.shape
+        op = self.transition
+        mx = log_b.max(axis=1, keepdims=True)
+        b = np.exp(log_b - mx)
+        alpha = np.zeros((T, self.K))
+        c = np.zeros(T)
+        alpha[0] = (self.pi if pi is None else pi) * b[0]
+        c[0] = alpha[0].sum()
+        alpha[0] /= c[0]
+        for t in range(1, T):
+            alpha[t] = op.forward(alpha[t - 1]) * b[t]
+            c[t] = alpha[t].sum()
+            alpha[t] = alpha[t] / c[t] if c[t] > 0 else alpha[t]
+        final_mass = float(alpha[T - 1][self.final_mask].sum())
+        loglik = float(np.sum(np.log(c)) + np.sum(mx) + np.log(final_mass + 1e-300))
+        beta = np.zeros((T, self.K))
+        beta[T - 1] = np.where(self.final_mask, 1.0, 0.0)
+        for t in range(T - 2, -1, -1):
+            beta[t] = op.backward(b[t + 1] * beta[t + 1]) / c[t + 1]
+        gamma = alpha * beta
+        gs = gamma.sum(axis=1, keepdims=True)
+        gamma = np.divide(gamma, gs, out=np.zeros_like(gamma), where=gs > 0)
         return alpha, beta, c, b, gamma, loglik
 
     def _terminal_forward_backward(self, log_b, pi=None):
@@ -1158,6 +1197,36 @@ class ExplicitDurationHMM:
             if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
                 break
         return self, ll_trace
+
+    def to_structured_hmm(self, len_dist=None):
+        """The HSMM as an EQUIVALENT StructuredHMM via the remaining-duration expansion: K*D sub-states
+        (k, r) = "state k with r steps left in the segment". The expanded chain emits from state k at every
+        sub-state, decrements deterministically (k,r)->(k,r-1), and at (k,1) switches segment with
+        A[k,k']*dur[k'](d'). ``final_states`` = the (k,1) sub-states require the last segment to COMPLETE, so
+        the expanded forward log-likelihood EQUALS this EDHMM's exactly. This hands the HSMM the full
+        StructuredHMM read-out API -- Viterbi (recover state+remaining-duration), posterior decoding, the
+        standard forward -- and, with ``len_dist``, enumeration. O(K*D) states."""
+
+        def idx(k, r):  # r in 1..D
+            return k * self.D + (r - 1)
+
+        n = self.K * self.D
+        emissions = [self.emissions[k] for k in range(self.K) for _ in range(self.D)]
+        pi = np.zeros(n)
+        for k in range(self.K):
+            for d in range(1, self.D + 1):
+                pi[idx(k, d)] = self.pi[k] * self.dur[k, d - 1]
+        a = np.zeros((n, n))
+        for k in range(self.K):
+            for r in range(2, self.D + 1):
+                a[idx(k, r), idx(k, r - 1)] = 1.0  # decrement remaining duration
+            for kp in range(self.K):
+                if kp == k:
+                    continue
+                for dp in range(1, self.D + 1):
+                    a[idx(k, 1), idx(kp, dp)] = self.a[k, kp] * self.dur[kp, dp - 1]  # switch segment
+        final = {idx(k, 1) for k in range(self.K)}
+        return StructuredHMM(emissions, pi, DenseTransition(a), len_dist=len_dist, final_states=final)
 
     def state_posteriors(self, seq):
         """Per-position smoothing posteriors gamma[t, j] = P(z_t = j | obs), marginalizing the durations
