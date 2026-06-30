@@ -564,3 +564,35 @@ class EDHMMPosteriorTest(unittest.TestCase):
         g = m.state_posteriors(seq)
         self.assertTrue(np.allclose(g.sum(axis=1), 1.0))
         self.assertTrue(np.array_equal(m.posterior_decode(seq), np.array(true)))
+
+
+class NumbaFastFitTest(unittest.TestCase):
+    def test_fast_dense_fit_equals_numpy_fit(self):
+        try:
+            from mixle.utils.optional_deps import HAS_NUMBA
+        except Exception:
+            HAS_NUMBA = False
+        if not HAS_NUMBA:
+            self.skipTest("numba not installed")
+        rng = np.random.RandomState(0)
+        k = 5
+        emis = [S.GaussianDistribution(4 * i, 1) for i in range(k)]
+        gen = StructuredHMM(emis, np.ones(k) / k, DenseTransition(_row_normalize(rng.rand(k, k) + 2 * np.eye(k))))
+        seqs = [gen.sampler(seed=s).sample(150) for s in range(30)]
+
+        def init():
+            return StructuredHMM(
+                [S.GaussianDistribution(4 * i + rng.uniform(-1, 1), 1) for i in range(k)],
+                np.ones(k) / k,
+                DenseTransition(_row_normalize(rng.rand(k, k) + np.eye(k))),
+            )
+
+        rng = np.random.RandomState(1)
+        hf = init()
+        rng = np.random.RandomState(1)
+        hs = init()
+        hf.fit(seqs, max_its=20, fast=True)
+        hs.fit(seqs, max_its=20, fast=False)
+        self.assertTrue(
+            np.allclose(sorted(e.mu for e in hf.emissions), sorted(e.mu for e in hs.emissions), atol=1e-6)
+        )  # numba fast path is the SAME EM, just faster
