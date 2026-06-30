@@ -284,18 +284,28 @@ class _LinearPredictor:
         return f"_LinearPredictor({self.terms!r}, intercept={self.intercept!r}, groups={self.groups!r})"
 
 
-class Net:
-    """A neural (MLP) predictor in a parameter slot -- the *nonlinear* sibling of :class:`_LinearPredictor`.
+class _NeuralPredictor:
+    """Base for a neural predictor in a parameter slot -- the *nonlinear* sibling of :class:`_LinearPredictor`.
 
-    Put it in an outer family's slot and the outer family sets the link, exactly as a linear predictor makes a
+    Put one in an outer family's slot and the outer family sets the link, exactly as a linear predictor makes a
     GLM::
 
-        Categorical(logits=Net(hidden=[256], out=10))   # softmax link -> neural classification, p(y|x)
-        Normal(Net(hidden=[16], out=1), free)            # identity link + learned noise -> neural regression
+        Categorical(logits=Net(out=10))    # softmax link -> neural classification, p(y|x)
+        Categorical(logits=Conv(out=10))    # ...over image covariates, with a conv net
+        Normal(Net(out=1), free)            # identity link + learned noise -> neural regression
 
-    ``Net`` is pure shape-data (no torch in user code); the torch MLP is built lazily at fit. The input width is
+    Pure shape-data (no torch in user code); the torch module is built lazily at fit, with the input shape
     inferred from the covariates. Fit with the conditional verb, same as a GLM: ``.fit(y, given={"x": X})``.
     """
+
+    __slots__ = ()
+
+    def build(self, in_shape: Any) -> Any:  # in_shape: int (vector width) or (C, H, W) for images
+        raise NotImplementedError
+
+
+class Net(_NeuralPredictor):
+    """An MLP predictor over vector covariates. ``Net(hidden=[256], out=10)`` is a one-hidden-layer ReLU net."""
 
     __slots__ = ("field", "hidden", "out")
 
@@ -304,11 +314,12 @@ class Net:
         self.hidden = tuple(int(h) for h in hidden)
         self.out = int(out)
 
-    def build(self, in_dim: int) -> Any:
+    def build(self, in_shape: Any) -> Any:
         import torch.nn as nn
 
-        dims = [int(in_dim), *self.hidden, self.out]
-        layers: list = []
+        in_dim = int(in_shape if isinstance(in_shape, int) else int(np.prod(in_shape)))
+        dims = [in_dim, *self.hidden, self.out]
+        layers: list = [nn.Flatten()]  # accept vector or already-flat image covariates
         for i in range(len(dims) - 1):
             layers.append(nn.Linear(dims[i], dims[i + 1]))
             if i < len(dims) - 2:
@@ -317,6 +328,42 @@ class Net:
 
     def __repr__(self) -> str:
         return f"Net(field={self.field!r}, hidden={self.hidden!r}, out={self.out})"
+
+
+class Conv(_NeuralPredictor):
+    """A conv-net predictor over image covariates ``(C, H, W)``. ``Conv(channels=[64,128,256], out=10)`` is a
+    VGG-style stack (two 3x3 convs + BatchNorm + max-pool per channel stage), global-pooled into a linear head.
+    Use it exactly like :class:`Net`: ``Categorical(logits=Conv(out=10)).fit(y, given={"x": images})``."""
+
+    __slots__ = ("field", "channels", "out")
+
+    def __init__(self, field: Any = "x", *, channels: Any = (64, 128, 256), out: int = 10):
+        self.field = field if isinstance(field, str) else getattr(field, "name", "x")
+        self.channels = tuple(int(c) for c in channels)
+        self.out = int(out)
+
+    def build(self, in_shape: Any) -> Any:
+        import torch.nn as nn
+
+        c = int(in_shape[0])  # (C, H, W)
+        layers: list = []
+        prev = c
+        for ch in self.channels:
+            layers += [
+                nn.Conv2d(prev, ch, 3, padding=1),
+                nn.BatchNorm2d(ch),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(ch, ch, 3, padding=1),
+                nn.BatchNorm2d(ch),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(2),
+            ]
+            prev = ch
+        layers += [nn.AdaptiveAvgPool2d((2, 2)), nn.Flatten(), nn.Dropout(0.3), nn.Linear(prev * 4, self.out)]
+        return nn.Sequential(*layers)
+
+    def __repr__(self) -> str:
+        return f"Conv(field={self.field!r}, channels={self.channels!r}, out={self.out})"
 
 
 class _SimplexSpec:
@@ -1777,8 +1824,8 @@ class RandomVariable:
 
             return _reg.regression_fit(self, data, **kw)
 
-        # neural conditional: a Net (nonlinear predictor) in a parameter slot -> a neural-headed leaf
-        if self._kind == "sample" and any(isinstance(a, Net) for a in self._args):
+        # neural conditional: a Net/Conv (nonlinear predictor) in a parameter slot -> a neural-headed leaf
+        if self._kind == "sample" and any(isinstance(a, _NeuralPredictor) for a in self._args):
             from mixle.ppl import neural as _neu
 
             return _neu.neural_fit(self, data, **kw)

@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.ppl.core import Net
+from mixle.ppl.core import _NeuralPredictor
 
 
 class NeuralResult:
@@ -32,8 +32,8 @@ class NeuralResult:
     def _design(self, given: dict) -> np.ndarray:
         if self.field not in given:
             raise ValueError(f"needs the covariates: given={{{self.field!r}: X}}")
-        X = np.asarray(given[self.field], dtype=float)
-        return X.reshape(len(X), -1)
+        # keep the natural shape: (N, D) for an MLP, (N, C, H, W) for a conv net -- the module handles it
+        return np.asarray(given[self.field], dtype="float32")
 
     def predict(self, given: dict) -> np.ndarray:
         """Class labels (Categorical) or the conditional mean (Normal) at covariates ``given``."""
@@ -51,25 +51,36 @@ class NeuralResult:
 
 
 def neural_fit(
-    rv: Any, data: Any, *, given: dict | None = None, epochs: int = 200, lr: float = 0.01, **_: Any
+    rv: Any,
+    data: Any,
+    *,
+    given: dict | None = None,
+    epochs: int = 200,
+    lr: float = 0.01,
+    batch_size: int | None = None,
+    device: str = "cpu",
+    **_: Any,
 ) -> NeuralResult:
-    """Fit a neural-headed conditional RV. ``data`` is the response ``y``; ``given`` carries the covariates."""
+    """Fit a neural-headed conditional RV. ``data`` is the response ``y``; ``given`` carries the covariates.
+
+    ``epochs`` is the number of passes; ``batch_size`` (None = full batch) + ``device`` ("mps"/"cuda") let a
+    conv net train on a real image set on the GPU. The input keeps its natural shape -- (N, D) or (N, C, H, W).
+    """
     from mixle.inference import estimate
 
-    net = next(a for a in rv._args if isinstance(a, Net))
+    net = next(a for a in rv._args if isinstance(a, _NeuralPredictor))
     given = given or {}
     if net.field not in given:
         raise ValueError(f"neural fit needs covariates: .fit(y, given={{{net.field!r}: X}})")
-    x = np.asarray(given[net.field], dtype=float)
-    x = x.reshape(len(x), -1)
-    module = net.build(x.shape[1])
+    x = np.asarray(given[net.field], dtype="float32")
+    module = net.build(tuple(x.shape[1:]))  # (D,) for an MLP, (C, H, W) for a conv net
     fam = rv._family.name
 
     if fam == "Categorical":
         from mixle.models.softmax_leaf import SoftmaxNeuralLeaf
 
         y = np.asarray(data, dtype=int).reshape(-1)
-        leaf = SoftmaxNeuralLeaf(module, m_steps=int(epochs), lr=float(lr))
+        leaf = SoftmaxNeuralLeaf(module, m_steps=int(epochs), lr=float(lr), batch_size=batch_size, device=device)
         fitted = estimate(list(zip(x, y)), leaf.estimator())
         return NeuralResult(fitted, net.field, "categorical")
 
