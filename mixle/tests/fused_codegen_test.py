@@ -739,3 +739,41 @@ class ReducedPrecisionTest(unittest.TestCase):
         self.assertEqual(np.dtype(k_f32.compute_dtype), np.float32)
         self.assertTrue(np.array_equal(k_default.score(enc), fused_seq_log_density(m, enc)))
         self.assertTrue(np.allclose(k_f32.score(enc), fused_seq_log_density(m, enc), rtol=1e-4, atol=1e-4))
+
+    def test_float32_summed_ll_robust_on_danger_zone_families(self):
+        # The validated fp32 safety envelope: across ill-conditioned families the f64-accumulated
+        # summed log-likelihood (what EM actually consumes) stays accurate to ~1e-6 relative, even
+        # though per-row error widens. This pins the band the quantization review said was untested.
+        rng = np.random.RandomState(7)
+
+        def summed_rel_err(model):
+            enc = model.dist_to_encoder().seq_encode(model.sampler(11).sample(20000))
+            s64 = float(fused_seq_log_density(model, enc).sum())
+            s32 = float(fused_seq_log_density(model, enc, np.float32).sum())
+            return abs(s32 - s64) / max(abs(s64), 1e-12)
+
+        danger = {
+            "tiny-variance": stats.MixtureDistribution(
+                [stats.GaussianDistribution(0.0, 1e-6), stats.GaussianDistribution(1.0, 1e-6)], [0.5, 0.5]
+            ),
+            "studentt-heavy-tail": stats.MixtureDistribution(
+                [stats.StudentTDistribution(1.5, 0.0, 1.0), stats.StudentTDistribution(1.5, 3.0, 1.0)], [0.5, 0.5]
+            ),
+            "pareto-heavy-tail": stats.MixtureDistribution(
+                [stats.ParetoDistribution(1.2, 1.0), stats.ParetoDistribution(1.2, 2.0)], [0.5, 0.5]
+            ),
+            "near-degenerate": stats.MixtureDistribution(
+                [stats.GaussianDistribution(0.0, 1.0), stats.GaussianDistribution(1e-4, 1.0)], [0.5, 0.5]
+            ),
+        }
+        for name, model in danger.items():
+            self.assertLess(summed_rel_err(model), 1e-6, "fp32 summed-LL drifted on %s" % name)
+
+    def test_fused_rejects_non_float32_reduced_precision(self):
+        # numba cannot compile float16/bfloat16 or sub-byte formats on CPU -> clear error, not a numba crash.
+        rng = np.random.RandomState(8)
+        m = self._gmm(rng)
+        enc = m.dist_to_encoder().seq_encode(m.sampler(9).sample(2000))
+        with self.assertRaises(ValueError) as ctx:
+            fused_seq_log_density(m, enc, np.float16)
+        self.assertIn("float32", str(ctx.exception))
