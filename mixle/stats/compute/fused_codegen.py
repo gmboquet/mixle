@@ -1003,13 +1003,20 @@ def _component_factor_lists(model: Any, plan: FusedPlan) -> list[list[Any]]:
 
 
 def _data_and_params(
-    model: Any, plan: FusedPlan, enc: Any
+    model: Any, plan: FusedPlan, enc: Any, compute_dtype: Any = None
 ) -> tuple[list[np.ndarray], list[np.ndarray], dict[int, tuple[int, int]]]:
     """Return (flattened data arrays, param arrays, tabulated-leaf context {i: (min_x, max_x)}).
 
     Tabulated leaves additionally get a data-dependent ``(K, max_x+1)`` log-pmf table appended to the param
     arrays (right after their -- empty -- ``params()`` block, matching the order :func:`_emit` assigns), and
     their integer min/max over x recorded for ``to_value``.
+
+    When ``compute_dtype`` is a reduced float (e.g. ``np.float32``), the *floating* data and parameter
+    arrays are down-cast to it so the row arithmetic runs in that precision (DeepSeek-style low-precision
+    compute), while every accumulator -- ``acc``/``llbuf``/``out``/``comp_counts`` and the E-step
+    sufficient statistics -- stays float64 (high-precision accumulation), so the reduction does not drift
+    with N or with the number of components. Integer index arrays (categorical / tabulated lookups) are
+    left untouched. ``None`` keeps everything float64 (byte-identical to the legacy path).
     """
     factor_lists = _component_factor_lists(model, plan)
     # A Composite encodes as a per-factor tuple; a bare leaf encodes as its own payload (which may itself
@@ -1037,11 +1044,20 @@ def _data_and_params(
             table = np.ascontiguousarray(t.cat_table(comps_i, factor_encs[i]))  # type: ignore[misc]
             param_arrays.append(table)
             tab_ctx[i] = (factor_encs[i], table.shape[1])  # (encoding for to_value, C for histogram width)
+    if compute_dtype is not None and np.dtype(compute_dtype) != np.float64:
+        # Down-cast only the FLOATING arrays; integer index/lookup arrays must keep their dtype. The
+        # generated kernels promote back to the float64 accumulators on every ``acc += ...``.
+        cast = lambda a: np.ascontiguousarray(a, dtype=compute_dtype) if a.dtype.kind == "f" else a  # noqa: E731
+        data_arrays = [cast(a) for a in data_arrays]
+        param_arrays = [cast(a) for a in param_arrays]
     return data_arrays, param_arrays, tab_ctx
 
 
-def fused_seq_log_density(model: Any, enc: Any) -> np.ndarray:
+def fused_seq_log_density(model: Any, enc: Any, compute_dtype: Any = None) -> np.ndarray:
     """Per-row log densities of ``model`` over encoding ``enc`` via one fused numba pass.
+
+    ``compute_dtype`` (e.g. ``np.float32``) runs the row arithmetic in reduced precision while the
+    log-sum-exp accumulator and output stay float64; ``None`` keeps the byte-identical float64 path.
 
     Raises ``ValueError`` if ``model`` is not fusible -- callers should check :func:`fusible` first.
     """
@@ -1050,7 +1066,7 @@ def fused_seq_log_density(model: Any, enc: Any) -> np.ndarray:
         from mixle.stats.compute.fused_nested import fused_nested_seq_log_density
 
         return fused_nested_seq_log_density(model, enc)  # nested scalar tree (raises if not that either)
-    data_arrays, param_arrays, _ = _data_and_params(model, plan, enc)
+    data_arrays, param_arrays, _ = _data_and_params(model, plan, enc, compute_dtype)
     logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
     out = np.empty(data_arrays[0].shape[0], dtype=np.float64)
     llbuf = np.empty(plan.num_components, dtype=np.float64)
@@ -1075,7 +1091,9 @@ def fusible_estep(model: Any) -> bool:
     return all(hook[t.kind](t) is not None for t in plan.leaf_templates)
 
 
-def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool = False) -> Any:
+def fused_accumulate(
+    model: Any, enc: Any, weights: np.ndarray, return_ll: bool = False, compute_dtype: Any = None
+) -> Any:
     """Run one fused E-step and return the sufficient statistic in the estimator's ``value()`` format.
 
     The whole E-step -- component scoring, responsibility soft-max, and per-leaf weighted-statistic
@@ -1093,7 +1111,7 @@ def fused_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool 
     if not fusible_estep(model):
         raise ValueError("%s is not a fusible E-step (an unsupported leaf)." % type(model).__name__)
     K = plan.num_components
-    data_arrays, param_arrays, tab_ctx = _data_and_params(model, plan, enc)
+    data_arrays, param_arrays, tab_ctx = _data_and_params(model, plan, enc, compute_dtype)
 
     # per-leaf accumulator arrays, in the same leaf order the generated signature expects. data_arrays is
     # flattened by arity, so track the running offset to find each leaf's first data array.
@@ -1182,17 +1200,24 @@ class FusedKernel:
         self.dist = dist
         self.engine = engine
         self.estimator = estimator
+        # Reduced-precision row arithmetic when the engine declares a non-float64 float dtype (e.g. a
+        # ``NumpyEngine(dtype="float32", prefer_fused=True)``); None keeps the byte-identical float64 path.
+        # The default fused engine carries dtype=None, so auto-fusion never silently lowers precision.
+        edt = getattr(engine, "dtype", None)
+        self.compute_dtype = edt if edt is not None and np.dtype(edt) != np.float64 else None
         self.last_ll: float | None = None  # data LL of the last accumulate() pass (posterior normalizer)
 
     def encode(self, data: Any) -> Any:
         return self.dist.dist_to_encoder().seq_encode(data)
 
     def score(self, enc: Any) -> np.ndarray:
-        return fused_seq_log_density(self.dist, getattr(enc, "engine_payload", enc))
+        return fused_seq_log_density(self.dist, getattr(enc, "engine_payload", enc), self.compute_dtype)
 
     def accumulate(self, enc: Any, weights: Any) -> Any:
         w = np.asarray(self.engine.to_numpy(weights) if hasattr(self.engine, "to_numpy") else weights, dtype=np.float64)
-        suff, self.last_ll = fused_accumulate(self.dist, getattr(enc, "engine_payload", enc), w, return_ll=True)
+        suff, self.last_ll = fused_accumulate(
+            self.dist, getattr(enc, "engine_payload", enc), w, return_ll=True, compute_dtype=self.compute_dtype
+        )
         return suff
 
     def refresh(self, dist: Any) -> None:

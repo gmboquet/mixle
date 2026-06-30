@@ -646,3 +646,96 @@ class AutoFusionCostModelTest(unittest.TestCase):
         am = sorted(c.dists[0].mu for c in auto.components)
         hm = sorted(c.dists[0].mu for c in host.components)
         self.assertTrue(np.allclose(am, hm, atol=1e-8))
+
+
+class ReducedPrecisionTest(unittest.TestCase):
+    """Opt-in float32 row arithmetic with float64 accumulation (DeepSeek low-precision-compute pattern).
+
+    ``compute_dtype`` down-casts the floating data/params so the row math runs in reduced precision while
+    every accumulator stays float64, so the log-sum-exp and the E-step statistics do not drift with N or K.
+    ``None`` (the default, and the auto-fusion engine's dtype) is byte-identical to the legacy path.
+    """
+
+    def _gmm(self, rng, k=8, fields=8):
+        comps = [
+            stats.CompositeDistribution(
+                tuple(stats.GaussianDistribution(float(rng.randn()), float(0.5 + rng.rand())) for _ in range(fields))
+            )
+            for _ in range(k)
+        ]
+        return stats.MixtureDistribution(comps, list(rng.dirichlet(np.ones(k))))
+
+    def test_default_dtype_is_byte_identical(self):
+        rng = np.random.RandomState(0)
+        m = self._gmm(rng)
+        enc = m.dist_to_encoder().seq_encode(m.sampler(1).sample(5000))
+        # compute_dtype=None and compute_dtype=float64 must both equal the unparameterized fused path
+        base = fused_seq_log_density(m, enc)
+        self.assertTrue(np.array_equal(base, fused_seq_log_density(m, enc, None)))
+        self.assertTrue(np.array_equal(base, fused_seq_log_density(m, enc, np.float64)))
+
+    def test_float32_scores_match_float64_within_tolerance(self):
+        rng = np.random.RandomState(1)
+        m = self._gmm(rng)
+        enc = m.dist_to_encoder().seq_encode(m.sampler(2).sample(20000))
+        f64 = fused_seq_log_density(m, enc)
+        f32 = fused_seq_log_density(m, enc, np.float32)
+        self.assertTrue(np.allclose(f32, f64, rtol=1e-4, atol=1e-4))
+
+    def test_float64_accumulation_does_not_drift_over_large_n(self):
+        # The point of high-precision accumulation: summing N reduced-precision rows stays float64-accurate.
+        # A naive float32 reduction of ~2e5 terms (sum magnitude ~1e5) would drift by ~N*eps_f32 (rel ~1e-2);
+        # here the reduction is float64 so the relative error must be near float32 *element* precision.
+        rng = np.random.RandomState(2)
+        m = self._gmm(rng)
+        enc = m.dist_to_encoder().seq_encode(m.sampler(3).sample(200000))
+        s64 = float(fused_seq_log_density(m, enc).sum())
+        s32 = float(fused_seq_log_density(m, enc, np.float32).sum())
+        self.assertLess(abs(s32 - s64) / abs(s64), 1e-6)
+
+    def test_float32_estep_statistics_match_float64(self):
+        from mixle.stats.compute.fused_codegen import fused_accumulate
+
+        rng = np.random.RandomState(3)
+        m = self._gmm(rng)
+        enc = m.dist_to_encoder().seq_encode(m.sampler(4).sample(20000))
+        w = np.ones(20000)
+        (counts64, _comp64), ll64 = fused_accumulate(m, enc, w, return_ll=True)
+        (counts32, _comp32), ll32 = fused_accumulate(m, enc, w, return_ll=True, compute_dtype=np.float32)
+        self.assertLess(abs(ll32 - ll64) / abs(ll64), 1e-6)  # data-LL is the float64-accumulated normalizer
+        self.assertTrue(np.allclose(np.asarray(counts32), np.asarray(counts64), rtol=1e-3, atol=1e-2))
+
+    def test_integer_index_leaves_are_not_downcast(self):
+        # Categorical / tabulated leaves carry INTEGER index arrays; reduced precision must leave them intact
+        # (only floating arrays are cast). A Poisson + Categorical mixture exercises both.
+        rng = np.random.RandomState(4)
+        k = 4
+        comps = [
+            stats.CompositeDistribution(
+                (
+                    stats.PoissonDistribution(float(1 + 5 * rng.rand())),
+                    stats.CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2}),
+                )
+            )
+            for _ in range(k)
+        ]
+        m = stats.MixtureDistribution(comps, list(rng.dirichlet(np.ones(k))))
+        enc = m.dist_to_encoder().seq_encode(m.sampler(5).sample(10000))
+        f64 = fused_seq_log_density(m, enc)
+        f32 = fused_seq_log_density(m, enc, np.float32)
+        self.assertTrue(np.allclose(f32, f64, rtol=1e-4, atol=1e-4))
+
+    def test_fused_kernel_takes_precision_from_engine(self):
+        from mixle.engines import NumpyEngine
+        from mixle.stats.compute.fused_codegen import FusedKernel
+
+        rng = np.random.RandomState(6)
+        m = self._gmm(rng)
+        enc = m.dist_to_encoder().seq_encode(m.sampler(7).sample(5000))
+        # default fused engine -> None (auto-fusion never silently lowers precision); float32 engine -> float32
+        k_default = FusedKernel(m, NumpyEngine(prefer_fused=True))
+        k_f32 = FusedKernel(m, NumpyEngine(dtype="float32", prefer_fused=True))
+        self.assertIsNone(k_default.compute_dtype)
+        self.assertEqual(np.dtype(k_f32.compute_dtype), np.float32)
+        self.assertTrue(np.array_equal(k_default.score(enc), fused_seq_log_density(m, enc)))
+        self.assertTrue(np.allclose(k_f32.score(enc), fused_seq_log_density(m, enc), rtol=1e-4, atol=1e-4))
