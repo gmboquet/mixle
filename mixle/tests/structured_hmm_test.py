@@ -541,3 +541,26 @@ class EDHMMDecodingTest(unittest.TestCase):
         for st, _, d in segs:
             recovered += [st] * d
         self.assertEqual(recovered[: len(true_states)], true_states)  # exact state path
+
+
+class EDHMMPosteriorTest(unittest.TestCase):
+    def test_state_posteriors_and_decode(self):
+        from mixle.stats.latent.structured_hmm import ExplicitDurationHMM
+
+        D = 6
+        dur = np.zeros((2, D))
+        dur[0, 3] = 1.0
+        dur[1, 1] = 1.0
+        m = ExplicitDurationHMM(
+            [S.GaussianDistribution(-6, 0.4), S.GaussianDistribution(6, 0.4)],
+            [1.0, 0.0],
+            np.array([[0, 1.0], [1.0, 0]]),
+            dur,
+            D,
+        )
+        rng = np.random.RandomState(0)
+        true = [0] * 4 + [1] * 2 + [0] * 4 + [1] * 2
+        seq = [float(rng.normal([-6, 6][s], 0.4)) for s in true]
+        g = m.state_posteriors(seq)
+        self.assertTrue(np.allclose(g.sum(axis=1), 1.0))
+        self.assertTrue(np.array_equal(m.posterior_decode(seq), np.array(true)))
