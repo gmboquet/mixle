@@ -81,3 +81,37 @@ def bitpacked_kernels_available() -> bool:
         return True
     except ImportError:
         return False
+
+
+def compile_lns_kernel(force: bool = False) -> str:
+    """Cythonize + compile ``_lns_kernel.pyx`` (the integer log-sum-exp tree fold) in place."""
+    import numpy
+    from Cython.Build import cythonize
+    from setuptools import Extension
+    from setuptools.dist import Distribution
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    ext = Extension(
+        "mixle.engines._lns_kernel",
+        [os.path.join(here, "_lns_kernel.pyx")],
+        include_dirs=[numpy.get_include()],
+        extra_compile_args=["-O3", "-mcpu=native"],
+    )
+    exts = cythonize([ext], quiet=True, compiler_directives={"language_level": "3"}, force=force)
+    dist = Distribution({"ext_modules": exts})
+    cmd = dist.get_command_obj("build_ext")
+    cmd.inplace = 1
+    cmd.ensure_finalized()
+    cmd.run()
+    built = [f for f in os.listdir(here) if f.startswith("_lns_kernel") and f.endswith((".so", ".pyd"))]
+    return os.path.join(here, built[0]) if built else ""
+
+
+def lns_kernel_available() -> bool:
+    """True if the compiled integer log-sum-exp kernel is importable."""
+    try:
+        import mixle.engines._lns_kernel  # noqa: F401
+
+        return True
+    except ImportError:
+        return False

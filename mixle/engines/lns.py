@@ -25,6 +25,13 @@ from typing import Any
 
 import numpy as np
 
+try:  # optional compiled one-pass tree kernel for the integer log-sum-exp (bit-identical, ~8x)
+    from mixle.engines._lns_kernel import logsumexp_rows as _logsumexp_rows_c
+
+    _HAS_LNS_KERNEL = True
+except ImportError:  # pragma: no cover - extension optional
+    _HAS_LNS_KERNEL = False
+
 
 class LogNumberSystem:
     """Quantize log-space values to integers in units of ``step = ln(C)`` and compute on the integers."""
@@ -67,8 +74,15 @@ class LogNumberSystem:
         return np.maximum(k1, k2) + self.lut[d]
 
     def logsumexp(self, k: Any, axis: int = -1) -> np.ndarray:
-        """Integer log-sum-exp along ``axis`` via a pairwise tree of :meth:`logadd` (no exp/log)."""
-        k = np.moveaxis(np.asarray(k, dtype=np.int64), axis, -1).copy()
+        """Integer log-sum-exp along ``axis`` via a pairwise tree of :meth:`logadd` (no exp/log).
+
+        Uses the compiled one-pass tree kernel for the common 2-D last-axis reduction when available
+        (bit-identical to the numpy tree, ~8x faster); falls back to vectorized numpy otherwise.
+        """
+        arr = np.asarray(k, dtype=np.int64)
+        if _HAS_LNS_KERNEL and arr.ndim == 2 and axis in (-1, 1) and arr.shape[1] > 0:
+            return _logsumexp_rows_c(np.ascontiguousarray(arr), self.lut, self.dmax)
+        k = np.moveaxis(arr, axis, -1).copy()
         while k.shape[-1] > 1:
             if k.shape[-1] & 1:
                 tail, k = k[..., -1:], k[..., :-1]
