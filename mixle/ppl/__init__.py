@@ -34,6 +34,7 @@ from mixle.ppl.conformal import (
 )
 from mixle.ppl.core import (
     Constraint,
+    Conv,
     Event,
     Field,
     Group,
@@ -183,6 +184,7 @@ __all__ = [
     "Nakagami",
     "Rician",
     "Dirichlet",
+    "Conv",
     "Mix",
     "Net",
     "SemiMix",

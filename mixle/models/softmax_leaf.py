@@ -43,22 +43,40 @@ def _log_softmax(logits: np.ndarray) -> np.ndarray:
 
 
 class SoftmaxNeuralLeaf(SequenceEncodableProbabilityDistribution):
-    """``p(y | x) = softmax(module(x))`` as a mixle leaf. Observation is the pair ``(x, y)``, ``y`` an int class."""
+    """``p(y | x) = softmax(module(x))`` as a mixle leaf. Observation is the pair ``(x, y)``, ``y`` an int class.
 
-    def __init__(self, module: Any, m_steps: int = 40, lr: float = 0.01, name: str | None = None) -> None:
+    ``batch_size`` (None = full batch) makes the M-step minibatch SGD over ``m_steps`` passes -- needed to train a
+    real conv net on a large image set; ``device`` (e.g. ``"mps"``/``"cuda"``) runs it on the GPU.
+    """
+
+    def __init__(
+        self,
+        module: Any,
+        m_steps: int = 40,
+        lr: float = 0.01,
+        name: str | None = None,
+        batch_size: int | None = None,
+        device: str = "cpu",
+    ) -> None:
         self.module = module
         self.m_steps = int(m_steps)
         self.lr = float(lr)
         self.name = name
+        self.batch_size = None if batch_size is None else int(batch_size)
+        self.device = device
 
     def __str__(self) -> str:
         return "SoftmaxNeuralLeaf()"
 
     def _logits(self, x: np.ndarray) -> np.ndarray:
         torch = _torch()
+        self.module.to(self.device)
+        out = []
         with torch.no_grad():
-            out = self.module(torch.as_tensor(np.atleast_2d(x), dtype=torch.float32))
-        return np.atleast_2d(out.detach().cpu().numpy())
+            xt = torch.as_tensor(np.atleast_2d(x), dtype=torch.float32)
+            for k in range(0, xt.shape[0], 4096):  # chunked so a large image set fits in GPU memory
+                out.append(self.module(xt[k : k + 4096].to(self.device)).detach().cpu().numpy())
+        return np.atleast_2d(np.concatenate(out))
 
     def log_density(self, xy: Any) -> float:
         x, y = xy
@@ -78,7 +96,7 @@ class SoftmaxNeuralLeaf(SequenceEncodableProbabilityDistribution):
         return SoftmaxNeuralLeafSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> SoftmaxNeuralLeafEstimator:
-        return SoftmaxNeuralLeafEstimator(self.module, self.m_steps, self.lr, self.name)
+        return SoftmaxNeuralLeafEstimator(self.module, self.m_steps, self.lr, self.name, self.batch_size, self.device)
 
     def dist_to_encoder(self) -> SoftmaxNeuralLeafEncoder:
         return SoftmaxNeuralLeafEncoder()
@@ -165,11 +183,21 @@ class SoftmaxNeuralLeafEstimator(ParameterEstimator):
     responsibility magnitude (the easy bug: an unnormalized weighted loss makes the step size track cluster size).
     """
 
-    def __init__(self, module: Any, m_steps: int = 40, lr: float = 0.01, name: str | None = None) -> None:
+    def __init__(
+        self,
+        module: Any,
+        m_steps: int = 40,
+        lr: float = 0.01,
+        name: str | None = None,
+        batch_size: int | None = None,
+        device: str = "cpu",
+    ) -> None:
         self.module = module
         self.m_steps = int(m_steps)
         self.lr = float(lr)
         self.name = name
+        self.batch_size = None if batch_size is None else int(batch_size)
+        self.device = device
 
     def accumulator_factory(self) -> SoftmaxNeuralLeafAccumulatorFactory:
         return SoftmaxNeuralLeafAccumulatorFactory()
@@ -177,17 +205,27 @@ class SoftmaxNeuralLeafEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple) -> SoftmaxNeuralLeaf:
         torch = _torch()
         xs, ys, ws = suff_stat
+        out = SoftmaxNeuralLeaf(self.module, self.m_steps, self.lr, self.name, self.batch_size, self.device)
         if not xs:
-            return SoftmaxNeuralLeaf(self.module, self.m_steps, self.lr, self.name)
+            return out
+        dev = self.device
+        self.module.to(dev)
+        # data stays on CPU (a large image set won't fit on the GPU); each minibatch is moved to the device
         xt = torch.as_tensor(np.array(xs), dtype=torch.float32)
         yt = torch.as_tensor(np.array(ys), dtype=torch.long)
         wt = torch.as_tensor(np.array(ws), dtype=torch.float32)
-        wsum = float(wt.sum()) + 1e-8
+        n = xt.shape[0]
+        bs = self.batch_size or n
         opt = torch.optim.Adam(self.module.parameters(), lr=self.lr)
         ce = torch.nn.CrossEntropyLoss(reduction="none")
-        for _ in range(self.m_steps):
-            opt.zero_grad()
-            loss = (wt * ce(self.module(xt), yt)).sum() / wsum
-            loss.backward()
-            opt.step()
-        return SoftmaxNeuralLeaf(self.module, self.m_steps, self.lr, self.name)
+        for _ in range(self.m_steps):  # m_steps passes over the data (full-batch when batch_size is None)
+            perm = torch.randperm(n) if bs < n else torch.arange(n)
+            for k in range(0, n, bs):
+                idx = perm[k : k + bs]
+                xb, yb, wb = xt[idx].to(dev), yt[idx].to(dev), wt[idx].to(dev)
+                opt.zero_grad()
+                # responsibility-weighted CE, normalized by the batch's responsibility mass (scale-invariant)
+                loss = (wb * ce(self.module(xb), yb)).sum() / (wb.sum() + 1e-8)
+                loss.backward()
+                opt.step()
+        return out

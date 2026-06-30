@@ -73,6 +73,18 @@ class NeuralPPLTest(unittest.TestCase):
         fit = Normal(Net(hidden=[16], out=1), free).fit(y, given={"x": x}, epochs=150)
         self.assertGreater(fit.score(y, given={"x": x}), 0.9)
 
+    def test_declarative_conv_classifier_minibatch(self):
+        # a conv net over image covariates, trained by minibatch SGD -- still three closure-free lines
+        from mixle.ppl import Categorical, Conv
+
+        torch.manual_seed(0)
+        rng = np.random.RandomState(3)
+        imgs = rng.randn(300, 3, 8, 8).astype("float32")
+        y = (imgs[:, 0].mean((1, 2)) + 0.5 * imgs[:, 1].mean((1, 2)) > 0).astype(int)
+        fit = Categorical(logits=Conv(channels=[8, 16], out=2)).fit(y, given={"x": imgs}, epochs=40, batch_size=64)
+        self.assertGreater(fit.score(y, given={"x": imgs}), 0.9)
+        self.assertEqual(len(np.atleast_1d(fit.predict(given={"x": imgs[:5]}))), 5)
+
 
 if __name__ == "__main__":
     unittest.main()
