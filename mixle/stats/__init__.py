@@ -1263,9 +1263,9 @@ from mixle.stats.latent.semi_supervised_mixture import (
 from mixle.stats.latent.structured_hmm import (
     BlockDiagonalTransition,
     DenseTransition,
+    InputOutputHMM,
     KroneckerTransition,
     LowRankTransition,
-    InputOutputHMM,
     SparseTransition,
     StructuredHMM,
     StructuredHMMDataEncoder,
