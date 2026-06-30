@@ -99,3 +99,68 @@ def sparse_mixture_score(mixture: Any, x: Any, max_components: int) -> SparseSco
     tail_upper = _logsumexp([float(log_w[k]) + float(sups[k]) for k in drop]) if drop else float("-inf")
     upper = _logsumexp([lower, tail_upper])
     return SparseScore(lower, upper, not drop, len(keep))
+
+
+def collapse_identical(mixture: Any) -> Any:
+    """Merge components that are identical (same family + parameters) by summing their weights -- EXACT.
+
+    A fitted huge mixture often carries duplicate components; pooling exact duplicates leaves ``log p(x)``
+    unchanged while shrinking K. Identity is keyed on the component's string form (which encodes its
+    parameters). 'Blend a mixture of closed forms' with zero approximation.
+    """
+    from mixle.stats.latent.mixture import MixtureDistribution
+
+    comps = list(mixture.components)
+    w = np.asarray(mixture.w, dtype=np.float64)
+    groups: dict[str, list[int]] = {}
+    order: list[str] = []
+    for k, c in enumerate(comps):
+        key = str(c)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(k)
+    new_comps = [comps[groups[key][0]] for key in order]
+    new_w = [float(sum(float(w[k]) for k in groups[key])) for key in order]
+    return MixtureDistribution(new_comps, new_w)
+
+
+def _merge_gaussians(comps: list[Any], weights: list[float]) -> tuple[Any, float]:
+    """Moment-match a weighted group of Gaussians to one Gaussian preserving combined weight/mean/var."""
+    import mixle.stats as st
+
+    w = np.asarray(weights, dtype=np.float64)
+    wt = float(w.sum())
+    mus = np.array([float(c.mu) for c in comps])
+    s2 = np.array([float(c.sigma2) for c in comps])
+    mu = float((w * mus).sum() / wt)
+    var = float((w * (s2 + mus**2)).sum() / wt - mu**2)
+    return st.GaussianDistribution(mu, max(var, 1e-12)), wt
+
+
+def collapse_gaussian_mixture(mixture: Any, max_components: int) -> Any:
+    """Reduce an all-Gaussian mixture to ``<= max_components`` by moment-matching the nearest pair.
+
+    Greedily merges the two closest components (by mean) into the single Gaussian preserving their
+    combined weight, mean, and variance, until ``max_components`` remain. Approximate (it widens), but it
+    preserves the OVERALL mixture mean and variance exactly -- the analytic 'collapse a huge mixture of
+    closed forms' that lets scoring/sampling scale.
+    """
+    from mixle.stats.latent.mixture import MixtureDistribution
+
+    comps = list(mixture.components)
+    w = [float(x) for x in mixture.w]
+    if any(type(c).__name__ != "GaussianDistribution" for c in comps):
+        raise ValueError("collapse_gaussian_mixture requires all-Gaussian components")
+    while len(comps) > max_components:
+        best = None
+        for i in range(len(comps)):
+            for j in range(i + 1, len(comps)):
+                d = abs(float(comps[i].mu) - float(comps[j].mu))
+                if best is None or d < best[0]:
+                    best = (d, i, j)
+        _, i, j = best  # type: ignore[misc]
+        merged, wt = _merge_gaussians([comps[i], comps[j]], [w[i], w[j]])
+        comps = [c for k, c in enumerate(comps) if k not in (i, j)] + [merged]
+        w = [x for k, x in enumerate(w) if k not in (i, j)] + [wt]
+    return MixtureDistribution(comps, w)
