@@ -53,12 +53,48 @@ def distill(
     (else inferred from the teacher's outputs). The student's train-set agreement with the teacher is recorded
     in ``meta``.
     """
+    texts = [str(t) for t in texts]
+    teacher_labels = _as_batched(teacher)(texts)
+    return distill_from_labels(
+        texts,
+        teacher_labels,
+        labels=labels,
+        n=n,
+        dim=dim,
+        hidden=hidden,
+        epochs=epochs,
+        lr=lr,
+        seed=seed,
+        task=task,
+        device=device,
+    )
+
+
+def distill_from_labels(
+    texts: Sequence[str],
+    teacher_labels: Sequence[Any],
+    *,
+    labels: Sequence[str] | None = None,
+    n: int = 3,
+    dim: int = 256,
+    hidden: Sequence[int] = (64,),
+    epochs: int = 200,
+    lr: float = 1e-2,
+    seed: int = 0,
+    task: str = "",
+    device: str = "cpu",
+) -> TaskModel:
+    """Fit a student from already-labeled ``(texts, teacher_labels)`` -- the teacher-free training core of ``distill``.
+
+    Active labeling (:mod:`mixle.task.active`) uses this to avoid re-querying the teacher: it controls exactly
+    which examples were paid for and passes their labels straight in. ``labels`` fixes the label set so a student
+    trained on a partial sample still spans every class.
+    """
     import torch
 
     from mixle.models.neural import make_mlp
 
     texts = [str(t) for t in texts]
-    teacher_labels = _as_batched(teacher)(texts)
     label_list = list(labels) if labels is not None else sorted({str(y) for y in teacher_labels})
     label_index = {y: i for i, y in enumerate(label_list)}
     y = np.asarray([label_index[str(t)] for t in teacher_labels], dtype=np.int64)
