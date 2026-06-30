@@ -637,3 +637,38 @@ class HSMMExpansionTest(unittest.TestCase):
         rng = np.random.RandomState(0)
         seq = [float(x) for x in rng.normal(0, 2, 6)]
         self.assertLessEqual(restricted.seq_log_density([seq])[0], free.seq_log_density([seq])[0] + 1e-9)
+
+
+class HSMMEnumerationTest(unittest.TestCase):
+    def _edhmm(self):
+        from mixle.stats.latent.structured_hmm import ExplicitDurationHMM
+
+        dur = np.array([[0.3, 0.5, 0.2], [0.6, 0.3, 0.1]])
+        emis = [S.CategoricalDistribution({0: 0.7, 1: 0.3}), S.CategoricalDistribution({0: 0.2, 1: 0.8})]
+        return ExplicitDurationHMM(emis, [0.6, 0.4], np.array([[0, 1.0], [1.0, 0]]), dur, 3)
+
+    def test_enumeration_matches_brute_force(self):
+        import itertools
+
+        m = self._edhmm()
+        ld = S.CategoricalDistribution({2: 0.5, 3: 0.5})
+        hmm = m.to_structured_hmm(len_dist=ld)
+        enum = m.enumerator(ld).top_k(12)
+
+        brute = []
+        for length in (2, 3):
+            for seq in itertools.product([0, 1], repeat=length):
+                lp = float(hmm.seq_log_density([list(seq)])[0]) + float(ld.log_density(length))
+                brute.append((list(seq), lp))
+        brute.sort(key=lambda x: -x[1])
+
+        for i in range(min(len(enum), len(brute))):
+            self.assertEqual(enum[i][0], brute[i][0])  # same order
+            self.assertAlmostEqual(enum[i][1], brute[i][1], places=9)  # same probability
+        self.assertTrue(all(enum[i][1] >= enum[i + 1][1] - 1e-12 for i in range(len(enum) - 1)))  # descending
+
+    def test_enumerated_prob_equals_forward_loglik_plus_len(self):
+        m = self._edhmm()
+        ld = S.CategoricalDistribution({2: 0.5, 3: 0.5})
+        seq, logp = m.enumerator(ld).top_k(1)[0]
+        self.assertAlmostEqual(logp, m.forward_loglik(seq) + float(ld.log_density(len(seq))), places=9)
