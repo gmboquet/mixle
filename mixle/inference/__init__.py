@@ -42,6 +42,8 @@ from mixle.inference.calibration import (
     top_label_confidence,
 )
 from mixle.inference.conformal import (
+    conformal_label_sets,
+    conformal_label_threshold,
     cv_plus,
     jackknife_plus,
     mondrian_conformal,
@@ -354,6 +356,8 @@ __all__ = [
     "cv_plus",
     "mondrian_conformal",
     "weighted_conformal",
+    "conformal_label_threshold",
+    "conformal_label_sets",
     # cross-validation fold generators (i.i.d., grouped, temporal, spatial-block, nested)
     "kfold",
     "blocked_kfold",
