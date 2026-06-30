@@ -177,6 +177,18 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(engine.with_precision("float64").dtype, torch.float64)
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_mps_engine_falls_back_to_float32(self):
+        # MPS has no float64; the engine must downgrade so torch-ready families run on Apple-silicon GPUs.
+        # torch.device("mps") is constructible regardless of whether MPS is actually available, so this
+        # exercises the policy on any host (incl. CPU-only CI).
+        mps = TorchEngine(device="mps")
+        self.assertEqual(mps.dtype, torch.float32)
+        self.assertEqual(mps.accumulator_dtype, torch.float32)
+        self.assertEqual(TorchEngine(device="mps", dtype="float64").dtype, torch.float32)  # explicit f64 downgraded
+        # CPU/CUDA keep full precision
+        self.assertEqual(TorchEngine(device="cpu").accumulator_dtype, torch.float64)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_mixed_engine_payload_fails(self):
         payload = (np.asarray([1.0]), torch.tensor([1.0]))
         with self.assertRaises(TypeError):
