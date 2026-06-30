@@ -596,3 +596,44 @@ class NumbaFastFitTest(unittest.TestCase):
         self.assertTrue(
             np.allclose(sorted(e.mu for e in hf.emissions), sorted(e.mu for e in hs.emissions), atol=1e-6)
         )  # numba fast path is the SAME EM, just faster
+
+
+class HSMMExpansionTest(unittest.TestCase):
+    def _edhmm(self):
+        from mixle.stats.latent.structured_hmm import ExplicitDurationHMM
+
+        dur = np.array([[0.1, 0.3, 0.4, 0.2], [0.5, 0.3, 0.1, 0.1]])
+        return ExplicitDurationHMM(
+            [S.GaussianDistribution(-2, 1), S.GaussianDistribution(2, 1)],
+            [0.6, 0.4],
+            np.array([[0, 1.0], [1.0, 0]]),
+            dur,
+            4,
+        )
+
+    def test_expansion_likelihood_matches_edhmm_exactly(self):
+        m = self._edhmm()
+        rng = np.random.RandomState(0)
+        seq = [float(x) for x in rng.normal(0, 2, 9)]
+        exp = m.to_structured_hmm()
+        self.assertEqual(exp.K, 2 * 4)  # K*D sub-states
+        self.assertAlmostEqual(m.forward_loglik(seq), float(exp.seq_log_density([seq])[0]), places=9)
+
+    def test_expansion_enables_viterbi_over_substates(self):
+        m = self._edhmm()
+        rng = np.random.RandomState(1)
+        seq = [float(x) for x in rng.normal(0, 2, 9)]
+        exp = m.to_structured_hmm()
+        base_path = [int(v // m.D) for v in exp.viterbi(seq)]  # sub-state -> base state
+        self.assertEqual(len(base_path), len(seq))
+        self.assertTrue(all(0 <= s < m.K for s in base_path))
+
+    def test_final_states_restrict_the_ending(self):
+        # a StructuredHMM with final_states must end in one of them; loglik <= the unrestricted loglik
+        a = _row_normalize(np.array([[0.6, 0.4], [0.4, 0.6]]))
+        emis = [S.GaussianDistribution(-2, 1), S.GaussianDistribution(2, 1)]
+        free = StructuredHMM(emis, [0.5, 0.5], DenseTransition(a))
+        restricted = StructuredHMM(emis, [0.5, 0.5], DenseTransition(a), final_states={0})
+        rng = np.random.RandomState(0)
+        seq = [float(x) for x in rng.normal(0, 2, 6)]
+        self.assertLessEqual(restricted.seq_log_density([seq])[0], free.seq_log_density([seq])[0] + 1e-9)
