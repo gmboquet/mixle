@@ -6,14 +6,14 @@
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![tests](https://img.shields.io/badge/tests-2700%2B-brightgreen)
 
-**Automatic inference for composable models of heterogeneous data.** A single observation can be a
-tuple of a category, a real, a count sequence, a vector, a set, or a tree — and mixle fits a
-probabilistic model to a dataset of them, *choosing the inference from the model itself* (conjugate /
-EM / MAP / variational / MCMC), locally on vectorized NumPy/Numba or distributed across Spark, Dask,
-Ray, MPI, or Torch (GPU).
+**Compose a Transformer, a Gaussian, and a latent structure into one model — and fit them together.**
+In mixle every model is a *distribution* with the same five-piece contract, so a neural language model, a
+classical density, and a mixture (or HMM) snap into one object you fit with a single call. The inference
+follows from the structure you built — conjugate, EM, MAP, variational, or MCMC — and the same fit runs
+locally on NumPy / Numba / GPU or scales out across Spark, Dask, Ray, or MPI by a `backend=` argument.
 
-The unit of composition is the distribution: leaves (Gaussian, categorical, Poisson, …) combine into
-tuples, tuples become mixture components, mixtures become HMM emissions, to any depth. A model and the
+The unit of composition is the distribution: leaves (a Transformer LM, a Gaussian, a Poisson, …) combine
+into tuples, tuples become mixture components, mixtures become HMM emissions, to any depth. A model and the
 estimator that fits it have the same shape — so **what you can express, you can fit**.
 
 ## Contents
@@ -51,8 +51,30 @@ Development: `git clone … && pip install -e ".[all]"`.
 
 ## Quickstart
 
-Each record here is a `(category, real, variable-length count sequence)`. Fit a two-component mixture
-straight from a list of records:
+**A hybrid in one fit.** Compose a Transformer language model with a classical Gamma and train them
+*together*. Each event pairs text with a number — say an incident's log message and how long it took to
+resolve — and a mixture puts a few latent event *types* over the whole pair:
+
+```python
+from mixle.models import LM, StreamingTransformerLeaf
+from mixle.stats import MixtureEstimator, CompositeEstimator, GammaEstimator
+from mixle.inference import optimize
+
+def event_type():                                            # one latent kind of event:
+    lm = LM(vocab=8000, d_model=256, n_layer=6, block=128)   #   a small causal Transformer …
+    text = StreamingTransformerLeaf(lm.module).estimator()   #   … exposed as a generative leaf
+    return CompositeEstimator((text, GammaEstimator()))      #   p(text) × p(latency), one component
+
+# One call runs EM: every Transformer and every Gamma trains together, and an event's score
+# is just transformer(text) + gamma(latency). Swap GammaEstimator for any of ~90 families.
+model = optimize(events, MixtureEstimator([event_type(), event_type(), event_type()]))
+```
+
+The language model and the classical density are the *same kind of object* — a distribution — so they
+compose and fit through one interface (runnable: [`examples/hybrid_llm_example.py`](https://github.com/gmboquet/mixle/blob/main/examples/hybrid_llm_example.py)).
+
+The same machinery fits an ordinary heterogeneous record just as well — each here is a
+`(category, real, variable-length count sequence)`:
 
 ```python
 from mixle.stats import *
@@ -317,6 +339,10 @@ e.seek(10_000)    # the ~10,000th most probable value, by structural count-DP
 - **Design & analysis of experiments** (`mixle.doe`): space-filling designs, GP Bayesian optimization,
   and the analysis half — Sobol/Morris sensitivity, uncertainty propagation, Kennedy-O'Hagan calibration.
 - **Embeddings** (`mixle.utils.hvis`): model-based t-SNE / UMAP over per-record posteriors.
+- **Neural & language leaves** (`mixle.models`): a causal-Transformer LM (`LM` / `StreamingTransformerLeaf`),
+  neural experts (`NeuralLeaf`, `SoftmaxNeuralLeaf`), and preference-tuned (`DPOLeaf`) leaves — each a
+  distribution that composes into mixtures / composites / HMM emissions and trains by EM (the E-step
+  weights it; its M-step is gradient descent on the net). GPU/distributed pretraining via `LM.fit`.
 - **Supervised & non-iid models** (`mixle.models`): GP regression, neural regressors, random forests
   (a conditional `p(y | x)` leaf), random graphs, grammars, knowledge graphs.
 - **MLOps** (`mixle.inference.production`): reproducible model artifacts (`fit_with_provenance` → a
@@ -332,6 +358,7 @@ Self-contained scripts in [examples/](https://github.com/gmboquet/mixle/tree/mai
 
 ```sh
 cd examples
+python hybrid_llm_example.py            # a Transformer LM × a Gamma, composed and fit together by EM
 python gallery_univariate_example.py    # tour the scalar families (also gallery_{multivariate,combinators,…})
 python gallery_structured_example.py    # mixtures / HMMs / LDA / latent-variable models
 python ppl_example.py                   # the equation-style mixle.ppl surface
