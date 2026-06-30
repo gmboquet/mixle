@@ -580,6 +580,10 @@ def optimize(
         precision (Optional[Any]): Optional floating-point precision such as ``'float32'`` or ``np.float64``.
             Pass ``'auto'`` to let ``mixle.engines.auto_precision`` choose from the data and engine:
             float32 only on a GPU torch engine with well-conditioned numeric data, else float64.
+            Pass ``'minimal'`` for the data-aware CPU allocator (``mixle.inference.precision_plan``): it
+            inspects the data magnitude and the model's leaf families/conditioning and runs the reduced
+            float32 fused kernel where verified safe (accumulation stays float64), else float64 -- the
+            "preserve accuracy with minimal compute" default for local fits.
         fields (Optional[Any]): DataFrame column/field selection. A single field yields scalar observations; several
             fields yield tuple observations unless the estimator/model is record-shaped, in which case dict records
             are produced by source column name.
@@ -632,7 +636,18 @@ def optimize(
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
     rng = RandomState() if rng is None else rng
-    if precision == "auto":
+    if precision == "minimal":
+        # Data-aware allocation: inspect the data + model and run the reduced-precision fused kernel only
+        # where it is verified safe; else stay float64. The accumulation is float64 either way.
+        from mixle.inference.precision_plan import recommend_compute_precision
+
+        plan = recommend_compute_precision(prev_estimate, data)
+        if plan.reduced() and engine is None:
+            from mixle.engines import NumpyEngine
+
+            engine = NumpyEngine(dtype=plan.compute_dtype, prefer_fused=True)
+        precision = None  # carried by the explicit engine (or the default float64 host path)
+    elif precision == "auto":
         from mixle.engines import auto_precision
 
         precision = auto_precision(data, engine=engine)
