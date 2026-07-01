@@ -24,6 +24,7 @@ from typing import Any
 
 from mixle.inference.belief import BeliefState, GaussianBelief, as_belief
 from mixle.reason.core import Evidence, Latent, LinearGaussianEvidence, ReasonedAnswer, reason
+from mixle.reason.store import CrossModalStore, RetrievalStep
 
 __all__ = [
     "reason",
@@ -34,6 +35,8 @@ __all__ = [
     "GaussianBelief",
     "BeliefState",
     "as_belief",
+    "CrossModalStore",
+    "RetrievalStep",
     "AmortizedEncoder",
 ]
 
