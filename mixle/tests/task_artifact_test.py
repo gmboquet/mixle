@@ -71,6 +71,7 @@ class TorchRoundTripTest(unittest.TestCase):
             A.save_module(path, module, "mixle.mlp", cfg)
             out_file = os.path.join(d, "out.json")
             script = (
+                "import torch; torch.set_num_threads(1)\n"
                 "import json, numpy as np, torch\n"
                 "from mixle.task import artifact as A\n"
                 f"m,_ = A.load_module({path!r})\n"
