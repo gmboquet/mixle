@@ -55,9 +55,13 @@ class HeterogeneousEncoder:
 
     def register(self, modality: str, segmenter: Any, embedding: Any) -> HeterogeneousEncoder:
         """Add a modality's ``(segmenter, embedding)``; the embedding's ``dim`` must match the shared space."""
-        if int(embedding.dim) != self.dim:
-            raise ValueError(f"modality {modality!r} dim {embedding.dim} != shared dim {self.dim}")
-        self.encoders[modality] = ModalityEncoder(segmenter, embedding)
+        return self.register_encoder(modality, ModalityEncoder(segmenter, embedding))
+
+    def register_encoder(self, modality: str, encoder: ModalityEncoder) -> HeterogeneousEncoder:
+        """Add a pre-built :class:`ModalityEncoder` (e.g. a ``GraphEncoder`` that owns its own segment+embed path)."""
+        if int(encoder.dim) != self.dim:
+            raise ValueError(f"modality {modality!r} dim {encoder.dim} != shared dim {self.dim}")
+        self.encoders[modality] = encoder
         self._modality_ids.setdefault(modality, len(self._modality_ids))
         self._modality_embedding = None  # invalidate: modality count changed
         return self
