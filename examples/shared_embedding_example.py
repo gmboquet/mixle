@@ -1,7 +1,7 @@
 """A learned embedding, declared once and shared across models -- so a mixture of LMs ties one word embedding.
 
 If the per-cluster experts of a mixture-of-language-models each learn their own token vectors, they duplicate a
-big parameter block and can't pool what a word *means* across the mixture. ``SharedEmbedding`` (``mixle.ppl.Embedding``
+big parameter block and can't pool what a word *means* across the mixture. ``CategoricalEmbedding`` (``mixle.ppl.Embedding``
 in the PPL) declares one embedding and hands the same module to every model that references it -- the neural
 analogue of the PPL's ``name=`` scalar tying. This shows the mixture the README builds, but with the word
 embedding shared across its experts.
@@ -11,7 +11,7 @@ Run: ``python shared_embedding_example.py``  (needs ``pip install "mixle[torch]"
 
 from __future__ import annotations
 
-from mixle.models import SharedEmbedding, StreamingTransformerLeaf
+from mixle.models import CategoricalEmbedding, TransformerLMEstimator
 from mixle.stats import MixtureEstimator
 
 
@@ -33,21 +33,21 @@ def main() -> None:
     vocab, dim, n_experts = 8000, 256, 3
 
     def expert(embedding=None):
-        return StreamingTransformerLeaf.from_config(vocab, d_model=dim, n_layer=4, block=64, embedding=embedding)
+        return TransformerLMEstimator(vocab, d_model=dim, n_layer=4, block=64, embedding=embedding)
 
     print(f"a mixture of {n_experts} language-model experts over a {vocab}-word vocabulary\n")
 
     # independent experts: each learns its own word embedding
     indep = [expert() for _ in range(n_experts)]
     print("independent embeddings:")
-    print(f"   total parameters: {unique_params(m.module for m in indep):,}")
+    print(f"   total parameters: {unique_params(e.module for e in indep):,}")
 
     # shared embedding: one word embedding, tied across all experts
-    emb = SharedEmbedding(vocab=vocab, dim=dim, name="word")
+    emb = CategoricalEmbedding(vocab, dim, name="word")
     shared = [expert(emb) for _ in range(n_experts)]
     print("\nshared word embedding (mixle.ppl.Embedding):")
-    print(f"   total parameters: {unique_params(m.module for m in shared):,}")
-    tied = len({id(m.module.tok.weight) for m in shared}) == 1
+    print(f"   total parameters: {unique_params(e.module for e in shared):,}")
+    tied = len({id(e.module.tok.weight) for e in shared}) == 1
     print(f"   all experts tie the same token vectors: {tied}")
 
     emb_params = vocab * dim
@@ -55,7 +55,7 @@ def main() -> None:
     print("      and lets every expert train (and pool) one set of word vectors.")
 
     # assemble the mixture exactly as in the README -- each expert is a generative language-model leaf
-    est = MixtureEstimator([leaf.estimator() for leaf in shared])
+    est = MixtureEstimator(shared)
     print(f"\n   MixtureEstimator of {len(est.estimators)} shared-embedding LM experts, ready to fit with optimize().")
 
 

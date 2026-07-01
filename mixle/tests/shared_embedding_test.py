@@ -1,8 +1,9 @@
-"""Shared learned embedding (mixle.models.SharedEmbedding / mixle.ppl.Embedding): declare once, tie everywhere.
+"""Shared learned embedding (mixle.models.CategoricalEmbedding / mixle.ppl.Embedding): declare once, tie everywhere.
 
 Several language models can reference one word embedding so they train the same token vectors jointly -- the
 neural analogue of the PPL's ``name=`` scalar tying. The tie must be a real shared parameter (same tensor, one
-gradient), reachable from both the stats ``LM`` and the PPL ``Transformer`` token.
+gradient), reachable from the plain estimator (``TransformerLMEstimator``), the ``LM`` convenience, and the PPL
+``Transformer`` token.
 """
 
 import unittest
@@ -11,23 +12,22 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from mixle.models import LM, SharedEmbedding, build_causal_lm  # noqa: E402
+from mixle.models import LM, CategoricalEmbedding, TransformerLMEstimator, build_causal_lm  # noqa: E402
 from mixle.ppl import Embedding, Transformer  # noqa: E402
 
 
 class SharingTest(unittest.TestCase):
     def test_lms_share_the_same_embedding_tensor(self):
-        emb = SharedEmbedding(vocab=40, dim=16, name="word")
+        emb = CategoricalEmbedding(40, 16, name="word")
         a = LM(vocab=40, d_model=16, n_layer=2, block=8, embedding=emb)
         b = LM(vocab=40, d_model=16, n_layer=2, block=8, embedding=emb)
         self.assertIs(a.module.tok, b.module.tok)
         self.assertIs(a.module.tok.weight, b.module.tok.weight)
         self.assertIs(a.module.head.weight, a.module.tok.weight)  # tied head follows the shared embedding
-        # the rest of each model is its own
-        self.assertIsNot(a.module.blocks[0].attn.qkv.weight, b.module.blocks[0].attn.qkv.weight)
+        self.assertIsNot(a.module.blocks[0].attn.qkv.weight, b.module.blocks[0].attn.qkv.weight)  # rest is its own
 
     def test_a_gradient_step_on_one_updates_the_shared_embedding(self):
-        emb = SharedEmbedding(40, 16)
+        emb = CategoricalEmbedding(40, 16)
         a = LM(vocab=40, d_model=16, n_layer=1, block=8, embedding=emb)
         b = LM(vocab=40, d_model=16, n_layer=1, block=8, embedding=emb)
         before = emb.module().weight.detach().clone()
@@ -45,54 +45,37 @@ class SharingTest(unittest.TestCase):
 
     def test_shape_mismatch_raises(self):
         with self.assertRaises(ValueError):
-            build_causal_lm(40, 32, embedding=SharedEmbedding(40, 16))  # dim 16 != d_model 32
+            build_causal_lm(40, 32, embedding=CategoricalEmbedding(40, 16))  # dim 16 != d_model 32
         with self.assertRaises(ValueError):
-            build_causal_lm(50, 16, embedding=SharedEmbedding(40, 16))  # vocab 40 != 50
+            build_causal_lm(50, 16, embedding=CategoricalEmbedding(40, 16))  # num_categories 40 != vocab 50
 
 
 class PPLTest(unittest.TestCase):
     def test_ppl_transformer_tokens_share_embedding(self):
-        emb = Embedding(40, 16)
+        emb = Embedding(40, 16)  # mixle.ppl.Embedding is CategoricalEmbedding
         t1 = Transformer(out=40, d_model=16, embedding=emb)
         t2 = Transformer(out=40, d_model=16, embedding=emb)
         m1, m2 = t1.build(8), t2.build(8)
         self.assertIs(m1.tok.weight, m2.tok.weight)
-        # a Transformer without a shared embedding keeps its own
-        m3 = Transformer(out=40, d_model=16).build(8)
+        m3 = Transformer(out=40, d_model=16).build(8)  # no shared embedding -> its own
         self.assertIsNot(m3.tok.weight, m1.tok.weight)
 
 
-class MixtureExpertsTest(unittest.TestCase):
-    def test_mixture_of_lms_shares_word_embedding(self):
-        # per-cluster experts (the README's mixture) that tie one word embedding across components
-        from mixle.models import StreamingTransformerLeaf
-        from mixle.stats import MixtureEstimator
-
-        emb = SharedEmbedding(vocab=64, dim=24, name="word")
-        experts = [LM(vocab=64, d_model=24, n_layer=2, block=16, embedding=emb) for _ in range(3)]
-        est = MixtureEstimator([StreamingTransformerLeaf(e.module).estimator() for e in experts])
-        self.assertEqual(len(est.estimators), 3)
-        # every expert's token embedding is the one shared tensor
-        weights = {id(e.module.tok.weight) for e in experts}
-        self.assertEqual(len(weights), 1)
-
-    def test_regular_estimator_syntax_shares_and_trains(self):
-        # the plain estimator API -- declarative leaf.from_config, no hand-built torch module
+class EstimatorSyntaxTest(unittest.TestCase):
+    def test_transformer_lm_estimator_shares_and_trains(self):
+        # the clean estimator surface: TransformerLMEstimator(vocab, ...) -- no Leaf, no .estimator(), no raw module
         import numpy as np
 
-        from mixle.models import StreamingTransformerLeaf
+        from mixle.inference import optimize
         from mixle.stats import MixtureEstimator
 
         v, d, block = 60, 24, 8
-        emb = SharedEmbedding(vocab=v, dim=d, name="word")
-        leaves = [
-            StreamingTransformerLeaf.from_config(v, d_model=d, n_layer=2, n_head=2, block=block, embedding=emb)
-            for _ in range(3)
+        emb = CategoricalEmbedding(v, d, name="word")
+        experts = [
+            TransformerLMEstimator(v, d_model=d, n_layer=2, n_head=2, block=block, embedding=emb) for _ in range(3)
         ]
-        est = MixtureEstimator([leaf.estimator() for leaf in leaves])
-        self.assertEqual(len({id(leaf.module.tok.weight) for leaf in leaves}), 1)  # one shared tensor before fit
-
-        from mixle.inference import optimize
+        est = MixtureEstimator(experts)
+        self.assertEqual(len({id(e.module.tok.weight) for e in experts}), 1)  # one shared tensor before fit
 
         rng = np.random.RandomState(0)
         data = [(list(rng.randint(0, v, size=block)), int(rng.randint(0, v))) for _ in range(48)]
