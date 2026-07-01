@@ -140,6 +140,30 @@ class ExtractionIO:
         tag_ids = logits.argmax(axis=-1)
         return [self._decode(texts[i], spans_per[i], tag_ids[i]) for i in range(len(texts))]
 
+    def predict_with_confidence(self, module: Any, texts: list[str]) -> list[tuple[dict[str, str], float]]:
+        """Extract each record and a confidence in ``[0, 1]``: the min per-token tag probability over tagged tokens.
+
+        A low confidence (or a missing field) is the honest "this format is unfamiliar" signal a cascade escalates
+        on -- the extractor equivalent of the classifier's conformal set size. ``0.0`` when nothing was tagged.
+        """
+        import torch
+
+        spans_per = [tokenize(t) for t in texts]
+        toks_per = [[s[0] for s in spans] for spans in spans_per]
+        ids, feats, mask = self._batch(toks_per)
+        module.eval()
+        with torch.no_grad():
+            logits = module(ids, feats)
+            probs = torch.softmax(logits, dim=-1).cpu().numpy()
+        tag_ids = probs.argmax(axis=-1)
+        out = []
+        for i in range(len(texts)):
+            n = min(len(spans_per[i]), tag_ids.shape[1])
+            tagged = [probs[i, k, tag_ids[i, k]] for k in range(n) if tag_ids[i, k] != 0]
+            conf = float(min(tagged)) if tagged else 0.0
+            out.append((self._decode(texts[i], spans_per[i], tag_ids[i]), conf))
+        return out
+
     # --- persistence ---
     def to_spec(self) -> dict[str, Any]:
         return {"kind": self.kind, "vocab": self.vocab, "fields": self.fields, "max_len": self.max_len}
