@@ -38,14 +38,18 @@ __all__ = [
     "CrossModalStore",
     "RetrievalStep",
     "AmortizedEncoder",
+    "ScaledEmbedding",
 ]
+
+_LAZY = {"AmortizedEncoder": "encoder", "ScaledEmbedding": "embedding"}
 
 
 def __getattr__(name: str) -> Any:
-    # Lazy: defer importing the encoder module (and building its torch net) until first access, so
+    # Lazy: defer importing the torch-backed modules (and building their nets) until first access, so
     # the exact linear-Gaussian core here does not construct a torch model just to be imported.
-    if name == "AmortizedEncoder":
-        from mixle.reason.encoder import AmortizedEncoder
+    if name in _LAZY:
+        import importlib
 
-        return AmortizedEncoder
+        mod = importlib.import_module(f"mixle.reason.{_LAZY[name]}")
+        return getattr(mod, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
