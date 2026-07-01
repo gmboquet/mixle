@@ -97,11 +97,20 @@ class DependencyTreeDistribution:
     per-parent-value conditionals -- while it still scores, samples, and composes like any mixle distribution.
     """
 
-    def __init__(self, parents: Sequence[int | None], factors: Sequence[Any]) -> None:
-        # factors[i]: a marginal distribution if parents[i] is None, else a ConditionalDistribution over (parent, i)
+    def __init__(
+        self, parents: Sequence[int | None], factors: Sequence[Any], binners: Sequence[Any] | None = None
+    ) -> None:
+        # factors[i]: a marginal distribution if parents[i] is None, else a ConditionalDistribution over (key, i),
+        # where the parent value is mapped to a conditioning key by binners[i] (identity for a discrete parent,
+        # a quantile bin for a continuous one).
         self.parents = list(parents)
         self.factors = list(factors)
+        self.binners = list(binners) if binners is not None else [None] * len(self.parents)
         self.order = _topo_order(self.parents)
+
+    def _key(self, i: int, parent_value: Any) -> Any:
+        binner = self.binners[i]
+        return parent_value if binner is None else binner(parent_value)
 
     def __str__(self) -> str:
         edges = [f"{p}->{i}" for i, p in enumerate(self.parents) if p is not None]
@@ -113,7 +122,7 @@ class DependencyTreeDistribution:
             if parent is None:
                 total += self.factors[i].log_density(x[i])
             else:
-                total += self.factors[i].log_density((x[parent], x[i]))
+                total += self.factors[i].log_density((self._key(i, x[parent]), x[i]))
         return total
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
@@ -124,7 +133,7 @@ class DependencyTreeDistribution:
             if parent is None:
                 out += fac.seq_log_density(fac.dist_to_encoder().seq_encode(cols[i]))
             else:
-                pairs = list(zip(cols[parent], cols[i]))
+                pairs = [(self._key(i, pv), cv) for pv, cv in zip(cols[parent], cols[i])]
                 out += fac.seq_log_density(fac.dist_to_encoder().seq_encode(pairs))
         return out
 
@@ -165,7 +174,7 @@ class _DependencyTreeSampler:
                 if parent is None:
                     vals[i] = fac.sampler(seed).sample(1)[0]
                 else:
-                    vals[i] = fac.sampler(seed).sample_given(vals[parent])
+                    vals[i] = fac.sampler(seed).sample_given(self.dist._key(i, vals[parent]))
             rows.append(tuple(vals))
         return rows
 
@@ -179,14 +188,17 @@ def learn_structure(
     field_estimators: Sequence[Any] | None = None,
     min_gain: float = 0.0,
     max_levels: int = 64,
+    n_bins: int = 4,
     max_its: int = 30,
 ) -> DependencyTreeDistribution:
     """Discover the dependency forest for heterogeneous ``data`` and return the fitted joint model.
 
-    Scores every ``(discrete parent -> child)`` pair by :func:`dependency_gain`, greedily builds a maximum-gain
-    forest (each field gets at most one parent; no cycles), and fits each factor. Falls back to independent
-    marginals where no dependence clears ``min_gain`` -- so it is never worse than a composite, and much better
-    when structure exists. This is "automatic inference for composable models of heterogeneous data" made real.
+    Any field can be a parent: a discrete one conditions directly, a continuous one is quantile-binned into
+    ``n_bins`` conditioning levels (so a real can drive a count, a category, or another real). Scores every
+    ``(parent -> child)`` pair by :func:`dependency_gain`, greedily builds a maximum-gain acyclic forest (each
+    field at most one parent), and fits each factor. Falls back to independent marginals where no dependence
+    clears ``min_gain`` -- never worse than a composite, much better when structure exists. This is "automatic
+    inference for composable models of heterogeneous data" made real.
     """
     data = list(data)
     cols = _columns(data)
@@ -194,43 +206,61 @@ def learn_structure(
     templates = list(field_estimators) if field_estimators is not None else [_field_estimator(c) for c in cols]
     discrete = [_is_discrete(c, max_levels=max_levels) for c in cols]
 
-    # score candidate edges (parent must be discrete; a field is not its own parent)
+    # a conditioning key per candidate parent: identity for a discrete field, a quantile bin for a continuous one
+    binners = [None if discrete[p] else _quantile_binner(cols[p], n_bins) for p in range(n_fields)]
+    keyed = [cols[p] if binners[p] is None else [binners[p](v) for v in cols[p]] for p in range(n_fields)]
+
     candidates: list[tuple[float, int, int]] = []
     for p in range(n_fields):
-        if not discrete[p]:
-            continue
         for c in range(n_fields):
             if c == p:
                 continue
-            gain = dependency_gain(cols[p], cols[c], templates[c], max_its=max_its)
+            gain = dependency_gain(keyed[p], cols[c], templates[c], max_its=max_its)
             if gain > min_gain:
                 candidates.append((gain, p, c))
-    candidates.sort(reverse=True)
+    candidates.sort(key=lambda t: t[0], reverse=True)
 
     # greedy maximum-gain forest: each child at most one parent, keep it acyclic (union-find on undirected links)
     parents: list[int | None] = [None] * n_fields
     uf = _UnionFind(n_fields)
-    for gain, p, c in candidates:
-        if parents[c] is not None:
-            continue
-        if uf.connected(p, c):  # would create a cycle / second path
+    for _gain, p, c in candidates:
+        if parents[c] is not None or uf.connected(p, c):
             continue
         parents[c] = p
         uf.union(p, c)
 
-    # fit each factor: roots as marginals, children as per-parent-value conditionals
+    # fit each factor: roots as marginals, children as per-parent-key conditionals
     factors: list[Any] = [None] * n_fields
+    edge_binners: list[Any] = [None] * n_fields
     for i in range(n_fields):
         if parents[i] is None:
             factors[i] = fit(cols[i], _clone(templates[i]), max_its=max_its, out=None)
         else:
             p = parents[i]
-            levels = sorted(set(cols[p]))
+            keys = keyed[p]
             est = ConditionalDistributionEstimator(
-                estimator_map={lv: _clone(templates[i]) for lv in levels}, given_estimator=None
+                estimator_map={lv: _clone(templates[i]) for lv in sorted(set(keys))}, given_estimator=None
             )
-            factors[i] = fit(list(zip(cols[p], cols[i])), est, max_its=max_its, out=None)
-    return DependencyTreeDistribution(parents, factors)
+            factors[i] = fit(list(zip(keys, cols[i])), est, max_its=max_its, out=None)
+            edge_binners[i] = binners[p]
+    return DependencyTreeDistribution(parents, factors, edge_binners)
+
+
+class _QuantileBinner:
+    """Map a continuous value to a bin label ``bK`` by fixed quantile edges -- a continuous field as a parent."""
+
+    def __init__(self, edges: Sequence[float]) -> None:
+        self.edges = list(edges)
+
+    def __call__(self, value: Any) -> str:
+        return f"b{int(np.searchsorted(self.edges, float(value)))}"
+
+
+def _quantile_binner(column: Sequence[Any], n_bins: int) -> _QuantileBinner:
+    arr = np.asarray(column, dtype=np.float64)
+    qs = np.linspace(0.0, 1.0, n_bins + 1)[1:-1]
+    edges = np.unique(np.quantile(arr, qs)) if len(arr) else np.array([0.0])
+    return _QuantileBinner(edges)
 
 
 # --- small helpers -------------------------------------------------------------------------------------------

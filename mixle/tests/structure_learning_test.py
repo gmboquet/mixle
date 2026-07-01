@@ -60,6 +60,39 @@ class DependencyGainTest(unittest.TestCase):
         self.assertLess(gain, 20.0)  # BIC penalty keeps a spurious edge from paying off
 
 
+def _continuous_parent(seed, n=800):
+    """A continuous field drives a count: rate = exp(field/3), plus an independent category."""
+    r = np.random.RandomState(seed)
+    out = []
+    for _ in range(n):
+        x = float(r.uniform(-6, 6))
+        k = int(r.poisson(np.exp(x / 3.0)))
+        c = str(r.randint(0, 3))
+        out.append((x, k, c))
+    return out
+
+
+class ContinuousParentTest(unittest.TestCase):
+    def _composite_xc(self, data):
+        est = st.CompositeEstimator((st.GaussianEstimator(), st.PoissonEstimator(), st.CategoricalEstimator()))
+        return fit(data, est, max_its=30, out=None)
+
+    def test_continuous_field_drives_count(self):
+        train, test = _continuous_parent(1), _continuous_parent(2)
+        model = learn_structure(train)
+        self.assertIn((0, 1), model.edges())  # real(0) -> count(1) via quantile binning
+        gain = _ll(model, test) - _ll(self._composite_xc(train), test)
+        self.assertGreater(gain, 50.0)  # modeling the real->count link beats the independent composite
+
+    def test_sampling_respects_continuous_dependence(self):
+        model = learn_structure(_continuous_parent(3))
+        rows = model.sampler(0).sample(600)
+        xs = np.array([r[0] for r in rows])
+        ks = np.array([r[1] for r in rows])
+        # high-x rows have larger counts than low-x rows
+        self.assertGreater(ks[xs > 2].mean(), ks[xs < -2].mean() + 1.0)
+
+
 class LearnStructureTest(unittest.TestCase):
     def test_finds_the_edge_and_beats_composite(self):
         train, test = _dependent(1), _dependent(2)
