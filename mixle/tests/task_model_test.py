@@ -81,6 +81,7 @@ class TaskModelPersistenceTest(unittest.TestCase):
             task.save(path)
             out_file = os.path.join(d, "out.json")
             script = (
+                "import torch; torch.set_num_threads(1)\n"
                 "import json\n"
                 "from mixle.task.model import TaskModel\n"
                 f"t = TaskModel.load({path!r})\n"
