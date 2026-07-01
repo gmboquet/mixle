@@ -46,6 +46,27 @@ class StreamingTransformerLeaf(SequenceEncodableProbabilityDistribution):
         self.module = module
         self.device = device
 
+    @classmethod
+    def from_config(
+        cls,
+        vocab: int,
+        *,
+        d_model: int = 128,
+        n_layer: int = 4,
+        n_head: int = 4,
+        block: int = 64,
+        embedding: Any = None,
+        device: str = "cpu",
+    ) -> StreamingTransformerLeaf:
+        """Build the leaf from hyperparameters (no hand-built torch module) -- the declarative estimator surface.
+
+        ``embedding`` optionally ties a shared :class:`~mixle.models.embedding.SharedEmbedding` across leaves.
+        """
+        from mixle.models.transformer import build_causal_lm
+
+        module = build_causal_lm(vocab, d_model, n_layer, n_head, block, embedding=embedding)
+        return cls(module, device=device)
+
     def __str__(self) -> str:
         return "StreamingTransformerLeaf()"
 

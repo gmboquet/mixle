@@ -11,7 +11,7 @@ Run: ``python shared_embedding_example.py``  (needs ``pip install "mixle[torch]"
 
 from __future__ import annotations
 
-from mixle.models import LM, SharedEmbedding, StreamingTransformerLeaf
+from mixle.models import SharedEmbedding, StreamingTransformerLeaf
 from mixle.stats import MixtureEstimator
 
 
@@ -32,16 +32,19 @@ def unique_params(modules) -> int:
 def main() -> None:
     vocab, dim, n_experts = 8000, 256, 3
 
+    def expert(embedding=None):
+        return StreamingTransformerLeaf.from_config(vocab, d_model=dim, n_layer=4, block=64, embedding=embedding)
+
     print(f"a mixture of {n_experts} language-model experts over a {vocab}-word vocabulary\n")
 
     # independent experts: each learns its own word embedding
-    indep = [LM(vocab=vocab, d_model=dim, n_layer=4, block=64) for _ in range(n_experts)]
+    indep = [expert() for _ in range(n_experts)]
     print("independent embeddings:")
     print(f"   total parameters: {unique_params(m.module for m in indep):,}")
 
     # shared embedding: one word embedding, tied across all experts
     emb = SharedEmbedding(vocab=vocab, dim=dim, name="word")
-    shared = [LM(vocab=vocab, d_model=dim, n_layer=4, block=64, embedding=emb) for _ in range(n_experts)]
+    shared = [expert(emb) for _ in range(n_experts)]
     print("\nshared word embedding (mixle.ppl.Embedding):")
     print(f"   total parameters: {unique_params(m.module for m in shared):,}")
     tied = len({id(m.module.tok.weight) for m in shared}) == 1
@@ -52,7 +55,7 @@ def main() -> None:
     print("      and lets every expert train (and pool) one set of word vectors.")
 
     # assemble the mixture exactly as in the README -- each expert is a generative language-model leaf
-    est = MixtureEstimator([StreamingTransformerLeaf(m.module).estimator() for m in shared])
+    est = MixtureEstimator([leaf.estimator() for leaf in shared])
     print(f"\n   MixtureEstimator of {len(est.estimators)} shared-embedding LM experts, ready to fit with optimize().")
 
 
