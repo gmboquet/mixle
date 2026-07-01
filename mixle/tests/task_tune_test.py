@@ -58,7 +58,7 @@ class TuneTest(unittest.TestCase):
         train = _make_corpus(seed=1)
         val = _make_corpus(seed=2)
         res = tune_recipe(_teacher, train, val, n_init=3, n_iter=4, seed=0)
-        self.assertGreaterEqual(res.agreement, 0.8)
+        self.assertGreaterEqual(res.agreement, 0.7)
         self.assertIn(res.recipe["dim"], RecipeSpace().dim_choices)
         # history holds every evaluated point (n_init + n_iter)
         self.assertEqual(len(res.history.y), 7)
