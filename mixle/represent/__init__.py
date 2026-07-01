@@ -21,6 +21,7 @@ from mixle.represent.embed import CategoricalEmbedding, FeatureEmbedding
 from mixle.represent.generative import AutoencoderResult, fit_autoencoder
 from mixle.represent.graph import GraphEmbedding, GraphEncoder
 from mixle.represent.heterogeneous import HeterogeneousEncoder, ModalityEncoder
+from mixle.represent.learned_segment import LearnedSegmenter
 from mixle.represent.quantize import VectorQuantizer
 from mixle.represent.segment import (
     ByteSegmenter,
@@ -41,6 +42,7 @@ __all__ = [
     "GraphEmbedding",
     "GraphEncoder",
     "HeterogeneousEncoder",
+    "LearnedSegmenter",
     "ModalityEncoder",
     "PatchSegmenter",
     "Segmenter",
