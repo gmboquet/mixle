@@ -76,6 +76,14 @@ class ExtractionTest(unittest.TestCase):
         f1 = extraction_f1(model, test_gold, test_texts)
         self.assertGreaterEqual(f1, 0.85)  # generalizes to unseen ids/amounts/dates
 
+    def test_confidence_high_in_format_low_off_format(self):
+        model, _ = self._train(epochs=120)
+        io = model.adapter
+        (rec_in, conf_in) = io.predict_with_confidence(model.model, ["INV-3333 Acme $9.99 on 2026-02-02"])[0]
+        (_rec_out, conf_out) = io.predict_with_confidence(model.model, ["?!? nothing structured here at all ???"])[0]
+        self.assertEqual(len(rec_in), 4)  # all fields found on a familiar format
+        self.assertGreater(conf_in, conf_out)  # confidence drops on an unfamiliar line
+
     def test_returns_field_dict(self):
         model, _ = self._train(epochs=120)
         out = model("Receipt 7777: Acme $12.34 (2026-05-05)")
