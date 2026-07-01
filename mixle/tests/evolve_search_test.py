@@ -7,9 +7,13 @@ from mixle.evolve import (
     OperatorBandit,
     Population,
     Real,
+    Recompose,
     SearchResult,
     Space,
+    challenger_beats_champion,
+    default_operators,
     nll_objective,
+    registered_operators,
     search,
 )
 from mixle.evolve.operators import Candidate
@@ -62,6 +66,24 @@ def test_population_improves_bad_seed():
     result = Population([seed_model], objective=obj, seed=0).run(data, generations=2)
     # anti-regression: the evolved champion is never worse than the seed
     assert obj.scalar(result.best_model, data) <= obj.scalar(seed_model, data)
+
+
+def test_recompose_captures_bimodal_structure():
+    rng = np.random.RandomState(0)
+    data = list(rng.normal(-4.0, 0.5, 120)) + list(rng.normal(4.0, 0.5, 120))   # clearly bimodal
+    champion = GaussianDistribution(0.0, 5.0)                                    # one wide Gaussian misses the modes
+    obj = nll_objective()
+    op = Recompose()
+    assert op.applicable(champion, data, ctx={})
+    cand = op.propose(champion, data, ctx={"seed": 0})
+    assert obj.scalar(cand.model, data) < obj.scalar(champion, data)            # the 2-component mixture fits better
+    verdict = challenger_beats_champion(champion, cand.model, data, objective=obj, nonnested=True)
+    assert verdict.favored == "challenger"                                      # and it passes the verify gate
+
+
+def test_recompose_registered_but_off_by_default():
+    assert "recompose" in registered_operators()
+    assert "recompose" not in {op.name for op in default_operators()}          # structural + expensive -> opt-in
 
 
 def test_search_bandit_method_runs():
