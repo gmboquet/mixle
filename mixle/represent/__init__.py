@@ -18,6 +18,7 @@ objective, so "the right tokenization" is *inferred* under the objective rather 
 from __future__ import annotations
 
 from mixle.represent.embed import CategoricalEmbedding, FeatureEmbedding
+from mixle.represent.generative import AutoencoderResult, fit_autoencoder
 from mixle.represent.graph import GraphEmbedding, GraphEncoder
 from mixle.represent.heterogeneous import HeterogeneousEncoder, ModalityEncoder
 from mixle.represent.quantize import VectorQuantizer
@@ -32,6 +33,7 @@ from mixle.represent.segment import (
 )
 
 __all__ = [
+    "AutoencoderResult",
     "ByteSegmenter",
     "CategoricalEmbedding",
     "ElementSegmenter",
@@ -46,4 +48,5 @@ __all__ = [
     "VectorQuantizer",
     "WholeSegmenter",
     "WindowSegmenter",
+    "fit_autoencoder",
 ]
