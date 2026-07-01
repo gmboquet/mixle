@@ -13,10 +13,12 @@ import mixle.stats as st
 from mixle.inference import fit
 from mixle.inference.structure import (
     DependencyTreeDistribution,
+    LinearGaussianEdge,
     MixtureOfDependencyTrees,
     dependency_gain,
     learn_mixture_structure,
     learn_structure,
+    regression_gain,
 )
 
 
@@ -199,6 +201,58 @@ class MixtureOfTreesTest(unittest.TestCase):
         seq = mot.seq_log_density(mot.dist_to_encoder().seq_encode(rows))
         for i, row in enumerate(rows):
             self.assertAlmostEqual(mot.log_density(row), float(seq[i]), places=6)
+
+
+def _linear(seed, n=400):
+    """A linear continuous dependence y ~ 2x + noise, plus an independent categorical field."""
+    r = np.random.RandomState(seed)
+    x = r.normal(0.0, 2.0, n)
+    y = 2.0 * x + r.normal(0.0, 0.5, n)
+    z = r.choice(["a", "b", "c"], n)
+    return list(zip(x.tolist(), y.tolist(), z.tolist()))
+
+
+class RegressionEdgeTest(unittest.TestCase):
+    """A continuous->continuous dependence should be modeled by a linear-Gaussian REGRESSION edge (1 slope param),
+    not a coarse per-bin conditional -- more accurate AND more parsimonious."""
+
+    def test_regression_edge_is_chosen_and_wins(self):
+        data = _linear(0)
+        train, test = data[:300], data[300:]
+        model = learn_structure(train)
+
+        # the continuous fields are linked, and the child edge is a regression (not a binned conditional)
+        child_edges = [(p, i) for i, p in enumerate(model.parents) if p is not None]
+        self.assertEqual(len(child_edges), 1)
+        child = child_edges[0][1]
+        self.assertIsInstance(model.factors[child], LinearGaussianEdge)
+
+        # decisively beats the independent composite on held-out data
+        marg = [
+            fit(col, est, max_its=30, out=None)
+            for col, est in zip(
+                zip(*train), (st.GaussianEstimator(), st.GaussianEstimator(), st.CategoricalEstimator())
+            )
+        ]
+        independent = DependencyTreeDistribution([None, None, None], marg)
+        self.assertGreater(_ll(model, test), _ll(independent, test) + 50.0)
+
+    def test_regression_gain_beats_binned_on_linear_data(self):
+        data = _linear(1)
+        x = [r[0] for r in data]
+        y = [r[1] for r in data]
+        binner_keys = [round(v, 1) for v in x]  # a crude discretization of the parent
+        binned = dependency_gain(binner_keys, y, st.GaussianEstimator())
+        regression = regression_gain(x, y, st.GaussianEstimator())
+        self.assertGreater(regression, binned)  # 1 slope param beats a per-bin conditional
+
+    def test_regression_edge_samples_and_scores(self):
+        edge = LinearGaussianEdge(1.0, 2.0, 0.25)
+        self.assertTrue(np.isfinite(edge.log_density((3.0, 7.0))))
+        s = edge.sampler(0).sample_given(3.0)  # E[child | parent=3] = 1 + 2*3 = 7
+        self.assertAlmostEqual(s, 7.0, delta=2.0)
+        seq = edge.seq_log_density((np.array([0.0, 1.0]), np.array([1.0, 3.0])))
+        self.assertEqual(len(seq), 2)
 
 
 if __name__ == "__main__":

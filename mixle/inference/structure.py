@@ -89,6 +89,88 @@ def dependency_gain(
     return ll_cond - ll_marginal - pen
 
 
+def _is_numeric(column: Sequence[Any]) -> bool:
+    return all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in column)
+
+
+class LinearGaussianEdge:
+    """A *regression* edge: ``P(child | parent) = Normal(a + b*parent, sigma2)``.
+
+    Where the current per-parent-bin conditional needs ``bins * k`` parameters (and coarse bins) to model a smooth
+    continuous dependence, this captures it with a single slope ``b`` — far more statistically efficient and exact
+    for a linear relationship. Slots into :class:`DependencyTreeDistribution` as a factor with an identity binner
+    (the raw parent value drives the conditional)."""
+
+    def __init__(self, a: float, b: float, sigma2: float) -> None:
+        self.a, self.b, self.sigma2 = float(a), float(b), max(float(sigma2), 1e-12)
+
+    def log_density(self, x: tuple) -> float:
+        parent, child = x
+        resid = float(child) - (self.a + self.b * float(parent))
+        return float(-0.5 * np.log(2.0 * np.pi * self.sigma2) - 0.5 * resid * resid / self.sigma2)
+
+    def dist_to_encoder(self) -> Any:
+        return _EdgeEncoder()
+
+    def seq_log_density(self, encoded: Any) -> np.ndarray:
+        parent, child = encoded
+        resid = np.asarray(child, dtype=float) - (self.a + self.b * np.asarray(parent, dtype=float))
+        return -0.5 * np.log(2.0 * np.pi * self.sigma2) - 0.5 * resid * resid / self.sigma2
+
+    def sampler(self, seed: int | None = None) -> Any:
+        return _LinearGaussianEdgeSampler(self, seed)
+
+    def __str__(self) -> str:
+        return f"LinearGaussianEdge(child ~ N({self.a:.3g} + {self.b:.3g}*parent, {self.sigma2:.3g}))"
+
+
+class _EdgeEncoder:
+    def seq_encode(self, pairs: Sequence[tuple]) -> tuple[np.ndarray, np.ndarray]:
+        arr = np.asarray(pairs, dtype=float)
+        return arr[:, 0], arr[:, 1]
+
+
+class _LinearGaussianEdgeSampler:
+    def __init__(self, edge: LinearGaussianEdge, seed: int | None) -> None:
+        self.edge = edge
+        self.rng = np.random.RandomState(seed)
+
+    def sample_given(self, parent: Any) -> float:
+        mean = self.edge.a + self.edge.b * float(parent)
+        return float(self.rng.normal(mean, np.sqrt(self.edge.sigma2)))
+
+
+def fit_linear_gaussian_edge(pairs: Sequence[tuple]) -> LinearGaussianEdge:
+    """OLS fit of a linear-Gaussian conditional ``child ~ a + b*parent`` (closed form)."""
+    arr = np.asarray(pairs, dtype=float)
+    p, c = arr[:, 0], arr[:, 1]
+    pm, cm = float(p.mean()), float(c.mean())
+    denom = float(np.sum((p - pm) ** 2))
+    b = float(np.sum((p - pm) * (c - cm)) / denom) if denom > 1e-12 else 0.0
+    a = cm - b * pm
+    resid = c - (a + b * p)
+    return LinearGaussianEdge(a, b, float(np.var(resid)))
+
+
+def regression_gain(
+    parent: Sequence[Any], child: Sequence[Any], child_estimator: Any, *, max_its: int = 30, penalty: str = "bic"
+) -> float:
+    """Description-length gain (nats) of a linear-Gaussian *regression* edge ``child ~ a + b*parent`` over the
+    child marginal. One extra parameter (the slope) vs. the ``bins * k`` a binned conditional spends — so for a
+    real linear dependence this beats binning decisively. Returns ``-inf`` when a regression is undefined."""
+    p = np.asarray(parent, dtype=float)
+    c = np.asarray(child, dtype=float)
+    n = len(c)
+    if n < 3 or float(np.var(p)) < 1e-12:
+        return float("-inf")
+    edge = fit_linear_gaussian_edge(list(zip(p.tolist(), c.tolist())))
+    ll_reg = float(np.sum(edge.seq_log_density((p, c))))
+    marginal = fit(list(child), _clone(child_estimator), max_its=max_its, out=None)
+    ll_marginal = float(np.sum(marginal.seq_log_density(marginal.dist_to_encoder().seq_encode(list(child)))))
+    pen = 0.5 * 1.0 * np.log(max(n, 2)) if penalty == "bic" else 0.0  # a single extra parameter: the slope
+    return ll_reg - ll_marginal - pen
+
+
 class DependencyTreeDistribution:
     """A directed-forest joint over a heterogeneous record: each field is a marginal or a conditional on its parent.
 
@@ -334,31 +416,45 @@ def learn_structure(
     binners = [None if discrete[p] else _quantile_binner(cols[p], n_bins) for p in range(n_fields)]
     keyed = [cols[p] if binners[p] is None else [binners[p](v) for v in cols[p]] for p in range(n_fields)]
 
-    candidates: list[tuple[float, int, int]] = []
+    # a continuous child on a numeric parent can use a linear-Gaussian REGRESSION edge (1 slope param) instead of
+    # a coarse per-bin conditional; each edge takes whichever scores the higher description-length gain.
+    numeric = [_is_numeric(cols[i]) for i in range(n_fields)]
+
+    candidates: list[tuple[float, int, int, str]] = []
     for p in range(n_fields):
         for c in range(n_fields):
             if c == p:
                 continue
             gain = dependency_gain(keyed[p], cols[c], templates[c], max_its=max_its)
+            kind = "binned"
+            if not discrete[c] and not discrete[p] and numeric[c] and numeric[p]:
+                rgain = regression_gain(cols[p], cols[c], templates[c], max_its=max_its)
+                if rgain > gain:
+                    gain, kind = rgain, "regression"
             if gain > min_gain:
-                candidates.append((gain, p, c))
+                candidates.append((gain, p, c, kind))
     candidates.sort(key=lambda t: t[0], reverse=True)
 
     # greedy maximum-gain forest: each child at most one parent, keep it acyclic (union-find on undirected links)
     parents: list[int | None] = [None] * n_fields
+    edge_kind: list[str] = ["binned"] * n_fields
     uf = _UnionFind(n_fields)
-    for _gain, p, c in candidates:
+    for _gain, p, c, kind in candidates:
         if parents[c] is not None or uf.connected(p, c):
             continue
         parents[c] = p
+        edge_kind[c] = kind
         uf.union(p, c)
 
-    # fit each factor: roots as marginals, children as per-parent-key conditionals
+    # fit each factor: roots as marginals, children as per-parent-key conditionals (or regression edges)
     factors: list[Any] = [None] * n_fields
     edge_binners: list[Any] = [None] * n_fields
     for i in range(n_fields):
         if parents[i] is None:
             factors[i] = fit(cols[i], _clone(templates[i]), max_its=max_its, out=None)
+        elif edge_kind[i] == "regression":
+            factors[i] = fit_linear_gaussian_edge(list(zip(cols[parents[i]], cols[i])))
+            edge_binners[i] = None  # the raw parent value drives the regression
         else:
             p = parents[i]
             keys = keyed[p]
