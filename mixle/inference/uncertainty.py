@@ -37,6 +37,7 @@ from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
+from scipy.special import logsumexp
 
 from mixle.utils.special import softmax as _softmax
 
@@ -49,6 +50,7 @@ __all__ = [
     "decompose_uncertainty",
     "Clustering",
     "cluster_samples",
+    "marginalize_meaning",
     "semantic_entropy",
 ]
 
@@ -216,16 +218,76 @@ def cluster_samples(samples: Sequence[Any], equivalent: Callable[[Any, Any], boo
     return Clustering(reps, counts / counts.sum(), np.asarray(labels))
 
 
-def semantic_entropy(samples: Sequence[Any], equivalent: Callable[[Any, Any], bool] | None = None) -> float:
+def marginalize_meaning(
+    items: Sequence[Any],
+    equivalent: Callable[[Any, Any], bool] | None = None,
+    *,
+    log_probs: Any = None,
+    weights: Any = None,
+) -> Clustering:
+    """The distribution over *meanings* = the string distribution marginalized over each meaning class.
+
+    A generative model puts probability on *strings*; a meaning is an equivalence class of strings
+    (``equivalent`` decides sameness). The probability of a meaning ``c`` is the pushforward under the
+    quotient -- you **sum the string probabilities over the class**: ``P(c) = sum_{s in c} P(s)``.
+    This returns that marginal (as a :class:`Clustering`, ``probs`` = ``P(c)``).
+
+    How the per-string probability enters:
+
+    * ``log_probs`` -- the model's sequence log-probabilities ``log P(s)`` for each item; classes are
+      combined by ``logsumexp`` (exact marginalization, numerically stable). Use this when the items
+      are *distinct* strings whose probabilities you know -- it corrects the counting form's hidden
+      "every string in a class is equiprobable" assumption.
+    * ``weights`` -- explicit non-negative masses per item (summed within class).
+    * neither -- uniform mass, i.e. counting: ``P(c) = count_c / N``. For i.i.d. samples from the
+      model this is the unbiased Monte-Carlo estimate of the same marginal.
+    """
+    c = cluster_samples(items, equivalent)
+    if log_probs is None and weights is None:
+        return c
+    labels = c.labels
+    k = len(c.representatives)
+    if log_probs is not None:
+        lp = np.asarray(log_probs, dtype=float).reshape(-1)
+        if lp.shape[0] != labels.shape[0]:
+            raise ValueError("log_probs must have one entry per item")
+        logmass = np.full(k, -np.inf)
+        for i, lab in enumerate(labels):
+            logmass[lab] = np.logaddexp(logmass[lab], lp[i])
+        probs = np.exp(logmass - logsumexp(logmass))
+    else:
+        w = np.asarray(weights, dtype=float).reshape(-1)
+        if w.shape[0] != labels.shape[0]:
+            raise ValueError("weights must have one entry per item")
+        mass = np.zeros(k)
+        for i, lab in enumerate(labels):
+            mass[lab] += w[i]
+        total = mass.sum()
+        if total <= 0.0:
+            raise ValueError("weights must sum to a positive value")
+        probs = mass / total
+    return Clustering(c.representatives, probs, labels)
+
+
+def semantic_entropy(
+    samples: Sequence[Any],
+    equivalent: Callable[[Any, Any], bool] | None = None,
+    *,
+    log_probs: Any = None,
+    weights: Any = None,
+) -> float:
     """Entropy (nats) over the *meaning* classes of ``samples`` -- the model's predictive uncertainty.
 
-    Sample a stochastic generator (an LLM at temperature) ``n`` times, cluster by meaning
-    (:func:`cluster_samples`), and take the entropy of the class distribution. High semantic entropy
-    means the model disagrees with itself about *what* the answer is (a hallucination signal), as
-    opposed to merely phrasing one answer many ways (which clusters to low entropy). Feed the same
-    clusters' per-member distributions to :func:`decompose_entropy` for an epistemic/aleatoric split.
+    Sample a stochastic generator (an LLM at temperature) ``n`` times, marginalize the string
+    distribution over meaning classes (:func:`marginalize_meaning`), and take the entropy of that
+    marginal. High semantic entropy means the model disagrees with itself about *what* the answer is
+    (a hallucination signal), as opposed to merely phrasing one answer many ways (which collapses to
+    low entropy). Pass ``log_probs`` (the sequence log-likelihoods) to marginalize with the actual
+    string probabilities rather than by sample counting. Feed the clusters' per-member distributions
+    to :func:`decompose_entropy` for an epistemic/aleatoric split.
     """
-    return float(_entropy_last(cluster_samples(samples, equivalent).probs))
+    probs = marginalize_meaning(samples, equivalent, log_probs=log_probs, weights=weights).probs
+    return float(_entropy_last(probs))
 
 
 def decompose_uncertainty(

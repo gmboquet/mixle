@@ -241,6 +241,7 @@ from mixle.inference.uncertainty import (
     decompose_entropy,
     decompose_uncertainty,
     decompose_variance,
+    marginalize_meaning,
     posterior_ensemble,
     predictive_distribution,
     semantic_entropy,
@@ -303,6 +304,7 @@ __all__ = [
     # semantic clustering of stochastic samples (LLM meaning-clusters -> semantic entropy)
     "Clustering",
     "cluster_samples",
+    "marginalize_meaning",
     "semantic_entropy",
     # calibration diagnostics (reliability diagrams, ECE/MCE, PIT, coverage curves)
     "reliability_curve",

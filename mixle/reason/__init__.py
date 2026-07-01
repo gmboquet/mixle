@@ -32,8 +32,10 @@ from mixle.reason.core import (
     reason,
 )
 from mixle.reason.design import AcquisitionPlan, select_evidence_batch
+from mixle.reason.graph_llm import GraphDistribution, GraphLLM, canonical_graph
 from mixle.reason.llm import (
     ClaimAssessment,
+    FactualityModel,
     InformationAssessment,
     LLMAssessment,
     LLMUncertainty,
@@ -61,9 +63,13 @@ __all__ = [
     "LLMAssessment",
     "ClaimAssessment",
     "InformationAssessment",
+    "FactualityModel",
     "sentence_claims",
     "content_overlap",
     "information_corroborator",
+    "GraphLLM",
+    "GraphDistribution",
+    "canonical_graph",
     "AmortizedEncoder",
     "ScaledEmbedding",
     "CrossModalModel",
