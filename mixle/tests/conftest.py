@@ -262,6 +262,12 @@ def _isolate_global_process_state():
     rng_state = np.random.get_state()
     err_mode = np.geterr()
     try:
+        import torch  # a prior test may have raised the thread count; force single-threaded before this one runs
+
+        torch.set_num_threads(1)  # (multi-threaded CPU matmuls aren't bit-reproducible -> training-threshold flakes)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         yield
     finally:
         set_default_engine(engine)
