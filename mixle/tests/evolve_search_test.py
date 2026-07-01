@@ -86,6 +86,33 @@ def test_recompose_registered_but_off_by_default():
     assert "recompose" not in {op.name for op in default_operators()}          # structural + expensive -> opt-in
 
 
+def test_structural_genotype_distance():
+    from mixle.evolve import model_signature, structural_distance
+    from mixle.ops import mixture
+
+    g = GaussianDistribution(0.0, 1.0)
+    m2 = mixture([GaussianDistribution(-3.0, 1.0), GaussianDistribution(3.0, 1.0)])
+    m3 = mixture([GaussianDistribution(-3.0, 1.0), GaussianDistribution(0.0, 1.0), GaussianDistribution(3.0, 1.0)])
+    assert model_signature(g) == ("GaussianDistribution", [])
+    assert structural_distance(g, g) == 0.0
+    assert structural_distance(m2, m3) < structural_distance(g, m3)            # 2-vs-3 comps closer than leaf-vs-3
+
+
+def test_mutate_grows_structure_by_selection():
+    from mixle.evolve import Mutate
+
+    rng = np.random.RandomState(0)
+    data = list(rng.normal(-4.0, 0.5, 120)) + list(rng.normal(4.0, 0.5, 120))
+    champion = GaussianDistribution(0.0, 5.0)
+    obj = nll_objective()
+    op = Mutate()
+    assert op.applicable(champion, data, ctx={})
+    # structure search = mutate + select: over a few seeds, at least one mutation beats the single Gaussian
+    best = min(obj.scalar(op.propose(champion, data, ctx={"seed": s}).model, data) for s in range(6))
+    assert best < obj.scalar(champion, data)
+    assert "mutate" in registered_operators() and "mutate" not in {o.name for o in default_operators()}
+
+
 def test_search_bandit_method_runs():
     obj = nll_objective()
     data = list(np.random.RandomState(4).normal(5.0, 1.0, 80))
