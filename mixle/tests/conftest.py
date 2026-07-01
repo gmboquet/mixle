@@ -10,6 +10,17 @@ from pathlib import Path
 
 import pytest
 
+# Pin torch to a single intra-op thread per (xdist) worker. Multi-threaded CPU matmuls are not
+# bit-reproducible, so torch-training tests with tight parameter-recovery thresholds pass in isolation but
+# flake only under the parallel runner. One thread makes them deterministic; the models here are tiny so the
+# throughput cost is negligible. No-op when torch is absent.
+try:  # pragma: no cover - depends on whether the torch extra is installed
+    import torch as _torch
+
+    _torch.set_num_threads(1)
+except Exception:  # noqa: BLE001
+    pass
+
 MarkerTuple = tuple[str, ...]
 
 
