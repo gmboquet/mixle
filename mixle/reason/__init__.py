@@ -23,7 +23,14 @@ from __future__ import annotations
 from typing import Any
 
 from mixle.inference.belief import BeliefState, GaussianBelief, as_belief
-from mixle.reason.core import Evidence, Latent, LinearGaussianEvidence, ReasonedAnswer, reason
+from mixle.reason.core import (
+    Evidence,
+    Latent,
+    LinearGaussianEvidence,
+    ReasonedAnswer,
+    block_selector,
+    reason,
+)
 from mixle.reason.store import CrossModalStore, RetrievalStep
 
 __all__ = [
@@ -31,6 +38,7 @@ __all__ = [
     "Latent",
     "Evidence",
     "LinearGaussianEvidence",
+    "block_selector",
     "ReasonedAnswer",
     "GaussianBelief",
     "BeliefState",

@@ -30,6 +30,60 @@ class Latent:
         """An isotropic Gaussian prior over a ``dim``-vector latent: ``N(mean*1, var*I)``."""
         return GaussianBelief(np.full(int(dim), float(mean)), np.eye(int(dim)) * float(var))
 
+    @staticmethod
+    def mechanistic(
+        A: Any,
+        steps: int,
+        *,
+        x0_mean: Any = None,
+        x0_cov: Any = None,
+        process_cov: Any = None,
+    ) -> GaussianBelief:
+        """A physics-constrained prior over a latent *trajectory* ``z_0 .. z_{steps-1}``.
+
+        The trajectory follows a linear dynamical law ``z_{t+1} = A z_t + w_t``, ``w_t ~ N(0, Q)`` --
+        a discretized linear ODE/PDE (``A`` is the state-transition operator; take it from a
+        ``mixle_pde`` ``DynamicsOperator`` for real physics). The returned belief is the exact joint
+        Gaussian over the stacked trajectory ``(steps * d,)`` (block ``t`` is ``z_t``); its
+        block-tridiagonal precision *is* the mechanistic prior. Because the states are coupled,
+        evidence at any one time informs *all* times through the dynamics -- fusing observations via
+        :func:`reason` is then exact Kalman smoothing, so a sparsely-observed field is filled in by
+        the physics, not by a generic smoothness assumption.
+
+        Args:
+            A: ``(d, d)`` linear state-transition operator (one discrete step).
+            steps: number of time steps ``T`` in the trajectory.
+            x0_mean: mean of ``z_0`` (default zeros).
+            x0_cov: covariance of ``z_0`` (default identity).
+            process_cov: process-noise covariance ``Q`` (default zeros -- deterministic dynamics).
+        """
+        A = np.atleast_2d(np.asarray(A, dtype=float))
+        d = A.shape[0]
+        if A.shape != (d, d):
+            raise ValueError(f"A must be square (d, d); got {A.shape}")
+        T = int(steps)
+        if T < 1:
+            raise ValueError("steps must be >= 1")
+        m0 = np.zeros(d) if x0_mean is None else np.atleast_1d(np.asarray(x0_mean, dtype=float))
+        P0 = np.eye(d) if x0_cov is None else np.atleast_2d(np.asarray(x0_cov, dtype=float))
+        Q = np.zeros((d, d)) if process_cov is None else np.atleast_2d(np.asarray(process_cov, dtype=float))
+
+        # forward marginals: mean_{t+1} = A mean_t, P_{t+1} = A P_t Aᵀ + Q
+        means = [m0]
+        margs = [P0]
+        for _ in range(1, T):
+            means.append(A @ means[-1])
+            margs.append(A @ margs[-1] @ A.T + Q)
+
+        # joint covariance: Cov(z_t, z_s) = A^{t-s} P_s for t >= s (noise after s is independent of z_s)
+        big = np.zeros((T * d, T * d))
+        for s in range(T):
+            for t in range(s, T):
+                block = np.linalg.matrix_power(A, t - s) @ margs[s]
+                big[t * d : (t + 1) * d, s * d : (s + 1) * d] = block
+                big[s * d : (s + 1) * d, t * d : (t + 1) * d] = block.T
+        return GaussianBelief(np.concatenate(means), big)
+
 
 @dataclass(frozen=True)
 class LinearGaussianEvidence:
@@ -48,6 +102,20 @@ class LinearGaussianEvidence:
 
 #: Short alias -- ``Evidence(H, y, R, name)``.
 Evidence = LinearGaussianEvidence
+
+
+def block_selector(step: int, n_blocks: int, block_dim: int, within: Any = None) -> np.ndarray:
+    """An observation matrix that reads time-block ``step`` of a stacked trajectory latent.
+
+    For a latent built by :meth:`Latent.mechanistic` (shape ``(n_blocks * block_dim,)``), returns the
+    ``H`` selecting block ``step`` -- use it to build :class:`LinearGaussianEvidence` for an
+    observation at that time. ``within`` optionally reads only part of the block (a
+    ``(k, block_dim)`` local readout); by default the whole block is read (identity).
+    """
+    local = np.eye(block_dim) if within is None else np.atleast_2d(np.asarray(within, dtype=float))
+    H = np.zeros((local.shape[0], n_blocks * block_dim))
+    H[:, step * block_dim : (step + 1) * block_dim] = local
+    return H
 
 
 class ReasonedAnswer:
