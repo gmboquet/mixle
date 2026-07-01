@@ -20,6 +20,8 @@ Design: notes/mixle-cross-modal-reasoning-design.md. Built on :mod:`mixle.infere
 
 from __future__ import annotations
 
+from typing import Any
+
 from mixle.inference.belief import BeliefState, GaussianBelief, as_belief
 from mixle.reason.core import Evidence, Latent, LinearGaussianEvidence, ReasonedAnswer, reason
 
@@ -32,4 +34,15 @@ __all__ = [
     "GaussianBelief",
     "BeliefState",
     "as_belief",
+    "AmortizedEncoder",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    # Lazy: defer importing the encoder module (and building its torch net) until first access, so
+    # the exact linear-Gaussian core here does not construct a torch model just to be imported.
+    if name == "AmortizedEncoder":
+        from mixle.reason.encoder import AmortizedEncoder
+
+        return AmortizedEncoder
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
