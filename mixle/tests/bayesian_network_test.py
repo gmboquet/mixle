@@ -1,0 +1,114 @@
+"""Heterogeneous Bayesian network learning (mixle.inference.bayesian_network): regression edges + multi-parent DAG.
+
+The deepening of the dependency-structure moat: continuous dependence is parametric (linear-Gaussian), not
+quantile-binned, and a field may have several parents. Must (a) beat the binned single-parent tree on continuous
+dependence, (b) recover a node's multiple parents when orientation is forced, and (c) score/sample coherently.
+"""
+
+import unittest
+
+import numpy as np
+
+import mixle.stats as st
+from mixle.inference import fit, learn_structure
+from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork, learn_bayesian_network
+
+
+def _ll(model, data):
+    return float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
+
+
+def _linear_pair(seed, n=800):
+    r = np.random.RandomState(seed)
+    x = r.randn(n)
+    y = 2.0 * x - 1.0 + 0.3 * r.randn(n)
+    return list(zip(x.tolist(), y.tolist()))
+
+
+class RegressionEdgeTest(unittest.TestCase):
+    def test_regression_beats_binned_tree_on_linear_dependence(self):
+        train, test = _linear_pair(1), _linear_pair(2)
+        bn = learn_bayesian_network(train, max_parents=1)
+        tree = learn_structure(train)  # the quantile-binned single-parent forest
+        self.assertIsInstance(bn, HeterogeneousBayesianNetwork)
+        self.assertEqual(len(bn.edges()), 1)  # the two fields are linked
+        self.assertGreater(_ll(bn, test) - _ll(tree, test), 300.0)  # parametric edge is far sharper than binning
+
+    def test_categorical_parent_via_one_hot(self):
+        # cat -> real: the CLG factor one-hot-encodes the categorical parent (a per-category mean)
+        r = np.random.RandomState(0)
+        data = [("hi" if r.rand() < 0.5 else "lo", 0.0) for _ in range(600)]
+        data = [(c, (5.0 if c == "hi" else -5.0) + 0.5 * r.randn()) for c, _ in data]
+        bn = learn_bayesian_network(data, max_parents=1)
+        self.assertIn((0, 1), bn.edges())
+
+
+class MultiParentTest(unittest.TestCase):
+    def test_discrete_child_recovers_both_parents(self):
+        # two independent categoricals drive a count via their INTERACTION -> the count needs BOTH as parents
+        r = np.random.RandomState(0)
+        data = []
+        for _ in range(2000):
+            a, b = int(r.rand() < 0.5), int(r.rand() < 0.5)
+            rate = 2.0 + 3.0 * a + 5.0 * b + 4.0 * a * b
+            data.append((str(a), str(b), int(r.poisson(rate))))
+        bn = learn_bayesian_network(data, max_parents=2)
+        count_parents = {p for (p, c) in bn.edges() if c == 2}
+        self.assertEqual(count_parents, {0, 1})  # rate[a,b] interaction -> both parents recovered
+
+    def test_continuous_node_uses_multiple_parents(self):
+        # y = f(x1, x2); a linear-Gaussian orientation is non-identifiable, so assert the orientation-robust facts:
+        # some node has two parents, the graph is one connected component, and it beats independence.
+        r = np.random.RandomState(1)
+        n = 1200
+        x1, x2 = r.randn(n), r.randn(n)
+        y = 1.5 * x1 - 2.0 * x2 + 0.3 * r.randn(n)
+        train = list(zip(x1.tolist(), x2.tolist(), y.tolist()))
+        r2 = np.random.RandomState(2)
+        z1, z2 = r2.randn(n), r2.randn(n)
+        test = list(zip(z1.tolist(), z2.tolist(), (1.5 * z1 - 2.0 * z2 + 0.3 * r2.randn(n)).tolist()))
+
+        bn = learn_bayesian_network(train, max_parents=2)
+        self.assertTrue(any(len(f.parents) >= 2 for f in bn.factors))  # multi-parent used
+        ind = fit(
+            train,
+            st.CompositeEstimator((st.GaussianEstimator(), st.GaussianEstimator(), st.GaussianEstimator())),
+            max_its=30,
+            out=None,
+            rng=np.random.RandomState(0),
+        )
+        self.assertGreater(_ll(bn, test) - _ll(ind, test), 300.0)  # models the (x1,x2)->y dependence
+
+
+class ScoreSampleTest(unittest.TestCase):
+    def test_log_density_matches_seq(self):
+        bn = learn_bayesian_network(_linear_pair(3), max_parents=1)
+        rows = _linear_pair(4)[:40]
+        seq = bn.seq_log_density(bn.dist_to_encoder().seq_encode(rows))
+        for i, row in enumerate(rows):
+            self.assertAlmostEqual(bn.log_density(row), float(seq[i]), places=6)
+
+    def test_sampling_respects_dependence(self):
+        bn = learn_bayesian_network(_linear_pair(5, n=1500), max_parents=1)
+        rows = bn.sampler(0).sample(600)
+        a = np.array([r[0] for r in rows])
+        b = np.array([r[1] for r in rows])
+        self.assertGreater(abs(np.corrcoef(a, b)[0, 1]), 0.8)  # the linear dependence is reproduced
+
+    def test_independent_fields_stay_near_independence(self):
+        r = np.random.RandomState(7)
+        data = [(float(r.randn()), float(r.randn()), int(r.poisson(3))) for _ in range(800)]
+        bn = learn_bayesian_network(data, max_parents=2)
+        ind = fit(
+            data,
+            st.CompositeEstimator((st.GaussianEstimator(), st.GaussianEstimator(), st.PoissonEstimator())),
+            max_its=30,
+            out=None,
+            rng=np.random.RandomState(0),
+        )
+        # no real structure -> the network does not meaningfully beat the independent composite in-sample
+        self.assertLess(_ll(bn, data) - _ll(ind, data), 40.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

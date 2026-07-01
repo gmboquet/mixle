@@ -26,6 +26,10 @@ from __future__ import annotations
 
 from mixle.capability import ConjugateUpdatable
 from mixle.inference import production
+from mixle.inference.bayesian_network import (
+    HeterogeneousBayesianNetwork,
+    learn_bayesian_network,
+)
 
 # belief states: a distribution over a latent, updated by evidence (the assimilation step)
 from mixle.inference.belief import BeliefState, GaussianBelief, as_belief
@@ -392,6 +396,8 @@ __all__ = [
     # automatic dependency-structure learning for heterogeneous records
     "learn_structure",
     "learn_mixture_structure",
+    "learn_bayesian_network",
+    "HeterogeneousBayesianNetwork",
     "dependency_gain",
     "DependencyTreeDistribution",
     "MixtureOfDependencyTrees",
