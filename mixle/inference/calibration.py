@@ -26,6 +26,7 @@ reliability diagram or ECE comes with honest error bars rather than a bare point
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -354,6 +355,100 @@ def coverage_curve(forecasts: np.ndarray, y: np.ndarray, *, levels: np.ndarray |
     return {"nominal": levels, "empirical": emp}
 
 
+def _pava(y: np.ndarray) -> np.ndarray:
+    """Pool-adjacent-violators: the non-decreasing least-squares fit to ``y`` (in order)."""
+    blocks: list[list[float]] = []  # each block is [sum, count]
+    for yi in y:
+        cur = [float(yi), 1.0]
+        while blocks and blocks[-1][0] / blocks[-1][1] >= cur[0] / cur[1]:
+            s, c = blocks.pop()
+            cur[0] += s
+            cur[1] += c
+        blocks.append(cur)
+    out = np.empty(len(y))
+    i = 0
+    for s, c in blocks:
+        k = int(round(c))
+        out[i : i + k] = s / c
+        i += k
+    return out
+
+
+class ProbabilityCalibrator:
+    """Map raw scores to *calibrated probabilities* -- fit against binary outcomes.
+
+    A raw score (a model's confidence, a self-consistency fraction, a token likelihood) need not be a
+    probability of anything: it can be monotone-but-miscalibrated, or have no relationship to the
+    outcome at all. This learns the transform ``score -> P(outcome = 1 | score)`` from labeled data,
+    so the output *is* a probability of the event you calibrated against.
+
+    * ``method="isotonic"`` -- monotone, non-parametric (pool-adjacent-violators). Assumes higher
+      score => not-lower probability; flexible, needs enough calibration points.
+    * ``method="platt"`` -- logistic ``sigmoid(a * score + b)``. Two parameters, robust on little data,
+      but assumes a sigmoidal relationship.
+
+    A near-flat fitted curve is itself the finding: it means the raw score carried little information
+    about the outcome (its "likelihood" was unrelated to the event).
+    """
+
+    def __init__(self, method: str = "isotonic") -> None:
+        if method not in ("isotonic", "platt"):
+            raise ValueError("method must be 'isotonic' or 'platt'")
+        self.method = method
+        self._fitted = False
+
+    def fit(self, scores: Any, outcomes: Any) -> ProbabilityCalibrator:
+        """Fit the score->probability map on ``scores`` with binary ``outcomes`` (0/1)."""
+        s = np.asarray(scores, dtype=float).reshape(-1)
+        y = np.asarray(outcomes, dtype=float).reshape(-1)
+        if s.shape != y.shape:
+            raise ValueError("scores and outcomes must have the same length")
+        if s.size < 2:
+            raise ValueError("need at least two calibration points")
+        if self.method == "isotonic":
+            order = np.argsort(s, kind="mergesort")
+            xs = s[order]
+            fit = np.clip(_pava(y[order]), 0.0, 1.0)
+            # collapse ties to a strictly increasing support for interpolation
+            uniq, idx = np.unique(xs, return_index=True)
+            self._x = uniq
+            self._y = np.maximum.accumulate(fit[idx])
+        else:  # platt
+            from scipy.optimize import minimize
+
+            sm, ss = s.mean(), s.std() + 1e-12
+            z = (s - sm) / ss  # standardize for a well-scaled logistic fit
+
+            def nll(theta: np.ndarray) -> float:
+                a, b = theta
+                logits = a * z + b
+                # stable BCE
+                return float(np.mean(np.logaddexp(0.0, logits) - y * logits))
+
+            res = minimize(nll, np.array([1.0, 0.0]), method="BFGS")
+            self._a, self._b, self._sm, self._ss = res.x[0], res.x[1], sm, ss
+        self._fitted = True
+        return self
+
+    def predict(self, scores: Any) -> np.ndarray:
+        """Calibrated probabilities for ``scores`` (clamped to ``[0, 1]``)."""
+        if not self._fitted:
+            raise RuntimeError("call fit(...) before predict(...)")
+        s = np.asarray(scores, dtype=float).reshape(-1)
+        if self.method == "isotonic":
+            return np.clip(np.interp(s, self._x, self._y), 0.0, 1.0)
+        z = (s - self._sm) / self._ss
+        return 1.0 / (1.0 + np.exp(-(self._a * z + self._b)))
+
+    def __call__(self, scores: Any) -> np.ndarray:
+        return self.predict(scores)
+
+
+def calibrate_probabilities(scores: Any, outcomes: Any, *, method: str = "isotonic") -> ProbabilityCalibrator:
+    """Fit a :class:`ProbabilityCalibrator` mapping ``scores`` to ``P(outcome=1 | score)``."""
+    return ProbabilityCalibrator(method).fit(scores, outcomes)
+
+
 __all__ = [
     "reliability_curve",
     "expected_calibration_error",
@@ -365,4 +460,6 @@ __all__ = [
     "pit_calibration_error",
     "interval_coverage",
     "coverage_curve",
+    "ProbabilityCalibrator",
+    "calibrate_probabilities",
 ]
