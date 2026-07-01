@@ -392,7 +392,7 @@ def default_operators() -> list[ImprovementOperator]:
     return [Refit(), OnlineUpdate(mode="streaming"), AutoSelect(), Recalibrate()]
 
 
-register_operator(Recompose())                                # discoverable via the registry, off by default
+register_operator(Recompose())  # discoverable via the registry, off by default
 register_operator(Mutate())
 
 
