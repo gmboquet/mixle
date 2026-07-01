@@ -47,6 +47,9 @@ __all__ = [
     "predictive_distribution",
     "posterior_ensemble",
     "decompose_uncertainty",
+    "Clustering",
+    "cluster_samples",
+    "semantic_entropy",
 ]
 
 
@@ -179,6 +182,50 @@ def posterior_ensemble(param_post: Any, build: Callable[[Any], Any], n: int = 20
     """
     r = _as_rng(rng)
     return [build(param_post.sample(r)) for _ in range(int(n))]
+
+
+@dataclass(frozen=True)
+class Clustering:
+    """Samples grouped into equivalence classes: ``representatives``, class ``probs``, per-sample ``labels``."""
+
+    representatives: list[Any]
+    probs: np.ndarray
+    labels: np.ndarray
+
+
+def cluster_samples(samples: Sequence[Any], equivalent: Callable[[Any, Any], bool] | None = None) -> Clustering:
+    """Group ``samples`` into equivalence classes under ``equivalent`` (default exact ``==``).
+
+    For discrete draws whose *surface form* varies but *meaning* does not -- e.g. LLM generations
+    ("Paris", "It's Paris.", "The capital is Paris") -- pass a semantic ``equivalent`` (embedding
+    similarity, an entailment check, normalized match). Greedy single-linkage against each cluster's
+    first member; returns the class distribution and per-sample assignments.
+    """
+    eq = equivalent if equivalent is not None else (lambda a, b: a == b)
+    reps: list[Any] = []
+    labels: list[int] = []
+    for s in samples:
+        found = next((ci for ci, r in enumerate(reps) if eq(s, r)), None)
+        if found is None:
+            found = len(reps)
+            reps.append(s)
+        labels.append(found)
+    if not reps:
+        raise ValueError("cluster_samples needs at least one sample")
+    counts = np.bincount(labels, minlength=len(reps)).astype(float)
+    return Clustering(reps, counts / counts.sum(), np.asarray(labels))
+
+
+def semantic_entropy(samples: Sequence[Any], equivalent: Callable[[Any, Any], bool] | None = None) -> float:
+    """Entropy (nats) over the *meaning* classes of ``samples`` -- the model's predictive uncertainty.
+
+    Sample a stochastic generator (an LLM at temperature) ``n`` times, cluster by meaning
+    (:func:`cluster_samples`), and take the entropy of the class distribution. High semantic entropy
+    means the model disagrees with itself about *what* the answer is (a hallucination signal), as
+    opposed to merely phrasing one answer many ways (which clusters to low entropy). Feed the same
+    clusters' per-member distributions to :func:`decompose_entropy` for an epistemic/aleatoric split.
+    """
+    return float(_entropy_last(cluster_samples(samples, equivalent).probs))
 
 
 def decompose_uncertainty(
