@@ -117,3 +117,52 @@ def llm_labeler(
         return out
 
     return teacher
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """Pull the first JSON object out of an LLM reply (tolerates code fences / surrounding prose)."""
+    start, depth = None, 0
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if start is None:
+                start = i
+            depth += 1
+        elif ch == "}" and start is not None:
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except ValueError:
+                    return {}
+    return {}
+
+
+def llm_extractor(
+    llm: LLM,
+    fields: Sequence[str],
+    *,
+    instruction: str | None = None,
+    system: str | None = None,
+) -> Callable[[list[str]], list[dict[str, str]]]:
+    """Turn an LLM into a field-extraction teacher ``texts -> [{field: value}]`` for :func:`mixle.task.extract.distill_extractor`.
+
+    Each text is extracted into a JSON object over ``fields`` (values must be verbatim substrings so they align to
+    token spans during distillation). The returned callable has the batched-teacher shape the extractor expects.
+    """
+    fields = list(fields)
+    field_list = ", ".join(fields)
+    instr = instruction or "Extract the fields from the text."
+    sys = system or (
+        f"You extract fields from text. Return a single JSON object with keys {field_list}. Each value must be an "
+        "exact substring of the text (copy it verbatim). Omit a key if the field is absent. Output only JSON."
+    )
+
+    def teacher(texts: list[str]) -> list[dict[str, str]]:
+        out = []
+        for t in texts:
+            reply = llm.complete(f"{instr}\n\nFields: {field_list}\n\nText: {t}\n\nJSON:", system=sys)
+            parsed = _extract_json_object(reply)
+            out.append({k: str(v) for k, v in parsed.items() if k in fields and v not in (None, "")})
+        return out
+
+    return teacher

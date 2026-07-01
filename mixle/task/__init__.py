@@ -51,6 +51,7 @@ from mixle.task.extract import (
 from mixle.task.llm import (
     CallableLLM,
     OpenAICompatLLM,
+    llm_extractor,
     llm_labeler,
     pick_label,
 )
@@ -104,6 +105,7 @@ __all__ = [
     "distill_records_from_labels",
     "extraction_f1",
     "get_builder",
+    "llm_extractor",
     "llm_labeler",
     "pick_label",
     "recommend_model",
