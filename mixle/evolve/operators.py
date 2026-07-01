@@ -334,13 +334,66 @@ class Recompose:
         return Candidate(fitted, self.name, ctx.get("parent_hash"), {"components": 2})
 
 
+@dataclass(frozen=True)
+class Mutate:
+    """Genetic-programming structure search (Koza 1992): apply a random structural mutation to the champion and
+    refit. Moves: ``grow`` (add a bootstrap-fit component), ``shrink`` (drop the lowest-weight component), and
+    ``perturb`` (bootstrap re-fit). Repeated application inside a :class:`~mixle.evolve.population.Population` +
+    the verify gate + a tree-edit genotype distance IS structure induction by selection (cf. Bayesian model
+    merging, Stolcke & Omohundro 1994) — not open research. Registered but OUT of the default set (expensive)."""
+
+    name: str = "mutate"
+    cost_hint: float = 4.0
+    max_its: int = 30
+
+    def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
+        return callable(getattr(model, "estimator", None)) and len(list(data)) >= 8
+
+    def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
+        import numpy as np
+
+        from mixle.ops import mixture
+
+        rng = np.random.RandomState(int(ctx.get("seed", 0)))
+        rows = list(data)
+        components = getattr(model, "components", None)
+        is_mixture = isinstance(components, (list, tuple)) and len(components) >= 1
+
+        moves = ["grow", "perturb"]
+        if is_mixture and len(components) > 1:
+            moves.append("shrink")
+        move = moves[rng.randint(len(moves))]
+
+        def _bootstrap() -> list:
+            idx = rng.randint(0, len(rows), len(rows))
+            return [rows[int(i)] for i in idx]
+
+        if move == "shrink":
+            weights = np.asarray(model.w, dtype=float)
+            drop = int(np.argmin(weights))
+            keep = [i for i in range(len(components)) if i != drop]
+            proto = mixture([components[i] for i in keep], [float(weights[i]) for i in keep])
+        elif move == "grow":
+            leaf = components[0] if is_mixture else model
+            extra = optimize(_bootstrap(), leaf.estimator(), max_its=12, prev_estimate=leaf, out=None)
+            base = list(components) if is_mixture else [model]
+            base_w = list(np.asarray(model.w, dtype=float)) if is_mixture else [1.0]
+            proto = mixture(base + [extra], base_w + [0.5])
+        else:  # perturb
+            proto = optimize(_bootstrap(), model.estimator(), max_its=12, prev_estimate=model, out=None)
+
+        fitted = optimize(rows, proto.estimator(), max_its=self.max_its, prev_estimate=proto, out=None)
+        return Candidate(fitted, self.name, ctx.get("parent_hash"), {"move": move})
+
+
 def default_operators() -> list[ImprovementOperator]:
-    """The Phase-1 default operator set: refit, online update, auto-select, recalibrate. (Recompose is
-    structural + expensive, so it is available via the registry but not enabled by default.)"""
+    """The Phase-1 default operator set: refit, online update, auto-select, recalibrate. (Recompose + Mutate are
+    structural + expensive, so they are available via the registry but not enabled by default.)"""
     return [Refit(), OnlineUpdate(mode="streaming"), AutoSelect(), Recalibrate()]
 
 
 register_operator(Recompose())                                # discoverable via the registry, off by default
+register_operator(Mutate())
 
 
 __all__ = [
@@ -351,6 +404,7 @@ __all__ = [
     "AutoSelect",
     "Recalibrate",
     "Recompose",
+    "Mutate",
     "register_operator",
     "unregister_operator",
     "registered_operators",
