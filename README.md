@@ -79,12 +79,14 @@ the same token vectors jointly instead of duplicating a big parameter block, the
 `name=` scalar tying:
 
 ```python
-from mixle.models import LM, SharedEmbedding, StreamingTransformerLeaf
+from mixle.models import SharedEmbedding, StreamingTransformerLeaf
 from mixle.stats import MixtureEstimator
 
 emb = SharedEmbedding(vocab=8000, dim=256, name="word")               # one embedding, declared once
-experts = [LM(vocab=8000, d_model=256, embedding=emb) for _ in range(3)]   # every expert ties it
-mixture = MixtureEstimator([StreamingTransformerLeaf(e.module).estimator() for e in experts])
+mixture = MixtureEstimator([                                          # 3 experts, every one ties it
+    StreamingTransformerLeaf.from_config(8000, d_model=256, embedding=emb).estimator()
+    for _ in range(3)
+])
 ```
 
 The same machinery fits an ordinary heterogeneous record just as well — each here is a
