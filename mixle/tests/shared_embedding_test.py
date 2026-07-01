@@ -76,6 +76,28 @@ class MixtureExpertsTest(unittest.TestCase):
         weights = {id(e.module.tok.weight) for e in experts}
         self.assertEqual(len(weights), 1)
 
+    def test_regular_estimator_syntax_shares_and_trains(self):
+        # the plain estimator API -- no LM convenience: build shared-embedding modules and wrap them in leaves
+        import numpy as np
+
+        from mixle.models import StreamingTransformerLeaf, build_causal_lm
+        from mixle.stats import MixtureEstimator
+
+        v, d, block = 60, 24, 8
+        emb = SharedEmbedding(vocab=v, dim=d, name="word")
+        mods = [build_causal_lm(v, d, n_layer=2, n_head=2, block=block, embedding=emb) for _ in range(3)]
+        est = MixtureEstimator([StreamingTransformerLeaf(m).estimator() for m in mods])
+        self.assertEqual(len({id(m.tok.weight) for m in mods}), 1)  # one shared tensor before fit
+
+        from mixle.inference import optimize
+
+        rng = np.random.RandomState(0)
+        data = [(list(rng.randint(0, v, size=block)), int(rng.randint(0, v))) for _ in range(48)]
+        before = emb.module().weight.detach().clone()
+        model = optimize(data, est, max_its=2, out=None)
+        self.assertFalse(torch.allclose(before, emb.module().weight))  # the shared embedding trained under EM
+        self.assertEqual(len({id(c.module.tok.weight) for c in model.components}), 1)  # still shared after fit
+
 
 if __name__ == "__main__":
     unittest.main()
