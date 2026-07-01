@@ -77,17 +77,20 @@ class MixtureExpertsTest(unittest.TestCase):
         self.assertEqual(len(weights), 1)
 
     def test_regular_estimator_syntax_shares_and_trains(self):
-        # the plain estimator API -- no LM convenience: build shared-embedding modules and wrap them in leaves
+        # the plain estimator API -- declarative leaf.from_config, no hand-built torch module
         import numpy as np
 
-        from mixle.models import StreamingTransformerLeaf, build_causal_lm
+        from mixle.models import StreamingTransformerLeaf
         from mixle.stats import MixtureEstimator
 
         v, d, block = 60, 24, 8
         emb = SharedEmbedding(vocab=v, dim=d, name="word")
-        mods = [build_causal_lm(v, d, n_layer=2, n_head=2, block=block, embedding=emb) for _ in range(3)]
-        est = MixtureEstimator([StreamingTransformerLeaf(m).estimator() for m in mods])
-        self.assertEqual(len({id(m.tok.weight) for m in mods}), 1)  # one shared tensor before fit
+        leaves = [
+            StreamingTransformerLeaf.from_config(v, d_model=d, n_layer=2, n_head=2, block=block, embedding=emb)
+            for _ in range(3)
+        ]
+        est = MixtureEstimator([leaf.estimator() for leaf in leaves])
+        self.assertEqual(len({id(leaf.module.tok.weight) for leaf in leaves}), 1)  # one shared tensor before fit
 
         from mixle.inference import optimize
 
