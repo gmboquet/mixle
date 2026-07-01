@@ -26,6 +26,7 @@ import numpy as np
 from mixle.capability import capabilities
 from mixle.evolve.objective import Objective
 from mixle.evolve.operators import ImprovementOperator, default_operators
+from mixle.evolve.structure import structural_distance
 from mixle.evolve.verify import challenger_beats_champion
 
 
@@ -180,13 +181,8 @@ class _Member:
     caps: frozenset[str]
 
 
-def _capability_distance(a: frozenset[str], b: frozenset[str]) -> float:
-    """Coarse structural distance: Jaccard distance over capability-name sets (honestly labeled coarse)."""
-    if not a and not b:
-        return 0.0
-    inter = len(a & b)
-    union = len(a | b)
-    return 1.0 - (inter / union if union else 1.0)
+# diversity now uses the real genotype distance (tree-edit over the model's compositional structure); the
+# ``caps`` fingerprint is kept as cheap cached metadata.
 
 
 class Population:
@@ -269,17 +265,18 @@ class Population:
         return [members[i] for i in idx]
 
     def _survivors(self) -> list[_Member]:
-        """Keep the fittest ``size - quota`` plus a capability-diverse quota (greedy farthest-first)."""
+        """Keep the fittest ``size - quota`` plus a structurally-diverse quota (greedy farthest-first over the
+        tree-edit genotype distance)."""
         members = sorted(self._members, key=lambda m: m.score)
         if len(members) <= self.size:
             return members
         n_fit = max(1, self.size - self.diversity_quota)
         kept = members[:n_fit]
         pool = members[n_fit:]
-        # greedily add the members whose capability fingerprint is farthest from those already kept.
+        # greedily add the members whose STRUCTURE is farthest (tree-edit) from those already kept.
         while len(kept) < self.size and pool:
-            kept_caps = [m.caps for m in kept]
-            far = max(pool, key=lambda m: min(_capability_distance(m.caps, c) for c in kept_caps))
+            kept_models = [m.model for m in kept]
+            far = max(pool, key=lambda m: min(structural_distance(m.model, k) for k in kept_models))
             kept.append(far)
             pool.remove(far)
         return kept[: self.size]

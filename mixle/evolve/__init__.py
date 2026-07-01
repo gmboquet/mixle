@@ -23,8 +23,9 @@ Phase 2-3 surface:
 * **search** -- :func:`search` over a typed :class:`Space` (:class:`Real` / :class:`Integer` /
   :class:`Categorical`), ``method='evolutionary'`` / ``'bandit'`` / ``'bo'``, returning a :class:`SearchResult`.
 * **meta-search** -- :class:`Population` + :class:`OperatorBandit` (the policy that learns which operators help).
-
-The ``Recompose`` / ``Mutate`` structural operators (Phase 4) are not built.
+* **structure search** -- :class:`Recompose` / :class:`Mutate` (genetic-programming structural moves over the
+  model's compositional tree) + :func:`structural_distance` (a tree-edit genotype distance) driving the
+  population's diversity; registered but off by default (structural + expensive).
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from mixle.evolve.operators import (
     AutoSelect,
     Candidate,
     ImprovementOperator,
+    Mutate,
     OnlineUpdate,
     Recalibrate,
     Recompose,
@@ -56,6 +58,7 @@ from mixle.evolve.operators import (
 from mixle.evolve.population import OperatorBandit, Population
 from mixle.evolve.search import SearchResult, auto_select, search
 from mixle.evolve.space import Categorical, Integer, Real, Space
+from mixle.evolve.structure import model_signature, structural_distance, tree_edit_distance
 from mixle.evolve.verify import Verdict, challenger_beats_champion
 
 __all__ = [
@@ -83,6 +86,10 @@ __all__ = [
     "AutoSelect",
     "Recalibrate",
     "Recompose",
+    "Mutate",
+    "structural_distance",
+    "model_signature",
+    "tree_edit_distance",
     "register_operator",
     "unregister_operator",
     "registered_operators",
