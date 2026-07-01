@@ -51,6 +51,19 @@ class LabelerTest(unittest.TestCase):
         self.assertGreaterEqual(agreement(student, teacher(texts), texts), 0.85)
 
 
+class ExtractorTest(unittest.TestCase):
+    def test_llm_extractor_parses_json_fields(self):
+        from mixle.task.llm import llm_extractor
+
+        def fake(prompt, system=None):
+            # a stub extraction LLM that returns JSON (with surrounding prose to test tolerant parsing)
+            return 'Sure! Here you go:\n```json\n{"id": "1234", "vendor": "Acme", "missing": "x"}\n```'
+
+        teacher = llm_extractor(CallableLLM(fake), ["id", "vendor", "amount"])
+        out = teacher(["INV-1234 Acme $5.00"])
+        self.assertEqual(out, [{"id": "1234", "vendor": "Acme"}])  # off-schema 'missing' dropped, absent omitted
+
+
 class OpenAICompatTest(unittest.TestCase):
     def test_request_shape_and_parse(self):
         captured = {}
