@@ -64,6 +64,13 @@ from mixle.models.streaming_transformer_leaf import (
     TransformerLMEstimator,
     stream_fit,
 )
+from mixle.models.train_search import (
+    TrainingSearchResult,
+    TrainingSpace,
+    extrapolate_learning_curve,
+    lm_train_fn,
+    tune_training,
+)
 from mixle.models.transformer import build_causal_lm
 
 __all__ = [
@@ -79,11 +86,16 @@ __all__ = [
     "NeuralLeaf",
     "SoftmaxNeuralLeaf",
     "StreamingTransformerLeaf",
+    "TrainingSearchResult",
+    "TrainingSpace",
     "TransformerLMEstimator",
     "build_causal_lm",
     "ewc",
+    "extrapolate_learning_curve",
     "fisher_diagonal",
+    "lm_train_fn",
     "snapshot",
+    "tune_training",
     "stream_fit",
     "GrammarLearningResult",
     "HardEMResult",
