@@ -32,10 +32,12 @@ from typing import Any
 
 import numpy as np
 
+from mixle.inference.calibration import ProbabilityCalibrator, calibrate_probabilities
 from mixle.inference.uncertainty import (
     UncertaintyDecomposition,
     cluster_samples,
     decompose_entropy,
+    marginalize_meaning,
     semantic_entropy,
 )
 
@@ -43,6 +45,16 @@ _STOP = frozenset(
     "a an the is are was were be been being of to in on at by for with and or but it its this that "
     "as from into over under near".split()
 )
+
+
+def _auc(scores: np.ndarray, outcomes: np.ndarray) -> float:
+    """Rank-based AUC of ``scores`` vs binary ``outcomes`` -- how well the signal separates right/wrong."""
+    pos = np.sum(outcomes == 1.0)
+    neg = np.sum(outcomes == 0.0)
+    if pos == 0 or neg == 0:
+        return 0.5
+    ranks = np.argsort(np.argsort(scores)) + 1.0  # average-rank ties are negligible for a diagnostic
+    return float((ranks[outcomes == 1.0].sum() - pos * (pos + 1) / 2.0) / (pos * neg))
 
 
 def sentence_claims(text: str) -> list[str]:
@@ -144,6 +156,25 @@ class InformationAssessment:
         return [c for c in self.claims if not c.reliable]
 
 
+@dataclass(frozen=True)
+class FactualityModel:
+    """A fitted map from a per-prompt uncertainty signal to a *calibrated* ``P(answer is correct)``.
+
+    The signal (self-consistency, a token likelihood, ...) is only a raw number; the calibrator turns
+    it into a genuine probability of the *information* being correct, learned against labeled facts.
+    ``discrimination`` (held-out AUC on the fit set) reports how much the signal actually knew about
+    correctness -- ~0.5 means the signal was unrelated to truth, no matter how confident it looked.
+    """
+
+    calibrator: ProbabilityCalibrator
+    signal: Callable[[str], float]
+    discrimination: float
+
+    def probability(self, prompt: str) -> float:
+        """Calibrated probability that the answer's information is correct."""
+        return float(self.calibrator.predict([float(self.signal(prompt))])[0])
+
+
 class LLMUncertainty:
     """Calibrated uncertainty and selective prediction for any ``generate(prompt) -> str`` LLM.
 
@@ -168,21 +199,39 @@ class LLMUncertainty:
         self._alpha: float | None = None
 
     def sample(self, prompt: str, n: int | None = None) -> list[Any]:
-        """Draw ``n`` stochastic responses to ``prompt``."""
+        """Draw ``n`` stochastic responses to ``prompt``.
+
+        ``generate`` may return a plain string, or a ``(text, logprob)`` pair -- the sequence
+        log-probability ``log P(s)``. When logprobs are provided they are used to marginalize the
+        string distribution over meaning classes exactly (:func:`mixle.inference.marginalize_meaning`)
+        rather than by sample counting.
+        """
         return [self.generate(prompt) for _ in range(int(n or self.n))]
 
+    @staticmethod
+    def _split(samples: list[Any]) -> tuple[list[Any], np.ndarray | None]:
+        """Separate ``(text, logprob)`` pairs into texts + log-probs; pass strings through unchanged."""
+        if samples and isinstance(samples[0], tuple) and len(samples[0]) == 2:
+            return [s[0] for s in samples], np.array([float(s[1]) for s in samples])
+        return samples, None
+
     def assess(self, prompt: str, n: int | None = None) -> LLMAssessment:
-        """Sample, cluster by meaning, and report the answer with its semantic uncertainty."""
-        samples = self.sample(prompt, n)
-        c = cluster_samples(samples, self.equivalent)
-        top = int(np.argmax(c.probs))
-        clusters = sorted(zip(c.representatives, c.probs.tolist()), key=lambda t: -t[1])
+        """Sample, marginalize the string distribution over meaning classes, and report the answer.
+
+        The reported ``confidence`` is the marginal probability of the top *meaning* (summed over its
+        equivalence class of strings), and ``semantic_entropy`` the entropy of that meaning marginal
+        -- not a per-string token probability.
+        """
+        texts, log_probs = self._split(self.sample(prompt, n))
+        m = marginalize_meaning(texts, self.equivalent, log_probs=log_probs)
+        top = int(np.argmax(m.probs))
+        clusters = sorted(zip(m.representatives, m.probs.tolist()), key=lambda t: -t[1])
         return LLMAssessment(
-            answer=c.representatives[top],
-            confidence=float(c.probs[top]),
-            semantic_entropy=semantic_entropy(samples, self.equivalent),
+            answer=m.representatives[top],
+            confidence=float(m.probs[top]),
+            semantic_entropy=semantic_entropy(texts, self.equivalent, log_probs=log_probs),
             clusters=clusters,
-            samples=samples,
+            samples=texts,
         )
 
     def decompose(self, prompts: Sequence[str], n: int | None = None) -> UncertaintyDecomposition:
@@ -298,3 +347,42 @@ class LLMUncertainty:
             raise RuntimeError("call calibrate(...) before answer()")
         a = self.assess(prompt, n)
         return a if a.confidence >= self._threshold else None
+
+    # -- calibrated information likelihood ----------------------------------------------------
+    def fit_factuality(
+        self,
+        examples: Sequence[tuple[str, Any]],
+        *,
+        signal: Callable[[str], float] | None = None,
+        correct: Callable[[Any, Any], bool] | None = None,
+        method: str = "isotonic",
+        n: int | None = None,
+    ) -> FactualityModel:
+        """Learn a calibrated ``P(answer is correct)`` from a raw signal, on labeled ``(prompt, gold)``.
+
+        The model's raw confidence (its self-consistency, or a token likelihood) is *not* a
+        probability that the information is correct -- it can be systematically over/under-confident,
+        or unrelated to truth. This fits a :class:`~mixle.inference.ProbabilityCalibrator` mapping the
+        signal to the empirical correctness rate, so the output *is* a probability of the information
+        being right. ``discrimination`` (AUC of signal vs correctness) reports how much the raw signal
+        knew at all -- ~0.5 means it was unrelated to truth, calibration or not.
+
+        Args:
+            examples: labeled ``(prompt, gold_answer)`` pairs.
+            signal: ``prompt -> float`` raw score (default: the self-consistency confidence from
+                :meth:`assess`).
+            correct: ``(answer, gold) -> bool`` (default the ``equivalent`` relation).
+            method: calibration map -- ``"isotonic"`` or ``"platt"``.
+            n: samples per prompt.
+        """
+        corr = correct or self.equivalent or (lambda a, b: a == b)
+        scores, outcomes = [], []
+        for prompt, gold in examples:
+            a = self.assess(prompt, n)
+            scores.append(float(signal(prompt)) if signal is not None else a.confidence)
+            outcomes.append(1.0 if corr(a.answer, gold) else 0.0)
+        scores_arr = np.asarray(scores, dtype=float)
+        outcomes_arr = np.asarray(outcomes, dtype=float)
+        calibrator = calibrate_probabilities(scores_arr, outcomes_arr, method=method)
+        sig = signal if signal is not None else (lambda p: self.assess(p, n).confidence)
+        return FactualityModel(calibrator, sig, _auc(scores_arr, outcomes_arr))
