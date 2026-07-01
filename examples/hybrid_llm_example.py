@@ -3,8 +3,9 @@
 Each event in a log / activity stream has a TYPE (what happened) and a TIME (seconds since the previous
 event). mixle models both at once as a *neural marked point process*: a causal Transformer predicts the
 next event type from recent history, and a Gamma models the wait time. The two compose into a single
-distribution and fit in one EM call -- the language model and the classical timing law are the same kind
-of object -- so an event's anomaly score is a single joint log-density that drops when an event is unusual
+distribution and fit in one ``optimize`` call (the Gamma in closed form, the Transformer by gradient
+descent) -- the language model and the classical timing law are the same kind of object -- so an event's
+anomaly score is a single joint log-density that drops when an event is unusual
 in *what* happened, in *when* it happened, or both. A sequence model alone would miss the timing; a timing
 model alone would miss the content.
 
@@ -38,7 +39,7 @@ def main() -> None:
     rng = np.random.RandomState(0)
     data = synth_stream(800, rng)
 
-    # One fit trains the Transformer (next event | history) and the Gamma (wait time) together.
+    # One optimize() call fits both: the Gamma in closed form, the Transformer by gradient descent.
     model = optimize(
         data,
         CompositeEstimator((
