@@ -108,10 +108,11 @@ class GaussianBelief(BeliefState):
         return self._cov.copy()
 
     def entropy(self) -> float:
-        # H[N(m,P)] = 0.5 (d log(2 pi e) + log|P|); slogdet is stable for near-singular P.
-        sign, logdet = np.linalg.slogdet(self._cov)
-        if sign <= 0:
-            logdet = float(np.log(np.clip(np.linalg.eigvalsh(self._cov), 1e-300, None)).sum())
+        # H[N(m,P)] = 0.5 (d log(2 pi e) + log|P|). Use the symmetric eigenvalues (clipped to a tiny
+        # floor) rather than slogdet: eigvalsh is stable and warning-free for the wide dynamic range a
+        # multi-modal latent produces (e.g. density ~1e2 alongside susceptibility ~1e-2).
+        evals = np.clip(np.linalg.eigvalsh(self._cov), 1e-300, None)
+        logdet = float(np.log(evals).sum())
         return float(0.5 * (self._dim * np.log(2.0 * np.pi * np.e) + logdet))
 
     def interval(self, level: float = 0.9) -> np.ndarray:
