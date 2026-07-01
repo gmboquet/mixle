@@ -28,7 +28,9 @@ from mixle.capability import ConjugateUpdatable
 from mixle.inference import production
 from mixle.inference.bayesian_network import (
     HeterogeneousBayesianNetwork,
+    MixtureOfBayesianNetworks,
     learn_bayesian_network,
+    learn_mixture_bayesian_network,
 )
 
 # belief states: a distribution over a latent, updated by evidence (the assimilation step)
@@ -404,7 +406,9 @@ __all__ = [
     "learn_structure",
     "learn_mixture_structure",
     "learn_bayesian_network",
+    "learn_mixture_bayesian_network",
     "HeterogeneousBayesianNetwork",
+    "MixtureOfBayesianNetworks",
     "dependency_gain",
     "DependencyTreeDistribution",
     "MixtureOfDependencyTrees",
