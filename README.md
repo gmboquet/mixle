@@ -69,8 +69,9 @@ model = optimize(events, CompositeEstimator((
 model.log_density(event)   # one joint score — drops when an event is odd in WHAT happened, WHEN, or both
 ```
 
-The Transformer trains by EM alongside the Gamma — both are just distributions. Swap the Gamma for any of
-~90 families, or wrap it in a mixture/HMM. Runnable: [`examples/hybrid_llm_example.py`](https://github.com/gmboquet/mixle/blob/main/examples/hybrid_llm_example.py).
+The Transformer and the Gamma are just distributions, fit together in one `optimize` call — the Gamma in
+closed form, the Transformer by gradient descent. Swap the Gamma for any of ~90 families, or wrap it in a
+mixture/HMM (that latent adds the EM step). Runnable: [`examples/hybrid_llm_example.py`](https://github.com/gmboquet/mixle/blob/main/examples/hybrid_llm_example.py).
 
 The same machinery fits an ordinary heterogeneous record just as well — each here is a
 `(category, real, variable-length count sequence)`:
@@ -122,8 +123,8 @@ Each family is five cooperating pieces:
 | `...Accumulator`  | sufficient statistics for the E-step, mergeable across data partitions     |
 | `...DataEncoder`  | packs raw Python records into arrays for the fast path                     |
 
-`optimize(data, est)` (in `mixle.inference`) runs EM to convergence — vectorized locally, or
-distributed via `backend=`. It also accepts a distribution **prototype** (`optimize(data, proto)`) or
+`optimize(data, est)` (in `mixle.inference`) fits the model to convergence — EM for latent models
+(mixtures, HMMs), maximum likelihood otherwise — vectorized locally, or distributed via `backend=`. It also accepts a distribution **prototype** (`optimize(data, proto)`) or
 nothing but the data (`optimize(data)`, which infers the estimator). Related entry points:
 
 - `best_of` — multi-restart EM
