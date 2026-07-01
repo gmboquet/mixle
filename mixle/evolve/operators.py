@@ -301,9 +301,46 @@ class Recalibrate:
         )
 
 
+@dataclass(frozen=True)
+class Recompose:
+    """Propose a richer STRUCTURE for the champion: a 2-component mixture of its family, each component warm-fit on
+    a different half of the data so EM starts non-degenerate (avoiding the identical-component collapse). It wins
+    the verify gate only when the data has structure a single component misses — anti-regression keeps it honest.
+    Expensive, so it is registered but kept OUT of the default operator set."""
+
+    name: str = "recompose"
+    cost_hint: float = 4.0
+    max_its: int = 30
+
+    def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
+        return callable(getattr(model, "estimator", None)) and len(list(data)) >= 8
+
+    def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
+        import numpy as np
+
+        from mixle.ops import mixture
+
+        rows = list(data)
+        rng = np.random.RandomState(int(ctx.get("seed", 0)))
+        perm = rng.permutation(len(rows))
+        half = max(1, len(rows) // 2)
+        left = [rows[i] for i in perm[:half]]
+        right = [rows[i] for i in perm[half:]] or left
+        estimator = model.estimator()
+        comp_a = optimize(left, estimator, max_its=15, prev_estimate=model, out=None)
+        comp_b = optimize(right, estimator, max_its=15, prev_estimate=model, out=None)
+        proto = mixture([comp_a, comp_b], [0.5, 0.5])
+        fitted = optimize(rows, proto.estimator(), max_its=self.max_its, prev_estimate=proto, out=None)
+        return Candidate(fitted, self.name, ctx.get("parent_hash"), {"components": 2})
+
+
 def default_operators() -> list[ImprovementOperator]:
-    """The Phase-1 default operator set: refit, online update, auto-select, recalibrate."""
+    """The Phase-1 default operator set: refit, online update, auto-select, recalibrate. (Recompose is
+    structural + expensive, so it is available via the registry but not enabled by default.)"""
     return [Refit(), OnlineUpdate(mode="streaming"), AutoSelect(), Recalibrate()]
+
+
+register_operator(Recompose())                                # discoverable via the registry, off by default
 
 
 __all__ = [
@@ -313,6 +350,7 @@ __all__ = [
     "OnlineUpdate",
     "AutoSelect",
     "Recalibrate",
+    "Recompose",
     "register_operator",
     "unregister_operator",
     "registered_operators",
