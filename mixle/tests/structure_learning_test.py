@@ -147,7 +147,10 @@ def _two_regime(seed, n=1600):
 class MixtureOfTreesTest(unittest.TestCase):
     def test_beats_single_tree_and_independent_mixture(self):
         train, test = _two_regime(1), _two_regime(2)
-        mot = learn_mixture_structure(train, 2, restarts=4, seed=0)
+        # more restarts so the mixture EM reliably reaches the good optimum: the fit is stochastic and
+        # its convergence differs across numpy/BLAS versions (Linux-x64 CI vs local), so a low restart
+        # count let one cluster miss the dependency edge on CI while passing locally.
+        mot = learn_mixture_structure(train, 2, restarts=12, seed=0)
         self.assertIsInstance(mot, MixtureOfDependencyTrees)
 
         tree_ll = _ll(learn_structure(train), test)
