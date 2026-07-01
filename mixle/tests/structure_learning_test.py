@@ -158,6 +158,7 @@ class MixtureOfTreesTest(unittest.TestCase):
             ),
             max_its=80,
             out=None,
+            rng=np.random.RandomState(0),  # seed the baseline's EM init so the margin is order-independent
         )
         ind_ll = float(np.sum([ind.log_density(d) for d in test]))
         mot_ll = _ll(mot, test)

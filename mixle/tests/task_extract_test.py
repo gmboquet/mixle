@@ -100,6 +100,7 @@ class ExtractionTest(unittest.TestCase):
             model.save(path)
             out_file = os.path.join(d, "out.json")
             script = (
+                "import torch; torch.set_num_threads(1)\n"
                 "import json\n"
                 "import mixle.task  # registers the seq_tagger builder + extraction adapter\n"
                 "from mixle.task.model import TaskModel\n"
