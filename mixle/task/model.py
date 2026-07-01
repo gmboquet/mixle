@@ -135,6 +135,10 @@ def _register_builtin_adapters() -> None:
         register_adapter("text_classifier", TextClassifierIO.from_spec)
     if "record_classifier" not in _ADAPTERS:
         register_adapter("record_classifier", RecordClassifierIO.from_spec)
+    if "extraction" not in _ADAPTERS:
+        from mixle.task.extract import ExtractionIO
+
+        register_adapter("extraction", ExtractionIO.from_spec)
 
 
 class _ClassifierIO:
