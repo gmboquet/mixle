@@ -19,7 +19,6 @@ estimator that fits it have the same shape — so **what you can express, you ca
 ## Contents
 
 [Installation](#installation) · [Quickstart](#quickstart) · [Core concepts](#core-concepts) ·
-[When to reach for mixle](#when-to-reach-for-mixle) ·
 [Distribution catalog](#distribution-catalog) · [Probabilistic programming](#probabilistic-programming-mixleppl) ·
 [Frequentist & Bayesian](#frequentist--bayesian) · [Engines & orchestration](#engines--orchestration) ·
 [Enumeration & ranking](#enumeration--ranking) · [Beyond fitting](#beyond-fitting) ·
@@ -70,10 +69,8 @@ model = optimize(events, CompositeEstimator((
 model.log_density(event)   # one joint score — drops when an event is odd in WHAT happened, WHEN, or both
 ```
 
-The Transformer trains by EM right alongside the Gamma because they are the *same kind of object* — a
-distribution. A sequence model alone misses the timing; a timing model alone misses the content; the
-hybrid scores both at once (swap the Gamma for any of ~90 families, or wrap it in a mixture/HMM for
-regimes). Runnable: [`examples/hybrid_llm_example.py`](https://github.com/gmboquet/mixle/blob/main/examples/hybrid_llm_example.py).
+The Transformer trains by EM alongside the Gamma — both are just distributions. Swap the Gamma for any of
+~90 families, or wrap it in a mixture/HMM. Runnable: [`examples/hybrid_llm_example.py`](https://github.com/gmboquet/mixle/blob/main/examples/hybrid_llm_example.py).
 
 The same machinery fits an ordinary heterogeneous record just as well — each here is a
 `(category, real, variable-length count sequence)`:
@@ -143,29 +140,6 @@ Families live in `mixle.stats`; operations on them are grouped by concern:
 
 Drawing is a method, not a concern: `dist.sampler(seed).sample(n)`.
 
-## When to reach for mixle
-
-mixle is built for one shape of problem: **a heterogeneous observation modelled as one composable
-distribution, where the inference should follow from the structure.** Reach for it when —
-
-- a single record mixes *kinds* of data — a category, a real, a count, a sequence, a set, a tree — and
-  you want to model the whole record jointly, not column-by-column;
-- you'd rather **declare the model and let `fit` choose the algorithm family** (closed-form / EM / MAP /
-  hierarchical / state-space) than wire a sampler by hand;
-- you need the *same* model to also **rank, enumerate, or unrank** its support, or to scale out by a
-  `backend=` argument rather than a rewrite.
-
-Reach for something else when —
-
-- you want a single-family Bayesian regression with best-in-class **NUTS** and a deep diagnostics
-  ecosystem — **Stan / NumPyro / PyMC** are more mature there, and faster (compiled / JIT);
-- you need a custom likelihood as free-form array code with autodiff — that's **Pyro / NumPyro / TFP**;
-- you only need one off-the-shelf estimator (a GMM, an HMM) with no composition — **scikit-learn /
-  hmmlearn / pomegranate** are simpler.
-
-Honest framing: mixle's edge is the **composition + automatic cross-family inference** combination, not
-raw sampler speed. Use `m.explain_fit()` to see exactly which route it will take, and why.
-
 ## Distribution catalog
 
 About 90 families in `mixle.stats`. The distinguishing feature: the **combinators model a whole
@@ -228,8 +202,7 @@ Mix([Normal(a, 1), Normal(b, 1)]).fit(data, constraints=a < b)    # ordered mean
 ```
 
 - **`how=`** selects the route: `auto` reads the model's *structure* and picks the algorithm **family**
-  — `conjugate | em | map | laplace | vi | vmp | mcmc | hmc | nuts | ensemble` — crossing the
-  closed-form ↔ EM ↔ MAP ↔ hierarchical ↔ state-space boundary that other "auto" knobs stay inside.
+  — `conjugate | em | map | laplace | vi | vmp | mcmc | hmc | nuts | ensemble`.
 - **See the choice before you fit:** `m.explain_fit()` (or `mixle.describe(m)`) reports the route `auto`
   will take, *why*, and its honest caveats; `how='laplace'` adds a cheap Gaussian posterior where
   `how='map'` gives only a point.
@@ -261,8 +234,8 @@ Normal(theta[Field("g")], free).fit(y, given={"g": labels})  #   y[i] ~ Normal(t
 Categorical(free).fit(labels)                                # the category set is inferred from the data
 ```
 
-- **Custom factors:** `potential(fn, *vars)` adds an arbitrary `fn(*values)` log-term to the joint
-  (the equivalent of Stan's `target +=`), and may introduce auxiliary latents.
+- **Custom factors:** `potential(fn, *vars)` adds an arbitrary `fn(*values)` log-term to the joint, and
+  may introduce auxiliary latents.
 - **Hierarchies & GLMMs:** `.each()` / `.each(by=...)` are random effects; `Group(...)` is the same in a
   regression predictor, for a Normal, Poisson, or Bernoulli response.
 - **Diagnostics:** a multi-chain fit (`how="nuts", chains=4`) folds per-parameter R̂ and ESS straight
