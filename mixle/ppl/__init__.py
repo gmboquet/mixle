@@ -20,6 +20,8 @@ their own modules. This package init only re-exports.
 
 from __future__ import annotations
 
+from mixle.models.embedding import SharedEmbedding as Embedding
+
 # Run the family/composite registrations (import-time side effects) BEFORE the dialect constructors
 # and the dynamics operators (which register after the composites) are pulled in.
 from mixle.ppl import _lowering  # noqa: F401  (imported for its registration side effects)
@@ -186,6 +188,7 @@ __all__ = [
     "Rician",
     "Dirichlet",
     "Conv",
+    "Embedding",
     "Mix",
     "Net",
     "Transformer",
