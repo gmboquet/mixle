@@ -39,6 +39,8 @@ from mixle.inference.blackbox import LaplacePosterior, laplace_posterior
 
 # calibration diagnostics — "is my probability / interval actually calibrated?"
 from mixle.inference.calibration import (
+    ProbabilityCalibrator,
+    calibrate_probabilities,
     coverage_curve,
     expected_calibration_error,
     interval_coverage,
@@ -307,6 +309,9 @@ __all__ = [
     "expected_calibration_error",
     "maximum_calibration_error",
     "top_label_confidence",
+    # recalibration: map raw scores -> calibrated probabilities (isotonic / Platt)
+    "ProbabilityCalibrator",
+    "calibrate_probabilities",
     "pit_values",
     "pit_ensemble",
     "pit_histogram",
