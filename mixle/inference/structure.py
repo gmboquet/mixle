@@ -171,6 +171,135 @@ def regression_gain(
     return ll_reg - ll_marginal - pen
 
 
+def _is_count(column: Sequence[Any]) -> bool:
+    return len({v for v in column}) > 2 and all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) and float(v) >= 0 and float(v) == int(v) for v in column
+    )
+
+
+def _is_binary(column: Sequence[Any]) -> bool:
+    return _is_numeric(column) and {float(v) for v in column} <= {0.0, 1.0}
+
+
+def _family_logpmf(name: str, y: Any, mu: np.ndarray, phi: float) -> np.ndarray:
+    from scipy import stats
+
+    y = np.asarray(y, dtype=float)
+    if name == "poisson":
+        return stats.poisson.logpmf(y, np.clip(mu, 1e-12, None))
+    if name == "binomial":
+        m = np.clip(mu, 1e-12, 1.0 - 1e-12)
+        return y * np.log(m) + (1.0 - y) * np.log(1.0 - m)
+    return stats.norm.logpdf(y, mu, np.sqrt(max(phi, 1e-12)))
+
+
+class GLMEdge:
+    """A generalized-linear regression edge: a *count* child's rate ``= exp(a + b*parent)`` (Poisson log-link), a
+    *binary* child's probability ``= logit^-1(a + b*parent)`` (logistic) — the heterogeneous generalization of
+    :class:`LinearGaussianEdge` (McCullagh & Nelder 1989). One slope parameter, fit by IRLS via
+    :func:`mixle.inference.glm.glm`. Models a count/binary child driven by a continuous parent far better than a
+    coarse per-bin conditional."""
+
+    def __init__(self, family: str, beta: Any, link: str, phi: float = 1.0) -> None:
+        from mixle.inference.glm import _LINKS
+
+        self.family, self.beta, self.link, self.phi = family, np.asarray(beta, dtype=float), link, float(phi)
+        self._inv = _LINKS[link].inv
+
+    def _mu(self, parent: Any) -> np.ndarray:
+        return self._inv(self.beta[0] + self.beta[1] * np.asarray(parent, dtype=float))
+
+    def log_density(self, x: tuple) -> float:
+        parent, child = x
+        return float(_family_logpmf(self.family, [float(child)], self._mu(np.array([float(parent)])), self.phi)[0])
+
+    def dist_to_encoder(self) -> Any:
+        return _EdgeEncoder()
+
+    def seq_log_density(self, encoded: Any) -> np.ndarray:
+        parent, child = encoded
+        return _family_logpmf(
+            self.family, np.asarray(child, dtype=float), self._mu(np.asarray(parent, dtype=float)), self.phi
+        )
+
+    def sampler(self, seed: int | None = None) -> Any:
+        return _GLMEdgeSampler(self, seed)
+
+    def __str__(self) -> str:
+        return f"GLMEdge({self.family}/{self.link}: child ~ {self.beta[0]:.3g} + {self.beta[1]:.3g}*parent)"
+
+
+class _GLMEdgeSampler:
+    def __init__(self, edge: GLMEdge, seed: int | None) -> None:
+        self.edge = edge
+        self.rng = np.random.RandomState(seed)
+
+    def sample_given(self, parent: Any) -> Any:
+        mu = float(self.edge._mu(np.array([float(parent)]))[0])
+        if self.edge.family == "poisson":
+            return int(self.rng.poisson(max(mu, 0.0)))
+        if self.edge.family == "binomial":
+            return int(self.rng.binomial(1, min(max(mu, 0.0), 1.0)))
+        return float(self.rng.normal(mu, np.sqrt(self.edge.phi)))
+
+
+def fit_glm_edge(pairs: Sequence[tuple], family: str) -> GLMEdge:
+    """Fit a GLM conditional ``child ~ g^-1(a + b*parent)`` (family's canonical link) by IRLS."""
+    from mixle.inference.glm import glm
+
+    arr = np.asarray(pairs, dtype=float)
+    p, c = arr[:, 0], arr[:, 1]
+    result = glm(np.column_stack([np.ones_like(p), p]), c, family=family)
+    return GLMEdge(result.family, result.coef, result.link, result.dispersion)
+
+
+def glm_gain(
+    parent: Sequence[Any],
+    child: Sequence[Any],
+    child_estimator: Any,
+    family: str,
+    *,
+    max_its: int = 30,
+    penalty: str = "bic",
+) -> float:
+    """Description-length gain (nats) of a GLM ``family`` regression edge over the child marginal (one extra slope
+    parameter). Returns ``-inf`` when the fit is undefined or non-finite."""
+    p = np.asarray(parent, dtype=float)
+    c = np.asarray(child, dtype=float)
+    n = len(c)
+    if n < 3 or float(np.var(p)) < 1e-12:
+        return float("-inf")
+    try:
+        edge = fit_glm_edge(list(zip(p.tolist(), c.tolist())), family)
+        ll_glm = float(np.sum(edge.seq_log_density((p, c))))
+    except Exception:
+        return float("-inf")
+    if not np.isfinite(ll_glm):
+        return float("-inf")
+    marginal = fit(list(child), _clone(child_estimator), max_its=max_its, out=None)
+    ll_marginal = float(np.sum(marginal.seq_log_density(marginal.dist_to_encoder().seq_encode(list(child)))))
+    pen = 0.5 * 1.0 * np.log(max(n, 2)) if penalty == "bic" else 0.0
+    return ll_glm - ll_marginal - pen
+
+
+def _numeric_edge_candidate(
+    parent_col: Sequence[Any], child_col: Sequence[Any], template: Any, *, max_its: int = 30
+) -> tuple[float | None, str | None]:
+    """The best regression/GLM edge of ``child`` on a numeric ``parent``: ``(gain, kind)`` or ``(None, None)``.
+    Dispatches on the child's type — binary -> logistic, count -> Poisson, real -> linear-Gaussian."""
+    if not _is_numeric(parent_col) or float(np.var(np.asarray(parent_col, dtype=float))) < 1e-12:
+        return None, None
+    if not _is_numeric(child_col):  # a categorical child stays a binned conditional
+        return None, None
+    if _is_binary(child_col):
+        return glm_gain(parent_col, child_col, template, "binomial", max_its=max_its), "glm:binomial"
+    if _is_count(child_col):
+        return glm_gain(parent_col, child_col, template, "poisson", max_its=max_its), "glm:poisson"
+    if _is_numeric(child_col):
+        return regression_gain(parent_col, child_col, template, max_its=max_its), "regression"
+    return None, None
+
+
 class DependencyTreeDistribution:
     """A directed-forest joint over a heterogeneous record: each field is a marginal or a conditional on its parent.
 
@@ -416,10 +545,8 @@ def learn_structure(
     binners = [None if discrete[p] else _quantile_binner(cols[p], n_bins) for p in range(n_fields)]
     keyed = [cols[p] if binners[p] is None else [binners[p](v) for v in cols[p]] for p in range(n_fields)]
 
-    # a continuous child on a numeric parent can use a linear-Gaussian REGRESSION edge (1 slope param) instead of
-    # a coarse per-bin conditional; each edge takes whichever scores the higher description-length gain.
-    numeric = [_is_numeric(cols[i]) for i in range(n_fields)]
-
+    # a numeric parent + a real/count/binary child can use a linear-Gaussian or GLM REGRESSION edge (1 slope
+    # param) instead of a coarse per-bin conditional; each edge takes whichever scores the higher DL gain.
     candidates: list[tuple[float, int, int, str]] = []
     for p in range(n_fields):
         for c in range(n_fields):
@@ -427,10 +554,9 @@ def learn_structure(
                 continue
             gain = dependency_gain(keyed[p], cols[c], templates[c], max_its=max_its)
             kind = "binned"
-            if not discrete[c] and not discrete[p] and numeric[c] and numeric[p]:
-                rgain = regression_gain(cols[p], cols[c], templates[c], max_its=max_its)
-                if rgain > gain:
-                    gain, kind = rgain, "regression"
+            ngain, nkind = _numeric_edge_candidate(cols[p], cols[c], templates[c], max_its=max_its)
+            if ngain is not None and ngain > gain:
+                gain, kind = ngain, nkind
             if gain > min_gain:
                 candidates.append((gain, p, c, kind))
     candidates.sort(key=lambda t: t[0], reverse=True)
@@ -455,6 +581,9 @@ def learn_structure(
         elif edge_kind[i] == "regression":
             factors[i] = fit_linear_gaussian_edge(list(zip(cols[parents[i]], cols[i])))
             edge_binners[i] = None  # the raw parent value drives the regression
+        elif edge_kind[i].startswith("glm:"):
+            factors[i] = fit_glm_edge(list(zip(cols[parents[i]], cols[i])), edge_kind[i].split(":", 1)[1])
+            edge_binners[i] = None  # the raw parent value drives the GLM
         else:
             p = parents[i]
             keys = keyed[p]

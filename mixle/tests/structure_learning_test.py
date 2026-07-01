@@ -13,9 +13,14 @@ import mixle.stats as st
 from mixle.inference import fit
 from mixle.inference.structure import (
     DependencyTreeDistribution,
+    GLMEdge,
     LinearGaussianEdge,
     MixtureOfDependencyTrees,
+    _field_estimator,
+    _quantile_binner,
     dependency_gain,
+    fit_glm_edge,
+    glm_gain,
     learn_mixture_structure,
     learn_structure,
     regression_gain,
@@ -252,6 +257,52 @@ class RegressionEdgeTest(unittest.TestCase):
         s = edge.sampler(0).sample_given(3.0)  # E[child | parent=3] = 1 + 2*3 = 7
         self.assertAlmostEqual(s, 7.0, delta=2.0)
         seq = edge.seq_log_density((np.array([0.0, 1.0]), np.array([1.0, 3.0])))
+        self.assertEqual(len(seq), 2)
+
+
+class GLMEdgeTest(unittest.TestCase):
+    """A count child's rate (Poisson log-link) or a binary child's odds (logistic) as a function of a continuous
+    parent -- the heterogeneous generalization of the regression edge, chosen when it beats binning."""
+
+    def test_poisson_edge_recovers_rate_slope(self):
+        r = np.random.RandomState(1)
+        x = r.uniform(-6, 6, 600)
+        y = r.poisson(np.exp(x / 3.0))  # true rate exp(x/3) -> slope 1/3
+        edge = fit_glm_edge(list(zip(x.tolist(), [int(v) for v in y])), "poisson")
+        self.assertEqual(edge.family, "poisson")
+        self.assertAlmostEqual(edge.beta[1], 1.0 / 3.0, delta=0.08)
+
+    def test_logistic_edge_recovers_logit_slope(self):
+        r = np.random.RandomState(2)
+        x = r.uniform(-6, 6, 800)
+        y = (r.rand(800) < 1.0 / (1.0 + np.exp(-x))).astype(int)  # true logit slope 1
+        edge = fit_glm_edge(list(zip(x.tolist(), [int(v) for v in y])), "binomial")
+        self.assertEqual(edge.family, "binomial")
+        self.assertAlmostEqual(edge.beta[1], 1.0, delta=0.3)
+
+    def test_glm_gain_beats_binned_on_count(self):
+        r = np.random.RandomState(3)
+        x = r.uniform(-6, 6, 800)
+        y = [int(v) for v in r.poisson(np.exp(x / 3.0))]
+        tmpl = _field_estimator(y)
+        binner = _quantile_binner(x, 4)
+        binned = dependency_gain([binner(v) for v in x], y, tmpl)
+        poisson = glm_gain(x.tolist(), y, tmpl, "poisson")
+        self.assertGreater(poisson, binned)  # 1 slope param beats a per-bin conditional
+
+    def test_learn_structure_uses_glm_edge_for_count(self):
+        r = np.random.RandomState(1)
+        x = r.uniform(-6, 6, 800)
+        k = [int(v) for v in r.poisson(np.exp(x / 3.0))]
+        model = learn_structure(list(zip(x.tolist(), k)))
+        glm_factors = [f for f in model.factors if isinstance(f, GLMEdge)]
+        self.assertTrue(glm_factors and glm_factors[0].family == "poisson")
+
+    def test_glm_edge_samples_and_scores(self):
+        edge = GLMEdge("poisson", [0.0, 0.5], "log")
+        self.assertTrue(np.isfinite(edge.log_density((2.0, 3))))
+        self.assertIsInstance(edge.sampler(0).sample_given(2.0), int)  # a count draw
+        seq = edge.seq_log_density((np.array([0.0, 1.0]), np.array([1.0, 2.0])))
         self.assertEqual(len(seq), 2)
 
 
