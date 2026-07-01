@@ -11,7 +11,12 @@ import numpy as np
 
 import mixle.stats as st
 from mixle.inference import fit, learn_structure
-from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork, learn_bayesian_network
+from mixle.inference.bayesian_network import (
+    HeterogeneousBayesianNetwork,
+    MixtureOfBayesianNetworks,
+    learn_bayesian_network,
+    learn_mixture_bayesian_network,
+)
 
 
 def _ll(model, data):
@@ -108,6 +113,48 @@ class ScoreSampleTest(unittest.TestCase):
         )
         # no real structure -> the network does not meaningfully beat the independent composite in-sample
         self.assertLess(_ll(bn, data) - _ll(ind, data), 40.0)
+
+
+def _slope_regimes(seed, n=1600):
+    """Two clusters with OPPOSITE y-on-x slopes (separable by level) -- a per-cluster regression only a mixture gets."""
+    r = np.random.RandomState(seed)
+    out = []
+    for _ in range(n):
+        z = r.randint(0, 2)
+        x = r.randn()
+        y = (2.0 * x + 6.0 if z == 0 else -2.0 * x - 6.0) + 0.3 * r.randn()
+        out.append((float(x), float(y)))
+    return out
+
+
+class MixtureOfBayesianNetworksTest(unittest.TestCase):
+    def test_captures_per_cluster_regression(self):
+        train, test = _slope_regimes(1), _slope_regimes(2)
+        mix = learn_mixture_bayesian_network(train, 2, restarts=3, seed=0)
+        self.assertIsInstance(mix, MixtureOfBayesianNetworks)
+        single = learn_bayesian_network(train, max_parents=1)
+        self.assertGreater(_ll(mix, test) - _ll(single, test), 1000.0)  # a single DAG can't hold two slopes
+        self.assertTrue(all(len(c.edges()) >= 1 for c in mix.components))  # each cluster learned its regression
+
+    def test_responsibilities_recover_clusters(self):
+        r = np.random.RandomState(3)
+        rows, z = [], []
+        for _ in range(1200):
+            zi = r.randint(0, 2)
+            x = r.randn()
+            rows.append((float(x), float((2.0 * x + 6.0 if zi == 0 else -2.0 * x - 6.0) + 0.3 * r.randn())))
+            z.append(zi)
+        mix = learn_mixture_bayesian_network(rows, 2, restarts=3, seed=0)
+        assign = mix.responsibilities(rows).argmax(axis=1)
+        z = np.array(z)
+        self.assertGreater(max((assign == z).mean(), (assign != z).mean()), 0.9)
+
+    def test_samples_and_scores(self):
+        mix = learn_mixture_bayesian_network(_slope_regimes(4), 2, restarts=2, seed=0)
+        s = mix.sampler(0).sample(20)
+        self.assertEqual(len(s), 20)
+        self.assertEqual(len(s[0]), 2)
+        self.assertTrue(np.isfinite(mix.log_density(s[0])))
 
 
 if __name__ == "__main__":
