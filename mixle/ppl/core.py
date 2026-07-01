@@ -375,23 +375,29 @@ class Transformer(_NeuralPredictor):
     ``.fit(next_tokens, given={"x": context_windows})``. The context width is the ``block`` inferred from the data.
     """
 
-    __slots__ = ("field", "out", "d_model", "n_layer", "n_head")
+    __slots__ = ("field", "out", "d_model", "n_layer", "n_head", "embedding")
 
-    def __init__(self, field: Any = "x", *, out: int, d_model: int = 128, n_layer: int = 3, n_head: int = 4):
+    def __init__(
+        self, field: Any = "x", *, out: int, d_model: int = 128, n_layer: int = 3, n_head: int = 4, embedding: Any = None
+    ):
         self.field = field if isinstance(field, str) else getattr(field, "name", "x")
         self.out = int(out)
         self.d_model = int(d_model)
         self.n_layer = int(n_layer)
         self.n_head = int(n_head)
+        # embedding=Embedding(...) ties one word embedding across every Transformer that references it (e.g. the
+        # per-cluster language models of a Mix) -- they train the same token vectors jointly.
+        self.embedding = embedding
 
     def build(self, in_shape: Any) -> Any:
         from mixle.models.transformer import build_causal_lm
 
         block = int(in_shape[0] if not isinstance(in_shape, int) else in_shape)
-        return build_causal_lm(self.out, self.d_model, self.n_layer, self.n_head, block)
+        return build_causal_lm(self.out, self.d_model, self.n_layer, self.n_head, block, embedding=self.embedding)
 
     def __repr__(self) -> str:
-        return f"Transformer(out={self.out}, d_model={self.d_model}, n_layer={self.n_layer}, n_head={self.n_head})"
+        emb = ", embedding=shared" if self.embedding is not None else ""
+        return f"Transformer(out={self.out}, d_model={self.d_model}, n_layer={self.n_layer}, n_head={self.n_head}{emb})"
 
 
 class _SimplexSpec:

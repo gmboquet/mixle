@@ -15,11 +15,22 @@ from __future__ import annotations
 from typing import Any
 
 
-def build_causal_lm(vocab: int, d_model: int = 128, n_layer: int = 3, n_head: int = 4, block: int = 64) -> Any:
-    """Build a causal decoder-only Transformer LM (token+pos embeddings, pre-norm blocks, weight-tied head)."""
+def build_causal_lm(
+    vocab: int, d_model: int = 128, n_layer: int = 3, n_head: int = 4, block: int = 64, embedding: Any = None
+) -> Any:
+    """Build a causal decoder-only Transformer LM (token+pos embeddings, pre-norm blocks, weight-tied head).
+
+    ``embedding`` optionally injects a *shared* token ``nn.Embedding`` (``vocab x d_model``) to use in place of a
+    fresh one -- so several language models can tie the same word embedding and train it jointly (the weight-tied
+    head follows it). Its shape must match ``(vocab, d_model)``.
+    """
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
+
+    from mixle.models.embedding import resolve_embedding
+
+    embedding = resolve_embedding(embedding, vocab, d_model)  # SharedEmbedding | nn.Embedding | None -> module
 
     class CausalAttention(nn.Module):
         def __init__(self) -> None:
@@ -49,7 +60,7 @@ def build_causal_lm(vocab: int, d_model: int = 128, n_layer: int = 3, n_head: in
     class CausalLM(nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.tok = nn.Embedding(vocab, d_model)
+            self.tok = embedding if embedding is not None else nn.Embedding(vocab, d_model)
             self.pos = nn.Embedding(block, d_model)
             self.blocks = nn.ModuleList([Block() for _ in range(n_layer)])
             self.ln = nn.LayerNorm(d_model)

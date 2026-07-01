@@ -21,6 +21,7 @@ from mixle.models.dirichlet_process_mixture import (
     stick_breaking_weights,
 )
 from mixle.models.dpo_leaf import DPOLeaf
+from mixle.models.embedding import SharedEmbedding
 from mixle.models.gaussian_process import GaussianProcessRegressor
 from mixle.models.grammar import (
     GrammarLearningResult,
@@ -63,6 +64,7 @@ from mixle.models.transformer import build_causal_lm
 
 __all__ = [
     "LM",
+    "SharedEmbedding",
     "CausalSkeleton",
     "CategoricalClassificationNeuralNetwork",
     "ConditionalIndependenceResult",
