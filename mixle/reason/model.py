@@ -71,6 +71,7 @@ class CrossModalModel:
         self.latent_dim = int(latent_dim)
         self._mods: dict[str, _Modality] = {}
         self._fitted = False
+        self._conformal: dict[str, tuple[float, np.ndarray, float]] = {}  # target -> (alpha, scale, q)
 
     def add_modality(self, name: str, in_dim: int, *, hidden: tuple[int, ...] = (64,)) -> CrossModalModel:
         """Register a modality with its encoder ``q(z|x)`` and decoder ``p(x|z)`` (both learned)."""
@@ -193,6 +194,46 @@ class CrossModalModel:
         with torch.no_grad():
             xhat = mod.decoder(torch.as_tensor(z[None, :], dtype=torch.float64)).cpu().numpy()[0]
         return xhat * mod.scale + mod.mean
+
+    # -- distribution-free (conformal) calibration --------------------------------------------
+    def calibrate(self, cal_data: dict[str, Any], target: str, *, alpha: float = 0.1) -> CrossModalModel:
+        """Calibrate cross-modal prediction of ``target`` for finite-sample coverage (split conformal).
+
+        On a held-out calibration set, predict ``target`` from the *other* modalities, normalize the
+        per-dimension residuals, and take the ``ceil((n+1)(1-alpha))``-th largest max-normalized
+        residual as the conformal radius. Using the *max* over dimensions makes the guarantee
+        **simultaneous**: :meth:`predict_interval` returns a box whose *joint* coverage over the whole
+        target vector is ``>= 1 - alpha`` -- distribution-free, regardless of model specification
+        (unlike the Gaussian posterior interval).
+        """
+        if target not in self._mods:
+            raise KeyError(f"unknown modality {target!r}")
+        others = [m for m in self._mods if m != target]
+        if not others:
+            raise ValueError("need at least one other modality to predict the target from")
+        y = np.atleast_2d(np.asarray(cal_data[target], dtype=float))
+        n = len(y)
+        preds = np.array([self.predict({o: cal_data[o][i] for o in others}, target) for i in range(n)])
+        resid = np.abs(y - preds)  # (n, dim)
+        scale = resid.std(axis=0) + 1e-8  # per-dim normalization so no dimension dominates the box
+        scores = (resid / scale).max(axis=1)  # (n,) max-normalized nonconformity -> simultaneous cover
+        k = int(np.ceil((n + 1) * (1.0 - alpha)))
+        q = float(np.sort(scores)[min(k, n) - 1]) if k <= n else float(scores.max())
+        self._conformal[target] = (float(alpha), scale, q)
+        return self
+
+    def predict_interval(self, obs: dict[str, Any], target: str) -> tuple[np.ndarray, np.ndarray]:
+        """A conformally-calibrated prediction box ``(lower, upper)`` for ``target`` given ``obs``.
+
+        Requires a prior :meth:`calibrate` call for ``target``. Coverage is distribution-free and
+        *simultaneous*: ``P(y in box) >= 1 - alpha`` jointly over the whole target vector.
+        """
+        if target not in self._conformal:
+            raise RuntimeError(f"call calibrate(..., target={target!r}) before predict_interval")
+        _, scale, q = self._conformal[target]
+        yhat = self.predict(obs, target)
+        radius = q * scale
+        return yhat - radius, yhat + radius
 
     @property
     def modalities(self) -> Sequence[str]:
