@@ -42,6 +42,12 @@ from mixle.task.economics import (
     cascade_cost_per_request,
     recommend_route,
 )
+from mixle.task.extract import (
+    ExtractionIO,
+    distill_extractor,
+    extraction_f1,
+    tokenize,
+)
 from mixle.task.llm import (
     CallableLLM,
     OpenAICompatLLM,
@@ -71,6 +77,7 @@ __all__ = [
     "CostModel",
     "DensityGate",
     "DesignedModel",
+    "ExtractionIO",
     "FieldChoice",
     "HashedNGram",
     "HashedRecord",
@@ -91,9 +98,11 @@ __all__ = [
     "cascade_cost_per_request",
     "design_model",
     "distill",
+    "distill_extractor",
     "distill_from_labels",
     "distill_records",
     "distill_records_from_labels",
+    "extraction_f1",
     "get_builder",
     "llm_labeler",
     "pick_label",
@@ -107,5 +116,6 @@ __all__ = [
     "register_builder",
     "save_json",
     "save_module",
+    "tokenize",
     "tune_recipe",
 ]

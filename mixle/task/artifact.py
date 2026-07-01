@@ -70,6 +70,10 @@ def _register_native_builders() -> None:
         from mixle.models.neural import make_mlp
 
         register_builder("mixle.mlp", make_mlp)
+    if "mixle.seq_tagger" not in _BUILDERS:
+        from mixle.task.extract import build_seq_tagger
+
+        register_builder("mixle.seq_tagger", build_seq_tagger)
 
 
 # --- manifest ------------------------------------------------------------------------------------------------
