@@ -179,6 +179,130 @@ class _DependencyTreeSampler:
         return rows
 
 
+class MixtureOfDependencyTrees:
+    """A latent mixture whose components each carry their *own* discovered dependency structure.
+
+    ``log p(x) = logsumexp_k ( log w_k + log p_k(x) )`` where each ``p_k`` is a :class:`DependencyTreeDistribution`.
+    This is the deep form of the tagline: it discovers both the clustering *and* the within-cluster cross-field
+    dependence -- so the same category can map to different reals in different clusters, which neither a single
+    dependency tree (one relationship) nor a mixture of independent composites (no within-cluster dependence) can
+    represent. Fit by :func:`learn_mixture_structure`.
+    """
+
+    def __init__(self, components: Sequence[DependencyTreeDistribution], weights: Sequence[float]) -> None:
+        self.components = list(components)
+        self.weights = np.asarray(weights, dtype=np.float64)
+        self.log_weights = np.log(np.clip(self.weights, 1e-300, None))
+
+    def __str__(self) -> str:
+        return f"MixtureOfDependencyTrees(k={len(self.components)}, weights={np.round(self.weights, 3).tolist()})"
+
+    def _component_ll(self, encoded: Any) -> np.ndarray:
+        return np.stack([c.seq_log_density(encoded) for c in self.components], axis=1)  # (n, K)
+
+    def log_density(self, x: tuple) -> float:
+        from scipy.special import logsumexp
+
+        return float(logsumexp(self.log_weights + np.array([c.log_density(x) for c in self.components])))
+
+    def seq_log_density(self, encoded: Any) -> np.ndarray:
+        from scipy.special import logsumexp
+
+        return logsumexp(self._component_ll(encoded) + self.log_weights[None, :], axis=1)
+
+    def dist_to_encoder(self) -> Any:
+        return _DependencyEncoder(len(self.components[0].parents))
+
+    def responsibilities(self, data: Sequence[tuple]) -> np.ndarray:
+        """Posterior ``p(component | record)`` for each record -- the E-step and a soft cluster assignment."""
+        enc = self.dist_to_encoder().seq_encode(list(data))
+        joint = self._component_ll(enc) + self.log_weights[None, :]
+        joint -= joint.max(axis=1, keepdims=True)
+        r = np.exp(joint)
+        return r / r.sum(axis=1, keepdims=True)
+
+    def sampler(self, seed: int | None = None) -> Any:
+        return _MixtureTreeSampler(self, seed)
+
+    @property
+    def n_components(self) -> int:
+        return len(self.components)
+
+
+class _MixtureTreeSampler:
+    def __init__(self, dist: MixtureOfDependencyTrees, seed: int | None) -> None:
+        self.dist = dist
+        self.rng = np.random.RandomState(seed)
+
+    def sample(self, size: int = 1) -> list[tuple]:
+        ks = self.rng.choice(self.dist.n_components, size=size, p=self.dist.weights)
+        rows = []
+        for k in ks:
+            s = int(self.rng.randint(0, 2**31 - 1))
+            rows.append(self.dist.components[int(k)].sampler(s).sample(1)[0])
+        return rows
+
+
+def learn_mixture_structure(
+    data: Sequence[tuple],
+    n_components: int,
+    *,
+    restarts: int = 3,
+    max_iter: int = 15,
+    seed: int = 0,
+    min_gain: float = 0.0,
+    n_bins: int = 4,
+    max_its: int = 30,
+) -> MixtureOfDependencyTrees:
+    """Fit a :class:`MixtureOfDependencyTrees` by hard EM -- discover clusters AND each cluster's dependency graph.
+
+    Each iteration re-learns a dependency forest per cluster on its currently-assigned points (M-step), then
+    reassigns every record to its most-probable cluster (E-step), until assignments stabilize. Runs ``restarts``
+    random initializations and returns the highest-likelihood fit. Empty/tiny clusters are re-seeded so a
+    component never collapses.
+    """
+    data = list(data)
+    n = len(data)
+    rng = np.random.RandomState(seed)
+    min_size = max(10, n // (4 * n_components))
+    best: MixtureOfDependencyTrees | None = None
+    best_ll = -np.inf
+
+    def learn(subset: list[tuple]) -> DependencyTreeDistribution:
+        return learn_structure(subset, min_gain=min_gain, n_bins=n_bins, max_its=max_its)
+
+    # seed the first restarts with k-means (numeric-level split, then full-feature split), rest random
+    inits = [
+        _kmeans_init(data, n_components, rng, numeric_only=True),
+        _kmeans_init(data, n_components, rng, numeric_only=False),
+    ]
+    inits += [rng.randint(0, n_components, n) for _ in range(max(0, restarts - len(inits)))]
+    for assign in inits:
+        model: MixtureOfDependencyTrees | None = None
+        prev = None
+        for _it in range(max_iter):
+            comps, counts = [], []
+            for k in range(n_components):
+                idx = np.flatnonzero(assign == k)
+                if len(idx) < min_size:  # re-seed a starved component from random points
+                    idx = rng.choice(n, size=min_size, replace=False)
+                comps.append(learn([data[i] for i in idx]))
+                counts.append(len(idx))
+            weights = np.asarray(counts, dtype=np.float64)
+            weights /= weights.sum()
+            model = MixtureOfDependencyTrees(comps, weights)
+            new = model.responsibilities(data).argmax(axis=1)
+            if prev is not None and np.array_equal(new, prev):
+                break
+            prev, assign = assign, new
+        assert model is not None
+        ll = float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
+        if ll > best_ll:
+            best_ll, best = ll, model
+    assert best is not None
+    return best
+
+
 # --- structure search + fitting ------------------------------------------------------------------------------
 
 
@@ -244,6 +368,46 @@ def learn_structure(
             factors[i] = fit(list(zip(keys, cols[i])), est, max_its=max_its, out=None)
             edge_binners[i] = binners[p]
     return DependencyTreeDistribution(parents, factors, edge_binners)
+
+
+def _init_matrix(data: list[tuple], *, numeric_only: bool) -> np.ndarray:
+    """Featurize records for the init k-means: standardized numerics, plus one-hot categoricals unless ``numeric_only``.
+
+    ``numeric_only`` clusters on the continuous fields alone -- which carry the regime's *level* -- and avoids
+    k-means latching onto an observed categorical (clustering by a data field, not the latent). The full-feature
+    variant is tried as a separate restart for cases where a categorical marginal defines the clusters.
+    """
+    cols = _columns(data)
+    numerics, onehots = [], []
+    for c in cols:
+        if _is_discrete(c):
+            levels = sorted(set(c))
+            onehots.append(np.array([[1.0 if v == lv else 0.0 for lv in levels] for v in c]))
+        else:
+            arr = np.asarray(c, dtype=np.float64)
+            sd = arr.std() or 1.0
+            numerics.append(((arr - arr.mean()) / sd)[:, None])
+    blocks = numerics if (numeric_only and numerics) else (numerics + onehots)
+    return np.hstack(blocks) if blocks else np.zeros((len(data), 1))
+
+
+def _kmeans_init(data: list[tuple], k: int, rng: np.random.RandomState, *, numeric_only: bool) -> np.ndarray:
+    """k-means (Lloyd, few iters) on init features -> an initial hard cluster assignment."""
+    x = _init_matrix(data, numeric_only=numeric_only)
+    n = x.shape[0]
+    centers = x[rng.choice(n, size=k, replace=False)]
+    assign = np.zeros(n, dtype=int)
+    for _ in range(10):
+        d = ((x[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+        new = d.argmin(axis=1)
+        if np.array_equal(new, assign):
+            break
+        assign = new
+        for j in range(k):
+            m = assign == j
+            if m.any():
+                centers[j] = x[m].mean(axis=0)
+    return assign
 
 
 class _QuantileBinner:
