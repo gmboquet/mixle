@@ -46,7 +46,7 @@ class LM:
         self.vocab = int(vocab)
         self.block = int(block)
         self.device = device
-        # embedding=SharedEmbedding ties one word embedding across LMs (e.g. a mixture's per-cluster experts)
+        # embedding=CategoricalEmbedding ties one word embedding across LMs (e.g. a mixture's per-cluster experts)
         self.module = build_causal_lm(self.vocab, d_model, n_layer, n_head, self.block, embedding=embedding)
 
     def fit(

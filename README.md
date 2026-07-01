@@ -56,14 +56,14 @@ event from recent history, a Gamma models the wait time — as a single distribu
 process*, fit in one call:
 
 ```python
-from mixle.models import LM, StreamingTransformerLeaf
+from mixle.models import TransformerLMEstimator
 from mixle.stats import CompositeEstimator, GammaEstimator
 from mixle.inference import optimize
 
 # each event = ((recent history, next event type), seconds since last)
 model = optimize(events, CompositeEstimator((
-    StreamingTransformerLeaf(LM(vocab=500, d_model=128, n_layer=4, block=64).module).estimator(),  # what
-    GammaEstimator(),                                                                              # when
+    TransformerLMEstimator(vocab=500, d_model=128, n_layer=4, block=64),   # what
+    GammaEstimator(),                                                      # when
 )))
 
 model.log_density(event)   # one joint score — drops when an event is odd in WHAT happened, WHEN, or both
@@ -74,18 +74,17 @@ closed form, the Transformer by gradient descent. Swap the Gamma for any of ~90 
 mixture/HMM (that latent adds the EM step). Runnable: [`examples/hybrid_llm_example.py`](https://github.com/gmboquet/mixle/blob/main/examples/hybrid_llm_example.py).
 
 **Tie a learned embedding across models.** When the mixture has several language-model experts, declare the
-word embedding once with `SharedEmbedding` (`mixle.ppl.Embedding` in the PPL) and hand it to each — they train
-the same token vectors jointly instead of duplicating a big parameter block, the neural analogue of the PPL's
-`name=` scalar tying:
+word embedding once with `CategoricalEmbedding` (`mixle.ppl.Embedding` in the PPL) and hand it to each — they
+train the same token vectors jointly instead of duplicating a big parameter block, the neural analogue of the
+PPL's `name=` scalar tying:
 
 ```python
-from mixle.models import SharedEmbedding, StreamingTransformerLeaf
+from mixle.models import CategoricalEmbedding, TransformerLMEstimator
 from mixle.stats import MixtureEstimator
 
-emb = SharedEmbedding(vocab=8000, dim=256, name="word")               # one embedding, declared once
+emb = CategoricalEmbedding(8000, 256, name="word")                    # one word embedding, declared once
 mixture = MixtureEstimator([                                          # 3 experts, every one ties it
-    StreamingTransformerLeaf.from_config(8000, d_model=256, embedding=emb).estimator()
-    for _ in range(3)
+    TransformerLMEstimator(8000, d_model=256, embedding=emb) for _ in range(3)
 ])
 ```
 
