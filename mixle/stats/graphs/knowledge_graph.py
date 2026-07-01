@@ -462,12 +462,14 @@ class KnowledgeGraphEnsemble:
         return self._tail_probs(h, r).mean(axis=0)
 
     def epistemic_tail_uncertainty(self, h: int, r: int) -> float:
-        """Mutual-information (BALD) epistemic uncertainty of the tail completion (nats); 0 if members agree."""
-        ps = self._tail_probs(h, r)
-        mean = ps.mean(axis=0)
-        h_mean = float(-np.sum(mean * np.log(mean + 1e-12)))
-        h_each = float(np.mean(-np.sum(ps * np.log(ps + 1e-12), axis=1)))
-        return h_mean - h_each
+        """Mutual-information (BALD) epistemic uncertainty of the tail completion (nats); 0 if members agree.
+
+        Thin wrapper over the general :func:`mixle.inference.uncertainty.decompose_entropy` -- the
+        tail posteriors ``p(t | h, r)`` per member are exactly the categorical predictives it splits.
+        """
+        from mixle.inference.uncertainty import decompose_entropy
+
+        return float(decompose_entropy(self._tail_probs(h, r)).epistemic)
 
 
 def fit_knowledge_graph_ensemble(
