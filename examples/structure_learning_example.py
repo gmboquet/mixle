@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 
 import mixle.stats as st
-from mixle.inference import fit, learn_structure
+from mixle.inference import fit, learn_mixture_structure, learn_structure
 
 
 def generate(seed: int, n: int = 800) -> list[tuple]:
@@ -58,7 +58,39 @@ def main() -> None:
     edges = ", ".join(f"{names[p]} -> {names[c]}" for p, c in model.edges()) or "none"
     print(f"   discovered dependencies: {edges}")
     print(f"   held-out log-likelihood: {ll_struct:.1f}")
-    print(f"\n   => {ll_struct - ll_comp:+.1f} nats vs the independent composite (same data, same families)")
+    print(f"   => {ll_struct - ll_comp:+.1f} nats vs the independent composite (same data, same families)\n")
+
+    # the deep form: two latent regimes, each with its OWN dependency structure
+    two_regime_train = _two_regime(3)
+    two_regime_test = _two_regime(4)
+    print("two hidden regimes, each with a different (category -> real) relationship:")
+    tree1 = learn_structure(two_regime_train)
+    mix_ind = fit(
+        two_regime_train,
+        st.MixtureEstimator(
+            [st.CompositeEstimator((st.CategoricalEstimator(), st.GaussianEstimator())) for _ in range(2)]
+        ),
+        max_its=80,
+        out=None,
+    )
+    mot = learn_mixture_structure(two_regime_train, 2, restarts=4)
+    print(f"   single dependency tree        : {total_ll(tree1, two_regime_test):.1f}")
+    print(f"   mixture of INDEPENDENT models : {sum(mix_ind.log_density(d) for d in two_regime_test):.1f}")
+    print(f"   MIXTURE OF DEPENDENCY TREES   : {total_ll(mot, two_regime_test):.1f}")
+    print(f"   per-cluster structure found   : {[c.edges() for c in mot.components]}")
+    print("   => only a mixture of trees discovers BOTH the clustering AND each cluster's dependence.")
+
+
+def _two_regime(seed: int, n: int = 1600) -> list[tuple]:
+    """Two latent clusters that differ in level and each carry a category -> real dependence."""
+    r = np.random.RandomState(seed)
+    out = []
+    for _ in range(n):
+        z = r.randint(0, 2)
+        c = "hi" if r.rand() < 0.5 else "lo"
+        base = 5.0 if z == 0 else -5.0
+        out.append((str(c), float(base + (3.0 if c == "hi" else -3.0) + r.randn())))
+    return out
 
 
 if __name__ == "__main__":
