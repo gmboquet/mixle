@@ -23,6 +23,9 @@ mock -- no hard LLM dependency here.
 
 from __future__ import annotations
 
+import math
+import re
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -35,6 +38,64 @@ from mixle.inference.uncertainty import (
     decompose_entropy,
     semantic_entropy,
 )
+
+_STOP = frozenset(
+    "a an the is are was were be been being of to in on at by for with and or but it its this that "
+    "as from into over under near".split()
+)
+
+
+def sentence_claims(text: str) -> list[str]:
+    """Split a response into atomic claims (sentence-ish units) -- the default claim extractor."""
+    parts = re.split(r"(?<=[.!?])\s+|\n+", str(text).strip())
+    return [p.strip() for p in parts if len(p.strip().split()) >= 2]
+
+
+def _content_words(s: str) -> set[str]:
+    return {w for w in re.sub(r"[^a-z0-9 ]", " ", str(s).lower()).split() if w not in _STOP}
+
+
+def content_overlap(sample: str, claim: str, *, threshold: float = 0.6) -> bool:
+    """Simple corroboration test: does ``sample`` cover >= ``threshold`` of ``claim``'s content words?
+
+    Counts every content word equally, so boilerplate shared across responses ("the tower is located
+    in ...") can mask that the *informative* word (the city) differs. :func:`information_corroborator`
+    fixes that by weighting words by their information content; it is the default in
+    :meth:`LLMUncertainty.assess_claims`.
+    """
+    cw = _content_words(claim)
+    if not cw:
+        return False
+    return len(cw & _content_words(sample)) / len(cw) >= threshold
+
+
+def information_corroborator(samples: Sequence[str], *, overlap: float = 0.5) -> Callable[[str, str], bool]:
+    """Build a corroboration test that weights each word by its *information content* over ``samples``.
+
+    A word appearing in nearly every sample is boilerplate (low information, low weight); a rare word
+    carries the actual claim (high weight). A sample corroborates a claim when it covers at least
+    ``overlap`` of the claim's *information-weighted* words -- so whether the distinctive fact (a city,
+    a number, a name) matches drives the decision, not the shared filler. Inverse-document-frequency
+    weighting: ``w(word) = log((N + 1) / (df + 0.5))``.
+    """
+    df: Counter[str] = Counter()
+    for s in samples:
+        df.update(_content_words(s))
+    n = len(samples)
+
+    def weight(w: str) -> float:
+        return math.log((n + 1.0) / (df.get(w, 0) + 0.5))
+
+    def corroborates(sample: str, claim: str) -> bool:
+        cw = _content_words(claim)
+        if not cw:
+            return False
+        sw = _content_words(sample)
+        num = sum(weight(w) for w in cw if w in sw)
+        den = sum(weight(w) for w in cw)
+        return den > 0.0 and num / den >= overlap
+
+    return corroborates
 
 
 @dataclass(frozen=True)
@@ -51,6 +112,36 @@ class LLMAssessment:
     semantic_entropy: float
     clusters: list[tuple[Any, float]]
     samples: list[Any]
+
+
+@dataclass(frozen=True)
+class ClaimAssessment:
+    """Reliability of one claim inside a response, by cross-sample corroboration.
+
+    ``support`` is the fraction of independent resamples that corroborate the claim (in ``[0, 1]``);
+    ``reliable`` is ``support >= threshold``. A claim the model actually knows recurs across samples
+    (high support); a fabricated one appears once and vanishes (low support).
+    """
+
+    claim: str
+    support: float
+    reliable: bool
+
+
+@dataclass(frozen=True)
+class InformationAssessment:
+    """UQ over the *information content* of a response: every claim scored, plus a summary.
+
+    ``claims`` is the per-claim reliability; ``reliability`` the mean support (how trustworthy the
+    response's information is overall); ``fabricated`` the claims below threshold (likely hallucinated).
+    """
+
+    claims: list[ClaimAssessment]
+    reliability: float
+
+    @property
+    def fabricated(self) -> list[ClaimAssessment]:
+        return [c for c in self.claims if not c.reliable]
 
 
 class LLMUncertainty:
@@ -117,6 +208,48 @@ class LLMUncertainty:
             return counts / counts.sum() if counts.sum() else counts
 
         return decompose_entropy(np.array([dist(m) for m in members]))
+
+    # -- claim-level UQ: reliability of the information inside a response ----------------------
+    def assess_claims(
+        self,
+        prompt: str,
+        *,
+        extract: Callable[[str], Sequence[str]] | None = None,
+        corroborates: Callable[[str, str], bool] | None = None,
+        n: int | None = None,
+        threshold: float = 0.5,
+    ) -> InformationAssessment:
+        """Score the reliability of each *claim* in the response by cross-sample corroboration.
+
+        Finer-grained than :meth:`assess`: a response can be internally consistent (low semantic
+        entropy) yet contain one fabricated fact. This decomposes the response into claims and checks
+        each *unit of information* separately -- a claim the model knows recurs across independent
+        resamples; a hallucinated one appears once. This is UQ *on the information in what is said*,
+        not just on the answer as a whole.
+
+        Args:
+            prompt: the query.
+            extract: ``response -> [claim, ...]`` (default :func:`sentence_claims`).
+            corroborates: ``(other_sample, claim) -> bool`` -- does a resample support the claim?
+                (default :func:`content_overlap`; pass an entailment/NLI check for real text).
+            n: number of samples (the first is the response scored; the rest corroborate).
+            threshold: support below which a claim is flagged as unreliable/fabricated.
+        """
+        extract = extract or sentence_claims
+        samples = self.sample(prompt, n)
+        if len(samples) < 2:
+            samples = samples + self.sample(prompt, 2 - len(samples))
+        primary, others = samples[0], samples[1:]
+        # default corroboration weights words by information content over the drawn samples, so the
+        # distinctive fact drives the decision rather than shared boilerplate.
+        corr = corroborates or information_corroborator(samples)
+        claims = list(extract(primary))
+        assessed: list[ClaimAssessment] = []
+        for claim in claims:
+            support = float(np.mean([corr(s, claim) for s in others])) if others else 1.0
+            assessed.append(ClaimAssessment(claim, support, support >= threshold))
+        reliability = float(np.mean([c.support for c in assessed])) if assessed else 1.0
+        return InformationAssessment(assessed, reliability)
 
     # -- conformal answer-or-abstain ----------------------------------------------------------
     def calibrate(
