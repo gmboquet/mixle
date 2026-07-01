@@ -180,7 +180,9 @@ from mixle.inference.select import SelectionResult, select_best
 from mixle.inference.streaming import IncrementalEstimator, StreamingEstimator
 from mixle.inference.structure import (
     DependencyTreeDistribution,
+    MixtureOfDependencyTrees,
     dependency_gain,
+    learn_mixture_structure,
     learn_structure,
 )
 
@@ -365,8 +367,10 @@ __all__ = [
     "conformal_label_sets",
     # automatic dependency-structure learning for heterogeneous records
     "learn_structure",
+    "learn_mixture_structure",
     "dependency_gain",
     "DependencyTreeDistribution",
+    "MixtureOfDependencyTrees",
     # cross-validation fold generators (i.i.d., grouped, temporal, spatial-block, nested)
     "kfold",
     "blocked_kfold",

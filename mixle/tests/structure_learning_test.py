@@ -13,7 +13,9 @@ import mixle.stats as st
 from mixle.inference import fit
 from mixle.inference.structure import (
     DependencyTreeDistribution,
+    MixtureOfDependencyTrees,
     dependency_gain,
+    learn_mixture_structure,
     learn_structure,
 )
 
@@ -128,6 +130,71 @@ class LearnStructureTest(unittest.TestCase):
         seq = model.seq_log_density(model.dist_to_encoder().seq_encode(rows))
         for i, r in enumerate(rows):
             self.assertAlmostEqual(model.log_density(r), float(seq[i]), places=6)
+
+
+def _two_regime(seed, n=1600):
+    """Two clusters that differ in level (findable) AND both have a category->real dependence (structure)."""
+    r = np.random.RandomState(seed)
+    out = []
+    for _ in range(n):
+        z = r.randint(0, 2)
+        c = "hi" if r.rand() < 0.5 else "lo"
+        base = 5.0 if z == 0 else -5.0
+        out.append((c, float(base + (3.0 if c == "hi" else -3.0) + r.randn())))
+    return out
+
+
+class MixtureOfTreesTest(unittest.TestCase):
+    def test_beats_single_tree_and_independent_mixture(self):
+        train, test = _two_regime(1), _two_regime(2)
+        mot = learn_mixture_structure(train, 2, restarts=4, seed=0)
+        self.assertIsInstance(mot, MixtureOfDependencyTrees)
+
+        tree_ll = _ll(learn_structure(train), test)
+        ind = fit(
+            train,
+            st.MixtureEstimator(
+                [st.CompositeEstimator((st.CategoricalEstimator(), st.GaussianEstimator())) for _ in range(2)]
+            ),
+            max_its=80,
+            out=None,
+        )
+        ind_ll = float(np.sum([ind.log_density(d) for d in test]))
+        mot_ll = _ll(mot, test)
+
+        self.assertGreater(mot_ll - tree_ll, 200.0)  # a single tree can't capture per-cluster structure
+        self.assertGreater(mot_ll - ind_ll, 500.0)  # an independent mixture misses within-cluster dependence
+        # both clusters recovered the category->real edge
+        self.assertTrue(all((0, 1) in c.edges() for c in mot.components))
+
+    def test_responsibilities_recover_clusters(self):
+        # label each row by its regime and check the mixture's hard assignment separates them
+        r = np.random.RandomState(7)
+        rows, z = [], []
+        for _ in range(1200):
+            zi = r.randint(0, 2)
+            c = "hi" if r.rand() < 0.5 else "lo"
+            rows.append((c, float((5.0 if zi == 0 else -5.0) + (3.0 if c == "hi" else -3.0) + r.randn())))
+            z.append(zi)
+        mot = learn_mixture_structure(rows, 2, restarts=4, seed=0)
+        assign = mot.responsibilities(rows).argmax(axis=1)
+        z = np.array(z)
+        purity = max((assign == z).mean(), (assign != z).mean())
+        self.assertGreater(purity, 0.9)
+
+    def test_samples_and_scores(self):
+        mot = learn_mixture_structure(_two_regime(3), 2, restarts=3, seed=0)
+        s = mot.sampler(0).sample(50)
+        self.assertEqual(len(s), 50)
+        self.assertEqual(len(s[0]), 2)
+        self.assertTrue(np.isfinite(mot.log_density(s[0])))
+
+    def test_log_density_matches_seq(self):
+        mot = learn_mixture_structure(_two_regime(4), 2, restarts=2, seed=0)
+        rows = _two_regime(5)[:40]
+        seq = mot.seq_log_density(mot.dist_to_encoder().seq_encode(rows))
+        for i, row in enumerate(rows):
+            self.assertAlmostEqual(mot.log_density(row), float(seq[i]), places=6)
 
 
 if __name__ == "__main__":
