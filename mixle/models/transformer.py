@@ -30,7 +30,7 @@ def build_causal_lm(
 
     from mixle.models.embedding import resolve_embedding
 
-    embedding = resolve_embedding(embedding, vocab, d_model)  # SharedEmbedding | nn.Embedding | None -> module
+    embedding = resolve_embedding(embedding, vocab, d_model)  # CategoricalEmbedding | nn.Embedding | None -> module
 
     class CausalAttention(nn.Module):
         def __init__(self) -> None:

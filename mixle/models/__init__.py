@@ -21,7 +21,7 @@ from mixle.models.dirichlet_process_mixture import (
     stick_breaking_weights,
 )
 from mixle.models.dpo_leaf import DPOLeaf
-from mixle.models.embedding import SharedEmbedding
+from mixle.models.embedding import CategoricalEmbedding
 from mixle.models.gaussian_process import GaussianProcessRegressor
 from mixle.models.grammar import (
     GrammarLearningResult,
@@ -59,12 +59,16 @@ from mixle.models.random_graph import (
     hard_em_stochastic_block_model,
 )
 from mixle.models.softmax_leaf import SoftmaxNeuralLeaf
-from mixle.models.streaming_transformer_leaf import StreamingTransformerLeaf, stream_fit
+from mixle.models.streaming_transformer_leaf import (
+    StreamingTransformerLeaf,
+    TransformerLMEstimator,
+    stream_fit,
+)
 from mixle.models.transformer import build_causal_lm
 
 __all__ = [
     "LM",
-    "SharedEmbedding",
+    "CategoricalEmbedding",
     "CausalSkeleton",
     "CategoricalClassificationNeuralNetwork",
     "ConditionalIndependenceResult",
@@ -75,6 +79,7 @@ __all__ = [
     "NeuralLeaf",
     "SoftmaxNeuralLeaf",
     "StreamingTransformerLeaf",
+    "TransformerLMEstimator",
     "build_causal_lm",
     "ewc",
     "fisher_diagonal",

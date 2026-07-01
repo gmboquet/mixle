@@ -60,7 +60,7 @@ class StreamingTransformerLeaf(SequenceEncodableProbabilityDistribution):
     ) -> StreamingTransformerLeaf:
         """Build the leaf from hyperparameters (no hand-built torch module) -- the declarative estimator surface.
 
-        ``embedding`` optionally ties a shared :class:`~mixle.models.embedding.SharedEmbedding` across leaves.
+        ``embedding`` optionally ties a shared :class:`~mixle.models.embedding.CategoricalEmbedding` across leaves.
         """
         from mixle.models.transformer import build_causal_lm
 
@@ -201,6 +201,34 @@ class StreamingTransformerLeafEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple) -> StreamingTransformerLeaf:
         # suff_stat = (loss_sum, tokens) telemetry; the module was already trained in place by seq_update -- no-op.
         return StreamingTransformerLeaf(self.module, self.device)
+
+
+class TransformerLMEstimator(StreamingTransformerLeafEstimator):
+    """A Transformer language model as a fit-ready estimator: ``TransformerLMEstimator(vocab, d_model=..., ...)``.
+
+    The clean, declarative surface -- no hand-built torch module, no ``Leaf(...).estimator()`` two-step. Drops into
+    ``MixtureEstimator``/``CompositeEstimator`` like any other ``*Estimator``. ``embedding`` optionally ties a
+    shared :class:`~mixle.models.embedding.CategoricalEmbedding` (e.g. one word embedding across a mixture's
+    experts). ``TransformerLMEstimator(V, embedding=emb)`` and ``StreamingTransformerLeaf.from_config(V,
+    embedding=emb).estimator()`` build the same thing.
+    """
+
+    def __init__(
+        self,
+        vocab: int,
+        *,
+        d_model: int = 128,
+        n_layer: int = 4,
+        n_head: int = 4,
+        block: int = 64,
+        embedding: Any = None,
+        lr: float = 3e-3,
+        device: str = "cpu",
+    ) -> None:
+        from mixle.models.transformer import build_causal_lm
+
+        module = build_causal_lm(vocab, d_model, n_layer, n_head, block, embedding=embedding)
+        super().__init__(module, lr=lr, device=device)
 
 
 def stream_fit(

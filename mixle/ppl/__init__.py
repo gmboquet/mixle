@@ -20,7 +20,7 @@ their own modules. This package init only re-exports.
 
 from __future__ import annotations
 
-from mixle.models.embedding import SharedEmbedding as Embedding
+from mixle.models.embedding import CategoricalEmbedding as Embedding
 
 # Run the family/composite registrations (import-time side effects) BEFORE the dialect constructors
 # and the dynamics operators (which register after the composites) are pulled in.
