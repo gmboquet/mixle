@@ -26,6 +26,9 @@ from __future__ import annotations
 
 from mixle.capability import ConjugateUpdatable
 from mixle.inference import production
+
+# belief states: a distribution over a latent, updated by evidence (the assimilation step)
+from mixle.inference.belief import BeliefState, GaussianBelief, as_belief
 from mixle.inference.blackbox import LaplacePosterior, laplace_posterior
 
 # calibration diagnostics — "is my probability / interval actually calibrated?"
@@ -275,6 +278,10 @@ __all__ = [
     "posterior",
     "ParameterPosterior",
     "PredictivePosterior",
+    # belief states (distribution over a latent, updated by evidence)
+    "BeliefState",
+    "GaussianBelief",
+    "as_belief",
     # epistemic / aleatoric uncertainty decomposition (BALD entropy + law-of-total-variance)
     "UncertaintyDecomposition",
     "decompose_uncertainty",
