@@ -231,12 +231,15 @@ from mixle.inference.target import (
 
 # epistemic / aleatoric uncertainty decomposition for any predictive (generalizes KG BALD)
 from mixle.inference.uncertainty import (
+    Clustering,
     UncertaintyDecomposition,
+    cluster_samples,
     decompose_entropy,
     decompose_uncertainty,
     decompose_variance,
     posterior_ensemble,
     predictive_distribution,
+    semantic_entropy,
 )
 from mixle.stats.bayes.conjugate import (
     ConjugatePosterior,
@@ -293,6 +296,10 @@ __all__ = [
     "decompose_variance",
     "predictive_distribution",
     "posterior_ensemble",
+    # semantic clustering of stochastic samples (LLM meaning-clusters -> semantic entropy)
+    "Clustering",
+    "cluster_samples",
+    "semantic_entropy",
     # calibration diagnostics (reliability diagrams, ECE/MCE, PIT, coverage curves)
     "reliability_curve",
     "expected_calibration_error",
