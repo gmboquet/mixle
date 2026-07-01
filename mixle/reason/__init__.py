@@ -47,9 +47,14 @@ __all__ = [
     "RetrievalStep",
     "AmortizedEncoder",
     "ScaledEmbedding",
+    "CrossModalModel",
 ]
 
-_LAZY = {"AmortizedEncoder": "encoder", "ScaledEmbedding": "embedding"}
+_LAZY = {
+    "AmortizedEncoder": "encoder",
+    "ScaledEmbedding": "embedding",
+    "CrossModalModel": "model",
+}
 
 
 def __getattr__(name: str) -> Any:
