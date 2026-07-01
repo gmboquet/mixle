@@ -221,6 +221,16 @@ from mixle.inference.target import (
     rhat_max,
     split_rhat,
 )
+
+# epistemic / aleatoric uncertainty decomposition for any predictive (generalizes KG BALD)
+from mixle.inference.uncertainty import (
+    UncertaintyDecomposition,
+    decompose_entropy,
+    decompose_uncertainty,
+    decompose_variance,
+    posterior_ensemble,
+    predictive_distribution,
+)
 from mixle.stats.bayes.conjugate import (
     ConjugatePosterior,
     MixtureConjugatePosterior,
@@ -265,6 +275,13 @@ __all__ = [
     "posterior",
     "ParameterPosterior",
     "PredictivePosterior",
+    # epistemic / aleatoric uncertainty decomposition (BALD entropy + law-of-total-variance)
+    "UncertaintyDecomposition",
+    "decompose_uncertainty",
+    "decompose_entropy",
+    "decompose_variance",
+    "predictive_distribution",
+    "posterior_ensemble",
     # calibration diagnostics (reliability diagrams, ECE/MCE, PIT, coverage curves)
     "reliability_curve",
     "expected_calibration_error",
