@@ -9,6 +9,7 @@ A signature is a nested ``(type_label, [child_signatures])`` tree — a mixture 
 a leaf is childless. The distance is an (unordered) tree-edit distance with greedy child matching: exact relabel
 cost plus insert/delete of unmatched subtrees, normalized to ``[0, 1]``. Greedy matching is a standard, adequate
 approximation for the shallow trees model structures produce."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -40,20 +41,20 @@ def _match_children(kids_a: list[Signature], kids_b: list[Signature]) -> int:
     if not kids_a and not kids_b:
         return 0
     if not kids_a:
-        return sum(_size(t) for t in kids_b)                 # insert all of b's children
+        return sum(_size(t) for t in kids_b)  # insert all of b's children
     if not kids_b:
-        return sum(_size(t) for t in kids_a)                 # delete all of a's children
+        return sum(_size(t) for t in kids_a)  # delete all of a's children
     remaining = list(kids_b)
     total = 0
     for child in kids_a:
         if not remaining:
-            total += _size(child)                            # nothing left to match -> delete
+            total += _size(child)  # nothing left to match -> delete
             continue
         dists = [tree_edit_distance(child, other) for other in remaining]
         j = min(range(len(remaining)), key=lambda i: dists[i])
         total += dists[j]
         remaining.pop(j)
-    total += sum(_size(t) for t in remaining)                # leftover b children -> insert
+    total += sum(_size(t) for t in remaining)  # leftover b children -> insert
     return total
 
 

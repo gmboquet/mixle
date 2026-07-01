@@ -207,7 +207,9 @@ class HmmTorchGpuEStepTestCase(unittest.TestCase):
             seqs.append(s)
         init = HiddenMarkovModelDistribution(
             [GaussianDistribution(-1.0, 1.0), GaussianDistribution(1.0, 1.0)],
-            [0.5, 0.5], [[0.8, 0.2], [0.2, 0.8]], use_numba=False,
+            [0.5, 0.5],
+            [[0.8, 0.2], [0.2, 0.8]],
+            use_numba=False,
         )
         if _TORCH is not None:
             self.assertTrue(init.supports_engine(_TORCH))

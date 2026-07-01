@@ -1,4 +1,5 @@
 """Marginalizing the string distribution over meaning equivalence classes (semantic entropy done right)."""
+
 import unittest
 
 import numpy as np

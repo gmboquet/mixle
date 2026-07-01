@@ -378,7 +378,14 @@ class Transformer(_NeuralPredictor):
     __slots__ = ("field", "out", "d_model", "n_layer", "n_head", "embedding")
 
     def __init__(
-        self, field: Any = "x", *, out: int, d_model: int = 128, n_layer: int = 3, n_head: int = 4, embedding: Any = None
+        self,
+        field: Any = "x",
+        *,
+        out: int,
+        d_model: int = 128,
+        n_layer: int = 3,
+        n_head: int = 4,
+        embedding: Any = None,
     ):
         self.field = field if isinstance(field, str) else getattr(field, "name", "x")
         self.out = int(out)
