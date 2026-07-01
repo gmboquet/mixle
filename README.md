@@ -73,6 +73,20 @@ The Transformer and the Gamma are just distributions, fit together in one `optim
 closed form, the Transformer by gradient descent. Swap the Gamma for any of ~90 families, or wrap it in a
 mixture/HMM (that latent adds the EM step). Runnable: [`examples/hybrid_llm_example.py`](https://github.com/gmboquet/mixle/blob/main/examples/hybrid_llm_example.py).
 
+**Tie a learned embedding across models.** When the mixture has several language-model experts, declare the
+word embedding once with `SharedEmbedding` (`mixle.ppl.Embedding` in the PPL) and hand it to each — they train
+the same token vectors jointly instead of duplicating a big parameter block, the neural analogue of the PPL's
+`name=` scalar tying:
+
+```python
+from mixle.models import LM, SharedEmbedding, StreamingTransformerLeaf
+from mixle.stats import MixtureEstimator
+
+emb = SharedEmbedding(vocab=8000, dim=256, name="word")               # one embedding, declared once
+experts = [LM(vocab=8000, d_model=256, embedding=emb) for _ in range(3)]   # every expert ties it
+mixture = MixtureEstimator([StreamingTransformerLeaf(e.module).estimator() for e in experts])
+```
+
 The same machinery fits an ordinary heterogeneous record just as well — each here is a
 `(category, real, variable-length count sequence)`:
 
