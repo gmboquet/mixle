@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Auto-format and lint-fix staged Python before every commit, so no commit (human OR the autonomous
+# evolve loop) can land unformatted / lint-broken code that fails the CI 'lint (ruff enforced)' job.
+# Enable once per clone:  git config core.hooksPath .githooks
+#
+# NOTE: this catches the recurring format/import-order CI breakage. It does NOT catch cross-platform
+# flaky tests (stochastic EM/BO whose convergence differs across numpy/BLAS) -- those need robust
+# assertions, not a hook.
+# POSIX/Bash-3.2 compatible (macOS ships Bash 3.2 -- no mapfile/associative arrays).
+set -eu
+
+# Locate ruff: prefer the repo venv, then PATH, then python -m ruff. Skip gracefully if unavailable.
+if [ -x ".venv/bin/ruff" ]; then
+  RUFF=".venv/bin/ruff"
+elif command -v ruff >/dev/null 2>&1; then
+  RUFF="ruff"
+elif command -v python >/dev/null 2>&1 && python -c "import ruff" >/dev/null 2>&1; then
+  RUFF="python -m ruff"
+else
+  echo "pre-commit: ruff not found; skipping format/lint (install ruff to enforce)." >&2
+  exit 0
+fi
+
+# Staged, added/copied/modified Python files only (fast; leaves the rest untouched).
+files=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.py$' || true)
+[ -z "$files" ] && exit 0
+
+# Format + autofix, then re-stage what changed. ($files word-splits; repo has no spaced paths.)
+# shellcheck disable=SC2086
+$RUFF format $files >/dev/null
+# shellcheck disable=SC2086
+$RUFF check --fix $files >/dev/null || true
+# shellcheck disable=SC2086
+git add -- $files
+
+# Final gate: block the commit if anything remains that autofix could not resolve.
+# shellcheck disable=SC2086
+if ! $RUFF check $files; then
+  echo "pre-commit: ruff found issues autofix could not resolve; commit aborted. Fix them and retry." >&2
+  exit 1
+fi
