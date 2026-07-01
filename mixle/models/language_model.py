@@ -39,13 +39,15 @@ class LM:
         n_head: int = 8,
         block: int = 128,
         device: str = "cpu",
+        embedding: Any = None,
     ) -> None:
         from mixle.models.transformer import build_causal_lm
 
         self.vocab = int(vocab)
         self.block = int(block)
         self.device = device
-        self.module = build_causal_lm(self.vocab, d_model, n_layer, n_head, self.block)
+        # embedding=SharedEmbedding ties one word embedding across LMs (e.g. a mixture's per-cluster experts)
+        self.module = build_causal_lm(self.vocab, d_model, n_layer, n_head, self.block, embedding=embedding)
 
     def fit(
         self,
