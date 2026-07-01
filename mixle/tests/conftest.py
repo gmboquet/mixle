@@ -5,27 +5,19 @@ the collection and CI harness so we can attach stable markers without rewriting
 hundreds of existing tests at once.
 """
 
+import os
 from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
 
-# Force reproducible CPU math for torch-training tests. Multi-threaded matmuls are not bit-reproducible, so
-# tests with tight parameter-recovery thresholds pass in isolation but flake under the parallel runner (and the
-# flake hops to whichever threshold is tightest). torch.set_num_threads(1) alone doesn't cover the MKL/OpenMP
-# BLAS pool -- those honor the env vars, which must be set before the first numpy/torch import (conftest is
-# imported at collection start, before the test bodies). use_deterministic_algorithms closes the remaining gap.
-import os as _os
-
-_os.environ.setdefault("OMP_NUM_THREADS", "1")
-_os.environ.setdefault("MKL_NUM_THREADS", "1")
-try:  # pragma: no cover - depends on whether the torch extra is installed
-    import torch as _torch
-
-    _torch.set_num_threads(1)
-    _torch.use_deterministic_algorithms(True, warn_only=True)
-except Exception:  # noqa: BLE001
-    pass
+# Force reproducible CPU math for torch-training tests. Multi-threaded matmuls are not bit-reproducible, so tests
+# with tight parameter-recovery thresholds pass in isolation but flake under the parallel runner (the flake hops
+# to whichever threshold is tightest). torch.set_num_threads(1) alone doesn't cover the MKL/OpenMP BLAS pool --
+# those honor these env vars, which must be set before the first torch/numpy import (this runs at collection
+# start, before any test body). The per-test fixture below adds torch's own determinism knobs.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 MarkerTuple = tuple[str, ...]
 
@@ -268,9 +260,10 @@ def _isolate_global_process_state():
     rng_state = np.random.get_state()
     err_mode = np.geterr()
     try:
-        import torch  # a prior test may have raised the thread count; force single-threaded before this one runs
+        import torch  # force single-threaded + deterministic before this test runs (a prior test may have changed it)
 
         torch.set_num_threads(1)  # (multi-threaded CPU matmuls aren't bit-reproducible -> training-threshold flakes)
+        torch.use_deterministic_algorithms(True, warn_only=True)
     except Exception:  # noqa: BLE001
         pass
     try:
