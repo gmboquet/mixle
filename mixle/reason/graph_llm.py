@@ -29,6 +29,8 @@ from typing import Any
 import numpy as np
 from scipy.special import logsumexp
 
+from mixle.inference.calibration import ProbabilityCalibrator, calibrate_probabilities
+
 Triple = tuple  # (subject, relation, object) or any fixed-arity fact tuple
 
 
@@ -79,6 +81,20 @@ class GraphDistribution:
         """``P(triple in G)`` for one fact (0 if never asserted)."""
         t = tuple(triple)
         return float(sum(p for g, p in zip(self.graphs, self.probs) if t in g))
+
+    def calibrated_edge_marginals(self, calibrator: ProbabilityCalibrator) -> dict[Triple, float]:
+        """Edge marginals mapped through a fitted calibrator -> a *calibrated* ``P(fact is true)``.
+
+        A raw edge marginal is the model's internal assertion rate for a fact, not a probability that
+        the fact is *true* -- a confidently-hallucinated fact has a high marginal yet is false. Fit the
+        calibrator with :func:`fit_fact_calibrator` on labeled facts, then this reports, per fact, the
+        empirical truth rate at that marginal. (Its residual limit -- confident hallucinations that look
+        exactly like known facts -- is why an external check is needed; see the validation tests.)
+        """
+        m = self.edge_marginals()
+        keys = list(m)
+        vals = calibrator.predict([m[k] for k in keys])
+        return dict(zip(keys, (float(v) for v in vals)))
 
     def query(self, *prefix: Any) -> list[tuple[Any, float]]:
         """Answer-completion posterior: ``P(object | prefix)`` over triples whose leading fields match.
@@ -170,3 +186,30 @@ class GraphLLM:
                 counts[index[g]] += 1.0
             probs = counts / counts.sum()
         return GraphDistribution(distinct, probs)
+
+
+def fit_fact_calibrator(
+    distributions: Iterable[GraphDistribution],
+    truth: Callable[[Any], bool],
+    *,
+    method: str = "isotonic",
+) -> ProbabilityCalibrator:
+    """Fit ``edge marginal -> P(fact is true)`` over the facts asserted across many graph distributions.
+
+    Turn the model's internal assertion rate (the edge marginal) into a calibrated probability of
+    *truth*, learned against ground-truth labels. Collect every ``(triple, marginal)`` the model
+    asserts, label it with ``truth(triple)``, and fit a :class:`~mixle.inference.ProbabilityCalibrator`.
+
+    This does NOT rescue confident hallucination -- a fact the model reliably confabulates has a high
+    marginal indistinguishable from a genuinely-known one, so calibration lowers the *overall* fact-ECE
+    but cannot pull those specific facts down. Separating them needs a signal external to the model
+    (retrieval / a checker); the validation tests quantify both the gain and this residual.
+    """
+    scores, outcomes = [], []
+    for d in distributions:
+        for triple, marg in d.edge_marginals().items():
+            scores.append(float(marg))
+            outcomes.append(1.0 if truth(triple) else 0.0)
+    if len(scores) < 2:
+        raise ValueError("need at least two asserted facts across the distributions to calibrate")
+    return calibrate_probabilities(np.asarray(scores), np.asarray(outcomes), method=method)
