@@ -31,6 +31,7 @@ from mixle.reason.core import (
     block_selector,
     reason,
 )
+from mixle.reason.llm import LLMAssessment, LLMUncertainty
 from mixle.reason.store import CrossModalStore, RetrievalStep
 
 __all__ = [
@@ -45,6 +46,8 @@ __all__ = [
     "as_belief",
     "CrossModalStore",
     "RetrievalStep",
+    "LLMUncertainty",
+    "LLMAssessment",
     "AmortizedEncoder",
     "ScaledEmbedding",
     "CrossModalModel",
