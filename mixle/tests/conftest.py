@@ -10,14 +10,20 @@ from pathlib import Path
 
 import pytest
 
-# Pin torch to a single intra-op thread per (xdist) worker. Multi-threaded CPU matmuls are not
-# bit-reproducible, so torch-training tests with tight parameter-recovery thresholds pass in isolation but
-# flake only under the parallel runner. One thread makes them deterministic; the models here are tiny so the
-# throughput cost is negligible. No-op when torch is absent.
+# Force reproducible CPU math for torch-training tests. Multi-threaded matmuls are not bit-reproducible, so
+# tests with tight parameter-recovery thresholds pass in isolation but flake under the parallel runner (and the
+# flake hops to whichever threshold is tightest). torch.set_num_threads(1) alone doesn't cover the MKL/OpenMP
+# BLAS pool -- those honor the env vars, which must be set before the first numpy/torch import (conftest is
+# imported at collection start, before the test bodies). use_deterministic_algorithms closes the remaining gap.
+import os as _os
+
+_os.environ.setdefault("OMP_NUM_THREADS", "1")
+_os.environ.setdefault("MKL_NUM_THREADS", "1")
 try:  # pragma: no cover - depends on whether the torch extra is installed
     import torch as _torch
 
     _torch.set_num_threads(1)
+    _torch.use_deterministic_algorithms(True, warn_only=True)
 except Exception:  # noqa: BLE001
     pass
 
