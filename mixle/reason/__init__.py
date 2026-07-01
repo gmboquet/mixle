@@ -32,7 +32,12 @@ from mixle.reason.core import (
     reason,
 )
 from mixle.reason.design import AcquisitionPlan, select_evidence_batch
-from mixle.reason.graph_llm import GraphDistribution, GraphLLM, canonical_graph
+from mixle.reason.graph_llm import (
+    GraphDistribution,
+    GraphLLM,
+    canonical_graph,
+    fit_fact_calibrator,
+)
 from mixle.reason.llm import (
     ClaimAssessment,
     FactualityModel,
@@ -70,6 +75,7 @@ __all__ = [
     "GraphLLM",
     "GraphDistribution",
     "canonical_graph",
+    "fit_fact_calibrator",
     "AmortizedEncoder",
     "ScaledEmbedding",
     "CrossModalModel",
