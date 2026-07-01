@@ -178,6 +178,11 @@ from mixle.inference.select import SelectionResult, select_best
 
 # online / streaming estimators (single discoverable surface for the streaming drivers)
 from mixle.inference.streaming import IncrementalEstimator, StreamingEstimator
+from mixle.inference.structure import (
+    DependencyTreeDistribution,
+    dependency_gain,
+    learn_structure,
+)
 
 # survival / time-to-event estimators and hazard regression
 from mixle.inference.survival import (
@@ -358,6 +363,10 @@ __all__ = [
     "weighted_conformal",
     "conformal_label_threshold",
     "conformal_label_sets",
+    # automatic dependency-structure learning for heterogeneous records
+    "learn_structure",
+    "dependency_gain",
+    "DependencyTreeDistribution",
     # cross-validation fold generators (i.i.d., grouped, temporal, spatial-block, nested)
     "kfold",
     "blocked_kfold",
