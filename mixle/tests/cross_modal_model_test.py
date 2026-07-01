@@ -111,6 +111,40 @@ class CrossModalModelTest(unittest.TestCase):
         dec = decompose_variance(means)
         self.assertEqual(dec.kind, "variance")
 
+    def test_conformal_prediction_intervals_have_coverage(self):
+        # The honest-UQ claim, verified: conformal intervals cover the truth at ~1-alpha on held-out
+        # data -- a finite-sample, distribution-free guarantee (not a Gaussian-posterior hope).
+        from mixle.reason import CrossModalModel
+
+        rng = np.random.RandomState(7)
+        s, xA, xB = _two_view_data(rng, 1500, k=2, dA=6, dB=4, noise=0.1)
+        m = CrossModalModel(latent_dim=4, seed=6)
+        m.add_modality("A", 6).add_modality("B", 4)
+        m.fit({"A": xA[:900], "B": xB[:900]}, epochs=700, beta=0.2)
+
+        alpha = 0.1
+        m.calibrate({"A": xA[900:1200], "B": xB[900:1200]}, target="B", alpha=alpha)  # calibration split
+        # test split: empirical coverage of the interval predicting B from A
+        covered = []
+        for i in range(1200, 1500):
+            lo, hi = m.predict_interval({"A": xA[i]}, target="B")
+            covered.append(np.all((xB[i] >= lo) & (xB[i] <= hi)))
+        coverage = np.mean(covered)
+        # SIMULTANEOUS coverage over the whole target vector should hold near/above 1-alpha
+        # (finite-sample conformal guarantee), give or take sampling slack on 300 test points.
+        self.assertGreater(coverage, 1 - alpha - 0.06)
+
+    def test_predict_interval_needs_calibration(self):
+        from mixle.reason import CrossModalModel
+
+        rng = np.random.RandomState(8)
+        s, xA, xB = _two_view_data(rng, 400, k=2, dA=4, dB=3)
+        m = CrossModalModel(latent_dim=3, seed=7)
+        m.add_modality("A", 4).add_modality("B", 3)
+        m.fit({"A": xA, "B": xB}, epochs=200)
+        with self.assertRaises(RuntimeError):
+            m.predict_interval({"A": xA[0]}, target="B")
+
 
 if __name__ == "__main__":
     unittest.main()
