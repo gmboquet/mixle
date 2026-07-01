@@ -31,6 +31,7 @@ from mixle.reason.core import (
     block_selector,
     reason,
 )
+from mixle.reason.design import AcquisitionPlan, select_evidence_batch
 from mixle.reason.llm import (
     ClaimAssessment,
     InformationAssessment,
@@ -51,6 +52,8 @@ __all__ = [
     "ReasonedAnswer",
     "GaussianBelief",
     "BeliefState",
+    "AcquisitionPlan",
+    "select_evidence_batch",
     "as_belief",
     "CrossModalStore",
     "RetrievalStep",
