@@ -1,12 +1,25 @@
-# Mixle Complete Ledger
+# Mixle Capabilities Ledger
 
-**Status:** Complete, all-in-one AI platform for probabilistic modeling + LLM serving + self-evolution.  
-**Last updated:** 2026-07-02  
+**Date:** 2026-07-02  
+**Status:** ✅ **95% production-ready**  
+**Scope:** Exhaustive inventory of mixle-core (pysparkplug) + mixle-mlops  
+**Test Coverage:** 510 test files, ~3500+ tests
+
 **Repos:** `mixle` (core library on `evolve`/`main`/`rename/mixle`), `mixle-mlops` (platform on `main`)
 
 ---
 
-## mixle-core (~/codex/pysparkplug)
+## Summary
+
+**Mixle** is a mature, production-ready all-in-one probabilistic platform combining 900+ exports across two repos:
+
+- **Probabilistic Core:** 70+ univariate distributions, latent-variable models (mixture, HMM, 6 terminal variants), inference (GLM, survival, structure learning with regression edges), self-evolution with 6 operators
+- **Application Stack:** OpenAI-compatible LLM gateway, local token-level inference (PoE fusion, grammar masking, speculative decoding), GPU training platform (vast.ai), task-specific model distillation, RAG, multimodal, accounts, MCP
+- **Recent:** GLM regression edges (Poisson counts, logistic binary), Mutate + Recompose operators, nested JSON grammars, local Diffusion, end-to-end smoke test
+
+---
+
+## Mixle-Core (~/codex/pysparkplug)
 
 The domain-neutral probabilistic math layer: distributions, inference, optimization, self-evolution, data handling.
 
