@@ -101,6 +101,8 @@ class LinearGaussianEdge:
     for a linear relationship. Slots into :class:`DependencyTreeDistribution` as a factor with an identity binner
     (the raw parent value drives the conditional)."""
 
+    __pysp_serializable__ = True  # opt in to mixle JSON serialization (a/b/sigma2 round-trip via __dict__)
+
     def __init__(self, a: float, b: float, sigma2: float) -> None:
         self.a, self.b, self.sigma2 = float(a), float(b), max(float(sigma2), 1e-12)
 
@@ -200,11 +202,28 @@ class GLMEdge:
     :func:`mixle.inference.glm.glm`. Models a count/binary child driven by a continuous parent far better than a
     coarse per-bin conditional."""
 
+    __pysp_serializable__ = (
+        True  # opt in to mixle JSON serialization (custom state: the link fn is rebuilt, not stored)
+    )
+
     def __init__(self, family: str, beta: Any, link: str, phi: float = 1.0) -> None:
         from mixle.inference.glm import _LINKS
 
         self.family, self.beta, self.link, self.phi = family, np.asarray(beta, dtype=float), link, float(phi)
         self._inv = _LINKS[link].inv
+
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        # ``_inv`` is a live link function -- store the named parameters and rebuild it on decode instead.
+        return {"family": self.family, "beta": self.beta, "link": self.link, "phi": self.phi}
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        from mixle.inference.glm import _LINKS
+
+        self.family = state["family"]
+        self.beta = np.asarray(state["beta"], dtype=float)
+        self.link = state["link"]
+        self.phi = float(state["phi"])
+        self._inv = _LINKS[self.link].inv
 
     def _mu(self, parent: Any) -> np.ndarray:
         return self._inv(self.beta[0] + self.beta[1] * np.asarray(parent, dtype=float))
@@ -308,6 +327,8 @@ class DependencyTreeDistribution:
     per-parent-value conditionals -- while it still scores, samples, and composes like any mixle distribution.
     """
 
+    __pysp_serializable__ = True  # parents/factors/binners/order round-trip via __dict__ (factors self-serialize)
+
     def __init__(
         self, parents: Sequence[int | None], factors: Sequence[Any], binners: Sequence[Any] | None = None
     ) -> None:
@@ -399,6 +420,8 @@ class MixtureOfDependencyTrees:
     dependency tree (one relationship) nor a mixture of independent composites (no within-cluster dependence) can
     represent. Fit by :func:`learn_mixture_structure`.
     """
+
+    __pysp_serializable__ = True  # components/weights/log_weights round-trip via __dict__
 
     def __init__(self, components: Sequence[DependencyTreeDistribution], weights: Sequence[float]) -> None:
         self.components = list(components)
@@ -637,6 +660,8 @@ def _kmeans_init(data: list[tuple], k: int, rng: np.random.RandomState, *, numer
 
 class _QuantileBinner:
     """Map a continuous value to a bin label ``bK`` by fixed quantile edges -- a continuous field as a parent."""
+
+    __pysp_serializable__ = True  # edges (a list of floats) round-trip via __dict__
 
     def __init__(self, edges: Sequence[float]) -> None:
         self.edges = list(edges)

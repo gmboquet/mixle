@@ -136,6 +136,18 @@ def ensure_pysp_serialization_registry() -> None:
         # stats/bstats registries above should still be available.
         pass
 
+    # Structure-learning distributions (DependencyTreeDistribution and its regression/GLM edges) live in
+    # mixle.inference, outside the stats walk above, but opt in explicitly via __pysp_serializable__ so a
+    # learned structured model -- e.g. a distilled structured classifier -- persists through the json artifact path.
+    try:
+        structure = importlib.import_module("mixle.inference.structure")
+        for _, cls in inspect.getmembers(structure, inspect.isclass):
+            if cls.__module__ == structure.__name__ and getattr(cls, "__pysp_serializable__", False):
+                register_serializable_class(cls)
+    except Exception:
+        # Optional: the core stats registry above is enough for pure-stats models.
+        pass
+
     _REGISTRY_READY = True
 
 
