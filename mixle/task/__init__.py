@@ -34,6 +34,8 @@ from mixle.task.distill import (
     distill_from_labels,
     distill_records,
     distill_records_from_labels,
+    distill_structured,
+    distill_structured_from_labels,
 )
 from mixle.task.economics import (
     CostModel,
@@ -59,6 +61,7 @@ from mixle.task.model import (
     HashedNGram,
     HashedRecord,
     RecordClassifierIO,
+    StructuredClassifierIO,
     TaskModel,
     TextClassifierIO,
     adapter_from_spec,
@@ -87,6 +90,7 @@ __all__ = [
     "RecipeSpace",
     "RecordClassifierIO",
     "RoutePlan",
+    "StructuredClassifierIO",
     "TaskManifest",
     "TaskModel",
     "TextClassifierIO",
@@ -103,6 +107,8 @@ __all__ = [
     "distill_from_labels",
     "distill_records",
     "distill_records_from_labels",
+    "distill_structured",
+    "distill_structured_from_labels",
     "extraction_f1",
     "get_builder",
     "llm_extractor",
