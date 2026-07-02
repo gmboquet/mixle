@@ -18,6 +18,7 @@ active labeling ──> LLM teacher ──> distill ──> tune ──> calibra
 | Module | Purpose |
 | --- | --- |
 | `distill` / `distill_records` | A teacher labels data; a tiny student (text **or** structured record) learns to match → a callable `TaskModel`. |
+| `distill_structured` | Distill a teacher into a **structured probabilistic** student — a learned dependency network (`learn_structure`), not an MLP. Classifies generatively (`argmax P(fields, label)`), so its confidence is a *real posterior* the calibration/cascade stack can trust; interpretable (`meta["edges"]`), a few KB on disk, and **no torch to run**. `n_components>1` gives a latent-regime mixture-of-trees. |
 | `active_distill` | **DoE for the labeling decision** — query the teacher only for the most informative examples. Same quality, far fewer paid labels. |
 | `tune_recipe` | **DoE for training cost** — Bayesian-optimize the student recipe; optional compute penalty finds the cheapest recipe that still matches. |
 | `llm_labeler` + `OpenAICompatLLM` | Make an LLM the teacher (Ollama/vLLM/TGI/hosted, stdlib-only client). |

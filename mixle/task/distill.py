@@ -17,7 +17,14 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task.model import HashedNGram, HashedRecord, RecordClassifierIO, TaskModel, TextClassifierIO
+from mixle.task.model import (
+    HashedNGram,
+    HashedRecord,
+    RecordClassifierIO,
+    StructuredClassifierIO,
+    TaskModel,
+    TextClassifierIO,
+)
 
 
 def _as_batched(teacher: Callable[..., Any]) -> Callable[[list[str]], list[Any]]:
@@ -170,6 +177,114 @@ def distill_records_from_labels(
     )
     student.meta["train_agreement"] = agreement(student, teacher_labels, records)
     return student
+
+
+def distill_structured(
+    teacher: Callable[..., Any],
+    records: Sequence[Any],
+    *,
+    labels: Sequence[str] | None = None,
+    n_components: int = 1,
+    min_gain: float = 0.0,
+    n_bins: int = 4,
+    max_its: int = 30,
+    seed: int = 0,
+    task: str = "",
+) -> TaskModel:
+    """Distill a teacher into a tiny **structured probabilistic** classifier -- a learned Bayesian network, not an MLP.
+
+    The teacher labels ``records``; :func:`mixle.inference.structure.learn_structure` then discovers the dependency
+    forest over the joint ``(field_1, ..., field_m, label)`` and fits it. The student classifies by the generative
+    rule ``argmax_label P(features, label)`` -- and because ``softmax_label log P(features, label) = P(label |
+    features)`` exactly, its confidence is a real posterior the cascade/calibration stack can trust. Unlike
+    :func:`distill_records` (a hashed-feature MLP), this student is *interpretable* (``model.edges()`` lists the
+    discovered dependencies), a few kilobytes on disk, and needs no torch to run.
+
+    ``n_components > 1`` fits a :class:`~mixle.inference.structure.MixtureOfDependencyTrees` -- a latent-cluster
+    student whose sub-structures differ by regime. Assumes a fixed record schema (see :class:`StructuredClassifierIO`).
+    """
+    records = list(records)
+    teacher_labels = [str(t) for t in _as_batched(teacher)(records)]
+    return distill_structured_from_labels(
+        records,
+        teacher_labels,
+        labels=labels,
+        n_components=n_components,
+        min_gain=min_gain,
+        n_bins=n_bins,
+        max_its=max_its,
+        seed=seed,
+        task=task,
+    )
+
+
+def distill_structured_from_labels(
+    records: Sequence[Any],
+    teacher_labels: Sequence[Any],
+    *,
+    labels: Sequence[str] | None = None,
+    n_components: int = 1,
+    min_gain: float = 0.0,
+    n_bins: int = 4,
+    max_its: int = 30,
+    seed: int = 0,
+    task: str = "",
+) -> TaskModel:
+    """Teacher-free core of :func:`distill_structured`: fit a structured classifier from labeled records."""
+    from mixle.inference.structure import learn_mixture_structure, learn_structure
+
+    records = list(records)
+    teacher_labels = [str(t) for t in teacher_labels]
+    label_list = list(labels) if labels is not None else sorted(set(teacher_labels))
+    field_keys, values = _record_schema(records)
+    label_index = len(field_keys) if field_keys is not None else len(values[0])
+    augmented = [v + (lab,) for v, lab in zip(values, teacher_labels)]  # label as the last joint field
+
+    if n_components > 1:
+        model = learn_mixture_structure(
+            augmented, n_components, seed=seed, min_gain=min_gain, n_bins=n_bins, max_its=max_its
+        )
+        edges = model.components[0].edges()
+    else:
+        model = learn_structure(augmented, min_gain=min_gain, n_bins=n_bins, max_its=max_its)
+        edges = model.edges()
+
+    adapter = StructuredClassifierIO(field_keys, label_index, label_list)
+    student = TaskModel(
+        model,
+        adapter,
+        payload="json",
+        task=task or "distilled structured classifier",
+        meta={
+            "distilled": True,
+            "structured": True,
+            "n_examples": len(records),
+            "labels": label_list,
+            "recipe": {"n_components": n_components, "min_gain": min_gain, "n_bins": n_bins},
+            "edges": edges,
+        },
+    )
+    student.meta["train_agreement"] = agreement(student, teacher_labels, records)
+    return student
+
+
+def _record_schema(records: Sequence[Any]) -> tuple[list[str] | None, list[tuple]]:
+    """Canonical (field_keys, per-record value tuples). Dict records key by sorted first-record keys (fixed schema);
+    tuple/list records are positional (``field_keys=None``). Raises on a schema mismatch across dict records."""
+    first = records[0]
+    if isinstance(first, dict):
+        field_keys = sorted(first)
+        values = []
+        for r in records:
+            if not isinstance(r, dict) or sorted(r) != field_keys:
+                raise ValueError("structured distillation needs a fixed dict schema; record keys differ")
+            values.append(tuple(r[k] for k in field_keys))
+        return field_keys, values
+    values = [tuple(r) if isinstance(r, (list, tuple)) else (r,) for r in records]
+    width = len(values[0])
+    if any(len(v) != width for v in values):
+        raise ValueError("structured distillation needs fixed-width tuple records")
+    return None, values
 
 
 def _encode_labels(teacher_labels: Sequence[Any], labels: Sequence[str] | None) -> tuple[list[str], np.ndarray]:

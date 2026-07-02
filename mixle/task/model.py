@@ -135,6 +135,8 @@ def _register_builtin_adapters() -> None:
         register_adapter("text_classifier", TextClassifierIO.from_spec)
     if "record_classifier" not in _ADAPTERS:
         register_adapter("record_classifier", RecordClassifierIO.from_spec)
+    if "structured_classifier" not in _ADAPTERS:
+        register_adapter("structured_classifier", StructuredClassifierIO.from_spec)
     if "extraction" not in _ADAPTERS:
         from mixle.task.extract import ExtractionIO
 
@@ -211,6 +213,86 @@ class RecordClassifierIO(_ClassifierIO):
 
     def __init__(self, featurizer: HashedRecord, labels: list[str]) -> None:
         super().__init__(featurizer, labels)
+
+
+class StructuredClassifierIO:
+    """``record -> label`` through a *structured probabilistic* model instead of a neural net.
+
+    The model is a fitted joint over ``(field_1, ..., field_m, label)`` -- a :class:`DependencyTreeDistribution`
+    (or mixture) discovered by :func:`mixle.inference.structure.learn_structure`. Classification is the generative
+    rule ``argmax_label P(features, label)``: score each candidate label and pick the best. Because
+    ``softmax_label log P(features, label) = P(label | features)`` *exactly* (the feature evidence is a shared
+    constant across labels), :meth:`proba_batch` returns the true posterior -- not a softmax over arbitrary logits
+    -- so conformal calibration (:mod:`mixle.task.calibrate`) and the density gate operate on a real probability.
+
+    The student is interpretable (``model.edges()`` shows the discovered dependencies), kilobytes on disk, and
+    round-trips through the json artifact path. It assumes a *fixed schema*: every record exposes the same fields
+    (``field_keys`` for dicts, positional for tuples) -- the variable set a Bayesian network is defined over.
+    """
+
+    kind = "structured_classifier"
+
+    def __init__(self, field_keys: list[str] | None, label_index: int, labels: list[str]) -> None:
+        self.field_keys = list(field_keys) if field_keys is not None else None  # None => positional tuple records
+        self.label_index = int(label_index)
+        self.labels = list(labels)
+
+    def _values(self, record: Any) -> tuple:
+        """The non-label field values of a raw record, in the canonical order the model was fit on."""
+        if self.field_keys is not None:
+            if not isinstance(record, dict):
+                raise TypeError(f"structured classifier expects dict records with keys {self.field_keys}")
+            return tuple(record.get(k) for k in self.field_keys)
+        if isinstance(record, (list, tuple)):
+            return tuple(record)
+        return (record,)
+
+    def _augment(self, values: tuple, label: str) -> tuple:
+        """Splice ``label`` into the field position it occupied at fit time, giving a full joint record."""
+        return values[: self.label_index] + (label,) + values[self.label_index :]
+
+    def logits_batch(self, model: Any, raw_inputs: list[Any]) -> np.ndarray:
+        """Per-label log-joint ``log P(features, label)`` as an ``(m, K)`` score matrix (the classifier logits)."""
+        values = [self._values(r) for r in raw_inputs]
+        out = np.full((len(values), len(self.labels)), -np.inf, dtype=np.float64)
+        for k, label in enumerate(self.labels):
+            rows = [self._augment(v, label) for v in values]
+            try:
+                out[:, k] = np.asarray(model.seq_log_density(model.dist_to_encoder().seq_encode(rows)))
+            except Exception:  # unseen conditioning value in some row: fall back to per-row scoring
+                for i, row in enumerate(rows):
+                    try:
+                        out[i, k] = float(model.log_density(row))
+                    except Exception:
+                        out[i, k] = -np.inf
+        return out
+
+    def proba_batch(self, model: Any, raw_inputs: list[Any]) -> np.ndarray:
+        """The exact posterior ``P(label | features)`` -- softmax of the per-label log-joints (shared evidence cancels)."""
+        z = self.logits_batch(model, raw_inputs)
+        z = np.where(np.isneginf(z).all(axis=1, keepdims=True), 0.0, z)  # all-(-inf) row -> uniform, avoid nan
+        z = z - z.max(axis=1, keepdims=True)
+        e = np.exp(z)
+        return e / e.sum(axis=1, keepdims=True)
+
+    def predict_batch(self, model: Any, raw_inputs: list[Any]) -> list[str]:
+        idx = self.logits_batch(model, raw_inputs).argmax(axis=1)
+        return [self.labels[i] for i in idx]
+
+    def predict(self, model: Any, raw_input: Any) -> str:
+        return self.predict_batch(model, [raw_input])[0]
+
+    def to_spec(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "field_keys": self.field_keys,
+            "label_index": self.label_index,
+            "labels": self.labels,
+        }
+
+    @classmethod
+    def from_spec(cls, spec: dict[str, Any]) -> StructuredClassifierIO:
+        return cls(spec.get("field_keys"), spec["label_index"], spec["labels"])
 
 
 # --- the task model: a callable raw -> result, durable through the artifact ----------------------------------
