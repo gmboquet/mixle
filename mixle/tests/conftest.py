@@ -261,11 +261,13 @@ def _isolate_global_process_state():
     engine = get_default_engine()
     rng_state = np.random.get_state()
     err_mode = np.geterr()
+    torch_dtype = None
     try:
         import torch  # force single-threaded + deterministic before this test runs (a prior test may have changed it)
 
         torch.set_num_threads(1)  # (multi-threaded CPU matmuls aren't bit-reproducible -> training-threshold flakes)
         torch.use_deterministic_algorithms(True, warn_only=True)
+        torch_dtype = torch.get_default_dtype()  # a leaked float64 default silently retrains later students in f64
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -274,3 +276,7 @@ def _isolate_global_process_state():
         set_default_engine(engine)
         np.random.set_state(rng_state)
         np.seterr(**err_mode)
+        if torch_dtype is not None:
+            import torch
+
+            torch.set_default_dtype(torch_dtype)
