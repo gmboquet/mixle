@@ -342,11 +342,18 @@ class CountIndex:
     a bucket is deterministic but otherwise unspecified.
     """
 
-    __slots__ = ("hist", "_getter")
+    __slots__ = ("hist", "_getter", "dropped_upper")
 
-    def __init__(self, hist: CountHistogram, getter: Callable[[int, int], tuple[Any, float]]) -> None:
+    def __init__(
+        self, hist: CountHistogram, getter: Callable[[int, int], tuple[Any, float]], dropped_upper: float = 0.0
+    ) -> None:
         self.hist = hist
         self._getter = getter
+        # A sound upper bound on in-budget values EXCLUDED from the histogram by an explicit
+        # approximation knob (e.g. the autoregressive ``branch_cap``). 0.0 for exhaustive indices.
+        # Distinct from budget truncation: deepening cannot recover these, so ``truncated`` stays
+        # False for them and count queries report the bracket [total, total + dropped_upper].
+        self.dropped_upper = float(dropped_upper)
 
     def total(self) -> int:
         return self.hist.total()
