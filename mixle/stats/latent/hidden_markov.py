@@ -3498,6 +3498,9 @@ def hmm_engine_forward_ll(engine, log_emit, log_w, log_a, mask):
 
     Args mirror the forward-backward: ``log_emit`` (N, Tmax, S) padded log emissions, ``log_w`` (S,),
     ``log_a`` (S, S), ``mask`` (N, Tmax) 1.0 for real steps. Returns ``ll`` (N,)."""
+    fast = getattr(engine, "hmm_forward_ll", None)
+    if fast is not None:  # an engine may provide a fused native recurrence (TorchEngine does)
+        return fast(log_emit, log_w, log_a, mask)
     mask_np = np.asarray(mask)
     tmax = mask_np.shape[1]
     log_emit = engine.asarray(log_emit)
@@ -3529,6 +3532,9 @@ def hmm_engine_forward_backward(engine, log_emit, log_w, log_a, mask, weights=No
             xi_sum: (S, S) expected transition counts over all sequences and steps (weighted).
             pi: (N, S) initial-state posteriors (weighted).
     """
+    fast = getattr(engine, "hmm_forward_backward", None)
+    if fast is not None:  # an engine may provide a fused native recurrence (TorchEngine does — ~2.5x)
+        return fast(log_emit, log_w, log_a, mask, weights=weights)
     mask_np = np.asarray(mask)
     n, tmax = mask_np.shape[0], mask_np.shape[1]
     # log_w is either a shared (S,) initial vector or a per-sequence (N, S) vector (SemiSupervised HMM).
