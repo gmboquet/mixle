@@ -13,7 +13,7 @@ torch = pytest.importorskip("torch")
 
 import mixle.stats as st  # noqa: E402
 from mixle.inference import optimize  # noqa: E402
-from mixle.models.neural_density import NeuralDensity, build_coupling_flow  # noqa: E402
+from mixle.models.neural_density import NeuralDensity, build_coupling_flow, build_vae  # noqa: E402
 
 
 def _two_modes(seed, n=500):
@@ -65,6 +65,26 @@ class CompositionTest(unittest.TestCase):
         self.assertGreater(
             _ll(mix, train), _ll(optimize(train, st.MultivariateGaussianEstimator(dim=2), max_its=20, out=None), train)
         )
+
+
+class VAETest(unittest.TestCase):
+    def test_vae_elbo_beats_gaussian_on_multimodal_density(self):
+        # the VAE's log_density is the ELBO (a LOWER bound). If the bound already beats the Gaussian's EXACT
+        # log-likelihood, the VAE's true likelihood beats it by at least that margin -- a valid one-sided claim.
+        train, test = _two_modes(0), _two_modes(1)
+        vae = NeuralDensity(build_vae(2, latent=2, hidden=64), m_steps=150, lr=5e-3)
+        fit = optimize(train, vae.estimator(), prev_estimate=vae, max_its=15, out=None)
+        gauss = optimize(train, st.MultivariateGaussianEstimator(dim=2), max_its=20, out=None)
+        self.assertGreater(_ll(fit, test) - _ll(gauss, test), 200.0)
+
+    def test_vae_samples_are_bimodal(self):
+        train = _two_modes(2)
+        vae = NeuralDensity(build_vae(2, latent=2, hidden=64), m_steps=150, lr=5e-3)
+        fit = optimize(train, vae.estimator(), prev_estimate=vae, max_its=15, out=None)
+        s = np.asarray(fit.sampler(0).sample(400))
+        self.assertEqual(s.shape, (400, 2))
+        # the decoder learned both modes at (+3,+3) and (-3,-3), not a single blob between them
+        self.assertTrue(np.any(s[:, 0] > 1.0) and np.any(s[:, 0] < -1.0))
 
 
 class GeneralityTest(unittest.TestCase):
