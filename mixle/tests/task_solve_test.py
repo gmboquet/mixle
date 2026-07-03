@@ -100,6 +100,27 @@ class SolveTest(unittest.TestCase):
         self.assertIn("epochs", sol.distill_kw)
         self.assertGreater(sol.holdout_agreement, 0.7)
 
+    def test_synthesize_creates_teacher_labeled_training_data(self):
+        from mixle.task import solve
+
+        real = _tickets(60)  # scarce
+        sol = solve(_route, real, synthesize=150, ood=None, seed=0, epochs=200)
+        rep = sol.report()
+        self.assertGreater(rep["synthesized_inputs"], 100)  # the training set materially grew
+        self.assertEqual(len(sol.train_inputs), len(sol.train_labels))
+        # every synthetic label is the TEACHER's answer on that exact synthetic input (labels stay real)
+        n_real_train = len(sol.train_inputs) - sol.synthesized
+        for x, y in zip(sol.train_inputs[n_real_train:], sol.train_labels[n_real_train:]):
+            self.assertEqual(y, _route(x))
+        self.assertGreater(sol.holdout_agreement, 0.7)
+
+    def test_synthesize_rejects_text_inputs(self):
+        from mixle.task import solve
+
+        texts = [f"hello {i}" for i in range(20)]
+        with self.assertRaises(ValueError):
+            solve(lambda s: "x", texts, synthesize=10, seed=0, epochs=10)
+
     def test_text_path_and_input_sniffing(self):
         from mixle.task import solve
 
