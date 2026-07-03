@@ -85,6 +85,29 @@ def _fit_gate(kind: str, inputs: list, alpha: float, seed: int, dim: int = 256) 
     return DensityGate(feat).fit(inputs, alpha=alpha, seed=seed)
 
 
+def _synthesize_inputs(real_inputs: list, n: int, seed: int) -> list:
+    """Sample ``n`` fresh synthetic inputs from a generative model fit to the real inputs.
+
+    mixle's home turf: the input space is heterogeneous records, so infer a generative model of it
+    (:func:`mixle.utils.automatic.get_estimator`), fit, and sample. Dedup against the real inputs and
+    within the draw -- the synthetic inputs are only ever *teacher-labeled*, so labels stay real."""
+    from mixle.inference import optimize
+    from mixle.utils.automatic import get_estimator
+
+    gen = optimize(real_inputs, get_estimator(real_inputs), max_its=25, out=None, rng=np.random.RandomState(seed))
+    draws = gen.sampler(seed=seed).sample(max(n + n // 2, n))  # oversample; dedup below
+    seen = {repr(x) for x in real_inputs}
+    out: list = []
+    for x in draws:
+        r = repr(x)
+        if r not in seen:
+            seen.add(r)
+            out.append(x)
+        if len(out) >= n:
+            break
+    return out
+
+
 def _tune_recipe(kind: str, inputs: list, labels: list, distill_kw: dict, budget: int, seed: int) -> dict:
     """Teacher-free recipe search: BO over (dim, hidden, epochs, lr) maximizing agreement on a val slice.
 
@@ -137,6 +160,8 @@ class Solution:
     distill_kw: dict = field(default_factory=dict)
     ood: float | None = None  # OOD-floor quantile the gate was fit with (None = no gate)
     seed: int = 0
+    synthesized: int = 0  # synthetic (generative-sampled, teacher-labeled) inputs in the training set
+    gate_inputs: list = field(default_factory=list)  # REAL inputs only — what the p(x) gate is fit on
 
     def __call__(self, x: Any) -> Any:
         if not self.promoted:
@@ -153,6 +178,7 @@ class Solution:
             "requests": stats.n_requests,
             "live_escalated": stats.n_escalated,
             "harvested_labels": len(stats.escalated_labels),
+            "synthesized_inputs": self.synthesized,
         }
 
     def improve(self) -> bool:
@@ -168,7 +194,9 @@ class Solution:
         labels = self.train_labels + [str(y) for y in new_labels]
         student = _fit_student(self.kind, inputs, labels, self.distill_kw)
         alpha = self.cascade.model.alpha
-        gate = _fit_gate(self.kind, inputs, self.ood, self.seed) if self.ood is not None else None
+        # the gate stays real-inputs-only: harvested escalations are real, synthetic training rows are not
+        gate_inputs = self.gate_inputs + list(new_inputs)
+        gate = _fit_gate(self.kind, gate_inputs, self.ood, self.seed) if self.ood is not None else None
         cal = CalibratedTaskModel(student, alpha=alpha, density_gate=gate).calibrate(self.cal_inputs, self.cal_labels)
         agree = agreement(student, self.cal_labels, self.cal_inputs)
         esc = cal.escalation_rate(self.cal_inputs)
@@ -176,6 +204,7 @@ class Solution:
             return False  # anti-regression: keep the current student
         self.cascade.model = cal
         self.train_inputs, self.train_labels = inputs, labels
+        self.gate_inputs = gate_inputs
         self.holdout_agreement, self.escalation_rate = agree, esc
         self.promoted = self.promoted or self._passes_target(agree)
         self.cascade.stats.escalated_texts.clear()
@@ -201,6 +230,7 @@ def solve(
     ood: float | None = 0.02,
     propose: str | None = None,
     propose_budget: int = 8,
+    synthesize: int = 0,
     cost: Any = None,
     seed: int = 0,
     **distill_kw: Any,
@@ -224,6 +254,10 @@ def solve(
             val slice carved from the training split) instead of using the defaults. Teacher-free — the
             labels are already computed, so candidates cost only student fits.
         propose_budget: Total candidate recipes tried when ``propose="auto"``.
+        synthesize: When example inputs are scarce, sample this many *synthetic* inputs from a generative
+            model fit to the real training inputs (record inputs only) and have the teacher label them.
+            Labels are always real (teacher-produced); the calibration slice and the OOD gate stay
+            real-inputs-only, so the conformal guarantee and the p(x) floor reflect the true distribution.
         cost: Optional :class:`~mixle.task.economics.CostModel` for realized-savings reporting.
         seed: Split + fit determinism.
         **distill_kw: Student knobs forwarded to distillation (``dim``, ``hidden``, ``epochs``, ``lr``, …).
@@ -246,11 +280,24 @@ def solve(
     cal_inputs = [items[i] for i in cal_idx]
     cal_labels = [labels[i] for i in cal_idx]
 
+    n_synth = 0
+    gate = _fit_gate(k, train_inputs, ood, seed) if ood is not None else None  # real inputs only
+    if synthesize:
+        if k == "text":
+            raise ValueError(
+                "synthesize= samples a generative model of the inputs, which needs record inputs; "
+                "for text, provide more examples (or synthesize upstream with an LLM) instead."
+            )
+        synth = _synthesize_inputs(train_inputs, int(synthesize), seed)
+        if synth:
+            train_inputs = train_inputs + synth
+            train_labels = train_labels + [str(y) for y in _label_with(teacher, synth)]
+            n_synth = len(synth)
+
     distill_kw.setdefault("seed", seed)
     if propose == "auto":
         distill_kw = _tune_recipe(k, train_inputs, train_labels, distill_kw, propose_budget, seed)
     student = _fit_student(k, train_inputs, train_labels, distill_kw)
-    gate = _fit_gate(k, train_inputs, ood, seed) if ood is not None else None
     cal = CalibratedTaskModel(student, alpha=alpha, density_gate=gate).calibrate(cal_inputs, cal_labels)
     agree = agreement(student, cal_labels, cal_inputs)
     esc = cal.escalation_rate(cal_inputs)
@@ -271,4 +318,6 @@ def solve(
         distill_kw=dict(distill_kw),
         ood=ood,
         seed=seed,
+        synthesized=n_synth,
+        gate_inputs=list(train_inputs[: len(train_inputs) - n_synth]),
     )
