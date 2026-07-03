@@ -191,5 +191,97 @@ class ServingLoopRoundTripTest(unittest.TestCase):
             self.assertIn("tasks/router", path.replace("\\", "/"))
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class SolveOnDeviceTest(unittest.TestCase):
+    """solve(device=DeviceSpec(...)): 'give me this capability on that device' as one call."""
+
+    def _space(self):
+        from mixle.task import EdgeSpace
+
+        return EdgeSpace(
+            families=("mlp", "structured"),
+            dim_choices=(64, 128),
+            hidden_range=(4, 24),
+            epochs_range=(30, 90),
+            components_range=(1, 2),
+            max_its_range=(8, 20),
+        )
+
+    def test_solve_under_device_budget(self):
+        from mixle.task import DeviceSpec, solve
+
+        sol = solve(
+            _route,
+            _tickets(300),
+            device=DeviceSpec(max_bytes=200_000),
+            device_space=self._space(),
+            propose_budget=5,
+            seed=0,
+        )
+        self.assertTrue(sol.promoted)
+        self.assertIsNotNone(sol.edge)
+        self.assertTrue(sol.edge.feasible)
+        self.assertLessEqual(sol.edge.footprint.bytes, 200_000)
+        rep = sol.report()
+        self.assertIn("device", rep)
+        self.assertTrue(rep["device"]["feasible"])
+        # still a drop-in: confident answers are the local model's, escalations exact teacher answers
+        for t in _tickets(60, seed=2):
+            got = sol(t)
+            local = sol.cascade.model.decide(t)
+            self.assertEqual(got, local if local is not None else _route(t))
+
+    def test_torch_free_device_gives_deployable_torch_free_artifact(self):
+        import tempfile
+
+        from mixle.task import DeviceSpec, Solution, solve
+
+        sol = solve(
+            _route,
+            _tickets(300),
+            device=DeviceSpec(torch_free=True),
+            device_space=self._space(),
+            propose_budget=4,
+            seed=0,
+        )
+        self.assertTrue(sol.edge.footprint.torch_free)
+        self.assertNotEqual(sol.cascade.model.task.payload, "torch")
+        # the artifact round-trips and serves in a fresh Solution
+        with tempfile.TemporaryDirectory() as d:
+            path = sol.save(d)
+            served = Solution.load(path, _route)
+        for t in _tickets(30, seed=3):
+            self.assertEqual(served(t), sol(t))
+
+    def test_infeasible_budget_demotes_to_teacher(self):
+        from mixle.task import DeviceSpec, solve
+
+        sol = solve(
+            _route,
+            _tickets(200),
+            device=DeviceSpec(max_bytes=50),  # 50 bytes: nothing fits
+            device_space=self._space(),
+            propose_budget=3,
+            seed=0,
+        )
+        self.assertFalse(sol.promoted)
+        self.assertFalse(sol.edge.feasible)
+        for t in _tickets(20, seed=4):
+            self.assertEqual(sol(t), _route(t))  # honest failure: everything routes to the teacher
+
+    def test_device_string_keeps_torch_device_meaning(self):
+        from mixle.task import solve
+
+        sol = solve(_route, _tickets(200), device="cpu", seed=0, epochs=120)
+        self.assertIsNone(sol.edge)  # the old kwarg path, no edge search
+        self.assertGreater(sol.holdout_agreement, 0.7)
+
+    def test_device_conflicts_with_propose_auto(self):
+        from mixle.task import DeviceSpec, solve
+
+        with self.assertRaises(ValueError):
+            solve(_route, _tickets(100), device=DeviceSpec(max_bytes=1000), propose="auto", seed=0)
+
+
 if __name__ == "__main__":
     unittest.main()
