@@ -27,6 +27,7 @@ from mixle.reason.core import (
     Evidence,
     Latent,
     LinearGaussianEvidence,
+    NonlinearEvidence,
     ReasonedAnswer,
     block_selector,
     reason,
@@ -52,6 +53,7 @@ from mixle.reason.llm import (
 from mixle.reason.store import CrossModalStore, RetrievalStep
 
 __all__ = [
+    "NonlinearEvidence",
     "DiscreteAnswer",
     "model_evidence",
     "reason_discrete",
