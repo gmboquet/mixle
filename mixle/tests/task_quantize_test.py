@@ -82,9 +82,57 @@ class QuantizeMLPTest(unittest.TestCase):
 
     def test_guards(self):
         with self.assertRaises(NotImplementedError):
-            quantize_mlp(self.fp32, bits=4)
+            quantize_mlp(self.fp32, bits=2)  # LNS/sub-4-bit rungs are explicitly not wired
         with self.assertRaises(ValueError):
             quantize_mlp(self.q)  # already-quantized (arrays payload) is not a torch student
+
+
+class Int4Test(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.train, cls.train_y = _record_task(240, 0)
+        cls.val, cls.val_y = _record_task(120, 1)
+        cls.fp32 = distill_records_from_labels(
+            cls.train, cls.train_y, dim=128, hidden=[16], epochs=120, lr=1e-2, seed=0
+        )
+        cls.q4 = quantize_mlp(cls.fp32, bits=4)
+
+    def test_nibble_pack_unpack_is_exact(self):
+        from mixle.task.quantize import _pack_nibbles, _unpack_nibbles
+
+        rng = np.random.RandomState(0)
+        for shape in [(3, 5), (4, 4), (1, 7)]:  # odd and even element counts
+            w = rng.randint(-7, 8, size=shape).astype(np.int8)
+            packed = _pack_nibbles(w)
+            self.assertEqual(packed.dtype, np.uint8)
+            self.assertEqual(packed.size, (w.size + 1) // 2)  # two weights per byte
+            np.testing.assert_array_equal(_unpack_nibbles(packed, shape), w)
+
+    def test_int4_weights_in_range_and_bytes_8x_smaller(self):
+        for w, s, _b in self.q4.model.layers:
+            self.assertLessEqual(int(np.abs(w).max()), 7)
+            self.assertGreater(s, 0.0)
+        fp_fp32 = footprint(self.fp32)
+        fp_q4 = footprint(self.q4)
+        self.assertLess(fp_q4.bytes, 0.17 * fp_fp32.bytes)  # ~8x on weights; fp32 biases remain
+        self.assertTrue(fp_q4.torch_free)
+
+    def test_int4_fidelity_holds_on_the_rule_task(self):
+        fp32_acc = np.mean([self.fp32(r) == y for r, y in zip(self.val, self.val_y)])
+        q4_acc = np.mean([self.q4(r) == y for r, y in zip(self.val, self.val_y)])
+        self.assertGreaterEqual(q4_acc, fp32_acc - 0.10)  # 4-bit costs more than int8; bounded here
+
+    def test_int4_artifact_is_packed_on_disk_and_roundtrips(self):
+        arrays = self.q4.model.to_arrays()
+        self.assertEqual(int(arrays["bits"]), 4)
+        self.assertEqual(arrays["w0"].dtype, np.uint8)  # nibble-packed storage, not int8
+        w0_shape = tuple(int(d) for d in arrays["shape0"])
+        self.assertEqual(arrays["w0"].size, (int(np.prod(w0_shape)) + 1) // 2)
+        with tempfile.TemporaryDirectory() as d:
+            self.q4.save(d)
+            loaded = TaskModel.load(d)
+        self.assertEqual(loaded.model.bits, 4)
+        self.assertEqual(loaded.batch(self.val[:40]), self.q4.batch(self.val[:40]))
 
 
 if __name__ == "__main__":
