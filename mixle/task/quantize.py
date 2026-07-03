@@ -11,9 +11,12 @@ axis trades measured bytes against measured fidelity, never assumed ones.
 
 ``quantize_mlp(student, bits=8|4)`` converts a trained torch student in place of retraining; the
 result stores quantized arrays (``payload="arrays"``, int4 stored nibble-packed), round-trips
-through the artifact as an ``.npz``, and reports its true byte size. LNS (log-number-system,
-transcendental-free; ``mixle.engines.lns``) is the remaining rung -- it needs LUT matmul kernels,
-so it stays explicitly unimplemented here.
+through the artifact as an ``.npz``, and reports its true byte size.
+
+LNS (log-number-system; ``mixle.engines.lns``) is wired where it is a *complete* fit: the
+structured student, whose inference is sums of factor log-densities -- :func:`lns_classifier`
+re-executes it on integers (add / max / LUT, no transcendentals above the leaf boundary). Signed
+MLP matmuls in LNS would need signed-logadd kernels and stay out of scope.
 """
 
 from __future__ import annotations
@@ -22,9 +25,22 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task.model import HashedNGram, HashedRecord, TaskModel, _ClassifierIO, register_adapter
+from mixle.task.model import (
+    HashedNGram,
+    HashedRecord,
+    StructuredClassifierIO,
+    TaskModel,
+    _ClassifierIO,
+    register_adapter,
+)
 
-__all__ = ["QuantizedMLP", "QuantizedClassifierIO", "quantize_mlp"]
+__all__ = [
+    "QuantizedMLP",
+    "QuantizedClassifierIO",
+    "quantize_mlp",
+    "LNSStructuredClassifierIO",
+    "lns_classifier",
+]
 
 _QMAX = {8: 127, 4: 7}  # symmetric integer range per weight precision
 
@@ -161,7 +177,9 @@ def quantize_mlp(student: TaskModel, *, bits: int = 8) -> TaskModel:
     (``mixle.engines.lns``) and is left explicitly unimplemented.
     """
     if bits not in _QMAX:
-        raise NotImplementedError(f"bits={bits}: supported precisions are {sorted(_QMAX)} (LNS not wired yet)")
+        raise NotImplementedError(
+            f"bits={bits}: MLP precisions are {sorted(_QMAX)}; LNS applies to structured students via lns_classifier"
+        )
     if student.payload != "torch":
         raise ValueError("quantize_mlp expects a torch MLP student (payload='torch')")
     linears = _torch_linears(student.model)
@@ -198,3 +216,141 @@ def quantize_mlp(student: TaskModel, *, bits: int = 8) -> TaskModel:
         task=student.task,
         meta=meta,
     )
+
+
+# --- LNS: integer log-space inference for structured students -----------------------------------------------
+
+_LOG_ZERO_INT = -(2**40)  # integer sentinel for log 0 (-inf); adds across factors cannot overflow int64
+
+
+class LNSStructuredClassifierIO(StructuredClassifierIO):
+    """The structured classifier executed in the log-number system: integers above the leaf boundary.
+
+    A structured student's per-label score is a *sum of factor log-densities* -- in log-space that is
+    products of probabilities, which is exactly what :class:`~mixle.engines.lns.LogNumberSystem` runs
+    on integers: each factor's log-density is quantized once at the leaf boundary (``k = round(logp /
+    step)``), then the per-label accumulation is integer ADDs, mixture components fold with the
+    integer ``logadd`` LUT, the classification is an integer argmax, and the posterior is the integer
+    log-softmax of :mod:`mixle.engines.lns_nn` -- no ``exp``/``log`` anywhere above the leaves (one
+    ``exp`` only if you ask for linear-scale probabilities). The dequantized scores match the float
+    classifier within the engine's documented bound (~``1.5 * step`` per fold), so ``step`` is a
+    dial between integer-width and fidelity.
+
+    Categorical factors could further pre-quantize their tables to pure integer lookups (no float at
+    all for discrete schemas); that fast path is future work -- today every leaf evaluates in float
+    and quantizes at the boundary, which is the same contract as the engine's ``SumProductCircuit``.
+    """
+
+    kind = "lns_structured_classifier"
+
+    def __init__(self, field_keys: list[str] | None, label_index: int, labels: list[str], step: float = 1e-2) -> None:
+        super().__init__(field_keys, label_index, labels)
+        self.step = float(step)
+        from mixle.engines.lns import LogNumberSystem
+
+        self._lns = LogNumberSystem(step=self.step)
+
+    # -- integer scoring -------------------------------------------------------------------------
+    def _quantize_term(self, logp: float) -> int:
+        if not np.isfinite(logp):
+            return _LOG_ZERO_INT
+        return int(np.rint(logp / self.step))
+
+    def _tree_int_score(self, tree: Any, row: tuple) -> int:
+        """Integer log-joint of one row under one dependency tree: quantized factor terms, integer adds."""
+        from mixle.inference.structure import _safe_log_density
+
+        total = 0
+        for i, parent in enumerate(tree.parents):
+            if parent is None:
+                term = _safe_log_density(tree.factors[i], row[i])
+            else:
+                term = _safe_log_density(tree.factors[i], (tree._key(i, row[parent]), row[i]))
+            k = self._quantize_term(term)
+            if k <= _LOG_ZERO_INT:
+                return _LOG_ZERO_INT
+            total += k
+        return total
+
+    def int_logits_batch(self, model: Any, raw_inputs: list[Any]) -> np.ndarray:
+        """Per-label INTEGER log-joint scores ``(m, K)`` -- the whole combination is integer math."""
+        values = [self._values(r) for r in raw_inputs]
+        out = np.full((len(values), len(self.labels)), _LOG_ZERO_INT, dtype=np.int64)
+        components = getattr(model, "components", None)
+        if components is not None:  # mixture: integer logadd across components with quantized log-weights
+            log_w = np.log(np.clip(np.asarray(model.weights, dtype=np.float64), 1e-300, None))
+            wk = self._lns.quantize(log_w)
+            for k, label in enumerate(self.labels):
+                for i, v in enumerate(values):
+                    row = self._augment(v, label)
+                    scores = np.array(
+                        [self._tree_int_score(c, row) + int(wk[j]) for j, c in enumerate(components)],
+                        dtype=np.int64,
+                    )
+                    live = scores > _LOG_ZERO_INT // 2
+                    if live.any():
+                        out[i, k] = int(self._lns.logsumexp(scores[live].reshape(1, -1), axis=-1)[0])
+        else:
+            for k, label in enumerate(self.labels):
+                for i, v in enumerate(values):
+                    out[i, k] = self._tree_int_score(model, self._augment(v, label))
+        return out
+
+    # -- the classifier contract on integers ------------------------------------------------------
+    def logits_batch(self, model: Any, raw_inputs: list[Any]) -> np.ndarray:
+        z = self.int_logits_batch(model, raw_inputs).astype(np.float64) * self.step
+        z[z <= _LOG_ZERO_INT // 2 * self.step] = -np.inf
+        return z
+
+    def proba_batch(self, model: Any, raw_inputs: list[Any]) -> np.ndarray:
+        """Posterior via the INTEGER log-softmax (max + LUT); one exp at the very end for linear scale.
+
+        The LUT rounds each log-probability to ~``step``, so the raw ``exp`` sums to ``1 +/- K*step/2``;
+        the final float renormalization (free -- we already left integer space for the exp) removes
+        that systematic drift without touching the integer pipeline.
+        """
+        from mixle.engines.lns_nn import log_softmax
+
+        ints = self.int_logits_batch(model, raw_inputs)
+        dead = ints <= _LOG_ZERO_INT // 2
+        ints = np.where(dead.all(axis=1, keepdims=True), 0, ints)  # all-impossible row -> uniform
+        p = np.exp(log_softmax(ints * self.step, self._lns, axis=-1))
+        return p / p.sum(axis=1, keepdims=True)
+
+    def predict_batch(self, model: Any, raw_inputs: list[Any]) -> list[str]:
+        idx = self.int_logits_batch(model, raw_inputs).argmax(axis=1)  # pure integer decision
+        return [self.labels[i] for i in idx]
+
+    def to_spec(self) -> dict[str, Any]:
+        spec = super().to_spec()
+        spec["kind"] = self.kind
+        spec["step"] = self.step
+        return spec
+
+    @classmethod
+    def from_spec(cls, spec: dict[str, Any]) -> LNSStructuredClassifierIO:
+        return cls(spec.get("field_keys"), spec["label_index"], spec["labels"], step=spec.get("step", 1e-2))
+
+
+register_adapter(LNSStructuredClassifierIO.kind, LNSStructuredClassifierIO.from_spec)
+
+
+def lns_classifier(student: TaskModel, *, step: float = 1e-2) -> TaskModel:
+    """Re-execute a structured student in integer log-space (the LNS rung for structured students).
+
+    The fitted model is unchanged (same factors, same JSON artifact); what changes is *how inference
+    runs*: factor log-densities are quantized once at the leaf boundary, and everything above --
+    per-label accumulation, mixture folding, the argmax decision, the posterior's log-softmax -- is
+    integer add/max/LUT arithmetic (:class:`LNSStructuredClassifierIO`). ``step`` trades fidelity for
+    integer width; the dequantized scores match the float classifier within ~``1.5 * step`` per fold.
+    This is compute quantization (transcendental-free combination), not weight compression -- pair it
+    with the structured student's already-tiny JSON payload.
+    """
+    if not isinstance(student.adapter, StructuredClassifierIO) or student.payload != "json":
+        raise ValueError("lns_classifier expects a structured student (from distill_structured)")
+    adapter = LNSStructuredClassifierIO(
+        student.adapter.field_keys, student.adapter.label_index, student.adapter.labels, step=step
+    )
+    meta = dict(student.meta)
+    meta["lns"] = {"step": float(step), "max_fold_error": 1.5 * float(step)}
+    return TaskModel(student.model, adapter, payload="json", task=student.task, meta=meta)
