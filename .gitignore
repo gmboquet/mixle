@@ -52,6 +52,9 @@ docs/_build/
 audit/
 benchmarks/
 
+# generated logo preview / QA renders (checkerboard + dark-mode checks) stay local
+*_preview_*.png
+
 # Cython-generated C from .pyx (build artifact)
 mixle/engines/_dd_kernels.c
 mixle/engines/_bitpacked.c
