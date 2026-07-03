@@ -11,9 +11,17 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+import itertools  # noqa: E402
+
 import mixle.stats as st  # noqa: E402
 from mixle.inference import optimize  # noqa: E402
-from mixle.models.neural_density import NeuralDensity, build_coupling_flow, build_maf, build_vae  # noqa: E402
+from mixle.models.neural_density import (  # noqa: E402
+    NeuralDensity,
+    build_autoregressive_categorical,
+    build_coupling_flow,
+    build_maf,
+    build_vae,
+)
 
 
 def _two_modes(seed, n=500):
@@ -139,6 +147,40 @@ class MAFTest(unittest.TestCase):
         mix = optimize(train, est, prev_estimate=init, max_its=6, out=None)
         self.assertEqual(len(mix.components), 2)
         self.assertTrue(np.isfinite(mix.log_density(train[0])))
+
+
+def _markov_discrete(seed, n=1000, dim=3, cats=4):
+    """A discrete chain: x0 uniform, then x_i = (x_{i-1} + step) % cats -- strong nearest-neighbor dependence."""
+    r = np.random.RandomState(seed)
+    out = []
+    for _ in range(n):
+        x = [r.randint(cats)]
+        for _ in range(dim - 1):
+            x.append((x[-1] + r.randint(0, 2)) % cats)  # mostly repeat or step by one
+        out.append(np.array(x, dtype=float))
+    return out
+
+
+class AutoregressiveCategoricalTest(unittest.TestCase):
+    def test_density_sums_to_one_over_the_finite_space(self):
+        _seed()
+        # exactness for a discrete density: sum over ALL C^dim configurations must be 1.
+        D, C = 2, 3
+        leaf = NeuralDensity(build_autoregressive_categorical(D, C, hidden=16))
+        configs = np.array(list(itertools.product(range(C), repeat=D)), dtype=float)
+        total = float(np.exp(leaf.seq_log_density(configs)).sum())
+        self.assertAlmostEqual(total, 1.0, delta=1e-4)
+
+    def test_beats_independent_categorical_on_a_chain(self):
+        _seed()
+        train, test = _markov_discrete(0), _markov_discrete(1)
+        ar = NeuralDensity(build_autoregressive_categorical(3, 4, hidden=64), m_steps=120, lr=5e-3)
+        fit = optimize(train, ar.estimator(), prev_estimate=ar, max_its=8, out=None)
+        # independent baseline: per-coordinate empirical categoricals (blind to the nearest-neighbor dependence)
+        arr = np.array(train, dtype=int)
+        marg = [np.bincount(arr[:, d], minlength=4) / len(arr) for d in range(3)]
+        indep_ll = float(sum(np.log(marg[d][int(row[d])] + 1e-12) for row in test for d in range(3)))
+        self.assertGreater(_ll(fit, test) - indep_ll, 100.0)
 
 
 class GeneralityTest(unittest.TestCase):
