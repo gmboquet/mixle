@@ -149,6 +149,9 @@ sol.improve()        # fold escalations back in; promote only if it verifies bet
 sol.save("artifacts/router")   # artifact carries its own verification record
 ```
 
+The student defaults to a compact hashed-feature classifier; `solve(..., student="generative")` swaps in a
+generative distribution instead — interpretable and torch-free.
+
 ## Core concepts
 
 Each family is five cooperating pieces:
@@ -279,6 +282,17 @@ Categorical(free).fit(labels)                                # the category set 
   regression predictor, for a Normal, Poisson, or Bernoulli response.
 - **Diagnostics:** a multi-chain fit (`how="nuts", chains=4`) folds per-parameter R̂ and ESS straight
   into `m.result.summary()`; `waic` / `loo` / `compare` rank fitted models.
+
+When the density itself should be neural, the same dialect exposes flow / VAE / autoregressive
+constructors that fit with `.fit()` and compose into mixtures like any distribution — no training loop in
+user code:
+
+```python
+from mixle.ppl import Flow, MDN
+
+Flow(2).fit(X)                     # p(x): a normalizing flow (also MAF, VAE, DiscreteAR)
+MDN(1, 1).fit(y, given={"x": X})   # p(y | x): a mixture density network (also CondFlow, CondDiscreteAR)
+```
 
 The dialect is thin — the `mixle.stats` classes underneath are untouched.
 
