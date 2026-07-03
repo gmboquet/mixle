@@ -116,6 +116,7 @@ class NumpyEngine(ComputeEngine):
     cos = staticmethod(np.cos)
     sin = staticmethod(np.sin)
     arctan2 = staticmethod(np.arctan2)
+    i0e = staticmethod(scipy.special.i0e)
 
     def index_add(self, out: np.ndarray, index: np.ndarray, values: np.ndarray) -> np.ndarray:
         """Add ``values`` into ``out`` at ``index`` using NumPy's ``add.at`` semantics."""
