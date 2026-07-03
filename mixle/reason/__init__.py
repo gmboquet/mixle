@@ -32,6 +32,7 @@ from mixle.reason.core import (
     reason,
 )
 from mixle.reason.design import AcquisitionPlan, select_evidence_batch
+from mixle.reason.discrete import DiscreteAnswer, model_evidence, reason_discrete
 from mixle.reason.graph_llm import (
     GraphDistribution,
     GraphLLM,
@@ -51,6 +52,9 @@ from mixle.reason.llm import (
 from mixle.reason.store import CrossModalStore, RetrievalStep
 
 __all__ = [
+    "DiscreteAnswer",
+    "model_evidence",
+    "reason_discrete",
     "reason",
     "Latent",
     "Evidence",
