@@ -25,7 +25,7 @@ from typing import Any
 import numpy as np
 
 from mixle.task.model import HashedNGram
-from mixle.task.regress import RecordRegressionFeaturizer
+from mixle.task.regress import RecordRegressionFeaturizer, featurizer_from_spec, featurizer_spec
 from mixle.task.solve import _input_kind, _label_with
 
 
@@ -125,10 +125,69 @@ class MultiLabelSolution:
             "harvested": len(self.harvested_sets),
         }
 
+    def save(self, path: str) -> str:
+        """Persist net + featurizer + per-label bars; :meth:`load` restores a serving tagger."""
+        from mixle.task.artifact import save_module
+
+        first = next(m for m in self.net.modules() if hasattr(m, "in_features"))
+        return save_module(
+            path,
+            self.net,
+            "mixle.mlp",
+            {
+                "input_dim": int(first.in_features),
+                "hidden_dims": [int(h) for h in self.hidden],
+                "output_dim": len(self.labels),
+                "activation": "relu",
+            },
+            task="solve_multilabel student",
+            io=featurizer_spec(self.featurizer),
+            meta={
+                "multilabel": {
+                    "labels": list(self.labels),
+                    "upper_absent": [float(v) for v in self.upper_absent],
+                    "lower_present": [float(v) for v in self.lower_present],
+                    "alpha": self.alpha,
+                    "holdout_set_agreement": self.holdout_set_agreement,
+                    "hidden": [int(h) for h in self.hidden],
+                    "epochs": self.epochs,
+                    "lr": self.lr,
+                    "seed": self.seed,
+                }
+            },
+        )
+
+    @classmethod
+    def load(cls, path: str, teacher: Callable[..., Any], *, device: str = "cpu") -> MultiLabelSolution:
+        """Reconstitute a serving MultiLabelSolution (no training/calibration data; improve() raises)."""
+        from mixle.task.artifact import load_module
+
+        net, manifest = load_module(path, device=device)
+        m = manifest.meta["multilabel"]
+        return cls(
+            net=net,
+            featurizer=featurizer_from_spec(manifest.io),
+            labels=list(m["labels"]),
+            teacher=teacher,
+            upper_absent=np.asarray(m["upper_absent"], dtype=np.float64),
+            lower_present=np.asarray(m["lower_present"], dtype=np.float64),
+            alpha=float(m["alpha"]),
+            holdout_set_agreement=float(m["holdout_set_agreement"]),
+            hidden=tuple(m["hidden"]),
+            epochs=int(m["epochs"]),
+            lr=float(m["lr"]),
+            seed=int(m["seed"]),
+        )
+
     def improve(self) -> bool:
         """Re-fit with harvested sets; promote only if held-out set agreement does not regress."""
         if not self.harvested_inputs:
             return False
+        if not self.cal_inputs:
+            raise RuntimeError(
+                "this MultiLabelSolution was loaded from an artifact and has no calibration data; "
+                "collect the harvested pairs and re-solve_multilabel() to improve."
+            )
         inputs = self.train_inputs + list(self.harvested_inputs)
         sets = self.train_sets + [list(v) for v in self.harvested_sets]
         cand = _fit_and_calibrate(

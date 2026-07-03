@@ -80,5 +80,31 @@ class SolveStructuredTest(unittest.TestCase):
             self.assertEqual(len(sol.harvested_inputs), 0)  # harvest consumed by the field buffers
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class StructuredPersistenceTest(unittest.TestCase):
+    def test_save_load_serves_identically(self):
+        import tempfile
+
+        from mixle.task import StructuredSolution, solve_structured
+
+        sol = solve_structured(_triage, _tickets(300), tol={"priority": 3.0}, alpha=0.1, seed=0, epochs=200)
+        fresh = _tickets(60, seed=5)
+        want = [sol.try_local(t) for t in fresh]
+        with tempfile.TemporaryDirectory() as d:
+            path = sol.save(d + "/triage")
+            back = StructuredSolution.load(path, _triage)
+            self.assertEqual(back.schema, sol.schema)
+            got = [back.try_local(t) for t in fresh]
+        for g, w in zip(got, want):
+            if w is None:
+                self.assertIsNone(g)
+            else:
+                self.assertEqual(g["queue"], w["queue"])
+                self.assertAlmostEqual(g["priority"], w["priority"], places=4)
+        # escalation on the loaded artifact still runs the PARENT teacher exactly
+        hard = {"kind": "refund", "amount": 505.0, "region": "eu"}
+        self.assertEqual(set(back(hard)), {"queue", "priority"})
+
+
 if __name__ == "__main__":
     unittest.main()
