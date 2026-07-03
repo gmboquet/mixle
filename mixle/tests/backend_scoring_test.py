@@ -74,6 +74,7 @@ from mixle.stats import (
     TreeHiddenMarkovModelDistribution,
     UniformDistribution,
     VonMisesFisherDistribution,
+    WatsonDistribution,
     WeibullDistribution,
     WeightedDistribution,
     WrappedCauchyDistribution,
@@ -129,6 +130,10 @@ class BackendScoringTestCase(unittest.TestCase):
             (GeneralizedExtremeValueDistribution(0.5, 2.0, 0.2), np.asarray([-1.0, 0.5, 4.0])),
             (RicianDistribution(2.0, 1.0), np.asarray([0.3, 1.0, 3.5])),
             (ProjectedNormalDistribution(1.5, 0.5), np.asarray([-3.0, -1.2, 0.7, 2.9])),
+            (
+                WatsonDistribution(np.array([0.0, 0.0, 1.0]), 5.0),
+                np.array([[0.0, 0.0, 1.0], [0.6, 0.0, 0.8], [1.0, 0.0, 0.0]]),
+            ),
             (ExponentiallyModifiedGaussianDistribution(0.0, 1.0, 0.8), np.asarray([-4.0, 0.0, 2.5])),
             (SkewNormalDistribution(0.0, 1.0, 4.0), np.asarray([-2.0, 0.3, 3.0])),
             (WrappedCauchyDistribution(0.8, 0.6), np.asarray([-3.0, -1.2, 0.7, 2.9])),

@@ -106,6 +106,21 @@ class KentDistribution(SequenceEncodableProbabilityDistribution):
         p = np.asarray(x, dtype=np.float64) @ self.gamma  # (n, 3) projections onto the frame
         return -self._log_c + self.kappa * p[:, 0] + self.beta * (p[:, 1] ** 2 - p[:, 2] ** 2)
 
+    # --- compute-engine backend (numpy + torch/GPU), SCORING only: the normalizer is a host scalar
+    # (Kummer / Bingham constants via scipy), the data math is engine matmul + quadratics. The scatter
+    # accumulator stays host-side, so torch accelerates mixture E-step scoring with a bit-correct M-step. ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for ``(N, 3)`` unit vectors."""
+        p = engine.matmul(engine.asarray(x), engine.asarray(self.gamma))
+        p1, p2 = p[:, 1], p[:, 2]
+        return -self._log_c + self.kappa * p[:, 0] + self.beta * (p1 * p1 - p2 * p2)
+
     def sampler(self, seed: int | None = None) -> "KentSampler":
         return KentSampler(self, seed)
 
