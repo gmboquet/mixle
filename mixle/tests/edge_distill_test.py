@@ -4,8 +4,11 @@ import json
 import unittest
 
 import numpy as np
+import pytest
 
-from mixle.task import (
+pytest.importorskip("torch")  # the edge-distillation stack builds torch students; skip cleanly where torch is absent
+
+from mixle.task import (  # noqa: E402
     DesignModel,
     DeviceSpec,
     EdgeFootprint,
