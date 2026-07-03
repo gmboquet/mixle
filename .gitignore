@@ -47,9 +47,10 @@ pip-delete-this-directory.txt
 # Downloaded example datasets
 /data/
 
-# local-only design docs + audit ledgers (not for GitHub)
-docs/
+# audit ledgers + Sphinx build output stay local; the docs source (.rst) is published
+docs/_build/
 audit/
+benchmarks/
 
 # Cython-generated C from .pyx (build artifact)
 mixle/engines/_dd_kernels.c
