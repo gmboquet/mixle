@@ -103,6 +103,7 @@ from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_mod
 from mixle.task.router import Router, RouterStats, route_stack
 from mixle.task.scorecard import Scorecard, scorecard
 from mixle.task.solve import Solution, load_harvested, solve
+from mixle.task.toolcall import ToolCaller, ToolSpec, distill_tool_caller
 from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
 
 __all__ = [
@@ -142,6 +143,8 @@ __all__ = [
     "StructuredClassifierIO",
     "TaskManifest",
     "TaskModel",
+    "ToolCaller",
+    "ToolSpec",
     "TextClassifierIO",
     "TuneResult",
     "acquisition_scores",
@@ -154,6 +157,7 @@ __all__ = [
     "distill",
     "distill_designer",
     "distill_extractor",
+    "distill_tool_caller",
     "distill_for_edge",
     "footprint",
     "distill_from_labels",
