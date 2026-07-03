@@ -82,6 +82,51 @@ class ToolCaller:
             "harvested_traces": len(self.harvested),
         }
 
+    def save(self, path: str) -> str:
+        """Persist selector + per-tool extractors + specs as one artifact directory; :meth:`load` restores."""
+        import json
+        from pathlib import Path
+
+        out = Path(path)
+        out.mkdir(parents=True, exist_ok=True)
+        self.selector.save(str(out / "selector"))
+        for name, ex in self.extractors.items():
+            ex.save(str(out / "extractors" / name))
+        manifest = {
+            "kind": "toolcaller/v1",
+            "tools": {n: {"args": t.args, "required": t.required} for n, t in self.tools.items()},
+            "extractors": sorted(self.extractors),
+            "selection_agreement": self.selection_agreement,
+        }
+        (out / "toolcaller.json").write_text(json.dumps(manifest, indent=2))
+        return str(out)
+
+    @classmethod
+    def load(cls, path: str, teacher: Callable[[str], dict], *, device: str = "cpu") -> ToolCaller:
+        """Reconstitute a serving ToolCaller from :meth:`save` output plus the teacher fallback."""
+        import json
+        from pathlib import Path
+
+        from mixle.task.model import TaskModel
+        from mixle.task.solve import Solution
+
+        p = Path(path)
+        manifest = json.loads((p / "toolcaller.json").read_text())
+        selector = Solution.load(
+            str(p / "selector"), lambda batch: [teacher(r).get("tool") or _NO_TOOL for r in batch], device=device
+        )
+        extractors = {
+            name: TaskModel.load(str(p / "extractors" / name), device=device) for name in manifest["extractors"]
+        }
+        tools = {n: ToolSpec(n, list(t["args"]), t.get("required")) for n, t in manifest["tools"].items()}
+        return cls(
+            selector=selector,
+            extractors=extractors,
+            tools=tools,
+            teacher=teacher,
+            selection_agreement=float(manifest.get("selection_agreement", float("nan"))),
+        )
+
 
 def distill_tool_caller(
     teacher: Callable[[str], dict],
