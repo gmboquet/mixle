@@ -126,6 +126,28 @@ optimize(reals)           # or let mixle infer the estimator from the data
 
 The same model in the shorter [`mixle.ppl`](#probabilistic-programming-mixleppl) dialect is a few lines.
 
+**The whole lifecycle is one object.** `mixle.propose(data)` fits every proposer the library has on a
+train split, ranks them on held-out data, and returns the winner — then the verbs chain:
+
+```python
+m = mixle.propose(data, fit=True)   # verified candidate frontier -> the winner, fitted
+m.evaluate(holdout); m.sample(5); m.posterior(x); m.explain()
+m.deploy("artifacts/m")             # durable artifact; mixle.Model.load() restores it
+```
+
+**Replace a function with a model.** `solve()` closes the loop: the code currently doing the job labels
+the dataset, a small student trains, and the deployable answers locally only when a conformally
+calibrated, in-distribution decision is safe — otherwise it calls the original code:
+
+```python
+from mixle.task import solve
+
+sol = solve(route, tickets, propose="auto", synthesize=200)   # dataset <- route(t); train; calibrate
+sol(ticket)          # drop-in: answers locally when SURE, falls back to route() when not
+sol.improve()        # fold escalations back in; promote only if it verifies better
+sol.save("artifacts/router")   # artifact carries its own verification record
+```
+
 ## Core concepts
 
 Each family is five cooperating pieces:
