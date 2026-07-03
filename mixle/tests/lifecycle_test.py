@@ -150,5 +150,50 @@ class AnalysisVerbsTest(unittest.TestCase):
             mh.do({0: 1.0})
 
 
+class AutoRestartTest(unittest.TestCase):
+    """restarts='auto': the newcomer's first mixture fit escapes the symmetric saddle by itself."""
+
+    def _data(self):
+        rng = np.random.RandomState(0)
+        return np.concatenate([rng.normal(-3, 1, 400), rng.normal(3, 1, 400)]).tolist()
+
+    def test_gamma_mixture_saddle_is_detected_and_escaped(self):
+        # THE known repro ([[mixture-init-em-saddle]]): positive-support leaves collapse to the
+        # symmetric saddle under the default random init. Every saddling seed must escape via the
+        # sorted-block hard-partition init (random shards are exchangeable and would NOT escape).
+        import mixle
+        from mixle.lifecycle import saddle_suspect
+        from mixle.stats import GammaDistribution, GammaEstimator, MixtureEstimator
+
+        data = np.concatenate(
+            [GammaDistribution(2.0, 0.5).sampler(1).sample(400), GammaDistribution(20.0, 1.0).sampler(2).sample(400)]
+        ).tolist()
+        est = MixtureEstimator([GammaEstimator(), GammaEstimator()])
+
+        saddled = escaped = 0
+        for seed in range(6):
+            raw = mixle.Model(est).fit(data, restarts=None, rng=np.random.RandomState(seed), max_its=40)
+            if saddle_suspect(raw.fitted, data):
+                saddled += 1
+                auto = mixle.Model(est).fit(data, restarts="auto", rng=np.random.RandomState(seed), max_its=40)
+                if not saddle_suspect(auto.fitted, data):
+                    escaped += 1
+                    self.assertTrue(any("kept" in n for n in auto.notes))
+        self.assertGreater(saddled, 0)  # the repro must actually reproduce
+        self.assertEqual(escaped, saddled)  # and every saddle must be escaped
+
+    def test_good_fit_is_untouched(self):
+        import mixle
+        from mixle.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator
+
+        data = self._data()
+        init = MixtureDistribution([GaussianDistribution(-1.0, 1.0), GaussianDistribution(1.0, 1.0)], [0.5, 0.5])
+        m = mixle.Model(MixtureEstimator([GaussianEstimator(), GaussianEstimator()]))
+        m.fit(data, restarts="auto", prev_estimate=init, max_its=30)
+        self.assertFalse(any("saddle" in n for n in m.notes))  # detector stayed quiet on a healthy fit
+        mus = sorted(c.mu for c in m.fitted.components)
+        self.assertLess(mus[0], -2.5)
+
+
 if __name__ == "__main__":
     unittest.main()
