@@ -99,6 +99,7 @@ class GenerativePlanner:
     teacher: Callable[[str], list[dict]]
     plan_agreement: float
     max_new: int = 160
+    constrained: bool = True  # decode inside the plan grammar (invalid output unrepresentable)
     n_requests: int = 0
     n_escalated: int = 0
     harvested: list[tuple[str, list[dict]]] = field(default_factory=list)
@@ -123,11 +124,22 @@ class GenerativePlanner:
         return True
 
     def try_plan(self, request: str) -> list[dict] | None:
-        """Generate, parse, validate (grammar + specs + copy-fidelity); ``None`` = must escalate."""
+        """Generate, parse, validate (grammar + specs + copy-fidelity); ``None`` = must escalate.
+
+        With ``constrained=True`` (default) the decode itself runs inside the plan grammar
+        (:func:`mixle.task.constrained.constrained_plan_decode`): malformed text and copy-drifted
+        values are unrepresentable, and the parse/validate below is a pure backstop."""
         request = str(request)
-        prompt = self.codec.encode(request + _PROMPT_SEP)
-        out = self.lm.generate(prompt, n=self.max_new, greedy=True, stop_id=self.codec.eos_id)
-        text = self.codec.decode(out[len(prompt) :])
+        if self.constrained:
+            from mixle.task.constrained import constrained_plan_decode
+
+            text = constrained_plan_decode(self.lm, self.codec, request, self.tools, max_new=self.max_new)
+            if text is None:
+                return None
+        else:
+            prompt = self.codec.encode(request + _PROMPT_SEP)
+            out = self.lm.generate(prompt, n=self.max_new, greedy=True, stop_id=self.codec.eos_id)
+            text = self.codec.decode(out[len(prompt) :])
         plan = _parse_plan(text if text.endswith(_EOS) else text + "")
         return plan if self._validate(plan, request) else None
 
@@ -178,6 +190,7 @@ def sft_planner(
     epochs: int = 30,
     lr: float = 3e-3,
     device: str = "cpu",
+    constrained: bool = True,
 ) -> GenerativePlanner:
     """Trace-SFT a small causal LM into a plan writer, verified on held-out requests.
 
@@ -213,7 +226,13 @@ def sft_planner(
     lm.fit_pairs(pairs, epochs=epochs, lr=lr, seed=seed)
 
     planner = GenerativePlanner(
-        lm=lm, codec=codec, tools=specs, teacher=teacher, plan_agreement=float("nan"), max_new=block
+        lm=lm,
+        codec=codec,
+        tools=specs,
+        teacher=teacher,
+        plan_agreement=float("nan"),
+        max_new=block,
+        constrained=constrained,
     )
     agree = 0
     for r in hold:
