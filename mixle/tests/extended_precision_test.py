@@ -117,10 +117,14 @@ class SpeedVsOracleTest(unittest.TestCase):
         rng = np.random.RandomState(7)
         x = rng.randn(20000)
 
-        t0 = time.perf_counter()
-        for _ in range(3):
+        # best-of-5: under the loaded parallel runner a scheduler preemption can inflate any single
+        # rep by orders of magnitude; the minimum is the honest speed of the vectorized path. The
+        # mpmath side stays single-shot -- load only ever slows it, which cannot flip the assertion.
+        t_dd = float("inf")
+        for _ in range(5):
+            t0 = time.perf_counter()
             dd_sum(x)
-        t_dd = (time.perf_counter() - t0) / 3
+            t_dd = min(t_dd, time.perf_counter() - t0)
 
         t0 = time.perf_counter()
         with mpmath.workprec(106):
