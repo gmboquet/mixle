@@ -319,6 +319,31 @@ def _numeric_edge_candidate(
     return None, None
 
 
+def _safe_log_density(fac: Any, value: Any) -> float:
+    """One factor's log-density with out-of-support semantics: zero probability -> ``-inf``, not a crash.
+
+    Field factors are chosen automatically from the *training* column, so a support-restricted family
+    (Weibull, Gamma, ...) can be picked from a slice that happened to satisfy its support; scoring new
+    data outside that support must then report ``log 0 = -inf`` (the model's honest answer), not raise.
+    """
+    try:
+        ld = float(fac.log_density(value))
+    except (ValueError, TypeError, KeyError, FloatingPointError, OverflowError):
+        return float("-inf")
+    return ld if not np.isnan(ld) else float("-inf")
+
+
+def _safe_seq_log_density(fac: Any, values: list[Any]) -> np.ndarray:
+    """Vectorized factor scoring with the same out-of-support -> ``-inf`` semantics as
+    :func:`_safe_log_density`; falls back to element-wise scoring only when the batch encode rejects."""
+    try:
+        out = np.asarray(fac.seq_log_density(fac.dist_to_encoder().seq_encode(values)), dtype=np.float64)
+    except (ValueError, TypeError, KeyError, FloatingPointError, OverflowError):
+        return np.array([_safe_log_density(fac, v) for v in values], dtype=np.float64)
+    out[np.isnan(out)] = -np.inf
+    return out
+
+
 class DependencyTreeDistribution:
     """A directed-forest joint over a heterogeneous record: each field is a marginal or a conditional on its parent.
 
@@ -352,9 +377,9 @@ class DependencyTreeDistribution:
         total = 0.0
         for i, parent in enumerate(self.parents):
             if parent is None:
-                total += self.factors[i].log_density(x[i])
+                total += _safe_log_density(self.factors[i], x[i])
             else:
-                total += self.factors[i].log_density((self._key(i, x[parent]), x[i]))
+                total += _safe_log_density(self.factors[i], (self._key(i, x[parent]), x[i]))
         return total
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
@@ -363,10 +388,10 @@ class DependencyTreeDistribution:
         for i, parent in enumerate(self.parents):
             fac = self.factors[i]
             if parent is None:
-                out += fac.seq_log_density(fac.dist_to_encoder().seq_encode(cols[i]))
+                out += _safe_seq_log_density(fac, list(cols[i]))
             else:
                 pairs = [(self._key(i, pv), cv) for pv, cv in zip(cols[parent], cols[i])]
-                out += fac.seq_log_density(fac.dist_to_encoder().seq_encode(pairs))
+                out += _safe_seq_log_density(fac, pairs)
         return out
 
     def dist_to_encoder(self) -> Any:
