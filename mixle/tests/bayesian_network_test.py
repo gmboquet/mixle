@@ -163,6 +163,42 @@ class MixtureOfBayesianNetworksTest(unittest.TestCase):
         self.assertTrue(np.isfinite(mix.log_density(s[0])))
 
 
+class SoftEMTest(unittest.TestCase):
+    """em='soft': responsibility-weighted structure + factor fits; BIC selects the cluster count."""
+
+    def test_soft_em_matches_hard_on_separated_regimes(self):
+        rows = _slope_regimes(4, n=1200)
+        soft = learn_mixture_bayesian_network(rows, 2, em="soft", restarts=2, seed=0)
+        hard = learn_mixture_bayesian_network(rows, 2, em="hard", restarts=2, seed=0)
+        self.assertGreater(_ll(soft, rows), _ll(hard, rows) - 5.0)  # no floor-contamination regression
+
+    def test_soft_em_recovers_regimes(self):
+        r = np.random.RandomState(7)
+        rows, z = [], []
+        for _ in range(1000):
+            zi = r.randint(0, 2)
+            x = r.randn()
+            rows.append((float(x), float((2.0 * x + 6.0 if zi == 0 else -2.0 * x - 6.0) + 0.3 * r.randn())))
+            z.append(zi)
+        mix = learn_mixture_bayesian_network(rows, 2, em="soft", restarts=2, seed=0)
+        assign = mix.responsibilities(rows).argmax(axis=1)
+        z = np.array(z)
+        self.assertGreater(max((assign == z).mean(), (assign != z).mean()), 0.95)
+
+    def test_bic_selects_the_true_cluster_count(self):
+        from mixle.inference.bayesian_network import select_mixture_components
+
+        rows = _slope_regimes(4, n=1200)
+        model, rep = select_mixture_components(rows, (1, 2, 3), em="soft", restarts=2, seed=0)
+        self.assertEqual(rep["k"], 2)
+        self.assertLess(rep["bic"][2], rep["bic"][1])
+        self.assertLess(rep["bic"][2], rep["bic"][3])
+
+    def test_invalid_em_raises(self):
+        with self.assertRaises(ValueError):
+            learn_mixture_bayesian_network(_slope_regimes(1, n=100), 2, em="fuzzy")
+
+
 class GLMFactorTest(unittest.TestCase):
     """Continuous -> discrete edges (the direction the greedy search used to refuse outright)."""
 

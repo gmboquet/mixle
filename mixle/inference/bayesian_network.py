@@ -90,13 +90,28 @@ class _LinearGaussianFactor:
         return float(mu + self.sigma * rng.randn())
 
     @classmethod
-    def fit(cls, child: int, parents: list[int], cols: list[list[Any]], discrete: dict[int, list[Any]]):
+    def fit(
+        cls,
+        child: int,
+        parents: list[int],
+        cols: list[list[Any]],
+        discrete: dict[int, list[Any]],
+        weights: np.ndarray | None = None,
+    ):
         stub = cls(child, parents, discrete, np.zeros(1), 1.0)
         x = stub._design(cols)
         y = np.asarray(cols[child], dtype=np.float64)
-        coef, *_ = np.linalg.lstsq(x, y, rcond=None)
-        resid = y - x @ coef
-        sigma = float(np.sqrt(max(resid.var(), 1e-6)))
+        if weights is None:
+            coef, *_ = np.linalg.lstsq(x, y, rcond=None)
+            resid = y - x @ coef
+            sigma = float(np.sqrt(max(resid.var(), 1e-6)))
+        else:
+            w = np.asarray(weights, dtype=np.float64)
+            sw = np.sqrt(np.maximum(w, 0.0))
+            coef, *_ = np.linalg.lstsq(x * sw[:, None], y * sw, rcond=None)
+            resid = y - x @ coef
+            var = float(np.sum(w * resid**2) / max(np.sum(w), 1e-12))
+            sigma = float(np.sqrt(max(var, 1e-6)))
         return cls(child, parents, discrete, coef, sigma)
 
     def n_params(self) -> int:
@@ -179,7 +194,14 @@ class _GLMFactor:
         return self.levels[int(rng.choice(len(self.levels), p=p / p.sum()))]
 
     @classmethod
-    def fit(cls, child: int, parents: list[int], cols: list[list[Any]], discrete: dict[int, list[Any]]):
+    def fit(
+        cls,
+        child: int,
+        parents: list[int],
+        cols: list[list[Any]],
+        discrete: dict[int, list[Any]],
+        weights: np.ndarray | None = None,
+    ):
         stub = cls(child, parents, discrete, "binomial", [], np.zeros(1))
         x = stub._design(cols)
         col = cols[child]
@@ -189,14 +211,14 @@ class _GLMFactor:
             from mixle.inference.glm import glm
 
             y01 = np.asarray([1.0 if v == levels[1] else 0.0 for v in col])
-            beta = glm(x, y01, family="binomial").coef
+            beta = glm(x, y01, family="binomial", weights=weights).coef
             return cls(child, parents, discrete, "binomial", levels, beta)
         if is_count and len(levels) > 2:
             from mixle.inference.glm import glm
 
-            beta = glm(x, np.asarray(col, dtype=np.float64), family="poisson").coef
+            beta = glm(x, np.asarray(col, dtype=np.float64), family="poisson", weights=weights).coef
             return cls(child, parents, discrete, "poisson", [], beta)
-        w = _fit_multinomial_logistic(x, np.asarray([levels.index(v) for v in col]), len(levels))
+        w = _fit_multinomial_logistic(x, np.asarray([levels.index(v) for v in col]), len(levels), weights=weights)
         return cls(child, parents, discrete, "multinomial", levels, w)
 
     def n_params(self) -> int:
@@ -208,21 +230,24 @@ def _logsumexp_rows(a: np.ndarray) -> np.ndarray:
     return m + np.log(np.sum(np.exp(a - m[:, None]), axis=1))
 
 
-def _fit_multinomial_logistic(x: np.ndarray, y_idx: np.ndarray, k: int, ridge: float = 1e-6) -> np.ndarray:
-    """Softmax regression (class 0 reference) by L-BFGS on the convex ridge-penalized NLL."""
+def _fit_multinomial_logistic(
+    x: np.ndarray, y_idx: np.ndarray, k: int, ridge: float = 1e-6, weights: np.ndarray | None = None
+) -> np.ndarray:
+    """Softmax regression (class 0 reference) by L-BFGS on the convex ridge-penalized (weighted) NLL."""
     from scipy.optimize import minimize
 
     n, d = x.shape
     onehot = np.zeros((n, k))
     onehot[np.arange(n), y_idx] = 1.0
+    w_obs = np.ones(n) if weights is None else np.asarray(weights, dtype=np.float64)
 
     def nll_grad(flat: np.ndarray) -> tuple[float, np.ndarray]:
         w = flat.reshape(k - 1, d)
         logits = np.concatenate([np.zeros((n, 1)), x @ w.T], axis=1)
         lse = _logsumexp_rows(logits)
-        nll = float(np.sum(lse - logits[np.arange(n), y_idx]) + 0.5 * ridge * np.sum(w * w))
+        nll = float(np.sum(w_obs * (lse - logits[np.arange(n), y_idx])) + 0.5 * ridge * np.sum(w * w))
         p = np.exp(logits - lse[:, None])
-        grad = (p[:, 1:] - onehot[:, 1:]).T @ x + ridge * w
+        grad = ((p[:, 1:] - onehot[:, 1:]) * w_obs[:, None]).T @ x + ridge * w
         return nll, grad.ravel()
 
     res = minimize(nll_grad, np.zeros((k - 1) * d), jac=True, method="L-BFGS-B", options={"maxiter": 500})
@@ -259,17 +284,45 @@ class _DiscreteConditionalFactor:
         return d.sampler(int(rng.randint(0, 2**31 - 1))).sample(1)[0]
 
     @classmethod
-    def fit(cls, child: int, parents: list[int], cols: list[list[Any]], template: Any, max_its: int):
+    def fit(
+        cls,
+        child: int,
+        parents: list[int],
+        cols: list[list[Any]],
+        template: Any,
+        max_its: int,
+        weights: np.ndarray | None = None,
+    ):
         n = len(cols[child])
-        backoff = fit(cols[child], _clone(template), max_its=max_its, out=None)
-        groups: dict[tuple, list[Any]] = {}
+        backoff = _leaf_fit(cols[child], template, max_its, weights)
+        groups: dict[tuple, list[int]] = {}
         for j in range(n):
-            groups.setdefault(tuple(cols[p][j] for p in parents), []).append(cols[child][j])
-        table = {cfg: fit(vals, _clone(template), max_its=max_its, out=None) for cfg, vals in groups.items()}
+            groups.setdefault(tuple(cols[p][j] for p in parents), []).append(j)
+        table = {
+            cfg: _leaf_fit(
+                [cols[child][j] for j in idx],
+                template,
+                max_its,
+                None if weights is None else weights[idx],
+            )
+            for cfg, idx in ((cfg, np.asarray(idx)) for cfg, idx in groups.items())
+        }
         return cls(child, parents, table, backoff)
 
     def n_params(self) -> int:
         return _num_free_params(self.backoff) * max(1, len(self.table))
+
+
+def _leaf_fit(values: list, template: Any, max_its: int, weights: np.ndarray | None) -> Any:
+    """Fit a leaf template to ``values``; with ``weights`` the sufficient statistics are accumulated
+    directly (one weighted pass — exact for the simple exponential-family leaves the templates are)."""
+    if weights is None:
+        return fit(values, _clone(template), max_its=max_its, out=None)
+    est = _clone(template)
+    enc = est.accumulator_factory().make().acc_to_encoder().seq_encode(values)
+    acc = est.accumulator_factory().make()
+    acc.seq_update(enc, np.asarray(weights, dtype=np.float64), None)
+    return est.estimate(None, acc.value())
 
 
 class HeterogeneousBayesianNetwork:
@@ -395,13 +448,20 @@ def learn_mixture_bayesian_network(
     max_parents: int = 2,
     min_gain: float = 0.0,
     max_its: int = 30,
+    em: str = "hard",
 ) -> MixtureOfBayesianNetworks:
-    """Fit a :class:`MixtureOfBayesianNetworks` by hard EM -- discover clusters AND each cluster's DAG.
+    """Fit a :class:`MixtureOfBayesianNetworks` by EM -- discover clusters AND each cluster's DAG.
 
-    Each iteration re-learns a heterogeneous network per cluster on its assigned points (M-step) and reassigns
-    every record to its most-probable cluster (E-step), until assignments stabilize; the best of ``restarts``
-    (k-means-seeded + random) initializations wins. Starved clusters are re-seeded so none collapses.
+    ``em="hard"`` (default): each iteration re-learns a network per cluster on its assigned points and
+    reassigns every record to its most-probable cluster, until assignments stabilize. ``em="soft"``:
+    proper EM -- every record contributes to EVERY cluster with its responsibility, each component's
+    structure search and factor fits are responsibility-weighted (``learn_bayesian_network(weights=)``),
+    and convergence is on the observed-data log-likelihood; boundary points shape both clusters instead
+    of whipsawing between them. Both run from the same restarts (k-means-seeded + random); best final
+    log-likelihood wins. Starved clusters are re-seeded (hard) / responsibility-floored (soft).
     """
+    if em not in ("hard", "soft"):
+        raise ValueError(f"em must be 'hard' or 'soft', got {em!r}")
     from mixle.inference.structure import _kmeans_init
 
     data = list(data)
@@ -409,8 +469,8 @@ def learn_mixture_bayesian_network(
     rng = np.random.RandomState(seed)
     min_size = max(10, n // (4 * n_components))
 
-    def learn(subset: list[tuple]) -> HeterogeneousBayesianNetwork:
-        return learn_bayesian_network(subset, max_parents=max_parents, min_gain=min_gain, max_its=max_its)
+    def learn(subset: list[tuple], w: np.ndarray | None = None) -> HeterogeneousBayesianNetwork:
+        return learn_bayesian_network(subset, max_parents=max_parents, min_gain=min_gain, max_its=max_its, weights=w)
 
     inits = [
         _kmeans_init(data, n_components, rng, numeric_only=True),
@@ -421,29 +481,108 @@ def learn_mixture_bayesian_network(
     best: MixtureOfBayesianNetworks | None = None
     best_ll = -np.inf
     for assign in inits:
-        model: MixtureOfBayesianNetworks | None = None
-        prev = None
-        for _it in range(max_iter):
-            comps, counts = [], []
-            for k in range(n_components):
-                idx = np.flatnonzero(assign == k)
-                if len(idx) < min_size:
-                    idx = rng.choice(n, size=min_size, replace=False)
-                comps.append(learn([data[i] for i in idx]))
-                counts.append(len(idx))
-            weights = np.asarray(counts, dtype=np.float64)
-            weights /= weights.sum()
-            model = MixtureOfBayesianNetworks(comps, weights)
-            new = model.responsibilities(data).argmax(axis=1)
-            if prev is not None and np.array_equal(new, prev):
-                break
-            prev, assign = assign, new
-        assert model is not None
-        ll = float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
+        if em == "soft":
+            model, ll = _soft_em_run(data, n_components, assign, learn, max_iter)
+        else:
+            model, ll = _hard_em_run(data, n_components, assign, learn, max_iter, min_size, rng)
         if ll > best_ll:
             best_ll, best = ll, model
     assert best is not None
     return best
+
+
+def _hard_em_run(data, n_components, assign, learn, max_iter, min_size, rng):
+    n = len(data)
+    model = None
+    prev = None
+    for _it in range(max_iter):
+        comps, counts = [], []
+        for k in range(n_components):
+            idx = np.flatnonzero(assign == k)
+            if len(idx) < min_size:
+                idx = rng.choice(n, size=min_size, replace=False)
+            comps.append(learn([data[i] for i in idx]))
+            counts.append(len(idx))
+        weights = np.asarray(counts, dtype=np.float64)
+        weights /= weights.sum()
+        model = MixtureOfBayesianNetworks(comps, weights)
+        new = model.responsibilities(data).argmax(axis=1)
+        if prev is not None and np.array_equal(new, prev):
+            break
+        prev, assign = assign, new
+    assert model is not None
+    ll = float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
+    return model, ll
+
+
+def _soft_em_run(data, n_components, assign, learn, max_iter, tol: float = 1e-5):
+    n = len(data)
+    # a soft one-hot init: 0.95 on the seeded cluster, the rest spread — enough overlap to move points,
+    # NOT a running floor (a persistent floor makes every component carry a sliver of every regime,
+    # inflating its variance and dragging the whole mixture below the hard-EM fit).
+    r = np.full((n, n_components), 0.05 / max(n_components - 1, 1))
+    r[np.arange(n), assign] = 0.95
+    model = None
+    prev_ll = -np.inf
+    for _it in range(max_iter):
+        mass = r.sum(axis=0)
+        for k in np.flatnonzero(mass < 2.0):  # a starved component restarts from a random slice
+            r[:, k] = np.random.RandomState(int(mass.sum()) + k).dirichlet(np.ones(n)) * n * 0.05
+        r = np.clip(r, 1e-12, None)
+        r /= r.sum(axis=1, keepdims=True)
+        comps = [learn(data, w=r[:, k]) for k in range(n_components)]
+        mix_w = r.mean(axis=0)
+        model = MixtureOfBayesianNetworks(comps, mix_w)
+        enc = model.dist_to_encoder().seq_encode(data)
+        ll = float(np.sum(model.seq_log_density(enc)))
+        r = model.responsibilities(data)
+        if ll - prev_ll < tol * max(n, 1):
+            break
+        prev_ll = ll
+    assert model is not None
+    ll = float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
+    return model, ll
+
+
+def bayesian_network_bic(model: Any, data: Sequence[tuple]) -> float:
+    """BIC (lower is better) for a fitted network or mixture: ``-2 LL + n_params log n``."""
+    data = list(data)
+    enc = model.dist_to_encoder().seq_encode(data)
+    ll = float(np.sum(model.seq_log_density(enc)))
+    if isinstance(model, MixtureOfBayesianNetworks):
+        k = sum(sum(f.n_params() for f in c.factors) for c in model.components) + (len(model.components) - 1)
+    else:
+        k = sum(f.n_params() for f in model.factors)
+    return -2.0 * ll + k * float(np.log(max(len(data), 2)))
+
+
+def select_mixture_components(
+    data: Sequence[tuple],
+    k_values: Sequence[int] = (1, 2, 3, 4),
+    *,
+    em: str = "hard",
+    seed: int = 0,
+    **kwargs: Any,
+) -> tuple[Any, dict[str, Any]]:
+    """Model selection over the number of clusters by BIC.
+
+    Fits :func:`learn_bayesian_network` for ``k=1`` and :func:`learn_mixture_bayesian_network` for each
+    larger ``k``, scores each by :func:`bayesian_network_bic`, and returns ``(best_model, report)`` where
+    ``report = {"k": chosen, "bic": {k: score, ...}}``. BIC's ``n_params log n`` penalty is what stops a
+    mixture of per-cluster DAGs from always preferring more clusters.
+    """
+    data = list(data)
+    scores: dict[int, float] = {}
+    models: dict[int, Any] = {}
+    for k in k_values:
+        if int(k) <= 1:
+            models[1] = learn_bayesian_network(data, **{a: v for a, v in kwargs.items() if a != "restarts"})
+            scores[1] = bayesian_network_bic(models[1], data)
+        else:
+            models[int(k)] = learn_mixture_bayesian_network(data, int(k), em=em, seed=seed, **kwargs)
+            scores[int(k)] = bayesian_network_bic(models[int(k)], data)
+    k_best = min(scores, key=scores.get)  # type: ignore[arg-type]
+    return models[k_best], {"k": k_best, "bic": scores}
 
 
 # --- structure search ---------------------------------------------------------------------------------------
@@ -455,17 +594,22 @@ def learn_bayesian_network(
     max_parents: int = 2,
     min_gain: float = 0.0,
     max_its: int = 30,
+    weights: Sequence[float] | None = None,
 ) -> HeterogeneousBayesianNetwork:
     """Discover a heterogeneous DAG for ``data`` and return the fitted network.
 
     Each field greedily gains up to ``max_parents`` parents by BIC-penalized conditional likelihood, keeping the
     graph acyclic. Continuous children become conditional-linear-Gaussian factors (regression on continuous +
-    one-hot discrete parents); discrete/count children condition on the joint config of their discrete parents.
+    one-hot discrete parents); discrete/count children condition on the joint config of their discrete parents,
+    or become GLM nodes when a driver is continuous. With ``weights`` (soft-EM responsibilities), every factor
+    fit and the BIC search itself are responsibility-weighted, with effective sample size ``sum(weights)``.
     """
     data = list(data)
     cols = _columns(data)
     n_fields = len(cols)
     n = len(data)
+    w = None if weights is None else np.asarray(weights, dtype=np.float64)
+    n_eff = float(n) if w is None else float(np.sum(w))
     import mixle.stats as st
 
     discrete = [_is_discrete(c) for c in cols]
@@ -474,16 +618,19 @@ def learn_bayesian_network(
     templates = [_field_estimator(cols[i]) if discrete[i] else st.GaussianEstimator() for i in range(n_fields)]
     levels = {i: sorted(set(cols[i])) for i in range(n_fields) if discrete[i]}
 
+    def _wsum(ll: np.ndarray) -> float:
+        return float(np.sum(ll) if w is None else np.dot(w, ll))
+
     parents: list[list[int]] = [[] for _ in range(n_fields)]
     factors: list[Any] = [None] * n_fields
     base_ll = np.zeros(n_fields)
     for c in range(n_fields):
-        factors[c] = _fit_factor(c, [], cols, discrete, levels, templates[c], max_its)
-        base_ll[c] = float(np.sum(factors[c].seq_log_density(cols)))
+        factors[c] = _fit_factor(c, [], cols, discrete, levels, templates[c], max_its, w)
+        base_ll[c] = _wsum(factors[c].seq_log_density(cols))
 
     # global greedy: each round add the single best-penalized-gain edge over the WHOLE graph, so the cheaper
     # (fewer-parameter) orientation of a dependence wins instead of whichever node happened to be visited first.
-    log_n = np.log(max(n, 2))
+    log_n = np.log(max(n_eff, 2.0))
     while True:
         best = (min_gain, -1, -1, None)  # (gain, child, parent, factor)
         for c in range(n_fields):
@@ -492,8 +639,8 @@ def learn_bayesian_network(
             for q in range(n_fields):
                 if q == c or q in parents[c] or _would_cycle(parents, q, c):
                     continue
-                cand = _fit_factor(c, [*parents[c], q], cols, discrete, levels, templates[c], max_its)
-                ll = float(np.sum(cand.seq_log_density(cols)))
+                cand = _fit_factor(c, [*parents[c], q], cols, discrete, levels, templates[c], max_its, w)
+                ll = _wsum(cand.seq_log_density(cols))
                 gain = ll - base_ll[c] - 0.5 * (cand.n_params() - factors[c].n_params()) * log_n
                 if gain > best[0]:
                     best = (gain, c, q, cand)
@@ -502,20 +649,20 @@ def learn_bayesian_network(
             break
         parents[c].append(q)
         factors[c] = cand
-        base_ll[c] = float(np.sum(cand.seq_log_density(cols)))
+        base_ll[c] = _wsum(cand.seq_log_density(cols))
 
     return HeterogeneousBayesianNetwork(factors)
 
 
-def _fit_factor(child, parents, cols, discrete, levels, template, max_its):
+def _fit_factor(child, parents, cols, discrete, levels, template, max_its, weights=None):
     if not parents:
-        return _MarginalFactor(child, fit(cols[child], _clone(template), max_its=max_its, out=None))
+        return _MarginalFactor(child, _leaf_fit(cols[child], template, max_its, weights))
     disc = {p: levels[p] for p in parents if discrete[p]}
     if discrete[child]:
         if len(disc) == len(parents):  # all-discrete parents: the exact per-config table
-            return _DiscreteConditionalFactor.fit(child, parents, cols, template, max_its)
-        return _GLMFactor.fit(child, parents, cols, disc)  # a continuous driver: the GLM node
-    return _LinearGaussianFactor.fit(child, parents, cols, disc)
+            return _DiscreteConditionalFactor.fit(child, parents, cols, template, max_its, weights)
+        return _GLMFactor.fit(child, parents, cols, disc, weights)  # a continuous driver: the GLM node
+    return _LinearGaussianFactor.fit(child, parents, cols, disc, weights)
 
 
 def _would_cycle(parents: list[list[int]], new_parent: int, child: int) -> bool:

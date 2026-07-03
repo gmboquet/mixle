@@ -29,8 +29,10 @@ from mixle.inference import production
 from mixle.inference.bayesian_network import (
     HeterogeneousBayesianNetwork,
     MixtureOfBayesianNetworks,
+    bayesian_network_bic,
     learn_bayesian_network,
     learn_mixture_bayesian_network,
+    select_mixture_components,
 )
 
 # belief states: a distribution over a latent, updated by evidence (the assimilation step)
@@ -433,6 +435,8 @@ __all__ = [
     "learn_mixture_structure",
     "learn_bayesian_network",
     "learn_mixture_bayesian_network",
+    "select_mixture_components",
+    "bayesian_network_bic",
     "HeterogeneousBayesianNetwork",
     "MixtureOfBayesianNetworks",
     "dependency_gain",
