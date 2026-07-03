@@ -7,7 +7,7 @@ module exposing ``log_density(x) -> (n,)`` (an unconditional ``p(x)``), this wra
 a composite field, or an HMM emission and is fit **jointly with classical families** by the same
 responsibility-weighted-NLL EM M-step (warm-started across iterations, i.e. generalized EM).
 
-Why it matters: :class:`~mixle.models.neural_leaf.NeuralLeaf` fixes the conditional law to a single Gaussian,
+Why it matters: :class:`~mixle.models.neural_leaf.NeuralGaussian` fixes the conditional law to a single Gaussian,
 ``p(y | x) = N(y; f(x), sigma^2 I)`` -- one mean per ``x``, unimodal and homoscedastic. Many real conditionals
 are neither: an inverse problem has *several* valid ``y`` for one ``x``; measurement noise grows with ``x``.
 :func:`build_mdn` is the ready instance -- a **mixture density network**, ``p(y | x) = sum_k pi_k(x) N(y; mu_k(x),
@@ -263,7 +263,7 @@ def build_conditional_flow(x_dim: int, y_dim: int, *, hidden: int = 32, layers: 
     The exact-density counterpart to :func:`build_mdn`. Each affine-coupling layer's shift/scale networks take
     both the passed-through ``y`` coordinates *and* ``x``, so the whole invertible ``y``-transform bends with the
     input -- capturing *within-``y``* dependence (e.g. ``y2`` a nonlinear function of ``y1``) that a single-Gaussian
-    :class:`~mixle.models.neural_leaf.NeuralLeaf` (isotropic mean-only) cannot, while keeping an exact log-density
+    :class:`~mixle.models.neural_leaf.NeuralGaussian` (isotropic mean-only) cannot, while keeping an exact log-density
     (so it composes honestly, unlike a bound). Needs ``y_dim >= 2`` for the coupling to be non-trivial. Exposes
     ``log_density(x, y)`` and ``sample_given(x)`` -- the contract a :class:`NeuralConditionalDensity` adapts.
     """

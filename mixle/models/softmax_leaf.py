@@ -1,6 +1,6 @@
 """A neural classifier as a mixle conditional-density leaf: ``p(y | x) = softmax(module(x))``.
 
-The discriminative sibling of :class:`~mixle.models.neural_leaf.NeuralLeaf`. ``SoftmaxNeuralLeaf(module)`` wraps
+The discriminative sibling of :class:`~mixle.models.neural_leaf.NeuralGaussian`. ``NeuralCategorical(module)`` wraps
 a Torch module that emits ``k`` logits as a mixle distribution over observations ``(x, y)`` with ``y`` an integer
 class index. It implements the full ``SequenceEncodableProbabilityDistribution`` contract, so it drops into
 ``MixtureDistribution`` / ``CompositeDistribution`` / HMM emissions like any leaf -- and its EM **M-step is a
@@ -12,7 +12,7 @@ This is the leaf that the declarative ``Categorical(logits=Net(...))`` PPL slot 
 that makes a ``Mix([Categorical(logits=Net(...)), ...])`` a mixture of neural classifiers fit by ordinary EM.
 
 Requires torch. The leaf is conditional: ``predict(x)`` / ``sampler().sample_given(x)`` work; ``sample()`` raises
-(there is no ``p(x)``) -- the same honest limitation ``NeuralLeaf`` and ``RandomForestConditional`` carry.
+(there is no ``p(x)``) -- the same honest limitation ``NeuralGaussian`` and ``RandomForestConditional`` carry.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def _log_softmax(logits: np.ndarray) -> np.ndarray:
     return logits - m - np.log(np.exp(logits - m).sum(axis=1, keepdims=True))
 
 
-class SoftmaxNeuralLeaf(SequenceEncodableProbabilityDistribution):
+class NeuralCategorical(SequenceEncodableProbabilityDistribution):
     """``p(y | x) = softmax(module(x))`` as a mixle leaf. Observation is the pair ``(x, y)``, ``y`` an int class.
 
     ``batch_size`` (None = full batch) makes the M-step minibatch SGD over ``m_steps`` passes -- needed to train a
@@ -66,7 +66,7 @@ class SoftmaxNeuralLeaf(SequenceEncodableProbabilityDistribution):
         self.device = device
 
     def __str__(self) -> str:
-        return "SoftmaxNeuralLeaf()"
+        return "NeuralCategorical()"
 
     def _logits(self, x: np.ndarray) -> np.ndarray:
         torch = _torch()
@@ -92,35 +92,35 @@ class SoftmaxNeuralLeaf(SequenceEncodableProbabilityDistribution):
         p = self._logits(x).argmax(axis=1)
         return int(p[0]) if np.ndim(x) == 1 else p
 
-    def sampler(self, seed: int | None = None) -> SoftmaxNeuralLeafSampler:
-        return SoftmaxNeuralLeafSampler(self, seed)
+    def sampler(self, seed: int | None = None) -> NeuralCategoricalSampler:
+        return NeuralCategoricalSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> SoftmaxNeuralLeafEstimator:
-        return SoftmaxNeuralLeafEstimator(self.module, self.m_steps, self.lr, self.name, self.batch_size, self.device)
+    def estimator(self, pseudo_count: float | None = None) -> NeuralCategoricalEstimator:
+        return NeuralCategoricalEstimator(self.module, self.m_steps, self.lr, self.name, self.batch_size, self.device)
 
-    def dist_to_encoder(self) -> SoftmaxNeuralLeafEncoder:
-        return SoftmaxNeuralLeafEncoder()
+    def dist_to_encoder(self) -> NeuralCategoricalEncoder:
+        return NeuralCategoricalEncoder()
 
 
-class SoftmaxNeuralLeafSampler(DistributionSampler):
-    def __init__(self, dist: SoftmaxNeuralLeaf, seed: int | None = None) -> None:
+class NeuralCategoricalSampler(DistributionSampler):
+    def __init__(self, dist: NeuralCategorical, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
-        raise NotImplementedError("SoftmaxNeuralLeaf is conditional p(y|x); use sampler().sample_given(x).")
+        raise NotImplementedError("NeuralCategorical is conditional p(y|x); use sampler().sample_given(x).")
 
     def sample_given(self, x: Any) -> int:
         p = np.exp(_log_softmax(self.dist._logits(x))[0])
         return int(self.rng.choice(len(p), p=p / p.sum()))
 
 
-class SoftmaxNeuralLeafEncoder(DataSequenceEncoder):
+class NeuralCategoricalEncoder(DataSequenceEncoder):
     def __str__(self) -> str:
-        return "SoftmaxNeuralLeafEncoder"
+        return "NeuralCategoricalEncoder"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, SoftmaxNeuralLeafEncoder)
+        return isinstance(other, NeuralCategoricalEncoder)
 
     def seq_encode(self, data: list) -> tuple[np.ndarray, np.ndarray]:
         x = np.array([np.atleast_1d(np.asarray(xy[0], dtype=float)) for xy in data])
@@ -128,7 +128,7 @@ class SoftmaxNeuralLeafEncoder(DataSequenceEncoder):
         return (x, y)
 
 
-class SoftmaxNeuralLeafAccumulator(SequenceEncodableStatisticAccumulator):
+class NeuralCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
     def __init__(self) -> None:
         self.x: list = []
         self.y: list = []
@@ -152,7 +152,7 @@ class SoftmaxNeuralLeafAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
         self.seq_update(enc, weights, None)
 
-    def combine(self, other: Any) -> SoftmaxNeuralLeafAccumulator:
+    def combine(self, other: Any) -> NeuralCategoricalAccumulator:
         xo, yo, wo = other
         self.x.extend(xo)
         self.y.extend(yo)
@@ -162,21 +162,21 @@ class SoftmaxNeuralLeafAccumulator(SequenceEncodableStatisticAccumulator):
     def value(self) -> tuple:
         return (list(self.x), list(self.y), list(self.w))
 
-    def from_value(self, value: tuple) -> SoftmaxNeuralLeafAccumulator:
+    def from_value(self, value: tuple) -> NeuralCategoricalAccumulator:
         self.x, self.y, self.w = list(value[0]), list(value[1]), list(value[2])
         return self
 
-    def acc_to_encoder(self) -> SoftmaxNeuralLeafEncoder:
-        return SoftmaxNeuralLeafEncoder()
+    def acc_to_encoder(self) -> NeuralCategoricalEncoder:
+        return NeuralCategoricalEncoder()
 
 
-class SoftmaxNeuralLeafAccumulatorFactory(StatisticAccumulatorFactory):
-    def make(self) -> SoftmaxNeuralLeafAccumulator:
-        return SoftmaxNeuralLeafAccumulator()
+class NeuralCategoricalAccumulatorFactory(StatisticAccumulatorFactory):
+    def make(self) -> NeuralCategoricalAccumulator:
+        return NeuralCategoricalAccumulator()
 
 
-class SoftmaxNeuralLeafEstimator(ParameterEstimator):
-    """EM estimator for a :class:`SoftmaxNeuralLeaf`: the M-step is ``m_steps`` of responsibility-weighted
+class NeuralCategoricalEstimator(ParameterEstimator):
+    """EM estimator for a :class:`NeuralCategorical`: the M-step is ``m_steps`` of responsibility-weighted
     cross-entropy gradient on the module (the module is warm-started across EM iterations => generalized EM).
 
     The weighted CE is normalized by the responsibility mass ``sum(w)`` so the M-step is scale-invariant to the
@@ -202,13 +202,13 @@ class SoftmaxNeuralLeafEstimator(ParameterEstimator):
         # ewc = (anchor_params, fisher_diag, lambda): the EWC anti-forgetting penalty for continued pretraining
         self.ewc = ewc
 
-    def accumulator_factory(self) -> SoftmaxNeuralLeafAccumulatorFactory:
-        return SoftmaxNeuralLeafAccumulatorFactory()
+    def accumulator_factory(self) -> NeuralCategoricalAccumulatorFactory:
+        return NeuralCategoricalAccumulatorFactory()
 
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> SoftmaxNeuralLeaf:
+    def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralCategorical:
         torch = _torch()
         xs, ys, ws = suff_stat
-        out = SoftmaxNeuralLeaf(self.module, self.m_steps, self.lr, self.name, self.batch_size, self.device)
+        out = NeuralCategorical(self.module, self.m_steps, self.lr, self.name, self.batch_size, self.device)
         if not xs:
             return out
         dev = self.device
@@ -241,3 +241,8 @@ class SoftmaxNeuralLeafEstimator(ParameterEstimator):
                 loss.backward()
                 opt.step()
         return out
+
+
+# --- back-compat aliases (the classes were renamed off the '...Leaf' suffix) ---
+SoftmaxNeuralLeaf = NeuralCategorical
+SoftmaxNeuralLeafEstimator = NeuralCategoricalEstimator
