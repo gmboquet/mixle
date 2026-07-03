@@ -4,8 +4,17 @@ import tempfile
 import unittest
 
 import numpy as np
+import pytest
 
-from mixle.task import TaskModel, distill_from_labels, distill_records_from_labels, footprint, quantize_mlp
+pytest.importorskip("torch")  # quantization distills a torch student; skip cleanly where torch is absent
+
+from mixle.task import (  # noqa: E402
+    TaskModel,
+    distill_from_labels,
+    distill_records_from_labels,
+    footprint,
+    quantize_mlp,
+)
 
 
 def _record_task(n, seed):
