@@ -24,9 +24,11 @@ it verifies at least as well (anti-regression) -- so the deployed thing gets che
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -59,6 +61,26 @@ def _batch_view(teacher: Callable[..., Any]) -> Callable[[list], list]:
         return _label_with(teacher, list(batch))
 
     return batched
+
+
+def load_harvested(path: str) -> tuple[list, list]:
+    """Read the ``harvested.jsonl`` a serving endpoint accumulates into ``(inputs, labels)``.
+
+    Each line is ``{"input": ..., "label": ...}`` (the mixle-mlops ``/v1/tasks/{name}/feedback``
+    format). JSON lists coerce back to tuples — the record shape ``solve()`` trained on — so the
+    pairs feed straight into ``solve(..., prelabeled=load_harvested(p))`` for the next round."""
+    inputs: list = []
+    labels: list = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            x = row["input"]
+            inputs.append(tuple(x) if isinstance(x, list) else x)
+            labels.append(str(row["label"]))
+    return inputs, labels
 
 
 def _input_kind(x: Any) -> str:
@@ -246,6 +268,11 @@ class Solution:
         }
         return self.cascade.model.save(path)
 
+    def deploy(self, name: str, root: str = "./mixle_data/registry") -> str:
+        """Save into the serving layout — ``{root}/tasks/{name}`` — the directory the mixle-mlops
+        ``/v1/tasks`` routes serve from. Returns the artifact path."""
+        return self.save(str(Path(root) / "tasks" / name))
+
     @classmethod
     def load(cls, path: str, teacher: Callable[..., Any], *, cost: Any = None, device: str = "cpu") -> Solution:
         """Reconstitute a *serving* Solution from a saved artifact — the deploy path for a fresh process.
@@ -283,6 +310,7 @@ def solve(
     propose: str | None = None,
     propose_budget: int = 8,
     synthesize: int = 0,
+    prelabeled: tuple[Sequence[Any], Sequence[Any]] | None = None,
     cost: Any = None,
     seed: int = 0,
     **distill_kw: Any,
@@ -310,6 +338,10 @@ def solve(
             model fit to the real training inputs (record inputs only) and have the teacher label them.
             Labels are always real (teacher-produced); the calibration slice and the OOD gate stay
             real-inputs-only, so the conformal guarantee and the p(x) floor reflect the true distribution.
+        prelabeled: Already-teacher-labeled ``(inputs, labels)`` pairs — typically
+            ``load_harvested("harvested.jsonl")`` from a serving deployment — folded into the TRAINING
+            split (and the OOD gate: they are real traffic) but never into calibration, which stays a
+            fresh split of ``inputs``. This is the re-solve half of the serving loop.
         cost: Optional :class:`~mixle.task.economics.CostModel` for realized-savings reporting.
         seed: Split + fit determinism.
         **distill_kw: Student knobs forwarded to distillation (``dim``, ``hidden``, ``epochs``, ``lr``, …).
@@ -331,6 +363,13 @@ def solve(
     train_labels = [labels[i] for i in train_idx]
     cal_inputs = [items[i] for i in cal_idx]
     cal_labels = [labels[i] for i in cal_idx]
+
+    if prelabeled is not None:
+        pre_in, pre_lab = prelabeled
+        if len(pre_in) != len(pre_lab):
+            raise ValueError("prelabeled inputs and labels must have equal length")
+        train_inputs = train_inputs + list(pre_in)
+        train_labels = train_labels + [str(y) for y in pre_lab]
 
     n_synth = 0
     gate = _fit_gate(k, train_inputs, ood, seed) if ood is not None else None  # real inputs only

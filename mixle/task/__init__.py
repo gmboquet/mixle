@@ -99,7 +99,7 @@ from mixle.task.quantize import (
     quantize_mlp,
 )
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
-from mixle.task.solve import Solution, solve
+from mixle.task.solve import Solution, load_harvested, solve
 from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
 
 __all__ = [
@@ -158,6 +158,7 @@ __all__ = [
     "get_builder",
     "llm_extractor",
     "llm_labeler",
+    "load_harvested",
     "lns_classifier",
     "pick_label",
     "recommend_model",
