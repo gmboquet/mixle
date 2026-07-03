@@ -81,6 +81,76 @@ class RicianDistribution(SequenceEncodableProbabilityDistribution):
             )
         return np.where(xv > 0.0, out, -np.inf)
 
+    # --- compute-engine backend (numpy + torch/GPU): scoring + sufficient statistics in engine ops.
+    # log I0(z) = log i0e(z) + z (the exponentially-scaled Bessel from the engines' special tier). ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+
+    @classmethod
+    def compute_declaration(cls):
+        from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+
+        return DistributionDeclaration(
+            name="rician",
+            distribution_type=cls,
+            parameters=(ParameterSpec("nu"), ParameterSpec("sigma", constraint="positive")),
+            statistics=(StatisticSpec("count"), StatisticSpec("sum_x2"), StatisticSpec("sum_x4")),
+            support="positive",
+            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Per-row Rician power sums in accumulator order ``(count, sum x^2, sum x^4)``."""
+        xx = engine.asarray(x)
+        x2 = xx * xx
+        return xx * 0.0 + engine.asarray(1.0), x2, x2 * x2
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, nu: Any, sigma: Any, engine: Any) -> Any:
+        """Engine-neutral Rician log-density (``-inf`` for ``x <= 0``)."""
+        sig2 = sigma * sigma
+        x_pos = engine.where(x > 0.0, x, engine.asarray(1.0))  # keep log NaN-free off-support
+        z = x_pos * nu / sig2
+        out = (
+            engine.log(x_pos)
+            - engine.log(sig2)
+            - (x_pos * x_pos + nu * nu) / (2.0 * sig2)
+            + engine.log(engine.i0e(z))
+            + z
+        )
+        return engine.where(x > 0.0, out, engine.asarray(float("-inf")))
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x), engine.asarray(self.nu), engine.asarray(self.sigma), engine
+        )
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence["RicianDistribution"], engine: Any) -> dict[str, Any]:
+        """Stacked Rician parameters for a homogeneous mixture kernel."""
+        return {"nu": engine.asarray([d.nu for d in dists]), "sigma": engine.asarray([d.sigma for d in dists])}
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: np.ndarray, params: dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of Rician log densities."""
+        xx = engine.asarray(x)
+        return cls.backend_log_density_from_params(xx[:, None], params["nu"][None, :], params["sigma"][None, :], engine)
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(
+        cls, x: np.ndarray, weights: Any, params: dict[str, Any], engine: Any
+    ) -> tuple[Any, Any, Any]:
+        """Stacked Rician power sums ``(count, sum x^2, sum x^4)`` using engine-resident arrays."""
+        xx = engine.asarray(x)
+        ww = engine.asarray(weights)
+        x2 = xx * xx
+        return engine.sum(ww, axis=0), engine.sum(ww * x2[:, None], axis=0), engine.sum(ww * (x2 * x2)[:, None], axis=0)
+
     def cdf(self, x: float) -> float:
         """Cumulative distribution function P(X <= x) (Marcum-Q, via scipy rice)."""
         from scipy.stats import rice

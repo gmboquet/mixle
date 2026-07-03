@@ -136,6 +136,7 @@ class JaxEngine(ComputeEngine):
     cos = staticmethod(lambda x: jnp.cos(x))
     sin = staticmethod(lambda x: jnp.sin(x))
     arctan2 = staticmethod(lambda x, y: jnp.arctan2(x, y))
+    i0e = staticmethod(lambda x: jsp.i0e(x))
 
     def index_add(self, out: Any, index: Any, values: Any) -> Any:
         """Add ``values`` into ``out`` along axis 0 via the functional ``.at[idx].add`` update.
