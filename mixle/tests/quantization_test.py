@@ -76,22 +76,78 @@ class CountSemiringTestCase(unittest.TestCase):
         cases = [
             (CountHistogram(2, [1, 3, 0, 5]), CountHistogram(-1, [2, 0, 4])),
             (CountHistogram(0, [7]), rand_hist(60, 200)),  # delta x wide, huge counts
-            (rand_hist(80, 300), rand_hist(70, 300)),  # wide x wide, > 2**128 counts
+            (rand_hist(80, 300), rand_hist(70, 300)),  # wide x wide, > 2**128 counts (NTT declines)
             (rand_hist(50, 4), CountHistogram(3, [0, 0, 9, 0])),  # internal zeros
+            (rand_hist(80, 12), rand_hist(70, 12)),  # small counts: NTT single-prime regime
+            (rand_hist(90, 25), rand_hist(75, 25)),  # medium counts: NTT two-prime + CRT regime
+            (rand_hist(130, 28), rand_hist(3, 28)),  # wide x narrow through the NTT path
         ]
         saved = core._KRONECKER_MIN_PRODUCT
         try:
             for a, b in cases:
                 for cap in (None, a.base + b.base + 5):
                     truth = brute(a, b, cap)
-                    core._KRONECKER_MIN_PRODUCT = 0  # force Kronecker
+                    core._KRONECKER_MIN_PRODUCT = 0
+                    core._NTT_ENABLED = False  # force Kronecker
                     kron = a.convolve(b, max_fine_bucket=cap)
+                    core._NTT_ENABLED = True  # NTT engages where eligible, falls back where not
+                    ntt = a.convolve(b, max_fine_bucket=cap)
                     core._KRONECKER_MIN_PRODUCT = 10**18  # force naive
                     naive = a.convolve(b, max_fine_bucket=cap)
                     self.assertEqual((kron.base, kron.data), (truth.base, truth.data))
+                    self.assertEqual((ntt.base, ntt.data), (truth.base, truth.data))
                     self.assertEqual((naive.base, naive.data), (truth.base, truth.data))
         finally:
             core._KRONECKER_MIN_PRODUCT = saved
+            core._NTT_ENABLED = True
+
+    def test_ntt_backend_declines_out_of_range_coefficients(self):
+        import mixle.enumeration.quantization.core as core
+
+        # an output could reach min(len)*max*max >= the full-ladder ceiling -> the NTT must hand off
+        big = 1 << 105
+        self.assertIsNone(core._convolve_ntt([big] * 3, [big] * 3, 5))
+        # ...but the public convolve stays exact via the Kronecker fallback
+        a = CountHistogram(0, [big] * 3)
+        b = CountHistogram(0, [big] * 3)
+        got = a.convolve(b)
+        self.assertEqual(got.data[0], big * big)
+        self.assertEqual(got.data[2], 3 * big * big)
+
+    def test_ntt_three_and_four_prime_ladders_are_exact(self):
+        import mixle.enumeration.quantization.core as core
+
+        # coefficients past the two-prime CRT range exercise the Garner mixed-radix reconstruction,
+        # including inputs above 2^64 (the per-prime Python-mod reduction path)
+        big31 = (1 << 31) - 1
+        got = core._convolve_ntt([big31] * 3, [big31] * 3, 5)  # outputs up to 3*2^62: three primes
+        self.assertEqual(got, [big31 * big31, 2 * big31 * big31, 3 * big31 * big31, 2 * big31 * big31, big31 * big31])
+        big40 = (1 << 40) + 12345
+        got = core._convolve_ntt([big40] * 4, [big40] * 4, 7)  # outputs up to 4*2^80: four primes
+        want = [min(i + 1, 4, 7 - i) * big40 * big40 for i in range(7)]
+        self.assertEqual(got, want)
+        huge = (1 << 70) + 999  # inputs above uint64: reduced per prime with Python int mod
+        got = core._convolve_ntt([huge, 1] * 40, [3, 2] * 40, 8)
+        want_a, want_b = [huge, 1] * 40, [3, 2] * 40
+        want = [sum(want_a[i] * want_b[k - i] for i in range(k + 1)) for k in range(8)]
+        self.assertEqual(got, want)
+
+    def test_ntt_matches_kronecker_at_scale(self):
+        import random
+
+        import mixle.enumeration.quantization.core as core
+
+        rng = random.Random(11)
+        a = CountHistogram(0, [rng.randrange(0, 1 << 27) for _ in range(3000)])
+        b = CountHistogram(0, [rng.randrange(0, 1 << 27) for _ in range(2500)])
+        try:
+            core._NTT_ENABLED = False  # Kronecker truth
+            want = a.convolve(b)
+            core._NTT_ENABLED = True
+            got = a.convolve(b)
+        finally:
+            core._NTT_ENABLED = True
+        self.assertEqual(want.data, got.data)  # bit-identical at width 5499, coeffs through the CRT range
 
     def test_convolution_unranker_matches_brute_force(self):
         q = Quantizer(bin_width_bits=1.0, oversample=8)
