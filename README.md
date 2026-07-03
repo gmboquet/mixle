@@ -5,6 +5,7 @@
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![tests](https://img.shields.io/badge/tests-2700%2B-brightgreen)
+[![docs](https://img.shields.io/badge/docs-gmboquet.github.io%2Fmixle-blue)](https://gmboquet.github.io/mixle/)
 
 **Automatic inference for composable models of heterogeneous data.** Every model in mixle is a
 *distribution* with the same five-piece contract, so a neural language model, a classical density, and a
@@ -15,6 +16,9 @@ fit runs locally on NumPy / Numba / GPU or scales out across Spark, Dask, Ray, o
 The unit of composition is the distribution: leaves (a Transformer LM, a Gaussian, a Poisson, …) combine
 into tuples, tuples become mixture components, mixtures become HMM emissions, to any depth. A model and the
 estimator that fits it have the same shape — so **what you can express, you can fit**.
+
+📖 **Full documentation:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) — guides, the
+distribution catalog, and the API reference.
 
 ## Contents
 
@@ -77,6 +81,39 @@ cascade.report()        # -> ~8% escalated; ~$2.76 saved / 300 requests vs front
 The tiny model handles the easy majority and defers the hard cases, so the blend matches the teacher while
 running the large model on a fraction of requests. The same pattern distills tool-callers, extractors, and
 structured classifiers (`mixle.task`).
+
+**Compose arbitrarily deep — and tie parameters across the structure.** A segmental HMM whose every state
+emits a *composite* segment (a two-mode mixture plus a phrase scored by a PCFG), with the mixture's first
+mode **coupled across states by `keys=`**. One `optimize` call fits the whole tree by EM:
+
+```python
+from mixle.stats import *
+from mixle.inference import optimize
+
+# a PCFG over a 2-terminal "phrase": S -> A B | B A, with Gaussian terminals
+def pcfg(a, b):
+    return HeterogeneousPCFGDistribution(binary_rules={"S": [("A", "B", .5), ("B", "A", .5)]},
+        terminal_rules={"A": [(GaussianDistribution(a, .5), 1.)], "B": [(GaussianDistribution(b, .5), 1.)]}, start="S")
+
+# each state emits a SEGMENT = Composite(a 2-mode "tone" mixture, a PCFG phrase)
+def emit(tone, a, b):
+    return CompositeDistribution((MixtureDistribution(
+        [GaussianDistribution(tone, .5), GaussianDistribution(tone + 3, .5)], [.6, .4]), pcfg(a, b)))
+
+truth = SegmentalHiddenMarkovModelDistribution([emit(-2, -1, 1), emit(2, 3, 5)], [.5, .5],
+    [[.8, .2], [.3, .7]], len_dist=CategoricalDistribution({3: 1.0}))
+data = truth.sampler(0).sample(200)     # each obs: a length-3 sequence of (tone, [phrase]) segments
+
+# fit by EM; keys="tone" ties the mixture's first mode across BOTH states (a shared parameter, one gradient)
+def emest():
+    return CompositeEstimator((MixtureEstimator([GaussianEstimator(keys="tone"), GaussianEstimator()]),
+        HeterogeneousPCFGEstimator(binary_rules={"S": [("A", "B", .5), ("B", "A", .5)]},
+            terminal_rules={"A": [(GaussianEstimator(), 1.)], "B": [(GaussianEstimator(), 1.)]}, start="S")))
+fit = optimize(data, SegmentalHiddenMarkovEstimator(
+    [emest(), emest()], len_estimator=CategoricalDistribution({3: 1.0}).estimator()), max_its=15)
+
+fit.log_density(data[0])   # score a structured observation under the whole composed model
+```
 
 **The whole lifecycle is one object.** `mixle.propose(data)` fits every proposer the library has on a
 train split, ranks them on held-out data, and returns the winner — then the verbs chain:
