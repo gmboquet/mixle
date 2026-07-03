@@ -34,6 +34,10 @@ _NAMESPACES = (
 
 
 def __getattr__(name: str):  # PEP 562 — resolve any mixle submodule (incl. the namespaces) lazily
+    if name in ("Model", "propose"):  # the lifecycle facade, kept lazy so `import mixle` stays cheap
+        import mixle.lifecycle as _lc
+
+        return getattr(_lc, name)
     if not name.startswith("_"):
         import importlib
 
@@ -45,10 +49,12 @@ def __getattr__(name: str):  # PEP 562 — resolve any mixle submodule (incl. th
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals().keys()) | set(_NAMESPACES))
+    return sorted(set(globals().keys()) | set(_NAMESPACES) | {"Model", "propose"})
 
 
 __all__ = [
+    "Model",
+    "propose",
     "supports",
     "capabilities",
     "describe",
