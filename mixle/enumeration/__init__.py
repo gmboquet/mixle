@@ -48,7 +48,7 @@ from mixle.enumeration.algorithms import (
 # --- count / threshold / unrank for arbitrary autoregressive (next_logprobs) models ---
 from mixle.enumeration.autoregressive import AutoregressiveEnumerable, autoregressive_count_index
 from mixle.enumeration.density_rank import DensityRankResult, density_rank
-from mixle.enumeration.envelope import AREnvelopeIndex
+from mixle.enumeration.envelope import AREnvelopeIndex, LatticeEnvelopeIndex
 
 # --- HMM state paths: exact A* enumeration + the quantized random-access path index ---
 from mixle.enumeration.hmm_paths import HMMPathIndex, hmm_best_paths
@@ -102,6 +102,7 @@ __all__ = [
     "AutoregressiveEnumerable",
     "autoregressive_count_index",
     "AREnvelopeIndex",
+    "LatticeEnvelopeIndex",
     "RescoredIndex",
     # HMM path enumeration (non-decomposable family): exact A* head + quantized random-access index
     "hmm_best_paths",
