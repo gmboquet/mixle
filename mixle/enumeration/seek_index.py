@@ -83,6 +83,15 @@ class SeekIndex:
         """How many times the structural DP has been (re)built -- the cost a persistent index amortizes."""
         return self._builds
 
+    @property
+    def dropped_upper(self) -> float:
+        """Certified upper bound on in-budget values excluded by an approximation knob (e.g. ``branch_cap``).
+
+        0.0 for exhaustive indices. The true in-budget count lies in ``[len(self), len(self) + dropped_upper]``;
+        deepening does not recover these (that is what distinguishes it from ``truncated``).
+        """
+        return float(getattr(self._count_index, "dropped_upper", 0.0)) if self._count_index is not None else 0.0
+
     def _build(self, depth_bits: float) -> None:
         depth_bits = min(float(depth_bits), self.max_depth_bits)
         max_fb = int(math.ceil(depth_bits * self.quantizer.fine_per_bit()))

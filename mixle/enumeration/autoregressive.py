@@ -82,6 +82,7 @@ def autoregressive_count_index(
     quantizer: Quantizer,
     max_fine_bucket: int,
     eos: Any = None,
+    branch_cap: int | None = None,
 ) -> tuple[CountIndex, bool]:
     """Tree-recursive count index over completions of ``prefix`` up to ``depth`` more tokens.
 
@@ -94,6 +95,13 @@ def autoregressive_count_index(
     :meth:`CountHistogram.shift`; the per-token children are pooled with :meth:`CountHistogram.add`. Because
     ``steps`` are taken in descending probability, once a token's own bits exceed the remaining budget every
     later token does too, so the loop can stop -- this is what bounds the work to the live prefixes.
+
+    ``branch_cap`` recurses into only the top-``cap`` in-budget tokens per node -- the certified
+    approximation for wide vocabularies. Each skipped token's subtree is bounded soundly (completions
+    within ``r`` remaining bits number at most ``2**r``, since their conditional probabilities sum to at
+    most 1) and the total accumulates in ``CountIndex.dropped_upper``: the true in-budget count lies in
+    ``[total(), total() + dropped_upper]``. Dropped tokens do NOT set ``truncated`` (deepening cannot
+    recover them; raising ``branch_cap`` can).
     """
     # A sequence ending in eos is a complete element of a terminating model's support (bucket 0, log-prob 0).
     if eos is not None and prefix and prefix[-1] == eos:
@@ -107,6 +115,9 @@ def autoregressive_count_index(
         return CountIndex(CountHistogram.empty(), _raise_index), True
 
     truncated = False
+    dropped = 0.0
+    kept = 0
+    per_bit = quantizer.fine_per_bit()
     by_token: list[tuple[Any, float, int, CountIndex]] = []
     acc: dict[int, int] = {}  # fine_bucket -> count, pooled across tokens (avoids O(V) array rebuilds)
     for token, step_lp in steps(prefix):
@@ -114,10 +125,16 @@ def autoregressive_count_index(
         if sb > max_fine_bucket:
             truncated = True  # steps are descending, so all remaining tokens also exceed the budget
             break
+        if branch_cap is not None and kept >= branch_cap:
+            # skipped in-budget token: its subtree holds at most 2**remaining_bits completions
+            dropped += 2.0 ** ((max_fine_bucket - sb) / per_bit)
+            continue
+        kept += 1
         child, child_trunc = autoregressive_count_index(
-            steps, prefix + (token,), depth - 1, quantizer, max_fine_bucket - sb, eos
+            steps, prefix + (token,), depth - 1, quantizer, max_fine_bucket - sb, eos, branch_cap
         )
         truncated = truncated or child_trunc
+        dropped += child.dropped_upper
         h = child.hist
         if h.is_empty():
             continue
@@ -128,7 +145,10 @@ def autoregressive_count_index(
         by_token.append((token, step_lp, sb, child))
 
     if not acc:
-        return CountIndex(CountHistogram.empty(), lambda fb, off: (_ for _ in ()).throw(IndexError())), truncated
+        empty = CountIndex(
+            CountHistogram.empty(), lambda fb, off: (_ for _ in ()).throw(IndexError()), dropped_upper=dropped
+        )
+        return empty, truncated
 
     lo, hi = min(acc), max(acc)
     data = [0] * (hi - lo + 1)
@@ -147,7 +167,7 @@ def autoregressive_count_index(
             o -= c
         raise IndexError("offset %d outside autoregressive bucket %d" % (off, fb))
 
-    return CountIndex(joint, getter), truncated
+    return CountIndex(joint, getter, dropped_upper=dropped), truncated
 
 
 def _ar_count_index_fast(
@@ -158,6 +178,7 @@ def _ar_count_index_fast(
     max_fine_bucket: int,
     eos: Any = None,
     dtype: type = np.int64,
+    branch_cap: int | None = None,
 ) -> tuple[CountIndex, bool]:
     """numpy-vectorized :func:`autoregressive_count_index` (int64 or float64 counts).
 
@@ -187,6 +208,16 @@ def _ar_count_index_fast(
     if tokens.size == 0:
         return CountIndex(CountHistogram.empty(), _raise_index), truncated
 
+    dropped = 0.0
+    if branch_cap is not None and tokens.size > branch_cap:
+        tail_sb = sb[branch_cap:]
+        if depth == 1 and eos is None:
+            dropped = float(tail_sb.size)  # each dropped leaf token is exactly one completion
+        else:
+            # each skipped subtree holds at most 2**remaining_bits completions (probabilities sum <= 1)
+            dropped = float(np.sum(2.0 ** ((max_fine_bucket - tail_sb) / quantizer.fine_per_bit())))
+        tokens, lps, sb = tokens[:branch_cap], lps[:branch_cap], sb[:branch_cap]
+
     if depth == 1 and eos is None:
         # Fixed-length leaf: each kept token is a length-1 completion in fine bucket sb; bincount is the
         # histogram. (A terminating model has no fixed leaf depth -- only eos completes -- so it falls through
@@ -203,23 +234,24 @@ def _ar_count_index_fast(
                 raise IndexError("offset %d outside leaf bucket %d" % (off, fb))
             return (_tok[j].item(),), float(_lp[j])
 
-        return CountIndex(hist, leaf_getter), truncated
+        return CountIndex(hist, leaf_getter, dropped_upper=dropped), truncated
 
     # depth > 1: recurse into each token's subtree, then pool the shifted child histograms with numpy.
     by_token: list[tuple[Any, float, int, CountIndex]] = []
     shifted: list[tuple[int, np.ndarray]] = []
     for tok, lp, s in zip(tokens.tolist(), lps.tolist(), sb.tolist()):
         child, child_trunc = _ar_count_index_fast(
-            steps_np, prefix + (tok,), depth - 1, quantizer, max_fine_bucket - s, eos, dtype
+            steps_np, prefix + (tok,), depth - 1, quantizer, max_fine_bucket - s, eos, dtype, branch_cap
         )
         truncated = truncated or child_trunc
+        dropped += child.dropped_upper
         if not child.hist.data:
             continue
         shifted.append((child.hist.base + s, np.asarray(child.hist.data, dtype=dtype)))
         by_token.append((tok, float(lp), int(s), child))
 
     if not shifted:
-        return CountIndex(CountHistogram.empty(), _raise_index), truncated
+        return CountIndex(CountHistogram.empty(), _raise_index, dropped_upper=dropped), truncated
     lo = min(s for s, _ in shifted)
     hi = max(s + d.size - 1 for s, d in shifted)
     buf = np.zeros(hi - lo + 1, dtype=dtype)
@@ -238,7 +270,7 @@ def _ar_count_index_fast(
             o -= c
         raise IndexError("offset %d outside autoregressive bucket %d" % (off, fb))
 
-    return CountIndex(joint, getter), truncated
+    return CountIndex(joint, getter, dropped_upper=dropped), truncated
 
 
 class _ARSampler:
@@ -305,6 +337,11 @@ class AutoregressiveEnumerable:
             (exact below 2**53, ~1e-16 relative error per pooling beyond) at full numpy speed. ``'exact'``
             preserves arbitrary-precision counts by falling back to the slow Python recursion. ``'float'``
             forces float64 everywhere.
+        branch_cap: recurse into only the top-``branch_cap`` in-budget tokens per prefix -- the certified
+            approximation for wide (LLM-sized) vocabularies, shrinking the tree by ~V/cap per level. The
+            skipped remainder is soundly bounded (``count_bracket``/``dropped_upper``: a skipped subtree
+            with ``r`` remaining budget bits holds at most ``2**r`` completions); enumeration covers the
+            sub-support of sequences whose every token is among its context's top-``branch_cap``.
 
     The model is queried lazily and **memoized by prefix**, so deepening the index (or recomputing a
     log-density) never re-runs a forward pass it has already seen. With integer tokens the histogram build
@@ -322,6 +359,7 @@ class AutoregressiveEnumerable:
         batch_next_logprobs: Callable[[list[tuple]], list[Any]] | None = None,
         batch_size: int = 256,
         count_mode: str = "auto",
+        branch_cap: int | None = None,
     ) -> None:
         if eos is None and max_len is None:
             raise ValueError("give max_len (a fixed-length model) or eos (a terminating model).")
@@ -329,6 +367,8 @@ class AutoregressiveEnumerable:
             raise ValueError("max_len must be a positive integer.")
         if count_mode not in ("auto", "exact", "float"):
             raise ValueError("count_mode must be 'auto', 'exact', or 'float'")
+        if branch_cap is not None and int(branch_cap) < 1:
+            raise ValueError("branch_cap must be a positive integer (or None for no cap)")
         self.next_logprobs = next_logprobs
         self.eos = eos
         self.terminating = eos is not None
@@ -342,6 +382,7 @@ class AutoregressiveEnumerable:
         self.batch_next_logprobs = batch_next_logprobs
         self.batch_size = int(batch_size)
         self.count_mode = count_mode
+        self.branch_cap = None if branch_cap is None else int(branch_cap)
         self._cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}  # prefix -> (tokens, log_probs), desc by lp
         self._fast: bool | None = None
         self._seek = None  # cached SeekIndex: built once, reused by unrank/count/threshold/mass_above
@@ -418,7 +459,10 @@ class AutoregressiveEnumerable:
                 tokens, lps = self._steps_np(pfx)
                 sb = np.floor(np.maximum(0.0, -lps / _LOG2) * scale + _TOL).astype(np.int64)
                 live = (cum + sb) <= max_fine_bucket
-                for tok, s in zip(tokens[live].tolist(), (cum + sb[live]).tolist()):
+                live_toks, live_cum = tokens[live].tolist(), (cum + sb[live]).tolist()
+                if self.branch_cap is not None:  # the recursion only descends the top-cap tokens
+                    live_toks, live_cum = live_toks[: self.branch_cap], live_cum[: self.branch_cap]
+                for tok, s in zip(live_toks, live_cum):
                     nxt.append((pfx + (tok,), int(s)))
                 if len(nxt) > frontier_cap:
                     return  # too wide to prefetch; the recursion forwards the rest lazily
@@ -433,15 +477,19 @@ class AutoregressiveEnumerable:
             int64_safe = budget_bits < _INT64_SAFE_BITS
             if int64_safe and self.count_mode != "float":
                 self._prefetch(quantizer, max_fine_bucket)
-                return _ar_count_index_fast(self._steps_np, (), self._depth, quantizer, max_fine_bucket, self.eos)
+                return _ar_count_index_fast(
+                    self._steps_np, (), self._depth, quantizer, max_fine_bucket, self.eos, np.int64, self.branch_cap
+                )
             if self.count_mode in ("auto", "float"):
                 # Deep budget (or forced float): carry counts as float64 -- approximate past 2**53, but the
                 # build keeps numpy speed instead of dropping to the arbitrary-precision Python recursion.
                 self._prefetch(quantizer, max_fine_bucket)
                 return _ar_count_index_fast(
-                    self._steps_np, (), self._depth, quantizer, max_fine_bucket, self.eos, np.float64
+                    self._steps_np, (), self._depth, quantizer, max_fine_bucket, self.eos, np.float64, self.branch_cap
                 )
-        return autoregressive_count_index(self._steps, (), self._depth, quantizer, max_fine_bucket, self.eos)
+        return autoregressive_count_index(
+            self._steps, (), self._depth, quantizer, max_fine_bucket, self.eos, self.branch_cap
+        )
 
     def log_density(self, sequence: Iterable[Any]) -> float:
         """Exact total log-probability of a sequence (``-inf`` if any token is off-support given its prefix)."""
@@ -519,8 +567,22 @@ class AutoregressiveEnumerable:
         return out
 
     def count(self, min_log_prob: float) -> int | float:
-        """How many sequences have ``log_density >= min_log_prob`` -- computed from counts, not listed."""
+        """How many sequences have ``log_density >= min_log_prob`` -- computed from counts, not listed.
+
+        With ``branch_cap`` set this is the count over the capped sub-support (a sound lower bound);
+        :meth:`count_bracket` adds the certified upper bound including the skipped remainder.
+        """
         return self.seek_index().count(min_log_prob)
+
+    def count_bracket(self, min_log_prob: float) -> tuple[float, float]:
+        """A sound ``[lo, hi]`` bracket on the number of sequences with ``log_density >= min_log_prob``.
+
+        ``lo`` counts the (exactly enumerated) kept sub-support; ``hi`` adds ``dropped_upper`` -- the
+        certified bound on completions excluded by ``branch_cap`` (identical to ``lo`` when no cap is set).
+        """
+        si = self.seek_index()
+        lo = float(si.count(min_log_prob))
+        return lo, lo + float(si.dropped_upper)
 
     def unrank(self, i: int) -> tuple[tuple, float]:
         """The ``i``-th most probable sequence (0-based) and its exact log-probability, by random access."""
