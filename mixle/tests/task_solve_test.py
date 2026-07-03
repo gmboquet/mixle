@@ -80,6 +80,26 @@ class SolveTest(unittest.TestCase):
         t = {"kind": "refund", "amount": 900.0, "region": "us"}
         self.assertEqual(sol(t), _route(t))
 
+    def test_ood_gate_escalates_novel_inputs(self):
+        from mixle.task import ESCALATE, solve
+
+        sol = solve(_route, _tickets(300), alpha=0.15, ood=0.05, seed=0, epochs=200)
+        self.assertIsNotNone(sol.cascade.model.density_gate)
+        # a wildly out-of-distribution record must escalate — and hence get the TEACHER's exact answer —
+        # regardless of how confident the softmax looks.
+        alien = {"kind": "zzz-never-seen", "amount": 1.0e9, "region": "??", "extra": "fields" * 50}
+        self.assertIs(sol.cascade.model.decide(alien), ESCALATE)
+        self.assertEqual(sol(alien), _route(alien))
+
+    def test_propose_auto_tunes_the_recipe(self):
+        from mixle.task import solve
+
+        sol = solve(_route, _tickets(240), propose="auto", propose_budget=4, seed=0)
+        # the tuned recipe was recorded (so improve() re-distills with it) and the solution verifies
+        self.assertIn("dim", sol.distill_kw)
+        self.assertIn("epochs", sol.distill_kw)
+        self.assertGreater(sol.holdout_agreement, 0.7)
+
     def test_text_path_and_input_sniffing(self):
         from mixle.task import solve
 

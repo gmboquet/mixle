@@ -19,19 +19,26 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task.model import HashedNGram
+from mixle.task.model import HashedNGram, HashedRecord
 
 
 class DensityGate:
-    """A generative density over featurized inputs with a calibrated out-of-distribution floor on ``log p(x)``."""
+    """A generative density over featurized inputs with a calibrated out-of-distribution floor on ``log p(x)``.
 
-    def __init__(self, featurizer: HashedNGram, density: Any = None, log_threshold: float | None = None) -> None:
+    The featurizer is any ``transform(list) -> matrix``: :class:`HashedNGram` for text, or
+    :class:`HashedRecord` for dict/tuple records (so record models get the same OOD protection).
+    """
+
+    def __init__(self, featurizer: Any, density: Any = None, log_threshold: float | None = None) -> None:
         self.featurizer = featurizer
         self.density = density
         self.log_threshold = log_threshold
 
-    def _rows(self, texts: Sequence[str]) -> list[np.ndarray]:
-        return [np.asarray(r, dtype=np.float64) for r in self.featurizer.transform([str(t) for t in texts])]
+    def _rows(self, texts: Sequence[Any]) -> list[np.ndarray]:
+        # str-coerce only for the text featurizer: a record featurizer must see the raw dict/tuple,
+        # not its repr, or the gate silently scores garbage features.
+        items = [str(t) for t in texts] if isinstance(self.featurizer, HashedNGram) else list(texts)
+        return [np.asarray(r, dtype=np.float64) for r in self.featurizer.transform(items)]
 
     def fit(
         self,
@@ -78,6 +85,7 @@ class DensityGate:
         ensure_pysp_serialization_registry()
         return {
             "featurizer": self.featurizer.to_spec(),
+            "featurizer_kind": "record" if isinstance(self.featurizer, HashedRecord) else "text",
             "density": to_serializable(self.density),
             "log_threshold": self.log_threshold,
         }
@@ -87,8 +95,9 @@ class DensityGate:
         from mixle.utils.serialization import ensure_pysp_serialization_registry, from_serializable
 
         ensure_pysp_serialization_registry()
+        feat_cls = HashedRecord if spec.get("featurizer_kind") == "record" else HashedNGram
         return cls(
-            HashedNGram.from_spec(spec["featurizer"]),
+            feat_cls.from_spec(spec["featurizer"]),
             density=from_serializable(spec["density"]),
             log_threshold=spec["log_threshold"],
         )
