@@ -236,9 +236,10 @@ class LNSStructuredClassifierIO(StructuredClassifierIO):
     classifier within the engine's documented bound (~``1.5 * step`` per fold), so ``step`` is a
     dial between integer-width and fidelity.
 
-    Categorical factors could further pre-quantize their tables to pure integer lookups (no float at
-    all for discrete schemas); that fast path is future work -- today every leaf evaluates in float
-    and quantizes at the boundary, which is the same contract as the engine's ``SumProductCircuit``.
+    Categorical factors are pre-quantized to integer tables at first use, so their leaves are pure
+    integer lookups -- on an all-discrete schema inference touches no floats at all. Continuous
+    leaves evaluate in float and quantize at the boundary, the same contract as the engine's
+    ``SumProductCircuit``.
     """
 
     kind = "lns_structured_classifier"
@@ -256,17 +257,63 @@ class LNSStructuredClassifierIO(StructuredClassifierIO):
             return _LOG_ZERO_INT
         return int(np.rint(logp / self.step))
 
-    def _tree_int_score(self, tree: Any, row: tuple) -> int:
-        """Integer log-joint of one row under one dependency tree: quantized factor terms, integer adds."""
-        from mixle.inference.structure import _safe_log_density
+    # -- compiled integer tables: categorical leaves become pure lookups --------------------------
+    def _compile_factor(self, factor: Any) -> tuple[dict, int] | None:
+        """Pre-quantize a categorical factor to an integer table ``{key: k}`` (+ unseen default).
 
+        Marginal ``CategoricalDistribution`` -> ``{value: k}``; a ``ConditionalDistribution`` whose
+        branches are all categorical -> ``{(parent_key, value): k}``. Returns ``None`` for anything
+        else (continuous leaves keep the float-then-quantize boundary path).
+        """
+        pmap = getattr(factor, "pmap", None)
+        if isinstance(pmap, dict):  # categorical marginal
+            table = {v: self._quantize_term(float(np.log(p)) if p > 0 else -np.inf) for v, p in pmap.items()}
+            log_default = float(getattr(factor, "log_default_value", -np.inf))
+            return table, self._quantize_term(log_default)
+        dmap = getattr(factor, "dmap", None)
+        if isinstance(dmap, dict) and dmap:
+            table = {}
+            for key, branch in dmap.items():
+                branch_pmap = getattr(branch, "pmap", None)
+                if not isinstance(branch_pmap, dict):
+                    return None  # a non-categorical branch: leave the whole factor on the float path
+                for v, p in branch_pmap.items():
+                    table[(key, v)] = self._quantize_term(float(np.log(p)) if p > 0 else -np.inf)
+            return table, _LOG_ZERO_INT  # unseen (parent, value) pair carries no mass
+        return None
+
+    def _compiled_tables(self, tree: Any) -> list[tuple[dict, int] | None]:
+        cache = getattr(self, "_table_cache", None)
+        if cache is None:
+            cache = self._table_cache = {}
+        key = id(tree)
+        if key not in cache:
+            cache[key] = [self._compile_factor(f) for f in tree.factors]
+        return cache[key]
+
+    def _tree_int_score(self, tree: Any, row: tuple) -> int:
+        """Integer log-joint of one row under one dependency tree: quantized factor terms, integer adds.
+
+        Categorical factors resolve through pre-quantized integer tables (a dict lookup of an int --
+        no float log-density at all); continuous leaves evaluate in float and quantize at the
+        boundary, the same contract as the engine's ``SumProductCircuit`` leaves.
+        """
+        tables = self._compiled_tables(tree)
         total = 0
         for i, parent in enumerate(tree.parents):
-            if parent is None:
-                term = _safe_log_density(tree.factors[i], row[i])
+            compiled = tables[i]
+            if compiled is not None:  # pure integer lookup
+                table, default = compiled
+                lookup = row[i] if parent is None else (tree._key(i, row[parent]), row[i])
+                k = table.get(lookup, default)
             else:
-                term = _safe_log_density(tree.factors[i], (tree._key(i, row[parent]), row[i]))
-            k = self._quantize_term(term)
+                from mixle.inference.structure import _safe_log_density
+
+                if parent is None:
+                    term = _safe_log_density(tree.factors[i], row[i])
+                else:
+                    term = _safe_log_density(tree.factors[i], (tree._key(i, row[parent]), row[i]))
+                k = self._quantize_term(term)
             if k <= _LOG_ZERO_INT:
                 return _LOG_ZERO_INT
             total += k
