@@ -65,19 +65,20 @@ teacher.
 from mixle.task import distill, CalibratedTaskModel, Cascade, CostModel
 
 def teacher(texts):
-    ...   # a slow, expensive "frontier" model — an LLM, a human, a rule; ground truth, but $ per call
+    ...   # a slow, expensive "frontier" model — an LLM, a human, a rule
 
-# text for the task (e.g. spam vs ham): `train` to distill on, `cal` to calibrate, `stream` to serve
+# `train` to distill on, `cal` to calibrate, `stream` to serve (e.g. spam vs ham)
 train, cal, stream = ..., ..., ...
 
-# distill the teacher into a tiny local model (a ~33K-parameter MLP over hashed n-grams, ~130 KB),
-# calibrate WHEN to trust it (conformal), and serve a cascade — local when confident, escalate the rest
-student = distill(teacher, train, n=4, dim=512, hidden=[64], epochs=250, task="spam vs ham")
+# distill the teacher into a tiny local model (~33K-param MLP over hashed
+# n-grams, ~130 KB), calibrate WHEN to trust it, then serve a cascade
+student = distill(teacher, train, n=4, dim=512, hidden=[64], epochs=250,
+                  task="spam vs ham")
 gated   = CalibratedTaskModel(student, alpha=0.1).calibrate(cal, teacher(cal))
 cascade = Cascade(gated, teacher, cost=CostModel(c_local=0.0, c_frontier=0.01))
 
-cascade.serve(stream)   # frontier-quality answers, ~92% from the 33K-parameter local model
-cascade.report()        # -> ~8% escalated; ~$2.76 saved / 300 requests vs frontier-only (on spam-vs-ham)
+cascade.serve(stream)   # frontier-quality answers, ~92% handled locally
+cascade.report()        # -> ~8% escalated; ~$2.76 saved / 300 reqs vs frontier
 ```
 
 The tiny model handles the easy majority and defers the hard cases, so the blend matches the teacher while
@@ -92,22 +93,28 @@ mode **coupled across states by `keys=`**. One `optimize` call fits the whole tr
 from mixle.stats import *
 from mixle.inference import optimize
 
-# each observation is a length-3 sequence of segments; a segment = (a real "tone", a 2-token "phrase"):
+# each observation is a length-3 sequence of segments;
+# a segment = (a real "tone", a 2-token "phrase"):
 data = [
     [(-2.61, [0.05, 1.81]), (2.13, [-0.26, -1.14]), (-1.01, [-1.33, 1.36])],
     [(2.24, [4.90, 2.64]), (-2.33, [0.68, -0.50]), (1.29, [1.93, -1.04])],
     ...   # 200 like these, from two latent segment types
 ]
 
-# fit by EM; keys="tone" ties the mixture's first mode across BOTH states (a shared parameter, one gradient)
+# fit by EM; keys="tone" ties the mixture's first mode across BOTH
+# states — a shared parameter, one gradient
 def emest():
-    return CompositeEstimator((MixtureEstimator([GaussianEstimator(keys="tone"), GaussianEstimator()]),
-        HeterogeneousPCFGEstimator(binary_rules={"S": [("A", "B", .5), ("B", "A", .5)]},
-            terminal_rules={"A": [(GaussianEstimator(), 1.)], "B": [(GaussianEstimator(), 1.)]}, start="S")))
+    return CompositeEstimator((
+        MixtureEstimator([GaussianEstimator(keys="tone"), GaussianEstimator()]),
+        HeterogeneousPCFGEstimator(
+            binary_rules={"S": [("A", "B", .5), ("B", "A", .5)]},
+            terminal_rules={"A": [(GaussianEstimator(), 1.)],
+                            "B": [(GaussianEstimator(), 1.)]}, start="S")))
 fit = optimize(data, SegmentalHiddenMarkovEstimator(
-    [emest(), emest()], len_estimator=CategoricalDistribution({3: 1.0}).estimator()), max_its=15)
+    [emest(), emest()],
+    len_estimator=CategoricalDistribution({3: 1.0}).estimator()), max_its=15)
 
-fit.log_density(data[0])   # score a structured observation under the whole composed model
+fit.log_density(data[0])   # score the observation under the whole model
 ```
 
 **The whole lifecycle is one object.** `mixle.propose(data)` fits every proposer the library has on a
@@ -116,9 +123,10 @@ train split, ranks them on held-out data, and returns the winner — then the ve
 ```python
 data = ...    # your records — any mix of types
 
-m = mixle.propose(data, fit=True)   # fit every proposer on a split, rank on held-out, keep the winner
+# fit every proposer on a split, rank on held-out, keep the winner
+m = mixle.propose(data, fit=True)
 m.evaluate(...); m.sample(5); m.posterior(...); m.explain()
-m.deploy("artifacts/m")             # durable artifact; mixle.Model.load() restores it
+m.deploy("artifacts/m")   # durable artifact; mixle.Model.load() restores it
 ```
 
 **Replace a function with a model.** `solve()` closes the loop: the code currently doing the job labels
@@ -128,12 +136,13 @@ calibrated, in-distribution decision is safe — otherwise it calls the original
 ```python
 from mixle.task import solve
 
-route = ...     # the function doing the job today — a rule, an API call, an LLM
+route = ...     # the function doing the job today — a rule, an API, an LLM
 tickets = ...   # a list of representative inputs
 
-sol = solve(route, tickets, propose="auto", synthesize=200)   # label with route(); train; conformally calibrate
-sol(tickets[0])      # drop-in: answers locally when SURE, else falls back to route()
-sol.improve()        # fold escalations back in; promote only if it verifies better
+# label with route(), train a student, conformally calibrate
+sol = solve(route, tickets, propose="auto", synthesize=200)
+sol(tickets[0])   # drop-in: answers locally when SURE, else calls route()
+sol.improve()     # fold escalations back in; promote only if it verifies better
 sol.save("artifacts/router")
 ```
 
@@ -148,9 +157,9 @@ ops, device, and precision — so **scale-out is a backend argument, not a rewri
 ```python
 from mixle.engines import TorchEngine
 
-optimize(..., engine=TorchEngine(device="cuda", dtype="float32"))   # GPU: the same fit, one extra argument
-optimize(..., precision="auto")                                     # mixed precision; stats still accumulate in float64
-optimize(..., backend="spark")                                      # distributed: mp · dask · mpi · ray · lightning
+optimize(..., engine=TorchEngine(device="cuda", dtype="float32"))  # GPU: one arg
+optimize(..., precision="auto")   # mixed precision; stats accumulate in float64
+optimize(..., backend="spark")    # distributed: mp · dask · mpi · ray · lightning
 ```
 
 - The same EM contract runs unchanged on NumPy, Numba, Torch, or a symbolic backend.
@@ -171,22 +180,25 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from mixle.enumeration import AutoregressiveEnumerable
 
-tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M")
-llm       = AutoModelForCausalLM.from_pretrained("HuggingFaceTB/SmolLM2-135M").eval()
+name      = "HuggingFaceTB/SmolLM2-135M"
+tokenizer = AutoTokenizer.from_pretrained(name)
+llm       = AutoModelForCausalLM.from_pretrained(name).eval()
 prompt    = tokenizer("The capital of France is", return_tensors="pt").input_ids
 
 @torch.no_grad()
-def next_logprobs(continuation):               # tokens chosen so far -> [(token_id, log_prob), ...]
-    ids = torch.cat([prompt, torch.tensor([continuation], dtype=torch.long)], 1) if continuation else prompt
+def next_logprobs(continuation):   # tokens so far -> [(token_id, log_prob), ...]
+    ids = (torch.cat([prompt, torch.tensor([continuation], dtype=torch.long)], 1)
+           if continuation else prompt)
     return list(enumerate(torch.log_softmax(llm(ids).logits[0, -1], -1).tolist()))
 
-continuations = AutoregressiveEnumerable(next_logprobs, max_len=3, branch_cap=8)   # branch_cap tames the 49K-token vocab
+# branch_cap tames the 49K-token vocab
+continuations = AutoregressiveEnumerable(next_logprobs, max_len=3, branch_cap=8)
 
-continuations.top_k(3)      # 3 most probable continuations -> [' located in the', ' the city of', ' the capital of']
-continuations.unrank(100)   # jump straight to the 100th-most-probable continuation, no generation -> ' in the country'
+continuations.top_k(3)      # -> [' located in the', ' the city of', ' the capital of']
+continuations.unrank(100)   # 100th-most-probable, no generation -> ' in the country'
 
-answer = continuations.unrank(5)[0]            # the ' Paris, the' continuation, as a token tuple
-continuations.rank(answer)  # the inverse — where a continuation lands -> rank=6, cumulative_prob=0.114 (exact)
+answer = continuations.unrank(5)[0]   # the ' Paris, the' continuation
+continuations.rank(answer)  # inverse -> rank=6, cumulative_prob=0.114 (exact)
 ```
 
 The same operations work on a fitted latent model. Here an HMM learns *when to stop* from an absorbing
@@ -202,13 +214,16 @@ sequences = [["team", "meet", "buy", "<EOL>"],
              ["meet", "meet", "<EOL>"],
              ...]
 
-# fit a 3-state HMM by EM; state 2 is terminal, so the model learns WHEN to stop — its emission
-# converges to "<EOL>" and the sequence length becomes a learned stopping time (no separate len_dist)
-model = optimize(sequences, HiddenMarkovEstimator([CategoricalEstimator()] * 3, terminal_states={2}))
+# fit a 3-state HMM by EM; state 2 is terminal, so the model learns WHEN to
+# stop — its emission converges to "<EOL>" and the length becomes a learned
+# stopping time (no separate len_dist)
+model = optimize(sequences,
+    HiddenMarkovEstimator([CategoricalEstimator()] * 3, terminal_states={2}))
 
 emitted = model.enumerator()
-emitted.top_k(3)          # most probable EOL-terminated sequences -> [('buy <EOL>', -2.09), ('meet <EOL>', -2.12), ('now <EOL>', -2.48)]
-emitted.from_index(3, 6)  # stream sequences ranked 3..5 in descending probability, without materializing 0..2
+# most probable EOL-terminated sequences:
+emitted.top_k(3)          # -> [('buy <EOL>', -2.09), ('meet <EOL>', -2.12), ...]
+emitted.from_index(3, 6)  # stream ranks 3..5 without materializing 0..2
 ```
 
 - **Decomposable families** (Composite / Record / Sequence / MarkovChain): rank ↔ value is an exact
@@ -228,15 +243,16 @@ A concise dialect over the same distributions. **One rule:** any parameter slot 
 ```python
 from mixle.ppl import Normal, Mix, Markov, Field, free
 
-data = [-2.1, 1.9, -1.8, 2.3, -2.0, 2.1]                 # reals from two clusters
-seqs = [[0.1, 5.1, 4.9], [4.8, 5.0], [0.0, 0.2]]         # variable-length real sequences
-Normal(free, free).fit(data)                             # estimate mean + standard deviation
-Normal(Normal(0, 10), 1.0).fit(data)                     # a prior on the mean (hierarchical)
-Mix([Normal(free, free), Normal(free, free)]).fit(data)  # a two-cluster mixture
-Markov(Normal(free, free), states=2).fit(seqs)           # a 2-state Gaussian HMM
+data = [-2.1, 1.9, -1.8, 2.3, -2.0, 2.1]   # reals from two clusters
+seqs = [[0.1, 5.1, 4.9], [4.8, 5.0], [0.0, 0.2]]   # variable-length sequences
+Normal(free, free).fit(data)               # estimate mean + standard deviation
+Normal(Normal(0, 10), 1.0).fit(data)       # a prior on the mean (hierarchical)
+Mix([Normal(free, free), Normal(free, free)]).fit(data)   # two-cluster mixture
+Markov(Normal(free, free), states=2).fit(seqs)   # a 2-state Gaussian HMM
 
 # a slot can be an expression over named latents or data columns:
-Normal(free * Field("x") + free * Field("z") + free, free).fit(..., given={"x": ..., "z": ...})  # regression
+Normal(free * Field("x") + free * Field("z") + free, free).fit(
+    ..., given={"x": ..., "z": ...})   # a regression
 ```
 
 - **`how=`** picks the inference route from the model's structure (`conjugate | em | map | laplace | vi |
@@ -291,11 +307,11 @@ Self-contained scripts in [examples/](https://github.com/gmboquet/mixle/tree/mai
 
 ```sh
 cd examples
-python gallery_univariate_example.py    # tour the scalar families (also gallery_{multivariate,combinators,…})
-python gallery_structured_example.py    # mixtures / HMMs / LDA / latent-variable models
-python ppl_example.py                   # the equation-style mixle.ppl surface
-python production_example.py            # provenance, registry, serving, drift, checkpoints
-python scaling_example.py               # the same fit distributed by backend= (local / mp / mpi / spark)
+python gallery_univariate_example.py   # scalar families (+ multivariate, …)
+python gallery_structured_example.py   # mixtures / HMMs / LDA / latent models
+python ppl_example.py                  # the equation-style mixle.ppl surface
+python production_example.py           # provenance, registry, serving, drift
+python scaling_example.py              # same fit by backend= (mp / mpi / spark)
 ```
 
 **Distributed backends** (see `scaling_example.py`): `local` and `mp` run out of the box; `mpi` and Spark
