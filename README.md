@@ -1,5 +1,8 @@
 <p align="left">
-  <img src="https://raw.githubusercontent.com/gmboquet/mixle/main/assets/mixle_logo.png" alt="mixle" width="480"/>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/gmboquet/mixle/main/assets/mixle_logo_dark.png"/>
+    <img src="https://raw.githubusercontent.com/gmboquet/mixle/main/assets/mixle_logo.png" alt="mixle" width="480"/>
+  </picture>
 </p>
 
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
