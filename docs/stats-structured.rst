@@ -68,7 +68,7 @@ observations.
      - a field must pass through shape validation but not affect likelihood.
    * - ``NullDistribution`` / ``NullEstimator``
      - no information
-     - placeholder branch in a larger composition.
+     - neutral branch in a larger composition.
 
 Combinators are how a heterogeneous row becomes one model:
 
@@ -263,4 +263,3 @@ Generated reference pages:
 * :doc:`api/mixle.stats.rankings`;
 * :doc:`api/mixle.stats.trees`;
 * :doc:`api/mixle.stats.graphs`.
-

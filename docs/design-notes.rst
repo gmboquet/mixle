@@ -84,12 +84,3 @@ The architecture favors additive shims and re-exports over breaking moves:
 stable import paths matter because serialized models store fully-qualified class
 names.
 
-Interface catalog
------------------
-
-The repository still contains detailed Markdown interface notes under
-``docs/``. They are excluded from the Sphinx build because they are internal
-cataloging material and include Markdown link patterns that are not portable
-across Sphinx/MyST versions. This Sphinx page is the stable public summary; the
-generated API reference remains the source-level detail.
-

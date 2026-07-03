@@ -466,7 +466,7 @@ class ProbabilityDistribution(ABC):
 
         Note: ``start``/``stop`` index the STRUCTURAL enumeration, not the distinct rank. Jumping to
         the k-th *distinct* value in O(1) is not possible -- it needs exact distinct per-bin counts,
-        which require the overlap structure this design deliberately avoids materializing.
+        which require materializing the component/path overlap structure.
         """
         from mixle.enumeration.quantization.core import distinct_budget_stream
 

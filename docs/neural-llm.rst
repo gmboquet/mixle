@@ -7,8 +7,7 @@ the API much easier to reason about.
 This page covers an incubating part of the project. The examples are useful
 for experiments and for hybrid models that genuinely need a neural likelihood,
 but they carry more dependency, training-state, and reproducibility risk than
-the core ``mixle.stats`` families. Start with :doc:`quickstart` and
-:doc:`concepts` if you are new to Mixle.
+the core ``mixle.stats`` families.
 
 .. list-table::
    :header-rows: 1
@@ -279,8 +278,8 @@ The older names ``StreamingTransformerLeaf``, ``NeuralLeaf``,
 ``StreamingTransformer``, ``NeuralGaussian``, ``NeuralCategorical``, and
 ``DPOModel`` in new code.
 
-Related Code
-------------
+Examples And Tests
+------------------
 
 * ``examples/hybrid_llm_example.py``: Transformer event type plus Gamma timing.
 * ``examples/shared_embedding_example.py``: shared embeddings across LM mixture

@@ -105,8 +105,8 @@ Symbolic engines make density expressions inspectable:
    expr = to_sympy(symbolic)
    latex = to_latex(symbolic)
 
-Use this for documentation, audits, or checking closed-form expressions. It is
-not intended to replace numeric fitting.
+Use this for reports, audits, or checking closed-form expressions. It is not
+intended to replace numeric fitting.
 
 Registering Array Types
 -----------------------

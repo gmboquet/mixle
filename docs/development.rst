@@ -60,11 +60,11 @@ Linting and Typing
 The project allows incremental typing in places. Treat existing configuration
 in ``pyproject.toml`` as canonical rather than broadening ignores locally.
 
-Documentation
--------------
+Documentation Build
+-------------------
 
 Update curated guide pages whenever behavior or public workflow changes. Do
-not rely on generated API stubs to explain a feature.
+not rely on generated API reference pages to explain a feature.
 
 Regenerate API pages after adding, removing, or renaming modules:
 
@@ -101,23 +101,8 @@ When adding a public symbol:
    user-facing;
 2. add it to ``__all__``;
 3. add a guide-page mention if it changes a workflow;
-4. add API-stub regeneration to the change;
+4. update generated API reference pages when module coverage changes;
 5. include tests showing expected behavior.
-
-Working on Docs
----------------
-
-Good guide pages should answer:
-
-* what problem the feature solves;
-* what data shape it expects;
-* what object to import first;
-* what the minimal workflow looks like;
-* what guarantees or caveats apply;
-* where the generated API reference lives.
-
-Keep landing pages editorial and reference pages concrete. Avoid making a page
-only a list of names unless it is explicitly an API map.
 
 Release Checklist
 -----------------
@@ -126,7 +111,7 @@ Before cutting or preparing a release-like change:
 
 * run the relevant tests;
 * build docs with ``-W``;
-* regenerate API stubs;
+* regenerate API reference pages when module coverage changes;
 * check optional dependency behavior for touched integrations;
 * verify examples that advertise the changed workflow;
 * update version or packaging metadata only as part of an intentional release.

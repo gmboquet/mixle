@@ -53,7 +53,7 @@ and header in their own registry.
        model,
        "demo-gaussian",
        header=header,
-       metadata={"owner": "docs", "purpose": "tutorial"},
+       metadata={"owner": "ml-platform", "purpose": "density-monitoring"},
    )
    registry.promote("demo-gaussian", version, alias="production")
 

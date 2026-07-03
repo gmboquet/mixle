@@ -119,7 +119,7 @@ Optional: fit a Transformer plus timing model
 
 This recipe uses ``mixle.models``, which is an incubating applied-helper
 namespace. Use it when a neural event-history likelihood is actually needed;
-otherwise prefer the stable ``mixle.stats`` examples above.
+otherwise keep the event model in ordinary ``mixle.stats`` families.
 
 .. code-block:: python
 
@@ -374,11 +374,3 @@ Create a durable production fit
 
    model, header = fit_with_provenance(data, estimator, seed=1)
    print(header.dataset_hash, header.model_hash)
-
-Regenerate and build docs
--------------------------
-
-.. code-block:: sh
-
-   make -C docs apidoc
-   .venv/bin/sphinx-build -W -b html docs docs/_build/html

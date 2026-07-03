@@ -40,8 +40,8 @@ At the stable center are distribution families, estimators, samplers, encoders,
 combinators, mixtures, HMMs, and the ``optimize`` inference entry point. Around
 that center are newer workflow layers for automatic model recommendation,
 probabilistic-programming expressions, neural leaves, task replacement, LLM
-uncertainty, design loops, model evolution, and production metadata. The docs
-call out maturity where it matters so users can choose the right validation
+uncertainty, design loops, model evolution, and production metadata. Maturity
+is called out where it matters so users can choose the right validation
 standard.
 
 Core Principles
@@ -66,10 +66,8 @@ Inspectable automation
     specifications expose assumptions, validation checks, confidence gaps, and
     fallback behavior.
 
-First Paths
------------
-
-Use these routes when you are deciding where to enter the documentation.
+Common Workflows
+----------------
 
 Fit a heterogeneous probability model
     Start with :doc:`quickstart`, then read :doc:`concepts`,
@@ -145,12 +143,12 @@ evidence, latent structure, learned components, and calibrated decisions, Mixle
 should make it possible to fit, inspect, compare, and deploy that system without
 breaking the abstraction apart.
 
-Documentation Map
------------------
+Manual Map
+----------
 
-New users should read :doc:`installation`, :doc:`quickstart`,
-:doc:`concepts`, :doc:`maturity`, and :doc:`package-map` first. The tutorial
-index in :doc:`tutorials/index` provides task-sized walkthroughs. The generated
+The foundational pages are :doc:`installation`, :doc:`quickstart`,
+:doc:`concepts`, :doc:`maturity`, and :doc:`package-map`. The tutorial index in
+:doc:`tutorials/index` provides task-sized walkthroughs. The generated
 reference under :doc:`api/modules` is exhaustive; :doc:`api-overview` is the
 human map for finding the right import.
 

@@ -156,7 +156,7 @@ that Java is installed.
 Documentation Build Fails
 -------------------------
 
-Use the same command as CI-style verification:
+Use the same strict verification command:
 
 .. code-block:: sh
 

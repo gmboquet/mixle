@@ -8,10 +8,10 @@ surrogate, a random-forest conditional, a graph model, an induced grammar, a
 knowledge-graph embedding, a POMDP, a truncated DPM helper, or a training-loop
 utility.
 
-This namespace is not the stable spine of Mixle. For most tutorials and
-production-facing examples, start with ``mixle.stats`` and
-``mixle.inference``. Reach for ``mixle.models`` only after the specialized
-family is needed.
+For ordinary distribution modeling, ``mixle.stats`` and ``mixle.inference``
+remain the primary surface. ``mixle.models`` is the applied-model layer for
+specialized families that need additional training, optional dependencies, or
+domain-specific conventions.
 
 The design goal is still compositional. Where practical, helpers expose the
 same estimator, distribution, sampler, scoring, or fit-result conventions used
