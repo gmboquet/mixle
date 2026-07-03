@@ -52,7 +52,7 @@ from mixle.inference.calibration import (
     reliability_curve,
     top_label_confidence,
 )
-from mixle.inference.causal import InterventionalNetwork, average_causal_effect, do
+from mixle.inference.causal import InterventionalNetwork, average_causal_effect, counterfactual, do
 from mixle.inference.conformal import (
     conformal_label_sets,
     conformal_label_threshold,
@@ -266,6 +266,7 @@ __all__ = [
     "explain",
     "InterventionalNetwork",
     "average_causal_effect",
+    "counterfactual",
     "do",
     "Forecast",
     "forecast",
