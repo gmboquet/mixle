@@ -103,6 +103,26 @@ class NeuralLeaf(SequenceEncodableProbabilityDistribution):
         sq = ((y - mean) ** 2).sum(axis=1)
         return -0.5 * sq / (self.noise**2) - 0.5 * d * np.log(2.0 * np.pi * self.noise**2)
 
+    # --- compute-engine backend (numpy + torch/GPU), SCORING: the module forward runs on the leaf's
+    # own device (as always), the Gaussian residual math on the active engine — so a mixture of neural
+    # experts computes its E-step responsibilities through engine=TorchEngine(...) like any other family.
+    # The accumulator (the responsibility-weighted gradient M-step buffer) stays host-side by design. ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+
+    def backend_seq_log_density(self, enc: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded ``(x, y)`` pairs."""
+        x, y = enc
+        mean = engine.asarray(self._forward(x))
+        yy = engine.asarray(np.atleast_2d(np.asarray(y, dtype=float)))
+        d = int(yy.shape[1])
+        resid = yy - mean
+        sq = engine.sum(resid * resid, axis=1)
+        return -0.5 * sq / (self.noise**2) - 0.5 * d * float(np.log(2.0 * np.pi * self.noise**2))
+
     def sampler(self, seed: int | None = None) -> NeuralLeafSampler:
         return NeuralLeafSampler(self, seed)
 

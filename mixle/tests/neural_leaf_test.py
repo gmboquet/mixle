@@ -92,5 +92,28 @@ class NeuralLeafTest(unittest.TestCase):
         self.assertNotEqual(str(_resolve_device(None, torch)), "meta")
 
 
+class NeuralLeafEngineScoringTest(unittest.TestCase):
+    @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+    def test_backend_scoring_matches_host_and_mixture_is_torch_eligible(self):
+        import numpy as np
+        import torch
+
+        from mixle.engines import TorchEngine
+        from mixle.models.neural_leaf import NeuralLeaf
+        from mixle.stats import MixtureDistribution
+        from mixle.stats.compute.backend import backend_seq_log_density
+
+        torch.manual_seed(0)
+        leaf = NeuralLeaf(_mlp([1, 8, 1]), noise=0.7, device="cpu")
+        rng = np.random.RandomState(0)
+        data = [(rng.uniform(-2, 2, 1).astype("float32"), rng.randn(1).astype("float32")) for _ in range(40)]
+        enc = leaf.dist_to_encoder().seq_encode(data)
+        eng = TorchEngine(device="cpu", dtype="float64")
+        got = eng.to_numpy(backend_seq_log_density(leaf, enc, eng))
+        np.testing.assert_allclose(got, leaf.seq_log_density(enc), atol=1e-12)
+        mix = MixtureDistribution([leaf, NeuralLeaf(_mlp([1, 8, 1]), device="cpu")], [0.5, 0.5])
+        self.assertTrue(mix.supports_engine(eng))
+
+
 if __name__ == "__main__":
     unittest.main()
