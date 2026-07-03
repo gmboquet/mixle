@@ -146,6 +146,7 @@ def solve_structured(
     *,
     tol: dict[str, float] | float | None = None,
     alpha: float = 0.1,
+    prelabeled: tuple[Sequence[Any], Sequence[dict]] | None = None,
     seed: int = 0,
     **sub_kw: Any,
 ) -> StructuredSolution:
@@ -157,6 +158,11 @@ def solve_structured(
         tol: the precision requirement for numeric fields — a scalar for all, or ``{field: tol}``.
             Required when the schema has numeric fields.
         alpha: shared miscoverage level for every field's calibration.
+        prelabeled: already-teacher-labeled ``(inputs, output_dicts)`` — typically harvested
+            escalations from a serving deployment — fanned down into every field's TRAINING split
+            only, never calibration (each sub-solution's guarantee stays a fresh split of ``inputs``).
+            The schema stays authoritative from the ``inputs`` pass; a pair missing a field is simply
+            skipped for that field.
         **sub_kw: knobs forwarded to every sub-solve (``epochs``, ``hidden``, ``dim``, …).
     """
     items = list(inputs)
@@ -167,6 +173,14 @@ def solve_structured(
     if not keys:
         raise ValueError("the teacher produced empty dicts on the example inputs")
 
+    pre_in: list = []
+    pre_outs: list[dict] = []
+    if prelabeled is not None:
+        pre_in = list(prelabeled[0])
+        pre_outs = [dict(o) for o in prelabeled[1]]
+        if len(pre_in) != len(pre_outs):
+            raise ValueError("prelabeled inputs and output dicts must have equal length")
+
     numeric = {k for k in keys if all(_is_number(o.get(k)) for o in outs)}
     if numeric and tol is None:
         raise ValueError(f"numeric output fields {sorted(numeric)} need tol= (a scalar or per-field dict)")
@@ -174,15 +188,31 @@ def solve_structured(
 
     table = {repr(x): o for x, o in zip(items, outs)}
 
+    def _field_pre(key: str, cast: Callable[[Any], Any]) -> tuple[list, list] | None:
+        pairs = [(x, cast(o[key])) for x, o in zip(pre_in, pre_outs) if key in o]
+        return ([p[0] for p in pairs], [p[1] for p in pairs]) if pairs else None
+
     fields_cat: dict[str, Solution] = {}
     fields_num: dict[str, RegressionSolution] = {}
     for key in keys:
         if key in numeric:
             fields_num[key] = solve_regression(
-                lambda x, _k=key: float(table[repr(x)][_k]), items, tol=tol_of(key), alpha=alpha, seed=seed, **sub_kw
+                lambda x, _k=key: float(table[repr(x)][_k]),
+                items,
+                tol=tol_of(key),
+                alpha=alpha,
+                prelabeled=_field_pre(key, float),
+                seed=seed,
+                **sub_kw,
             )
         else:
             fields_cat[key] = solve(
-                lambda x, _k=key: str(table[repr(x)][_k]), items, alpha=alpha, ood=None, seed=seed, **sub_kw
+                lambda x, _k=key: str(table[repr(x)][_k]),
+                items,
+                alpha=alpha,
+                ood=None,
+                prelabeled=_field_pre(key, str),
+                seed=seed,
+                **sub_kw,
             )
     return StructuredSolution(fields_cat=fields_cat, fields_num=fields_num, teacher=teacher)

@@ -190,6 +190,29 @@ class ServingLoopRoundTripTest(unittest.TestCase):
             self.assertTrue((__import__("pathlib").Path(d) / "tasks" / "router" / "manifest.json").exists())
             self.assertIn("tasks/router", path.replace("\\", "/"))
 
+    def test_answer_rows_keep_their_shape(self):
+        import json
+        import tempfile
+
+        from mixle.task import load_harvested
+
+        with tempfile.TemporaryDirectory() as d:
+            # what the mlops /v1/solutions/{name}/feedback endpoint accumulates: shape-typed answers
+            rows = [
+                {"input": {"kind": "bug", "amount": 5.0}, "answer": 2520.0},
+                {"input": "flag this one", "answer": ["high-value", "eu-rules"]},
+                {"input": ["refund", 30.0], "answer": {"queue": "billing", "priority": 12.5}},
+            ]
+            p = d + "/harvested.jsonl"
+            with open(p, "w") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+            ins, answers = load_harvested(p)
+            self.assertEqual(answers[0], 2520.0)  # regression: a number, NOT str-coerced
+            self.assertEqual(answers[1], ["high-value", "eu-rules"])  # multilabel: the set
+            self.assertEqual(answers[2], {"queue": "billing", "priority": 12.5})  # structured: the dict
+            self.assertIsInstance(ins[2], tuple)  # record inputs still coerce to tuples
+
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class SolveOnDeviceTest(unittest.TestCase):

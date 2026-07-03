@@ -119,5 +119,34 @@ class MultiLabelPersistenceTest(unittest.TestCase):
             back.improve()
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class MultiLabelResolveTest(unittest.TestCase):
+    """prelabeled= closes the serving loop: harvested sets retrain WITHOUT re-calling the teacher."""
+
+    def test_prelabeled_trains_only_and_extends_label_space(self):
+        from mixle.task import solve_multilabel
+
+        calls = {"n": 0}
+
+        def counting_teacher(t):
+            if isinstance(t, list):  # the batched probe, not a real label
+                raise TypeError("per-item teacher")
+            calls["n"] += 1
+            return _tags(t)
+
+        base = _txns(100, seed=0)
+        harvested = _txns(60, seed=11)
+        # one harvested set carries a label the base pass never produced
+        pre_sets = [_tags(t) for t in harvested]
+        pre_sets[0] = [*pre_sets[0], "manual-review"]
+
+        sol = solve_multilabel(counting_teacher, base, alpha=0.1, prelabeled=(harvested, pre_sets), seed=0, epochs=150)
+        self.assertEqual(calls["n"], len(base))  # prelabeled pairs came in free
+        self.assertIn("manual-review", sol.labels)  # harvest-only labels enter the space
+        self.assertEqual(len(sol.train_inputs), len(base) - len(sol.cal_inputs) + len(harvested))
+        for t in harvested:
+            self.assertNotIn(repr(t), [repr(c) for c in sol.cal_inputs])
+
+
 if __name__ == "__main__":
     unittest.main()
