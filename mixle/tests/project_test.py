@@ -112,6 +112,21 @@ class ReduceTest(unittest.TestCase):
         same = reduce_mixture(gmm, 10)  # target exceeds K -> unchanged
         self.assertEqual(same.num_components, gmm.num_components)
 
+    def test_reduction_gets_monotonically_closer_to_teacher(self):
+        # the benchmark's headline claim, as a fast deterministic property: more retained components =>
+        # lower forward KL to the teacher. KL(teacher || reduced) ~ mean_x~teacher[log p(x) - log q(x)].
+        gmm, *_ = self._gmm(seed=5)
+        xs = list(gmm.sampler(0).sample(1500))
+        tlogp = np.array([gmm.log_density(x) for x in xs])
+
+        def kl(student):
+            return float(np.mean(tlogp - np.array([student.log_density(x) for x in xs])))
+
+        kls = [kl(reduce_mixture(gmm, m)) for m in (1, 2, 4)]
+        self.assertGreater(kls[0], kls[1])  # 1 -> 2 components strictly closer
+        self.assertGreaterEqual(kls[1] + 1e-9, kls[2])  # 2 -> 4 no worse
+        self.assertGreaterEqual(kls[2], -1e-9)  # forward KL is non-negative (up to MC noise)
+
     def test_runnalls_merges_the_closest_pair(self):
         # two nearly-identical components + one far away; reducing 3->2 must merge the two close ones,
         # leaving the far component essentially untouched
