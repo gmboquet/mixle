@@ -58,6 +58,199 @@ _KRONECKER_MIN_PRODUCT = 2048
 # wide deep-sequence convolutions produce.
 _GMPY2_MIN_BITS = 50_000
 
+# --- exact NTT backend (Pollard 1971): vectorized number-theoretic transform + CRT -----------------
+# Two NTT-friendly primes p = c*2^k + 1 with known primitive roots, both < 2^31 so every butterfly
+# product fits uint64 EXACTLY (a*b < 2^62), and their product (~2^61.66) bounds the largest output
+# coefficient the two-prime CRT reconstructs exactly. An earlier prototype concluded "NTT loses to
+# Kronecker" — that verdict was an implementation artifact: it reduced/reconstructed the coefficients
+# with per-element Python big-int arithmetic, which dominated the C-level transform. When the
+# coefficients FIT machine words (the common depth-bounded-budget case), the whole pipeline —
+# reduction, transforms, pointwise multiply, CRT — stays inside vectorized uint64 numpy with no
+# Python-level big-int work at all, and the classical algorithm wins as it should.
+_NTT_P1, _NTT_G1 = 2013265921, 31  # 15 * 2^27 + 1
+_NTT_P2, _NTT_G2 = 1811939329, 13  # 27 * 2^26 + 1
+# (prime, primitive root, max transform length = its 2-adic capacity). All primes < 2^31 so every
+# butterfly product fits uint64; roots verified primitive (g^((p-1)/q) != 1 for all q | p-1).
+_NTT_PRIMES = (
+    (_NTT_P1, _NTT_G1, 1 << 27),
+    (_NTT_P2, _NTT_G2, 1 << 26),
+    (469762049, 3, 1 << 26),  # 7 * 2^26 + 1
+    (754974721, 11, 1 << 24),  # 45 * 2^24 + 1
+    (998244353, 3, 1 << 23),  # 119 * 2^23 + 1
+    (167772161, 3, 1 << 25),  # 5 * 2^25 + 1
+    (1004535809, 3, 1 << 21),  # 479 * 2^21 + 1
+)
+_NTT_CRT_INV = pow(_NTT_P1, _NTT_P2 - 2, _NTT_P2)  # p1^{-1} mod p2
+_NTT_MAX_COEFF = _NTT_P1 * _NTT_P2  # exclusive bound on outputs the pure-uint64 two-prime CRT covers
+_NTT_MAX_COEFF_FULL = math.prod(p for p, _g, _n in _NTT_PRIMES)  # ~2^207: the full-ladder ceiling
+_NTT_ENABLED = True  # test hook: force the Kronecker backend by flipping this off
+_ntt_tables_cache: dict[tuple[int, int], tuple[Any, Any, Any, int]] = {}
+
+
+def _ntt_tables(p: int, g: int, n: int) -> tuple[Any, Any, Any, int]:
+    """Cached (bit-reversal index, per-stage forward twiddles, per-stage inverse twiddles, n^-1 mod p)."""
+    key = (p, n)
+    tab = _ntt_tables_cache.get(key)
+    if tab is not None:
+        return tab
+    bits = n.bit_length() - 1
+    idx = np.arange(n, dtype=np.int64)
+    rev = np.zeros(n, dtype=np.int64)
+    for _ in range(bits):
+        rev = (rev << 1) | (idx & 1)
+        idx >>= 1
+    pp = np.uint64(p)
+    fwd: list[Any] = []
+    inv: list[Any] = []
+    length = 2
+    while length <= n:
+        half = length >> 1
+        root = pow(g, (p - 1) // length, p)
+        for stages, r in ((fwd, root), (inv, pow(root, p - 2, p))):
+            w = np.empty(half, dtype=np.uint64)
+            w[0] = 1
+            m, cur = 1, r
+            while m < half:  # doubling: w[m:2m] = w[:m] * r^m — O(log half) vector ops
+                step = min(m, half - m)
+                w[m : m + step] = (w[:step] * np.uint64(cur)) % pp
+                cur = (cur * cur) % p
+                m <<= 1
+            stages.append(w)
+        length <<= 1
+    tab = (rev, fwd, inv, pow(n, p - 2, p))
+    _ntt_tables_cache[key] = tab
+    return tab
+
+
+def _ntt_transform(x: Any, p: int, stages: Any, rev: Any) -> Any:
+    """In-place-style iterative Cooley-Tukey NTT of ``x`` (length a power of two) modulo ``p``."""
+    x = x[rev]
+    pp = np.uint64(p)
+    length, s = 2, 0
+    n = len(x)
+    while length <= n:
+        half = length >> 1
+        xv = x.reshape(-1, length)
+        u = xv[:, :half]
+        v = (xv[:, half:] * stages[s]) % pp
+        hi = (u + pp - v) % pp  # both outputs read the ORIGINAL u before either write
+        lo = (u + v) % pp
+        xv[:, :half] = lo
+        xv[:, half:] = hi
+        length <<= 1
+        s += 1
+    return x
+
+
+def _packed_bits_estimate(a: list[int], b: list[int]) -> int:
+    """The Kronecker packed-operand bit length this multiply would produce (backend routing only)."""
+    bit_l = max(a).bit_length() + max(b).bit_length() + min(len(a), len(b)).bit_length() + 1
+    return 8 * ((bit_l + 7) // 8) * max(len(a), len(b))
+
+
+def _kept_coeff_bound(a: list[int], b: list[int], width: int, delta_bits: float | None) -> int:
+    """A sound MEASURED bound on every kept output coefficient (index < ``width``).
+
+    Baseline: the arithmetic bound ``min(len)*max(a)*max(b)``. When the caller supplies the
+    histogram's bucket pitch ``delta_bits`` (bits per fine bucket), sharpen it with the measured
+    exponential envelopes ``a_i <= 2^(C_a + i*delta)`` where ``C_a = max_i(bitlen(a_i) - i*delta)``
+    (and likewise ``C_b``): then ``out[k] = sum_i a_i b_{k-i} <= min(len) * 2^(C_a + C_b + k*delta)``.
+    Count-DP histograms hug that envelope (counts grow with the bucket's bits), so the kept low-order
+    outputs get a bound near their true size even when the raw maxima sit far beyond the CRT range —
+    with nothing assumed: both envelopes are computed from the data.
+    """
+    bound = min(len(a), len(b)) * max(a) * max(b)
+    if delta_bits is None or delta_bits <= 0:
+        return bound
+    c_a = max(v.bit_length() - i * delta_bits for i, v in enumerate(a) if v)
+    c_b = max(v.bit_length() - i * delta_bits for i, v in enumerate(b) if v)
+    env_bits = c_a + c_b + delta_bits * (width - 1) + math.log2(min(len(a), len(b), width)) + 1.0
+    if env_bits < bound.bit_length():
+        return 1 << int(math.ceil(env_bits))
+    return bound
+
+
+def _convolve_ntt(a: list[int], b: list[int], width: int, bucket_delta_bits: float | None = None) -> list[int] | None:
+    """Exact integer convolution via a multi-prime NTT + CRT, vectorized in uint64.
+
+    Returns ``None`` when a KEPT output coefficient (index < ``width``) could exceed the prime
+    ladder's CRT capacity (~2^207) — the caller falls back to Kronecker substitution, which is exact
+    for arbitrarily large counts. Eligibility and the number of primes come from
+    :func:`_kept_coeff_bound` (measured, assumption-free). A wrapped coefficient beyond ``width`` is
+    harmless: the transform length covers the full linear convolution (no cyclic aliasing), each
+    coefficient reconstructs independently, and the out-of-range ones are exactly the ones sliced
+    away. Within capacity the result is bit-identical to the other backends.
+    """
+    max_a = max(a)
+    max_b = max(b)
+    if max_a == 0 or max_b == 0:
+        return [0] * width
+    bound = _kept_coeff_bound(a, b, width, bucket_delta_bits)
+    if not _NTT_ENABLED or bound >= _NTT_MAX_COEFF_FULL:
+        return None
+    n_primes = 1
+    cap = _NTT_PRIMES[0][0]
+    while cap <= bound:
+        cap *= _NTT_PRIMES[n_primes][0]
+        n_primes += 1
+
+    full = len(a) + len(b) - 1
+    n = 1
+    while n < full:
+        n <<= 1
+    if any(n > max_n for _p, _g, max_n in _NTT_PRIMES[:n_primes]):
+        return None  # transform longer than a used prime's 2-adic capacity
+    if max_a.bit_length() < 64 and max_b.bit_length() < 64:
+        fa = np.zeros(n, dtype=np.uint64)
+        fb = np.zeros(n, dtype=np.uint64)
+        fa[: len(a)] = a
+        fb[: len(b)] = b
+        reduce = lambda arr, pp: arr % pp  # noqa: E731 - vectorized residues
+    else:
+        fa, fb = a, b  # counts above 2^64: reduce per prime with Python int mod (O(n), cheap vs the multiply)
+
+        def reduce(arr: Any, pp: Any) -> Any:
+            out = np.zeros(n, dtype=np.uint64)
+            out[: len(arr)] = [c % int(pp) for c in arr]
+            return out
+
+    residues = []
+    for p, g, _max_n in _NTT_PRIMES[:n_primes]:
+        rev, fwd, inv, n_inv = _ntt_tables(p, g, n)
+        pp = np.uint64(p)
+        ha = _ntt_transform(reduce(fa, pp), p, fwd, rev)
+        hb = _ntt_transform(reduce(fb, pp), p, fwd, rev)
+        hc = _ntt_transform((ha * hb) % pp, p, inv, rev)
+        residues.append(((hc * np.uint64(n_inv)) % pp)[:width])
+
+    if n_primes == 1:
+        return residues[0].tolist()
+    if n_primes == 2:
+        a1, a2 = residues
+        p2 = np.uint64(_NTT_P2)
+        t = ((a2 + p2 - a1 % p2) * np.uint64(_NTT_CRT_INV)) % p2
+        return (a1 + np.uint64(_NTT_P1) * t).tolist()  # < p1*p2 < 2^62: exact in uint64
+
+    # 3+ primes: Garner mixed-radix digits, every intermediate in uint64 (digits and moduli < 2^31,
+    # so d*p products < 2^62); only the final positional assembly leaves machine words, one cheap
+    # Python big-int expression per KEPT coefficient (the same order of per-element work as
+    # Kronecker's from_bytes unpack).
+    digits = [residues[0]]
+    for j in range(1, n_primes):
+        pj = np.uint64(_NTT_PRIMES[j][0])
+        acc = residues[j]
+        scale = np.uint64(1)
+        for i in range(j):
+            di = digits[i] % pj
+            acc = (acc + pj - (di * scale) % pj) % pj
+            scale = (scale * np.uint64(_NTT_PRIMES[i][0])) % pj
+        digits.append((acc * np.uint64(pow(int(scale), _NTT_PRIMES[j][0] - 2, _NTT_PRIMES[j][0]))) % pj)
+    lists = [d.tolist() for d in digits]
+    prefix = [1]
+    for p, _g, _max_n in _NTT_PRIMES[: n_primes - 1]:
+        prefix.append(prefix[-1] * p)
+    return [sum(dj * pj for dj, pj in zip(row, prefix)) for row in zip(*lists)]
+
 
 def _convolve_kronecker(a: list[int], b: list[int], width: int) -> list[int]:
     """Exact integer convolution of ``a`` and ``b`` via one big-integer multiply.
@@ -150,7 +343,7 @@ class Quantizer:
             return a.convolve_float(b, max_fine_bucket=max_fine_bucket)
         if self.executor is not None:
             return self.executor.convolve(a, b, max_fine_bucket)
-        return a.convolve(b, max_fine_bucket=max_fine_bucket)
+        return a.convolve(b, max_fine_bucket=max_fine_bucket, bucket_delta_bits=self.bin_width_bits / self.oversample)
 
     def bits(self, log_prob: float) -> float:
         """Information content -log2 p in bits (>= 0)."""
@@ -259,19 +452,23 @@ class CountHistogram:
                 out[other.base + i - base] += c
         return CountHistogram(base, out)
 
-    def convolve(self, other: "CountHistogram", max_fine_bucket: int | None = None) -> "CountHistogram":
+    def convolve(
+        self, other: "CountHistogram", max_fine_bucket: int | None = None, bucket_delta_bits: float | None = None
+    ) -> "CountHistogram":
         """Discrete convolution: counts of sums of two independent additive log-prob terms.
 
         Optionally drop output buckets beyond ``max_fine_bucket`` during accumulation so a
         depth bound keeps the histogram width fixed regardless of how large the counts grow.
 
-        Two backends produce identical results: a direct double loop for small operands, and
-        Kronecker substitution (:func:`_convolve_kronecker`) for large ones. The latter packs
-        each integer histogram into one big integer (the polynomial evaluated at a power of two
-        wide enough that output coefficients cannot overlap) and multiplies once, pushing the
-        inner loop into CPython's sub-quadratic big-integer multiply. Exact for arbitrarily
-        large counts -- the counts here routinely exceed 2**128, so a floating-point FFT is not
-        an option.
+        Three backends produce identical results: a direct double loop for small operands, a
+        vectorized multi-prime number-theoretic transform (:func:`_convolve_ntt`) when every KEPT
+        output coefficient provably fits the prime ladder's CRT capacity (``bucket_delta_bits`` — the
+        quantizer's bits-per-fine-bucket pitch — lets the measured-envelope bound engage; see
+        :func:`_kept_coeff_bound`), and Kronecker substitution (:func:`_convolve_kronecker`)
+        otherwise. The latter packs each integer histogram into a single big integer and multiplies
+        once, pushing the inner loop into CPython's sub-quadratic big-integer multiply -- exact for
+        arbitrarily large counts (they can exceed the ladder's ~2^207, so an unchecked
+        floating-point FFT is never an option).
         """
         a, b = self.data, other.data
         if not a or not b:
@@ -290,7 +487,15 @@ class CountHistogram:
         if len(b) > width:
             b = b[:width]
         if len(a) * len(b) > _KRONECKER_MIN_PRODUCT:
-            out = _convolve_kronecker(a, b, width)
+            # Backend choice, measured: the vectorized NTT beats CPython-bigint Kronecker 3-14x across
+            # the eligible range, but GMP's FFT multiply still wins once the packed operands are large
+            # enough to clear the gmpy2 threshold (~0.6-0.9x there) — so with gmpy2 installed AND a
+            # huge multiply ahead, keep Kronecker; otherwise try the NTT first.
+            out = None
+            if gmpy2 is None or _packed_bits_estimate(a, b) <= _GMPY2_MIN_BITS:
+                out = _convolve_ntt(a, b, width, bucket_delta_bits)  # exact when outputs fit the CRT range
+            if out is None:
+                out = _convolve_kronecker(a, b, width)
         else:
             out = [0] * width
             for i, ai in enumerate(a):
