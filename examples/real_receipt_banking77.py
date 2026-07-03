@@ -9,8 +9,12 @@ dataset. The "frontier" is an oracle stand-in (the dataset's gold labels, priced
         artifact 84 KB · $19.95 vs $30.00 per 1k
   * the ESCALATION-DECAY CURVE — six rounds of live traffic, each followed by ``improve()``
     (harvest the teacher's answers on escalated queries, re-distill, promote only if better):
-        0.679 -> 0.584 -> 0.576 -> 0.488 -> 0.499 -> 0.428
-    while end-to-end accuracy stays ~0.98 throughout. "Gets cheaper the longer it runs", measured.
+        MLP student        : 0.679 -> 0.584 -> 0.576 -> 0.488 -> 0.499 -> 0.428
+        generative student : 0.588 -> 0.476 -> 0.438 -> 0.380 -> 0.300 -> 0.297
+    "Gets cheaper the longer it runs", measured — and the generative student (torch-free,
+    ``student="generative"``) compounds faster, ending 13 points lower. End-to-end accuracy eases
+    0.98 -> 0.95 as more traffic answers locally: that is the alpha = 0.1 design exposing its bounded
+    local risk, not a regression (escalated queries are still answered exactly by the teacher).
 
 Honest readings this run forces: (1) a 77-class real task makes a hashed-feature student humble — the
 conformal gate correctly refuses ~2/3 of traffic at first; the SYSTEM is still 98% accurate because
@@ -44,7 +48,11 @@ def main() -> None:
     rounds = [[t for t, _ in train_all[3000 + i * 1000 : 3000 + (i + 1) * 1000]] for i in range(6)]
     test_texts = [t for t, _ in test]
 
-    sol = solve(oracle, seed_texts, alpha=0.1, seed=0, epochs=250)
+    import sys
+
+    student = "generative" if "--generative" in sys.argv else "mlp"
+    kw = {"student": "generative", "pseudo_count": 4.0} if student == "generative" else {"epochs": 250}
+    sol = solve(oracle, seed_texts, alpha=0.1, seed=0, **kw)
     card = scorecard(
         sol,
         oracle,
