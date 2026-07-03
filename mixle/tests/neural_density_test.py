@@ -27,8 +27,15 @@ def _ll(model, data):
     return float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
 
 
+def _seed(s=0):
+    """Torch-model tests must be order-independent: pin the global RNG that drives module init and Adam."""
+    torch.manual_seed(s)
+    np.random.seed(s)
+
+
 class FlowLeafTest(unittest.TestCase):
     def test_flow_leaf_beats_gaussian_on_multimodal_density(self):
+        _seed()
         train, test = _two_modes(0), _two_modes(1)
         flow = NeuralDensity(build_coupling_flow(2, hidden=32, layers=6), m_steps=80, lr=5e-3)
         fit = optimize(train, flow.estimator(), prev_estimate=flow, max_its=8, out=None)
@@ -37,6 +44,7 @@ class FlowLeafTest(unittest.TestCase):
         self.assertGreater(_ll(fit, test) - _ll(gauss, test), 200.0)
 
     def test_samples_are_bimodal(self):
+        _seed()
         train = _two_modes(2)
         flow = NeuralDensity(build_coupling_flow(2, layers=6), m_steps=80, lr=5e-3)
         fit = optimize(train, flow.estimator(), prev_estimate=flow, max_its=8, out=None)
@@ -48,6 +56,7 @@ class FlowLeafTest(unittest.TestCase):
 
 class CompositionTest(unittest.TestCase):
     def test_flow_composes_in_a_mixture_with_a_gaussian(self):
+        _seed()
         train = _two_modes(3)
         est = st.MixtureEstimator(
             [NeuralDensity(build_coupling_flow(2, layers=6)).estimator(), st.MultivariateGaussianEstimator(dim=2)]
@@ -69,6 +78,7 @@ class CompositionTest(unittest.TestCase):
 
 class VAETest(unittest.TestCase):
     def test_vae_elbo_beats_gaussian_on_multimodal_density(self):
+        _seed()
         # the VAE's log_density is the ELBO (a LOWER bound). If the bound already beats the Gaussian's EXACT
         # log-likelihood, the VAE's true likelihood beats it by at least that margin -- a valid one-sided claim.
         train, test = _two_modes(0), _two_modes(1)
@@ -78,6 +88,7 @@ class VAETest(unittest.TestCase):
         self.assertGreater(_ll(fit, test) - _ll(gauss, test), 200.0)
 
     def test_vae_samples_are_bimodal(self):
+        _seed()
         train = _two_modes(2)
         vae = NeuralDensity(build_vae(2, latent=2, hidden=64), m_steps=150, lr=5e-3)
         fit = optimize(train, vae.estimator(), prev_estimate=vae, max_its=15, out=None)
@@ -97,6 +108,7 @@ def _curved_pair(seed, n=800):
 
 class MAFTest(unittest.TestCase):
     def test_density_integrates_to_one(self):
+        _seed()
         # the exactness claim, made crisp: a 1-D flow is a proper normalized density, so int p(x) dx = 1.
         flow = build_maf(1, hidden=16, blocks=2)
         leaf = NeuralDensity(flow)
@@ -106,6 +118,7 @@ class MAFTest(unittest.TestCase):
         self.assertAlmostEqual(integral, 1.0, delta=0.02)
 
     def test_maf_beats_gaussian_on_curved_dependence(self):
+        _seed()
         train, test = _curved_pair(0), _curved_pair(1)
         maf = NeuralDensity(build_maf(2, hidden=64, blocks=3), m_steps=80, lr=5e-3)
         fit = optimize(train, maf.estimator(), prev_estimate=maf, max_its=8, out=None)
@@ -113,6 +126,7 @@ class MAFTest(unittest.TestCase):
         self.assertGreater(_ll(fit, test) - _ll(gauss, test), 100.0)
 
     def test_composes_honestly_in_a_mixture(self):
+        _seed()
         # exact density => mixing with a Gaussian is a fair comparison of two exact leaves (no bound bias)
         train = _curved_pair(2)
         est = st.MixtureEstimator(
@@ -129,6 +143,8 @@ class MAFTest(unittest.TestCase):
 
 class GeneralityTest(unittest.TestCase):
     def test_wraps_any_module_exposing_log_density(self):
+        _seed()
+
         # the wrapper is not flow-specific: any module with log_density(x)->(n,) works
         class StdNormalModule(torch.nn.Module):
             def __init__(self, dim):
