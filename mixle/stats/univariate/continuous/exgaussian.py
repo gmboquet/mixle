@@ -116,6 +116,32 @@ class ExponentiallyModifiedGaussianDistribution(SequenceEncodableProbabilityDist
         z = (self.lam * self.sigma - u) / math.sqrt(2.0)
         return self.log_lam_half - 0.5 * u * u + np.asarray(log_erfcx(z), dtype=np.float64)
 
+    # --- compute-engine backend (numpy + torch/GPU), SCORING only: the Welford running-moment
+    # accumulator stays host-side (a bit-correct E-step fallback), so torch accelerates likelihood
+    # evaluation while estimation statistics remain exactly the legacy path. ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+
+    @staticmethod
+    def _engine_log_erfcx(z: Any, engine: Any) -> Any:
+        """Stable ``log erfcx(z)`` on engine ops: direct for ``z >= 0``; ``z^2 + log(2 - erfc(-z))``
+        below (``erfc(-z) = exp(-z^2) erfcx(-z)`` is in (0, 1] there), so neither side overflows."""
+        zp = engine.maximum(z, engine.asarray(0.0))
+        zn = engine.maximum(-z, engine.asarray(0.0))
+        pos = engine.log(engine.erfcx(zp))
+        neg = z * z + engine.log(2.0 - engine.exp(-zn * zn) * engine.erfcx(zn))
+        return engine.where(z >= 0.0, pos, neg)
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized EMG log-density for encoded data."""
+        xx = engine.asarray(x)
+        u = (xx - self.mu) / self.sigma
+        z = (self.lam * self.sigma - u) / math.sqrt(2.0)
+        return self.log_lam_half - 0.5 * u * u + self._engine_log_erfcx(z, engine)
+
     def cdf(self, x: float) -> float:
         """Cumulative distribution function ``P(X <= x)`` (exact, via scipy's exponnorm)."""
         from scipy.stats import exponnorm
