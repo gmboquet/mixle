@@ -242,6 +242,7 @@ class TorchEngine(ComputeEngine):
     sin = staticmethod(lambda x: torch.sin(x))
     arctan2 = staticmethod(lambda x, y: torch.atan2(x, y))
     i0e = staticmethod(lambda x: torch.special.i0e(x))
+    erfcx = staticmethod(lambda x: torch.special.erfcx(x))
 
     def index_add(self, out: Any, index: Any, values: Any) -> Any:
         """Add ``values`` into ``out`` along axis 0 using Torch ``index_add``.

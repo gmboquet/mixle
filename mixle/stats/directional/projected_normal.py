@@ -82,6 +82,93 @@ class ProjectedNormalDistribution(SequenceEncodableProbabilityDistribution):
         a = self.mu_x * cos_t + self.mu_y * sin_t
         return -_LOG_2PI - self._half_sq + np.log1p(a * _mills(a))
 
+    # --- compute-engine backend (numpy + torch/GPU). Density AND the latent-radius E-step lower to
+    # engine ops via erfcx from the special tier: M(a) = sqrt(pi/2) erfcx(-a/sqrt2),
+    # E[r|theta] = (a + (1+a^2) M) / (1 + a M) — the estimate-dependent stats come from the params dict. ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+
+    @classmethod
+    def compute_declaration(cls):
+        from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+
+        return DistributionDeclaration(
+            name="projected_normal",
+            distribution_type=cls,
+            parameters=(ParameterSpec("mu_x"), ParameterSpec("mu_y")),
+            statistics=(StatisticSpec("sum_x"), StatisticSpec("sum_y"), StatisticSpec("count")),
+            support="real",
+            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+        )
+
+    @staticmethod
+    def _engine_mills(a: Any, engine: Any) -> Any:
+        return _SQRT_HALF_PI * engine.erfcx(-a * _INV_SQRT2)
+
+    @classmethod
+    def backend_legacy_sufficient_statistics(cls, x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Per-row E-step stats ``(E[r] cos, E[r] sin, 1)`` under the CURRENT estimate's parameters."""
+        cos_t = engine.asarray(x[0])
+        sin_t = engine.asarray(x[1])
+        a = engine.asarray(params["mu_x"]) * cos_t + engine.asarray(params["mu_y"]) * sin_t
+        m = cls._engine_mills(a, engine)
+        r = (a + (1.0 + a * a) * m) / (1.0 + a * m)
+        return r * cos_t, r * sin_t, cos_t * 0.0 + engine.asarray(1.0)
+
+    @classmethod
+    def backend_log_density_from_params(cls, cos_t: Any, sin_t: Any, mu_x: Any, mu_y: Any, engine: Any) -> Any:
+        """Engine-neutral projected-normal log-density from ``(cos, sin)`` and the mean vector."""
+        a = mu_x * cos_t + mu_y * sin_t
+        half_sq = 0.5 * (mu_x * mu_x + mu_y * mu_y)
+        return -_LOG_2PI - half_sq + engine.log(1.0 + a * cls._engine_mills(a, engine))
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded ``(cos, sin)`` data."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x[0]),
+            engine.asarray(x[1]),
+            engine.asarray(self.mu_x),
+            engine.asarray(self.mu_y),
+            engine,
+        )
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence["ProjectedNormalDistribution"], engine: Any) -> dict[str, Any]:
+        """Stacked projected-normal mean vectors for a homogeneous mixture kernel."""
+        return {
+            "mu_x": engine.asarray([d.mu_x for d in dists]),
+            "mu_y": engine.asarray([d.mu_y for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of projected-normal log densities."""
+        cos_t = engine.asarray(x[0])
+        sin_t = engine.asarray(x[1])
+        return cls.backend_log_density_from_params(
+            cos_t[:, None], sin_t[:, None], params["mu_x"][None, :], params["mu_y"][None, :], engine
+        )
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(
+        cls, x: Any, weights: Any, params: dict[str, Any], engine: Any
+    ) -> tuple[Any, Any, Any]:
+        """Stacked E-step resultants ``(sum r cos, sum r sin, count)`` under per-component parameters."""
+        cos_t = engine.asarray(x[0])
+        sin_t = engine.asarray(x[1])
+        ww = engine.asarray(weights)
+        a = cos_t[:, None] * params["mu_x"][None, :] + sin_t[:, None] * params["mu_y"][None, :]
+        m = cls._engine_mills(a, engine)
+        r = (a + (1.0 + a * a) * m) / (1.0 + a * m)
+        return (
+            engine.sum(ww * r * cos_t[:, None], axis=0),
+            engine.sum(ww * r * sin_t[:, None], axis=0),
+            engine.sum(ww, axis=0),
+        )
+
     def sampler(self, seed: int | None = None) -> "ProjectedNormalSampler":
         """Return a sampler that draws ``N(mu, I_2)`` and returns the angle."""
         return ProjectedNormalSampler(self, seed)
