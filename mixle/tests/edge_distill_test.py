@@ -174,6 +174,72 @@ class DesignModelTest(unittest.TestCase):
         self.assertGreaterEqual(np.mean(picks[:, 0] <= 0.3), 0.75)  # random draws filtered too
 
 
+class CrossTaskDesignModelTest(unittest.TestCase):
+    """Task fingerprints: one ledger, many tasks — the surrogate conditions on which task it is."""
+
+    def _two_task_ledger(self):
+        # task A (fingerprint 0.0): quality peaks at x0 = 0.2; task B (fingerprint 3.0): peaks at 0.8
+        dm = DesignModel("sig", n_constraints=0, n_fingerprint=1)
+        rng = np.random.RandomState(0)
+        for _ in range(16):
+            p = rng.uniform(0, 1, size=1)
+            dm.add(p, float(np.exp(-((p[0] - 0.2) ** 2) * 12)), [], fingerprint=[0.0], task="A")
+            q = rng.uniform(0, 1, size=1)
+            dm.add(q, float(np.exp(-((q[0] - 0.8) ** 2) * 12)), [], fingerprint=[3.0], task="B")
+        return dm
+
+    def test_add_validates_fingerprint_length(self):
+        dm = DesignModel("sig", 0, n_fingerprint=2)
+        with self.assertRaises(ValueError):
+            dm.add([0.5], 1.0, [], fingerprint=[0.0])  # wrong length
+        dm.add([0.5], 1.0, [], fingerprint=[0.0, 1.0])
+        self.assertEqual(len(dm.X[0]), 3)  # design coord + 2 fingerprint coords
+
+    def test_predict_conditions_on_the_task(self):
+        dm = self._two_task_ledger()
+        pts = [[0.2], [0.8]]
+        at_a = dm.predict(pts, fingerprint=[0.0])["mean"]
+        at_b = dm.predict(pts, fingerprint=[3.0])["mean"]
+        self.assertGreater(at_a[0], at_a[1])  # task A prefers x0=0.2
+        self.assertGreater(at_b[1], at_b[0])  # task B prefers x0=0.8 — same ledger, flipped answer
+
+    def test_propose_returns_design_dims_and_conditions_on_task(self):
+        dm = self._two_task_ledger()
+        picks_a = np.array([dm.propose([(0.0, 1.0)], seed=s, fingerprint=[0.0]) for s in range(6)])
+        picks_b = np.array([dm.propose([(0.0, 1.0)], seed=s, fingerprint=[3.0]) for s in range(6)])
+        self.assertEqual(picks_a.shape, (6, 1))  # fingerprint coords stripped from the proposal
+        # proposals track each task's own optimum from the SHARED ledger
+        self.assertLess(np.median(picks_a[:, 0]), np.median(picks_b[:, 0]))
+
+    def test_json_roundtrip_keeps_fingerprint_dims(self):
+        dm = self._two_task_ledger()
+        clone = DesignModel.from_json(json.loads(json.dumps(dm.to_json())))
+        self.assertEqual(clone.n_fingerprint, 1)
+        np.testing.assert_allclose(clone.X, dm.X)
+
+
+class TaskFingerprintTest(unittest.TestCase):
+    def test_record_task_fingerprint(self):
+        from mixle.task import task_fingerprint
+
+        recs, labels = _make_records(240, 0)
+        fp = task_fingerprint(recs, labels)
+        self.assertEqual(len(fp), 5)
+        self.assertAlmostEqual(fp[0], np.log10(240), places=6)  # log10 examples
+        self.assertEqual(fp[1], 2.0)  # two labels
+        self.assertEqual(fp[2], 2.0)  # two fields
+        self.assertAlmostEqual(fp[3], 0.5)  # one of two fields categorical
+        self.assertGreater(fp[4], 0.9)  # near-balanced labels -> entropy ~ 1
+
+    def test_text_task_fingerprint(self):
+        from mixle.task import task_fingerprint
+
+        fp = task_fingerprint(["some text"] * 50, ["a"] * 40 + ["b"] * 10)
+        self.assertEqual(fp[2], 1.0)  # text = one field
+        self.assertEqual(fp[3], 1.0)  # fully categorical
+        self.assertLess(fp[4], 0.9)  # imbalanced labels -> entropy < 1
+
+
 class DistillForEdgeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -295,6 +361,54 @@ class DistillForEdgeTest(unittest.TestCase):
             distill_for_edge(
                 self.teacher, self.train, self.val, dev, space=_tiny_space(), design=DesignModel("other", 1), seed=0
             )
+        # an un-fingerprinted ledger (old shape) is also rejected with the same clear error
+        with self.assertRaises(ValueError):
+            distill_for_edge(
+                self.teacher,
+                self.train,
+                self.val,
+                dev,
+                space=_tiny_space(),
+                design=DesignModel(_tiny_space().signature(), 1, n_fingerprint=0),
+                seed=0,
+            )
+
+    def test_design_knowledge_transfers_across_different_tasks(self):
+        # task A: 2-field records; task B: 3-field records (different fingerprint) -- ONE ledger
+        # serves both: no compatibility error, rows accumulate, and B's search still succeeds.
+        dev = DeviceSpec(max_bytes=200_000)
+        a = distill_for_edge(
+            self.teacher, self.train, self.val, dev, space=_tiny_space(), n_init=2, n_iter=1, promote=1, seed=0
+        )
+        rng = np.random.RandomState(5)
+        recs3 = [(float(rng.normal()), float(rng.normal()), "p" if rng.random() < 0.5 else "q") for _ in range(200)]
+
+        class T3:
+            def __call__(self, records):
+                if isinstance(records, list):
+                    return ["a" if (t == "p") == (x > 0) else "b" for (x, _y, t) in records]
+                x, _y, t = records
+                return "a" if (t == "p") == (x > 0) else "b"
+
+        n_after_a = len(a.design)
+        b = distill_for_edge(
+            T3(),
+            recs3[:140],
+            recs3[140:],
+            dev,
+            space=_tiny_space(),
+            design=a.design,
+            n_init=2,
+            n_iter=1,
+            promote=1,
+            seed=1,
+        )
+        self.assertGreater(len(b.design), n_after_a)  # shared ledger keeps growing across tasks
+        self.assertTrue(b.feasible)
+        self.assertGreater(b.agreement, 0.6)
+        # the two tasks are distinguishable inside the ledger via their fingerprint coords
+        fps = {tuple(row[-5:]) for row in b.design.X}
+        self.assertGreaterEqual(len(fps), 2)
 
     def test_torch_free_with_fp32_only_mlp_space_raises(self):
         # an mlp-only space with NO quantized precision cannot serve a torch-free device...
