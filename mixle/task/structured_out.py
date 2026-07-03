@@ -87,6 +87,41 @@ class StructuredSolution:
             "harvested": len(self.harvested_outputs),
         }
 
+    def save(self, path: str) -> str:
+        """Persist every field's sub-artifact under one directory; :meth:`load` restores the whole schema."""
+        import json
+        from pathlib import Path
+
+        out = Path(path)
+        out.mkdir(parents=True, exist_ok=True)
+        for key, sub in self.fields_cat.items():
+            sub.save(str(out / "cat" / key))
+        for key, sub in self.fields_num.items():
+            sub.save(str(out / "num" / key))
+        (out / "structured.json").write_text(
+            json.dumps({"kind": "structured/v1", "cat": sorted(self.fields_cat), "num": sorted(self.fields_num)})
+        )
+        return str(out)
+
+    @classmethod
+    def load(cls, path: str, teacher: Callable[..., Any], *, device: str = "cpu") -> StructuredSolution:
+        """Reconstitute a serving StructuredSolution (fields serve locally; escalation runs ``teacher``)."""
+        import json
+        from pathlib import Path
+
+        from mixle.task.regress import RegressionSolution as _RS
+        from mixle.task.solve import Solution as _S
+
+        p = Path(path)
+        manifest = json.loads((p / "structured.json").read_text())
+
+        def _never(*_a: Any, **_k: Any) -> Any:  # sub-teachers are never consulted on the serving path
+            raise RuntimeError("structured sub-fields serve locally; escalation goes through the parent teacher")
+
+        fields_cat = {k: _S.load(str(p / "cat" / k), _never, device=device) for k in manifest["cat"]}
+        fields_num = {k: _RS.load(str(p / "num" / k), _never, device=device) for k in manifest["num"]}
+        return cls(fields_cat=fields_cat, fields_num=fields_num, teacher=teacher)
+
     def improve(self) -> bool:
         """Push the harvested dicts down into every field's buffer; each sub improves anti-regressively."""
         if not self.harvested_inputs:

@@ -66,5 +66,29 @@ class SolveRegressionTest(unittest.TestCase):
         self.assertLessEqual(sol.qhat, q0 + 1e-12)  # anti-regression on the calibrated width
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class RegressionPersistenceTest(unittest.TestCase):
+    def test_save_load_serves_identically(self):
+        import tempfile
+
+        from mixle.task import RegressionSolution, solve_regression
+
+        sol = solve_regression(_price, _items(300), tol=20.0, alpha=0.1, seed=0, epochs=200)
+        fresh = _items(60, seed=5)
+        want = [sol.interval(it) for it in fresh]
+        with tempfile.TemporaryDirectory() as d:
+            path = sol.save(d + "/pricer")
+            back = RegressionSolution.load(path, _price)
+            got = [back.interval(it) for it in fresh]
+        for a, b in zip(got, want):
+            self.assertAlmostEqual(a[0], b[0], places=5)
+            self.assertAlmostEqual(a[1], b[1], places=5)
+        self.assertEqual(back.answers_locally, sol.answers_locally)
+        back.harvested_inputs.append(fresh[0])
+        back.harvested_ys.append(1.0)
+        with self.assertRaises(RuntimeError):
+            back.improve()  # loaded artifacts serve; improving needs the original data
+
+
 if __name__ == "__main__":
     unittest.main()
