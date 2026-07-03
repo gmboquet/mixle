@@ -52,6 +52,7 @@ from mixle.task.economics import (
 # edge distillation: structure x training-process search under a hard device budget, steered by a
 # persistent design meta-model (the model that writes the model)
 from mixle.task.edge import (
+    FINGERPRINT_KEYS,
     DesignModel,
     DeviceSpec,
     EdgeDistillResult,
@@ -60,6 +61,7 @@ from mixle.task.edge import (
     distill_designer,
     distill_for_edge,
     footprint,
+    task_fingerprint,
 )
 from mixle.task.extract import (
     ExtractionIO,
@@ -171,6 +173,8 @@ __all__ = [
     "save_json",
     "save_module",
     "solve",
+    "task_fingerprint",
+    "FINGERPRINT_KEYS",
     "tokenize",
     "tune_recipe",
 ]
