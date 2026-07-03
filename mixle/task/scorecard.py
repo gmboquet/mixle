@@ -20,6 +20,12 @@ sides, artifact size, and (given per-request costs) realized $/1k::
 them); "local agreement" is the student alone on the requests it chose to answer — both are reported
 so the honest story is visible: the system is never worse than the teacher, and here is exactly how
 much of the work the tiny model absorbed.
+
+Every solve shape gets receipts, with agreement meaning that shape's own promise: classification =
+exact label match; :class:`~mixle.task.regress.RegressionSolution` = within the caller's ``tol``;
+:class:`~mixle.task.multilabel.MultiLabelSolution` = exact set match;
+:class:`~mixle.task.structured_out.StructuredSolution` = every categorical field exact and every
+numeric field within its own ``tol``.
 """
 
 from __future__ import annotations
@@ -73,6 +79,57 @@ class Scorecard:
         return "\n".join([head] + [f"{a.ljust(w)}   {b:>12}   {c:>12}" for a, b, c in rows])
 
 
+def _local_decider(student: Any) -> Any:
+    """The teacher-free half of ``student`` — the shape's local answer, or ``None`` = escalate."""
+    from mixle.task.multilabel import MultiLabelSolution
+    from mixle.task.regress import RegressionSolution
+    from mixle.task.structured_out import StructuredSolution
+
+    if isinstance(student, RegressionSolution):
+        return lambda x: float(student._predict([x])[0]) if student.answers_locally else None
+    if isinstance(student, (MultiLabelSolution, StructuredSolution)):
+        return student.try_local
+    model = student.cascade.model if hasattr(student, "cascade") else student
+    return model.decide
+
+
+def _agrees(student: Any, a: Any, y: Any) -> bool:
+    """Does local answer ``a`` meet the shape's own promise against reference ``y``?"""
+    from mixle.task.multilabel import MultiLabelSolution
+    from mixle.task.regress import RegressionSolution
+    from mixle.task.structured_out import StructuredSolution
+
+    if isinstance(student, RegressionSolution):
+        return abs(float(a) - float(y)) <= student.tol
+    if isinstance(student, MultiLabelSolution):
+        return sorted(a) == sorted(y)
+    if isinstance(student, StructuredSolution):
+        if any(abs(float(a[k]) - float(y[k])) > sub.tol for k, sub in student.fields_num.items()):
+            return False
+        return all(str(a[k]) == str(y[k]) for k in student.fields_cat)
+    return a == y
+
+
+def _artifact_bytes(student: Any, model: Any) -> int | None:
+    try:
+        from mixle.task.edge import footprint
+
+        return int(footprint(model.task if hasattr(model, "task") else model).bytes)
+    except Exception:  # noqa: BLE001 - fall through to the on-disk truth
+        pass
+    if hasattr(student, "save"):
+        import tempfile
+        from pathlib import Path
+
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = Path(student.save(str(Path(d) / "artifact")))
+                return sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
+        except Exception:  # noqa: BLE001 - size is a nicety; never fail the receipts over it
+            pass
+    return None
+
+
 def scorecard(
     student: Any,
     teacher: Any,
@@ -85,8 +142,10 @@ def scorecard(
     """Measure a deployed student against the teacher it replaces on held-out inputs (see module docstring).
 
     Args:
-        student: a :class:`~mixle.task.solve.Solution` (or anything exposing ``cascade.model.decide``
-            and ``__call__``) — the escalate-aware system under test.
+        student: any solve shape — :class:`~mixle.task.solve.Solution`,
+            :class:`~mixle.task.regress.RegressionSolution`, :class:`~mixle.task.multilabel.MultiLabelSolution`,
+            :class:`~mixle.task.structured_out.StructuredSolution` (or anything exposing
+            ``cascade.model.decide``) — the escalate-aware system under test.
         teacher: the callable being replaced; also the accuracy reference.
         test_inputs: held-out inputs (the teacher is called once per input for the reference labels).
         student_cost / teacher_cost: optional per-request costs for the $/1k rows. The blended student
@@ -100,11 +159,12 @@ def scorecard(
     truth = [teacher(x) for x in xs]
 
     model = student.cascade.model if hasattr(student, "cascade") else student
+    decide = _local_decider(student)
     local: list[Any] = []
     lat: list[float] = []
     for x in xs:
         t0 = time.perf_counter()
-        local.append(model.decide(x))
+        local.append(decide(x))
         lat.append(time.perf_counter() - t0)
 
     t_lat: list[float] = []
@@ -115,17 +175,15 @@ def scorecard(
 
     escalated = np.asarray([a is None for a in local])
     answered = ~escalated
-    agree = float(np.mean([a == y for a, y, m in zip(local, truth, answered) if m])) if answered.any() else float("nan")
-    end_to_end = float(np.mean([(y if e else a) == y for a, y, e in zip(local, truth, escalated)]))
+    agree = (
+        float(np.mean([_agrees(student, a, y) for a, y, m in zip(local, truth, answered) if m]))
+        if answered.any()
+        else float("nan")
+    )
+    end_to_end = float(np.mean([True if e else _agrees(student, a, y) for a, y, e in zip(local, truth, escalated)]))
     esc_rate = float(escalated.mean())
 
-    artifact_bytes: int | None = None
-    try:
-        from mixle.task.edge import footprint
-
-        artifact_bytes = int(footprint(model.task if hasattr(model, "task") else model).bytes)
-    except Exception:  # noqa: BLE001 - size is a nicety; never fail the receipts over it
-        artifact_bytes = None
+    artifact_bytes = _artifact_bytes(student, model)
 
     s_1k = t_1k = None
     if student_cost is not None and teacher_cost is not None:
