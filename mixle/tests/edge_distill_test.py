@@ -218,6 +218,40 @@ class CrossTaskDesignModelTest(unittest.TestCase):
         np.testing.assert_allclose(clone.X, dm.X)
 
 
+class LatencyProbeTest(unittest.TestCase):
+    """measure_* turn ops budgets into measured milliseconds; DeviceSpec.for_latency converts back."""
+
+    def test_measured_seconds_and_throughput_are_positive(self):
+        from mixle.task import distill_structured_from_labels, measure_inference_seconds, measure_ops_per_second
+
+        recs, labels = _make_records(150, 0)
+        student = distill_structured_from_labels(recs, labels, seed=0)
+        secs = measure_inference_seconds(student, recs[:20], repeats=2)
+        self.assertGreater(secs, 0.0)
+        rate = measure_ops_per_second(student, recs[:20], repeats=2)
+        self.assertTrue(np.isfinite(rate))
+        self.assertGreater(rate, 0.0)
+        self.assertAlmostEqual(rate, footprint(student).ops / secs, delta=rate)  # same order: ops/measured-s
+
+    def test_for_latency_converts_budget_arithmetic(self):
+        dev = DeviceSpec.for_latency(10.0, 2_000_000.0, max_bytes=5000, torch_free=True)
+        self.assertEqual(dev.max_ops, 20_000)  # 2e6 ops/s * 0.01 s
+        self.assertEqual(dev.max_bytes, 5000)
+        self.assertTrue(dev.torch_free)
+        with self.assertRaises(ValueError):
+            DeviceSpec.for_latency(0.0, 1e6)
+        with self.assertRaises(ValueError):
+            DeviceSpec.for_latency(10.0, -1.0)
+
+    def test_probe_requires_inputs(self):
+        from mixle.task import distill_structured_from_labels, measure_inference_seconds
+
+        recs, labels = _make_records(60, 0)
+        student = distill_structured_from_labels(recs, labels, seed=0)
+        with self.assertRaises(ValueError):
+            measure_inference_seconds(student, [])
+
+
 class TaskFingerprintTest(unittest.TestCase):
     def test_record_task_fingerprint(self):
         from mixle.task import task_fingerprint
