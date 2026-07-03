@@ -1,0 +1,223 @@
+"""``sft_planner`` -- trace-SFT: a small causal LM that *writes* plans, kept honest by a parser gate.
+
+The generative rung above :func:`~mixle.task.plan.distill_planner`. The step-students decompose by
+classifying "what comes next"; this trains ONE small causal LM (:class:`~mixle.models.LM`) on serialized
+teacher traces with the prompt-masked SFT objective (``LM.fit_pairs``) so the whole plan is *generated*::
+
+    request \\n=> tool(k=v; k=v) | tool(k=v) | done \\n
+
+Free-form generation is exactly where silent nonsense creeps in, so the honesty contract gets a harder
+gate: the emitted text must PARSE under the strict plan grammar, every tool must exist, every required
+argument must be present -- anything else escalates to the teacher and the trace is harvested. The model
+may write anything; only verified plans leave the function.
+
+What this adds over the step-students (and what it does not): one model covers every tool with
+variable-length plans and generalizes over entity values it never saw; it does NOT magically invent
+correct plans for tool compositions absent from the traces -- those escalate, which is the point.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+
+from mixle.task.toolcall import ToolSpec
+
+_EOS = "\n"
+_PROMPT_SEP = "\n=> "
+_EMPTY = "done"
+
+
+def _serialize_plan(plan: Sequence[dict]) -> str:
+    if not plan:
+        return _EMPTY + _EOS
+    parts = []
+    for step in plan:
+        args = "; ".join(f"{k}={v}" for k, v in (step.get("args") or {}).items())
+        parts.append(f"{step['tool']}({args})")
+    return " | ".join(parts) + _EOS
+
+
+def _parse_plan(text: str) -> list[dict] | None:
+    """Strict inverse of :func:`_serialize_plan`; ``None`` when the text is not a well-formed plan."""
+    body = text.split(_EOS, 1)[0].strip()
+    if body == _EMPTY:
+        return []
+    steps: list[dict] = []
+    for part in body.split(" | "):
+        part = part.strip()
+        if not (part and part.endswith(")") and "(" in part):
+            return None
+        name, arg_s = part[:-1].split("(", 1)
+        if not name.isidentifier():
+            return None
+        args: dict[str, str] = {}
+        if arg_s.strip():
+            for kv in arg_s.split("; "):
+                if "=" not in kv:
+                    return None
+                k, v = kv.split("=", 1)
+                v = v.strip()
+                # structural characters inside a VALUE mean the text was not a well-formed step list
+                if not k.strip().isidentifier() or not v or any(c in v for c in "()|="):
+                    return None
+                args[k.strip()] = v
+        steps.append({"tool": name, "args": args})
+    return steps
+
+
+class _CharCodec:
+    """A tiny char-level codec (pad=0, unk=1) built from the training corpus."""
+
+    def __init__(self, corpus: Sequence[str]) -> None:
+        chars = sorted(set("".join(corpus)) | {_EOS})
+        self.itos = ["\x00", "\x01", *chars]
+        self.stoi = {c: i for i, c in enumerate(self.itos)}
+        self.eos_id = self.stoi[_EOS]
+
+    @property
+    def vocab(self) -> int:
+        return len(self.itos)
+
+    def encode(self, text: str) -> list[int]:
+        return [self.stoi.get(c, 1) for c in text]
+
+    def decode(self, ids: Sequence[int]) -> str:
+        return "".join(self.itos[i] if 0 <= int(i) < len(self.itos) else "" for i in ids)
+
+
+@dataclass
+class GenerativePlanner:
+    """A plan-writing LM behind a parse-and-validate gate: only verified plans leave; the rest escalate."""
+
+    lm: Any
+    codec: _CharCodec
+    tools: dict[str, ToolSpec]
+    teacher: Callable[[str], list[dict]]
+    plan_agreement: float
+    max_new: int = 160
+    n_requests: int = 0
+    n_escalated: int = 0
+    harvested: list[tuple[str, list[dict]]] = field(default_factory=list)
+
+    def _validate(self, plan: list[dict] | None, request: str) -> bool:
+        if plan is None:
+            return False
+        for step in plan:
+            spec = self.tools.get(step["tool"])
+            if spec is None:
+                return False
+            if not all(step["args"].get(a) for a in spec.required_args):
+                return False
+            if any(k not in spec.args for k in step["args"]):
+                return False
+            # copy-fidelity: plan arguments are EXTRACTIVE — a generated value that does not literally
+            # occur in the request (or the tool's own fixed vocabulary, e.g. kind=refund) is a silent
+            # copy error (order 4242 -> order_id=4202) that spec validity cannot catch. Reject it.
+            for v in step["args"].values():
+                if str(v) not in request and str(v) not in step["tool"]:
+                    return False
+        return True
+
+    def try_plan(self, request: str) -> list[dict] | None:
+        """Generate, parse, validate (grammar + specs + copy-fidelity); ``None`` = must escalate."""
+        request = str(request)
+        prompt = self.codec.encode(request + _PROMPT_SEP)
+        out = self.lm.generate(prompt, n=self.max_new, greedy=True, stop_id=self.codec.eos_id)
+        text = self.codec.decode(out[len(prompt) :])
+        plan = _parse_plan(text if text.endswith(_EOS) else text + "")
+        return plan if self._validate(plan, request) else None
+
+    def __call__(self, request: str) -> dict[str, Any]:
+        self.n_requests += 1
+        plan = self.try_plan(request)
+        if plan is not None:
+            return {"plan": plan, "escalate": False}
+        self.n_escalated += 1
+        want = list(self.teacher(request))
+        self.harvested.append((request, want))
+        return {"plan": [dict(p) for p in want], "escalate": True}
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "plan_agreement": round(self.plan_agreement, 4),
+            "requests": self.n_requests,
+            "escalated": self.n_escalated,
+            "escalation_rate": (self.n_escalated / self.n_requests) if self.n_requests else 0.0,
+            "harvested_traces": len(self.harvested),
+        }
+
+
+def _plans_match(got: list[dict], want: list[dict], specs: dict[str, ToolSpec]) -> bool:
+    if len(got) != len(want):
+        return False
+    for g, w in zip(got, want):
+        if g["tool"] != w["tool"]:
+            return False
+        spec = specs.get(w["tool"])
+        req = spec.required_args if spec else list((w.get("args") or {}).keys())
+        if any(str(g["args"].get(a)) != str((w.get("args") or {}).get(a)) for a in req):
+            return False
+    return True
+
+
+def sft_planner(
+    teacher: Callable[[str], list[dict]],
+    requests: Sequence[str],
+    tools: Sequence[ToolSpec],
+    *,
+    holdout: float = 0.2,
+    seed: int = 0,
+    d_model: int = 96,
+    n_layer: int = 3,
+    n_head: int = 4,
+    block: int = 192,
+    epochs: int = 30,
+    lr: float = 3e-3,
+    device: str = "cpu",
+) -> GenerativePlanner:
+    """Trace-SFT a small causal LM into a plan writer, verified on held-out requests.
+
+    Traces serialize as ``request\\n=> tool(k=v; ...) | ... \\n`` pairs; ``LM.fit_pairs`` trains with the
+    prompt masked so only plan tokens carry loss; generation stops at newline. Held-out agreement is
+    plan-level exact match (tools + required args, in order) on requests the LM never saw.
+    """
+    from mixle.models import LM
+
+    reqs = [str(r) for r in requests]
+    if len(reqs) < 16:
+        raise ValueError("sft_planner needs at least 16 example requests")
+    specs = {t.name: t for t in tools}
+
+    rng = np.random.RandomState(seed)
+    order = rng.permutation(len(reqs))
+    n_hold = max(2, int(round(len(reqs) * holdout)))
+    hold = [reqs[i] for i in order[:n_hold]]
+    train = [reqs[i] for i in order[n_hold:]]
+
+    traces = {r: list(teacher(r)) for r in train}
+    for plan in traces.values():
+        for step in plan:
+            if step.get("tool") not in specs:
+                raise ValueError(f"teacher plan uses tool {step.get('tool')!r} not in the provided specs")
+
+    prompts = {r: r + _PROMPT_SEP for r in train}
+    completions = {r: _serialize_plan(traces[r]) for r in train}
+    codec = _CharCodec([*prompts.values(), *completions.values()])
+    pairs = [(codec.encode(prompts[r]), codec.encode(completions[r])) for r in train]
+
+    lm = LM(vocab=codec.vocab, d_model=d_model, n_layer=n_layer, n_head=n_head, block=block, device=device)
+    lm.fit_pairs(pairs, epochs=epochs, lr=lr, seed=seed)
+
+    planner = GenerativePlanner(
+        lm=lm, codec=codec, tools=specs, teacher=teacher, plan_agreement=float("nan"), max_new=block
+    )
+    agree = 0
+    for r in hold:
+        got = planner.try_plan(r)
+        agree += int(got is not None and _plans_match(got, list(teacher(r)), specs))
+    planner.plan_agreement = agree / len(hold)
+    return planner
