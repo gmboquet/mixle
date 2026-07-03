@@ -185,6 +185,7 @@ class Solution:
     seed: int = 0
     synthesized: int = 0  # synthetic (generative-sampled, teacher-labeled) inputs in the training set
     gate_inputs: list = field(default_factory=list)  # REAL inputs only — what the p(x) gate is fit on
+    edge: Any = None  # EdgeDistillResult when solve() ran under a DeviceSpec (footprint, pareto, design)
 
     def __call__(self, x: Any) -> Any:
         if not self.promoted:
@@ -194,7 +195,7 @@ class Solution:
     def report(self) -> dict:
         """What you would want on a dashboard: verification, live escalation, realized cost."""
         stats = self.cascade.stats
-        return {
+        out = {
             "promoted": self.promoted,
             "holdout_agreement": round(self.holdout_agreement, 4),
             "holdout_escalation_rate": round(self.escalation_rate, 4),
@@ -203,6 +204,15 @@ class Solution:
             "harvested_labels": len(stats.escalated_labels),
             "synthesized_inputs": self.synthesized,
         }
+        if self.edge is not None:
+            out["device"] = {
+                "feasible": self.edge.feasible,
+                "family": self.edge.family,
+                "bytes": self.edge.footprint.bytes,
+                "ops": self.edge.footprint.ops,
+                "torch_free": self.edge.footprint.torch_free,
+            }
+        return out
 
     def improve(self) -> bool:
         """Re-distill with the harvested (escalated) labels; promote only if it verifies at least as well.
@@ -311,6 +321,8 @@ def solve(
     propose_budget: int = 8,
     synthesize: int = 0,
     prelabeled: tuple[Sequence[Any], Sequence[Any]] | None = None,
+    device: Any = None,
+    device_space: Any = None,
     cost: Any = None,
     seed: int = 0,
     **distill_kw: Any,
@@ -342,6 +354,16 @@ def solve(
             ``load_harvested("harvested.jsonl")`` from a serving deployment — folded into the TRAINING
             split (and the OOD gate: they are real traffic) but never into calibration, which stays a
             fresh split of ``inputs``. This is the re-solve half of the serving loop.
+        device: A :class:`~mixle.task.edge.DeviceSpec` makes this "give me this capability on that
+            device": the student is found by :func:`~mixle.task.edge.distill_for_edge` — a structure x
+            precision x recipe search under the device's hard byte/ops/torch-free budget (reusing the
+            already-computed labels; the teacher is not re-called) — and the result's footprint,
+            Pareto front, and design ledger land on ``Solution.edge``. If nothing fits the budget the
+            Solution is demoted (everything routes to the teacher — an honest failure). Incompatible
+            with ``propose="auto"`` (the device search subsumes it). A plain string (e.g. ``"cpu"``)
+            keeps its old meaning: the torch training device.
+        device_space: Optional :class:`~mixle.task.edge.EdgeSpace` constraining the device search
+            (families, size ranges, precisions); default spans the standard space.
         cost: Optional :class:`~mixle.task.economics.CostModel` for realized-savings reporting.
         seed: Split + fit determinism.
         **distill_kw: Student knobs forwarded to distillation (``dim``, ``hidden``, ``epochs``, ``lr``, …).
@@ -349,6 +371,12 @@ def solve(
     Returns:
         A :class:`Solution` -- call it like the original function; ``report()`` / ``improve()`` / ``save()``.
     """
+    if isinstance(device, str):  # back-compat: solve(..., device="cpu") is the torch training device
+        distill_kw["device"] = device
+        device = None
+    if device is not None and propose == "auto":
+        raise ValueError("device= runs its own structure x recipe search; drop propose='auto'")
+
     items = list(inputs)
     if len(items) < 8:
         raise ValueError("solve() needs at least 8 example inputs to train and calibrate honestly")
@@ -386,13 +414,39 @@ def solve(
             n_synth = len(synth)
 
     distill_kw.setdefault("seed", seed)
-    if propose == "auto":
-        distill_kw = _tune_recipe(k, train_inputs, train_labels, distill_kw, propose_budget, seed)
-    student = _fit_student(k, train_inputs, train_labels, distill_kw)
+    edge_result = None
+    if device is not None:
+        # "this capability on that device": structure x precision x recipe search under the hard
+        # budget, on the labels already computed -- the teacher is never re-called.
+        from mixle.task.edge import distill_for_edge
+
+        n_val = max(2, len(train_inputs) // 4)
+        val_order = np.random.RandomState(seed).permutation(len(train_inputs))
+        v_idx, f_idx = val_order[:n_val], val_order[n_val:]
+        edge_result = distill_for_edge(
+            None,
+            [train_inputs[i] for i in f_idx],
+            [train_inputs[i] for i in v_idx],
+            device,
+            train_labels=[train_labels[i] for i in f_idx],
+            val_labels=[train_labels[i] for i in v_idx],
+            labels=sorted(set(train_labels)),
+            space=device_space,
+            n_init=min(4, max(2, propose_budget // 2)),
+            n_iter=max(1, propose_budget - min(4, max(2, propose_budget // 2))),
+            seed=seed,
+        )
+        student = edge_result.model
+    else:
+        if propose == "auto":
+            distill_kw = _tune_recipe(k, train_inputs, train_labels, distill_kw, propose_budget, seed)
+        student = _fit_student(k, train_inputs, train_labels, distill_kw)
     cal = CalibratedTaskModel(student, alpha=alpha, density_gate=gate).calibrate(cal_inputs, cal_labels)
     agree = agreement(student, cal_labels, cal_inputs)
     esc = cal.escalation_rate(cal_inputs)
     promoted = target_agreement is None or agree >= target_agreement
+    if edge_result is not None and not edge_result.feasible:
+        promoted = False  # nothing fit the device: serve the teacher, never a budget-busting student
 
     return Solution(
         cascade=Cascade(cal, _batch_view(teacher), cost=cost),
@@ -411,4 +465,5 @@ def solve(
         seed=seed,
         synthesized=n_synth,
         gate_inputs=list(train_inputs[: len(train_inputs) - n_synth]),
+        edge=edge_result,
     )
