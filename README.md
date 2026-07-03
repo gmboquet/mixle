@@ -367,8 +367,8 @@ e.seek(10_000)    # the ~10,000th most probable value, by structural count-DP
 - **Design & analysis of experiments** (`mixle.doe`): space-filling designs, GP Bayesian optimization,
   and the analysis half — Sobol/Morris sensitivity, uncertainty propagation, Kennedy-O'Hagan calibration.
 - **Embeddings** (`mixle.utils.hvis`): model-based t-SNE / UMAP over per-record posteriors.
-- **Neural & language leaves** (`mixle.models`): a causal-Transformer LM (`LM` / `StreamingTransformerLeaf`),
-  neural experts (`NeuralLeaf`, `SoftmaxNeuralLeaf`), and preference-tuned (`DPOLeaf`) leaves — each a
+- **Neural & language leaves** (`mixle.models`): a causal-Transformer LM (`LM` / `StreamingTransformer`),
+  neural experts (`NeuralGaussian`, `NeuralCategorical`), and preference-tuned (`DPOModel`) leaves — each a
   distribution that composes into mixtures / composites / HMM emissions and trains by EM (the E-step
   weights it; its M-step is gradient descent on the net). GPU/distributed pretraining via `LM.fit`.
 - **Supervised & non-iid models** (`mixle.models`): GP regression, neural regressors, random forests
