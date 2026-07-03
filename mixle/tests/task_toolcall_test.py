@@ -93,5 +93,35 @@ class ToolCallerTest(unittest.TestCase):
         self.assertEqual(rep["harvested_traces"], rep["escalated"])
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class ToolCallerPersistenceTest(unittest.TestCase):
+    def test_save_load_serves_identically(self):
+        import tempfile
+
+        from mixle.task import ToolCaller, ToolSpec, distill_tool_caller
+
+        tools = [
+            ToolSpec("get_weather", ["city"]),
+            ToolSpec("create_ticket", ["kind", "amount"]),
+            ToolSpec("search", ["query"]),
+        ]
+        tc = distill_tool_caller(
+            _teacher,
+            _requests(250),
+            tools,
+            seed=0,
+            selector_kw={"ood": None, "epochs": 200},
+            extractor_kw={"epochs": 30},
+        )
+        fresh = _requests(60, seed=5)
+        want = [tc(r) for r in fresh]
+        with tempfile.TemporaryDirectory() as d:
+            path = tc.save(d + "/caller")
+            back = ToolCaller.load(path, _teacher)
+            got = [back(r) for r in fresh]
+        self.assertEqual(got, want)  # identical calls, escalations included, in a fresh process
+        self.assertAlmostEqual(back.selection_agreement, tc.selection_agreement, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()
