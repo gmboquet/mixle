@@ -1750,6 +1750,9 @@ class HiddenMarkovModelEnumerator(DistributionEnumerator):
         if getattr(dist, "terminal_values", None) is not None:
             self._setup_terminal_values(dist, set(dist.terminal_values), topics, log_w, log_transitions, path_root)
             return
+        if getattr(dist, "terminal_states", None) is not None:
+            self._setup_terminal_states(dist, topics, log_w, log_transitions, path_root)
+            return
         len_dist = dist.len_dist if len_dist is None else len_dist
         if len_dist is None or supports(len_dist, Neutral):
             raise EnumerationError(dist, reason="no length distribution is modeled (len_dist is Null)")
@@ -1847,6 +1850,41 @@ class HiddenMarkovModelEnumerator(DistributionEnumerator):
         return next(self._merge)
 
     # ------------------------------------------------------------------ terminal_values enumeration
+    def _setup_terminal_states(self, dist, topics, log_w, log_transitions, path_root) -> None:
+        """Best-first enumeration of a terminal-STATE HMM by reduction to the terminal-VALUE enumerator.
+
+        A terminal-state HMM stops at the first *entry* to an absorbing state; a terminal-value HMM stops
+        at the first *emission* of a terminal value. The two coincide -- same support, same stopping-time
+        forward likelihood -- when terminal and non-terminal states emit disjoint value sets: then "enter a
+        terminal state" is observationally identical to "emit a value only a terminal state can emit". Under
+        that condition (the usual fitted case, e.g. an absorbing state that learns to emit ``<EOL>``) we
+        take the terminal states' emission support as the terminal-value set and delegate. When the sets
+        overlap the reduction is not exact, so we refuse rather than enumerate a different distribution.
+        """
+        path_root = path_root if path_root is not None else type(dist).__name__
+        topics_l = list(dist.topics) if topics is None else list(topics)
+        term_states = {int(s) for s in dist.terminal_states}
+        cap = 1 << 16
+
+        support: list[set] = []
+        for s, topic in enumerate(topics_l):
+            vals: set = set()
+            for cnt, (val, _lp) in enumerate(child_enumerator(topic, "%s.topics[%d]" % (path_root, s))):
+                if cnt >= cap:
+                    raise EnumerationError(dist, reason="emission support too large for terminal_states enumeration")
+                vals.add(val)
+            support.append(vals)
+
+        term_vals: set = set().union(*(support[s] for s in term_states)) if term_states else set()
+        nonterm_vals: set = set().union(*(support[s] for s in range(len(topics_l)) if s not in term_states))
+        if term_vals & nonterm_vals:
+            raise EnumerationError(
+                dist,
+                reason="terminal_states enumeration requires terminal and non-terminal states to emit "
+                "disjoint values (overlap on %r)" % sorted(term_vals & nonterm_vals)[:4],
+            )
+        self._setup_terminal_values(dist, term_vals, topics, log_w, log_transitions, path_root)
+
     def _setup_terminal_values(self, dist, term_set, topics, log_w, log_transitions, path_root) -> None:
         """Best-first enumeration of the terminal-VALUE support.
 
@@ -3087,6 +3125,11 @@ class HiddenMarkovEstimator(ParameterEstimator):
         self.use_numba = HAS_NUMBA if use_numba is None else use_numba
         self.steady_state_init = bool(steady_state_init)
         self.terminal_states = terminal_states
+        if terminal_states is not None:
+            # The terminal-state forward/backward use the non-numba per-sequence layout (mirrors the
+            # distribution). Leaving use_numba on emits the numba encoding, whose x0 is None, and the
+            # terminal seq_log_density / seq_update cannot read it.
+            self.use_numba = False
         self.set_prior(prior)
 
     def accumulator_factory(self):
