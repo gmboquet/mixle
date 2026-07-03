@@ -51,6 +51,44 @@ Development: `git clone … && pip install -e ".[all]"`.
 
 ## Quickstart
 
+**Both worlds, blended — frontier quality at a fraction of the cost.** Distill a slow, expensive teacher
+(a frontier LLM, a human, a rule) into a tiny local model, then serve a *cascade*: a **neural** student
+answers when a **classical** conformal gate says it is confident, and only the hard cases escalate to the
+teacher.
+
+```python
+import numpy as np
+from mixle.task import distill, CalibratedTaskModel, Cascade, CostModel
+
+# a slow, expensive "frontier" teacher — an LLM, a human, or a rule. Ground truth, but $ per call.
+SPAM = ["free", "winner", "prize", "buy", "cheap", "offer", "click"]
+HAM  = ["meeting", "lunch", "project", "report", "schedule", "team", "review"]
+def teacher(texts):
+    return ["spam" if set(t.split()) & set(SPAM) else "ham" for t in texts]
+
+def corpus(seed, n=150):                            # cheap synthetic mail so this runs offline
+    r, docs = np.random.RandomState(seed), []
+    for topic in (SPAM, HAM):
+        for _ in range(n):
+            toks = list(r.choice(topic, 2)) + list(r.choice(["the", "a", "today", "please", "thanks", "we"], r.randint(3, 7)))
+            r.shuffle(toks); docs.append(" ".join(toks))
+    r.shuffle(docs); return docs
+train, cal, stream = corpus(0), corpus(1), corpus(2)
+
+# distill the teacher into a tiny local model (a ~33K-parameter MLP over hashed n-grams, ~130 KB),
+# calibrate WHEN to trust it (conformal), and serve a cascade — local when confident, escalate the rest
+student = distill(teacher, train, n=4, dim=512, hidden=[64], epochs=250, task="spam vs ham")
+gated   = CalibratedTaskModel(student, alpha=0.1).calibrate(cal, teacher(cal))
+cascade = Cascade(gated, teacher, cost=CostModel(c_local=0.0, c_frontier=0.01))
+
+cascade.serve(stream)   # frontier-quality answers, ~92% from the 33K-parameter local model
+cascade.report()        # -> ~8% escalated to the teacher; ~$2.76 saved / 300 requests vs frontier-only
+```
+
+The tiny model handles the easy majority and defers the hard cases, so the blend matches the teacher while
+running the large model on a fraction of requests. The same pattern distills tool-callers, extractors, and
+structured classifiers (`mixle.task`).
+
 **Discover latent structure.** A *hierarchical mixture* is an outer mixture over a set of shared topics —
 a topic model: several word distributions (the topics) are shared, and each document class mixes them
 differently. One `optimize` call recovers the topics and tells you which class a document came from:
