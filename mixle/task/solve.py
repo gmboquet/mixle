@@ -32,8 +32,10 @@ import numpy as np
 
 from mixle.task.calibrate import CalibratedTaskModel
 from mixle.task.cascade import Cascade
+from mixle.task.density import DensityGate
 from mixle.task.distill import agreement, distill_from_labels, distill_records_from_labels
-from mixle.task.model import TaskModel
+from mixle.task.model import HashedNGram, HashedRecord, TaskModel
+from mixle.task.tune import RecipeSpace
 
 
 def _label_with(teacher: Callable[..., Any], items: list) -> list:
@@ -72,7 +74,45 @@ def _input_kind(x: Any) -> str:
 
 def _fit_student(kind: str, inputs: list, labels: list, distill_kw: dict) -> TaskModel:
     fit = distill_from_labels if kind == "text" else distill_records_from_labels
+    if kind != "text":  # the n-gram order is a text-only knob
+        distill_kw = {k: v for k, v in distill_kw.items() if k != "n"}
     return fit(inputs, labels, **distill_kw)
+
+
+def _fit_gate(kind: str, inputs: list, alpha: float, seed: int, dim: int = 256) -> DensityGate:
+    """Fit the p(x) OOD gate over the training inputs (text n-grams or hashed records)."""
+    feat = HashedNGram(n=3, dim=dim, seed=seed) if kind == "text" else HashedRecord(dim=dim, seed=seed)
+    return DensityGate(feat).fit(inputs, alpha=alpha, seed=seed)
+
+
+def _tune_recipe(kind: str, inputs: list, labels: list, distill_kw: dict, budget: int, seed: int) -> dict:
+    """Teacher-free recipe search: BO over (dim, hidden, epochs, lr) maximizing agreement on a val slice.
+
+    The labels are already computed, so candidates cost only student fits — the teacher is never re-called.
+    The val slice is carved from the *training* inputs; the calibration slice stays untouched, so the
+    conformal guarantee downstream is unaffected by selection."""
+    from mixle.doe import minimize
+
+    rng = np.random.RandomState(seed)
+    order = rng.permutation(len(inputs))
+    n_val = max(2, len(inputs) // 4)
+    val_idx, fit_idx = order[:n_val], order[n_val:]
+    fit_in, fit_lab = [inputs[i] for i in fit_idx], [labels[i] for i in fit_idx]
+    val_in, val_lab = [inputs[i] for i in val_idx], [labels[i] for i in val_idx]
+
+    space = RecipeSpace()
+    trials: list[tuple[float, dict]] = []
+
+    def objective(point: np.ndarray) -> float:
+        recipe = {**distill_kw, **space.decode(point), "seed": seed}
+        student = _fit_student(kind, fit_in, fit_lab, recipe)
+        score = agreement(student, val_lab, val_in)
+        trials.append((score, recipe))
+        return score
+
+    n_init = min(3, max(1, budget // 2))
+    minimize(objective, space.bounds(), n_init=n_init, n_iter=max(0, budget - n_init), seed=seed, maximize=True)
+    return max(trials, key=lambda t: t[0])[1]
 
 
 @dataclass
@@ -95,6 +135,8 @@ class Solution:
     promoted: bool
     target_agreement: float | None
     distill_kw: dict = field(default_factory=dict)
+    ood: float | None = None  # OOD-floor quantile the gate was fit with (None = no gate)
+    seed: int = 0
 
     def __call__(self, x: Any) -> Any:
         if not self.promoted:
@@ -126,7 +168,8 @@ class Solution:
         labels = self.train_labels + [str(y) for y in new_labels]
         student = _fit_student(self.kind, inputs, labels, self.distill_kw)
         alpha = self.cascade.model.alpha
-        cal = CalibratedTaskModel(student, alpha=alpha).calibrate(self.cal_inputs, self.cal_labels)
+        gate = _fit_gate(self.kind, inputs, self.ood, self.seed) if self.ood is not None else None
+        cal = CalibratedTaskModel(student, alpha=alpha, density_gate=gate).calibrate(self.cal_inputs, self.cal_labels)
         agree = agreement(student, self.cal_labels, self.cal_inputs)
         esc = cal.escalation_rate(self.cal_inputs)
         if agree < self.holdout_agreement or esc > self.escalation_rate:
@@ -155,6 +198,9 @@ def solve(
     target_agreement: float | None = None,
     holdout: float = 0.25,
     kind: str | None = None,
+    ood: float | None = 0.02,
+    propose: str | None = None,
+    propose_budget: int = 8,
     cost: Any = None,
     seed: int = 0,
     **distill_kw: Any,
@@ -171,6 +217,13 @@ def solve(
             the returned Solution routes *everything* to the teacher (``promoted=False``).
         holdout: Fraction reserved for calibration + verification (never trained on).
         kind: Force the student path, ``'text'`` or ``'record'``; default sniffs the first input.
+        ood: Fit a ``p(x)`` gate over the training inputs and escalate inputs whose ``log p(x)`` falls
+            below this quantile floor — so a wildly novel input escalates even when the softmax looks
+            confident. On by default (0.02); ``None`` disables.
+        propose: ``"auto"`` searches the student recipe (dim/hidden/epochs/lr, Bayesian-optimized on a
+            val slice carved from the training split) instead of using the defaults. Teacher-free — the
+            labels are already computed, so candidates cost only student fits.
+        propose_budget: Total candidate recipes tried when ``propose="auto"``.
         cost: Optional :class:`~mixle.task.economics.CostModel` for realized-savings reporting.
         seed: Split + fit determinism.
         **distill_kw: Student knobs forwarded to distillation (``dim``, ``hidden``, ``epochs``, ``lr``, …).
@@ -194,8 +247,11 @@ def solve(
     cal_labels = [labels[i] for i in cal_idx]
 
     distill_kw.setdefault("seed", seed)
+    if propose == "auto":
+        distill_kw = _tune_recipe(k, train_inputs, train_labels, distill_kw, propose_budget, seed)
     student = _fit_student(k, train_inputs, train_labels, distill_kw)
-    cal = CalibratedTaskModel(student, alpha=alpha).calibrate(cal_inputs, cal_labels)
+    gate = _fit_gate(k, train_inputs, ood, seed) if ood is not None else None
+    cal = CalibratedTaskModel(student, alpha=alpha, density_gate=gate).calibrate(cal_inputs, cal_labels)
     agree = agreement(student, cal_labels, cal_inputs)
     esc = cal.escalation_rate(cal_inputs)
     promoted = target_agreement is None or agree >= target_agreement
@@ -213,4 +269,6 @@ def solve(
         promoted=bool(promoted),
         target_agreement=target_agreement,
         distill_kw=dict(distill_kw),
+        ood=ood,
+        seed=seed,
     )
