@@ -938,10 +938,14 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         if tot == 0:
             rv = engine.zeros(n_seq)
         else:
-            pr_obs = np.empty((tot, self.n_states), dtype=np.float64)
-            for i in range(self.n_states):
-                pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
-            padded, mask, _ = hmm_pad_log_emissions(pr_obs, sz)
+            pr_dev = hmm_engine_emissions(self.topics, enc_data, engine)
+            if pr_dev is not None:  # emissions scored + padded on the engine (no host round-trip)
+                padded, mask = hmm_engine_pad_log_emissions(pr_dev, sz, engine)
+            else:
+                pr_obs = np.empty((tot, self.n_states), dtype=np.float64)
+                for i in range(self.n_states):
+                    pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
+                padded, mask, _ = hmm_pad_log_emissions(pr_obs, sz)
             with np.errstate(divide="ignore"):
                 log_w = np.log(self.w)
                 log_a = np.log(self.transitions)
@@ -2743,10 +2747,15 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             (idx, sz, enc_data), len_enc = x1
             sz = np.asarray(sz)
             tot_cnt = int(sz.sum())
-            pr_obs = np.empty((tot_cnt, num_states), dtype=np.float64)
-            for i in range(num_states):
-                pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
-            padded, mask, offsets = hmm_pad_log_emissions(pr_obs, sz)
+            offsets = np.concatenate([[0], np.cumsum(sz)]).astype(np.int64)  # gamma scatter below
+            pr_dev = hmm_engine_emissions(estimate.topics, enc_data, engine)
+            if pr_dev is not None:  # emissions scored + padded on the engine (no host round-trip)
+                padded, mask = hmm_engine_pad_log_emissions(pr_dev, sz, engine)
+            else:
+                pr_obs = np.empty((tot_cnt, num_states), dtype=np.float64)
+                for i in range(num_states):
+                    pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+                padded, mask, _ = hmm_pad_log_emissions(pr_obs, sz)
             scatter = None
         else:
             # blocked encoding: idx_mat[n, t] is the flat row of observation (sequence n, step t),
@@ -3490,6 +3499,43 @@ def hmm_pad_log_emissions(log_emit_flat, sz):
             padded[i, : s1 - s0, :] = log_emit_flat[s0:s1, :]
             mask[i, : s1 - s0] = 1.0
     return padded, mask, offsets
+
+
+def hmm_engine_emissions(topics, enc_data, engine):
+    """Per-state log emissions scored ON the engine — an (tot, S) engine tensor — or ``None`` when any
+    topic lacks engine scoring (the caller falls back to the host loop)."""
+    from mixle.stats.compute.backend import BackendScoringError, backend_seq_log_density
+
+    cols = []
+    for t in topics:
+        try:
+            cols.append(backend_seq_log_density(t, enc_data, engine))
+        except BackendScoringError:
+            return None
+    return engine.stack(cols, axis=1)
+
+
+def hmm_engine_pad_log_emissions(pr_dev, sz, engine):
+    """Pack engine-resident (tot, S) emissions into padded (N, Tmax, S) + host (N, Tmax) mask.
+
+    The gather index is built host-side (cheap ints); the gather itself runs on the engine, so the
+    emission matrix never round-trips through numpy on its way into the forward-backward."""
+    sz = np.asarray(sz, dtype=np.int64)
+    n = len(sz)
+    tmax = int(sz.max()) if n > 0 else 0
+    offsets = np.concatenate([[0], np.cumsum(sz)]).astype(np.int64)
+    rows = np.zeros((n, tmax), dtype=np.int64)
+    mask = np.zeros((n, tmax), dtype=np.float64)
+    for i in range(n):
+        length = int(sz[i])
+        if length > 0:
+            rows[i, :length] = np.arange(offsets[i], offsets[i] + length)
+            mask[i, :length] = 1.0
+    gathered = pr_dev[engine.asarray(rows.reshape(-1))]  # padding slots reuse row 0; masked to -inf below
+    padded = engine.where(engine.asarray(mask.reshape(-1, 1)) > 0, gathered, engine.asarray(float("-inf"))).reshape(
+        n, tmax, -1
+    )
+    return padded, mask
 
 
 def hmm_engine_forward_ll(engine, log_emit, log_w, log_a, mask):
