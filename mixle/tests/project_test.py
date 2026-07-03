@@ -10,7 +10,7 @@ import unittest
 
 import numpy as np
 
-from mixle.inference.project import collapse_mixture, gaussian_kl, moment_project, reduce_mixture
+from mixle.inference.project import collapse_mixture, fisher_merge, gaussian_kl, moment_project, reduce_mixture
 from mixle.stats.latent.gaussian_mixture import GaussianMixtureDistribution
 from mixle.stats.latent.mixture import MixtureDistribution
 from mixle.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
@@ -150,6 +150,47 @@ class MomentProjectDispatchTest(unittest.TestCase):
         # no target and not collapsible -> a clear capability error
         with self.assertRaises(CapabilityError):
             moment_project("not a distribution", None)
+
+
+class FisherMergeTest(unittest.TestCase):
+    def test_precision_weighted_mean_scalar(self):
+        # merge two 1-D estimates with precisions 1 and 3 -> (1*0 + 3*4)/(1+3) = 3.0
+        got = fisher_merge([np.array([0.0]), np.array([4.0])], [1.0, 3.0])
+        self.assertAlmostEqual(got[0], 3.0, places=12)
+
+    def test_equal_fisher_is_plain_average(self):
+        got = fisher_merge([np.array([1.0, 2.0]), np.array([3.0, 6.0])], [2.5, 2.5])
+        np.testing.assert_allclose(got, [2.0, 4.0], atol=1e-12)
+        # and None (unit Fisher) is also the plain average
+        np.testing.assert_allclose(fisher_merge([[1.0, 2.0], [3.0, 6.0]]), [2.0, 4.0], atol=1e-12)
+
+    def test_diagonal_fisher_is_per_coordinate(self):
+        # coordinate 0: precisions (1,1) -> mean; coordinate 1: precisions (9,1) -> pulled to first
+        got = fisher_merge([np.array([0.0, 0.0]), np.array([2.0, 2.0])], [np.array([1.0, 9.0]), np.array([1.0, 1.0])])
+        self.assertAlmostEqual(got[0], 1.0, places=12)
+        self.assertAlmostEqual(got[1], (9 * 0 + 1 * 2) / 10.0, places=12)
+
+    def test_matches_gaussian_product_of_experts_mean(self):
+        # Fisher of a Gaussian mean is its precision 1/sigma^2; the Fisher-merge of two means must equal
+        # the product-of-experts mean (the exact Bayesian combination of two Gaussian beliefs)
+        from mixle.ops import product_of_experts
+        from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+
+        m0, v0, m1, v1 = -1.0, 2.0, 3.0, 0.5
+        merged = fisher_merge([np.array([m0]), np.array([m1])], [1.0 / v0, 1.0 / v1])
+        poe = product_of_experts([GaussianDistribution(m0, v0), GaussianDistribution(m1, v1)])
+        self.assertAlmostEqual(merged[0], poe.mu, places=12)
+
+    def test_full_fisher_matrix_solve(self):
+        # two estimates with full-matrix Fishers -> (F0+F1)^-1 (F0 t0 + F1 t1)
+        t0, t1 = np.array([1.0, 0.0]), np.array([0.0, 1.0])
+        f0 = np.array([[2.0, 0.0], [0.0, 1.0]])
+        f1 = np.array([[1.0, 0.0], [0.0, 4.0]])
+        want = np.linalg.solve(f0 + f1, f0 @ t0 + f1 @ t1)
+        np.testing.assert_allclose(fisher_merge([t0, t1], [f0, f1]), want, atol=1e-10)
+
+    def test_single_estimate_is_identity(self):
+        np.testing.assert_allclose(fisher_merge([np.array([5.0, -1.0])], [np.array([3.0, 3.0])]), [5.0, -1.0])
 
 
 if __name__ == "__main__":
