@@ -224,5 +224,47 @@ class HmmTorchGpuEStepTestCase(unittest.TestCase):
             np.testing.assert_allclose(sorted(c.mu for c in got.topics), ref_mu, atol=5e-3)
 
 
+class HmmDefaultNumbaTorchTestCase(unittest.TestCase):
+    """The DEFAULT HMM (use_numba=True) is torch-eligible: the engine consumes the numba encoding for
+    both scoring (_backend_numba_encoding_ll -> hmm_engine_forward_ll) and the E-step, so the seamless
+    default runs its full EM on torch/GPU while the numpy engine keeps the tuned numba host path."""
+
+    def test_default_numba_hmm_scores_and_fits_on_torch(self):
+        from mixle.inference import optimize
+        from mixle.stats import GaussianDistribution, GaussianEstimator, HiddenMarkovEstimator
+        from mixle.stats.compute.backend import backend_seq_log_density
+
+        rng = np.random.RandomState(0)
+        seqs = [
+            [float(rng.normal(-4 if rng.rand() < 0.5 else 4, 1.0)) for _ in range(rng.randint(2, 7))] for _ in range(60)
+        ]
+        seqs.append([])  # the empty-sequence edge must contribute only the length term
+        dist = HiddenMarkovModelDistribution(
+            [GaussianDistribution(-4.0, 1.0), GaussianDistribution(4.0, 1.0)],
+            [0.5, 0.5],
+            [[0.8, 0.2], [0.3, 0.7]],
+            len_dist=CategoricalDistribution({0: 0.05, 2: 0.2, 3: 0.2, 4: 0.2, 5: 0.2, 6: 0.15}),
+            use_numba=True,
+        )
+        if _TORCH is None:
+            self.skipTest("torch not installed")
+        self.assertTrue(dist.supports_engine(_TORCH))
+        enc = dist.dist_to_encoder().seq_encode(seqs)
+        ref = dist.seq_log_density(enc)
+        got = _TORCH.to_numpy(backend_seq_log_density(dist, enc, _TORCH))
+        np.testing.assert_allclose(got, ref, atol=1e-10)
+
+        init = HiddenMarkovModelDistribution(
+            [GaussianDistribution(-1.0, 1.0), GaussianDistribution(1.0, 1.0)], [0.5, 0.5], [[0.8, 0.2], [0.2, 0.8]]
+        )
+        est = HiddenMarkovEstimator([GaussianEstimator(), GaussianEstimator()])  # default (numba)
+        train = [s for s in seqs if s]
+        ref_fit = optimize(train, est, max_its=20, engine=NUMPY_ENGINE, prev_estimate=init)
+        got_fit = optimize(train, est, max_its=20, engine=_TORCH, prev_estimate=init)
+        np.testing.assert_allclose(
+            sorted(c.mu for c in got_fit.topics), sorted(c.mu for c in ref_fit.topics), atol=5e-3
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

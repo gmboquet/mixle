@@ -516,11 +516,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
         children = tuple(self.topics) + (() if supports(self.len_dist, Neutral) else (self.len_dist,))
-        # has_topics (Bayesian emission priors) and terminal_values genuinely lack an engine path. The
-        # numba *encoding* (use_numba) is engine-ready for the E-step (seq_update_engine handles it), but
-        # the engine *scoring* path doesn't yet consume it, so a use_numba model stays numpy-only for now;
-        # build the HMM with use_numba=False to run its E-step + scoring on torch / GPU.
-        if self.has_topics or self.terminal_values is not None or self.use_numba:
+        # has_topics (Bayesian emission priors) and terminal_values genuinely lack an engine path.
+        # use_numba does NOT gate torch: the engine E-step (seq_update_engine) and the engine scoring
+        # path (_backend_numba_encoding_ll) both consume the numba encoding, so the default HMM runs
+        # its full Baum-Welch EM on torch / GPU while the numpy engine keeps the tuned numba host path.
+        if self.has_topics or self.terminal_values is not None:
             return DistributionCapabilities(engine_ready=("numpy",), kernel_status="legacy_numpy")
         ready = intersect_engine_ready(children)
         return DistributionCapabilities(engine_ready=ready, kernel_status="generic_latent")
@@ -871,7 +871,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         if x1 is not None:
             if getattr(engine, "supports_numba", False):
                 return self.seq_log_density(x)
-            raise BackendScoringError("HMM backend scoring requires the standard non-numba encoding.")
+            return self._backend_numba_encoding_ll(x1, engine)
 
         num_states = self.n_states
         (tot_cnt, idx_bands, has_next, len_vec, idx_mat, idx_vec, enc_data), _, len_enc = x0
@@ -922,6 +922,35 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             ll_ret = ll_ret + backend_seq_log_density(self.len_dist, len_enc, engine)
 
         return ll_ret
+
+    def _backend_numba_encoding_ll(self, x1: Any, engine: Any) -> Any:
+        """Engine forward scores for the numba (sequence-contiguous) encoding.
+
+        Mirrors the engine E-step's handling of this encoding: per-state emissions on the host, padded
+        into the ``(N, Tmax, S)`` layout, then the log-space forward on the active engine — so the
+        default ``use_numba=True`` HMM scores (and hence fits) on torch/GPU."""
+        from mixle.stats.compute.backend import backend_seq_log_density
+
+        (idx, sz, enc_data), len_enc = x1
+        sz = np.asarray(sz)
+        n_seq = len(sz)
+        tot = int(sz.sum())
+        if tot == 0:
+            rv = engine.zeros(n_seq)
+        else:
+            pr_obs = np.empty((tot, self.n_states), dtype=np.float64)
+            for i in range(self.n_states):
+                pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
+            padded, mask, _ = hmm_pad_log_emissions(pr_obs, sz)
+            with np.errstate(divide="ignore"):
+                log_w = np.log(self.w)
+                log_a = np.log(self.transitions)
+            rv = hmm_engine_forward_ll(engine, padded, log_w, log_a, mask)
+            # an empty sequence contributes no emission term (the padded row is all -inf; zero it)
+            rv = engine.where(engine.asarray(sz > 0), rv, engine.zeros(n_seq))
+        if self.len_dist is not None and len_enc is not None:
+            rv = rv + backend_seq_log_density(self.len_dist, len_enc, engine)
+        return rv
 
     def seq_posterior(self, x: E2) -> list[np.ndarray] | None:
         """Return vectorized posterior state probabilities for encoded observations."""
@@ -3454,6 +3483,25 @@ def hmm_pad_log_emissions(log_emit_flat, sz):
             padded[i, : s1 - s0, :] = log_emit_flat[s0:s1, :]
             mask[i, : s1 - s0] = 1.0
     return padded, mask, offsets
+
+
+def hmm_engine_forward_ll(engine, log_emit, log_w, log_a, mask):
+    """Per-sequence emission log-likelihood over padded sequences — the forward half of
+    :func:`hmm_engine_forward_backward`, for scoring paths that don't need posteriors.
+
+    Args mirror the forward-backward: ``log_emit`` (N, Tmax, S) padded log emissions, ``log_w`` (S,),
+    ``log_a`` (S, S), ``mask`` (N, Tmax) 1.0 for real steps. Returns ``ll`` (N,)."""
+    mask_np = np.asarray(mask)
+    tmax = mask_np.shape[1]
+    log_emit = engine.asarray(log_emit)
+    log_w = engine.asarray(log_w)
+    log_a = engine.asarray(log_a)
+    m = engine.asarray(mask)
+    alpha = log_w[None, :] + log_emit[:, 0, :]
+    for t in range(1, tmax):
+        cand = engine.logsumexp(alpha[:, :, None] + log_a[None, :, :], axis=1) + log_emit[:, t, :]
+        alpha = engine.where(m[:, t][:, None] > 0, cand, alpha)  # freeze alpha at padded steps
+    return engine.logsumexp(alpha, axis=1)
 
 
 def hmm_engine_forward_backward(engine, log_emit, log_w, log_a, mask, weights=None):
