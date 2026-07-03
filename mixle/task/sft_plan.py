@@ -78,6 +78,14 @@ class _CharCodec:
         self.stoi = {c: i for i, c in enumerate(self.itos)}
         self.eos_id = self.stoi[_EOS]
 
+    @classmethod
+    def from_itos(cls, itos: Sequence[str]) -> _CharCodec:
+        codec = cls.__new__(cls)
+        codec.itos = list(itos)
+        codec.stoi = {c: i for i, c in enumerate(codec.itos)}
+        codec.eos_id = codec.stoi[_EOS]
+        return codec
+
     @property
     def vocab(self) -> int:
         return len(self.itos)
@@ -101,6 +109,7 @@ class GenerativePlanner:
     max_new: int = 160
     constrained: bool = True  # decode inside the plan grammar (invalid output unrepresentable)
     conf_floor: float | None = None  # calibrated mean-logprob floor: low-confidence decodes escalate
+    lm_config: dict = field(default_factory=dict)  # builder config for save/load round-trip
     n_requests: int = 0
     n_escalated: int = 0
     harvested: list[tuple[str, list[dict]]] = field(default_factory=list)
@@ -167,6 +176,56 @@ class GenerativePlanner:
             "escalation_rate": (self.n_escalated / self.n_requests) if self.n_requests else 0.0,
             "harvested_traces": len(self.harvested),
         }
+
+    def save(self, path: str) -> str:
+        """Persist the plan-writing LM (weights + builder config), codec, specs, and gates; :meth:`load` restores."""
+        import json
+        from pathlib import Path
+
+        from mixle.task.artifact import save_module
+
+        out = Path(path)
+        out.mkdir(parents=True, exist_ok=True)
+        save_module(str(out / "lm"), self.lm.module, "mixle.causal_lm", dict(self.lm_config), task="plan-generation")
+        manifest = {
+            "kind": "genplanner/v1",
+            "itos": self.codec.itos,
+            "tools": {n: {"args": t.args, "required": t.required} for n, t in self.tools.items()},
+            "plan_agreement": self.plan_agreement,
+            "max_new": self.max_new,
+            "constrained": self.constrained,
+            "conf_floor": self.conf_floor,
+            "lm_config": dict(self.lm_config),
+        }
+        (out / "genplanner.json").write_text(json.dumps(manifest, indent=2))
+        return str(out)
+
+    @classmethod
+    def load(cls, path: str, teacher: Callable[[str], list[dict]], *, device: str = "cpu") -> GenerativePlanner:
+        """Reconstitute a serving GenerativePlanner from :meth:`save` output plus the teacher fallback."""
+        import json
+        from pathlib import Path
+
+        from mixle.models import LM
+        from mixle.task.artifact import load_module
+
+        p = Path(path)
+        manifest = json.loads((p / "genplanner.json").read_text())
+        cfg = dict(manifest["lm_config"])
+        lm = LM(device=device, **cfg)
+        module, _ = load_module(str(p / "lm"), device=device)
+        lm.module = module
+        return cls(
+            lm=lm,
+            codec=_CharCodec.from_itos(manifest["itos"]),
+            tools={n: ToolSpec(n, list(t["args"]), t.get("required")) for n, t in manifest["tools"].items()},
+            teacher=teacher,
+            plan_agreement=float(manifest.get("plan_agreement", float("nan"))),
+            max_new=int(manifest.get("max_new", 160)),
+            constrained=bool(manifest.get("constrained", True)),
+            conf_floor=manifest.get("conf_floor"),
+            lm_config=cfg,
+        )
 
 
 def _plans_match(got: list[dict], want: list[dict], specs: dict[str, ToolSpec]) -> bool:
@@ -242,6 +301,7 @@ def sft_planner(
         plan_agreement=float("nan"),
         max_new=block,
         constrained=constrained,
+        lm_config={"vocab": codec.vocab, "d_model": d_model, "n_layer": n_layer, "n_head": n_head, "block": block},
     )
     if constrained:
         # calibrate the confidence floor on the holdout: wrong-but-well-formed decodes score lower than

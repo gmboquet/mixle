@@ -98,5 +98,25 @@ class SftPlannerTest(unittest.TestCase):
         self.assertEqual(rep["harvested_traces"], rep["escalated"])
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class GenerativePlannerPersistenceTest(unittest.TestCase):
+    def test_save_load_plans_identically(self):
+        import tempfile
+
+        from mixle.task import GenerativePlanner, ToolSpec, sft_planner
+
+        tools = [ToolSpec("lookup_order", ["order_id"]), ToolSpec("notify", ["user"])]
+        planner = sft_planner(_teacher, _requests(160), tools, seed=0, epochs=25, d_model=64, n_layer=2)
+        fresh = _requests(30, seed=11)
+        want = [planner(r) for r in fresh]
+        with tempfile.TemporaryDirectory() as d:
+            path = planner.save(d + "/gen")
+            back = GenerativePlanner.load(path, _teacher)
+            got = [back(r) for r in fresh]
+        self.assertEqual(got, want)  # identical plans + escalations in a fresh process
+        self.assertEqual(back.conf_floor, planner.conf_floor)
+        self.assertAlmostEqual(back.plan_agreement, planner.plan_agreement, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()
