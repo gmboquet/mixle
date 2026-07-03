@@ -100,6 +100,7 @@ class GenerativePlanner:
     plan_agreement: float
     max_new: int = 160
     constrained: bool = True  # decode inside the plan grammar (invalid output unrepresentable)
+    conf_floor: float | None = None  # calibrated mean-logprob floor: low-confidence decodes escalate
     n_requests: int = 0
     n_escalated: int = 0
     harvested: list[tuple[str, list[dict]]] = field(default_factory=list)
@@ -133,8 +134,13 @@ class GenerativePlanner:
         if self.constrained:
             from mixle.task.constrained import constrained_plan_decode
 
-            text = constrained_plan_decode(self.lm, self.codec, request, self.tools, max_new=self.max_new)
-            if text is None:
+            decoded = constrained_plan_decode(self.lm, self.codec, request, self.tools, max_new=self.max_new)
+            if decoded is None:
+                return None
+            text, conf = decoded
+            # the grammar guarantees form, not content: a weak model can write a well-formed wrong plan,
+            # so emission additionally requires the model's own confidence to clear the calibrated floor
+            if self.conf_floor is not None and conf < self.conf_floor:
                 return None
         else:
             prompt = self.codec.encode(request + _PROMPT_SEP)
@@ -198,8 +204,11 @@ def sft_planner(
     prompt masked so only plan tokens carry loss; generation stops at newline. Held-out agreement is
     plan-level exact match (tools + required args, in order) on requests the LM never saw.
     """
+    import torch
+
     from mixle.models import LM
 
+    torch.manual_seed(seed)  # LM weight init draws from torch's global RNG; pin it so seed= means seed
     reqs = [str(r) for r in requests]
     if len(reqs) < 16:
         raise ValueError("sft_planner needs at least 16 example requests")
@@ -234,6 +243,26 @@ def sft_planner(
         max_new=block,
         constrained=constrained,
     )
+    if constrained:
+        # calibrate the confidence floor on the holdout: wrong-but-well-formed decodes score lower than
+        # correct ones, so pick the floor that keeps (almost) all correct decodes and pushes above the
+        # wrong ones when possible — low-confidence generations then escalate instead of shipping
+        from mixle.task.constrained import constrained_plan_decode
+
+        correct_scores: list[float] = []
+        wrong_scores: list[float] = []
+        for r in hold:
+            decoded = constrained_plan_decode(lm, codec, r, specs, max_new=block)
+            if decoded is None:
+                continue
+            plan = _parse_plan(decoded[0] if decoded[0].endswith(_EOS) else decoded[0] + _EOS)
+            ok = plan is not None and _plans_match(plan, list(teacher(r)), specs)
+            (correct_scores if ok else wrong_scores).append(decoded[1])
+        if correct_scores:
+            floor = float(np.quantile(correct_scores, 0.05))
+            if wrong_scores:
+                floor = max(floor, min(float(max(wrong_scores)) + 1e-9, float(np.quantile(correct_scores, 0.5))))
+            planner.conf_floor = floor
     agree = 0
     for r in hold:
         got = planner.try_plan(r)
