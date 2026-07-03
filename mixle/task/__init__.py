@@ -100,6 +100,7 @@ from mixle.task.quantize import (
 )
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
 from mixle.task.router import Router, RouterStats, route_stack
+from mixle.task.scorecard import Scorecard, scorecard
 from mixle.task.solve import Solution, load_harvested, solve
 from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
 
@@ -132,6 +133,7 @@ __all__ = [
     "RecordClassifierIO",
     "RoutePlan",
     "Router",
+    "Scorecard",
     "RouterStats",
     "Solution",
     "StructuredClassifierIO",
@@ -167,6 +169,7 @@ __all__ = [
     "recommend_model",
     "recommend_route",
     "route_stack",
+    "scorecard",
     "spec_to_estimator",
     "load_arrays",
     "load_json",
