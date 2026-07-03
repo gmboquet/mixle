@@ -57,6 +57,7 @@ from mixle.models.grammar import (
 )
 from mixle.models.knowledge_graph import KnowledgeGraphFitResult, TransEKnowledgeGraphModel
 from mixle.models.language_model import LM
+from mixle.models.mixture_density import NeuralConditionalDensity, build_mdn
 from mixle.models.neural import (
     CategoricalClassificationNeuralNetwork,
     GaussianRegressionNeuralNetwork,
@@ -108,6 +109,7 @@ __all__ = [
     "ErdosRenyiGraphModel",
     "GaussianProcessRegressor",
     "GaussianRegressionNeuralNetwork",
+    "NeuralConditionalDensity",
     "NeuralDensity",
     "NeuralLeaf",
     "SoftmaxNeuralLeaf",
@@ -151,6 +153,7 @@ __all__ = [
     "hard_em_stochastic_block_model",
     "learn_pc_skeleton",
     "build_coupling_flow",
+    "build_mdn",
     "make_mlp",
     "mean_stick_weights",
     "orient_v_structures",
