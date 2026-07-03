@@ -88,6 +88,7 @@ from mixle.task.model import (
 # post-training quantization: int8 weights, numpy-only inference (torch-free deployable MLP students)
 from mixle.task.quantize import QuantizedClassifierIO, QuantizedMLP, quantize_mlp
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
+from mixle.task.solve import Solution, solve
 from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
 
 __all__ = [
@@ -117,6 +118,7 @@ __all__ = [
     "RecipeSpace",
     "RecordClassifierIO",
     "RoutePlan",
+    "Solution",
     "StructuredClassifierIO",
     "TaskManifest",
     "TaskModel",
@@ -159,6 +161,7 @@ __all__ = [
     "save_arrays",
     "save_json",
     "save_module",
+    "solve",
     "tokenize",
     "tune_recipe",
 ]
