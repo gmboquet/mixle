@@ -8,8 +8,10 @@ The point is not a specific architecture; it is the *wrapper*. ``NeuralLeaf`` al
 responsibility-weighted maximum-likelihood gradient ascent on the module, warm-started across EM iterations.
 
 That is the thing no NN library offers: "a mixture of a normalizing flow and a Gamma", "an HMM whose emissions
-are flows". :func:`build_coupling_flow` is a ready RealNVP-style module to wrap; any other exact density (a flow,
-an autoregressive density, a normalized energy model) plugs in the same way.
+are flows". Two ready instances ship: :func:`build_coupling_flow` (a RealNVP-style flow, *exact* density) and
+:func:`build_vae` (a variational autoencoder, a *latent-variable* density whose ``log_density`` is the ELBO
+lower bound) -- two structurally different families behind one adapter. Any other density (an autoregressive
+density, a normalized energy model) plugs in the same way.
 """
 
 from __future__ import annotations
@@ -236,3 +238,57 @@ def build_coupling_flow(dim: int, *, hidden: int = 32, layers: int = 4) -> Any:
             return x
 
     return CouplingFlow()
+
+
+# --- a second, structurally different instance: a variational autoencoder (a LATENT-VARIABLE density) --------
+
+
+def build_vae(dim: int, *, latent: int = 2, hidden: int = 32) -> Any:
+    """A variational autoencoder over ``R^dim`` -- a *latent-variable* density ``p(x) = int p(x | z) p(z) dz``.
+
+    An amortized encoder ``q(z | x)`` and a decoder ``p(x | z)`` (diagonal-Gaussian, learned observation scale)
+    are trained by the ELBO with the reparameterization trick. It is a genuinely different *family* from the
+    flow -- structure through a low-dimensional latent, not an invertible map -- yet it plugs into the **same**
+    :class:`NeuralDensity` adapter, because it exposes the same two methods.
+
+    Caveat, stated plainly: ``log_density(x)`` returns the **ELBO**, a *lower bound* on ``log p(x)``, not the exact
+    value (the flow's is exact). So a VAE leaf is honest on its own, in a mixture *of VAEs*, or against another
+    bounded leaf -- but mixing it with an exact-density leaf (a Gaussian, a flow) compares a bound against an exact
+    value and will under-weight the VAE. Because ELBO <= log p(x), a VAE that *beats* an exact leaf on held-out
+    data still wins by at least that margin; a VAE that loses may not actually be worse.
+    """
+    import torch
+    import torch.nn as nn
+
+    class VAE(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dim = int(dim)
+            self.latent = int(latent)
+            self.enc = nn.Sequential(nn.Linear(self.dim, hidden), nn.Tanh())
+            self.enc_mu = nn.Linear(hidden, self.latent)
+            self.enc_log_var = nn.Linear(hidden, self.latent)
+            self.dec = nn.Sequential(nn.Linear(self.latent, hidden), nn.Tanh(), nn.Linear(hidden, self.dim))
+            self.log_obs_scale = nn.Parameter(torch.zeros(1))  # learned diagonal p(x|z) scale
+
+        def _decode_logp(self, x: Any, z: Any) -> Any:
+            recon = self.dec(z)
+            inv_var = torch.exp(-2.0 * self.log_obs_scale)
+            return (
+                -0.5 * ((x - recon) ** 2).sum(1) * inv_var
+                - self.dim * self.log_obs_scale
+                - 0.5 * self.dim * float(np.log(2.0 * np.pi))
+            )
+
+        def log_density(self, x: Any) -> Any:
+            h = self.enc(x)
+            mu, log_var = self.enc_mu(h), self.enc_log_var(h).clamp(-8.0, 8.0)
+            z = mu + torch.exp(0.5 * log_var) * torch.randn_like(mu)  # reparameterization
+            kl = 0.5 * (torch.exp(log_var) + mu**2 - 1.0 - log_var).sum(1)
+            return self._decode_logp(x, z) - kl  # ELBO: E_q[log p(x|z)] - KL(q(z|x) || p(z))
+
+        def sample(self, n: int) -> Any:
+            z = torch.randn(int(n), self.latent, device=self.log_obs_scale.device)
+            return self.dec(z) + torch.exp(self.log_obs_scale) * torch.randn(int(n), self.dim, device=z.device)
+
+    return VAE()
