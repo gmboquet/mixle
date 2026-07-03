@@ -258,16 +258,30 @@ def solve_multilabel(
     epochs: int = 300,
     lr: float = 1e-2,
     dim: int = 256,
+    prelabeled: tuple[Sequence[Any], Sequence[Sequence[str]]] | None = None,
     seed: int = 0,
 ) -> MultiLabelSolution:
-    """Replace a set-of-labels routine with a per-label-calibrated student (see module docstring)."""
+    """Replace a set-of-labels routine with a per-label-calibrated student (see module docstring).
+
+    ``prelabeled`` — already-teacher-labeled ``(inputs, label_sets)``, typically harvested escalations
+    from a serving deployment — folds into the TRAINING split only, never calibration (which stays a
+    fresh split of ``inputs``, so the per-label bars keep their finite-sample rank guarantee). Labels
+    seen only in ``prelabeled`` still enter the label space.
+    """
     items = list(inputs)
     if len(items) < 12:
         raise ValueError("solve_multilabel needs at least 12 example inputs")
     k = kind or _input_kind(items[0])
     raw = _label_with(teacher, items)
     sets = [[str(v) for v in (tags or [])] for tags in raw]
-    labels = sorted({t for tags in sets for t in tags})
+    pre_in: list = []
+    pre_sets: list[list[str]] = []
+    if prelabeled is not None:
+        pre_in = list(prelabeled[0])
+        pre_sets = [[str(v) for v in (tags or [])] for tags in prelabeled[1]]
+        if len(pre_in) != len(pre_sets):
+            raise ValueError("prelabeled inputs and label sets must have equal length")
+    labels = sorted({t for tags in sets for t in tags} | {t for tags in pre_sets for t in tags})
     if not labels:
         raise ValueError("the teacher produced no labels on the example inputs")
 
@@ -275,8 +289,8 @@ def solve_multilabel(
     order = rng.permutation(len(items))
     n_cal = max(4, int(round(len(items) * holdout)))
     cal_idx, train_idx = order[:n_cal], order[n_cal:]
-    train_inputs = [items[i] for i in train_idx]
-    train_sets = [sets[i] for i in train_idx]
+    train_inputs = [items[i] for i in train_idx] + pre_in
+    train_sets = [sets[i] for i in train_idx] + pre_sets
     cal_inputs = [items[i] for i in cal_idx]
     cal_sets = [sets[i] for i in cal_idx]
 

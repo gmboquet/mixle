@@ -51,68 +51,59 @@ Development: `git clone … && pip install -e ".[all]"`.
 
 ## Quickstart
 
-**A hybrid with a real job.** Catch anomalies in an event stream where each event has a *type* (what
-happened) and a *time* (seconds since the last one). Model both at once — a Transformer predicts the next
-event from recent history, a Gamma models the wait time — as a single distribution, a *neural marked point
-process*, fit in one call:
+**Compose neural and classical models — and share parameters across them.** Here one learned word
+embedding is tied across a plain language model and a topic mixture of language models, trained jointly in
+a single fit, so every topic and the LM read and write the *same* word vectors:
 
 ```python
-from mixle.models import TransformerLMEstimator
-from mixle.stats import CompositeEstimator, GammaEstimator
-from mixle.inference import optimize
-
-# each event = ((recent history, next event type), seconds since last)
-model = optimize(events, CompositeEstimator((
-    TransformerLMEstimator(vocab=500, d_model=128, n_layer=4, block=64),   # what
-    GammaEstimator(),                                                      # when
-)))
-
-model.log_density(event)   # one joint score — drops when an event is odd in WHAT happened, WHEN, or both
-```
-
-The Transformer and the Gamma are just distributions, fit together in one `optimize` call — the Gamma in
-closed form, the Transformer by gradient descent. Swap the Gamma for any of ~90 families, or wrap it in a
-mixture/HMM (that latent adds the EM step). Runnable: [`examples/hybrid_llm_example.py`](https://github.com/gmboquet/mixle/blob/main/examples/hybrid_llm_example.py).
-
-**Tie a learned embedding across models.** When the mixture has several language-model experts, declare the
-word embedding once with `CategoricalEmbedding` (`mixle.ppl.Embedding` in the PPL) and hand it to each — they
-train the same token vectors jointly instead of duplicating a big parameter block, the neural analogue of the
-PPL's `name=` scalar tying:
-
-```python
+import numpy as np
 from mixle.models import CategoricalEmbedding, TransformerLMEstimator
 from mixle.stats import MixtureEstimator
+from mixle.inference import optimize
 
-emb = CategoricalEmbedding(8000, 256, name="word")                    # one word embedding, declared once
-mixture = MixtureEstimator([                                          # 3 experts, every one ties it
-    TransformerLMEstimator(8000, d_model=256, embedding=emb) for _ in range(3)
-])
+V, d, B, K = 60, 24, 8, 3                        # vocab, embedding dim, context window, number of topics
+emb = CategoricalEmbedding(V, d, name="word")    # ONE learned word embedding, declared once
+
+# the SAME word vectors feed a plain language model AND a K-topic mixture of language models
+lm     = TransformerLMEstimator(V, d_model=d, n_layer=2, block=B, embedding=emb)
+topics = MixtureEstimator([TransformerLMEstimator(V, d_model=d, n_layer=2, block=B, embedding=emb)
+                           for _ in range(K)])
+
+# a document is (context window, next word); fitting the topic mixture trains the shared embedding jointly
+rng   = np.random.RandomState(0)
+docs  = [(list(rng.randint(0, V, size=B)), int(rng.randint(0, V))) for _ in range(240)]
+model = optimize(docs, topics, max_its=5)
+
+model.posterior(docs[0])                                    # soft topic assignment for a document
+{id(lm.module.tok.weight)} | {id(c.module.tok.weight) for c in model.components}   # one shared tensor
 ```
 
-The same machinery fits an ordinary heterogeneous record just as well — each here is a
-`(category, real, variable-length count sequence)`:
+The same one-`optimize` fit handles an ordinary heterogeneous record just as well — a web session,
+`(device, minutes on site, [clicks per page])`: a category, a real, and a variable-length count sequence,
+with a latent user segment over the whole record:
 
 ```python
 from mixle.stats import *
 from mixle.inference import optimize
 
+# one record per web session: (device, minutes on site, [clicks on each page visited])
 data = [
-    ('a', -0.4, [5, 7]),       ('b', 4.9, [11, 9]),
-    ('a',  0.2, [6, 5, 4]),    ('b', 5.3, [10, 12, 11]),
-    ('a', -1.1, [4, 6]),       ('b', 4.5, [9, 10]),
-    ('a',  0.7, [5, 5]),       ('b', 5.1, [12, 8]),
-    ('a', -0.2, [7, 6, 5]),    ('b', 4.7, [9, 11]),
+    ('ios', 2.3, [4, 1]),      ('web', 11.5, [9, 12, 7]),
+    ('ios', 1.1, [2]),         ('web',  9.8, [8, 10]),
+    ('ios', 3.0, [5, 3, 2]),   ('web', 12.1, [11, 9, 13]),
+    ('ios', 0.8, [1, 2]),      ('web', 10.4, [7, 8]),
 ]
 
-# The estimator mirrors the distribution's structure exactly.
+# the estimator mirrors the model's shape — two latent user segments over the whole record
 est = MixtureEstimator([CompositeEstimator((
-    CategoricalEstimator(),
-    GaussianEstimator(),
-    SequenceEstimator(PoissonEstimator(), len_estimator=CategoricalEstimator()),
+    CategoricalEstimator(),                                             # device
+    GaussianEstimator(),                                               # minutes on site
+    SequenceEstimator(PoissonEstimator(), len_estimator=CategoricalEstimator()),  # clicks per page
 ))] * 2)
 
 model = optimize(data, est, max_its=100)
-model.sampler(seed=0).sample(3)   # draw new records from the fitted model
+model.posterior(('web', 10.0, [9, 8]))   # soft segment assignment for a new session
+model.sampler(seed=0).sample(3)          # synthesize brand-new sessions
 ```
 
 You don't have to spell the estimator out. `optimize` (and `fit`) also accept a **prototype
@@ -120,9 +111,11 @@ distribution** — its matching estimator is taken automatically — or just the
 estimator is inferred:
 
 ```python
+reals = [-2.1, -1.8, -2.0, 1.9, 2.3, 2.1]     # two clusters
+
 proto = MixtureDistribution([GaussianDistribution(-1, 1), GaussianDistribution(1, 1)], [0.5, 0.5])
-optimize(reals, proto)    # build the model's shape once, fit it directly
-optimize(reals)           # or let mixle infer the estimator from the data
+optimize(reals, proto)    # fit the shape you drew — no estimator to spell out
+optimize(reals)           # or hand over just the data and let mixle infer the estimator
 ```
 
 The same model in the shorter [`mixle.ppl`](#probabilistic-programming-mixleppl) dialect is a few lines.
@@ -131,8 +124,10 @@ The same model in the shorter [`mixle.ppl`](#probabilistic-programming-mixleppl)
 train split, ranks them on held-out data, and returns the winner — then the verbs chain:
 
 ```python
-m = mixle.propose(data, fit=True)   # verified candidate frontier -> the winner, fitted
-m.evaluate(holdout); m.sample(5); m.posterior(x); m.explain()
+data = ...    # your records — any mix of types
+
+m = mixle.propose(data, fit=True)   # fit every proposer on a split, rank on held-out, keep the winner
+m.evaluate(...); m.sample(5); m.posterior(...); m.explain()
 m.deploy("artifacts/m")             # durable artifact; mixle.Model.load() restores it
 ```
 
@@ -143,11 +138,17 @@ calibrated, in-distribution decision is safe — otherwise it calls the original
 ```python
 from mixle.task import solve
 
-sol = solve(route, tickets, propose="auto", synthesize=200)   # dataset <- route(t); train; calibrate
-sol(ticket)          # drop-in: answers locally when SURE, falls back to route() when not
+route = ...     # the function doing the job today — a rule, an API call, an LLM
+tickets = ...   # a list of representative inputs
+
+sol = solve(route, tickets, propose="auto", synthesize=200)   # label with route(); train; conformally calibrate
+sol(tickets[0])      # drop-in: answers locally when SURE, else falls back to route()
 sol.improve()        # fold escalations back in; promote only if it verifies better
-sol.save("artifacts/router")   # artifact carries its own verification record
+sol.save("artifacts/router")
 ```
+
+The student defaults to a compact hashed-feature classifier; `solve(..., student="generative")` swaps in a
+generative distribution instead — interpretable and torch-free.
 
 ## Core concepts
 
@@ -233,11 +234,11 @@ m.posterior(data)                                                 # per-point re
 seqs = [[0.1, 5.1, 4.9], [4.8, 5.0], [0.0, 0.2]]                  # variable-length real sequences
 Markov(Normal(free, free), states=2).fit(seqs)                    # 2-state Gaussian HMM
 
-#   y[i] ~ Normal(b0 + b1*x[i] + b2*z[i], sd)   — a linear model
-Normal(free * Field("x") + free * Field("z") + free, free).fit(y, given={"x": x, "z": z})
-
 a, b = Normal(0, 10, name="a"), Normal(0, 10, name="b")
 Mix([Normal(a, 1), Normal(b, 1)]).fit(data, constraints=a < b)    # ordered means break label-switching
+
+# y[i] ~ Normal(b0 + b1*x[i] + b2*z[i], sd) — Bayesian linear regression over columns you supply
+Normal(free * Field("x") + free * Field("z") + free, free).fit(..., given={"x": ..., "z": ...})
 ```
 
 - **`how=`** selects the route: `auto` reads the model's *structure* and picks the algorithm **family**
@@ -256,21 +257,21 @@ A slot is not limited to a single value/`free`/prior — it can be an **expressi
 latents can be coupled, indexed, or grouped. All of the below fit through the same `how=` routes:
 
 ```python
-from mixle.ppl import Normal, Poisson, Field, Group, free, potential
+from mixle.ppl import Normal, Poisson, Categorical, Field, Group, free, potential
 
 a, b = Normal(0, 10, name="a"), Normal(0, 10, name="b")
-Normal(a + b, 1.0).fit(data)                       # deterministic expressions over latents
-Normal(0.0, a.exp()).fit(data)                     #   …and transforms of them
-Normal(a, 1.0).fit(data, potentials=potential(lambda av, bv: -0.5 * (av - bv) ** 2, a, b))  # custom log-factors
+Normal(a + b, 1.0).fit(...)                        # deterministic expressions over latents
+Normal(0.0, a.exp()).fit(...)                      #   …and transforms of them
+Normal(a, 1.0).fit(..., potentials=potential(lambda av, bv: -0.5 * (av - bv) ** 2, a, b))  # custom log-factors
 
-Normal(Normal(0, 5).each(), free).fit(groups)                # random effects: one list per group
-Normal(Normal(0, 5).each(by="school"), free).fit(y, given={"school": labels})  #   …or a flat array + index
-Poisson(free * Field("x") + Group("g")).fit(counts, given={"x": x, "g": g})    # non-Normal GLMM (PQL)
+Normal(Normal(0, 5).each(), free).fit(...)                         # random effects: one list per group
+Normal(Normal(0, 5).each(by="school"), free).fit(..., given={"school": ...})  #   …or a flat array + index
+Poisson(free * Field("x") + Group("g")).fit(..., given={"x": ..., "g": ...})  # non-Normal GLMM (PQL)
 
-theta = free(8)                                              # a latent vector, indexed by data
-Normal(theta[Field("g")], free).fit(y, given={"g": labels})  #   y[i] ~ Normal(theta[g[i]], sd)
+theta = free(8)                                             # a latent vector, indexed by data
+Normal(theta[Field("g")], free).fit(..., given={"g": ...})  #   y[i] ~ Normal(theta[g[i]], sd)
 
-Categorical(free).fit(labels)                                # the category set is inferred from the data
+Categorical(free).fit(...)                                  # the category set is inferred from the data
 ```
 
 - **Custom factors:** `potential(fn, *vars)` adds an arbitrary `fn(*values)` log-term to the joint, and
@@ -280,6 +281,17 @@ Categorical(free).fit(labels)                                # the category set 
 - **Diagnostics:** a multi-chain fit (`how="nuts", chains=4`) folds per-parameter R̂ and ESS straight
   into `m.result.summary()`; `waic` / `loo` / `compare` rank fitted models.
 
+When the density itself should be neural, the same dialect exposes flow / VAE / autoregressive
+constructors that fit with `.fit()` and compose into mixtures like any distribution — no training loop in
+user code:
+
+```python
+from mixle.ppl import Flow, MDN
+
+Flow(2).fit(...)                      # p(x): a normalizing flow (also MAF, VAE, DiscreteAR)
+MDN(1, 1).fit(..., given={"x": ...})  # p(y | x): a mixture density network (also CondFlow, CondDiscreteAR)
+```
+
 The dialect is thin — the `mixle.stats` classes underneath are untouched.
 
 ## Frequentist & Bayesian
@@ -287,6 +299,7 @@ The dialect is thin — the `mixle.stats` classes underneath are untouched.
 The prior is the only switch — no prior is MLE; a conjugate `prior=` makes the same machinery Bayesian:
 
 ```python
+from mixle.stats import GaussianEstimator
 from mixle.inference.priors import NormalGammaPrior
 
 GaussianEstimator()                          # MLE
@@ -309,9 +322,9 @@ ops, device, and precision — so **scale-out is a backend argument, not a rewri
 ```python
 from mixle.engines import TorchEngine
 
-optimize(data, est, engine=TorchEngine(device="cuda", dtype="float32"))   # GPU
-optimize(data, est, precision="auto")                                     # stats still accumulate in float64
-optimize(rdd,  est, backend="spark")                                      # also: mp · dask · mpi · ray · lightning
+optimize(..., engine=TorchEngine(device="cuda", dtype="float32"))   # GPU: the same fit, one extra argument
+optimize(..., precision="auto")                                     # mixed precision; stats still accumulate in float64
+optimize(..., backend="spark")                                      # distributed: mp · dask · mpi · ray · lightning
 ```
 
 - The same EM contract runs unchanged on NumPy, Numba, Torch, or a symbolic backend.
@@ -327,11 +340,16 @@ Discrete and structured models **enumerate their support in descending-probabili
 exact **rank / cumulative-probability** queries — even when the support is enormous or unbounded:
 
 ```python
-e = dist.enumerator()
-e.top_k(5)        # the 5 most probable (value, log_prob)
-e.top_p(0.95)     # smallest set covering 95% of the mass (the nucleus)
-e.rank(value)     # how many values are strictly more probable than `value`
-e.seek(10_000)    # the ~10,000th most probable value, by structural count-DP
+from mixle.stats import CategoricalDistribution, SequenceDistribution, PoissonDistribution
+
+# a toy language model: skewed letters in Poisson-length "words" — an unbounded support
+lm = SequenceDistribution(CategoricalDistribution({"a": .5, "b": .3, "c": .2}),
+                          len_dist=PoissonDistribution(3.0))
+
+e = lm.enumerator()
+e.top_k(5)                     # the 5 most probable words, in order — the rest are never touched
+e.seek(1_000).value            # jump straight to the 1,000th-most-probable word, by structural count-DP
+e.rank(["b", "a", "c"]).rank   # how many words are strictly more probable than "bac"
 ```
 
 - **Decomposable families** (Composite / Record / Sequence / MarkovChain): rank ↔ value is an exact
@@ -353,8 +371,8 @@ e.seek(10_000)    # the ~10,000th most probable value, by structural count-DP
 - **Design & analysis of experiments** (`mixle.doe`): space-filling designs, GP Bayesian optimization,
   and the analysis half — Sobol/Morris sensitivity, uncertainty propagation, Kennedy-O'Hagan calibration.
 - **Embeddings** (`mixle.utils.hvis`): model-based t-SNE / UMAP over per-record posteriors.
-- **Neural & language leaves** (`mixle.models`): a causal-Transformer LM (`LM` / `StreamingTransformerLeaf`),
-  neural experts (`NeuralLeaf`, `SoftmaxNeuralLeaf`), and preference-tuned (`DPOLeaf`) leaves — each a
+- **Neural & language leaves** (`mixle.models`): a causal-Transformer LM (`LM` / `StreamingTransformer`),
+  neural experts (`NeuralGaussian`, `NeuralCategorical`), and preference-tuned (`DPOModel`) leaves — each a
   distribution that composes into mixtures / composites / HMM emissions and trains by EM (the E-step
   weights it; its M-step is gradient descent on the net). GPU/distributed pretraining via `LM.fit`.
 - **Supervised & non-iid models** (`mixle.models`): GP regression, neural regressors, random forests
@@ -383,7 +401,6 @@ Self-contained scripts in [examples/](https://github.com/gmboquet/mixle/tree/mai
 
 ```sh
 cd examples
-python hybrid_llm_example.py            # a Transformer LM × a Gamma, composed and fit together by EM
 python gallery_univariate_example.py    # tour the scalar families (also gallery_{multivariate,combinators,…})
 python gallery_structured_example.py    # mixtures / HMMs / LDA / latent-variable models
 python ppl_example.py                   # the equation-style mixle.ppl surface
@@ -415,13 +432,10 @@ vectorized-vs-scalar density agreement, EM convergence. See
 Maintained by **Grant Boquet** ([@gmboquet](https://github.com/gmboquet) ·
 grant.boquet@gmail.com).
 
-mixle began life as **pysparkplug**, developed at Lawrence Livermore National Laboratory; thanks to the
-LLNL contributors who built the original library and to everyone in the
-[git history](https://github.com/gmboquet/mixle/graphs/contributors). Contributions, issues, and
-discussion are welcome — open a PR or an issue.
+Contributions, issues, and discussion are welcome — open a PR or an issue.
 
 ## License
 
 MIT — see [LICENSE](https://github.com/gmboquet/mixle/blob/main/LICENSE).
 
-© 2014–2025, developed at Lawrence Livermore National Laboratory (LLNL-CODE-844837).
+mixle began life as **pysparkplug**, developed at Lawrence Livermore National Laboratory 2014–2025 (LLNL-CODE-844837).

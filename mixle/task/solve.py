@@ -64,13 +64,16 @@ def _batch_view(teacher: Callable[..., Any]) -> Callable[[list], list]:
 
 
 def load_harvested(path: str) -> tuple[list, list]:
-    """Read the ``harvested.jsonl`` a serving endpoint accumulates into ``(inputs, labels)``.
+    """Read the ``harvested.jsonl`` a serving endpoint accumulates into ``(inputs, answers)``.
 
-    Each line is ``{"input": ..., "label": ...}`` (the mixle-mlops ``/v1/tasks/{name}/feedback``
-    format). JSON lists coerce back to tuples — the record shape ``solve()`` trained on — so the
-    pairs feed straight into ``solve(..., prelabeled=load_harvested(p))`` for the next round."""
+    Two line formats are understood: ``{"input": ..., "label": ...}`` (the mixle-mlops
+    ``/v1/tasks/{name}/feedback`` classification format — labels are str-coerced) and
+    ``{"input": ..., "answer": ...}`` (the ``/v1/solutions/{name}/feedback`` format for every solve
+    shape — the answer keeps its shape: a number for regression, a list of labels for multilabel, a
+    dict for structured). Input JSON lists coerce back to tuples — the record shape the solve
+    trained on — so the pairs feed straight into ``solve*(..., prelabeled=load_harvested(p))``."""
     inputs: list = []
-    labels: list = []
+    answers: list = []
     with open(path) as f:
         for line in f:
             line = line.strip()
@@ -79,8 +82,8 @@ def load_harvested(path: str) -> tuple[list, list]:
             row = json.loads(line)
             x = row["input"]
             inputs.append(tuple(x) if isinstance(x, list) else x)
-            labels.append(str(row["label"]))
-    return inputs, labels
+            answers.append(str(row["label"]) if "label" in row else row["answer"])
+    return inputs, answers
 
 
 def _input_kind(x: Any) -> str:

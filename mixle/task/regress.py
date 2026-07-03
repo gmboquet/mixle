@@ -313,6 +313,7 @@ def solve_regression(
     epochs: int = 300,
     lr: float = 1e-2,
     dim: int = 256,
+    prelabeled: tuple[Sequence[Any], Sequence[float]] | None = None,
     seed: int = 0,
 ) -> RegressionSolution:
     """Replace a numeric routine with a conformally-calibrated student (see module docstring).
@@ -322,6 +323,10 @@ def solve_regression(
         inputs: example inputs (text or dict/tuple records).
         tol: the caller's precision requirement — answer locally only when the calibrated ``qhat <= tol``.
         alpha: interval miscoverage level (``1 - alpha`` coverage of the teacher's answer).
+        prelabeled: already-teacher-labeled ``(inputs, values)`` — typically harvested escalations from
+            a serving deployment — folded into the TRAINING split only, never calibration (which stays
+            a fresh split of ``inputs``, so ``qhat`` keeps its finite-sample guarantee). The re-solve
+            half of the serving loop.
     """
     items = list(inputs)
     if len(items) < 12:
@@ -337,6 +342,13 @@ def solve_regression(
     train_ys = [ys[i] for i in train_idx]
     cal_inputs = [items[i] for i in cal_idx]
     cal_ys = [ys[i] for i in cal_idx]
+
+    if prelabeled is not None:
+        pre_in, pre_ys = prelabeled
+        if len(pre_in) != len(pre_ys):
+            raise ValueError("prelabeled inputs and values must have equal length")
+        train_inputs = train_inputs + list(pre_in)
+        train_ys = train_ys + [float(v) for v in pre_ys]
 
     featurizer = (
         HashedNGram(n=3, dim=dim, seed=seed)

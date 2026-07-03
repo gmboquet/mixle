@@ -90,5 +90,46 @@ class RegressionPersistenceTest(unittest.TestCase):
             back.improve()  # loaded artifacts serve; improving needs the original data
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class RegressionResolveTest(unittest.TestCase):
+    """prelabeled= closes the serving loop: harvested pairs retrain WITHOUT re-calling the teacher."""
+
+    def test_prelabeled_trains_only_and_calibration_stays_fresh(self):
+        from mixle.task import solve_regression
+
+        calls = {"n": 0}
+
+        def counting_teacher(item):
+            if isinstance(item, list):  # the batched probe, not a real label
+                raise TypeError("per-item teacher")
+            calls["n"] += 1
+            return _price(item)
+
+        base_items = _items(100, seed=0)
+        harvested = _items(60, seed=11)
+        pre = (harvested, [_price(it) for it in harvested])
+
+        sol = solve_regression(counting_teacher, base_items, tol=1e6, alpha=0.1, prelabeled=pre, seed=0, epochs=150)
+        # the teacher labeled ONLY the base inputs; prelabeled pairs came in free
+        self.assertEqual(calls["n"], len(base_items))
+        # prelabeled landed in training, never calibration
+        self.assertEqual(len(sol.train_inputs), len(base_items) - len(sol.cal_inputs) + len(harvested))
+        self.assertLessEqual(len(sol.cal_inputs), len(base_items))
+        for it in harvested:
+            self.assertNotIn(repr(it), [repr(c) for c in sol.cal_inputs])
+
+    def test_prelabeled_data_does_not_degrade_the_fit(self):
+        from mixle.task import solve_regression
+
+        small = _items(60, seed=0)
+        extra = _items(400, seed=5)
+        pre = (extra, [_price(it) for it in extra])
+        lone = solve_regression(_price, small, tol=1e6, alpha=0.1, seed=0, epochs=200)
+        fed = solve_regression(_price, small, tol=1e6, alpha=0.1, prelabeled=pre, seed=0, epochs=200)
+        # the 15-point cal split makes MAE noisy; pin non-degradation, not strict tightening
+        self.assertLess(fed.holdout_mae, lone.holdout_mae * 1.5)
+        self.assertTrue(np.isfinite(fed.qhat))
+
+
 if __name__ == "__main__":
     unittest.main()
