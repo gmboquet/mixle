@@ -187,6 +187,11 @@ class Solution:
         Returns True when a better student was promoted. The calibration slice is never trained on, so the
         conformal guarantee and the agreement comparison stay honest across rounds.
         """
+        if not self.cal_inputs:
+            raise RuntimeError(
+                "this Solution was loaded from an artifact and has no training/calibration data; "
+                "collect cascade.harvested() and re-solve(real + harvested inputs) to improve."
+            )
         new_inputs, new_labels = self.cascade.harvested()
         if not new_inputs:
             return False
@@ -216,7 +221,33 @@ class Solution:
 
     def save(self, path: str) -> str:
         """Persist the calibrated student (weights + calibration + manifest) as a load-anywhere artifact."""
+        task = self.cascade.model.task
+        task.meta = {**task.meta, "solve": {"kind": self.kind, "ood": self.ood}}
         return self.cascade.model.save(path)
+
+    @classmethod
+    def load(cls, path: str, teacher: Callable[..., Any], *, cost: Any = None, device: str = "cpu") -> Solution:
+        """Reconstitute a *serving* Solution from a saved artifact — the deploy path for a fresh process.
+
+        The loaded Solution answers locally / escalates to ``teacher`` and harvests labels exactly like
+        the original. It carries no training or calibration data, so :meth:`improve` raises — collect the
+        harvested pairs and re-``solve`` (real + harvested inputs) to train the next round."""
+        cal = CalibratedTaskModel.load(path, device=device)
+        meta = (cal.task.meta or {}).get("solve", {})
+        return cls(
+            cascade=Cascade(cal, _batch_view(teacher), cost=cost),
+            teacher=teacher,
+            kind=str(meta.get("kind", "text")),
+            train_inputs=[],
+            train_labels=[],
+            cal_inputs=[],
+            cal_labels=[],
+            holdout_agreement=float("nan"),
+            escalation_rate=float("nan"),
+            promoted=True,  # only verified solutions should be saved; loading one serves it
+            target_agreement=None,
+            ood=meta.get("ood"),
+        )
 
 
 def solve(

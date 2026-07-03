@@ -121,6 +121,23 @@ class SolveTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             solve(lambda s: "x", texts, synthesize=10, seed=0, epochs=10)
 
+    def test_save_load_reconstitutes_the_serving_cascade(self):
+        import tempfile
+
+        from mixle.task import Solution, solve
+
+        sol = solve(_route, _tickets(300), alpha=0.15, seed=0, epochs=200)
+        fresh = _tickets(60, seed=3)
+        want = [sol(t) for t in fresh]
+        with tempfile.TemporaryDirectory() as d:
+            path = sol.save(d + "/router")
+            served = Solution.load(path, _route)
+            self.assertEqual(served.kind, "record")
+            got = [served(t) for t in fresh]
+        self.assertEqual(got, want)  # identical serving behavior in a fresh process
+        with self.assertRaises(RuntimeError):
+            served.improve()  # loaded artifacts serve + harvest; improving needs the original data
+
     def test_text_path_and_input_sniffing(self):
         from mixle.task import solve
 
