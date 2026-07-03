@@ -12,6 +12,9 @@ knowing which subpackage owns which verb::
     m.distill(teacher, inputs)       # tiny deployable student in front of the teacher (task spine)
     m.deploy("artifacts/m")          # durable artifact directory; Model.load() restores it
     m.explain()                      # what it is, what it supports, and how it was proposed
+    m.explain_prediction(x)          # exact per-part attribution of one score
+    m.forecast(history, h)           # horizon predictions with honest intervals (HMMs)
+    m.do({field: value})             # graph-surgery intervention (learned Bayesian networks)
     m(x)                             # use it: log-density of an observation
 
 ``Model`` wraps a prototype distribution, an estimator, or nothing (the estimator is inferred from the
@@ -128,6 +131,25 @@ class Model:
         except (OSError, ValueError):
             pass
         return m
+
+    # --- the analysis verbs (delegate to the inference front doors) -------------------------------
+    def explain_prediction(self, x: Any):
+        """Exact per-part attribution of ``log p(x)`` — :func:`mixle.inference.explain`."""
+        from mixle.inference import explain
+
+        return explain(self._require_fitted(), x)
+
+    def forecast(self, history: Any, horizon: int, **kw: Any):
+        """Horizon predictions with honest intervals — :func:`mixle.inference.forecast` (HMMs)."""
+        from mixle.inference import forecast
+
+        return forecast(self._require_fitted(), history, horizon, **kw)
+
+    def do(self, interventions: dict, **kw: Any):
+        """Graph-surgery intervention — :func:`mixle.inference.do` (learned Bayesian networks)."""
+        from mixle.inference import do
+
+        return do(self._require_fitted(), interventions, **kw)
 
     # --- introspection ---------------------------------------------------------------------------
     def explain(self) -> str:
