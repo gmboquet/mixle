@@ -252,3 +252,69 @@ def build_mdn(x_dim: int, y_dim: int, *, k: int = 5, hidden: int = 32, layers: i
             return mu_c + sig_c * torch.randn_like(mu_c)
 
     return MixtureDensityNetwork()
+
+
+# --- the exact counterpart: a conditional normalizing flow -- exact p(y|x) with within-y structure -------------
+
+
+def build_conditional_flow(x_dim: int, y_dim: int, *, hidden: int = 32, layers: int = 4) -> Any:
+    """A conditional coupling flow: an **exact** ``p(y | x)`` whose transform of ``y`` is conditioned on ``x``.
+
+    The exact-density counterpart to :func:`build_mdn`. Each affine-coupling layer's shift/scale networks take
+    both the passed-through ``y`` coordinates *and* ``x``, so the whole invertible ``y``-transform bends with the
+    input -- capturing *within-``y``* dependence (e.g. ``y2`` a nonlinear function of ``y1``) that a single-Gaussian
+    :class:`~mixle.models.neural_leaf.NeuralLeaf` (isotropic mean-only) cannot, while keeping an exact log-density
+    (so it composes honestly, unlike a bound). Needs ``y_dim >= 2`` for the coupling to be non-trivial. Exposes
+    ``log_density(x, y)`` and ``sample_given(x)`` -- the contract a :class:`NeuralConditionalDensity` adapts.
+    """
+    import torch
+    import torch.nn as nn
+
+    class ConditionalFlow(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.x_dim = int(x_dim)
+            self.y_dim = int(y_dim)
+            masks = []
+            for k in range(int(layers)):
+                m = torch.zeros(self.y_dim)
+                m[k % self.y_dim :: 2] = 1.0  # alternating coordinate masks
+                masks.append(m)
+            self.register_buffer("masks", torch.stack(masks))
+
+            def net() -> nn.Module:
+                return nn.Sequential(
+                    nn.Linear(self.y_dim + self.x_dim, hidden), nn.Tanh(), nn.Linear(hidden, self.y_dim)
+                )
+
+            self.s = nn.ModuleList([net() for _ in range(int(layers))])
+            self.t = nn.ModuleList([net() for _ in range(int(layers))])
+
+        def _normalize(self, x: Any, y: Any) -> tuple[Any, Any]:
+            z = y
+            logdet = torch.zeros(y.shape[0], device=y.device)
+            for m, s_net, t_net in zip(self.masks, self.s, self.t):
+                zm = z * m
+                inp = torch.cat([zm, x], dim=1)  # the coupling is conditioned on x
+                s = s_net(inp) * (1.0 - m)
+                t = t_net(inp) * (1.0 - m)
+                z = zm + (1.0 - m) * ((z - t) * torch.exp(-s))
+                logdet = logdet - s.sum(1)
+            return z, logdet
+
+        def log_density(self, x: Any, y: Any) -> Any:
+            z, logdet = self._normalize(x, y)
+            base = -0.5 * (z**2).sum(1) - 0.5 * self.y_dim * float(np.log(2.0 * np.pi))
+            return base + logdet
+
+        def sample_given(self, x: Any) -> Any:
+            y = torch.randn(x.shape[0], self.y_dim, device=x.device)
+            for m, s_net, t_net in zip(reversed(self.masks), reversed(list(self.s)), reversed(list(self.t))):
+                ym = y * m
+                inp = torch.cat([ym, x], dim=1)
+                s = s_net(inp) * (1.0 - m)
+                t = t_net(inp) * (1.0 - m)
+                y = ym + (1.0 - m) * (y * torch.exp(s) + t)  # inverse of _normalize
+            return y
+
+    return ConditionalFlow()
