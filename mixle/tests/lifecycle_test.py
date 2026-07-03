@@ -113,5 +113,42 @@ class LifecycleTest(unittest.TestCase):
         self.assertIn(sol(data[0]), ("0", "1"))
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class AnalysisVerbsTest(unittest.TestCase):
+    def test_explain_prediction_forecast_and_do_delegate(self):
+        import mixle
+        from mixle.stats import (
+            CategoricalEstimator,
+            CompositeEstimator,
+            GaussianDistribution,
+            GaussianEstimator,
+            HiddenMarkovModelDistribution,
+            MixtureEstimator,
+        )
+
+        # explain_prediction on a fitted mixture-of-composites
+        data = _records(200)
+        comp = lambda: CompositeEstimator((CategoricalEstimator(), GaussianEstimator()))  # noqa: E731
+        m = mixle.Model(MixtureEstimator([comp(), comp()])).fit(data, max_its=15)
+        ex = m.explain_prediction(data[0])
+        self.assertAlmostEqual(ex.total, m(data[0]), places=9)
+        self.assertTrue(ex.parts)
+
+        # forecast on a fitted HMM held by a Model
+        hmm = HiddenMarkovModelDistribution(
+            [GaussianDistribution(-4.0, 1.0), GaussianDistribution(4.0, 1.0)],
+            [0.5, 0.5],
+            [[0.9, 0.1], [0.1, 0.9]],
+        )
+        mh = mixle.Model(hmm)
+        mh.fitted = hmm  # already-fitted model adopted by the facade
+        f = mh.forecast([3.9, 4.1, 4.0], horizon=3, n=2000, seed=0)
+        self.assertEqual(f.state_probs.shape, (3, 2))
+
+        # do() rejects models that are not learned Bayesian networks
+        with self.assertRaises(TypeError):
+            mh.do({0: 1.0})
+
+
 if __name__ == "__main__":
     unittest.main()
