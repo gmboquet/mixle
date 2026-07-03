@@ -50,9 +50,21 @@ class AREnvelopeIndex:
             they are shared with any exact index built later.
         seed: calibration sampling seed (the index is deterministic given it).
         budget_bits: initial depth of the suffix tables; queries deepen geometrically as needed.
+        calibration_sequences: optional typical sequences (a corpus, a provider's fast generations) to
+            calibrate the envelope from INSTEAD of ancestral sampling. Each is harvested through
+            ``model.harvest`` -- with the ``all_position_logprobs`` contract that is ONE forward per
+            sequence for all its per-depth contexts, ~L-times cheaper than sampling token by token.
     """
 
-    def __init__(self, model: Any, *, n_paths: int = 64, seed: int = 0, budget_bits: float = 64.0) -> None:
+    def __init__(
+        self,
+        model: Any,
+        *,
+        n_paths: int = 64,
+        seed: int = 0,
+        budget_bits: float = 64.0,
+        calibration_sequences: list[tuple] | None = None,
+    ) -> None:
         if getattr(model, "terminating", False):
             raise ValueError(
                 "AREnvelopeIndex supports fixed-length models only; a terminating (eos) model needs an "
@@ -66,7 +78,10 @@ class AREnvelopeIndex:
         self._budget_fb = max(1, int(math.ceil(float(budget_bits) * self.quantizer.fine_per_bit())))
         self._envelopes: list[CountHistogram] = []
         self._suffix: list[CountHistogram] = []
-        self._calibrate()
+        if calibration_sequences is not None:
+            self._calibrate_from_sequences([tuple(s) for s in calibration_sequences])
+        else:
+            self._calibrate()
         self._rebuild_suffix()
 
     # -- precompute ---------------------------------------------------------------------------------------
@@ -109,6 +124,36 @@ class AREnvelopeIndex:
                 p = np.exp(lps - lps.max())
                 p /= p.sum()
                 prefixes[j] = prefixes[j] + (tokens[int(rng.choice(tokens.size, p=p))].item(),)
+        self._envelopes = envelopes
+
+    def _calibrate_from_sequences(self, sequences: list[tuple]) -> None:
+        """Envelope per depth from user-supplied typical sequences (corpus calibration).
+
+        Each sequence is harvested first (one ``all_position_logprobs`` forward when the model has that
+        contract), then depth ``d``'s envelope averages the step histograms of the sequences' length-``d``
+        prefixes -- depth 0 stays the exact root context.
+        """
+        if not sequences:
+            raise ValueError("calibration_sequences must be non-empty")
+        if any(len(s) < self.length for s in sequences):
+            raise ValueError("every calibration sequence must cover the model length %d" % self.length)
+        harvest = getattr(self.model, "harvest", None)
+        if callable(harvest):
+            for seq in sequences:
+                harvest(seq[: self.length])
+        envelopes: list[CountHistogram] = [self._step_hist(())]  # one real root context: exact
+        for d in range(1, self.length):
+            acc = CountHistogram.empty()
+            seen: dict[tuple, int] = {}
+            for seq in sequences:
+                p = seq[:d]
+                seen[p] = seen.get(p, 0) + 1
+            for p, mult in seen.items():
+                h = self._step_hist(p)
+                if mult != 1:
+                    h = CountHistogram(h.base, [c * mult for c in h.data])
+                acc = acc.add(h)
+            envelopes.append(CountHistogram(acc.base, [c / float(len(sequences)) for c in acc.data]))
         self._envelopes = envelopes
 
     def _rebuild_suffix(self) -> None:
