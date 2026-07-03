@@ -133,6 +133,10 @@ class SolveTest(unittest.TestCase):
             path = sol.save(d + "/router")
             served = Solution.load(path, _route)
             self.assertEqual(served.kind, "record")
+            # the artifact answers "is this trustworthy" by itself: the verification record rides along
+            ver = (served.cascade.model.task.meta or {})["solve"]["verification"]
+            self.assertAlmostEqual(ver["holdout_agreement"], sol.holdout_agreement, places=6)
+            self.assertTrue(ver["promoted"])
             got = [served(t) for t in fresh]
         self.assertEqual(got, want)  # identical serving behavior in a fresh process
         with self.assertRaises(RuntimeError):
