@@ -86,6 +86,9 @@ __all__ = [
     "ScaledEmbedding",
     "CrossModalModel",
     "StructuredAdapter",
+    "ProductOfExpertsFusion",
+    "StructuredFusionClassifier",
+    "fusion_flops",
 ]
 
 _LAZY = {
@@ -93,6 +96,9 @@ _LAZY = {
     "ScaledEmbedding": "embedding",
     "CrossModalModel": "model",
     "StructuredAdapter": "adapter",
+    "ProductOfExpertsFusion": "fusion",
+    "StructuredFusionClassifier": "fusion",
+    "fusion_flops": "fusion",
 }
 
 
