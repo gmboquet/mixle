@@ -96,7 +96,7 @@ class ComputeEngine(ABC):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Enforce the :attr:`REQUIRED_OPS` contract on every concrete engine subclass.
 
-        Abstract subclasses (those still carrying ``@abstractmethod`` placeholders) are exempt, so
+        Abstract subclasses (those still carrying ``@abstractmethod`` declarations) are exempt, so
         intermediate bases can be declared incrementally.  A concrete engine missing any required op
         raises here -- at import/class-definition time -- instead of failing inside a kernel.
         """

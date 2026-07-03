@@ -1,7 +1,7 @@
 """Replace a regex scraper with a trained model: an LLM extracts fields once, a tiny local tagger learns it.
 
 The task hardcoded logic usually owns -- scraping structured fields out of messy text -- done as a *trained*
-model instead. An LLM teacher (here a stub via ``CallableLLM``; swap in ``OpenAICompatLLM(base_url, model)``)
+model instead. An LLM teacher (here a local ``CallableLLM``; swap in ``OpenAICompatLLM(base_url, model)``)
 extracts ``{id, amount, date, vendor}`` from example lines; ``distill_extractor`` trains a bi-GRU sequence
 tagger to reproduce it; the result is a local ``model(text) -> {field: value}`` that runs with no LLM, no
 network, and can be *retrained* when the format drifts (unlike a brittle regex).

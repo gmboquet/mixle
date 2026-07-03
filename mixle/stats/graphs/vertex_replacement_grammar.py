@@ -316,7 +316,7 @@ def marginal_log_prob(graph, grammar, start_symbol, budget=_PARSE_BUDGET, with_s
             if h.nodes[only].get(_NONTERMINAL) == start_symbol:
                 return 0.0  # the start symbol: one (empty) completion, probability 1
         if depth <= 0 or remaining[0] <= 0:
-            truncated[0] = True  # a cap was reached -> the explored forest may be incomplete
+            truncated[0] = True  # a cap was reached, so the explored forest is partial
             return float("-inf")
         terms = []
         for reduced, rule, total in _reductions(h, grammar):

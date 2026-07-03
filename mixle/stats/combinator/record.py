@@ -274,7 +274,7 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
         """Enumerate complete records consistent with the fixed fields in ``given``.
 
         ``given`` is a mapping ``{source: value}`` pinning a subset of fields (the canonical
-        most-probable-completion / imputation query: "fill in the rest, best first"). Because the
+        most-probable-completion / imputation query: complete missing fields, best first). Because the
         fields are independent, ``P(record | given)`` is proportional to the joint ``P(record)``, so
         descending order over the *free* fields is also descending conditional order. Each yielded
         value is a complete record with the fixed fields merged back in, and its ``log_prob`` is the

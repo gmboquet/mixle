@@ -117,7 +117,7 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def exp_family_sufficient_statistics(x: Any, engine: Any) -> tuple[Any, ...]:
-        """Placeholder; the per-category count vector needs K, so ``..._from_params`` is used."""
+        """Return a shape-only fallback; category-aware count vectors come from ``..._from_params``."""
         return (engine.asarray(np.zeros(int(x[0]), dtype=np.float64)),)
 
     @staticmethod

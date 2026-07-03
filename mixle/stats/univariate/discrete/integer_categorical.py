@@ -109,7 +109,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def exp_family_sufficient_statistics(x: Any, engine: Any) -> tuple[Any, ...]:
-        """Placeholder; the real one-hot needs K, so ``sufficient_statistics_from_params`` is used."""
+        """Return raw values; category-aware one-hot statistics come from ``..._from_params``."""
         return (engine.asarray(x),)
 
     @staticmethod

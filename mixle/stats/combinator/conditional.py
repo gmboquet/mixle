@@ -1472,7 +1472,7 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
                     eobs_vals.append(self.encoder_map[u[0]].seq_encode(u[1][0]))
                 else:
                     # No encoder and no default for this conditioning value: append a
-                    # placeholder so eobs_vals stays aligned with cond_vals/idx_vals.
+                    # sentinel so eobs_vals stays aligned with cond_vals/idx_vals.
                     # seq_log_density/seq_update guard on the cond key, so it is never
                     # dereferenced (the group scores -inf / is skipped).
                     eobs_vals.append(None)

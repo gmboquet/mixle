@@ -68,7 +68,7 @@ def _as_weighted_array(data: Any, weights: np.ndarray | None) -> tuple[np.ndarra
 class ConjugatePosterior:
     """Base class for a closed-form conjugate posterior over a likelihood's parameters.
 
-    Subclasses fill in the family-specific hyperparameters and the four capabilities: ``mean`` (the
+    Subclasses provide the family-specific hyperparameters and the four capabilities: ``mean`` (the
     posterior mean of the parameters), ``sample`` (exact draws of the parameters), ``point_estimate``
     (a fitted distribution at the posterior mean), ``log_marginal_likelihood`` (the evidence of the
     observed data under the prior), and ``posterior_predictive`` (the distribution of a new draw).

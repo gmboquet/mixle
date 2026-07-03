@@ -1237,16 +1237,16 @@ class LabeledLDADataEncoder(DataSequenceEncoder):
         nbidx = []
 
         for i in range(num_documents):
-            xxx = x[i][0]
+            tokens_with_context = x[i][0]
             nxx = x[i][1]
 
-            nx.append(len(xxx))
+            nx.append(len(tokens_with_context))
             nbcnt.append(len(nxx))
 
-            for j in range(len(xxx)):
+            for j in range(len(tokens_with_context)):
                 tidx.append(i)
-                tx.append(xxx[j][0])
-                ctx.append(xxx[j][1])
+                tx.append(tokens_with_context[j][0])
+                ctx.append(tokens_with_context[j][1])
 
             for j in range(len(nxx)):
                 nbidx.append(i)

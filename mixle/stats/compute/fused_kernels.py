@@ -967,7 +967,7 @@ class _SequenceB:
         if self.has_len:
             self.len_b = build_kernel([d.len_dist for d in dists])
         else:
-            self.len_b = _PoissonB([PoissonDistribution(1.0)])  # placeholder; never evaluated
+            self.len_b = _PoissonB([PoissonDistribution(1.0)])  # sentinel; never evaluated
         self.kernel = _sequence_kernel(self.inner.kernel, self.len_b.kernel, self.has_len)
         self.acc_kernel = _sequence_acc(self.inner.acc_kernel, self.len_b.acc_kernel, self.has_len)
 
