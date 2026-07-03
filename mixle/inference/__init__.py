@@ -154,6 +154,9 @@ from mixle.inference.ordinal import (
 )
 from mixle.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
 
+# closed-form variational projections — compress a structured teacher onto a smaller student exactly
+from mixle.inference.project import collapse_mixture, gaussian_kl, moment_project, reduce_mixture
+
 # bootstrap / permutation inference for arbitrary statistics (distribution-free uncertainty)
 from mixle.inference.resampling import (
     BootstrapResult,
@@ -282,6 +285,10 @@ __all__ = [
     "JittedScorer",
     "laplace_posterior",
     "LaplacePosterior",
+    "collapse_mixture",
+    "reduce_mixture",
+    "moment_project",
+    "gaussian_kl",
     "fit",
     "EMStep",
     "best_of",
