@@ -81,6 +81,7 @@ from mixle.inference.decision import RiskProfile, bayes_action
 from mixle.inference.em import EMStrategy, run_em
 from mixle.inference.errors_in_variables import DemingFit, deming_regression, propagate_uncertainty, simex
 from mixle.inference.estimation import BayesianStreamingEstimator, EMStep, best_of, fit, optimize
+from mixle.inference.explain import Explanation, explain
 from mixle.inference.fisher import FisherView, FixedFisherView, to_fisher
 from mixle.inference.forecast import Forecast, forecast
 
@@ -261,6 +262,8 @@ from mixle.stats.compute.pdist import ParameterEstimator
 from mixle.stats.compute.sequence import estimate, initialize, seq_estimate, seq_initialize
 
 __all__ = [
+    "Explanation",
+    "explain",
     "InterventionalNetwork",
     "average_causal_effect",
     "do",
