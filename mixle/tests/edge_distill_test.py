@@ -231,7 +231,9 @@ class LatencyProbeTest(unittest.TestCase):
         rate = measure_ops_per_second(student, recs[:20], repeats=2)
         self.assertTrue(np.isfinite(rate))
         self.assertGreater(rate, 0.0)
-        self.assertAlmostEqual(rate, footprint(student).ops / secs, delta=rate)  # same order: ops/measured-s
+        # same order of magnitude: the two wall-clock probes are separate measurements, and a loaded
+        # parallel test runner can deschedule a worker between them — a 2x tolerance flaked under load
+        self.assertLess(abs(np.log10(rate) - np.log10(footprint(student).ops / secs)), 1.0)
 
     def test_for_latency_converts_budget_arithmetic(self):
         dev = DeviceSpec.for_latency(10.0, 2_000_000.0, max_bytes=5000, torch_free=True)

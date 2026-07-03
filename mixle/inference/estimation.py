@@ -59,6 +59,54 @@ def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
     return estimator
 
 
+def _maybe_structured_model(data: Any, max_its: int, out: Any) -> Any:
+    """The automatic-structure front door for ``optimize(data)`` / ``fit(data)`` with no estimator.
+
+    For flat tuple records the independent :class:`CompositeDistribution` the automatic detector
+    produces is a Naive-Bayes assumption — the one heterogeneous data most often violates. This
+    discovers the cross-field dependency graph (:func:`mixle.inference.learn_bayesian_network`) and
+    returns it ONLY when it beats the independent composite by BIC on the same data; anything else —
+    no edges found, non-record data, too few rows, or any failure at all — returns ``None`` and the
+    historical composite path proceeds untouched, so the default is never worse.
+    """
+    try:
+        rows = list(data)
+        if len(rows) < 40:
+            return None
+        first = rows[0]
+        if not isinstance(first, tuple) or len(first) < 2:
+            return None
+        n_fields = len(first)
+        if any(not isinstance(r, tuple) or len(r) != n_fields for r in rows):
+            return None
+        if any(not isinstance(v, (str, bool, int, float, np.integer, np.floating)) for v in first):
+            return None  # nested/sequence fields: structure search handles flat records only
+
+        from mixle.inference.bayesian_network import bayesian_network_bic, learn_bayesian_network
+        from mixle.inference.structure import _num_free_params
+        from mixle.utils.automatic import get_estimator
+
+        net = learn_bayesian_network(rows)
+        if not net.edges():
+            return None  # independence is what the composite already models; keep the automatic families
+
+        composite = optimize(rows, get_estimator(rows), max_its=max_its, out=None)
+        enc = composite.dist_to_encoder().seq_encode(rows)
+        comp_ll = float(np.sum(composite.seq_log_density(enc)))
+        comp_bic = -2.0 * comp_ll + _num_free_params(composite) * float(np.log(max(len(rows), 2)))
+        net_bic = bayesian_network_bic(net, rows)
+        if net_bic >= comp_bic:
+            return None
+        if out is not None:
+            edges = ", ".join(f"{p}->{c}" for p, c in net.edges())
+            out.write(
+                f"structure: discovered cross-field dependencies [{edges}] (BIC {net_bic:.1f} < {comp_bic:.1f})\n"
+            )
+        return net
+    except Exception:  # noqa: BLE001 - the structure default must never break the historical path
+        return None
+
+
 # --- data-encoding helpers --------------------------------------------------
 def _local_encoded_chunks(enc_data: Any) -> list[tuple[int, Any]]:
     if hasattr(enc_data, "as_seq_chunk"):
@@ -551,6 +599,7 @@ def optimize(
     reuse_estep_ll: bool = True,
     objective: str = "auto",
     on_step: Any | None = None,
+    structure: str = "auto",
 ) -> SequenceEncodableProbabilityDistribution:
     """Estimation of 'estimator' via EM algorithm for max_its iterations or until
         new_loglikelihood - old_loglikelihood < delta.
@@ -631,12 +680,31 @@ def optimize(
             :class:`EMStep` ``(iter, model, log_density, delta)`` for the accepted model. Use it to
             checkpoint a long run -- e.g. ``on_step=registry.checkpointer('run', every=5)`` -- and
             resume with ``prev_estimate=``. Called on every iteration regardless of ``print_iter``.
+        structure (str): ``'auto'`` (default) makes the tagline literal for flat tuple records fit
+            with no estimator: the cross-field dependency graph is discovered
+            (:func:`mixle.inference.learn_bayesian_network`) and returned WHEN it beats the
+            independent composite by BIC — otherwise (no edges, non-record data, or any failure)
+            the historical automatic-composite path proceeds untouched. ``'off'`` restores the
+            unconditional historical behavior. Only consulted when ``estimator`` is ``None`` and no
+            ``prev_estimate``/``init_estimator``/``strategy``/``enc_data`` is supplied.
 
     Returns:
         SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm
             is met.
 
     """
+    if (
+        estimator is None
+        and structure == "auto"
+        and data is not None
+        and enc_data is None
+        and prev_estimate is None
+        and init_estimator is None
+        and strategy is None
+    ):
+        structured = _maybe_structured_model(data, max_its, out)
+        if structured is not None:
+            return structured
     estimator = _coerce_estimator(estimator, data)
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
@@ -817,6 +885,18 @@ def fit(
     verbatim, so reaching for a heavier knob never means switching verbs. ``estimator`` accepts the same
     three spellings as :func:`optimize` (estimator, distribution prototype, or ``None`` to infer from data).
     """
+    if (
+        estimator is None
+        and kwargs.get("structure", "auto") == "auto"
+        and data is not None
+        and kwargs.get("enc_data") is None
+        and init_estimator is None
+        and kwargs.get("prev_estimate") is None
+        and kwargs.get("strategy") is None
+    ):
+        structured = _maybe_structured_model(data, max_its, kwargs.get("out", sys.stdout))
+        if structured is not None:
+            return structured
     estimator = _coerce_estimator(estimator, data)
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)

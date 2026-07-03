@@ -204,6 +204,7 @@ from mixle.inference.structure import (
     learn_mixture_structure,
     learn_structure,
 )
+from mixle.inference.structure_embedded import EmbeddedStructureModel, learn_structure_embedded
 
 # survival / time-to-event estimators and hazard regression
 from mixle.inference.survival import (
@@ -437,6 +438,8 @@ __all__ = [
     "learn_mixture_bayesian_network",
     "select_mixture_components",
     "bayesian_network_bic",
+    "learn_structure_embedded",
+    "EmbeddedStructureModel",
     "HeterogeneousBayesianNetwork",
     "MixtureOfBayesianNetworks",
     "dependency_gain",
