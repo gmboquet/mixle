@@ -163,5 +163,60 @@ class MixtureOfBayesianNetworksTest(unittest.TestCase):
         self.assertTrue(np.isfinite(mix.log_density(s[0])))
 
 
+class GLMFactorTest(unittest.TestCase):
+    """Continuous -> discrete edges (the direction the greedy search used to refuse outright)."""
+
+    def test_continuous_drives_binary_edge_found_and_pays_held_out(self):
+        rng = np.random.RandomState(0)
+        x = rng.randn(600) * 1.5
+        data = [(float(v), "hi" if rng.rand() < 1.0 / (1.0 + np.exp(-3.0 * (v - 0.5))) else "lo") for v in x]
+        net = learn_bayesian_network(data)
+        self.assertEqual(len(net.edges()), 1)  # the dependence is found (either orientation is valid:
+        # logistic y|x with Gaussian x == shared-variance class-Gaussians x|y describe the same joint)
+        fresh_x = rng.randn(300) * 1.5
+        fresh = [(float(v), "hi" if rng.rand() < 1.0 / (1.0 + np.exp(-3.0 * (v - 0.5))) else "lo") for v in fresh_x]
+        indep = learn_bayesian_network(data, max_parents=0)
+        self.assertGreater(_ll(net, fresh), _ll(indep, fresh) + 50.0)
+
+    def test_continuous_drives_count_poisson_link(self):
+        rng = np.random.RandomState(1)
+        x = rng.uniform(0.0, 2.0, 700)
+        data = [(float(v), int(c)) for v, c in zip(x, rng.poisson(np.exp(0.8 * x + 0.2)))]
+        net = learn_bayesian_network(data)
+        self.assertEqual(len(net.edges()), 1)
+        fresh_x = rng.uniform(0.0, 2.0, 300)
+        fresh = [(float(v), int(c)) for v, c in zip(fresh_x, rng.poisson(np.exp(0.8 * fresh_x + 0.2)))]
+        indep = learn_bayesian_network(data, max_parents=0)
+        self.assertGreater(_ll(net, fresh), _ll(indep, fresh) + 30.0)
+        # the fitted factor is the GLM node, and off-support child values score -inf, not nan
+        glm_f = [f for f in net.factors if type(f).__name__ == "_GLMFactor"]
+        if glm_f:
+            self.assertEqual(glm_f[0].kind, "poisson")
+            self.assertEqual(glm_f[0].log_density((1.0, -3)), -np.inf)
+
+    def test_continuous_drives_three_way_categorical(self):
+        rng = np.random.RandomState(2)
+        x = rng.randn(900) * 2.0
+        data = [(float(v), "low" if v < -0.8 else ("mid" if v < 0.8 else "high")) for v in x]
+        net = learn_bayesian_network(data)
+        self.assertEqual(len(net.edges()), 1)
+        # separable bands stay finite (multinomial ridge) and sampling respects the bands
+        rows = net.sampler(seed=3).sample(400)
+        agree = sum(lab == ("low" if v < -0.8 else ("mid" if v < 0.8 else "high")) for v, lab in rows)
+        self.assertGreater(agree / len(rows), 0.8)
+        for v, lab in rows[:50]:
+            self.assertTrue(np.isfinite(net.log_density((v, lab))))
+
+    def test_mixed_parents_glm_uses_onehot_and_raw(self):
+        rng = np.random.RandomState(3)
+        g = [["a", "b"][i] for i in rng.randint(0, 2, 800)]
+        x = rng.randn(800)
+        logit = 2.5 * x + np.where(np.asarray(g) == "b", 2.0, -2.0)
+        y = ["t" if rng.rand() < 1.0 / (1.0 + np.exp(-z)) else "f" for z in logit]
+        data = list(zip(g, x.tolist(), y))
+        net = learn_bayesian_network(data)
+        self.assertIn((1, 2), net.edges())  # the continuous driver reaches the discrete child
+
+
 if __name__ == "__main__":
     unittest.main()
