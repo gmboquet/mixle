@@ -61,13 +61,14 @@ from mixle.models import TransformerLMEstimator
 from mixle.stats import CompositeEstimator, GammaEstimator
 from mixle.inference import optimize
 
-# each event = ((recent history, next event type), seconds since last)
+events = ...   # your log: [((recent event history, next event type), seconds since last), ...]
+
 model = optimize(events, CompositeEstimator((
-    TransformerLMEstimator(vocab=500, d_model=128, n_layer=4, block=64),   # what
-    GammaEstimator(),                                                      # when
+    TransformerLMEstimator(vocab=500, d_model=128, n_layer=4, block=64),   # WHAT happens next
+    GammaEstimator(),                                                      # WHEN it happens
 )))
 
-model.log_density(event)   # one joint score — drops when an event is odd in WHAT happened, WHEN, or both
+model.log_density(events[0])   # one joint score — low when an event is odd in WHAT, WHEN, or both
 ```
 
 The Transformer and the Gamma are just distributions, fit together in one `optimize` call — the Gamma in
@@ -96,23 +97,24 @@ The same machinery fits an ordinary heterogeneous record just as well — each h
 from mixle.stats import *
 from mixle.inference import optimize
 
+# one record per web session: (device, minutes on site, [clicks on each page visited])
 data = [
-    ('a', -0.4, [5, 7]),       ('b', 4.9, [11, 9]),
-    ('a',  0.2, [6, 5, 4]),    ('b', 5.3, [10, 12, 11]),
-    ('a', -1.1, [4, 6]),       ('b', 4.5, [9, 10]),
-    ('a',  0.7, [5, 5]),       ('b', 5.1, [12, 8]),
-    ('a', -0.2, [7, 6, 5]),    ('b', 4.7, [9, 11]),
+    ('ios', 2.3, [4, 1]),      ('web', 11.5, [9, 12, 7]),
+    ('ios', 1.1, [2]),         ('web',  9.8, [8, 10]),
+    ('ios', 3.0, [5, 3, 2]),   ('web', 12.1, [11, 9, 13]),
+    ('ios', 0.8, [1, 2]),      ('web', 10.4, [7, 8]),
 ]
 
-# The estimator mirrors the distribution's structure exactly.
+# the estimator mirrors the model's shape — two latent user segments over the whole record
 est = MixtureEstimator([CompositeEstimator((
-    CategoricalEstimator(),
-    GaussianEstimator(),
-    SequenceEstimator(PoissonEstimator(), len_estimator=CategoricalEstimator()),
+    CategoricalEstimator(),                                             # device
+    GaussianEstimator(),                                               # minutes on site
+    SequenceEstimator(PoissonEstimator(), len_estimator=CategoricalEstimator()),  # clicks per page
 ))] * 2)
 
 model = optimize(data, est, max_its=100)
-model.sampler(seed=0).sample(3)   # draw new records from the fitted model
+model.posterior(('web', 10.0, [9, 8]))   # soft segment assignment for a new session
+model.sampler(seed=0).sample(3)          # synthesize brand-new sessions
 ```
 
 You don't have to spell the estimator out. `optimize` (and `fit`) also accept a **prototype
@@ -120,9 +122,11 @@ distribution** — its matching estimator is taken automatically — or just the
 estimator is inferred:
 
 ```python
+reals = [-2.1, -1.8, -2.0, 1.9, 2.3, 2.1]     # two clusters
+
 proto = MixtureDistribution([GaussianDistribution(-1, 1), GaussianDistribution(1, 1)], [0.5, 0.5])
-optimize(reals, proto)    # build the model's shape once, fit it directly
-optimize(reals)           # or let mixle infer the estimator from the data
+optimize(reals, proto)    # fit the shape you drew — no estimator to spell out
+optimize(reals)           # or hand over just the data and let mixle infer the estimator
 ```
 
 The same model in the shorter [`mixle.ppl`](#probabilistic-programming-mixleppl) dialect is a few lines.
@@ -131,8 +135,10 @@ The same model in the shorter [`mixle.ppl`](#probabilistic-programming-mixleppl)
 train split, ranks them on held-out data, and returns the winner — then the verbs chain:
 
 ```python
-m = mixle.propose(data, fit=True)   # verified candidate frontier -> the winner, fitted
-m.evaluate(holdout); m.sample(5); m.posterior(x); m.explain()
+data = ...    # your records — any mix of types
+
+m = mixle.propose(data, fit=True)   # fit every proposer on a split, rank on held-out, keep the winner
+m.evaluate(...); m.sample(5); m.posterior(...); m.explain()
 m.deploy("artifacts/m")             # durable artifact; mixle.Model.load() restores it
 ```
 
@@ -143,10 +149,13 @@ calibrated, in-distribution decision is safe — otherwise it calls the original
 ```python
 from mixle.task import solve
 
-sol = solve(route, tickets, propose="auto", synthesize=200)   # dataset <- route(t); train; calibrate
-sol(ticket)          # drop-in: answers locally when SURE, falls back to route() when not
+route = ...     # the function doing the job today — a rule, an API call, an LLM
+tickets = ...   # a list of representative inputs
+
+sol = solve(route, tickets, propose="auto", synthesize=200)   # label with route(); train; conformally calibrate
+sol(tickets[0])      # drop-in: answers locally when SURE, else falls back to route()
 sol.improve()        # fold escalations back in; promote only if it verifies better
-sol.save("artifacts/router")   # artifact carries its own verification record
+sol.save("artifacts/router")
 ```
 
 The student defaults to a compact hashed-feature classifier; `solve(..., student="generative")` swaps in a
@@ -236,11 +245,11 @@ m.posterior(data)                                                 # per-point re
 seqs = [[0.1, 5.1, 4.9], [4.8, 5.0], [0.0, 0.2]]                  # variable-length real sequences
 Markov(Normal(free, free), states=2).fit(seqs)                    # 2-state Gaussian HMM
 
-#   y[i] ~ Normal(b0 + b1*x[i] + b2*z[i], sd)   — a linear model
-Normal(free * Field("x") + free * Field("z") + free, free).fit(y, given={"x": x, "z": z})
-
 a, b = Normal(0, 10, name="a"), Normal(0, 10, name="b")
 Mix([Normal(a, 1), Normal(b, 1)]).fit(data, constraints=a < b)    # ordered means break label-switching
+
+# y[i] ~ Normal(b0 + b1*x[i] + b2*z[i], sd) — Bayesian linear regression over columns you supply
+Normal(free * Field("x") + free * Field("z") + free, free).fit(..., given={"x": ..., "z": ...})
 ```
 
 - **`how=`** selects the route: `auto` reads the model's *structure* and picks the algorithm **family**
@@ -259,21 +268,21 @@ A slot is not limited to a single value/`free`/prior — it can be an **expressi
 latents can be coupled, indexed, or grouped. All of the below fit through the same `how=` routes:
 
 ```python
-from mixle.ppl import Normal, Poisson, Field, Group, free, potential
+from mixle.ppl import Normal, Poisson, Categorical, Field, Group, free, potential
 
 a, b = Normal(0, 10, name="a"), Normal(0, 10, name="b")
-Normal(a + b, 1.0).fit(data)                       # deterministic expressions over latents
-Normal(0.0, a.exp()).fit(data)                     #   …and transforms of them
-Normal(a, 1.0).fit(data, potentials=potential(lambda av, bv: -0.5 * (av - bv) ** 2, a, b))  # custom log-factors
+Normal(a + b, 1.0).fit(...)                        # deterministic expressions over latents
+Normal(0.0, a.exp()).fit(...)                      #   …and transforms of them
+Normal(a, 1.0).fit(..., potentials=potential(lambda av, bv: -0.5 * (av - bv) ** 2, a, b))  # custom log-factors
 
-Normal(Normal(0, 5).each(), free).fit(groups)                # random effects: one list per group
-Normal(Normal(0, 5).each(by="school"), free).fit(y, given={"school": labels})  #   …or a flat array + index
-Poisson(free * Field("x") + Group("g")).fit(counts, given={"x": x, "g": g})    # non-Normal GLMM (PQL)
+Normal(Normal(0, 5).each(), free).fit(...)                         # random effects: one list per group
+Normal(Normal(0, 5).each(by="school"), free).fit(..., given={"school": ...})  #   …or a flat array + index
+Poisson(free * Field("x") + Group("g")).fit(..., given={"x": ..., "g": ...})  # non-Normal GLMM (PQL)
 
-theta = free(8)                                              # a latent vector, indexed by data
-Normal(theta[Field("g")], free).fit(y, given={"g": labels})  #   y[i] ~ Normal(theta[g[i]], sd)
+theta = free(8)                                             # a latent vector, indexed by data
+Normal(theta[Field("g")], free).fit(..., given={"g": ...})  #   y[i] ~ Normal(theta[g[i]], sd)
 
-Categorical(free).fit(labels)                                # the category set is inferred from the data
+Categorical(free).fit(...)                                  # the category set is inferred from the data
 ```
 
 - **Custom factors:** `potential(fn, *vars)` adds an arbitrary `fn(*values)` log-term to the joint, and
@@ -290,8 +299,8 @@ user code:
 ```python
 from mixle.ppl import Flow, MDN
 
-Flow(2).fit(X)                     # p(x): a normalizing flow (also MAF, VAE, DiscreteAR)
-MDN(1, 1).fit(y, given={"x": X})   # p(y | x): a mixture density network (also CondFlow, CondDiscreteAR)
+Flow(2).fit(...)                      # p(x): a normalizing flow (also MAF, VAE, DiscreteAR)
+MDN(1, 1).fit(..., given={"x": ...})  # p(y | x): a mixture density network (also CondFlow, CondDiscreteAR)
 ```
 
 The dialect is thin — the `mixle.stats` classes underneath are untouched.
@@ -301,6 +310,7 @@ The dialect is thin — the `mixle.stats` classes underneath are untouched.
 The prior is the only switch — no prior is MLE; a conjugate `prior=` makes the same machinery Bayesian:
 
 ```python
+from mixle.stats import GaussianEstimator
 from mixle.inference.priors import NormalGammaPrior
 
 GaussianEstimator()                          # MLE
@@ -323,9 +333,9 @@ ops, device, and precision — so **scale-out is a backend argument, not a rewri
 ```python
 from mixle.engines import TorchEngine
 
-optimize(data, est, engine=TorchEngine(device="cuda", dtype="float32"))   # GPU
-optimize(data, est, precision="auto")                                     # stats still accumulate in float64
-optimize(rdd,  est, backend="spark")                                      # also: mp · dask · mpi · ray · lightning
+optimize(..., engine=TorchEngine(device="cuda", dtype="float32"))   # GPU: the same fit, one extra argument
+optimize(..., precision="auto")                                     # mixed precision; stats still accumulate in float64
+optimize(..., backend="spark")                                      # distributed: mp · dask · mpi · ray · lightning
 ```
 
 - The same EM contract runs unchanged on NumPy, Numba, Torch, or a symbolic backend.
@@ -341,11 +351,16 @@ Discrete and structured models **enumerate their support in descending-probabili
 exact **rank / cumulative-probability** queries — even when the support is enormous or unbounded:
 
 ```python
-e = dist.enumerator()
-e.top_k(5)        # the 5 most probable (value, log_prob)
-e.top_p(0.95)     # smallest set covering 95% of the mass (the nucleus)
-e.rank(value)     # how many values are strictly more probable than `value`
-e.seek(10_000)    # the ~10,000th most probable value, by structural count-DP
+from mixle.stats import CategoricalDistribution, SequenceDistribution, PoissonDistribution
+
+# a toy language model: skewed letters in Poisson-length "words" — an unbounded support
+lm = SequenceDistribution(CategoricalDistribution({"a": .5, "b": .3, "c": .2}),
+                          len_dist=PoissonDistribution(3.0))
+
+e = lm.enumerator()
+e.top_k(5)                     # the 5 most probable words, in order — the rest are never touched
+e.seek(1_000).value            # jump straight to the 1,000th-most-probable word, by structural count-DP
+e.rank(["b", "a", "c"]).rank   # how many words are strictly more probable than "bac"
 ```
 
 - **Decomposable families** (Composite / Record / Sequence / MarkovChain): rank ↔ value is an exact
