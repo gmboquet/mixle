@@ -226,12 +226,22 @@ class LatencyProbeTest(unittest.TestCase):
 
         recs, labels = _make_records(150, 0)
         student = distill_structured_from_labels(recs, labels, seed=0)
-        secs = measure_inference_seconds(student, recs[:20], repeats=2)
-        self.assertGreater(secs, 0.0)
-        rate = measure_ops_per_second(student, recs[:20], repeats=2)
-        self.assertTrue(np.isfinite(rate))
-        self.assertGreater(rate, 0.0)
-        self.assertAlmostEqual(rate, footprint(student).ops / secs, delta=rate)  # same order: ops/measured-s
+        # secs and rate come from two independent wall-clock probes; under a loaded parallel runner a
+        # scheduler preemption can inflate either one arbitrarily. The positivity/finiteness invariants
+        # hold on every attempt; the cross-probe consistency check (rate IS ops per measured second,
+        # not off by a unit conversion) retries with a generous same-order window instead of a tight
+        # one-shot ratio.
+        for _ in range(5):
+            secs = measure_inference_seconds(student, recs[:20], repeats=2)
+            self.assertGreater(secs, 0.0)
+            rate = measure_ops_per_second(student, recs[:20], repeats=2)
+            self.assertTrue(np.isfinite(rate))
+            self.assertGreater(rate, 0.0)
+            ratio = (footprint(student).ops / secs) / rate
+            if 0.05 <= ratio <= 20.0:
+                break
+        else:
+            self.fail(f"ops/secs vs measured rate disagreed by >20x on every attempt (last ratio {ratio:.3g})")
 
     def test_for_latency_converts_budget_arithmetic(self):
         dev = DeviceSpec.for_latency(10.0, 2_000_000.0, max_bytes=5000, torch_free=True)
