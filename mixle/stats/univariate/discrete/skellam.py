@@ -116,6 +116,53 @@ class SkellamDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] = mu1 + mu2."""
         return float(self.mu1 + self.mu2)
 
+    # --- compute-engine backend (numpy + torch/GPU), SCORING only: the moment accumulator stays
+    # host-side (it is plain count/sum/sum2 already). torch has no ``iv(k, .)``, so ``log I_k(z)``
+    # is evaluated engine-side as the ascending series (A&S 9.6.10) under logsumexp — every term is
+    # positive, so the accumulation is cancellation-free at any (k, z); truncation after
+    # ``M ~ z/2 + O(sqrt z)`` terms puts the tail far below double rounding. float32 engines lose
+    # log-space precision once ``z`` is large (spread ~ z*log(z/2) eats the mantissa); rates with
+    # ``2*sqrt(mu1*mu2)`` in the hundreds want a float64 engine. ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+
+    @staticmethod
+    def _engine_log_bessel_i(order: Any, z: float, engine: Any) -> Any:
+        """``log I_order(z)`` for integer ``order >= 0`` (array) and scalar ``z > 0`` on engine ops.
+
+        Series ``I_k(z) = sum_m (z/2)^(2m+k) / (m! (m+k)!)``: terms peak at
+        ``m* = (sqrt(k^2+z^2)-k)/2 <= z/2`` and decay super-geometrically past the peak, so one
+        ``z``-based truncation covers every order in the batch. Chunked over ``m`` so memory stays
+        ``O(n * 1024)`` no matter how large ``z`` (and hence ``M``) gets.
+        """
+        log_half_z = math.log(0.5 * z)
+        m_peak = 0.5 * z
+        m_total = int(math.ceil(m_peak + 12.0 * math.sqrt(m_peak + 1.0) + 24.0))
+        out = None
+        for start in range(0, m_total, 1024):
+            m = engine.asarray(np.arange(start, min(start + 1024, m_total), dtype=np.float64))
+            terms = (
+                (2.0 * m[None, :] + order[:, None]) * log_half_z
+                - engine.gammaln(m[None, :] + 1.0)
+                - engine.gammaln(m[None, :] + order[:, None] + 1.0)
+            )
+            block = engine.logsumexp(terms, axis=1)
+            out = block if out is None else engine.logsumexp(engine.stack([out, block]), axis=0)
+        return out
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized Skellam log-mass for encoded data (see class backend note).
+
+        The series yields the UNSCALED ``log I_k`` (not ``log ive = log I_k - z``), so the constant
+        here is ``-(mu1 + mu2)`` — the legacy path's ``-sqrt_diff_sq`` plus its implicit ``-z``.
+        """
+        kk = engine.asarray(x)
+        log_i = self._engine_log_bessel_i(engine.abs(kk), self.two_sqrt_prod, engine)
+        return -(self.mu1 + self.mu2) + kk * self.log_ratio_half + log_i
+
     def cdf(self, x: float) -> float:
         """Cumulative distribution function P(X <= x) (via scipy skellam)."""
         import math
