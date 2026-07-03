@@ -38,6 +38,7 @@ class Model:
         self.spec = spec
         self.fitted: Any = None
         self.notes: list[str] = list(notes or [])
+        self.frontier: list[dict[str, Any]] | None = None  # candidate ranking when built by propose()
         self._fit_info: dict[str, Any] = {}
 
     # --- fit / use -------------------------------------------------------------------------------
@@ -144,16 +145,69 @@ class Model:
         return f"Model({inner}, fitted={self.fitted is not None})"
 
 
-def propose(data: Any, *, fit: bool = False, **recommend_kw: Any) -> Model:
-    """Recommend a model shape from a data sample and return it as a :class:`Model`.
+def propose(
+    data: Any,
+    *,
+    fit: bool = False,
+    llm: Any = None,
+    holdout: float = 0.25,
+    seed: int = 0,
+    max_its: int = 25,
+    **recommend_kw: Any,
+) -> Model:
+    """Propose a model for ``data`` from a *verified frontier* of candidates and return the winner.
 
-    Wraps :func:`mixle.task.recommend.recommend_model`: per-field family choices with confidence, the
-    dependencies that argue for joint modeling, and honest warnings all land in ``Model.notes`` (shown by
-    ``explain()``). Pass ``fit=True`` to also fit it to ``data`` before returning.
+    Candidates come from every proposer the library has — the heuristic recommendation
+    (:func:`mixle.task.recommend.recommend_model`, dependency-aware), the plain independence baseline
+    (:func:`mixle.utils.automatic.get_estimator`), and, when an ``llm`` handle is given, an LLM-designed
+    structure (:func:`mixle.task.design.design_model`, allowlisted-spec, fit-validated). Each candidate is
+    **fitted on a train split and scored on held-out data**, so the ranking is out-of-sample, not a guess.
+    The winner becomes the returned :class:`Model`; the full ranking lands in ``Model.frontier`` and the
+    per-field confidence / dependency / candidate notes in ``Model.notes`` (shown by ``explain()``).
+    Pass ``fit=True`` to also fit the winner to all of ``data`` before returning.
     """
+    from mixle.inference import optimize
     from mixle.task import recommend_model
 
-    rec = recommend_model(data, **recommend_kw)
+    rows = list(data)
+    rec = recommend_model(rows, **recommend_kw)
+    candidates: list[tuple[str, Any]] = [("recommended", rec.estimator)]
+    try:  # the independence baseline the frontier has to beat (skip when identical to the recommendation)
+        from mixle.utils.automatic import get_estimator
+
+        indep = get_estimator(rows)
+        if repr(indep) != repr(rec.estimator):
+            candidates.append(("independent", indep))
+    except Exception:  # noqa: BLE001 - a baseline that can't build is just absent from the frontier
+        pass
+    if llm is not None:
+        from mixle.task import design_model
+
+        designed = design_model(rows, llm)
+        if designed.source == "llm":
+            candidates.append(("llm-designed", designed.estimator))
+
+    rng = np.random.RandomState(seed)
+    order = rng.permutation(len(rows))
+    n_val = max(2, int(round(len(rows) * holdout)))
+    val = [rows[i] for i in order[:n_val]]
+    train = [rows[i] for i in order[n_val:]]
+
+    frontier: list[dict[str, Any]] = []
+    for name, est in candidates:
+        try:
+            fitted = optimize(train, est, max_its=max_its, out=None)
+            enc = fitted.dist_to_encoder().seq_encode(val)
+            score = float(np.mean(np.asarray(fitted.seq_log_density(enc), dtype=np.float64)))
+            frontier.append({"name": name, "estimator": est, "heldout_mean_log_density": score})
+        except Exception as exc:  # noqa: BLE001 - a failing candidate is reported, never silently dropped
+            frontier.append({"name": name, "estimator": est, "error": f"{type(exc).__name__}: {exc}"})
+    scored = sorted(
+        (f for f in frontier if "heldout_mean_log_density" in f), key=lambda f: -f["heldout_mean_log_density"]
+    )
+    frontier = scored + [f for f in frontier if "error" in f]
+    winner = scored[0]["estimator"] if scored else rec.estimator
+
     notes = [
         f"field {c.path}: {c.family}"
         + (
@@ -165,5 +219,15 @@ def propose(data: Any, *, fit: bool = False, **recommend_kw: Any) -> Model:
     ]
     notes += [f"dependency: {a} <-> {b} ({bits:.1f} bits for joint modeling)" for a, b, bits in rec.dependencies]
     notes += list(rec.warnings)
-    m = Model(rec.estimator, notes=notes)
-    return m.fit(data) if fit else m
+    notes += [
+        f"candidate {f['name']}: "
+        + (
+            f"held-out mean log-density {f['heldout_mean_log_density']:.3f}"
+            if "error" not in f
+            else f"failed ({f['error']})"
+        )
+        for f in frontier
+    ]
+    m = Model(winner, notes=notes)
+    m.frontier = frontier
+    return m.fit(rows) if fit else m

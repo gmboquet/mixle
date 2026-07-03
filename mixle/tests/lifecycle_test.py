@@ -53,6 +53,19 @@ class LifecycleTest(unittest.TestCase):
 
         self.assertTrue(np.isfinite(m(data[0])))  # use it: log p(x)
 
+    def test_propose_builds_a_verified_frontier(self):
+        import mixle
+
+        m = mixle.propose(_records(300), fit=True)
+        self.assertIsNotNone(m.frontier)
+        scored = [f for f in m.frontier if "heldout_mean_log_density" in f]
+        self.assertGreaterEqual(len(scored), 1)
+        scores = [f["heldout_mean_log_density"] for f in scored]
+        self.assertEqual(scores, sorted(scores, reverse=True))  # ranked out-of-sample, best first
+        self.assertTrue(any(n.startswith("candidate ") for n in m.notes))
+        self.assertIs(m.spec, scored[0]["estimator"])  # the winner is the returned model
+        self.assertIsNotNone(m.fitted)
+
     def test_fit_with_explicit_spec_and_enumerate(self):
         import mixle
         from mixle.stats import CategoricalEstimator
