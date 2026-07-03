@@ -46,6 +46,7 @@ from mixle.models.dirichlet_process_mixture import (
 )
 from mixle.models.dpo_leaf import DPOLeaf, DPOModel
 from mixle.models.embedding import CategoricalEmbedding
+from mixle.models.energy import EnergyModel, build_energy_net
 from mixle.models.gaussian_process import GaussianProcessRegressor
 from mixle.models.grammar import (
     GrammarLearningResult,
@@ -126,6 +127,7 @@ __all__ = [
     "NeuralDensity",
     "NeuralGaussian",
     "DPOModel",
+    "EnergyModel",
     "StreamingTransformer",
     # deprecated "...Leaf" aliases (kept for back-compat; prefer the names above)
     "NeuralLeaf",
@@ -173,6 +175,7 @@ __all__ = [
     "build_conditional_autoregressive_categorical",
     "build_conditional_flow",
     "build_coupling_flow",
+    "build_energy_net",
     "build_maf",
     "build_mdn",
     "build_vae",
