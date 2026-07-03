@@ -24,6 +24,7 @@ it verifies at least as well (anti-regression) -- so the deployed thing gets che
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -220,9 +221,29 @@ class Solution:
         return self.target_agreement is None or agree >= self.target_agreement
 
     def save(self, path: str) -> str:
-        """Persist the calibrated student (weights + calibration + manifest) as a load-anywhere artifact."""
+        """Persist the calibrated student as a load-anywhere artifact, with its verification record.
+
+        Every deployed artifact carries how it was verified — held-out agreement with the teacher, the
+        escalation rate, the conformal alpha, and how much of its training data was synthetic — so "is
+        this model trustworthy" is answerable from the artifact alone."""
         task = self.cascade.model.task
-        task.meta = {**task.meta, "solve": {"kind": self.kind, "ood": self.ood}}
+        task.meta = {
+            **task.meta,
+            "solve": {
+                "kind": self.kind,
+                "ood": self.ood,
+                "verification": {
+                    "holdout_agreement": self.holdout_agreement,
+                    "holdout_escalation_rate": self.escalation_rate,
+                    "alpha": self.cascade.model.alpha,
+                    "promoted": self.promoted,
+                    "n_train": len(self.train_inputs),
+                    "n_calibration": len(self.cal_inputs),
+                    "synthesized_inputs": self.synthesized,
+                    "verified_at": time.time(),
+                },
+            },
+        }
         return self.cascade.model.save(path)
 
     @classmethod
