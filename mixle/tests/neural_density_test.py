@@ -13,7 +13,7 @@ torch = pytest.importorskip("torch")
 
 import mixle.stats as st  # noqa: E402
 from mixle.inference import optimize  # noqa: E402
-from mixle.models.neural_density import NeuralDensityLeaf, build_coupling_flow  # noqa: E402
+from mixle.models.neural_density import NeuralDensity, build_coupling_flow  # noqa: E402
 
 
 def _two_modes(seed, n=500):
@@ -30,7 +30,7 @@ def _ll(model, data):
 class FlowLeafTest(unittest.TestCase):
     def test_flow_leaf_beats_gaussian_on_multimodal_density(self):
         train, test = _two_modes(0), _two_modes(1)
-        flow = NeuralDensityLeaf(build_coupling_flow(2, hidden=32, layers=6), m_steps=80, lr=5e-3)
+        flow = NeuralDensity(build_coupling_flow(2, hidden=32, layers=6), m_steps=80, lr=5e-3)
         fit = optimize(train, flow.estimator(), prev_estimate=flow, max_its=8, out=None)
         gauss = optimize(train, st.MultivariateGaussianEstimator(dim=2), max_its=20, out=None)
         # a flexible neural density models the two modes; a single Gaussian cannot
@@ -38,7 +38,7 @@ class FlowLeafTest(unittest.TestCase):
 
     def test_samples_are_bimodal(self):
         train = _two_modes(2)
-        flow = NeuralDensityLeaf(build_coupling_flow(2, layers=6), m_steps=80, lr=5e-3)
+        flow = NeuralDensity(build_coupling_flow(2, layers=6), m_steps=80, lr=5e-3)
         fit = optimize(train, flow.estimator(), prev_estimate=flow, max_its=8, out=None)
         s = np.asarray(fit.sampler(0).sample(400))
         self.assertEqual(s.shape, (400, 2))
@@ -50,11 +50,11 @@ class CompositionTest(unittest.TestCase):
     def test_flow_composes_in_a_mixture_with_a_gaussian(self):
         train = _two_modes(3)
         est = st.MixtureEstimator(
-            [NeuralDensityLeaf(build_coupling_flow(2, layers=6)).estimator(), st.MultivariateGaussianEstimator(dim=2)]
+            [NeuralDensity(build_coupling_flow(2, layers=6)).estimator(), st.MultivariateGaussianEstimator(dim=2)]
         )
         init = st.MixtureDistribution(
             [
-                NeuralDensityLeaf(build_coupling_flow(2, layers=6)),
+                NeuralDensity(build_coupling_flow(2, layers=6)),
                 st.MultivariateGaussianDistribution(np.zeros(2), np.eye(2)),
             ],
             [0.5, 0.5],
@@ -82,7 +82,7 @@ class GeneralityTest(unittest.TestCase):
             def sample(self, n):
                 return torch.randn(n, self.dim)
 
-        leaf = NeuralDensityLeaf(StdNormalModule(2))
+        leaf = NeuralDensity(StdNormalModule(2))
         x = np.array([[0.0, 0.0], [1.0, -1.0]])
         got = leaf.seq_log_density(x)
         want = -0.5 * (x**2).sum(axis=1) - 0.5 * 2 * np.log(2 * np.pi)
