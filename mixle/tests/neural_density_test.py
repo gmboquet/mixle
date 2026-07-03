@@ -13,7 +13,7 @@ torch = pytest.importorskip("torch")
 
 import mixle.stats as st  # noqa: E402
 from mixle.inference import optimize  # noqa: E402
-from mixle.models.neural_density import NeuralDensity, build_coupling_flow, build_vae  # noqa: E402
+from mixle.models.neural_density import NeuralDensity, build_coupling_flow, build_maf, build_vae  # noqa: E402
 
 
 def _two_modes(seed, n=500):
@@ -85,6 +85,46 @@ class VAETest(unittest.TestCase):
         self.assertEqual(s.shape, (400, 2))
         # the decoder learned both modes at (+3,+3) and (-3,-3), not a single blob between them
         self.assertTrue(np.any(s[:, 0] > 1.0) and np.any(s[:, 0] < -1.0))
+
+
+def _curved_pair(seed, n=800):
+    """x1 ~ N(0, 1.5^2); x2 | x1 ~ N(0.5 x1^2 - 1, 0.3^2) -- a curved autoregressive dependence a Gaussian can't fit."""
+    r = np.random.RandomState(seed)
+    x1 = 1.5 * r.randn(n)
+    x2 = 0.5 * x1**2 - 1.0 + 0.3 * r.randn(n)
+    return [np.array([x1[i], x2[i]]) for i in range(n)]
+
+
+class MAFTest(unittest.TestCase):
+    def test_density_integrates_to_one(self):
+        # the exactness claim, made crisp: a 1-D flow is a proper normalized density, so int p(x) dx = 1.
+        flow = build_maf(1, hidden=16, blocks=2)
+        leaf = NeuralDensity(flow)
+        grid = np.linspace(-8.0, 8.0, 4001)
+        dens = np.exp(leaf.seq_log_density(grid.reshape(-1, 1)))
+        integral = np.trapezoid(dens, grid)
+        self.assertAlmostEqual(integral, 1.0, delta=0.02)
+
+    def test_maf_beats_gaussian_on_curved_dependence(self):
+        train, test = _curved_pair(0), _curved_pair(1)
+        maf = NeuralDensity(build_maf(2, hidden=64, blocks=3), m_steps=80, lr=5e-3)
+        fit = optimize(train, maf.estimator(), prev_estimate=maf, max_its=8, out=None)
+        gauss = optimize(train, st.MultivariateGaussianEstimator(dim=2), max_its=20, out=None)
+        self.assertGreater(_ll(fit, test) - _ll(gauss, test), 100.0)
+
+    def test_composes_honestly_in_a_mixture(self):
+        # exact density => mixing with a Gaussian is a fair comparison of two exact leaves (no bound bias)
+        train = _curved_pair(2)
+        est = st.MixtureEstimator(
+            [NeuralDensity(build_maf(2, blocks=3)).estimator(), st.MultivariateGaussianEstimator(dim=2)]
+        )
+        init = st.MixtureDistribution(
+            [NeuralDensity(build_maf(2, blocks=3)), st.MultivariateGaussianDistribution(np.zeros(2), np.eye(2))],
+            [0.5, 0.5],
+        )
+        mix = optimize(train, est, prev_estimate=init, max_its=6, out=None)
+        self.assertEqual(len(mix.components), 2)
+        self.assertTrue(np.isfinite(mix.log_density(train[0])))
 
 
 class GeneralityTest(unittest.TestCase):
