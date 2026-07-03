@@ -98,5 +98,26 @@ class SolveMultiLabelTest(unittest.TestCase):
                     self.fail("under-calibrated label decided as present")
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class MultiLabelPersistenceTest(unittest.TestCase):
+    def test_save_load_serves_identically(self):
+        import tempfile
+
+        from mixle.task import MultiLabelSolution, solve_multilabel
+
+        sol = solve_multilabel(_tags, _txns(400), alpha=0.1, seed=0, epochs=250)
+        fresh = _txns(80, seed=5)
+        want = [sol.try_local(t) for t in fresh]
+        with tempfile.TemporaryDirectory() as d:
+            path = sol.save(d + "/tagger")
+            back = MultiLabelSolution.load(path, _tags)
+            got = [back.try_local(t) for t in fresh]
+        self.assertEqual(got, want)  # identical decisions, ambiguity included
+        back.harvested_inputs.append(fresh[0])
+        back.harvested_sets.append(["x"])
+        with self.assertRaises(RuntimeError):
+            back.improve()
+
+
 if __name__ == "__main__":
     unittest.main()

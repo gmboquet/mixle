@@ -80,6 +80,36 @@ class RecordRegressionFeaturizer:
         hashed = np.asarray(self._hash.transform(cat_rows), dtype=np.float32)
         return np.concatenate([num, hashed], axis=1)
 
+    def to_spec(self) -> dict[str, Any]:
+        return {
+            "dim": self.dim,
+            "seed": self.seed,
+            "num_keys": list(self.num_keys),
+            "num_mean": dict(self.num_mean),
+            "num_std": dict(self.num_std),
+        }
+
+    @classmethod
+    def from_spec(cls, spec: dict[str, Any]) -> RecordRegressionFeaturizer:
+        f = cls(dim=int(spec["dim"]), seed=int(spec["seed"]))
+        f.num_keys = list(spec["num_keys"])
+        f.num_mean = {k: float(v) for k, v in spec["num_mean"].items()}
+        f.num_std = {k: float(v) for k, v in spec["num_std"].items()}
+        return f
+
+
+def featurizer_spec(f: Any) -> dict[str, Any]:
+    """Tagged, artifact-ready spec for the featurizers the solve shapes use."""
+    kind = "record_regression" if isinstance(f, RecordRegressionFeaturizer) else "ngram"
+    return {"kind": kind, **f.to_spec()}
+
+
+def featurizer_from_spec(spec: dict[str, Any]) -> Any:
+    body = {k: v for k, v in spec.items() if k != "kind"}
+    if spec.get("kind") == "record_regression":
+        return RecordRegressionFeaturizer.from_spec(body)
+    return HashedNGram.from_spec(body)
+
 
 def _fit_reg_mlp(x: np.ndarray, y: np.ndarray, hidden: Sequence[int], epochs: int, lr: float, seed: int):
     import torch
@@ -170,10 +200,71 @@ class RegressionSolution:
             "harvested": len(self.harvested_ys),
         }
 
+    def save(self, path: str) -> str:
+        """Persist net (safetensors via the mixle.mlp builder) + featurizer + calibration; :meth:`load` restores."""
+        from mixle.task.artifact import save_module
+
+        first = next(m for m in self.net.modules() if hasattr(m, "in_features"))
+        return save_module(
+            path,
+            self.net,
+            "mixle.mlp",
+            {
+                "input_dim": int(first.in_features),
+                "hidden_dims": [int(h) for h in self.hidden],
+                "output_dim": 1,
+                "activation": "relu",
+            },
+            task="solve_regression student",
+            io=featurizer_spec(self.featurizer),
+            meta={
+                "regress": {
+                    "qhat": float(self.qhat),
+                    "alpha": self.alpha,
+                    "tol": self.tol,
+                    "holdout_mae": self.holdout_mae,
+                    "y_mean": self.y_mean,
+                    "y_scale": self.y_scale,
+                    "hidden": [int(h) for h in self.hidden],
+                    "epochs": self.epochs,
+                    "lr": self.lr,
+                    "seed": self.seed,
+                }
+            },
+        )
+
+    @classmethod
+    def load(cls, path: str, teacher: Callable[..., Any], *, device: str = "cpu") -> RegressionSolution:
+        """Reconstitute a serving RegressionSolution (no training/calibration data; improve() raises)."""
+        from mixle.task.artifact import load_module
+
+        net, manifest = load_module(path, device=device)
+        m = manifest.meta["regress"]
+        return cls(
+            net=net,
+            featurizer=featurizer_from_spec(manifest.io),
+            teacher=teacher,
+            qhat=float(m["qhat"]),
+            alpha=float(m["alpha"]),
+            tol=float(m["tol"]),
+            holdout_mae=float(m["holdout_mae"]),
+            y_mean=float(m["y_mean"]),
+            y_scale=float(m["y_scale"]),
+            hidden=tuple(m["hidden"]),
+            epochs=int(m["epochs"]),
+            lr=float(m["lr"]),
+            seed=int(m["seed"]),
+        )
+
     def improve(self) -> bool:
         """Re-fit with harvested pairs; promote only if the calibrated width shrinks (anti-regression)."""
         if not self.harvested_inputs:
             return False
+        if not self.cal_inputs:
+            raise RuntimeError(
+                "this RegressionSolution was loaded from an artifact and has no calibration data; "
+                "collect the harvested pairs and re-solve_regression() to improve."
+            )
         inputs = self.train_inputs + list(self.harvested_inputs)
         ys = self.train_ys + [float(v) for v in self.harvested_ys]
         cand = _fit_scaled(inputs, ys, self.featurizer, self.hidden, self.epochs, self.lr, self.seed)
