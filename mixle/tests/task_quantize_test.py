@@ -135,5 +135,95 @@ class Int4Test(unittest.TestCase):
         self.assertEqual(loaded.batch(self.val[:40]), self.q4.batch(self.val[:40]))
 
 
+class LNSStudentTest(unittest.TestCase):
+    """lns_classifier: the structured student re-executed in integer log-space."""
+
+    @classmethod
+    def setUpClass(cls):
+        from mixle.task import distill_structured_from_labels, lns_classifier
+
+        cls.train, cls.train_y = _record_task(240, 0)
+        cls.val, cls.val_y = _record_task(120, 1)
+        cls.float_student = distill_structured_from_labels(cls.train, cls.train_y, seed=0)
+        cls.lns_student = lns_classifier(cls.float_student, step=1e-2)
+
+    def test_predictions_match_the_float_classifier(self):
+        f = self.float_student.batch(self.val)
+        q = self.lns_student.batch(self.val)
+        agree = np.mean([a == b for a, b in zip(f, q)])
+        self.assertGreaterEqual(agree, 0.98)  # step=1e-2 quantization barely moves the argmax
+
+    def test_integer_scores_match_float_log_joints_within_engine_bound(self):
+        float_logits = self.float_student.adapter.logits_batch(self.float_student.model, self.val[:60])
+        lns_logits = self.lns_student.adapter.logits_batch(self.lns_student.model, self.val[:60])
+        finite = np.isfinite(float_logits) & np.isfinite(lns_logits)
+        n_factors = len(self.float_student.model.parents)
+        bound = (n_factors + 1) * 1.5 * self.lns_student.adapter.step  # per-fold engine bound
+        self.assertTrue(finite.any())
+        self.assertLessEqual(np.max(np.abs(float_logits[finite] - lns_logits[finite])), bound)
+
+    def test_decision_is_pure_integer(self):
+        ints = self.lns_student.adapter.int_logits_batch(self.lns_student.model, self.val[:20])
+        self.assertEqual(ints.dtype, np.int64)
+        idx = ints.argmax(axis=1)
+        labels = [self.lns_student.adapter.labels[i] for i in idx]
+        self.assertEqual(labels, self.lns_student.batch(self.val[:20]))
+
+    def test_integer_posterior_matches_float_posterior(self):
+        pf = self.float_student.adapter.proba_batch(self.float_student.model, self.val[:60])
+        pq = self.lns_student.adapter.proba_batch(self.lns_student.model, self.val[:60])
+        self.assertLessEqual(np.max(np.abs(pf - pq)), 0.05)
+        np.testing.assert_allclose(pq.sum(axis=1), 1.0, atol=1e-6)
+
+    def test_mixture_student_folds_components_with_integer_logadd(self):
+        from mixle.task import distill_structured_from_labels, lns_classifier
+
+        mix = distill_structured_from_labels(self.train, self.train_y, n_components=2, seed=0)
+        lns_mix = lns_classifier(mix, step=1e-2)
+        f = mix.batch(self.val)
+        q = lns_mix.batch(self.val)
+        self.assertGreaterEqual(np.mean([a == b for a, b in zip(f, q)]), 0.95)
+
+    def test_artifact_roundtrip_preserves_step_and_predictions(self):
+        from mixle.task import TaskModel
+
+        with tempfile.TemporaryDirectory() as d:
+            self.lns_student.save(d)
+            loaded = TaskModel.load(d)
+        self.assertEqual(loaded.adapter.kind, "lns_structured_classifier")
+        self.assertAlmostEqual(loaded.adapter.step, 1e-2)
+        self.assertEqual(loaded.batch(self.val[:40]), self.lns_student.batch(self.val[:40]))
+
+    def test_step_is_a_fidelity_dial(self):
+        from mixle.task import lns_classifier
+
+        coarse = lns_classifier(self.float_student, step=0.5)
+        fine = lns_classifier(self.float_student, step=1e-3)
+        f_logits = self.float_student.adapter.logits_batch(self.float_student.model, self.val[:40])
+        for student in (fine, coarse):
+            q_logits = student.adapter.logits_batch(student.model, self.val[:40])
+            finite = np.isfinite(f_logits) & np.isfinite(q_logits)
+            err = np.max(np.abs(f_logits[finite] - q_logits[finite]))
+            n_factors = len(self.float_student.model.parents)
+            self.assertLessEqual(err, (n_factors + 1) * 1.5 * student.adapter.step)
+        # finer step -> strictly tighter observed error
+        qe = (
+            lambda s: np.max(  # noqa: E731
+                np.abs(
+                    (self.float_student.adapter.logits_batch(self.float_student.model, self.val[:40]))
+                    - s.adapter.logits_batch(s.model, self.val[:40])
+                )[np.isfinite(f_logits)]
+            )
+        )
+        self.assertLess(qe(fine), qe(coarse))
+
+    def test_guard_rejects_non_structured_students(self):
+        from mixle.task import lns_classifier
+
+        mlp = distill_records_from_labels(self.train, self.train_y, dim=64, hidden=[8], epochs=20, lr=1e-2, seed=0)
+        with self.assertRaises(ValueError):
+            lns_classifier(mlp)
+
+
 if __name__ == "__main__":
     unittest.main()
