@@ -8,10 +8,11 @@ The point is not a specific architecture; it is the *wrapper*. ``NeuralGaussian`
 responsibility-weighted maximum-likelihood gradient ascent on the module, warm-started across EM iterations.
 
 That is the thing no NN library offers: "a mixture of a normalizing flow and a Gamma", "an HMM whose emissions
-are flows". Three ready instances ship: :func:`build_coupling_flow` (a RealNVP-style flow, *exact*), :func:`build_maf` (a
-masked autoregressive flow, *exact*, richer autoregressive dependence) and :func:`build_vae` (a variational
-autoencoder, a *latent-variable* density whose ``log_density`` is the ELBO lower bound) -- structurally different
-families behind one adapter. Any other density (a normalized energy model, ...) plugs in the same way.
+are flows". Ready instances ship: :func:`build_coupling_flow` (a RealNVP-style flow, *exact*), :func:`build_maf` (a masked
+autoregressive flow, *exact*, richer autoregressive dependence), :func:`build_vae` (a variational autoencoder, a
+*latent-variable* density whose ``log_density`` is the ELBO lower bound) and :func:`build_autoregressive_categorical`
+(an exact autoregressive density over **discrete** vectors) -- structurally different families, continuous and
+discrete, behind one adapter. Any other density (a normalized energy model, ...) plugs in the same way.
 """
 
 from __future__ import annotations
@@ -371,3 +372,61 @@ def build_maf(dim: int, *, hidden: int = 64, blocks: int = 3) -> Any:
             return z
 
     return MAF()
+
+
+# --- a discrete instance: an autoregressive categorical density -- exact p(x) over DISCRETE vectors ------------
+
+
+def build_autoregressive_categorical(dim: int, n_categories: int, *, hidden: int = 64) -> Any:
+    """An autoregressive neural density over **discrete** vectors ``x in {0..C-1}^dim`` -- exact, normalized ``p(x)``.
+
+    The continuous flows/VAE above model ``R^d``; heterogeneous data is also categorical. This factorizes
+    ``p(x) = prod_i p(x_i | x_{<i})`` with a MADE-masked network whose per-coordinate softmax *is* each conditional,
+    so the density is **exactly normalized** (sums to 1 over the finite space) and composes honestly in a mixture
+    with count/categorical families. ``log_density`` sums the picked log-softmax logits; ``sample`` fills the vector
+    one coordinate at a time. Another ready module for :class:`NeuralDensity`; the adapter is unchanged.
+    """
+    import torch
+    import torch.nn as nn
+
+    D = int(dim)
+    C = int(n_categories)
+
+    class MaskedLinear(nn.Linear):
+        def set_mask(self, mask: Any) -> None:
+            self.register_buffer("mask", torch.as_tensor(mask, dtype=torch.float32))
+
+        def forward(self, x: Any) -> Any:
+            return nn.functional.linear(x, self.mask * self.weight, self.bias)
+
+    class AutoregressiveCategorical(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            m_in = np.arange(1, D + 1)
+            m_h = 1 + (np.arange(hidden) % max(D - 1, 1))
+            self.l1 = MaskedLinear(D, hidden)
+            self.l2 = MaskedLinear(hidden, hidden)
+            self.lout = MaskedLinear(hidden, D * C)
+            self.l1.set_mask((m_h[:, None] >= m_in[None, :]).astype(float))
+            self.l2.set_mask((m_h[:, None] >= m_h[None, :]).astype(float))
+            m_out = np.repeat(m_in, C)  # C logits per coordinate, all carrying that coordinate's degree
+            self.lout.set_mask((m_out[:, None] > m_h[None, :]).astype(float))  # strict: logits_i see x_{<i} only
+            self.act = nn.Tanh()
+
+        def _logits(self, x: Any) -> Any:
+            h = self.act(self.l2(self.act(self.l1(x))))
+            return self.lout(h).view(-1, D, C)  # (n, D, C)
+
+        def log_density(self, x: Any) -> Any:
+            log_p = torch.log_softmax(self._logits(x), dim=-1)  # (n, D, C), each row a proper conditional
+            idx = x.long().clamp(0, C - 1).unsqueeze(-1)  # (n, D, 1)
+            return log_p.gather(-1, idx).squeeze(-1).sum(1)  # sum_i log p(x_i | x_{<i})
+
+        def sample(self, n: int) -> Any:
+            x = torch.zeros(int(n), D, device=next(self.parameters()).device)
+            for d in range(D):  # coordinate d's conditional depends only on already-filled x_{<d}
+                probs = torch.softmax(self._logits(x)[:, d, :], dim=-1)
+                x[:, d] = torch.multinomial(probs, 1).squeeze(-1).float()
+            return x
+
+    return AutoregressiveCategorical()
