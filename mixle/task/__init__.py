@@ -85,8 +85,15 @@ from mixle.task.model import (
     register_adapter,
 )
 
-# post-training quantization: int8 weights, numpy-only inference (torch-free deployable MLP students)
-from mixle.task.quantize import QuantizedClassifierIO, QuantizedMLP, quantize_mlp
+# post-training quantization: int8/int4 MLP weights (numpy-only inference) + LNS integer log-space
+# execution for structured students (transcendental-free above the leaf boundary)
+from mixle.task.quantize import (
+    LNSStructuredClassifierIO,
+    QuantizedClassifierIO,
+    QuantizedMLP,
+    lns_classifier,
+    quantize_mlp,
+)
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
 from mixle.task.solve import Solution, solve
 from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
@@ -111,6 +118,7 @@ __all__ = [
     "FieldChoice",
     "HashedNGram",
     "HashedRecord",
+    "LNSStructuredClassifierIO",
     "ModelRecommendation",
     "OpenAICompatLLM",
     "QuantizedClassifierIO",
@@ -146,6 +154,7 @@ __all__ = [
     "get_builder",
     "llm_extractor",
     "llm_labeler",
+    "lns_classifier",
     "pick_label",
     "recommend_model",
     "recommend_route",
