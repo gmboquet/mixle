@@ -10,8 +10,10 @@ A causal Transformer trained on a token stream::
 
 ``fit`` runs the non-buffering streaming estimator (``mixle.models.streaming_transformer_leaf``); with
 ``distributed=True`` it dispatches through ``StreamingTokenEncodedData`` (per-rank shard, in-backward all-reduce,
-FSDP2/ZeRO-3 + bf16 + DCP on CUDA). The multi-stage pipeline (CPT-with-EWC, SFT loss-mask, DPO) is provided by
-``mixle.models.continual`` / the responsibility-weight channel / ``mixle.models.dpo_leaf``.
+FSDP2/ZeRO-3 + bf16 + DCP on CUDA). ``fit_pairs`` is the SFT stage: dense all-position teacher forcing on
+``(prompt, completion)`` pairs with the loss masked to completions -- the shape needed to distill verified
+trajectories (e.g. execution-checked ``page -> parser code`` pairs from a data factory) into a tiny model.
+The rest of the multi-stage pipeline (CPT-with-EWC, DPO) is ``mixle.models.continual`` / ``mixle.models.dpo_leaf``.
 """
 
 from __future__ import annotations
@@ -25,6 +27,21 @@ def _torch() -> Any:
     import torch
 
     return torch
+
+
+def _forward_all_positions(module: Any, x: Any) -> Any:
+    """Next-token logits at EVERY position, ``(batch, block, vocab)``.
+
+    ``build_causal_lm``'s forward returns only the last position (the shape the leaf estimators score);
+    dense teacher forcing needs them all, so this re-runs the same layers off the module's own parts.
+    """
+    torch = _torch()
+    t = x.shape[1]
+    pos = torch.arange(t, device=x.device)
+    h = module.tok(x.long()) + module.pos(pos)[None, :, :]
+    for blk in module.blocks:
+        h = blk(h)
+    return module.head(module.ln(h))
 
 
 class LM:
@@ -81,19 +98,97 @@ class LM:
             self.module = stream_fit(self.module, src, lr=lr, device=self.device)[0].module
         return self
 
+    def fit_pairs(
+        self,
+        pairs: Any,
+        *,
+        epochs: int = 1,
+        batch_size: int = 32,
+        lr: float = 3e-3,
+        mask_prompt: bool = True,
+        pad_id: int = 0,
+        seed: int = 0,
+        log: Any = None,
+    ) -> LM:
+        """Supervised fine-tuning on ``(prompt_ids, completion_ids)`` pairs with a dense per-position loss.
+
+        The streaming ``fit`` path scores ONE next-token target per window (the right shape for an unbounded
+        pretraining stream); for a pair corpus that wastes a factor of ``block`` in compute. Here every position
+        of every pair contributes cross-entropy in a single forward, and ``mask_prompt`` restricts the loss to
+        completion positions -- the standard SFT objective. Sequences longer than ``block`` keep the completion
+        and drop the oldest prompt tokens; shorter ones are left-padded with ``pad_id`` (excluded from the loss).
+        Include your end-of-sequence token in each completion so ``generate(stop_id=...)`` knows where to stop.
+        """
+        torch = _torch()
+        rng = np.random.RandomState(seed)
+        rows, tmask = [], []
+        for prompt, completion in pairs:
+            seq = [int(t) for t in prompt] + [int(t) for t in completion]
+            keep = [False] * (len(seq) if mask_prompt else 0)
+            if mask_prompt:
+                for i in range(len(prompt), len(seq)):
+                    keep[i] = True
+            else:
+                keep = [True] * len(seq)
+            if len(seq) > self.block:
+                seq, keep = seq[-self.block :], keep[-self.block :]
+            pad = self.block - len(seq)
+            # right-align the pad so tokens sit at positions 0..len-1 -- the same absolute positions
+            # generate() feeds them at (it runs the unpadded window), keeping train/decode consistent
+            rows.append(seq + [pad_id] * pad)
+            tmask.append(keep + [False] * pad)
+        x = torch.as_tensor(np.asarray(rows, dtype=np.int64))
+        # position t's logits predict token t+1: shift the target/mask left by one
+        target = x[:, 1:].to(self.device)
+        m = torch.as_tensor(np.asarray(tmask, dtype=bool))[:, 1:].to(self.device)
+        x = x.to(self.device)
+        module = self.module.to(self.device)
+        module.train()
+        opt = torch.optim.Adam(module.parameters(), lr=lr)
+        n = x.shape[0]
+        for epoch in range(int(epochs)):
+            order = rng.permutation(n)
+            total = count = 0.0
+            for s in range(0, n, int(batch_size)):
+                idx = torch.as_tensor(order[s : s + int(batch_size)], dtype=torch.int64, device=self.device)
+                logits = _forward_all_positions(module, x[idx])[:, :-1]
+                mask = m[idx]
+                if not bool(mask.any()):
+                    continue
+                loss = torch.nn.functional.cross_entropy(logits[mask], target[idx][mask])
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+                total += float(loss.detach()) * float(mask.sum())
+                count += float(mask.sum())
+            if log is not None:
+                log(epoch, total / max(count, 1.0))
+        return self
+
     def generate(
-        self, prompt_ids: Any, n: int = 200, *, temperature: float = 1.0, greedy: bool = False, seed: int = 0
+        self,
+        prompt_ids: Any,
+        n: int = 200,
+        *,
+        temperature: float = 1.0,
+        greedy: bool = False,
+        seed: int = 0,
+        stop_id: int | None = None,
     ) -> list:
-        """Autoregressively extend ``prompt_ids`` by ``n`` tokens (greedy, or temperature-sampled)."""
+        """Autoregressively extend ``prompt_ids`` by ``n`` tokens (greedy, or temperature-sampled).
+
+        ``stop_id`` ends generation early when that token is produced (it is included in the return value,
+        so callers can strip it -- and its presence distinguishes 'finished' from 'ran out of budget').
+        """
         torch = _torch()
         rng = np.random.RandomState(seed)
         self.module.to(self.device).eval()
         w = [int(t) for t in prompt_ids]
         out = list(w)
         for _ in range(int(n)):
+            # feed the window unpadded: positions run 0..len-1 exactly as in training (fit / fit_pairs),
+            # and the attention cost tracks the true length instead of always paying the full block
             win = w[-self.block :]
-            if len(win) < self.block:
-                win = [0] * (self.block - len(win)) + win
             with torch.no_grad():
                 logits = self.module(torch.as_tensor([win], dtype=torch.float32).to(self.device))[0].cpu().numpy()
             if greedy:
@@ -104,6 +199,8 @@ class LM:
                 nxt = int(rng.choice(len(p), p=p))
             w.append(nxt)
             out.append(nxt)
+            if stop_id is not None and nxt == int(stop_id):
+                break
         self.module.train()
         return out
 
