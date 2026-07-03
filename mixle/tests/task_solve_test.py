@@ -154,5 +154,42 @@ class SolveTest(unittest.TestCase):
         self.assertIn(sol("hello friend"), ("greeting", "other"))
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class ServingLoopRoundTripTest(unittest.TestCase):
+    """harvested.jsonl (the serving feedback format) -> load_harvested -> solve(prelabeled=) -> deploy."""
+
+    def test_harvested_pairs_feed_the_next_solve(self):
+        import json
+        import tempfile
+
+        from mixle.task import load_harvested, solve
+
+        with tempfile.TemporaryDirectory() as d:
+            # what the mlops /v1/tasks/{name}/feedback endpoint accumulates (dict + list inputs)
+            harvested = [
+                {"input": {"kind": "refund", "amount": 900.0, "region": "us"}, "label": "finance-escalation"},
+                {"input": ["refund", 30.0], "label": "billing"},
+            ]
+            p = d + "/harvested.jsonl"
+            with open(p, "w") as f:
+                for row in harvested:
+                    f.write(json.dumps(row) + "\n")
+            ins, labs = load_harvested(p)
+            self.assertEqual(labs, ["finance-escalation", "billing"])
+            self.assertIsInstance(ins[1], tuple)  # JSON lists coerce back to the tuple record shape
+
+            pre_in = [{"kind": "refund", "amount": 800.0 + i, "region": "us"} for i in range(20)]
+            pre = (pre_in, [_route(x) for x in pre_in])
+            sol = solve(_route, _tickets(200), prelabeled=pre, ood=0.05, seed=0, epochs=150)
+            self.assertGreaterEqual(len(sol.train_inputs), 150 + 20)  # prelabeled joined training
+            for x, y in zip(sol.train_inputs[-20:], sol.train_labels[-20:]):
+                self.assertEqual(y, _route(x))  # exact teacher labels, in order
+            self.assertGreater(sol.holdout_agreement, 0.7)
+
+            path = sol.deploy("router", root=d)  # the serving layout the mlops routes read
+            self.assertTrue((__import__("pathlib").Path(d) / "tasks" / "router" / "manifest.json").exists())
+            self.assertIn("tasks/router", path.replace("\\", "/"))
+
+
 if __name__ == "__main__":
     unittest.main()
