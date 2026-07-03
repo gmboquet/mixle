@@ -337,6 +337,12 @@ class TaskModel:
             return _artifact.save_module(
                 path, self.model, self.builder, self.config, task=self.task, io=io, meta=self.meta
             )
+        if self.payload == "arrays":
+            if self.builder is None:
+                raise ValueError("an arrays TaskModel needs builder= to be reconstructable")
+            return _artifact.save_arrays(
+                path, self.model.to_arrays(), self.builder, self.config, task=self.task, io=io, meta=self.meta
+            )
         return _artifact.save_json(path, self.model, task=self.task, io=io, meta=self.meta)
 
     @classmethod
@@ -352,6 +358,17 @@ class TaskModel:
                 builder=manifest.builder,
                 config=manifest.config,
                 payload="torch",
+                task=manifest.task,
+                meta=manifest.meta,
+            )
+        if manifest.payload == "arrays":
+            model, _ = _artifact.load_arrays(path)
+            return cls(
+                model,
+                adapter,
+                builder=manifest.builder,
+                config=manifest.config,
+                payload="arrays",
                 task=manifest.task,
                 meta=manifest.meta,
             )

@@ -32,6 +32,7 @@ SCHEMA_VERSION = "1"
 MANIFEST_NAME = "manifest.json"
 WEIGHTS_NAME = "weights.safetensors"
 JSON_MODEL_NAME = "model.json"
+ARRAYS_NAME = "arrays.npz"
 
 
 # --- builder registry: name -> (**config) -> nn.Module ------------------------------------------------------
@@ -102,7 +103,7 @@ class TaskManifest:
             "io": self.io,
             "meta": self.meta,
         }
-        if self.payload == "torch":
+        if self.payload in ("torch", "arrays"):  # payloads reconstructed through a registered builder
             d["builder"] = self.builder
             d["config"] = self.config
         return d
@@ -206,3 +207,68 @@ def load_json(path: str) -> tuple[Any, TaskManifest]:
     ensure_pysp_serialization_registry()
     with open(os.path.join(path, JSON_MODEL_NAME)) as f:
         return from_serializable(json.load(f)), manifest
+
+
+# --- arrays payload: a dict of numpy arrays + a registered reconstructor (torch-free students) ---------------
+
+_ARRAYS_BUILDERS: dict[str, Callable[..., Any]] = {}
+
+
+def register_arrays_builder(name: str, builder: Callable[..., Any]) -> None:
+    """Register ``builder(arrays: dict[str, ndarray], **config) -> model`` for arrays-payload artifacts.
+
+    The arrays payload is for torch-free numeric students (e.g. an int8-quantized MLP): weights live in
+    one ``.npz``, and the builder reconstructs the runnable model from them in a fresh process.
+    """
+    existing = _ARRAYS_BUILDERS.get(name)
+    if existing is not None and existing is not builder:
+        raise ValueError(f"arrays builder {name!r} is already registered to a different callable")
+    _ARRAYS_BUILDERS[name] = builder
+
+
+def get_arrays_builder(name: str | None) -> Callable[..., Any]:
+    """Look up a registered arrays builder, triggering native self-registration on first call."""
+    if name is None:
+        raise KeyError("arrays artifact has no builder recorded; it cannot be reconstructed")
+    if name not in _ARRAYS_BUILDERS and name.startswith("mixle."):
+        import mixle.task.quantize  # noqa: F401  (registers mixle.quantized_mlp)
+    if name not in _ARRAYS_BUILDERS:
+        raise KeyError(f"no arrays builder registered as {name!r}; call register_arrays_builder({name!r}, ...) first")
+    return _ARRAYS_BUILDERS[name]
+
+
+def save_arrays(
+    path: str,
+    arrays: dict[str, Any],
+    builder: str,
+    config: dict[str, Any] | None = None,
+    *,
+    task: str = "",
+    io: dict[str, Any] | None = None,
+    meta: dict[str, Any] | None = None,
+) -> str:
+    """Persist a dict of numpy arrays as an artifact directory (``arrays.npz``); return ``path``."""
+    import numpy as np
+
+    get_arrays_builder(builder)  # fail fast before writing anything
+    os.makedirs(path, exist_ok=True)
+    np.savez(os.path.join(path, ARRAYS_NAME), **arrays)
+    _write_manifest(
+        path,
+        TaskManifest(
+            payload="arrays", builder=builder, config=dict(config or {}), task=task, io=io or {}, meta=meta or {}
+        ),
+    )
+    return path
+
+
+def load_arrays(path: str) -> tuple[Any, TaskManifest]:
+    """Rebuild a torch-free model from an arrays-payload artifact; return ``(model, manifest)``."""
+    import numpy as np
+
+    manifest = read_manifest(path)
+    if manifest.payload != "arrays":
+        raise ValueError(f"artifact at {path!r} is a {manifest.payload!r} payload, not arrays")
+    with np.load(os.path.join(path, ARRAYS_NAME)) as z:
+        arrays = {k: z[k] for k in z.files}
+    return get_arrays_builder(manifest.builder)(arrays, **manifest.config), manifest

@@ -16,11 +16,15 @@ from mixle.task.active import ActiveResult, acquisition_scores, active_distill
 from mixle.task.artifact import (
     SCHEMA_VERSION,
     TaskManifest,
+    get_arrays_builder,
     get_builder,
+    load_arrays,
     load_json,
     load_module,
     read_manifest,
+    register_arrays_builder,
     register_builder,
+    save_arrays,
     save_json,
     save_module,
 )
@@ -80,6 +84,9 @@ from mixle.task.model import (
     adapter_from_spec,
     register_adapter,
 )
+
+# post-training quantization: int8 weights, numpy-only inference (torch-free deployable MLP students)
+from mixle.task.quantize import QuantizedClassifierIO, QuantizedMLP, quantize_mlp
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
 from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
 
@@ -105,6 +112,8 @@ __all__ = [
     "HashedRecord",
     "ModelRecommendation",
     "OpenAICompatLLM",
+    "QuantizedClassifierIO",
+    "QuantizedMLP",
     "RecipeSpace",
     "RecordClassifierIO",
     "RoutePlan",
@@ -131,6 +140,7 @@ __all__ = [
     "distill_structured",
     "distill_structured_from_labels",
     "extraction_f1",
+    "get_arrays_builder",
     "get_builder",
     "llm_extractor",
     "llm_labeler",
@@ -138,11 +148,15 @@ __all__ = [
     "recommend_model",
     "recommend_route",
     "spec_to_estimator",
+    "load_arrays",
     "load_json",
     "load_module",
+    "quantize_mlp",
     "read_manifest",
     "register_adapter",
+    "register_arrays_builder",
     "register_builder",
+    "save_arrays",
     "save_json",
     "save_module",
     "tokenize",
