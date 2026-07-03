@@ -60,6 +60,15 @@ from mixle.ppl.core import (
     ordered,
     potential,
 )
+from mixle.ppl.density import (
+    MAF,
+    MDN,
+    VAE,
+    CondDiscreteAR,
+    CondFlow,
+    DiscreteAR,
+    Flow,
+)
 from mixle.ppl.diagnostics import loo_stack, loo_stacking_weights
 from mixle.ppl.distributions import (
     AR1,
@@ -192,6 +201,13 @@ __all__ = [
     "Mix",
     "Net",
     "Transformer",
+    "Flow",
+    "MAF",
+    "VAE",
+    "DiscreteAR",
+    "MDN",
+    "CondFlow",
+    "CondDiscreteAR",
     "SemiMix",
     "Seq",
     "Markov",
