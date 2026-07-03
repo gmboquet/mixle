@@ -225,5 +225,94 @@ class LNSStudentTest(unittest.TestCase):
             lns_classifier(mlp)
 
 
+def _discrete_task(n, seed):
+    """All-categorical records (color, size) with a tree-expressible label rule.
+
+    (Not XOR: a dependency *tree* renders fields conditionally independent given the label, so an
+    XOR label would cap any tree student near 2/3 -- that would test the model class, not LNS.)
+    """
+    rng = np.random.RandomState(seed)
+    recs, labels = [], []
+    for _ in range(n):
+        color = ("red", "green", "blue")[rng.randint(3)]
+        size = ("s", "l")[rng.randint(2)]
+        recs.append((color, size))
+        labels.append("a" if color == "red" else "b")
+    return recs, labels
+
+
+class LNSIntegerTablesTest(unittest.TestCase):
+    """Categorical factors compile to integer tables: all-discrete inference touches no floats."""
+
+    @classmethod
+    def setUpClass(cls):
+        from mixle.task import distill_structured_from_labels, lns_classifier
+
+        cls.recs, cls.labels = _discrete_task(300, 0)
+        cls.val, cls.val_y = _discrete_task(120, 1)
+        cls.float_student = distill_structured_from_labels(cls.recs, cls.labels, seed=0)
+        cls.lns_student = lns_classifier(cls.float_student, step=1e-2)
+
+    def test_all_discrete_inference_calls_no_float_leaves(self):
+        # the decisive claim: with every factor compiled to an integer table, classification never
+        # evaluates a float log-density -- integers from the leaves up.
+        import mixle.inference.structure as structure
+
+        calls = {"n": 0}
+        original = structure._safe_log_density
+
+        def counting(*args, **kwargs):
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        structure._safe_log_density = counting
+        try:
+            preds = self.lns_student.batch(self.val)
+        finally:
+            structure._safe_log_density = original
+        self.assertEqual(calls["n"], 0)
+        self.assertTrue(all(p in ("a", "b") for p in preds))
+
+    def test_matches_float_classifier_on_discrete_schema(self):
+        f = self.float_student.batch(self.val)
+        q = self.lns_student.batch(self.val)
+        self.assertGreaterEqual(np.mean([a == b for a, b in zip(f, q)]), 0.98)
+        self.assertGreaterEqual(np.mean([p == y for p, y in zip(q, self.val_y)]), 0.9)  # rule learnable
+
+    def test_mixed_schema_compiles_only_the_categorical_factors(self):
+        # continuous field stays on the float-boundary path; categorical factors are still lookups
+        import mixle.inference.structure as structure
+        from mixle.task import distill_structured_from_labels, lns_classifier
+
+        train, train_y = _record_task(240, 0)  # (float, str) mixed schema
+        val, _ = _record_task(60, 1)
+        student = lns_classifier(distill_structured_from_labels(train, train_y, seed=0), step=1e-2)
+        n_factors = len(student.model.parents)
+
+        calls = {"n": 0}
+        original = structure._safe_log_density
+
+        def counting(*args, **kwargs):
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        structure._safe_log_density = counting
+        try:
+            student.batch(val)
+        finally:
+            structure._safe_log_density = original
+        total_leaf_evals = len(val) * len(student.adapter.labels) * n_factors
+        self.assertGreater(calls["n"], 0)  # the continuous factor really uses the float boundary
+        self.assertLess(calls["n"], total_leaf_evals)  # but not every factor does: tables took over
+
+    def test_unseen_categorical_value_scores_log_zero_not_crash(self):
+        pred = self.lns_student(("purple", "s"))  # a color never seen in training
+        self.assertIn(pred, ("a", "b"))
+        ints = self.lns_student.adapter.int_logits_batch(self.lns_student.model, [("purple", "s")])
+        from mixle.task.quantize import _LOG_ZERO_INT
+
+        self.assertTrue((ints <= _LOG_ZERO_INT // 2).all())  # no invented mass for unseen values
+
+
 if __name__ == "__main__":
     unittest.main()
