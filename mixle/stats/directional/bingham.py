@@ -98,6 +98,20 @@ class BinghamDistribution(SequenceEncodableProbabilityDistribution):
         p = np.asarray(x, dtype=np.float64) @ self.m  # (n, 3) projections onto the axes
         return -self._log_c + (p * p) @ self.z
 
+    # --- compute-engine backend (numpy + torch/GPU), SCORING only: the normalizer is a host scalar
+    # (Kummer / Bingham constants via scipy), the data math is engine matmul + quadratics. The scatter
+    # accumulator stays host-side, so torch accelerates mixture E-step scoring with a bit-correct M-step. ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for ``(N, 3)`` unit vectors."""
+        p = engine.matmul(engine.asarray(x), engine.asarray(self.m))
+        return -self._log_c + engine.matmul(p * p, engine.asarray(self.z))
+
     def sampler(self, seed: int | None = None) -> "BinghamSampler":
         return BinghamSampler(self, seed)
 

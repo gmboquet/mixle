@@ -94,6 +94,20 @@ class WatsonDistribution(SequenceEncodableProbabilityDistribution):
         dots = np.asarray(x, dtype=np.float64) @ self.mu
         return self._log_const + self.kappa * dots * dots
 
+    # --- compute-engine backend (numpy + torch/GPU), SCORING only: the normalizer is a host scalar
+    # (Kummer / Bingham constants via scipy), the data math is engine matmul + quadratics. The scatter
+    # accumulator stays host-side, so torch accelerates mixture E-step scoring with a bit-correct M-step. ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for ``(N, p)`` unit vectors."""
+        dots = engine.matmul(engine.asarray(x), engine.asarray(self.mu))
+        return self._log_const + self.kappa * dots * dots
+
     def sampler(self, seed: int | None = None) -> "WatsonSampler":
         """Return a sampler for drawing unit vectors from this distribution."""
         return WatsonSampler(self, seed)
