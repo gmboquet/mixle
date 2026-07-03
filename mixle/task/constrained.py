@@ -134,11 +134,13 @@ class PlanGrammar:
 
 def constrained_plan_decode(
     lm: Any, codec: Any, request: str, specs: dict[str, ToolSpec], *, max_new: int = 200
-) -> str | None:
+) -> tuple[str, float] | None:
     """Greedy decode with the grammar mask: the highest-logit LEGAL character at every step.
 
-    Returns the generated plan text (without the prompt), or ``None`` when the automaton dead-ends
-    (e.g. a value must start but the request offers no continuation the keys allow).
+    Returns ``(plan_text, confidence)`` — the confidence is the mean full-vocabulary log-probability
+    the model itself put on the legal path it took — or ``None`` when the automaton dead-ends. The
+    grammar guarantees FORM; a well-formed wrong plan is still possible from a weak model, so callers
+    gate emission on a calibrated confidence floor (see ``sft_planner``).
     """
     import torch
 
@@ -149,6 +151,7 @@ def constrained_plan_decode(
     w = codec.encode(str(request) + _PROMPT_SEP)
     lm.module.to(lm.device).eval()
     text: list[str] = []
+    logps: list[float] = []
     try:
         for _ in range(int(max_new)):
             allowed = grammar.allowed(state)
@@ -163,12 +166,14 @@ def constrained_plan_decode(
             masked = np.full_like(logits, -np.inf)
             masked[ids] = logits[ids]
             nxt = int(masked.argmax())
+            lse = float(np.logaddexp.reduce(logits - logits.max()) + logits.max())
+            logps.append(float(logits[nxt]) - lse)
             ch = codec.itos[nxt]
             w.append(nxt)
             text.append(ch)
             state = grammar.advance(state, ch)
             if state.mode == "terminal":
-                return "".join(text)
+                return "".join(text), float(np.mean(logps))
         return None  # budget exhausted before EOS
     finally:
         lm.module.train()
