@@ -52,6 +52,7 @@ from mixle.inference.calibration import (
     reliability_curve,
     top_label_confidence,
 )
+from mixle.inference.causal import InterventionalNetwork, average_causal_effect, do
 from mixle.inference.conformal import (
     conformal_label_sets,
     conformal_label_threshold,
@@ -260,6 +261,9 @@ from mixle.stats.compute.pdist import ParameterEstimator
 from mixle.stats.compute.sequence import estimate, initialize, seq_estimate, seq_initialize
 
 __all__ = [
+    "InterventionalNetwork",
+    "average_causal_effect",
+    "do",
     "Forecast",
     "forecast",
     # the estimator contract + MLE/EM/MAP drivers
