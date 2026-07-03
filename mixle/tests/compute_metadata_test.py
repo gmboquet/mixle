@@ -277,8 +277,10 @@ class ComputeMetadataTestCase(unittest.TestCase):
             len_dist=IntegerCategoricalDistribution(0, [0.1, 0.2, 0.4, 0.3]),
             use_numba=True,
         )
-        self.assertEqual(capabilities_for(numba_hmm).engine_ready, ("numpy",))
-        self.assertEqual(capabilities_for(numba_hmm).kernel_status, "legacy_numpy")
+        # use_numba selects the tuned numpy HOST kernel but no longer gates torch: the engine consumes
+        # the numba encoding for both scoring and the E-step, so the default HMM is engine-ready too.
+        self.assertEqual(capabilities_for(numba_hmm).engine_ready, ("numpy", "torch"))
+        self.assertEqual(capabilities_for(numba_hmm).kernel_status, "generic_latent")
 
         joint_mix = JointMixtureDistribution(
             components1=[GaussianDistribution(-1.0, 0.8), GaussianDistribution(2.0, 1.5)],
