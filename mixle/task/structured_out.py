@@ -1,0 +1,153 @@
+"""``solve_structured`` -- replace rigid code that returns a DICT, field by field, honestly.
+
+The structured-output shape of the solve loop: ``teacher(x) -> {"field": value, ...}`` with a consistent
+schema (an enricher, a triager, a quote builder). Rather than inventing new machinery, each output field
+decomposes onto the shape that already carries guarantees:
+
+  * a categorical/string field -> a :func:`~mixle.task.solve.solve` classifier (conformal singleton);
+  * a numeric field -> a :func:`~mixle.task.regress.solve_regression` student (conformal interval +
+    the caller's ``tol`` precision rule -- required per numeric field).
+
+The composition rule is strict: the input is answered locally ONLY when **every** field's sub-solution
+answers locally; one unsure field escalates the whole request to the teacher (harvested), so a
+locally-returned dict never contains a guessed field. The teacher is called exactly once per training
+example -- per-field sub-teachers are lookups over that single pass.
+
+``improve()`` pushes each harvested ``(input, dict)`` down into every field's own harvest buffer and
+runs each sub-solution's anti-regression improve. No structured-level OOD gate yet (the classifier
+fields' own gates are off here to avoid redundant vetoes) -- noted, not hidden.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+from mixle.task.regress import RegressionSolution, solve_regression
+from mixle.task.solve import Solution, _label_with, solve
+
+
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+@dataclass
+class StructuredSolution:
+    """Per-field calibrated students in front of the dict-valued routine they replace."""
+
+    fields_cat: dict[str, Solution]
+    fields_num: dict[str, RegressionSolution]
+    teacher: Callable[..., Any]
+    n_requests: int = 0
+    n_escalated: int = 0
+    harvested_inputs: list = field(default_factory=list)
+    harvested_outputs: list = field(default_factory=list)
+
+    @property
+    def schema(self) -> dict[str, str]:
+        return {**{k: "categorical" for k in self.fields_cat}, **{k: "numeric" for k in self.fields_num}}
+
+    def try_local(self, x: Any) -> dict[str, Any] | None:
+        """The fully-decided output dict, or ``None`` when ANY field is unsure (= must escalate)."""
+        out: dict[str, Any] = {}
+        for key, sub in self.fields_cat.items():
+            label = sub.cascade.model.decide(x)
+            if label is None:
+                return None
+            out[key] = label
+        for key, sub in self.fields_num.items():
+            if not sub.answers_locally:
+                return None
+            out[key] = float(sub._predict([x])[0])
+        return out
+
+    def __call__(self, x: Any) -> dict[str, Any]:
+        self.n_requests += 1
+        local = self.try_local(x)
+        if local is not None:
+            return local
+        self.n_escalated += 1
+        got = dict(_label_with(self.teacher, [x])[0])
+        self.harvested_inputs.append(x)
+        self.harvested_outputs.append(got)
+        return got
+
+    def report(self) -> dict[str, Any]:
+        per_field: dict[str, Any] = {}
+        for key, sub in self.fields_cat.items():
+            per_field[key] = {"kind": "categorical", "holdout_agreement": round(sub.holdout_agreement, 4)}
+        for key, sub in self.fields_num.items():
+            per_field[key] = {"kind": "numeric", "qhat": round(float(sub.qhat), 6), "tol": sub.tol}
+        return {
+            "fields": per_field,
+            "requests": self.n_requests,
+            "escalated": self.n_escalated,
+            "escalation_rate": (self.n_escalated / self.n_requests) if self.n_requests else 0.0,
+            "harvested": len(self.harvested_outputs),
+        }
+
+    def improve(self) -> bool:
+        """Push the harvested dicts down into every field's buffer; each sub improves anti-regressively."""
+        if not self.harvested_inputs:
+            return False
+        promoted = False
+        for key, sub in self.fields_cat.items():
+            sub.cascade.stats.escalated_texts.extend(self.harvested_inputs)
+            sub.cascade.stats.escalated_labels.extend(str(o.get(key)) for o in self.harvested_outputs)
+            promoted = bool(sub.improve()) or promoted
+        for key, sub in self.fields_num.items():
+            sub.harvested_inputs.extend(self.harvested_inputs)
+            sub.harvested_ys.extend(float(o.get(key)) for o in self.harvested_outputs)
+            promoted = bool(sub.improve()) or promoted
+        self.harvested_inputs.clear()
+        self.harvested_outputs.clear()
+        return promoted
+
+
+def solve_structured(
+    teacher: Callable[..., Any],
+    inputs: Sequence[Any],
+    *,
+    tol: dict[str, float] | float | None = None,
+    alpha: float = 0.1,
+    seed: int = 0,
+    **sub_kw: Any,
+) -> StructuredSolution:
+    """Replace a dict-valued routine with per-field calibrated students (see module docstring).
+
+    Args:
+        teacher: ``teacher(x) -> dict`` with a consistent schema; called once per example input.
+        inputs: example inputs (text or dict/tuple records).
+        tol: the precision requirement for numeric fields — a scalar for all, or ``{field: tol}``.
+            Required when the schema has numeric fields.
+        alpha: shared miscoverage level for every field's calibration.
+        **sub_kw: knobs forwarded to every sub-solve (``epochs``, ``hidden``, ``dim``, …).
+    """
+    items = list(inputs)
+    if len(items) < 12:
+        raise ValueError("solve_structured needs at least 12 example inputs")
+    outs = [dict(o) for o in _label_with(teacher, items)]
+    keys = sorted({k for o in outs for k in o})
+    if not keys:
+        raise ValueError("the teacher produced empty dicts on the example inputs")
+
+    numeric = {k for k in keys if all(_is_number(o.get(k)) for o in outs)}
+    if numeric and tol is None:
+        raise ValueError(f"numeric output fields {sorted(numeric)} need tol= (a scalar or per-field dict)")
+    tol_of = (lambda k: float(tol[k])) if isinstance(tol, dict) else (lambda k: float(tol))  # type: ignore[index,arg-type]
+
+    table = {repr(x): o for x, o in zip(items, outs)}
+
+    fields_cat: dict[str, Solution] = {}
+    fields_num: dict[str, RegressionSolution] = {}
+    for key in keys:
+        if key in numeric:
+            fields_num[key] = solve_regression(
+                lambda x, _k=key: float(table[repr(x)][_k]), items, tol=tol_of(key), alpha=alpha, seed=seed, **sub_kw
+            )
+        else:
+            fields_cat[key] = solve(
+                lambda x, _k=key: str(table[repr(x)][_k]), items, alpha=alpha, ood=None, seed=seed, **sub_kw
+            )
+    return StructuredSolution(fields_cat=fields_cat, fields_num=fields_num, teacher=teacher)
