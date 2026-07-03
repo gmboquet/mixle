@@ -283,5 +283,27 @@ class SolveOnDeviceTest(unittest.TestCase):
             solve(_route, _tickets(100), device=DeviceSpec(max_bytes=1000), propose="auto", seed=0)
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class HealthTest(unittest.TestCase):
+    def test_in_distribution_traffic_is_healthy_and_shift_alarms(self):
+        from mixle.task import solve
+
+        sol = solve(_route, _tickets(400), alpha=0.15, ood=0.05, seed=0, epochs=200)
+
+        for t in _tickets(200, seed=21):  # same world as training
+            sol(t)
+        ok = sol.health(recent_inputs=_tickets(200, seed=22))
+        self.assertGreaterEqual(ok["requests"], 200)
+
+        shifted = [
+            {"kind": "zzz-" + str(i), "amount": 1.0e8 + i, "region": "??"} for i in range(200)
+        ]  # a different world: the gate + ambiguity must push escalation far off baseline
+        for t in shifted:
+            sol(t)
+        bad = sol.health(recent_inputs=shifted)
+        self.assertTrue(bad["drifted"])
+        self.assertGreater(bad["live_ood_rate"], bad["design_ood_rate"])
+
+
 if __name__ == "__main__":
     unittest.main()

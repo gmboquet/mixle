@@ -268,6 +268,43 @@ class Solution:
     def _passes_target(self, agree: float) -> bool:
         return self.target_agreement is None or agree >= self.target_agreement
 
+    def health(self, recent_inputs: Any = None, *, p_threshold: float = 0.01) -> dict[str, Any]:
+        """Is the calibration still holding on live traffic? The guarantee-watcher.
+
+        The conformal escalate-or-answer rate was calibrated under exchangeability; when the input
+        distribution drifts, the live escalation rate moves away from the verified baseline — which is
+        exactly the observable to alarm on. This compares the live rate against the baseline with an
+        exact binomial test, and (when ``recent_inputs`` are supplied and an OOD gate exists) also
+        checks the gate's out-of-distribution hit-rate against its design quantile.
+
+        Returns a dict with ``drifted`` (bool), the rates, and p-values. Honest caveat: a drift alarm
+        means "the world changed, escalations (and cost) will rise, re-solve soon" — the SYSTEM stays
+        correct throughout because unsure inputs still go to the teacher."""
+        from scipy.stats import binomtest
+
+        stats = self.cascade.stats
+        out: dict[str, Any] = {
+            "requests": stats.n_requests,
+            "live_escalation_rate": (stats.n_escalated / stats.n_requests) if stats.n_requests else float("nan"),
+            "baseline_escalation_rate": self.escalation_rate,
+            "drifted": False,
+        }
+        if stats.n_requests >= 20 and np.isfinite(self.escalation_rate):
+            p = float(binomtest(stats.n_escalated, stats.n_requests, max(min(self.escalation_rate, 1.0), 1e-9)).pvalue)
+            out["escalation_p_value"] = p
+            out["drifted"] = p < p_threshold
+        gate = self.cascade.model.density_gate
+        if recent_inputs is not None and gate is not None and self.ood is not None:
+            rows = list(recent_inputs)
+            if rows:
+                hit = float(np.mean(gate.ood_mask(rows)))
+                out["live_ood_rate"] = hit
+                out["design_ood_rate"] = float(self.ood)
+                p_ood = float(binomtest(int(round(hit * len(rows))), len(rows), max(self.ood, 1e-9)).pvalue)
+                out["ood_p_value"] = p_ood
+                out["drifted"] = bool(out["drifted"] or p_ood < p_threshold)
+        return out
+
     def save(self, path: str) -> str:
         """Persist the calibrated student as a load-anywhere artifact, with its verification record.
 
