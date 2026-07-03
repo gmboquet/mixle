@@ -37,6 +37,7 @@ __all__ = [
     "collapse_mixture",
     "reduce_mixture",
     "moment_project",
+    "fisher_merge",
 ]
 
 
@@ -220,3 +221,54 @@ def moment_project(teacher: Any, target: Any = None, *, exact: bool = True, **sa
     from mixle.ops import project
 
     return project(teacher, target, **sampling_kw)
+
+
+def fisher_merge(estimates: Any, fishers: Any = None) -> np.ndarray:
+    """Fisher-weighted merge of parameter estimates -- the closed-form Laplace-posterior combination.
+
+    Given estimates ``θ_i`` (each a flat parameter vector) and their Fisher information ``F_i``, returns
+    ``θ* = (Σ F_i)⁻¹ (Σ F_i θ_i)`` -- the point that maximizes the sum of the local Laplace log-posteriors
+    ``Σ_i -½(θ-θ_i)ᵀ F_i (θ-θ_i)``. This is Matena & Raffel Fisher merging (diagonal ``F``) and, in
+    general, the precision-weighted mean; for Gaussians it coincides with the product-of-experts mean.
+    No gradient steps -- a single linear solve.
+
+    Args:
+        estimates: sequence of parameter vectors ``θ_i`` (each shape ``(p,)``), or a stack ``(m, p)``.
+        fishers: per-estimate Fisher information. Each may be a scalar/1-D vector (**diagonal** Fisher,
+            per-coordinate precision) or a ``(p, p)`` matrix (**full** Fisher). ``None`` uses unit Fisher
+            (a plain average). A single value is broadcast to every estimate.
+
+    Returns:
+        The merged parameter vector ``θ*`` of shape ``(p,)``.
+    """
+    thetas = [np.asarray(t, dtype=float).ravel() for t in estimates]
+    if not thetas:
+        raise ValueError("fisher_merge needs at least one estimate.")
+    p = thetas[0].shape[0]
+    if any(t.shape[0] != p for t in thetas):
+        raise ValueError("all estimates must have the same length.")
+    m = len(thetas)
+
+    if fishers is None:
+        fs: list[Any] = [np.ones(p) for _ in thetas]
+    elif isinstance(fishers, (list, tuple)) and len(fishers) == m:
+        fs = [np.asarray(f, dtype=float) for f in fishers]
+    else:  # a single Fisher broadcast to every estimate
+        fs = [np.asarray(fishers, dtype=float) for _ in thetas]
+
+    full = any(f.ndim == 2 for f in fs)
+    if full:
+        num = np.zeros(p)
+        den = np.zeros((p, p))
+        for t, f in zip(thetas, fs):
+            fm = np.diag(f) if f.ndim <= 1 else f  # promote diagonal Fishers to matrices
+            num += fm @ t
+            den += fm
+        return np.linalg.solve(den + 1e-12 * np.eye(p), num)
+    # diagonal fast path: per-coordinate precision weighting, with a guard for zero total precision
+    fs2 = [np.broadcast_to(np.atleast_1d(f), (p,)).astype(float) for f in fs]
+    den = np.sum(fs2, axis=0)
+    num = np.sum([f * t for t, f in zip(thetas, fs2)], axis=0)
+    zero = den <= 0
+    out = np.where(zero, np.mean(thetas, axis=0), num / np.where(zero, 1.0, den))
+    return out
