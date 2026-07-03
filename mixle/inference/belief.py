@@ -79,6 +79,57 @@ class BeliefState(ABC):
         raise NotImplementedError(f"{type(self).__name__} does not define marginal()")
 
 
+class CategoricalBelief(BeliefState):
+    """A belief over a finite hypothesis set -- exact Bayes over ``K`` discrete alternatives.
+
+    The discrete sibling of :class:`GaussianBelief`: evidence is a length-``K`` log-likelihood vector
+    ``log p(y | hypothesis k)`` and :meth:`update` is the exact posterior (a product of experts in log
+    space). ``mean`` returns the probability vector; ``entropy`` is Shannon (nats); ``map`` the modal
+    hypothesis index.
+    """
+
+    def __init__(self, probs: Any, labels: Any = None) -> None:
+        p = np.asarray(probs, dtype=np.float64).reshape(-1)
+        if p.size == 0 or np.any(p < 0) or not np.isfinite(p).all():
+            raise ValueError("CategoricalBelief requires finite non-negative probabilities")
+        total = float(p.sum())
+        if total <= 0:
+            raise ValueError("CategoricalBelief requires positive total mass")
+        self.probs = p / total
+        self.labels = list(labels) if labels is not None else list(range(p.size))
+
+    @classmethod
+    def uniform(cls, k_or_labels: Any) -> CategoricalBelief:
+        labels = list(range(k_or_labels)) if isinstance(k_or_labels, int) else list(k_or_labels)
+        return cls(np.full(len(labels), 1.0 / len(labels)), labels)
+
+    def mean(self) -> np.ndarray:
+        return self.probs.copy()
+
+    def entropy(self) -> float:
+        p = self.probs[self.probs > 0]
+        return float(-(p * np.log(p)).sum())
+
+    def sample(self, n: int = 1, rng: Any = None) -> np.ndarray:
+        rng = rng if rng is not None else np.random.RandomState()
+        return rng.choice(len(self.probs), size=n, p=self.probs)
+
+    def update(self, log_lik: Any) -> CategoricalBelief:
+        """Exact Bayes: condition on a length-``K`` log-likelihood vector for one observation."""
+        ll = np.asarray(log_lik, dtype=np.float64).reshape(-1)
+        if ll.shape != self.probs.shape:
+            raise ValueError("log_lik must have one entry per hypothesis (%d)" % self.probs.size)
+        with np.errstate(divide="ignore"):
+            log_post = np.log(self.probs) + ll
+        log_post -= log_post.max()
+        post = np.exp(log_post)
+        return CategoricalBelief(post, self.labels)
+
+    def map(self) -> Any:
+        """The modal hypothesis label."""
+        return self.labels[int(np.argmax(self.probs))]
+
+
 class GaussianBelief(BeliefState):
     """A multivariate-Gaussian belief ``N(mean, cov)`` over a continuous latent.
 
