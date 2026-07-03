@@ -1,0 +1,231 @@
+HMMs and Latent Structure
+=========================
+
+Latent models in ``mixle`` are distributions that wrap other distributions.
+They add hidden variables without changing the outer query surface:
+
+* score observations with ``log_density``;
+* fit with ``optimize``;
+* inspect posteriors when supported;
+* sample or enumerate when the model has the capability.
+
+The two most common latent wrappers are mixtures and HMMs.
+
+Mixtures
+--------
+
+A mixture adds one latent component assignment per observation.
+
+.. code-block:: python
+
+   from mixle.inference import best_of, optimize
+   from mixle.stats import GaussianEstimator, MixtureEstimator
+
+   est = MixtureEstimator([GaussianEstimator(), GaussianEstimator()])
+   model = optimize(data, est, max_its=100, out=None)
+   responsibilities = model.posterior(data)
+
+Use ``best_of`` when local optima matter:
+
+.. code-block:: python
+
+   import numpy as np
+
+   score, model = best_of(
+       train,
+       valid,
+       est,
+       trials=8,
+       max_its=100,
+       init_p=0.1,
+       delta=1e-8,
+       rng=np.random.RandomState(0),
+       out=None,
+   )
+
+The component can be any estimator with a compatible shape: a scalar
+distribution, a record, a sequence model, or a neural leaf.
+
+Mixture of Heterogeneous Records
+--------------------------------
+
+.. code-block:: python
+
+   from mixle.stats import (
+       CategoricalEstimator,
+       CompositeEstimator,
+       GammaEstimator,
+       MixtureEstimator,
+       PoissonEstimator,
+   )
+
+   component = CompositeEstimator(
+       (
+           CategoricalEstimator(),  # event type
+           GammaEstimator(),        # wait time
+           PoissonEstimator(),      # count
+       )
+   )
+   est = MixtureEstimator([component, component, component])
+
+The latent component clusters whole records. Each component owns its own child
+distributions.
+
+PPL Markov Models
+-----------------
+
+For compact HMMs, ``mixle.ppl`` is often the clearest surface:
+
+.. code-block:: python
+
+   from mixle.ppl import Markov, Normal, free
+
+   hmm = Markov(Normal(free, free), states=3).fit(sequences, how="auto")
+   post = hmm.posterior(sequences)
+
+``Markov`` lowers to the same latent estimator machinery as the explicit stats
+surface.
+
+Structured HMMs
+---------------
+
+``StructuredHMM`` separates the HMM algorithm from the transition
+representation. A transition operator supplies forward products, backward
+products, and expected-mass updates. The same forward-backward and EM code can
+then use dense, low-rank, sparse, Kronecker, duration, or input-output
+structure.
+
+.. code-block:: python
+
+   import numpy as np
+   import mixle.stats as S
+   from mixle.inference import optimize
+   from mixle.stats.latent.structured_hmm import (
+       LowRankTransition,
+       StructuredHMM,
+       _row_normalize,
+   )
+
+   rng = np.random.RandomState(0)
+   k, rank = 8, 2
+
+   transition = LowRankTransition(
+       _row_normalize(rng.rand(k, rank)),
+       _row_normalize(rng.rand(rank, k)),
+   )
+   init = StructuredHMM(
+       [S.GaussianDistribution(float(i), 1.0) for i in range(k)],
+       np.ones(k) / k,
+       transition,
+   )
+
+   model = optimize(sequences, init.estimator(), prev_estimate=init, max_its=40, out=None)
+
+Why use a structured transition?
+
+.. list-table::
+   :header-rows: 1
+
+   * - Transition
+     - Use when
+   * - Dense
+     - every state can move to every other state
+   * - Low-rank
+     - many states but transition structure has fewer degrees of freedom
+   * - Sparse
+     - left-to-right, skip-limited, or graph-constrained motion
+   * - Kronecker
+     - factorial states such as ``(speaker_state, topic_state)``
+   * - Sticky
+     - segmentation should prefer staying in the same state
+   * - Explicit-duration
+     - state durations are not geometric
+   * - Input-output
+     - an exogenous input controls which transition applies
+   * - Terminal states
+     - absorbing states determine sequence length as a stopping time
+
+Decoding
+--------
+
+HMMs are useful because they expose latent paths, not just likelihoods.
+
+.. code-block:: python
+
+   path = model.viterbi(sequence)
+   segments = model.viterbi_segments(sequence)  # explicit-duration models
+   state_posteriors = model.posterior(sequence)
+
+Exact method names vary by HMM family; use ``mixle.describe(model)`` to see
+which latent queries are available.
+
+Enumeration
+-----------
+
+When the support is discrete and the model advertises enumeration, you can ask
+for top sequences or paths:
+
+.. code-block:: python
+
+   enum = model.enumerator()
+   top = enum.top_k(5)
+   nucleus = enum.nucleus_size(0.9)
+
+For decomposable supports, ranking and seek can be exact. For hard latent
+marginals, mixle reports bounded or approximate routes rather than pretending
+they are exact.
+
+HMMs with Neural or Heterogeneous Emissions
+-------------------------------------------
+
+An HMM emission is just another distribution. That means the emission can be:
+
+* a Gaussian;
+* a categorical token model;
+* a composite record;
+* a sequence model;
+* a Transformer or other neural leaf, where supported by the estimator shape.
+
+The HMM parent supplies expected state responsibilities. Each child emission
+uses those responsibilities in its own M-step.
+
+Run the Structured HMM Tour
+---------------------------
+
+.. code-block:: sh
+
+   python examples/structured_hmm_example.py
+   python examples/lookback_hmm_example.py
+
+The structured tour demonstrates low-rank transitions, factorial Kronecker
+transitions, sparse left-to-right transitions, sticky priors, decoding,
+enumeration, terminal states, explicit-duration HMMs, and input-output HMMs.
+
+API Map
+-------
+
+.. list-table::
+   :header-rows: 1
+
+   * - Import
+     - Purpose
+   * - ``MixtureEstimator``
+     - latent clusters over observations
+   * - ``best_of``
+     - restart latent fitting and select by validation score
+   * - ``mixle.ppl.Markov``
+     - compact HMM expression surface
+   * - ``StructuredHMM``
+     - HMM with pluggable transition operator
+   * - ``DenseTransition``
+     - ordinary dense transition matrix
+   * - ``LowRankTransition``
+     - factorized transition matrix
+   * - ``SparseTransition``
+     - edge-constrained transition graph
+   * - ``KroneckerTransition``
+     - factorial state-space transition
+   * - ``ExplicitDurationHMM``
+     - HSMM with duration distributions
+   * - ``InputOutputHMM``
+     - transition chosen by exogenous input
