@@ -1091,6 +1091,13 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             return HiddenMarkovFisherView(self)
         return super().to_fisher(**kwargs)
 
+    def density_semantics(self):
+        from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
+
+        children = list(self.topics) + ([] if self.len_dist is None else [self.len_dist])
+        sems = [c.density_semantics() for c in children if hasattr(c, "density_semantics")]
+        return join_density_semantics(sems) if sems else DensitySemantics.EXACT
+
     def sampler(self, seed: int | None = None) -> HiddenMarkovSampler:
         """Create a HiddenMarkovSampler object with seed passed.
 

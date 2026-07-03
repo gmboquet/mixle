@@ -304,3 +304,29 @@ def test_combinators_propagate_density_semantics_from_children():
         is DensitySemantics.ESTIMATE
     )
     assert join_density_semantics([DensitySemantics.EXACT, DensitySemantics.EXACT]) is DensitySemantics.EXACT
+
+
+def test_latent_combinators_propagate_density_semantics():
+    """HMM / hierarchical-mixture over an ELBO-density child must not claim an exact density (WS-7)."""
+    import mixle.capability as cap
+    from mixle.stats import (
+        CategoricalDistribution,
+        GaussianDistribution,
+        HiddenMarkovModelDistribution,
+        HierarchicalMixtureDistribution,
+    )
+    from mixle.stats.latent.lda import LDADistribution
+
+    lda = LDADistribution(
+        [CategoricalDistribution({"a": 0.7, "b": 0.3}), CategoricalDistribution({"a": 0.2, "b": 0.8})],
+        [0.5, 0.5],
+    )
+    g1, g2 = GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 1.0)
+
+    assert not cap.supports(
+        HiddenMarkovModelDistribution([lda, lda], [0.5, 0.5], [[0.8, 0.2], [0.2, 0.8]]), cap.ExactDensity
+    )
+    assert cap.supports(HiddenMarkovModelDistribution([g1, g2], [0.5, 0.5], [[0.8, 0.2], [0.2, 0.8]]), cap.ExactDensity)
+    assert not cap.supports(
+        HierarchicalMixtureDistribution([lda, lda], [0.5, 0.5], [[0.6, 0.4], [0.4, 0.6]]), cap.ExactDensity
+    )

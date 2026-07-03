@@ -308,6 +308,13 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
             return JointMixtureFisherView(self)
         return super().to_fisher(**kwargs)
 
+    def density_semantics(self):
+        from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
+
+        children = list(self.components1) + list(self.components2)
+        sems = [c.density_semantics() for c in children if hasattr(c, "density_semantics")]
+        return join_density_semantics(sems) if sems else DensitySemantics.EXACT
+
     def sampler(self, seed: int | None = None) -> JointMixtureSampler:
         """Create a JointMixtureSampler object for sampling from this distribution.
 
