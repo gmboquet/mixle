@@ -160,19 +160,52 @@ optimize(..., backend="spark")                                      # distribute
 ## Enumeration & ranking
 
 Discrete and structured models **enumerate their support in descending-probability order** and answer
-exact **rank / cumulative-probability** queries — even when the support is enormous or unbounded:
+exact **rank / cumulative-probability** queries — even when the support is enormous or unbounded.
+This works on a real neural LM and on a model you just fit:
 
 ```python
-from mixle.stats import CategoricalDistribution, SequenceDistribution, PoissonDistribution
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from mixle.enumeration import AutoregressiveEnumerable
 
-# a toy language model: skewed letters in Poisson-length "words" — an unbounded support
-lm = SequenceDistribution(CategoricalDistribution({"a": .5, "b": .3, "c": .2}),
-                          len_dist=PoissonDistribution(3.0))
+tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M")
+llm       = AutoModelForCausalLM.from_pretrained("HuggingFaceTB/SmolLM2-135M").eval()
+prompt    = tokenizer("The capital of France is", return_tensors="pt").input_ids
 
-e = lm.enumerator()
-e.top_k(5)                     # the 5 most probable words, in order — the rest are never touched
-e.seek(1_000).value            # jump straight to the 1,000th-most-probable word, by structural count-DP
-e.rank(["b", "a", "c"]).rank   # how many words are strictly more probable than "bac"
+@torch.no_grad()
+def next_logprobs(continuation):               # tokens chosen so far -> [(token_id, log_prob), ...]
+    ids = torch.cat([prompt, torch.tensor([continuation], dtype=torch.long)], 1) if continuation else prompt
+    return list(enumerate(torch.log_softmax(llm(ids).logits[0, -1], -1).tolist()))
+
+continuations = AutoregressiveEnumerable(next_logprobs, max_len=3, branch_cap=8)   # branch_cap tames the 49K-token vocab
+
+continuations.top_k(3)      # 3 most probable continuations -> [' located in the', ' the city of', ' the capital of']
+continuations.unrank(100)   # jump straight to the 100th-most-probable continuation, no generation -> ' in the country'
+
+answer = continuations.unrank(5)[0]            # the ' Paris, the' continuation, as a token tuple
+continuations.rank(answer)  # the inverse — where a continuation lands -> rank=6, cumulative_prob=0.114 (exact)
+```
+
+The same operations work on a fitted latent model. Here an HMM learns *when to stop* from an absorbing
+terminal state, and its EOL-terminated support is enumerated in descending probability:
+
+```python
+from mixle.inference import optimize
+from mixle.stats import HiddenMarkovEstimator, CategoricalEstimator
+
+# your sequences, each ending in an EOL token
+sequences = [["team", "meet", "buy", "<EOL>"],
+             ["now", "now", "<EOL>"],
+             ["meet", "meet", "<EOL>"],
+             ...]
+
+# fit a 3-state HMM by EM; state 2 is terminal, so the model learns WHEN to stop — its emission
+# converges to "<EOL>" and the sequence length becomes a learned stopping time (no separate len_dist)
+model = optimize(sequences, HiddenMarkovEstimator([CategoricalEstimator()] * 3, terminal_states={2}))
+
+emitted = model.enumerator()
+emitted.top_k(3)          # most probable EOL-terminated sequences -> [('buy <EOL>', -2.09), ('meet <EOL>', -2.12), ('now <EOL>', -2.48)]
+emitted.from_index(3, 6)  # stream sequences ranked 3..5 in descending probability, without materializing 0..2
 ```
 
 - **Decomposable families** (Composite / Record / Sequence / MarkovChain): rank ↔ value is an exact
