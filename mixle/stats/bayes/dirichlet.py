@@ -1003,8 +1003,6 @@ class DirichletDataEncoder(DataSequenceEncoder):
         """
         rv = np.asarray(x).copy()
 
-        # TODO: Add warning for invalid values
-
         rv2 = np.maximum(rv, sys.float_info.min)
         np.log(rv2, out=rv2)
         return rv2, rv, rv * rv

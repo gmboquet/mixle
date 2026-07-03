@@ -89,22 +89,7 @@ The namespace currently mixes several levels of maturity:
   knowledge graphs, POMDPs, DPMs, training search, and continual learning.
 
 Use ``mixle.models`` when the specialized family is genuinely the right tool.
-Do not treat it as the default entry point for a new user. For tutorials,
-examples, and production-facing docs, lead with ``mixle.stats`` unless the
-story specifically needs a neural or applied model helper.
-
-Documentation Standard
-----------------------
-
-When writing or extending docs:
-
-* lead with stable ``stats``/``inference`` examples;
-* still show the modern workflow layers clearly;
-* name experimental or incubating surfaces at the point of use;
-* avoid claiming that all model families, inference routes, or deployment
-  surfaces are complete;
-* prefer capability language over class hierarchy language;
-* include a small verification step when an example touches an evolving API.
-
-This keeps the project honest while still showing the ambitious parts of the
-system.
+For ordinary distribution modeling, start with ``mixle.stats`` and
+``mixle.inference``. Reach for ``mixle.models`` when the problem specifically
+needs a neural leaf, Gaussian process, graph model, grammar, random forest,
+DPM, POMDP, or other applied helper.

@@ -251,8 +251,8 @@ For local task models, uncertainty becomes an answer/escalate decision through
 
 See :doc:`task-distillation` for the full serving workflow.
 
-Beyond This Page
-----------------
+Related Reasoning Workflows
+---------------------------
 
 This page focuses on uncertainty behavior. See :doc:`reasoning-systems` for the
 broader ``mixle.reason`` stack: finite-hypothesis reasoning, cross-modal

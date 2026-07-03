@@ -6,9 +6,6 @@ surface. A Transformer predicts the next event type from history while a Gamma
 distribution models the wait time. The fitted object is one joint distribution,
 so scoring an event gives one anomaly signal across type and timing.
 
-Read :doc:`/quickstart` first if you have not used the stable
-``mixle.stats``/``mixle.inference`` path yet.
-
 1. Define The Observation Shape
 -------------------------------
 
