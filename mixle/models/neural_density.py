@@ -8,10 +8,10 @@ The point is not a specific architecture; it is the *wrapper*. ``NeuralLeaf`` al
 responsibility-weighted maximum-likelihood gradient ascent on the module, warm-started across EM iterations.
 
 That is the thing no NN library offers: "a mixture of a normalizing flow and a Gamma", "an HMM whose emissions
-are flows". Two ready instances ship: :func:`build_coupling_flow` (a RealNVP-style flow, *exact* density) and
-:func:`build_vae` (a variational autoencoder, a *latent-variable* density whose ``log_density`` is the ELBO
-lower bound) -- two structurally different families behind one adapter. Any other density (an autoregressive
-density, a normalized energy model) plugs in the same way.
+are flows". Three ready instances ship: :func:`build_coupling_flow` (a RealNVP-style flow, *exact*), :func:`build_maf` (a
+masked autoregressive flow, *exact*, richer autoregressive dependence) and :func:`build_vae` (a variational
+autoencoder, a *latent-variable* density whose ``log_density`` is the ELBO lower bound) -- structurally different
+families behind one adapter. Any other density (a normalized energy model, ...) plugs in the same way.
 """
 
 from __future__ import annotations
@@ -292,3 +292,82 @@ def build_vae(dim: int, *, latent: int = 2, hidden: int = 32) -> Any:
             return self.dec(z) + torch.exp(self.log_obs_scale) * torch.randn(int(n), self.dim, device=z.device)
 
     return VAE()
+
+
+# --- a third instance: a masked autoregressive flow (MAF) -- exact multivariate p(x), composes honestly --------
+
+
+def build_maf(dim: int, *, hidden: int = 64, blocks: int = 3) -> Any:
+    """A masked autoregressive flow over ``R^dim`` -- an **exact** density that factorizes ``p(x)`` by the chain
+    rule, each ``p(x_i | x_{<i})`` an affine map with autoregressive (MADE-masked) mean and log-scale.
+
+    Unlike the coupling flow it conditions every coordinate on *all* earlier ones (a richer autoregressive
+    dependence), and unlike the VAE its ``log_density`` is exact -- so it composes **honestly** in a mixture with a
+    Gaussian, a flow, or any exact leaf. Sampling is the sequential inverse (one coordinate at a time). Another
+    ready module for :class:`NeuralDensity`; the adapter is unchanged.
+    """
+    import torch
+    import torch.nn as nn
+
+    D = int(dim)
+
+    class MaskedLinear(nn.Linear):
+        def set_mask(self, mask: Any) -> None:
+            self.register_buffer("mask", torch.as_tensor(mask, dtype=torch.float32))
+
+        def forward(self, x: Any) -> Any:
+            return nn.functional.linear(x, self.mask * self.weight, self.bias)
+
+    class MADE(nn.Module):
+        """Autoregressive net: outputs per-coordinate ``(mu, log_scale)`` depending only on earlier coordinates."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.D = D
+            m_in = np.arange(1, D + 1)
+            m_h = 1 + (np.arange(hidden) % max(D - 1, 1))
+            self.l1 = MaskedLinear(D, hidden)
+            self.l2 = MaskedLinear(hidden, hidden)
+            self.lout = MaskedLinear(hidden, 2 * D)
+            self.l1.set_mask((m_h[:, None] >= m_in[None, :]).astype(float))
+            self.l2.set_mask((m_h[:, None] >= m_h[None, :]).astype(float))
+            m_out = np.concatenate([m_in, m_in])  # mu block then log-scale block
+            self.lout.set_mask((m_out[:, None] > m_h[None, :]).astype(float))  # strict: output_i sees x_{<i} only
+            self.act = nn.Tanh()
+
+        def forward(self, x: Any) -> tuple[Any, Any]:
+            h = self.act(self.l2(self.act(self.l1(x))))
+            out = self.lout(h)
+            return out[:, :D], out[:, D:].clamp(-5.0, 5.0)
+
+    class MAF(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.mades = nn.ModuleList([MADE() for _ in range(int(blocks))])
+
+        def log_density(self, x: Any) -> Any:
+            z = x
+            logdet = torch.zeros(x.shape[0], device=x.device)
+            for i, made in enumerate(self.mades):
+                mu, log_scale = made(z)
+                z = (z - mu) * torch.exp(-log_scale)  # x_i -> z_i, affine and autoregressive
+                logdet = logdet - log_scale.sum(1)
+                if i < len(self.mades) - 1:
+                    z = z.flip(1)  # reverse the order between blocks so every coordinate leads somewhere
+            base = -0.5 * (z**2).sum(1) - 0.5 * D * float(np.log(2.0 * np.pi))
+            return base + logdet
+
+        def sample(self, n: int) -> Any:
+            z = torch.randn(int(n), D, device=next(self.parameters()).device)
+            for i in reversed(range(len(self.mades))):
+                if i < len(self.mades) - 1:
+                    z = z.flip(1)  # undo the inter-block flip
+                made = self.mades[i]
+                x = torch.zeros_like(z)
+                for d in range(D):  # sequential inverse: coordinate d needs x_{<d} already filled
+                    mu, log_scale = made(x)
+                    x[:, d] = z[:, d] * torch.exp(log_scale[:, d]) + mu[:, d]
+                z = x
+            return z
+
+    return MAF()
