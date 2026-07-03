@@ -89,6 +89,7 @@ from mixle.task.model import (
     adapter_from_spec,
     register_adapter,
 )
+from mixle.task.plan import Planner, distill_planner
 
 # post-training quantization: int8/int4 MLP weights (numpy-only inference) + LNS integer log-space
 # execution for structured students (transcendental-free above the leaf boundary)
@@ -139,6 +140,7 @@ __all__ = [
     "Router",
     "Scorecard",
     "RouterStats",
+    "Planner",
     "Solution",
     "StructuredClassifierIO",
     "TaskManifest",
@@ -157,6 +159,7 @@ __all__ = [
     "distill",
     "distill_designer",
     "distill_extractor",
+    "distill_planner",
     "distill_tool_caller",
     "distill_for_edge",
     "footprint",
