@@ -46,6 +46,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "neural_ppl_test.py": ("torch", "integration", "slow"),
     "language_model_sft_test.py": ("torch", "integration", "slow"),
     "project_neural_test.py": ("torch", "integration", "slow"),
+    "reason_adapter_test.py": ("torch", "integration", "slow"),
     "infer_backends_test.py": ("numba", "integration", "slow"),
     "kent_test.py": ("distribution", "stochastic", "slow"),
     "knowledge_graph_test.py": ("graph", "stochastic", "slow"),
