@@ -71,6 +71,7 @@ from mixle.task.extract import (
     extraction_f1,
     tokenize,
 )
+from mixle.task.generative_text import GenerativeTextIO, distill_text_generative, distill_text_generative_from_labels
 from mixle.task.harness import ExtractorHarness, MatcherHarness, replace_alerter, replace_extractor, replace_matcher
 from mixle.task.llm import (
     CallableLLM,
@@ -131,6 +132,7 @@ __all__ = [
     "ExtractorHarness",
     "MatcherHarness",
     "FieldChoice",
+    "GenerativeTextIO",
     "HashedNGram",
     "HashedRecord",
     "LNSStructuredClassifierIO",
@@ -169,6 +171,8 @@ __all__ = [
     "distill_for_edge",
     "footprint",
     "distill_from_labels",
+    "distill_text_generative",
+    "distill_text_generative_from_labels",
     "distill_records",
     "distill_records_from_labels",
     "distill_structured",
