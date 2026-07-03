@@ -61,6 +61,7 @@ from mixle.ppl.core import (
     potential,
 )
 from mixle.ppl.density import (
+    EBM,
     MAF,
     MDN,
     VAE,
@@ -205,6 +206,7 @@ __all__ = [
     "MAF",
     "VAE",
     "DiscreteAR",
+    "EBM",
     "MDN",
     "CondFlow",
     "CondDiscreteAR",
