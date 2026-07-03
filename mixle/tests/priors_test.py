@@ -22,6 +22,9 @@ if HAS_TORCH:
 @unittest.skipUnless(HAS_TORCH, "requires PyTorch")
 class TotalVariationTestCase(unittest.TestCase):
     def setUp(self):
+        # float64 for the MAP fits, restored afterward: a leaked float64 default breaks every
+        # float32-module test that runs later in the same process (Float/Double matmul errors).
+        self.addCleanup(torch.set_default_dtype, torch.get_default_dtype())
         torch.set_default_dtype(torch.float64)
 
     def test_preserves_edges_vs_smoothing(self):
@@ -48,6 +51,7 @@ class TotalVariationTestCase(unittest.TestCase):
 @unittest.skipUnless(HAS_TORCH, "requires PyTorch")
 class PottsTestCase(unittest.TestCase):
     def setUp(self):
+        self.addCleanup(torch.set_default_dtype, torch.get_default_dtype())
         torch.set_default_dtype(torch.float64)
 
     def test_pulls_toward_discrete_levels(self):
