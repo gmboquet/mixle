@@ -22,7 +22,8 @@ estimator that fits it have the same shape — so **what you can express, you ca
 [Distribution catalog](#distribution-catalog) · [Probabilistic programming](#probabilistic-programming-mixleppl) ·
 [Frequentist & Bayesian](#frequentist--bayesian) · [Engines & orchestration](#engines--orchestration) ·
 [Enumeration & ranking](#enumeration--ranking) · [Beyond fitting](#beyond-fitting) ·
-[Examples](#examples) · [Tests](#tests) · [Maintainers & contributors](#maintainers--contributors) · [License](#license)
+[Companion projects](#companion-projects) · [Examples](#examples) · [Tests](#tests) ·
+[Maintainers & contributors](#maintainers--contributors) · [License](#license)
 
 ## Installation
 
@@ -361,8 +362,19 @@ e.seek(10_000)    # the ~10,000th most probable value, by structural count-DP
 - **MLOps** (`mixle.inference.production`): reproducible model artifacts (`fit_with_provenance` → a
   `Header` with config, data hash, model-hash lineage, convergence, timing, resources, env), drift
   detection + a `Monitor` (retrain-and-swap), and a versioned `Registry` + `Service` (scoring +
-  activity logging). A container / Kubernetes serving layer lives in the separate
-  [mixle-deploy](https://github.com/gmboquet/mixle-deploy) package.
+  activity logging). A full OpenAI-compatible serving gateway lives in the separate
+  [mixle-mlops](https://github.com/gmboquet/mixle-mlops) project.
+
+## Companion projects
+
+The core library stands alone; three sibling projects build on it:
+
+- **[mixle-notebooks](https://github.com/gmboquet/mixle-notebooks)** — runnable tutorials, data-science
+  recipes, applied case studies, and architecture/scaling studies.
+- **[mixle-mlops](https://github.com/gmboquet/mixle-mlops)** — an OpenAI-compatible gateway that serves
+  fitted mixle models alongside open and hosted LLMs, with fine-tuning, registries, and monitoring.
+- **[mixle-pde](https://github.com/gmboquet/mixle-pde)** — a differentiable PDE / physics stack
+  (`Differential`, `make_ops`, `laplacian`, `NavierStokes2D`) for scientific inverse problems.
 
 ## Examples
 
