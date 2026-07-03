@@ -59,6 +59,8 @@ __all__ = [
     "footprint",
     "task_fingerprint",
     "FINGERPRINT_KEYS",
+    "measure_inference_seconds",
+    "measure_ops_per_second",
 ]
 
 
@@ -87,6 +89,26 @@ class DeviceSpec:
     max_bytes: int | None = None
     max_ops: int | None = None
     torch_free: bool = False
+
+    @classmethod
+    def for_latency(
+        cls,
+        max_ms: float,
+        ops_per_second: float,
+        *,
+        max_bytes: int | None = None,
+        torch_free: bool = False,
+    ) -> DeviceSpec:
+        """A budget from a latency target: ``max_ops = ops_per_second * max_ms / 1000``.
+
+        ``ops_per_second`` must come from a probe run **on the target device** for the student kind
+        you deploy (:func:`measure_ops_per_second` measures it for a representative student) --
+        throughput differs by orders of magnitude across devices and student kinds, so there is no
+        honest built-in constant.
+        """
+        if max_ms <= 0 or ops_per_second <= 0:
+            raise ValueError("max_ms and ops_per_second must be positive")
+        return cls(max_bytes=max_bytes, max_ops=int(ops_per_second * max_ms / 1000.0), torch_free=torch_free)
 
     def violations(self, fp: EdgeFootprint) -> list[float]:
         """Normalized constraint values, feasible when ``<= 0`` (the form constrained BO consumes)."""
@@ -137,6 +159,37 @@ def footprint(student: TaskModel) -> EdgeFootprint:
     # classification scores every label: one factor evaluation per field (+ label), per component.
     ops = n_labels * n_comp * (n_fields + 1)
     return EdgeFootprint(bytes=nbytes, ops=ops, torch_free=True)
+
+
+def measure_inference_seconds(student: TaskModel, inputs: Sequence[Any], *, repeats: int = 5) -> float:
+    """Median measured wall-clock seconds per single-input inference for ``student`` on this host.
+
+    Runs ``student.batch(inputs)`` ``repeats`` times (after one untimed warm-up) and reports the
+    median per-item time. Measured, not modeled -- run it on the machine whose latency you care
+    about (the deploy device, not the dev laptop) for a number that means anything there.
+    """
+    import time
+
+    inputs = list(inputs)
+    if not inputs:
+        raise ValueError("need at least one input to measure")
+    student.batch(inputs)  # warm-up: imports, JITs, caches
+    times = []
+    for _ in range(max(1, int(repeats))):
+        t0 = time.perf_counter()
+        student.batch(inputs)
+        times.append((time.perf_counter() - t0) / len(inputs))
+    return float(np.median(times))
+
+
+def measure_ops_per_second(student: TaskModel, inputs: Sequence[Any], *, repeats: int = 5) -> float:
+    """Measured throughput (footprint ops / measured second) for this student kind on this host.
+
+    The calibration constant that turns a latency budget into :class:`DeviceSpec` ``max_ops``
+    (:meth:`DeviceSpec.for_latency`): probe once per (device, student kind), reuse across searches.
+    """
+    seconds = measure_inference_seconds(student, inputs, repeats=repeats)
+    return float(footprint(student).ops) / max(seconds, 1e-12)
 
 
 # --- the joint structure + process design space ---------------------------------------------------

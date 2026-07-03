@@ -61,6 +61,8 @@ from mixle.task.edge import (
     distill_designer,
     distill_for_edge,
     footprint,
+    measure_inference_seconds,
+    measure_ops_per_second,
     task_fingerprint,
 )
 from mixle.task.extract import (
@@ -173,6 +175,8 @@ __all__ = [
     "save_json",
     "save_module",
     "solve",
+    "measure_inference_seconds",
+    "measure_ops_per_second",
     "task_fingerprint",
     "FINGERPRINT_KEYS",
     "tokenize",
