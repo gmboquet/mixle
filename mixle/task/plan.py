@@ -98,6 +98,51 @@ class Planner:
             "harvested_traces": len(self.harvested),
         }
 
+    def save(self, path: str) -> str:
+        """Persist selector + per-tool extractors + specs as one artifact directory; :meth:`load` restores."""
+        import json
+        from pathlib import Path
+
+        out = Path(path)
+        out.mkdir(parents=True, exist_ok=True)
+        self.selector.save(str(out / "selector"))
+        for name, ex in self.extractors.items():
+            ex.save(str(out / "extractors" / name))
+        manifest = {
+            "kind": "planner/v1",
+            "tools": {n: {"args": t.args, "required": t.required} for n, t in self.tools.items()},
+            "extractors": sorted(self.extractors),
+            "plan_agreement": self.plan_agreement,
+            "max_steps": self.max_steps,
+        }
+        (out / "planner.json").write_text(json.dumps(manifest, indent=2))
+        return str(out)
+
+    @classmethod
+    def load(cls, path: str, teacher: Callable[[str], list[dict]], *, device: str = "cpu") -> Planner:
+        """Reconstitute a serving Planner from :meth:`save` output plus the teacher fallback."""
+        import json
+        from pathlib import Path
+
+        from mixle.task.model import TaskModel
+        from mixle.task.solve import Solution
+
+        p = Path(path)
+        manifest = json.loads((p / "planner.json").read_text())
+        selector = Solution.load(str(p / "selector"), lambda batch: [_STOP for _ in batch], device=device)
+        extractors = {
+            name: TaskModel.load(str(p / "extractors" / name), device=device) for name in manifest["extractors"]
+        }
+        tools = {n: ToolSpec(n, list(t["args"]), t.get("required")) for n, t in manifest["tools"].items()}
+        return cls(
+            selector=selector,
+            extractors=extractors,
+            tools=tools,
+            teacher=teacher,
+            plan_agreement=float(manifest.get("plan_agreement", float("nan"))),
+            max_steps=int(manifest.get("max_steps", 8)),
+        )
+
 
 def distill_planner(
     teacher: Callable[[str], list[dict]],

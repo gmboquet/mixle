@@ -103,5 +103,30 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(rep["harvested_traces"], rep["escalated"])
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class PlannerPersistenceTest(unittest.TestCase):
+    def test_save_load_plans_identically(self):
+        import tempfile
+
+        from mixle.task import Planner, distill_planner
+
+        planner = distill_planner(
+            _teacher,
+            _requests(250),
+            TOOLS,
+            seed=0,
+            selector_kw={"ood": None, "epochs": 200},
+            extractor_kw={"epochs": 30},
+        )
+        fresh = _requests(50, seed=6)
+        want = [planner(r) for r in fresh]
+        with tempfile.TemporaryDirectory() as d:
+            path = planner.save(d + "/planner")
+            back = Planner.load(path, _teacher)
+            got = [back(r) for r in fresh]
+        self.assertEqual(got, want)
+        self.assertAlmostEqual(back.plan_agreement, planner.plan_agreement, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()
