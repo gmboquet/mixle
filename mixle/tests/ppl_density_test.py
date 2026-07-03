@@ -12,7 +12,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from mixle.ppl import MDN, DiscreteAR, Flow, lower  # noqa: E402
+from mixle.ppl import EBM, MDN, DiscreteAR, Flow, lower  # noqa: E402
 
 
 def _seed(s=0):
@@ -55,6 +55,13 @@ class UnconditionalPPLTest(unittest.TestCase):
         configs = np.array(list(itertools.product(range(3), repeat=2)), dtype=float)
         total = float(np.exp(m.dist.seq_log_density(m.dist.dist_to_encoder().seq_encode(list(configs)))).sum())
         self.assertAlmostEqual(total, 1.0, delta=1e-4)
+
+    def test_ebm_fit_beats_a_gaussian(self):
+        _seed()
+        train, test = _two_modes(0), _two_modes(1)
+        m = EBM(2, hidden=64, noise_ratio=2).fit(train, its=6)
+        self.assertEqual(type(m.dist).__name__, "EnergyModel")
+        self.assertGreater(m.log_likelihood(test) - _gaussian_ll(train, test), 200.0)
 
     def test_density_rv_lowers_and_composes(self):
         _seed()

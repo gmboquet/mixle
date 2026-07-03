@@ -7,6 +7,7 @@ shape (a Gaussian mean, softmax logits). These constructors instead make the neu
     Flow(dim=2).fit(x)                          # exact p(x) via a normalizing flow
     VAE(dim=8, latent=2).fit(x)                 # latent-variable p(x) (ELBO)
     DiscreteAR(dim=5, cats=4).fit(x)            # exact p(x) over discrete vectors
+    EBM(dim=2).fit(x)                           # energy-based p(x) (NCE-trained, approximately normalized)
     MDN(x_dim=1, y_dim=1).fit(y, given={"x": X})       # multimodal p(y|x)
     CondFlow(x_dim=1, y_dim=2).fit(y, given={"x": X})  # exact conditional p(y|x)
 
@@ -33,21 +34,32 @@ _BUILDERS: dict[str, tuple[str, bool]] = {
     "mdn": ("build_mdn", True),
     "conditional_flow": ("build_conditional_flow", True),
     "conditional_ar_categorical": ("build_conditional_autoregressive_categorical", True),
+    "energy": ("build_energy_net", False),  # its own EnergyModel leaf (NCE), not a NeuralDensity module
 }
 
 
 class _DensitySpec:
     """Config for a neural-density module: which builder + its kwargs + fit hyperparameters. Pickle-safe."""
 
-    __slots__ = ("kind", "params", "conditional", "field", "m_steps", "lr")
+    __slots__ = ("kind", "params", "conditional", "field", "m_steps", "lr", "extra")
 
-    def __init__(self, kind: str, params: dict, *, field: str = "x", m_steps: int = 80, lr: float = 5e-3):
+    def __init__(
+        self,
+        kind: str,
+        params: dict,
+        *,
+        field: str = "x",
+        m_steps: int = 80,
+        lr: float = 5e-3,
+        extra: dict | None = None,
+    ):
         self.kind = kind
         self.params = dict(params)
         self.conditional = _BUILDERS[kind][1]
         self.field = field
         self.m_steps = int(m_steps)
         self.lr = float(lr)
+        self.extra = dict(extra or {})  # leaf-specific extras (e.g. the EBM's noise_ratio)
 
     def build_module(self) -> Any:
         from mixle.models import (
@@ -55,6 +67,7 @@ class _DensitySpec:
             build_conditional_autoregressive_categorical,
             build_conditional_flow,
             build_coupling_flow,
+            build_energy_net,
             build_maf,
             build_mdn,
             build_vae,
@@ -68,10 +81,15 @@ class _DensitySpec:
             "build_mdn": build_mdn,
             "build_conditional_flow": build_conditional_flow,
             "build_conditional_autoregressive_categorical": build_conditional_autoregressive_categorical,
+            "build_energy_net": build_energy_net,
         }[_BUILDERS[self.kind][0]]
         return fn(**self.params)
 
     def make_leaf(self) -> Any:
+        if self.kind == "energy":
+            from mixle.models.energy import EnergyModel
+
+            return EnergyModel(self.build_module(), m_steps=self.m_steps, lr=self.lr, **self.extra)
         from mixle.models.mixture_density import NeuralConditionalDensity
         from mixle.models.neural_density import NeuralDensity
 
@@ -148,6 +166,21 @@ def VAE(dim: int, *, latent: int = 2, hidden: int = 32, m_steps: int = 120, lr: 
 def DiscreteAR(dim: int, cats: int, *, hidden: int = 64, m_steps: int = 100, lr: float = 5e-3) -> RandomVariable:
     """An exact ``p(x)`` over **discrete** vectors ``x in {0..cats-1}^dim`` (autoregressive). Fit with ``.fit(x)``."""
     return _rv(_DensitySpec("ar_categorical", {"dim": dim, "n_categories": cats}, m_steps=m_steps, lr=lr))
+
+
+def EBM(
+    dim: int, *, hidden: int = 64, layers: int = 3, noise_ratio: int = 2, m_steps: int = 250, lr: float = 5e-3
+) -> RandomVariable:
+    """An energy-based ``p(x) ∝ exp(-E(x))`` over ``R^dim``, trained by NCE (approximately normalized). Fit ``.fit(x)``."""
+    return _rv(
+        _DensitySpec(
+            "energy",
+            {"dim": dim, "hidden": hidden, "layers": layers},
+            m_steps=m_steps,
+            lr=lr,
+            extra={"noise_ratio": int(noise_ratio)},
+        )
+    )
 
 
 # --- the constructors: conditional p(y|x) --------------------------------------------------------------------
