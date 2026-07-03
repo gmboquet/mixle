@@ -1,19 +1,19 @@
-"""``sft_planner`` -- trace-SFT: a small causal LM that *writes* plans, kept honest by a parser gate.
+"""``sft_planner`` -- trace-SFT for generating tool plans with parser-gated validation.
 
 The generative rung above :func:`~mixle.task.plan.distill_planner`. The step-students decompose by
-classifying "what comes next"; this trains ONE small causal LM (:class:`~mixle.models.LM`) on serialized
-teacher traces with the prompt-masked SFT objective (``LM.fit_pairs``) so the whole plan is *generated*::
+classifying the next action; this trains a small causal LM (:class:`~mixle.models.LM`) on serialized teacher
+traces with the prompt-masked SFT objective (``LM.fit_pairs``) so the whole plan is generated::
 
     request \\n=> tool(k=v; k=v) | tool(k=v) | done \\n
 
-Free-form generation is exactly where silent nonsense creeps in, so the honesty contract gets a harder
-gate: the emitted text must PARSE under the strict plan grammar, every tool must exist, every required
-argument must be present -- anything else escalates to the teacher and the trace is harvested. The model
-may write anything; only verified plans leave the function.
+Free-form generation needs a strict validation boundary. The emitted text must parse under the plan grammar,
+every tool must exist, and every required argument must be present. Anything else escalates to the teacher and
+the trace is harvested. The model may emit arbitrary text, but only verified plans leave the function.
 
 What this adds over the step-students (and what it does not): one model covers every tool with
-variable-length plans and generalizes over entity values it never saw; it does NOT magically invent
-correct plans for tool compositions absent from the traces -- those escalate, which is the point.
+variable-length plans and can generalize over entity values it did not see during training. It does not infer
+unsupported tool compositions from absent traces; those cases escalate for teacher handling and future data
+collection.
 """
 
 from __future__ import annotations

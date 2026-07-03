@@ -93,7 +93,7 @@ For the neural quickstart:
 
 .. code-block:: sh
 
-   python examples/hybrid_llm_example.py
+   python examples/shared_embedding_example.py
 
 Documentation Build
 -------------------

@@ -41,15 +41,15 @@ def pool(seed, n_per_class=300):
     return out
 
 
-def stub_llm(prompt, system=None):
-    """Stand-in for a real LLM endpoint: reads the text out of the prompt and classifies it."""
+def local_llm(prompt, system=None):
+    """Deterministic local teacher with the same callable shape as an LLM endpoint."""
     text = prompt.split("Text:", 1)[-1].lower()
     return "spam" if any(w in text.split() for w in SPAM) else "ham"
 
 
 def main() -> None:
     # the teacher is an LLM, constrained to the label set
-    teacher = llm_labeler(CallableLLM(stub_llm), ["spam", "ham"], instruction="Classify the email as spam or ham.")
+    teacher = llm_labeler(CallableLLM(local_llm), ["spam", "ham"], instruction="Classify the email as spam or ham.")
     recipe = {"n": 4, "dim": 512, "hidden": [64], "epochs": 200, "lr": 1e-2}
 
     p, val = pool(1), pool(seed=900)[:300]

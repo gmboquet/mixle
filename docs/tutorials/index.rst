@@ -26,9 +26,6 @@ Choose By Problem
    * - save, serve, and monitor model artifacts
      - :doc:`production-artifacts`
      - Practical production helpers
-   * - build a hybrid neural/probabilistic event model
-     - :doc:`hybrid-llm-events`
-     - Incubating neural leaf
    * - replace repeated LLM calls with a calibrated local model
      - :doc:`llm-distillation-cascade`
      - Active task workflow
@@ -70,10 +67,6 @@ What Each Tutorial Demonstrates
      - Fitted models need provenance, registry metadata, serving wrappers, and
        drift checks.
      - :doc:`/production`, :doc:`/lifecycle`
-   * - :doc:`hybrid-llm-events`
-     - A Transformer event leaf and a Gamma timing model can form one joint
-       score for event streams.
-     - :doc:`/neural-llm`, :doc:`/models`
    * - :doc:`llm-distillation-cascade`
      - A teacher labels examples, a local model learns the task, and calibrated
        confidence decides whether to answer or escalate.
@@ -102,7 +95,6 @@ What Each Tutorial Demonstrates
    ppl-mixture
    enumeration-ranking
    production-artifacts
-   hybrid-llm-events
    llm-distillation-cascade
    llm-uncertainty
    representation-and-models

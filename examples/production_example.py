@@ -1,6 +1,6 @@
 """The production / MLOps layer: reproducible artifacts, a model registry, serving, drift, and checkpoints.
 
-Everything lives in ``mixle.inference.production``. This walks the lifecycle end to end on a toy Gaussian:
+Everything lives in ``mixle.inference.production``. This walks the lifecycle end to end on a small Gaussian model:
 
   1. fit a model *with provenance* -> a Header recording the data hash, model hash, training settings,
      timing, environment, and the per-iteration model-hash chain;

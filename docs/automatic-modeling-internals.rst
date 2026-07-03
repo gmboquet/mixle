@@ -1,7 +1,7 @@
 Automatic Modeling Internals
 ============================
 
-Automatic modeling in Mixle is not a single magic estimator. It is a set of
+Automatic modeling in Mixle is not a single opaque estimator. It is a set of
 profilers, factory functions, scoring heuristics, validation checks, and
 recommendation reports that turn heterogeneous Python data into an explicit
 estimator tree.
@@ -235,4 +235,3 @@ API Reference
 * :doc:`api/mixle.utils.automatic.profiling`
 * :doc:`api/mixle.utils.automatic.detectors`
 * :doc:`api/mixle.task.recommend`
-

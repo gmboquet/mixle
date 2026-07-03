@@ -26,8 +26,8 @@ tuple, a dictionary, a sequence, a graph-like object, or a neural training pair.
      - record distribution
    * - ``[3, 4, 5]``
      - sequence distribution
-   * - ``((history, next_token), wait)``
-     - Transformer leaf plus timing distribution
+   * - ``([12, 44, 91, 7], 18)``
+     - next-token distribution
    * - ``[0.2, 1.8, 1.5, ...]``
      - emission sequence with latent HMM states
 
@@ -125,8 +125,9 @@ Different structures specialize the same loop:
    * - Task cascades
      - fit local model, calibrate, decide answer versus escalation
 
-This is why mixle can compose a Transformer and a Gamma. The child estimators do
-different work, but they present the same outer shape to the parent composite.
+This is why mixle can fit heterogeneous records and latent structures without a
+new training loop for every combination. The child estimators do different work,
+but they present the same outer shape to the parent composite or latent model.
 
 Distributions Are Query Objects
 -------------------------------

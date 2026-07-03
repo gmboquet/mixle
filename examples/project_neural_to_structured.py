@@ -2,8 +2,8 @@
 
 The closed-form primitives in ``mixle.inference.project`` were validated on Gaussian mixtures; this is
 the capability they were built for: take an actual trained *neural* density and project it onto a small
-*structured* model, then measure what you paid and what you saved. Nothing here is a toy substitute --
-the teacher is a real RealNVP normalizing flow (``mixle.models.neural_density``), fit by gradient EM.
+*structured* model, then measure what you paid and what you saved. The teacher is a RealNVP normalizing
+flow (``mixle.models.neural_density``), fit by gradient EM.
 
 Pipeline (all mixle):
   1. train the flow on a target distribution (the "huge" model -- a torch net);

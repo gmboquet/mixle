@@ -1,9 +1,8 @@
-"""B5 — heterogeneous leaves as the flagship flexibility demo: a SET field inside a mixture.
+"""Heterogeneous structured leaves: a set-valued field inside a mixture.
 
-Composing a real + a count is something other libraries can do. The depth that distinguishes mixle is
-*structured* leaves as first-class fields of a record -- here a **set** field (`BernoulliSetDistribution`:
-a variable-size set drawn from a vocabulary, each element included independently). No mainstream rival
-composes a set leaf beside a Normal and a Poisson and fits all three by one EM.
+The example uses *structured* leaves as first-class fields of a record: here a **set** field
+(`BernoulliSetDistribution`: a variable-size set drawn from a vocabulary, each element included independently)
+beside a Normal and a Poisson field, with all three fitted by one EM loop.
 
 The model is ``Mixture(Composite(Gaussian, BernoulliSet, Poisson))`` over records ``(real, tag_set,
 count)``. Two latent clusters differ in *every* field -- mean, tag-inclusion propensities, and rate. A
