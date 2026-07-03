@@ -44,7 +44,7 @@ from mixle.models.dirichlet_process_mixture import (
     sample_crp_assignments,
     stick_breaking_weights,
 )
-from mixle.models.dpo_leaf import DPOLeaf
+from mixle.models.dpo_leaf import DPOLeaf, DPOModel
 from mixle.models.embedding import CategoricalEmbedding
 from mixle.models.gaussian_process import GaussianProcessRegressor
 from mixle.models.grammar import (
@@ -65,7 +65,7 @@ from mixle.models.neural import (
     make_mlp,
 )
 from mixle.models.neural_density import NeuralDensity, build_coupling_flow, build_maf, build_vae
-from mixle.models.neural_leaf import NeuralLeaf
+from mixle.models.neural_leaf import NeuralGaussian, NeuralLeaf
 from mixle.models.partially_observable_markov_decision_process import (
     PartiallyObservableMarkovDecisionProcessFilterResult,
     PartiallyObservableMarkovDecisionProcessFitResult,
@@ -84,8 +84,9 @@ from mixle.models.random_graph import (
     fit_stochastic_block_mle,
     hard_em_stochastic_block_model,
 )
-from mixle.models.softmax_leaf import SoftmaxNeuralLeaf
+from mixle.models.softmax_leaf import NeuralCategorical, SoftmaxNeuralLeaf
 from mixle.models.streaming_transformer_leaf import (
+    StreamingTransformer,
     StreamingTransformerLeaf,
     TransformerLMEstimator,
     stream_fit,
@@ -109,8 +110,13 @@ __all__ = [
     "ErdosRenyiGraphModel",
     "GaussianProcessRegressor",
     "GaussianRegressionNeuralNetwork",
+    "NeuralCategorical",
     "NeuralConditionalDensity",
     "NeuralDensity",
+    "NeuralGaussian",
+    "DPOModel",
+    "StreamingTransformer",
+    # deprecated "...Leaf" aliases (kept for back-compat; prefer the names above)
     "NeuralLeaf",
     "SoftmaxNeuralLeaf",
     "StreamingTransformerLeaf",
