@@ -13,7 +13,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from mixle.inference import optimize  # noqa: E402
-from mixle.models.mixture_density import NeuralConditionalDensity, build_mdn  # noqa: E402
+from mixle.models.mixture_density import NeuralConditionalDensity, build_conditional_flow, build_mdn  # noqa: E402
 from mixle.models.neural import make_mlp  # noqa: E402
 from mixle.models.neural_leaf import NeuralLeaf  # noqa: E402
 
@@ -47,6 +47,36 @@ class ConditionalDensityTest(unittest.TestCase):
         s = np.array([fit.sampler(i).sample_given((0.5,)) for i in range(200)]).reshape(-1)
         self.assertGreater(s.std(), 0.1)
         self.assertTrue(np.isfinite(_ll(fit, train)))
+
+
+def _within_y_curve(seed, n=800):
+    """y1 | x ~ N(x, 0.4), y2 | y1 ~ N(y1^2, 0.1): y2 depends on y1 (WITHIN y), not just on x.
+
+    A single-Gaussian NeuralLeaf gives an isotropic mean f(x) -- it cannot represent the y2 = y1^2 correlation.
+    """
+    r = np.random.RandomState(seed)
+    x = 1.2 * r.randn(n)
+    y1 = x + 0.4 * r.randn(n)
+    y2 = y1**2 + 0.1 * r.randn(n)
+    return [((float(x[i]),), (float(y1[i]), float(y2[i]))) for i in range(n)]
+
+
+class ConditionalFlowTest(unittest.TestCase):
+    def test_conditional_flow_beats_single_gaussian_on_within_y_structure(self):
+        train, test = _within_y_curve(0), _within_y_curve(1)
+        cf = NeuralConditionalDensity(build_conditional_flow(1, 2, hidden=32, layers=6), m_steps=100, lr=5e-3)
+        fit = optimize(train, cf.estimator(), prev_estimate=cf, max_its=8, out=None)
+        # NeuralLeaf: p(y|x) = N(y; mlp(x), sigma^2 I) -- isotropic, mean-only, blind to the y2=y1^2 coupling
+        gauss = optimize(train, NeuralLeaf(make_mlp(1, [32, 32], 2), lr=1e-2).estimator(), max_its=40, out=None)
+        self.assertGreater(_ll(fit, test) - _ll(gauss, test), 100.0)
+
+    def test_samples_reproduce_the_within_y_relation(self):
+        train = _within_y_curve(2)
+        cf = NeuralConditionalDensity(build_conditional_flow(1, 2, hidden=32, layers=6), m_steps=100, lr=5e-3)
+        fit = optimize(train, cf.estimator(), prev_estimate=cf, max_its=8, out=None)
+        s = np.array([fit.sampler(i).sample_given((0.7,)) for i in range(300)])
+        # at x=0.7, y1 ~ 0.7 and y2 ~ y1^2: the sampled (y1, y2) track the parabola, not an axis-aligned blob
+        self.assertGreater(np.corrcoef(s[:, 0] ** 2, s[:, 1])[0, 1], 0.5)
 
 
 class GeneralityTest(unittest.TestCase):
