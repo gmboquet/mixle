@@ -132,6 +132,10 @@ class JaxEngine(ComputeEngine):
     digamma = staticmethod(lambda x: jsp.digamma(x))
     betaln = staticmethod(lambda x, y: jsp.gammaln(x) + jsp.gammaln(y) - jsp.gammaln(x + y))
     erf = staticmethod(lambda x: jsp.erf(x))
+    # optional trig tier (not in REQUIRED_OPS): directional families use these where the engine has them
+    cos = staticmethod(lambda x: jnp.cos(x))
+    sin = staticmethod(lambda x: jnp.sin(x))
+    arctan2 = staticmethod(lambda x, y: jnp.arctan2(x, y))
 
     def index_add(self, out: Any, index: Any, values: Any) -> Any:
         """Add ``values`` into ``out`` along axis 0 via the functional ``.at[idx].add`` update.

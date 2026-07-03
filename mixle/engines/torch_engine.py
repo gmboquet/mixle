@@ -237,6 +237,10 @@ class TorchEngine(ComputeEngine):
     digamma = staticmethod(lambda x: torch.special.digamma(x))
     betaln = staticmethod(lambda x, y: torch.lgamma(x) + torch.lgamma(y) - torch.lgamma(x + y))
     erf = staticmethod(lambda x: torch.erf(x))
+    # optional trig tier (not in REQUIRED_OPS): directional families use these where the engine has them
+    cos = staticmethod(lambda x: torch.cos(x))
+    sin = staticmethod(lambda x: torch.sin(x))
+    arctan2 = staticmethod(lambda x, y: torch.atan2(x, y))
 
     def index_add(self, out: Any, index: Any, values: Any) -> Any:
         """Add ``values`` into ``out`` along axis 0 using Torch ``index_add``.
