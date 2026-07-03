@@ -51,36 +51,9 @@ Development: `git clone … && pip install -e ".[all]"`.
 
 ## Quickstart
 
-**Compose neural and classical models — and share parameters across them.** Here one learned word
-embedding is tied across a plain language model and a topic mixture of language models, trained jointly in
-a single fit, so every topic and the LM read and write the *same* word vectors:
-
-```python
-import numpy as np
-from mixle.models import CategoricalEmbedding, TransformerLMEstimator
-from mixle.stats import MixtureEstimator
-from mixle.inference import optimize
-
-V, d, B, K = 60, 24, 8, 3                        # vocab, embedding dim, context window, number of topics
-emb = CategoricalEmbedding(V, d, name="word")    # ONE learned word embedding, declared once
-
-# the SAME word vectors feed a plain language model AND a K-topic mixture of language models
-lm     = TransformerLMEstimator(V, d_model=d, n_layer=2, block=B, embedding=emb)
-topics = MixtureEstimator([TransformerLMEstimator(V, d_model=d, n_layer=2, block=B, embedding=emb)
-                           for _ in range(K)])
-
-# a document is (context window, next word); fitting the topic mixture trains the shared embedding jointly
-rng   = np.random.RandomState(0)
-docs  = [(list(rng.randint(0, V, size=B)), int(rng.randint(0, V))) for _ in range(240)]
-model = optimize(docs, topics, max_its=5)
-
-model.posterior(docs[0])                                    # soft topic assignment for a document
-{id(lm.module.tok.weight)} | {id(c.module.tok.weight) for c in model.components}   # one shared tensor
-```
-
-The same one-`optimize` fit handles an ordinary heterogeneous record just as well — a web session,
-`(device, minutes on site, [clicks per page])`: a category, a real, and a variable-length count sequence,
-with a latent user segment over the whole record:
+Each record here is a web session — `(device, minutes on site, [clicks per page])`: a category, a real,
+and a variable-length count sequence, with a latent user segment over the whole record. The estimator
+mirrors that shape, so one `optimize` call fits it:
 
 ```python
 from mixle.stats import *
