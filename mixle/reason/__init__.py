@@ -85,12 +85,14 @@ __all__ = [
     "AmortizedEncoder",
     "ScaledEmbedding",
     "CrossModalModel",
+    "StructuredAdapter",
 ]
 
 _LAZY = {
     "AmortizedEncoder": "encoder",
     "ScaledEmbedding": "embedding",
     "CrossModalModel": "model",
+    "StructuredAdapter": "adapter",
 }
 
 
