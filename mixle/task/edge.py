@@ -522,12 +522,14 @@ def _scaled(recipe: dict[str, Any], family: str, fidelity: float) -> dict[str, A
 
 
 def distill_for_edge(
-    teacher: Callable[..., Any],
+    teacher: Callable[..., Any] | None,
     train_data: Sequence[Any],
     val_data: Sequence[Any],
     device: DeviceSpec,
     *,
     labels: Sequence[str] | None = None,
+    train_labels: Sequence[Any] | None = None,
+    val_labels: Sequence[Any] | None = None,
     space: EdgeSpace | None = None,
     design: DesignModel | None = None,
     designer: Callable[[tuple], Any] | None = None,
@@ -540,7 +542,9 @@ def distill_for_edge(
 ) -> EdgeDistillResult:
     """Search structure x training-process for the best student that fits ``device``.
 
-    The teacher labels ``train_data``/``val_data`` once (cached). Candidates proposed by the
+    The teacher labels ``train_data``/``val_data`` once (cached) -- or pass ``train_labels``/
+    ``val_labels`` when the labels already exist (a harvested dataset, an upstream ``solve`` split)
+    and the teacher is then never called (it may be ``None``). Candidates proposed by the
     :class:`DesignModel` are trained at ``screen_fidelity`` (cheap), scored by held-out agreement,
     and measured (:func:`footprint`); the top ``promote`` feasible screens are re-trained at full
     fidelity and the best feasible one wins (ties -> smaller). Pass a previous search's ``design``
@@ -579,26 +583,35 @@ def distill_for_edge(
     ):
         raise ValueError("design model was built for a different space/device shape; start a fresh one")
 
-    # one teacher pass per dataset -- the search itself never re-queries the teacher
-    train_labels = [str(t) for t in _as_batched(teacher)(train_data)]
-    val_truth = [str(t) for t in _as_batched(teacher)(val_data)]
-    label_list = list(labels) if labels is not None else sorted(set(train_labels) | set(val_truth))
-    fingerprint = task_fingerprint(train_data, train_labels)  # conditions the shared ledger on THIS task
+    # one teacher pass per dataset -- the search itself never re-queries the teacher; precomputed
+    # labels (train_labels=/val_labels=) skip the teacher entirely
+    if (train_labels is None) != (val_labels is None):
+        raise ValueError("pass both train_labels and val_labels, or neither")
+    if train_labels is not None:
+        if len(train_labels) != len(train_data) or len(val_labels) != len(val_data):
+            raise ValueError("precomputed labels must match their data lengths")
+        train_y = [str(t) for t in train_labels]
+        val_truth = [str(t) for t in val_labels]
+    else:
+        if teacher is None:
+            raise ValueError("teacher may only be None when train_labels/val_labels are provided")
+        train_y = [str(t) for t in _as_batched(teacher)(train_data)]
+        val_truth = [str(t) for t in _as_batched(teacher)(val_data)]
+    label_list = list(labels) if labels is not None else sorted(set(train_y) | set(val_truth))
+    fingerprint = task_fingerprint(train_data, train_y)  # conditions the shared ledger on THIS task
 
     def _train(family: str, recipe: dict[str, Any]) -> TaskModel:
         if family == "structured":
             return distill_structured_from_labels(
-                train_data, train_labels, labels=label_list, seed=seed, task=task, **recipe
+                train_data, train_y, labels=label_list, seed=seed, task=task, **recipe
             )
         r = dict(recipe)
         bits = int(r.pop("bits", 32))
         if records:
-            student = distill_records_from_labels(
-                train_data, train_labels, labels=label_list, seed=seed, task=task, **r
-            )
+            student = distill_records_from_labels(train_data, train_y, labels=label_list, seed=seed, task=task, **r)
         else:
             student = distill_from_labels(
-                train_data, train_labels, labels=label_list, n=space.ngram, seed=seed, task=task, **r
+                train_data, train_y, labels=label_list, n=space.ngram, seed=seed, task=task, **r
             )
         if bits != 32:
             from mixle.task.quantize import quantize_mlp
