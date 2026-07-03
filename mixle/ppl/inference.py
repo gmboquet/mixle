@@ -2148,7 +2148,7 @@ def _prior_to_dict(prior_rv):
         return None
 
 
-def _prior_placeholder(prior_rv):
+def _prior_probe_value(prior_rv):
     """A valid value for the likelihood's target slot (only the dist *type* + known params matter to
     conjugate_posterior; this just has to let make_dist succeed). A draw from the prior is in-domain."""
     try:
@@ -2172,8 +2172,8 @@ def _stats_conjugate_probe(rv):
     if _prior_to_dict(prior_rv) is None:
         return None
     try:
-        ph = _prior_placeholder(prior_rv)
-        probe_args = tuple(ph if i == idx else rv._args[i] for i in range(len(rv._args)))
+        probe_value = _prior_probe_value(prior_rv)
+        probe_args = tuple(probe_value if i == idx else rv._args[i] for i in range(len(rv._args)))
         stats_dist = rv._family.make_dist(probe_args, rv._name)
     except Exception:
         return None

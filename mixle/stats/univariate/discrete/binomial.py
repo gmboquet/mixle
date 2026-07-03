@@ -103,7 +103,7 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def exp_family_sufficient_statistics(x: E, engine: Any) -> tuple[Any, ...]:
-        """Return placeholder-free Binomial sufficient statistics.
+        """Return Binomial sufficient statistics from encoded observations.
 
         The parameter-dependent support shift is handled by
         ``exp_family_sufficient_statistics_from_params`` when generated scoring
@@ -131,7 +131,7 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def exp_family_base_measure(x: E, engine: Any) -> Any:
-        """Return placeholder-free Binomial base measure."""
+        """Return the observation-only Binomial base measure."""
         return engine.asarray(x[2]) * 0.0
 
     @staticmethod
