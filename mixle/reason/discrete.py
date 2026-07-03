@@ -50,6 +50,40 @@ class DiscreteAnswer:
         lines.append(f"  residual entropy: {self.belief.entropy():.2f} nats")
         return "\n".join(lines)
 
+    def decide(self, loss: Any, actions: Any = None, *, abstain_cost: float | None = None) -> dict[str, Any]:
+        """The Bayes-optimal action under this posterior — EXACT over the finite hypothesis set.
+
+        Args:
+            loss: an ``(A, K)`` matrix (``loss[a, k]`` = cost of action ``a`` when hypothesis ``k`` is
+                true) or a callable ``loss(action, hypothesis) -> float``.
+            actions: action labels (defaults to the hypothesis labels — the "declare k" actions).
+            abstain_cost: when given, an extra ``"abstain"`` action with this flat cost — chosen
+                whenever every committal action's expected loss exceeds it (the escalate-don't-guess
+                decision, priced explicitly).
+
+        Returns:
+            ``{action, expected_loss, alternatives}`` with the exact expected loss of every candidate.
+        """
+        labels = self.belief.labels
+        acts = list(actions) if actions is not None else list(labels)
+        p = self.belief.probs
+        if callable(loss):
+            mat = np.asarray([[float(loss(a, h)) for h in labels] for a in acts], dtype=np.float64)
+        else:
+            mat = np.asarray(loss, dtype=np.float64)
+            if mat.shape != (len(acts), len(labels)):
+                raise ValueError("loss matrix must be (n_actions, n_hypotheses) = (%d, %d)" % (len(acts), len(labels)))
+        expected = mat @ p
+        if abstain_cost is not None:
+            acts = [*acts, "abstain"]
+            expected = np.concatenate([expected, [float(abstain_cost)]])
+        i = int(np.argmin(expected))
+        return {
+            "action": acts[i],
+            "expected_loss": float(expected[i]),
+            "alternatives": {a: float(e) for a, e in zip(acts, expected)},
+        }
+
 
 def reason_discrete(prior: Any, evidence: Any) -> DiscreteAnswer:
     """Fold evidence into a categorical belief and return the posterior with per-source attribution.
