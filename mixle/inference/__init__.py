@@ -81,6 +81,7 @@ from mixle.inference.em import EMStrategy, run_em
 from mixle.inference.errors_in_variables import DemingFit, deming_regression, propagate_uncertainty, simex
 from mixle.inference.estimation import BayesianStreamingEstimator, EMStep, best_of, fit, optimize
 from mixle.inference.fisher import FisherView, FixedFisherView, to_fisher
+from mixle.inference.forecast import Forecast, forecast
 
 # generalized linear models + penalized / robust / quantile regression on plain arrays
 from mixle.inference.glm import (
@@ -259,6 +260,8 @@ from mixle.stats.compute.pdist import ParameterEstimator
 from mixle.stats.compute.sequence import estimate, initialize, seq_estimate, seq_initialize
 
 __all__ = [
+    "Forecast",
+    "forecast",
     # the estimator contract + MLE/EM/MAP drivers
     "ParameterEstimator",
     "estimate",
