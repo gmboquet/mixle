@@ -104,6 +104,54 @@ class LinearGaussianEvidence:
 Evidence = LinearGaussianEvidence
 
 
+@dataclass
+class NonlinearEvidence:
+    """One modality's evidence through a NONLINEAR forward model: ``y = h(z) + noise``.
+
+    Assimilated by (iterated) extended-Kalman linearization: at the current belief mean ``m`` the
+    forward is replaced by its tangent ``h(z) ~ h(m) + J(m)(z - m)`` and the exact linear update runs
+    on that tangent; with ``iterations > 1`` the linearization point is refined at the updated mean and
+    the update repeats FROM THE PRE-UPDATE BELIEF (the iterated EKF), which matters when the prior mean
+    is far from the truth. ``jacobian`` is analytic when you have it; otherwise a central finite
+    difference is used. Honest caveat: this is a Gaussian approximation around the linearization point
+    -- for strongly multimodal posteriors it reports one mode's belief, not the mixture.
+    """
+
+    h: Any  # callable z -> predicted measurement (m,)
+    y: Any
+    R: Any
+    jacobian: Any = None  # callable z -> (m, d) Jacobian; finite-difference when None
+    iterations: int = 2
+    name: str = ""
+
+
+def _fd_jacobian(h: Any, z: np.ndarray, eps: float = 1.0e-6) -> np.ndarray:
+    z = np.asarray(z, dtype=np.float64).reshape(-1)
+    base = np.asarray(h(z), dtype=np.float64).reshape(-1)
+    J = np.empty((base.shape[0], z.shape[0]), dtype=np.float64)
+    for j in range(z.shape[0]):
+        dz = np.zeros_like(z)
+        dz[j] = eps * max(1.0, abs(float(z[j])))
+        J[:, j] = (
+            np.asarray(h(z + dz), dtype=np.float64).reshape(-1) - np.asarray(h(z - dz), dtype=np.float64).reshape(-1)
+        ) / (2.0 * dz[j])
+    return J
+
+
+def _assimilate_nonlinear(belief: Any, e: NonlinearEvidence) -> Any:
+    """Iterated-EKF fold of one nonlinear observation into a Gaussian belief."""
+    y = np.asarray(e.y, dtype=np.float64).reshape(-1)
+    point = np.asarray(belief.mean(), dtype=np.float64).reshape(-1)
+    updated = belief
+    for _ in range(max(1, int(e.iterations))):
+        J = np.asarray(e.jacobian(point) if e.jacobian is not None else _fd_jacobian(e.h, point), dtype=np.float64)
+        # tangent measurement: y - h(point) + J point plays the role of the linear y for H = J
+        y_lin = y - np.asarray(e.h(point), dtype=np.float64).reshape(-1) + J @ point
+        updated = belief.update(J, y_lin, e.R)  # each pass restarts from the PRE-update belief (IEKF)
+        point = np.asarray(updated.mean(), dtype=np.float64).reshape(-1)
+    return updated
+
+
 def block_selector(step: int, n_blocks: int, block_dim: int, within: Any = None) -> np.ndarray:
     """An observation matrix that reads time-block ``step`` of a stacked trajectory latent.
 
@@ -213,7 +261,9 @@ def reason(prior: Any, evidence: Any, *, query: Any = None) -> ReasonedAnswer:
 
     Args:
         prior: the latent's prior belief (:class:`GaussianBelief`; build one with :class:`Latent`).
-        evidence: a sequence of :class:`LinearGaussianEvidence` -- one per modality / observation.
+        evidence: a sequence of :class:`LinearGaussianEvidence` and/or :class:`NonlinearEvidence`
+            -- one per modality / observation. Nonlinear items assimilate by iterated-EKF
+            linearization (a Gaussian approximation; see :class:`NonlinearEvidence`).
             They are folded in one at a time (order does not affect the result), and the nats each
             removes are recorded for :meth:`ReasonedAnswer.attribution`.
         query: optional latent coordinate indices to restrict the answer to.
@@ -227,7 +277,10 @@ def reason(prior: Any, evidence: Any, *, query: Any = None) -> ReasonedAnswer:
     for i, e in enumerate(evidence):
         name = e.name or f"evidence[{i}]"
         before = belief.entropy()
-        belief = belief.update(e.H, e.y, e.R)
+        if isinstance(e, NonlinearEvidence):
+            belief = _assimilate_nonlinear(belief, e)
+        else:
+            belief = belief.update(e.H, e.y, e.R)
         gain = before - belief.entropy()
         contributions[name] = contributions.get(name, 0.0) + gain
     answer = ReasonedAnswer(belief, prior_entropy, contributions)
