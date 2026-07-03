@@ -108,6 +108,7 @@ from mixle.task.router import Router, RouterStats, route_stack
 from mixle.task.scorecard import Scorecard, scorecard
 from mixle.task.sft_plan import GenerativePlanner, sft_planner
 from mixle.task.solve import Solution, load_harvested, solve
+from mixle.task.structured_out import StructuredSolution, solve_structured
 from mixle.task.toolcall import ToolCaller, ToolSpec, distill_tool_caller
 from mixle.task.traces import AgentTrace, AgentTraces, harvest_agent_traces, parse_conversation
 from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
@@ -150,6 +151,7 @@ __all__ = [
     "RouterStats",
     "RegressionSolution",
     "MultiLabelSolution",
+    "StructuredSolution",
     "GenerativePlanner",
     "Planner",
     "Solution",
@@ -214,6 +216,7 @@ __all__ = [
     "solve",
     "solve_regression",
     "solve_multilabel",
+    "solve_structured",
     "measure_inference_seconds",
     "measure_ops_per_second",
     "task_fingerprint",
