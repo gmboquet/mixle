@@ -244,6 +244,78 @@ class TorchEngine(ComputeEngine):
     i0e = staticmethod(lambda x: torch.special.i0e(x))
     erfcx = staticmethod(lambda x: torch.special.erfcx(x))
 
+    # --- fused HMM recurrences (the generic engine-op loop pays ~2.5x indirection overhead per step;
+    # hidden_markov.hmm_engine_forward_backward/_ll delegate here when the engine provides these) ---
+    def _hmm_inputs(self, log_emit: Any, log_w: Any, log_a: Any, mask: Any):
+        le = self.asarray(log_emit)
+        lw = self.asarray(log_w)
+        la = self.asarray(log_a)
+        m = self.asarray(mask)
+        return le, lw, la, m
+
+    def hmm_forward_ll(self, log_emit: Any, log_w: Any, log_a: Any, mask: Any) -> Any:
+        """Fused log-space forward: per-sequence emission log-likelihood (freeze-alpha padding)."""
+        le, lw, la, m = self._hmm_inputs(log_emit, log_w, log_a, mask)
+        init = lw if lw.dim() == 2 else lw[None, :]
+        alpha = init + le[:, 0, :]
+        for t in range(1, le.shape[1]):
+            cand = torch.logsumexp(alpha[:, :, None] + la[None, :, :], dim=1) + le[:, t, :]
+            alpha = torch.where(m[:, t][:, None] > 0, cand, alpha)
+        return torch.logsumexp(alpha, dim=1)
+
+    def hmm_forward_backward(
+        self, log_emit: Any, log_w: Any, log_a: Any, mask: Any, weights: Any = None
+    ) -> tuple[Any, Any, Any, Any]:
+        """Fused log-space Baum-Welch recurrences, exactly mirroring the generic engine-op version:
+        alpha freezes across padded steps, beta carries, gamma is mask-SELECTED (NaN-safe for empty
+        sequences), xi is computed for all transitions at once, and per-sequence ``weights`` scale
+        gamma / xi / pi. Returns ``(ll, gamma, xi_sum, pi)``."""
+        le, lw, la, m = self._hmm_inputs(log_emit, log_w, log_a, mask)
+        n, tmax, k = le.shape
+        init = lw if lw.dim() == 2 else lw[None, :].expand(n, k)
+
+        alpha = init + le[:, 0, :]
+        alphas = [alpha]
+        for t in range(1, tmax):
+            cand = torch.logsumexp(alpha[:, :, None] + la[None, :, :], dim=1) + le[:, t, :]
+            alpha = torch.where(m[:, t][:, None] > 0, cand, alpha)
+            alphas.append(alpha)
+        alpha_stack = torch.stack(alphas, dim=1)
+        ll = torch.logsumexp(alpha, dim=1)
+
+        beta = torch.zeros((n, k), dtype=le.dtype, device=le.device)
+        betas = [beta]
+        for t in range(tmax - 2, -1, -1):
+            step = la[None, :, :] + (le[:, t + 1, :] + beta)[:, None, :]
+            cand = torch.logsumexp(step, dim=2)
+            beta = torch.where(m[:, t + 1][:, None] > 0, cand, beta)
+            betas.append(beta)
+        beta_stack = torch.stack(betas[::-1], dim=1)
+
+        wvec = torch.ones(n, dtype=le.dtype, device=le.device) if weights is None else self.asarray(weights)
+        zero = torch.zeros((), dtype=le.dtype, device=le.device)
+
+        ab = alpha_stack + beta_stack
+        log_gamma = ab - torch.logsumexp(ab, dim=2, keepdim=True)
+        gamma = torch.exp(log_gamma) * wvec[:, None, None]
+        gamma = torch.where(m[:, :, None] > 0, gamma, zero)
+        pi = gamma[:, 0, :]
+
+        if tmax > 1:  # all transitions at once: (N, T-1, S, S)
+            log_xi = (
+                alpha_stack[:, :-1, :, None]
+                + la[None, None, :, :]
+                + (le[:, 1:, :] + beta_stack[:, 1:, :])[:, :, None, :]
+                - ll[:, None, None, None]
+            )
+            contrib = torch.exp(log_xi) * wvec[:, None, None, None]
+            contrib = torch.where((m[:, 1:] > 0)[:, :, None, None], contrib, zero)
+            xi_sum = contrib.sum(dim=(0, 1))
+        else:
+            xi_sum = torch.zeros((k, k), dtype=le.dtype, device=le.device)
+
+        return ll, gamma, xi_sum, pi
+
     def index_add(self, out: Any, index: Any, values: Any) -> Any:
         """Add ``values`` into ``out`` along axis 0 using Torch ``index_add``.
 
