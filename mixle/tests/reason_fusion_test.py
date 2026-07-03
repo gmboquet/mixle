@@ -86,6 +86,40 @@ class ProductOfExpertsFusionTest(unittest.TestCase):
             acc = (model(xte).argmax(1) == yte).float().mean().item()
         self.assertGreater(acc, 0.8)  # fusing partial views recovers the class
 
+    def test_hybrid_learns_a_relational_task_that_pure_poe_cannot(self):
+        import torch
+
+        from mixle.reason import HybridFusionClassifier, StructuredFusionClassifier
+
+        n_tok, dtok = 8, 4
+
+        def batch(n, seed):  # label depends on token POSITION -- pure PoE is permutation-invariant, blind
+            r = np.random.RandomState(seed)
+            x = r.randn(n, n_tok, dtok).astype(np.float32)
+            y = ((x[:, 0] ** 2).sum(1) > (x[:, 1] ** 2).sum(1)).astype(np.int64)
+            return torch.tensor(x), torch.tensor(y)
+
+        def fit_acc(model, epochs):
+            xtr, ytr = batch(3000, 1)
+            opt = torch.optim.Adam(model.parameters(), lr=3e-3)
+            for _ in range(epochs):
+                for i in range(0, len(xtr), 128):
+                    loss = torch.nn.functional.cross_entropy(model(xtr[i : i + 128]), ytr[i : i + 128])
+                    opt.zero_grad()
+                    loss.backward()
+                    opt.step()
+            xte, yte = batch(1000, 2)
+            with torch.no_grad():
+                return (model(xte).argmax(1) == yte).float().mean().item()
+
+        torch.manual_seed(0)
+        hybrid = fit_acc(HybridFusionClassifier(dtok, 16, 2, n_tok, attn_layers=2), 80)
+        torch.manual_seed(0)
+        poe = fit_acc(StructuredFusionClassifier(dtok, 16, 2), 80)
+        self.assertGreater(hybrid, 0.8)  # the attention layer supplies the relational structure...
+        self.assertLess(poe, 0.6)  # ...that permutation-invariant PoE structurally cannot
+        self.assertGreater(hybrid, poe + 0.2)
+
 
 if __name__ == "__main__":
     unittest.main()
