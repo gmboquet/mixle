@@ -38,10 +38,14 @@ composable with the stable stats spine**, not the spine itself.
 
 ```python
 from mixle.inference import optimize
-from mixle.models import TransformerLMEstimator          # neural & deep
-from mixle.stats import CompositeEstimator, GammaEstimator
+from mixle.models import CategoricalEmbedding, TransformerLMEstimator
+from mixle.stats import MixtureEstimator
 
-# a neural next-token leaf beside a classical timing density, fit together in one call
-est = CompositeEstimator((TransformerLMEstimator(vocab=500, d_model=128, n_layer=4, block=64), GammaEstimator()))
-model = optimize(events, est, max_its=20)
+# language-model experts that share one token embedding table
+embedding = CategoricalEmbedding(num_categories=8000, dim=256, name="word")
+experts = [
+    TransformerLMEstimator(8000, d_model=256, n_layer=4, block=64, embedding=embedding)
+    for _ in range(3)
+]
+model = optimize(token_windows, MixtureEstimator(experts), max_its=20)
 ```

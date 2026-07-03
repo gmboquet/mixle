@@ -3,7 +3,7 @@
 The Gaussian-Markov / GP field prior is smooth -- it blurs sharp material boundaries and cannot express a
 field that takes a few discrete values (a composition of distinct materials). These priors fix that, and
 they plug into the field surface as *data-less proxies*: a prior is a proxy whose log-likelihood is the
-negative penalty, so ``joint([Gaussian(...), TotalVariation(over=field, shape=...)])`` just works.
+negative penalty, so ``joint([Gaussian(...), TotalVariation(over=field, shape=...)])`` can include it directly.
 
 - :func:`TotalVariation` -- a smoothed total-variation penalty on the field's gradient, which preserves
   sharp edges where the smooth prior would round them (the standard regularizer for piecewise-constant

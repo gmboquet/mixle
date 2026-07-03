@@ -85,7 +85,7 @@ m.result.coefficients   # fixed effects;  m.result.tau / .sigma — variance com
 m.result.group_effects  # per-group random intercepts (BLUPs)
 ```
 
-## Mixtures — and EM "just works"
+## Mixtures With Automatic EM Initialization
 
 ```python
 m = Mix([Normal(free, free), Normal(free, free)]).fit(data)
@@ -93,7 +93,7 @@ m.posterior(data)        # responsibilities (the E-step, exposed)
 ```
 
 Mixture components are auto-initialized with **k-means++** seeding, so well-separated
-clusters separate reliably — no manual init, no babysitting restarts.
+clusters usually separate without manual initialization.
 
 Other structured models, one line each:
 

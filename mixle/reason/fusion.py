@@ -1,4 +1,4 @@
-"""Differentiable product-of-experts fusion -- structured multimodal fusion you train from scratch.
+"""Differentiable product-of-experts fusion for structured multimodal evidence aggregation.
 
 Dense cross-attention fuses N tokens in O(N^2). When the tokens are (conditionally) independent evidence about
 a shared latent -- the common case for aggregating many partial observations (image patches, sensors, views) --
@@ -12,10 +12,10 @@ the posterior is their normalized product::
 Measured from scratch on a laptop (examples/structured_fusion_vlm.py): PoE fusion matches a cross-attention
 block's accuracy at ~2.6x fewer parameters and ~7x faster training on exchangeable-evidence tasks.
 
-The honest boundary: PoE fusion is PERMUTATION-INVARIANT and assumes conditional independence -- it cannot
+Boundary condition: PoE fusion is permutation-invariant and assumes conditional independence, so it cannot
 model token order or pairwise interactions. On a task that depends on a specific pair or position, attention
-reaches ~0.96 while PoE sits at chance. So the design is: structured fusion where evidence is exchangeable (to
-cut the quadratic cost), attention for the relational parts.
+reaches ~0.96 while PoE sits at chance. Use structured fusion where evidence is exchangeable, and attention
+where relational interactions are part of the signal.
 
 mixle.reason's exact core (:class:`GaussianBelief`) does this fusion in closed form for *inference*; this is the
 torch, end-to-end-trainable version -- the encoders that emit the experts are learned, the fusion stays exact.
@@ -59,8 +59,8 @@ def _build():
     class StructuredFusionClassifier(nn.Module):
         """A from-scratch multimodal classifier: shared per-token encoder -> PoE fusion -> linear head.
 
-        The Level-3 architecture in miniature -- swap the toy encoder for real modality encoders (a small
-        patch CNN, a text embedder) and the same structured fusion aggregates their evidence in O(N).
+        The Level-3 architecture in miniature: replace the minimal encoder with real modality encoders
+        such as a patch CNN or text embedder, and the same structured fusion aggregates their evidence in O(N).
         """
 
         def __init__(self, token_dim: int, latent_dim: int, n_classes: int, hidden: int = 32) -> None:
@@ -80,7 +80,7 @@ def _build():
         """Attention for the relations, structured PoE for the aggregation -- the accuracy/compute sweet spot.
 
         Pure PoE fusion is permutation-invariant and misses token interactions; a full ViT models them but pays
-        O(N^2) per layer and pools with a CLS token. This runs a FEW cheap attention layers to inject the
+        O(N^2) per layer and pools with a CLS token. This runs a small number of cheap attention layers to inject the
         relational structure PoE lacks, then aggregates with the parameter-free precision-weighted readout.
         Measured from scratch on CIFAR patches: one attention layer + PoE readout beats a same-budget ViT
         (the structured aggregate outperforms attention's CLS pooling) at less compute than a deeper ViT.

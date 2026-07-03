@@ -1,11 +1,11 @@
-"""Structured extraction: distill a teacher into a tiny sequence tagger that scrapes typed fields from text.
+"""Structured extraction: distill a teacher into a compact sequence tagger for typed text fields.
 
-The flagship "small model that replaces hardcoded logic" -- a regex scraper is brittle and breaks on every new
-format; this learns to pull fields (id, amount, date, ...) from messy text and can be *retrained* when the
-format drifts. The student is a real token-level model: a regex tokenizer + orthographic features → embedding →
-bidirectional GRU → per-token BIO tags, decoded into ``{field: value}``. It is distilled from a teacher that
-supplies example extractions (an LLM via :func:`mixle.task.llm.llm_labeler`-style calls, a rule, or gold data),
-so no hand-written parser.
+Use this module when brittle regular expressions or hand-written parsers are no longer enough for
+semi-structured text such as invoices, support tickets, orders, or clinical notes. The student model learns
+to extract fields such as ``id``, ``amount``, or ``date`` from labeled examples and can be retrained when
+the source format changes. The model is token-level: tokenizer and orthographic features, then an embedding,
+bidirectional GRU, per-token BIO tags, and a decoder back to ``{field: value}``. Labels can come from an LLM
+teacher, a rule-based teacher, or gold annotations.
 
 ``distill_extractor(teacher, texts, fields)`` returns a callable :class:`~mixle.task.model.TaskModel`:
 ``model(text) -> {field: value}``. It saves through the same durable artifact (vocab + tag scheme in the
@@ -47,7 +47,7 @@ def _token_features(tok: str) -> list[float]:
 
 
 def build_seq_tagger(vocab_size: int, n_tags: int, *, d_model: int = 64, hidden: int = 64, n_feats: int = _N_FEATS):
-    """A bidirectional-GRU sequence tagger: ``(token_ids, features) -> per-token tag logits``. A real small model."""
+    """A bidirectional-GRU sequence tagger: ``(token_ids, features) -> per-token tag logits``."""
     import torch
     import torch.nn as nn
 
@@ -143,8 +143,8 @@ class ExtractionIO:
     def predict_with_confidence(self, module: Any, texts: list[str]) -> list[tuple[dict[str, str], float]]:
         """Extract each record and a confidence in ``[0, 1]``: the min per-token tag probability over tagged tokens.
 
-        A low confidence (or a missing field) is the honest "this format is unfamiliar" signal a cascade escalates
-        on -- the extractor equivalent of the classifier's conformal set size. ``0.0`` when nothing was tagged.
+        A low confidence or a missing field is an explicit signal that the format may be unfamiliar and should
+        be escalated. Returns ``0.0`` when nothing was tagged.
         """
         import torch
 
