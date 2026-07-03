@@ -56,31 +56,38 @@ class Planner:
     n_escalated: int = 0
     harvested: list[tuple[str, list[dict]]] = field(default_factory=list)
 
-    def __call__(self, request: str, *, execute: dict[str, Callable[..., Any]] | None = None) -> dict[str, Any]:
-        """Plan (and optionally execute) step by step; any uncertain/malformed/failing step escalates."""
-        self.n_requests += 1
+    def try_plan(self, request: str, *, execute: dict[str, Callable[..., Any]] | None = None) -> dict[str, Any] | None:
+        """The local decomposition alone: a complete verified plan, or ``None`` (= must escalate).
+
+        No teacher, no stats — this is what a server without the frontier can run."""
         steps: list[dict] = []
         results: list[Any] = []
         for _ in range(self.max_steps):
             ctx = _render(request, steps)
             tool = self.selector.cascade.model.decide(ctx)
             if tool == _STOP:
-                return {"plan": steps, "results": results, "escalate": False}
+                return {"plan": steps, "results": results}
             if tool is None or tool not in self.extractors:
-                break  # unsure which step comes next -> the whole problem goes to the teacher
+                return None  # unsure which step comes next
             args = self.extractors[tool](ctx)
             spec = self.tools[tool]
             if not all(args.get(a) for a in spec.required_args):
-                break  # cannot fill the step's required arguments -> escalate
+                return None  # cannot fill the step's required arguments
             step = {"tool": tool, "args": {k: v for k, v in args.items() if k in spec.args}}
             if execute is not None:
                 try:
                     results.append(execute[tool](**step["args"]))
                 except Exception:  # noqa: BLE001 - a failing step is exactly what must escalate
-                    break
+                    return None
             steps.append(step)
-        else:
-            pass  # max_steps without STOP -> escalate
+        return None  # max_steps without STOP
+
+    def __call__(self, request: str, *, execute: dict[str, Callable[..., Any]] | None = None) -> dict[str, Any]:
+        """Plan (and optionally execute) step by step; any uncertain/malformed/failing step escalates."""
+        self.n_requests += 1
+        local = self.try_plan(request, execute=execute)
+        if local is not None:
+            return {**local, "escalate": False}
         self.n_escalated += 1
         plan = self.teacher(request)
         self.harvested.append((request, plan))

@@ -57,17 +57,27 @@ class ToolCaller:
     n_escalated: int = 0
     harvested: list[tuple[str, dict]] = field(default_factory=list)
 
-    def __call__(self, request: str) -> dict[str, Any]:
-        """Return ``{"tool", "args", "escalate"}``; escalations carry the teacher's call and are harvested."""
-        self.n_requests += 1
+    def try_local(self, request: str) -> dict[str, Any] | None:
+        """The local decision alone: a trustworthy call / no-op, or ``None`` (= must escalate).
+
+        No teacher, no stats — this is what a server without the frontier can run."""
         tool = self.selector.cascade.model.decide(request)
         if tool is not None and tool != _NO_TOOL and tool in self.extractors:
             args = self.extractors[tool](request)
             spec = self.tools[tool]
             if all(args.get(a) for a in spec.required_args):
-                return {"tool": tool, "args": {k: v for k, v in args.items() if k in spec.args}, "escalate": False}
-        elif tool == _NO_TOOL:
-            return {"tool": None, "args": {}, "escalate": False}
+                return {"tool": tool, "args": {k: v for k, v in args.items() if k in spec.args}}
+            return None
+        if tool == _NO_TOOL:
+            return {"tool": None, "args": {}}
+        return None
+
+    def __call__(self, request: str) -> dict[str, Any]:
+        """Return ``{"tool", "args", "escalate"}``; escalations carry the teacher's call and are harvested."""
+        self.n_requests += 1
+        local = self.try_local(request)
+        if local is not None:
+            return {**local, "escalate": False}
         self.n_escalated += 1
         out = self.teacher(request)
         self.harvested.append((request, out))
