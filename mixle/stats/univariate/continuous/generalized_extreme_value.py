@@ -111,6 +111,94 @@ class GeneralizedExtremeValueDistribution(SequenceEncodableProbabilityDistributi
             rv = -self.log_scale - (1.0 / self.shape + 1.0) * np.log(s) - np.power(s, -1.0 / self.shape)
         return np.where(s <= 0.0, -np.inf, rv)
 
+    # --- compute-engine backend (numpy + torch/GPU): scoring + sufficient statistics in engine ops ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
+
+    @classmethod
+    def compute_declaration(cls):
+        from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+
+        return DistributionDeclaration(
+            name="generalized_extreme_value",
+            distribution_type=cls,
+            parameters=(ParameterSpec("loc"), ParameterSpec("scale", constraint="positive"), ParameterSpec("shape")),
+            statistics=(StatisticSpec("sum"), StatisticSpec("sum2"), StatisticSpec("sum3"), StatisticSpec("count")),
+            support="real",
+            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Per-row GEV moment sums in accumulator order ``(sum, sum2, sum3, count)``."""
+        xx = engine.asarray(x)
+        x2 = xx * xx
+        return xx, x2, x2 * xx, xx * 0.0 + engine.asarray(1.0)
+
+    @staticmethod
+    def backend_log_density_from_params(x: Any, loc: Any, scale: Any, shape: Any, engine: Any) -> Any:
+        """Engine-neutral GEV log-density; the ``|xi| < tol`` Gumbel limit is selected per element.
+
+        ``s^{-1/xi}`` is computed as ``exp(-log(s)/xi)`` so the whole expression stays on engine ops."""
+        z = (x - loc) / scale
+        neg_inf = engine.asarray(float("-inf"))
+        is_limit = engine.abs(shape) < _XI_TOL
+        xi_safe = engine.where(is_limit, engine.asarray(1.0), shape)
+        s = 1.0 + xi_safe * z
+        s_pos = engine.where(s > 0.0, s, engine.asarray(1.0))  # keep log/exp NaN-free off-support
+        log_s = engine.log(s_pos)
+        general = -engine.log(scale) - (1.0 / xi_safe + 1.0) * log_s - engine.exp(-log_s / xi_safe)
+        general = engine.where(s > 0.0, general, neg_inf)
+        limit = -engine.log(scale) - z - engine.exp(-z)
+        return engine.where(is_limit, limit, general)
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded data."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x),
+            engine.asarray(self.loc),
+            engine.asarray(self.scale),
+            engine.asarray(self.shape),
+            engine,
+        )
+
+    @classmethod
+    def backend_stacked_params(
+        cls, dists: Sequence["GeneralizedExtremeValueDistribution"], engine: Any
+    ) -> dict[str, Any]:
+        """Stacked GEV parameters for a homogeneous mixture kernel."""
+        return {
+            "loc": engine.asarray([d.loc for d in dists]),
+            "scale": engine.asarray([d.scale for d in dists]),
+            "shape": engine.asarray([d.shape for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: np.ndarray, params: dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of GEV log densities."""
+        xx = engine.asarray(x)
+        return cls.backend_log_density_from_params(
+            xx[:, None], params["loc"][None, :], params["scale"][None, :], params["shape"][None, :], engine
+        )
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(
+        cls, x: np.ndarray, weights: Any, params: dict[str, Any], engine: Any
+    ) -> tuple[Any, Any, Any, Any]:
+        """Stacked GEV moment sums ``(sum, sum2, sum3, count)`` using engine-resident arrays."""
+        xx = engine.asarray(x)
+        ww = engine.asarray(weights)
+        x2 = xx * xx
+        return (
+            engine.sum(ww * xx[:, None], axis=0),
+            engine.sum(ww * x2[:, None], axis=0),
+            engine.sum(ww * (x2 * xx)[:, None], axis=0),
+            engine.sum(ww, axis=0),
+        )
+
     def cdf(self, x: float) -> float:
         """Cumulative distribution function ``P(X <= x)`` (exact)."""
         from scipy.stats import genextreme as _sp
