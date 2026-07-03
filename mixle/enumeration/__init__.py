@@ -50,8 +50,8 @@ from mixle.enumeration.autoregressive import AutoregressiveEnumerable, autoregre
 from mixle.enumeration.density_rank import DensityRankResult, density_rank
 from mixle.enumeration.envelope import AREnvelopeIndex
 
-# --- exact descending-probability enumeration of HMM state paths (list-Viterbi / A*) ---
-from mixle.enumeration.hmm_paths import hmm_best_paths
+# --- HMM state paths: exact A* enumeration + the quantized random-access path index ---
+from mixle.enumeration.hmm_paths import HMMPathIndex, hmm_best_paths
 from mixle.enumeration.model_enumeration import best_first_decode, quantized_best_first_decode
 
 # --- the count-budget seek / unrank index + the count semiring (rank-by-index machinery) ---
@@ -100,6 +100,7 @@ __all__ = [
     "AutoregressiveEnumerable",
     "autoregressive_count_index",
     "AREnvelopeIndex",
-    # HMM path enumeration (non-decomposable family, served by A* not the count index)
+    # HMM path enumeration (non-decomposable family): exact A* head + quantized random-access index
     "hmm_best_paths",
+    "HMMPathIndex",
 ]
