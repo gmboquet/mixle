@@ -23,6 +23,7 @@ Reference: Jorgensen, *The Theory of Dispersion Models* (Chapman & Hall, 1997).
 
 import math
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -149,6 +150,45 @@ class TweedieDistribution(SequenceEncodableProbabilityDistribution):
         if np.any(pos):
             rv[pos] = _tweedie_positive_logpdf(xx[pos], self.mu, self.phi, self.p)
         return rv
+
+    # --- compute-engine backend (numpy + torch/GPU), SCORING only: the moment accumulator stays
+    # host-side. The compound Poisson-Gamma series has all-POSITIVE terms, so the logsumexp
+    # accumulation is cancellation-free; the ``n``-window mirrors the numpy path (peak-centered,
+    # widened until the upper boundary sits 50 log-units below every row's peak). Zeros/negatives
+    # are handled by masking (the numpy path slices instead): ``y`` is clamped to 1e-300 inside the
+    # series so no ``-inf - (-inf)`` NaN can form, then ``where`` restores the point mass / -inf. ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized Tweedie log-density for encoded data (see class backend note)."""
+        lam, a, theta = _tweedie_params(self.mu, self.phi, self.p)
+        log_lam, log_theta = math.log(lam), math.log(theta)
+
+        xx = engine.asarray(x)
+        ys = engine.maximum(xx, engine.asarray(1.0e-300))  # keep the series finite on masked rows
+        log_y = engine.log(ys)
+        c_i = -lam - log_y - ys / theta
+
+        y_max = float(engine.to_numpy(engine.max(xx))) if np.prod(np.shape(engine.to_numpy(xx))) else 1.0
+        n_peak_max = max(y_max, _MIN_TWEEDIE) ** (2.0 - self.p) / (self.phi * (2.0 - self.p))
+        n_hi = max(50.0, 2.0 * n_peak_max + 10.0 * math.sqrt(n_peak_max + 1.0) + 50.0)
+        for _ in range(64):
+            n = engine.asarray(np.arange(1, int(math.ceil(n_hi)) + 1, dtype=np.float64))
+            a_n = n * log_lam - engine.gammaln(n + 1.0) - engine.gammaln(n * a) - n * a * log_theta
+            terms = c_i[:, None] + a_n[None, :] + (a * log_y)[:, None] * n[None, :]
+            m = engine.max(terms, axis=1)
+            gap = float(engine.to_numpy(engine.max(terms[:, -1] - m)))  # worst upper-boundary gap
+            if gap <= -50.0:
+                break
+            n_hi = n_hi * 2.0
+        pos_val = engine.logsumexp(terms, axis=1)
+
+        neg_inf = engine.asarray(-np.inf)
+        return engine.where(xx == 0.0, engine.asarray(-lam), engine.where(xx > 0.0, pos_val, neg_inf))
 
     def sampler(self, seed: int | None = None) -> "TweedieSampler":
         """Return a TweedieSampler for this distribution."""
