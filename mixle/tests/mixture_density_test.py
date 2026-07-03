@@ -30,8 +30,15 @@ def _ll(model, data):
     return float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
 
 
+def _seed(s=0):
+    """Torch-model tests must be order-independent: pin the global RNG that drives module init and Adam."""
+    torch.manual_seed(s)
+    np.random.seed(s)
+
+
 class ConditionalDensityTest(unittest.TestCase):
     def test_mdn_beats_single_gaussian_on_multimodal_conditional(self):
+        _seed()
         train, test = _inverse_problem(0), _inverse_problem(1)
         mdn = NeuralConditionalDensity(build_mdn(1, 1, k=5, hidden=32), m_steps=120, lr=5e-3)
         fit = optimize(train, mdn.estimator(), prev_estimate=mdn, max_its=8, out=None)
@@ -40,6 +47,7 @@ class ConditionalDensityTest(unittest.TestCase):
         self.assertGreater(_ll(fit, test) - _ll(gauss, test), 100.0)
 
     def test_samples_given_are_multimodal(self):
+        _seed()
         train = _inverse_problem(2)
         mdn = NeuralConditionalDensity(build_mdn(1, 1, k=5, hidden=32), m_steps=120, lr=5e-3)
         fit = optimize(train, mdn.estimator(), prev_estimate=mdn, max_its=8, out=None)
@@ -63,6 +71,7 @@ def _within_y_curve(seed, n=800):
 
 class ConditionalFlowTest(unittest.TestCase):
     def test_conditional_flow_beats_single_gaussian_on_within_y_structure(self):
+        _seed()
         train, test = _within_y_curve(0), _within_y_curve(1)
         cf = NeuralConditionalDensity(build_conditional_flow(1, 2, hidden=32, layers=6), m_steps=100, lr=5e-3)
         fit = optimize(train, cf.estimator(), prev_estimate=cf, max_its=8, out=None)
@@ -71,6 +80,7 @@ class ConditionalFlowTest(unittest.TestCase):
         self.assertGreater(_ll(fit, test) - _ll(gauss, test), 100.0)
 
     def test_samples_reproduce_the_within_y_relation(self):
+        _seed()
         train = _within_y_curve(2)
         cf = NeuralConditionalDensity(build_conditional_flow(1, 2, hidden=32, layers=6), m_steps=100, lr=5e-3)
         fit = optimize(train, cf.estimator(), prev_estimate=cf, max_its=8, out=None)
@@ -81,6 +91,8 @@ class ConditionalFlowTest(unittest.TestCase):
 
 class GeneralityTest(unittest.TestCase):
     def test_wraps_any_module_exposing_conditional_log_density(self):
+        _seed()
+
         # the adapter is not MDN-specific: any module with log_density(x, y)->(n,) works
         class LinearGaussian(torch.nn.Module):
             def __init__(self):
