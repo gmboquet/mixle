@@ -149,6 +149,9 @@ sol.improve()        # fold escalations back in; promote only if it verifies bet
 sol.save("artifacts/router")   # artifact carries its own verification record
 ```
 
+The student defaults to a compact hashed-feature classifier; `solve(..., student="generative")` swaps in a
+generative distribution instead — interpretable and torch-free.
+
 ## Core concepts
 
 Each family is five cooperating pieces:
@@ -280,6 +283,17 @@ Categorical(free).fit(labels)                                # the category set 
 - **Diagnostics:** a multi-chain fit (`how="nuts", chains=4`) folds per-parameter R̂ and ESS straight
   into `m.result.summary()`; `waic` / `loo` / `compare` rank fitted models.
 
+When the density itself should be neural, the same dialect exposes flow / VAE / autoregressive
+constructors that fit with `.fit()` and compose into mixtures like any distribution — no training loop in
+user code:
+
+```python
+from mixle.ppl import Flow, MDN
+
+Flow(2).fit(X)                     # p(x): a normalizing flow (also MAF, VAE, DiscreteAR)
+MDN(1, 1).fit(y, given={"x": X})   # p(y | x): a mixture density network (also CondFlow, CondDiscreteAR)
+```
+
 The dialect is thin — the `mixle.stats` classes underneath are untouched.
 
 ## Frequentist & Bayesian
@@ -353,8 +367,8 @@ e.seek(10_000)    # the ~10,000th most probable value, by structural count-DP
 - **Design & analysis of experiments** (`mixle.doe`): space-filling designs, GP Bayesian optimization,
   and the analysis half — Sobol/Morris sensitivity, uncertainty propagation, Kennedy-O'Hagan calibration.
 - **Embeddings** (`mixle.utils.hvis`): model-based t-SNE / UMAP over per-record posteriors.
-- **Neural & language leaves** (`mixle.models`): a causal-Transformer LM (`LM` / `StreamingTransformerLeaf`),
-  neural experts (`NeuralLeaf`, `SoftmaxNeuralLeaf`), and preference-tuned (`DPOLeaf`) leaves — each a
+- **Neural & language leaves** (`mixle.models`): a causal-Transformer LM (`LM` / `StreamingTransformer`),
+  neural experts (`NeuralGaussian`, `NeuralCategorical`), and preference-tuned (`DPOModel`) leaves — each a
   distribution that composes into mixtures / composites / HMM emissions and trains by EM (the E-step
   weights it; its M-step is gradient descent on the net). GPU/distributed pretraining via `LM.fit`.
 - **Supervised & non-iid models** (`mixle.models`): GP regression, neural regressors, random forests
