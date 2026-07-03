@@ -99,6 +99,7 @@ from mixle.task.quantize import (
     quantize_mlp,
 )
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
+from mixle.task.router import Router, RouterStats, route_stack
 from mixle.task.solve import Solution, load_harvested, solve
 from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
 
@@ -130,6 +131,8 @@ __all__ = [
     "RecipeSpace",
     "RecordClassifierIO",
     "RoutePlan",
+    "Router",
+    "RouterStats",
     "Solution",
     "StructuredClassifierIO",
     "TaskManifest",
@@ -163,6 +166,7 @@ __all__ = [
     "pick_label",
     "recommend_model",
     "recommend_route",
+    "route_stack",
     "spec_to_estimator",
     "load_arrays",
     "load_json",
