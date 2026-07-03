@@ -112,11 +112,15 @@ def _torch_macs_and_params(module: Any) -> tuple[int, int]:
 
 
 def footprint(student: TaskModel) -> EdgeFootprint:
-    """Measure a student's deployment cost. Bytes are real (fp32 weights, or the serialized JSON for a
-    torch-free student); ops are the closed-form per-inference count for the student's kind."""
+    """Measure a student's deployment cost. Bytes are real (fp32 weights, int8 arrays for a quantized
+    student, or serialized JSON for a structured one); ops are the closed-form per-inference count for
+    the student's kind."""
     if student.payload == "torch":
         macs, params = _torch_macs_and_params(student.model)
         return EdgeFootprint(bytes=4 * params, ops=macs, torch_free=False)
+    if student.payload == "arrays":
+        # quantized numpy student: int8 weight bytes measured from the arrays; inference needs no torch
+        return EdgeFootprint(bytes=student.model.nbytes(), ops=student.model.macs(), torch_free=True)
     # pure-mixle payload: measure the actual serialized size
     from mixle.utils.serialization import ensure_pysp_serialization_registry, to_serializable
 
@@ -149,6 +153,7 @@ class EdgeSpace:
     hidden_range: tuple[int, int] = (4, 96)
     epochs_range: tuple[int, int] = (40, 320)
     log10_lr_range: tuple[float, float] = (-3.0, -1.0)
+    bits_choices: Sequence[int] = (32, 8)  # weight precision: fp32, or int8 (post-training quantized, numpy inference)
     ngram: int = 3
     # structured axes
     components_range: tuple[int, int] = (1, 4)
@@ -157,7 +162,7 @@ class EdgeSpace:
     min_gain_range: tuple[float, float] = (0.0, 5.0)
 
     def dims(self) -> int:
-        return 5
+        return 6
 
     def bounds(self) -> list[tuple[float, float]]:
         return [(0.0, 1.0)] * self.dims()
@@ -171,6 +176,7 @@ class EdgeSpace:
                 "hidden": self.hidden_range,
                 "epochs": self.epochs_range,
                 "lr": self.log10_lr_range,
+                "bits": list(self.bits_choices),
                 "comp": self.components_range,
                 "bins": self.bins_range,
                 "its": self.max_its_range,
@@ -184,7 +190,7 @@ class EdgeSpace:
         return lo + float(np.clip(u, 0.0, 1.0)) * (hi - lo)
 
     def decode(self, point: np.ndarray) -> tuple[str, dict[str, Any]]:
-        """Unit-cube point -> ``(family, recipe kwargs)`` for that family's ``distill_*`` entry."""
+        """Unit-cube point -> ``(family, recipe kwargs)``; the mlp recipe carries a ``bits`` precision."""
         p = np.clip(np.asarray(point, dtype=np.float64).reshape(-1), 0.0, 1.0)
         if p.size != self.dims():
             raise ValueError(f"design point must have {self.dims()} coordinates, got {p.size}")
@@ -194,7 +200,8 @@ class EdgeSpace:
             hidden = int(round(self._lin(*self.hidden_range, p[2])))
             epochs = int(round(self._lin(*self.epochs_range, p[3])))
             lr = float(10.0 ** self._lin(*self.log10_lr_range, p[4]))
-            return "mlp", {"dim": dim, "hidden": [hidden], "epochs": epochs, "lr": lr}
+            bits = int(self.bits_choices[min(len(self.bits_choices) - 1, int(p[5] * len(self.bits_choices)))])
+            return "mlp", {"dim": dim, "hidden": [hidden], "epochs": epochs, "lr": lr, "bits": bits}
         if fam == "structured":
             comp = int(round(self._lin(*self.components_range, p[1])))
             bins = int(round(self._lin(*self.bins_range, p[2])))
@@ -388,10 +395,19 @@ def distill_for_edge(
     records = _is_record_data(train_data)
     space = space or EdgeSpace(families=("mlp", "structured") if records else ("mlp",))
     if device.torch_free:
-        fams = tuple(f for f in space.families if f != "mlp")
-        if not fams:
-            raise ValueError("device.torch_free excludes every family in the space (MLP students need torch)")
-        space.families = fams
+        # quantized MLPs run on numpy alone, so 'mlp' survives a torch-free device iff a quantized
+        # precision is available -- and is then pinned to it (fp32 students would need torch).
+        quantized = tuple(b for b in space.bits_choices if b != 32)
+        if quantized:
+            space.bits_choices = quantized
+        else:
+            fams = tuple(f for f in space.families if f != "mlp")
+            if not fams:
+                raise ValueError(
+                    "device.torch_free excludes every family in the space "
+                    "(fp32 MLP students need torch; add a quantized bits choice or the structured family)"
+                )
+            space.families = fams
 
     rng = RandomState(seed)
     n_constraints = len(device.violations(EdgeFootprint(0, 0, True)))
@@ -410,13 +426,21 @@ def distill_for_edge(
             return distill_structured_from_labels(
                 train_data, train_labels, labels=label_list, seed=seed, task=task, **recipe
             )
+        r = dict(recipe)
+        bits = int(r.pop("bits", 32))
         if records:
-            return distill_records_from_labels(
-                train_data, train_labels, labels=label_list, seed=seed, task=task, **recipe
+            student = distill_records_from_labels(
+                train_data, train_labels, labels=label_list, seed=seed, task=task, **r
             )
-        return distill_from_labels(
-            train_data, train_labels, labels=label_list, n=space.ngram, seed=seed, task=task, **recipe
-        )
+        else:
+            student = distill_from_labels(
+                train_data, train_labels, labels=label_list, n=space.ngram, seed=seed, task=task, **r
+            )
+        if bits != 32:
+            from mixle.task.quantize import quantize_mlp
+
+            student = quantize_mlp(student, bits=bits)  # scored quantized: measured bytes AND fidelity
+        return student
 
     trials: list[dict[str, Any]] = []
 

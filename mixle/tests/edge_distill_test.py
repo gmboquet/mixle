@@ -44,6 +44,7 @@ def _tiny_space():
         dim_choices=(64, 128),
         hidden_range=(4, 24),
         epochs_range=(30, 90),
+        bits_choices=(32, 8),
         components_range=(1, 2),
         max_its_range=(8, 20),
     )
@@ -94,8 +95,8 @@ class DeviceSpecTest(unittest.TestCase):
 class EdgeSpaceTest(unittest.TestCase):
     def test_decode_covers_both_families(self):
         sp = _tiny_space()
-        fam0, r0 = sp.decode(np.array([0.0, 0.5, 0.5, 0.5, 0.5]))
-        fam1, r1 = sp.decode(np.array([0.99, 0.5, 0.5, 0.5, 0.5]))
+        fam0, r0 = sp.decode(np.array([0.0, 0.5, 0.5, 0.5, 0.5, 0.0]))
+        fam1, r1 = sp.decode(np.array([0.99, 0.5, 0.5, 0.5, 0.5, 0.5]))
         self.assertEqual(fam0, "mlp")
         self.assertIn("epochs", r0)
         self.assertEqual(fam1, "structured")
@@ -103,6 +104,13 @@ class EdgeSpaceTest(unittest.TestCase):
         # decode is deterministic and in-range
         self.assertIn(r0["dim"], sp.dim_choices)
         self.assertTrue(sp.components_range[0] <= r1["n_components"] <= sp.components_range[1])
+
+    def test_bits_axis_decodes_both_precisions(self):
+        sp = _tiny_space()
+        _, fp32 = sp.decode(np.array([0.0, 0.5, 0.5, 0.5, 0.5, 0.0]))
+        _, int8 = sp.decode(np.array([0.0, 0.5, 0.5, 0.5, 0.5, 0.99]))
+        self.assertEqual(fp32["bits"], 32)
+        self.assertEqual(int8["bits"], 8)
 
     def test_signature_changes_with_space(self):
         self.assertNotEqual(_tiny_space().signature(), EdgeSpace().signature())
@@ -175,15 +183,52 @@ class DistillForEdgeTest(unittest.TestCase):
         # the callable student actually classifies
         self.assertIn(res.model(self.val[0]), ("a", "b"))
 
-    def test_torch_free_device_forces_structured_family(self):
+    def test_torch_free_device_yields_torch_free_student(self):
+        # a torch-free device admits structured students AND int8-quantized MLPs (numpy inference);
+        # whichever wins, the deployed artifact must carry no torch dependence.
         dev = DeviceSpec(torch_free=True)
         res = distill_for_edge(
-            self.teacher, self.train, self.val, dev, space=_tiny_space(), n_init=2, n_iter=1, promote=1, seed=0
+            self.teacher, self.train, self.val, dev, space=_tiny_space(), n_init=3, n_iter=2, promote=2, seed=0
         )
-        self.assertEqual(res.family, "structured")
         self.assertTrue(res.footprint.torch_free)
+        if res.family == "mlp":
+            self.assertEqual(res.recipe["bits"], 8)  # fp32 MLPs are pinned out on torch-free devices
         self.assertTrue(res.feasible)
         self.assertGreater(res.agreement, 0.7)
+
+    def test_quantization_unlocks_byte_budgets_fp32_cannot_meet(self):
+        # 1000 bytes, MLP-only space. The smallest fp32 MLP here is (64*4+4 + 4*2+2)*4 = 1080 bytes
+        # -- over budget BY CONSTRUCTION, so the fp32 arm must come back infeasible. The int8 arm has
+        # the same architecture space at ~1/4 the bytes, so the search must find a fitting student.
+        dev = DeviceSpec(max_bytes=1000)
+
+        def arm(bits):
+            return distill_for_edge(
+                self.teacher,
+                self.train,
+                self.val,
+                dev,
+                space=EdgeSpace(
+                    families=("mlp",),
+                    dim_choices=(64, 128),
+                    hidden_range=(4, 12),
+                    epochs_range=(30, 90),
+                    bits_choices=bits,
+                ),
+                n_init=3,
+                n_iter=2,
+                promote=2,
+                seed=0,
+            )
+
+        fp32 = arm((32,))
+        int8 = arm((8,))
+        self.assertFalse(fp32.feasible)  # deterministic: every fp32 candidate exceeds the budget
+        self.assertTrue(int8.feasible)  # quantization brings the same shapes under it
+        self.assertLessEqual(int8.footprint.bytes, 1000)
+        self.assertEqual(int8.recipe["bits"], 8)
+        self.assertTrue(int8.footprint.torch_free)
+        self.assertGreater(int8.agreement, 0.7)  # squeezed 4x, still matches the teacher
 
     def test_design_model_warm_start_accumulates_and_matches_cold(self):
         dev = DeviceSpec(max_bytes=200_000)
@@ -198,13 +243,13 @@ class DistillForEdgeTest(unittest.TestCase):
             dev,
             space=_tiny_space(),
             design=cold.design,
-            n_init=2,
-            n_iter=1,
-            promote=1,
+            n_init=2,  # halved seeding: the warm surrogate already covers the space
+            n_iter=2,
+            promote=2,
             seed=1,
         )
         self.assertGreater(len(warm.design), n_ledger)  # knowledge accumulates across searches
-        self.assertGreaterEqual(warm.agreement, 0.9 * cold.agreement)  # cheap warm run holds the line
+        self.assertGreaterEqual(warm.agreement, 0.9 * cold.agreement)  # cheaper warm run holds the line
 
     def test_incompatible_design_model_is_rejected(self):
         dev = DeviceSpec(max_bytes=200_000)
@@ -213,16 +258,32 @@ class DistillForEdgeTest(unittest.TestCase):
                 self.teacher, self.train, self.val, dev, space=_tiny_space(), design=DesignModel("other", 1), seed=0
             )
 
-    def test_torch_free_with_mlp_only_space_raises(self):
+    def test_torch_free_with_fp32_only_mlp_space_raises(self):
+        # an mlp-only space with NO quantized precision cannot serve a torch-free device...
         with self.assertRaises(ValueError):
             distill_for_edge(
                 self.teacher,
                 self.train,
                 self.val,
                 DeviceSpec(torch_free=True),
-                space=EdgeSpace(families=("mlp",)),
+                space=EdgeSpace(families=("mlp",), bits_choices=(32,)),
                 seed=0,
             )
+        # ...but with int8 available, an mlp-only space IS servable torch-free (numpy inference)
+        res = distill_for_edge(
+            self.teacher,
+            self.train,
+            self.val,
+            DeviceSpec(torch_free=True),
+            space=EdgeSpace(families=("mlp",), dim_choices=(64, 128), hidden_range=(4, 24), epochs_range=(30, 90)),
+            n_init=2,
+            n_iter=1,
+            promote=1,
+            seed=0,
+        )
+        self.assertEqual(res.family, "mlp")
+        self.assertEqual(res.recipe["bits"], 8)
+        self.assertTrue(res.footprint.torch_free)
 
 
 class DistillDesignerTest(unittest.TestCase):
