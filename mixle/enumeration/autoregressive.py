@@ -501,6 +501,14 @@ class AutoregressiveEnumerable:
             max_depth_bits=max_depth_bits,
         )
 
+    def envelope_index(self, *, n_paths: int = 64, seed: int = 0, budget_bits: float = 64.0):
+        """An :class:`~mixle.enumeration.envelope.AREnvelopeIndex` over this model -- **approximate**
+        enumeration at depths the exact tree index cannot reach (O(L) forwards per unrank instead of
+        Theta(count) tree expansion; exact for iid-step models, mean-field estimate otherwise)."""
+        from mixle.enumeration.envelope import AREnvelopeIndex
+
+        return AREnvelopeIndex(self, n_paths=n_paths, seed=seed, budget_bits=budget_bits)
+
     def top_k(self, k: int) -> list[tuple[tuple, float]]:
         """The ``k`` most probable sequences, exact, by best-first listing (use for small ``k``)."""
         out = []
