@@ -183,6 +183,13 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
             out = out + self.len_dist.seq_log_density(len_enc)
         return out
 
+    def density_semantics(self):
+        from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
+
+        children = list(self.topics) + ([] if self.len_dist is None else [self.len_dist])
+        sems = [c.density_semantics() for c in children if hasattr(c, "density_semantics")]
+        return join_density_semantics(sems) if sems else DensitySemantics.EXACT
+
     def sampler(self, seed=None):
         return SemiSupervisedHiddenMarkovSampler(self, seed)
 

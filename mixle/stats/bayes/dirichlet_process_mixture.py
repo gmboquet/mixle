@@ -304,6 +304,13 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
         ml = np.max(ll, axis=1, keepdims=True)
         return (np.log(np.sum(np.exp(ll - ml), axis=1, keepdims=True)) + ml).flatten()
 
+    def density_semantics(self):
+        from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
+
+        children = list(self.components)
+        sems = [c.density_semantics() for c in children if hasattr(c, "density_semantics")]
+        return join_density_semantics(sems) if sems else DensitySemantics.EXACT
+
     def sampler(self, seed: int | None = None) -> "DirichletProcessMixtureSampler":
         """Create a DirichletProcessMixtureSampler for this distribution."""
         return DirichletProcessMixtureSampler(self, seed)

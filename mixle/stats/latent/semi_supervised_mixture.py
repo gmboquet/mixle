@@ -343,6 +343,13 @@ class SemiSupervisedMixtureDistribution(SequenceEncodableProbabilityDistribution
 
         return ll_mat
 
+    def density_semantics(self):
+        from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
+
+        children = list(self.components)
+        sems = [c.density_semantics() for c in children if hasattr(c, "density_semantics")]
+        return join_density_semantics(sems) if sems else DensitySemantics.EXACT
+
     def sampler(self, seed: int | None = None) -> "SemiSupervisedMixtureSampler":
         """Creates a SemiSupervisedMixtureSampler for sampling component values.
 
