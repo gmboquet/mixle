@@ -51,31 +51,33 @@ Development: `git clone … && pip install -e ".[all]"`.
 
 ## Quickstart
 
-**Compose neural and classical models — and share parameters across them.** Here one learned word
-embedding is tied across a plain language model and a topic mixture of language models, trained jointly in
-a single fit, so every topic and the LM read and write the *same* word vectors:
+**Discover latent structure.** A *hierarchical mixture* is an outer mixture over a set of shared topics —
+a topic model: several word distributions (the topics) are shared, and each document class mixes them
+differently. One `optimize` call recovers the topics and tells you which class a document came from:
 
 ```python
 import numpy as np
-from mixle.models import CategoricalEmbedding, TransformerLMEstimator
-from mixle.stats import MixtureEstimator
+from mixle.stats import (CategoricalDistribution, CategoricalEstimator,
+                         HierarchicalMixtureDistribution, HierarchicalMixtureEstimator)
 from mixle.inference import optimize
 
-V, d, B, K = 60, 24, 8, 3                        # vocab, embedding dim, context window, number of topics
-emb = CategoricalEmbedding(V, d, name="word")    # ONE learned word embedding, declared once
+# ground truth: 3 shared topics (word distributions) and 3 document classes that mix them differently;
+# a document is a bag of words
+truth = HierarchicalMixtureDistribution(
+    topics=[CategoricalDistribution({"cat": .6, "dog": .3, "vet": .1}),      # pets
+            CategoricalDistribution({"loan": .5, "rate": .3, "bank": .2}),   # finance
+            CategoricalDistribution({"goal": .5, "team": .3, "match": .2})], # sports
+    mixture_weights=[0.34, 0.33, 0.33],                                      # 3 document classes
+    topic_weights=[[.8, .1, .1], [.1, .8, .1], [.1, .1, .8]],               # each class favors one topic
+    len_dist=CategoricalDistribution({6: 0.5, 7: 0.5}))
+docs = truth.sampler(0).sample(600)                                         # 600 bag-of-words documents
 
-# the SAME word vectors feed a plain language model AND a K-topic mixture of language models
-lm     = TransformerLMEstimator(V, d_model=d, n_layer=2, block=B, embedding=emb)
-topics = MixtureEstimator([TransformerLMEstimator(V, d_model=d, n_layer=2, block=B, embedding=emb)
-                           for _ in range(K)])
+# fit a fresh model (3 shared topics, 3 classes) — EM recovers the topics and the class mix
+est = HierarchicalMixtureEstimator([CategoricalEstimator()] * 3, num_mixtures=3,
+                                   len_estimator=CategoricalEstimator())
+model = optimize(docs, est, max_its=200, rng=np.random.RandomState(1))
 
-# a document is (context window, next word); fitting the topic mixture trains the shared embedding jointly
-rng   = np.random.RandomState(0)
-docs  = [(list(rng.randint(0, V, size=B)), int(rng.randint(0, V))) for _ in range(240)]
-model = optimize(docs, topics, max_its=5)
-
-model.posterior(docs[0])                                    # soft topic assignment for a document
-{id(lm.module.tok.weight)} | {id(c.module.tok.weight) for c in model.components}   # one shared tensor
+model.posterior(["cat", "dog", "cat", "vet", "dog", "cat"])   # which class wrote this pets-heavy document?
 ```
 
 The same one-`optimize` fit handles an ordinary heterogeneous record just as well — a web session,
@@ -111,6 +113,9 @@ distribution** — its matching estimator is taken automatically — or just the
 estimator is inferred:
 
 ```python
+from mixle.stats import MixtureDistribution, GaussianDistribution
+from mixle.inference import optimize
+
 reals = [-2.1, -1.8, -2.0, 1.9, 2.3, 2.1]     # two clusters
 
 proto = MixtureDistribution([GaussianDistribution(-1, 1), GaussianDistribution(1, 1)], [0.5, 0.5])
