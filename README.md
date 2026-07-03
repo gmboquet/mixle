@@ -405,13 +405,10 @@ vectorized-vs-scalar density agreement, EM convergence. See
 Maintained by **Grant Boquet** ([@gmboquet](https://github.com/gmboquet) ·
 grant.boquet@gmail.com).
 
-mixle began life as **pysparkplug**, developed at Lawrence Livermore National Laboratory; thanks to the
-LLNL contributors who built the original library and to everyone in the
-[git history](https://github.com/gmboquet/mixle/graphs/contributors). Contributions, issues, and
-discussion are welcome — open a PR or an issue.
+Contributions, issues, and discussion are welcome — open a PR or an issue.
 
 ## License
 
 MIT — see [LICENSE](https://github.com/gmboquet/mixle/blob/main/LICENSE).
 
-© 2014–2025, developed at Lawrence Livermore National Laboratory (LLNL-CODE-844837).
+mixle began life as **pysparkplug**, developed at Lawrence Livermore National Laboratory 2014–2025 (LLNL-CODE-844837).
