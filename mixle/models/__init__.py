@@ -63,7 +63,7 @@ from mixle.models.neural import (
     PoissonRegressionNeuralNetwork,
     make_mlp,
 )
-from mixle.models.neural_density import NeuralDensityLeaf, build_coupling_flow
+from mixle.models.neural_density import NeuralDensity, build_coupling_flow
 from mixle.models.neural_leaf import NeuralLeaf
 from mixle.models.partially_observable_markov_decision_process import (
     PartiallyObservableMarkovDecisionProcessFilterResult,
@@ -108,7 +108,7 @@ __all__ = [
     "ErdosRenyiGraphModel",
     "GaussianProcessRegressor",
     "GaussianRegressionNeuralNetwork",
-    "NeuralDensityLeaf",
+    "NeuralDensity",
     "NeuralLeaf",
     "SoftmaxNeuralLeaf",
     "StreamingTransformerLeaf",

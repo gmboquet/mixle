@@ -1,4 +1,4 @@
-"""``NeuralDensityLeaf`` -- the adapter that turns ANY torch density module into a composable mixle distribution.
+"""``NeuralDensity`` -- the adapter that turns ANY torch density module into a composable mixle distribution.
 
 The point is not a specific architecture; it is the *wrapper*. ``NeuralLeaf`` already adapts a conditional net
 (``p(y | x)``); this is its unconditional sibling: give it any torch module that exposes ``log_density(x) -> (n,)``
@@ -34,7 +34,7 @@ def _torch() -> Any:
     return torch
 
 
-class NeuralDensityLeaf(SequenceEncodableProbabilityDistribution):
+class NeuralDensity(SequenceEncodableProbabilityDistribution):
     """Wrap a torch density ``module`` (``module.log_density(x) -> (n,)``) as a composable mixle distribution."""
 
     def __init__(
@@ -47,7 +47,7 @@ class NeuralDensityLeaf(SequenceEncodableProbabilityDistribution):
         self.name = name
 
     def __str__(self) -> str:
-        return f"NeuralDensityLeaf({type(self.module).__name__})"
+        return f"NeuralDensity({type(self.module).__name__})"
 
     def log_density(self, x: Any) -> float:
         return float(self.seq_log_density(np.atleast_2d(np.asarray(x, dtype=float)))[0])
@@ -70,7 +70,7 @@ class NeuralDensityLeaf(SequenceEncodableProbabilityDistribution):
 
 
 class NeuralDensitySampler(DistributionSampler):
-    def __init__(self, dist: NeuralDensityLeaf, seed: int | None = None) -> None:
+    def __init__(self, dist: NeuralDensity, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
@@ -154,11 +154,11 @@ class NeuralDensityEstimator(ParameterEstimator):
     def accumulator_factory(self) -> NeuralDensityAccumulatorFactory:
         return NeuralDensityAccumulatorFactory()
 
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralDensityLeaf:
+    def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralDensity:
         torch = _torch()
         xs, ws = suff_stat
         if not xs:
-            return NeuralDensityLeaf(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
+            return NeuralDensity(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
         x = torch.as_tensor(np.stack(xs), dtype=torch.float32, device=self.device)
         w = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32, device=self.device)
         w = w / w.sum().clamp(min=1e-8)
@@ -169,7 +169,7 @@ class NeuralDensityEstimator(ParameterEstimator):
             loss = -(w * self.module.log_density(x)).sum()  # weighted negative log-likelihood
             loss.backward()
             opt.step()
-        return NeuralDensityLeaf(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
+        return NeuralDensity(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
 
 
 # --- a ready density module to wrap: a RealNVP-style coupling flow (exact log-density + sampling) ----------
@@ -180,7 +180,7 @@ def build_coupling_flow(dim: int, *, hidden: int = 32, layers: int = 4) -> Any:
 
     Alternating affine-coupling layers map data to a standard-normal base; ``log_density`` is the base log-prob
     plus the log-determinant of the (triangular) Jacobian. A minimal, correct instance of the density module a
-    :class:`NeuralDensityLeaf` adapts -- swap in any other module with the same two methods.
+    :class:`NeuralDensity` adapts -- swap in any other module with the same two methods.
     """
     import torch
     import torch.nn as nn
