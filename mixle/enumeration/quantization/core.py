@@ -40,6 +40,8 @@ import math
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
+import numpy as np
+
 from mixle.utils.optional_deps import gmpy2
 
 _LOG2 = math.log(2.0)
@@ -119,23 +121,33 @@ class Quantizer:
     tracked through convolutions, bounding the requantization error.
     """
 
-    __slots__ = ("bin_width_bits", "oversample", "executor")
+    __slots__ = ("bin_width_bits", "oversample", "executor", "count_mode")
 
-    def __init__(self, bin_width_bits: float = 1.0, oversample: int = 8, executor=None) -> None:
+    def __init__(
+        self, bin_width_bits: float = 1.0, oversample: int = 8, executor=None, count_mode: str = "exact"
+    ) -> None:
         if bin_width_bits <= 0:
             raise ValueError("bin_width_bits must be positive.")
         if int(oversample) < 1:
             raise ValueError("oversample must be a positive integer.")
+        if count_mode not in ("exact", "float"):
+            raise ValueError("count_mode must be 'exact' or 'float'")
         self.bin_width_bits = float(bin_width_bits)
         self.oversample = int(oversample)
         # Optional convolution executor (see mixle.enumeration.quantization.parallel). Lives only in the
         # building process; the count-DP routes its heavy convolutions through it when present.
         self.executor = executor
+        # 'exact' carries counts as arbitrary-precision integers; 'float' carries them as float64 --
+        # C-speed numpy convolutions, exact below 2**53 and ~1e-16 relative error per operation beyond
+        # (see CountHistogram.convolve_float). The approximate-counting knob for deep budgets.
+        self.count_mode = count_mode
 
     def convolve(
         self, a: "CountHistogram", b: "CountHistogram", max_fine_bucket: int | None = None
     ) -> "CountHistogram":
         """Convolve two histograms, using the attached parallel executor when present."""
+        if self.count_mode == "float":
+            return a.convolve_float(b, max_fine_bucket=max_fine_bucket)
         if self.executor is not None:
             return self.executor.convolve(a, b, max_fine_bucket)
         return a.convolve(b, max_fine_bucket=max_fine_bucket)
@@ -292,6 +304,34 @@ class CountHistogram:
                     if bj:
                         out[i + j] += ai * bj
         return CountHistogram(base, out)
+
+    def convolve_float(self, other: "CountHistogram", max_fine_bucket: int | None = None) -> "CountHistogram":
+        """Approximate convolution carrying counts as float64 -- the quantized-counting fast path.
+
+        One :func:`numpy.convolve` at C speed replaces the exact big-integer machinery. Counts are
+        **exact while they stay below 2**53** (float64 integers) and carry a relative error of at most
+        ``~width * 2**-53`` per convolution beyond that -- negligible against the bin-assignment
+        approximation the count-DP already makes. Counts above ``~2**1000`` would overflow float64, so
+        such results fall back to the exact backend (the histograms are identical below the cliff).
+        """
+        a, b = self.data, other.data
+        if not a or not b:
+            return CountHistogram.empty()
+        base = self.base + other.base
+        width = len(a) + len(b) - 1
+        if max_fine_bucket is not None:
+            cap = int(max_fine_bucket) - base + 1
+            if cap <= 0:
+                return CountHistogram.empty()
+            width = min(width, cap)
+        fa = np.asarray(a[:width] if len(a) > width else a, dtype=np.float64)
+        fb = np.asarray(b[:width] if len(b) > width else b, dtype=np.float64)
+        if not (np.isfinite(fa).all() and np.isfinite(fb).all()):
+            return self.convolve(other, max_fine_bucket=max_fine_bucket)  # counts too large for float64
+        out = np.convolve(fa, fb)[:width]
+        if not np.isfinite(out).all():
+            return self.convolve(other, max_fine_bucket=max_fine_bucket)
+        return CountHistogram(base, out.tolist())
 
 
 class CountIndex:
@@ -529,6 +569,7 @@ def count_budget_index(
     oversample: int = 8,
     max_depth_bits: float = 4096.0,
     num_workers: int | None = None,
+    count_mode: str = "exact",
 ):
     """Driver for the count-budget mode: deepen until the budget is covered, then build the index.
 
@@ -539,6 +580,8 @@ def count_budget_index(
 
     When ``num_workers`` is greater than 1, the heavy count-histogram convolutions are computed on
     a process pool (parallel quantization); the parallel result is identical to the serial one.
+    ``count_mode='float'`` carries counts as float64 (C-speed convolutions, exact below 2**53,
+    ~1e-16 relative error per operation beyond) -- the approximate-counting mode for deep budgets.
     """
     executor = None
     if num_workers is not None and int(num_workers) > 1:
@@ -548,7 +591,7 @@ def count_budget_index(
     try:
         if executor is not None:
             executor.__enter__()
-        q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample, executor=executor)
+        q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample, executor=executor, count_mode=count_mode)
         budget = _two_pow(budget_bits)
         depth_bits = max(float(bin_width_bits), float(budget_bits))
         index = None

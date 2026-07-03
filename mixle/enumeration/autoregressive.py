@@ -157,15 +157,18 @@ def _ar_count_index_fast(
     quantizer: Quantizer,
     max_fine_bucket: int,
     eos: Any = None,
+    dtype: type = np.int64,
 ) -> tuple[CountIndex, bool]:
-    """numpy-vectorized :func:`autoregressive_count_index` (int64 counts).
+    """numpy-vectorized :func:`autoregressive_count_index` (int64 or float64 counts).
 
     Identical results to the reference implementation, but the per-prefix work is vectorized: the V step
     log-probs are binned with one :func:`numpy.floor` + :func:`numpy.bincount` instead of a Python loop over
     the vocabulary, and child histograms are pooled with numpy slice-adds. ``steps_np(prefix)`` returns
-    ``(tokens, log_probs)`` as numpy arrays sorted by descending log-prob. Counts are int64, so the caller
-    must ensure the worst-case count stays below ~``2**62`` (see :data:`_INT64_SAFE_BITS`); deeper problems use
-    the arbitrary-precision Python path.
+    ``(tokens, log_probs)`` as numpy arrays sorted by descending log-prob. With ``dtype=int64`` counts are
+    exact while the budget stays below ~``2**62`` (see :data:`_INT64_SAFE_BITS`); with ``dtype=float64``
+    the same recursion carries **approximate** counts at any depth -- exact below 2**53, ~1e-16 relative
+    error per pooling beyond -- so deep budgets keep numpy speed instead of falling back to the
+    arbitrary-precision Python path.
     """
     if eos is not None and prefix and prefix[-1] == eos:
         return CountIndex(CountHistogram.delta(0, 1), lambda fb, off: ((), 0.0)), False
@@ -207,19 +210,19 @@ def _ar_count_index_fast(
     shifted: list[tuple[int, np.ndarray]] = []
     for tok, lp, s in zip(tokens.tolist(), lps.tolist(), sb.tolist()):
         child, child_trunc = _ar_count_index_fast(
-            steps_np, prefix + (tok,), depth - 1, quantizer, max_fine_bucket - s, eos
+            steps_np, prefix + (tok,), depth - 1, quantizer, max_fine_bucket - s, eos, dtype
         )
         truncated = truncated or child_trunc
         if not child.hist.data:
             continue
-        shifted.append((child.hist.base + s, np.asarray(child.hist.data, dtype=np.int64)))
+        shifted.append((child.hist.base + s, np.asarray(child.hist.data, dtype=dtype)))
         by_token.append((tok, float(lp), int(s), child))
 
     if not shifted:
         return CountIndex(CountHistogram.empty(), _raise_index), truncated
     lo = min(s for s, _ in shifted)
     hi = max(s + d.size - 1 for s, d in shifted)
-    buf = np.zeros(hi - lo + 1, dtype=np.int64)
+    buf = np.zeros(hi - lo + 1, dtype=dtype)
     for s, d in shifted:
         buf[s - lo : s - lo + d.size] += d
     joint = CountHistogram(lo, buf.tolist())
@@ -297,11 +300,15 @@ class AutoregressiveEnumerable:
             in ``batch_size`` chunks -- the large speed-up for transformers, where one-at-a-time forwards
             dominate (e.g. distilGPT-2 length-2 to rank 1e5: ~25 s one-at-a-time -> ~1 s batched).
         batch_size: prefixes per batched forward.
+        count_mode: how counts are carried past the int64-exact regime (budgets over ~2**60 sequences).
+            ``'auto'`` (default) switches the numpy fast path to float64 there -- **approximate** counts
+            (exact below 2**53, ~1e-16 relative error per pooling beyond) at full numpy speed. ``'exact'``
+            preserves arbitrary-precision counts by falling back to the slow Python recursion. ``'float'``
+            forces float64 everywhere.
 
     The model is queried lazily and **memoized by prefix**, so deepening the index (or recomputing a
-    log-density) never re-runs a forward pass it has already seen. With integer tokens and a budget under
-    ``2**60`` sequences the histogram build is the numpy fast path; otherwise it falls back to an
-    arbitrary-precision Python recursion with identical results.
+    log-density) never re-runs a forward pass it has already seen. With integer tokens the histogram build
+    is the numpy fast path (int64 counts below ~``2**60`` budgets; float64 beyond, per ``count_mode``).
     """
 
     def __init__(
@@ -314,11 +321,14 @@ class AutoregressiveEnumerable:
         oversample: int = 8,
         batch_next_logprobs: Callable[[list[tuple]], list[Any]] | None = None,
         batch_size: int = 256,
+        count_mode: str = "auto",
     ) -> None:
         if eos is None and max_len is None:
             raise ValueError("give max_len (a fixed-length model) or eos (a terminating model).")
         if max_len is not None and int(max_len) < 1:
             raise ValueError("max_len must be a positive integer.")
+        if count_mode not in ("auto", "exact", "float"):
+            raise ValueError("count_mode must be 'auto', 'exact', or 'float'")
         self.next_logprobs = next_logprobs
         self.eos = eos
         self.terminating = eos is not None
@@ -331,8 +341,10 @@ class AutoregressiveEnumerable:
         self.oversample = int(oversample)
         self.batch_next_logprobs = batch_next_logprobs
         self.batch_size = int(batch_size)
+        self.count_mode = count_mode
         self._cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}  # prefix -> (tokens, log_probs), desc by lp
         self._fast: bool | None = None
+        self._seek = None  # cached SeekIndex: built once, reused by unrank/count/threshold/mass_above
 
     # -- the model oracle, descending by log-prob and memoized (one forward per prefix) -------------------
     def _parse_steps(self, raw: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -417,9 +429,18 @@ class AutoregressiveEnumerable:
         """Count index over the model's support (length-``max_len`` sequences, or all eos-terminated
         sequences), bounded by the bit budget ``max_fine_bucket``."""
         budget_bits = max_fine_bucket * quantizer.bin_width_bits / quantizer.oversample
-        if self._use_fast() and budget_bits < _INT64_SAFE_BITS:
-            self._prefetch(quantizer, max_fine_bucket)
-            return _ar_count_index_fast(self._steps_np, (), self._depth, quantizer, max_fine_bucket, self.eos)
+        if self._use_fast():
+            int64_safe = budget_bits < _INT64_SAFE_BITS
+            if int64_safe and self.count_mode != "float":
+                self._prefetch(quantizer, max_fine_bucket)
+                return _ar_count_index_fast(self._steps_np, (), self._depth, quantizer, max_fine_bucket, self.eos)
+            if self.count_mode in ("auto", "float"):
+                # Deep budget (or forced float): carry counts as float64 -- approximate past 2**53, but the
+                # build keeps numpy speed instead of dropping to the arbitrary-precision Python recursion.
+                self._prefetch(quantizer, max_fine_bucket)
+                return _ar_count_index_fast(
+                    self._steps_np, (), self._depth, quantizer, max_fine_bucket, self.eos, np.float64
+                )
         return autoregressive_count_index(self._steps, (), self._depth, quantizer, max_fine_bucket, self.eos)
 
     def log_density(self, sequence: Iterable[Any]) -> float:
@@ -447,9 +468,28 @@ class AutoregressiveEnumerable:
             return ((s, lp) for s, lp in stream if s and s[-1] == self.eos)
         return stream
 
-    # -- convenience surface (self-contained, via the core count-budget driver) ---------------------------
+    # -- convenience surface (persistent: one cached SeekIndex serves every query) --------------------------
     def _quantizer(self) -> Quantizer:
         return Quantizer(bin_width_bits=self.bin_width_bits, oversample=self.oversample)
+
+    def seek_index(self, *, max_depth_bits: float = 4096.0):
+        """The cached persistent :class:`~mixle.enumeration.seek_index.SeekIndex` over this model.
+
+        Built lazily on first use and **reused by every convenience query** (``unrank`` / ``count`` /
+        ``threshold`` / ``mass_above``), deepening in place when a query needs more depth -- so a sweep of
+        a thousand unranks pays for one tree build, not a thousand. The forward cache is shared with it,
+        so deepening only runs new forwards for newly-live prefixes.
+        """
+        if self._seek is None:
+            from mixle.enumeration.seek_index import SeekIndex
+
+            self._seek = SeekIndex(
+                self,
+                bin_width_bits=self.bin_width_bits,
+                oversample=self.oversample,
+                max_depth_bits=max_depth_bits,
+            )
+        return self._seek
 
     def budget_index(self, budget_bits: float, max_depth_bits: float = 4096.0):
         """The count-budget seek index covering at least ``2**budget_bits`` sequences (for unrank/iterate)."""
@@ -470,28 +510,17 @@ class AutoregressiveEnumerable:
                 break
         return out
 
-    def count(self, min_log_prob: float) -> int:
+    def count(self, min_log_prob: float) -> int | float:
         """How many sequences have ``log_density >= min_log_prob`` -- computed from counts, not listed."""
-        q = self._quantizer()
-        index, _truncated = self.quantized_count_index(q, q.fine_bucket(min_log_prob))
-        return index.total()
+        return self.seek_index().count(min_log_prob)
 
     def unrank(self, i: int) -> tuple[tuple, float]:
         """The ``i``-th most probable sequence (0-based) and its exact log-probability, by random access."""
-        if i < 0:
-            raise IndexError("rank must be >= 0")
-        budget_bits = max(self.bin_width_bits, math.log2(i + 2) + 1.0)
-        index = self.budget_index(budget_bits)
-        if i >= len(index):
-            raise IndexError("rank %d beyond the enumerable support (size %d)" % (i, len(index)))
-        return index.get(i)
+        return self.seek_index().unrank(i)
 
     def threshold(self, rank: int) -> float:
         """Log-probability of the ``rank``-th most probable sequence -- the boundary of the top-``rank`` set."""
-        if rank < 1:
-            raise ValueError("rank must be >= 1")
-        _seq, lp = self.unrank(rank - 1)
-        return lp
+        return self.seek_index().threshold(rank)
 
     def mass_above(self, min_log_prob: float) -> tuple[float, float]:
         """A ``(lower, upper)`` bracket on the total probability of sequences with ``log_density >= min_log_prob``.
@@ -500,8 +529,8 @@ class AutoregressiveEnumerable:
         contributes between ``c * 2**(-hi_bits)`` and ``c * 2**(-lo_bits)``, where the bucket spans
         ``[lo_bits, hi_bits)`` of information. Tighten by raising ``oversample``.
         """
-        q = self._quantizer()
-        index, _truncated = self.quantized_count_index(q, q.fine_bucket(min_log_prob))
+        q = self.seek_index().quantizer
+        index = self.seek_index().fine_histogram(q.bits(min_log_prob) + q.bin_width_bits)
         hist = index.hist
         lo = hi = 0.0
         per_bit = q.fine_per_bit()
@@ -510,10 +539,13 @@ class AutoregressiveEnumerable:
         # number of steps. Bound L by the deepest sequence the index could hold (the upper bound is tight; the
         # lower bound loosens for long terminating sequences -- sum the head exactly if you need tight mass).
         steps_bound = self._depth if self.terminating else self.max_len
+        cutoff = q.fine_bucket(min_log_prob)  # the shared index may be built deeper than this query's bound
         for j, c in enumerate(hist.data):
+            fb = hist.base + j
+            if fb > cutoff:
+                break
             if not c:
                 continue
-            fb = hist.base + j
             lo_bits = fb / per_bit  # least information in the bucket -> most probable edge
             hi_bits = (fb + steps_bound) / per_bit  # most information after up to steps_bound roundings
             hi += c * 2.0 ** (-lo_bits)

@@ -56,6 +56,7 @@ from mixle.enumeration.model_enumeration import best_first_decode, quantized_bes
 # --- the count-budget seek / unrank index + the count semiring (rank-by-index machinery) ---
 from mixle.enumeration.quantization.core import count_budget_index
 from mixle.enumeration.quantization.semiring import CountSemiring, DecomposableSemiring, TropicalSemiring
+from mixle.enumeration.seek_index import SeekIndex
 
 # --- the contract (implemented by distributions AND relations) ---
 from mixle.stats.compute.pdist import (
@@ -80,6 +81,7 @@ __all__ = [
     "density_rank",
     # rank-by-index (count-budget unranking)
     "count_budget_index",
+    "SeekIndex",
     "quantized_index",
     "QuantizedEnumerationIndex",
     "LazyQuantizedEnumerationIndex",
