@@ -71,6 +71,7 @@ from mixle.task.extract import (
     extraction_f1,
     tokenize,
 )
+from mixle.task.harness import ExtractorHarness, MatcherHarness, replace_alerter, replace_extractor, replace_matcher
 from mixle.task.llm import (
     CallableLLM,
     OpenAICompatLLM,
@@ -121,6 +122,8 @@ __all__ = [
     "EdgeFootprint",
     "EdgeSpace",
     "ExtractionIO",
+    "ExtractorHarness",
+    "MatcherHarness",
     "FieldChoice",
     "HashedNGram",
     "HashedRecord",
@@ -168,6 +171,9 @@ __all__ = [
     "pick_label",
     "recommend_model",
     "recommend_route",
+    "replace_alerter",
+    "replace_extractor",
+    "replace_matcher",
     "route_stack",
     "scorecard",
     "spec_to_estimator",
