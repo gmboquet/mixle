@@ -86,6 +86,42 @@ class WrappedNormalDistribution(SequenceEncodableProbabilityDistribution):
         d = d0[:, None] + _TWO_PI * self._k[None, :]  # (n, 2K+1)
         return logsumexp(-0.5 * d * d / self.sigma2, axis=1) - self._log_norm
 
+    # --- compute-engine backend (numpy + torch/GPU), leaf path only. The wrap-branch count K is a
+    # per-instance truncation, so mixtures score component-by-component (each with its exact K) through
+    # the generic kernel rather than a stacked trio. Sufficient statistics use the engines' trig tier. ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+
+    @classmethod
+    def compute_declaration(cls):
+        from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+
+        return DistributionDeclaration(
+            name="wrapped_normal",
+            distribution_type=cls,
+            parameters=(ParameterSpec("mu"), ParameterSpec("sigma2", constraint="positive")),
+            statistics=(StatisticSpec("sum_cos"), StatisticSpec("sum_sin"), StatisticSpec("count")),
+            support="real",
+            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Per-row circular moments ``(sum_cos, sum_sin, count)`` — uses the engine trig tier."""
+        theta = engine.asarray(x)
+        return engine.cos(theta), engine.sin(theta), theta * 0.0 + engine.asarray(1.0)
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density: the (2K+1)-branch wrapped logsumexp on engine ops."""
+        theta = engine.asarray(x)
+        raw = theta - self.mu
+        d0 = raw - _TWO_PI * engine.floor((raw + math.pi) / _TWO_PI)  # wrap to (-pi, pi]
+        d = d0[:, None] + engine.asarray(_TWO_PI * self._k)[None, :]
+        return engine.logsumexp(-0.5 * d * d / self.sigma2, axis=1) - self._log_norm
+
     def sampler(self, seed: int | None = None) -> "WrappedNormalSampler":
         """Return a sampler that wraps ``N(mu, sigma2)`` onto the circle."""
         return WrappedNormalSampler(self, seed)
