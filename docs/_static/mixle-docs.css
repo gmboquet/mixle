@@ -1,0 +1,150 @@
+body {
+  letter-spacing: 0;
+}
+
+.content {
+  line-height: 1.68;
+}
+
+.content h1,
+.content h2,
+.content h3 {
+  letter-spacing: 0;
+}
+
+.content h1 {
+  margin-bottom: 1.1rem;
+}
+
+.content h2 {
+  margin-top: 2.4rem;
+}
+
+.mixle-hero {
+  border-bottom: 1px solid var(--color-background-border);
+  margin: 0 0 2rem;
+  padding: 0.35rem 0 2rem;
+}
+
+.mixle-eyebrow {
+  color: var(--color-brand-content);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin: 0 0 1rem;
+  text-transform: uppercase;
+}
+
+.mixle-hero-copy {
+  color: var(--color-foreground-secondary);
+  font-size: 1.08rem;
+  margin: 0 0 1rem;
+  max-width: 52rem;
+}
+
+.mixle-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin: 1.45rem 0 0;
+}
+
+.mixle-button {
+  align-items: center;
+  border: 1px solid var(--color-background-border);
+  border-radius: 6px;
+  color: var(--color-brand-content);
+  display: inline-flex;
+  font-weight: 650;
+  line-height: 1.2;
+  min-height: 2.45rem;
+  padding: 0.55rem 0.85rem;
+  text-decoration: none;
+}
+
+.mixle-button:hover {
+  border-color: var(--color-brand-primary);
+  text-decoration: none;
+}
+
+.mixle-button-primary {
+  background: var(--color-brand-primary);
+  border-color: var(--color-brand-primary);
+  color: var(--color-background-primary);
+}
+
+.mixle-button-primary:hover {
+  color: var(--color-background-primary);
+}
+
+.content dl.simple dt {
+  color: var(--color-foreground-primary);
+  font-weight: 700;
+}
+
+.content dl.simple dd {
+  margin-bottom: 0.9rem;
+}
+
+.content table.docutils {
+  border: 1px solid var(--color-background-border);
+  border-collapse: collapse;
+  box-shadow: none;
+}
+
+.content table.docutils th {
+  background: var(--color-background-secondary);
+  border-bottom: 1px solid var(--color-background-border);
+}
+
+.content table.docutils td,
+.content table.docutils th {
+  padding: 0.65rem 0.75rem;
+  vertical-align: top;
+}
+
+.sidebar-logo-container {
+  margin: 0.35rem auto 0.85rem;
+}
+
+.sidebar-logo {
+  max-width: 12.5rem;
+  width: 88%;
+}
+
+.sidebar-brand-text {
+  font-weight: 700;
+}
+
+.sidebar-tree .toctree-l1 > .reference {
+  font-weight: 600;
+}
+
+code.literal {
+  border-radius: 4px;
+  padding: 0.05rem 0.2rem;
+}
+
+pre {
+  border-radius: 6px;
+}
+
+@media (max-width: 640px) {
+  .mixle-hero {
+    padding-bottom: 1.4rem;
+  }
+
+  .mixle-hero-copy {
+    font-size: 1rem;
+  }
+
+  .mixle-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mixle-button {
+    justify-content: center;
+    width: 100%;
+  }
+}
