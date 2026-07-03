@@ -248,34 +248,60 @@ class DesignModel:
 
     # -- the two model operations --
     def propose(
-        self, bounds: Sequence[tuple[float, float]], *, seed: Any = None, n_candidates: int = 256
+        self,
+        bounds: Sequence[tuple[float, float]],
+        *,
+        seed: Any = None,
+        n_candidates: int = 256,
+        prefilter: Callable[[tuple], Any] | None = None,
+        max_tries: int = 8,
     ) -> np.ndarray:
-        """The next design worth training: feasibility-weighted EI over everything seen so far."""
-        if len(self.X) < 2:
-            rng = seed if isinstance(seed, RandomState) else RandomState(seed)
-            return np.array([rng.uniform(lo, hi) for lo, hi in bounds])
-        if self.n_constraints == 0:
-            from mixle.doe import propose_next
+        """The next design worth training: feasibility-weighted EI over everything seen so far.
 
-            return propose_next(
+        ``prefilter`` closes the designer loop: pass a design judge -- typically the tiny student
+        from :func:`distill_designer`, called as ``prefilter(point_tuple) -> label`` -- and any
+        proposal it labels ``"weak"`` is vetoed and re-drawn (fresh acquisition seed), up to
+        ``max_tries``. The distilled design knowledge thus skips known-bad designs before a single
+        training run is spent; if every retry is vetoed the last proposal is returned anyway (the
+        judge advises, the surrogate decides).
+        """
+        rng = seed if isinstance(seed, RandomState) else RandomState(seed)
+
+        def _one(s: Any) -> np.ndarray:
+            if len(self.X) < 2:
+                r = s if isinstance(s, RandomState) else RandomState(s)
+                return np.array([r.uniform(lo, hi) for lo, hi in bounds])
+            if self.n_constraints == 0:
+                from mixle.doe import propose_next
+
+                return propose_next(
+                    np.asarray(self.X),
+                    np.asarray(self.quality),
+                    bounds,
+                    seed=s,
+                    maximize=True,
+                    n_candidates=n_candidates,
+                )
+            from mixle.doe import propose_next_constrained
+
+            return propose_next_constrained(
                 np.asarray(self.X),
                 np.asarray(self.quality),
+                np.asarray(self.violations),
                 bounds,
-                seed=seed,
+                seed=s,
                 maximize=True,
                 n_candidates=n_candidates,
             )
-        from mixle.doe import propose_next_constrained
 
-        return propose_next_constrained(
-            np.asarray(self.X),
-            np.asarray(self.quality),
-            np.asarray(self.violations),
-            bounds,
-            seed=seed,
-            maximize=True,
-            n_candidates=n_candidates,
-        )
+        point = _one(rng)
+        if prefilter is None:
+            return point
+        for _ in range(max(1, int(max_tries)) - 1):
+            if prefilter(tuple(float(v) for v in point)) != "weak":
+                return point
+            point = _one(rng)
+        return point
 
     def predict(self, points: Any) -> dict[str, np.ndarray]:
         """For untrained designs: predicted quality (mean, sd) and P(fits the device)."""
@@ -373,6 +399,7 @@ def distill_for_edge(
     labels: Sequence[str] | None = None,
     space: EdgeSpace | None = None,
     design: DesignModel | None = None,
+    designer: Callable[[tuple], Any] | None = None,
     n_init: int = 4,
     n_iter: int = 6,
     screen_fidelity: float = 0.3,
@@ -387,8 +414,9 @@ def distill_for_edge(
     and measured (:func:`footprint`); the top ``promote`` feasible screens are re-trained at full
     fidelity and the best feasible one wins (ties -> smaller). Pass a previous search's ``design``
     (same space + device shape) to warm-start: the surrogate already knows which regions blow the
-    budget. If nothing fits the device, the least-infeasible student is returned with
-    ``feasible=False`` -- inspect ``result.pareto`` for the real trade-off frontier.
+    budget. Pass ``designer`` (the tiny judge from :func:`distill_designer`) to veto known-weak
+    proposals before any training is spent. If nothing fits the device, the least-infeasible student
+    is returned with ``feasible=False`` -- inspect ``result.pareto`` for the real trade-off frontier.
     """
     train_data = list(train_data)
     val_data = list(val_data)
@@ -475,7 +503,7 @@ def distill_for_edge(
     for row in latin_hypercube(space.bounds(), n_seed, rng):
         _evaluate(np.asarray(row), "screen")
     for _ in range(n_iter):
-        _evaluate(design.propose(space.bounds(), seed=rng), "screen")
+        _evaluate(design.propose(space.bounds(), seed=rng, prefilter=designer), "screen")
 
     # -- promote: full-fidelity re-train of the best feasible screens (fall back to least-infeasible)
     screens = [t for t in trials if t["fidelity"] == "screen"]
