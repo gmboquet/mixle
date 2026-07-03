@@ -96,10 +96,26 @@ def _input_kind(x: Any) -> str:
 
 
 def _fit_student(kind: str, inputs: list, labels: list, distill_kw: dict) -> TaskModel:
+    kw = dict(distill_kw)
+    student = kw.pop("student", "mlp")
+    if student == "generative":
+        if kind == "text":
+            from mixle.task.generative_text import distill_text_generative_from_labels
+
+            keep = {k: v for k, v in kw.items() if k in ("labels", "pseudo_count", "min_count", "task")}
+            return distill_text_generative_from_labels(inputs, labels, **keep)
+        from mixle.task.distill import distill_structured_from_labels
+
+        keep = {
+            k: v
+            for k, v in kw.items()
+            if k in ("labels", "n_components", "min_gain", "n_bins", "max_its", "seed", "task")
+        }
+        return distill_structured_from_labels(inputs, labels, **keep)
     fit = distill_from_labels if kind == "text" else distill_records_from_labels
     if kind != "text":  # the n-gram order is a text-only knob
-        distill_kw = {k: v for k, v in distill_kw.items() if k != "n"}
-    return fit(inputs, labels, **distill_kw)
+        kw = {k: v for k, v in kw.items() if k != "n"}
+    return fit(inputs, labels, **kw)
 
 
 def _fit_gate(kind: str, inputs: list, alpha: float, seed: int, dim: int = 256) -> DensityGate:
@@ -367,6 +383,10 @@ def solve(
         cost: Optional :class:`~mixle.task.economics.CostModel` for realized-savings reporting.
         seed: Split + fit determinism.
         **distill_kw: Student knobs forwarded to distillation (``dim``, ``hidden``, ``epochs``, ``lr``, …).
+            ``student="generative"`` swaps the hashed-feature MLP for mixle's generative student —
+            per-class token models for text (:mod:`mixle.task.generative_text`) or the structure-learned
+            joint for records (:func:`~mixle.task.distill.distill_structured_from_labels`): exact
+            posteriors, no torch needed at inference, and a built-in ``log p(x)``.
 
     Returns:
         A :class:`Solution` -- call it like the original function; ``report()`` / ``improve()`` / ``save()``.
