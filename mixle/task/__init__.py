@@ -102,6 +102,7 @@ from mixle.task.quantize import (
     quantize_mlp,
 )
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
+from mixle.task.regress import RegressionSolution, solve_regression
 from mixle.task.router import Router, RouterStats, route_stack
 from mixle.task.scorecard import Scorecard, scorecard
 from mixle.task.sft_plan import GenerativePlanner, sft_planner
@@ -146,6 +147,7 @@ __all__ = [
     "Router",
     "Scorecard",
     "RouterStats",
+    "RegressionSolution",
     "GenerativePlanner",
     "Planner",
     "Solution",
@@ -208,6 +210,7 @@ __all__ = [
     "save_json",
     "save_module",
     "solve",
+    "solve_regression",
     "measure_inference_seconds",
     "measure_ops_per_second",
     "task_fingerprint",
