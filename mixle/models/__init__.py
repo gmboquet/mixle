@@ -1,4 +1,28 @@
-"""Objective-driven model helpers for non-iid likelihoods."""
+"""Applied models -- richer, domain-specialized families that plug into the same contract as ``mixle.stats``.
+
+Where ``mixle.stats`` holds the *elementary* distributions (a Gaussian, a Poisson, a categorical), this package
+holds the models that are **more than one elementary density**: a neural network, a Gaussian process, a random
+forest, a knowledge graph, a grammar, a decision process, a causal skeleton. Each is exposed through the same
+five-piece ``Distribution``/``Estimator``/``Accumulator``/``Sampler``/``Encoder`` contract (or, for the
+supervised/decision/causal ones, a small task-appropriate surface), so it composes with the stats core -- a
+neural leaf drops into a ``CompositeDistribution``, a GP into a mixture, and so on.
+
+The right mental model is a small catalog of applied model *families* (``mixle/models/README.md`` maps every
+module to one):
+
+  * **neural & deep** -- neural nets, transformers/LMs, embeddings, and their training utilities;
+  * **non-parametric** -- Gaussian processes and random forests as ``p(y | x)`` leaves;
+  * **relational / structured** -- knowledge graphs, random graphs, grammars;
+  * **latent-variable** -- Bayesian-nonparametric mixtures (Dirichlet process);
+  * **decision & control** -- partially observable Markov decision processes;
+  * **causal discovery** -- constraint-based structure learning.
+
+(The imports below stay alphabetical -- the ruff import sorter enforces that -- so use the families above, not
+import order, as the map.)
+
+These surfaces vary in maturity (see the Project status table in the top-level README); treat them as specialist
+adapters composable with the stable stats spine, not as the spine itself.
+"""
 
 from mixle.models.continual import ewc, fisher_diagonal, snapshot
 from mixle.models.dependence import (
