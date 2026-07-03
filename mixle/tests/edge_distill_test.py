@@ -155,6 +155,24 @@ class DesignModelTest(unittest.TestCase):
         self.assertEqual(p.shape, (3,))
         self.assertTrue(np.all((p >= 0) & (p <= 1)))
 
+    def test_prefilter_vetoes_weak_designs(self):
+        # the designer loop closed: a judge labeling x0 > 0.5 'weak' steers proposals below it
+        dm = self._seeded()
+        judge = lambda pt: "weak" if pt[0] > 0.5 else "good"  # noqa: E731
+        picks = np.array([dm.propose([(0.0, 1.0)] * 2, seed=s, prefilter=judge) for s in range(8)])
+        self.assertGreaterEqual(np.mean(picks[:, 0] <= 0.5), 0.875)  # at most one veto survives retries
+
+    def test_prefilter_that_rejects_everything_still_returns(self):
+        dm = self._seeded()
+        p = dm.propose([(0.0, 1.0)] * 2, seed=0, prefilter=lambda pt: "weak", max_tries=3)
+        self.assertEqual(p.shape, (2,))  # the judge advises; the surrogate still decides
+
+    def test_cold_propose_respects_prefilter(self):
+        dm = DesignModel("sig", 1)
+        judge = lambda pt: "weak" if pt[0] > 0.3 else "good"  # noqa: E731
+        picks = np.array([dm.propose([(0.0, 1.0)] * 2, seed=s, prefilter=judge) for s in range(8)])
+        self.assertGreaterEqual(np.mean(picks[:, 0] <= 0.3), 0.75)  # random draws filtered too
+
 
 class DistillForEdgeTest(unittest.TestCase):
     @classmethod
@@ -250,6 +268,26 @@ class DistillForEdgeTest(unittest.TestCase):
         )
         self.assertGreater(len(warm.design), n_ledger)  # knowledge accumulates across searches
         self.assertGreaterEqual(warm.agreement, 0.9 * cold.agreement)  # cheaper warm run holds the line
+
+    def test_designer_prefilter_passes_through_the_front_door(self):
+        # a judge vetoing the structured half of the cube (p0 > 0.5) rides along without breaking
+        # the search; the winner still fits the device and matches the teacher.
+        dev = DeviceSpec(max_bytes=200_000)
+        judge = lambda pt: "weak" if pt[0] > 0.5 else "good"  # noqa: E731
+        res = distill_for_edge(
+            self.teacher,
+            self.train,
+            self.val,
+            dev,
+            space=_tiny_space(),
+            designer=judge,
+            n_init=3,
+            n_iter=2,
+            promote=1,
+            seed=0,
+        )
+        self.assertTrue(res.feasible)
+        self.assertGreater(res.agreement, 0.7)
 
     def test_incompatible_design_model_is_rejected(self):
         dev = DeviceSpec(max_bytes=200_000)
