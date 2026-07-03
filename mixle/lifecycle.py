@@ -33,6 +33,31 @@ from typing import Any
 import numpy as np
 
 
+def saddle_suspect(fitted: Any, data: Any, *, sample: int = 200, tol: float = 0.02) -> bool:
+    """Family-agnostic symmetric-saddle check for latent-variable fits.
+
+    At the symmetric saddle every component is identical, so every observation's component posterior
+    is (numerically) uniform. Suspect when, over a data sample, NO observation's posterior deviates
+    from uniform by more than ``tol``. Non-latent models (no ``posterior``/``components``) return False.
+    """
+    if not (hasattr(fitted, "posterior") and hasattr(fitted, "components")):
+        return False
+    rows = list(data)[: int(sample)]
+    if not rows:
+        return False
+    k = len(fitted.components)
+    if k < 2:
+        return False
+    try:
+        dev = 0.0
+        for x in rows:
+            post = np.asarray(fitted.posterior(x), dtype=np.float64).reshape(-1)
+            dev = max(dev, float(np.max(np.abs(post - 1.0 / k))))
+        return dev < tol
+    except Exception:  # noqa: BLE001 - a family whose posterior we cannot read is not "suspect"
+        return False
+
+
 class Model:
     """One object over the model lifecycle: build / fit / evaluate / enumerate / distill / deploy / use."""
 
@@ -45,14 +70,92 @@ class Model:
         self._fit_info: dict[str, Any] = {}
 
     # --- fit / use -------------------------------------------------------------------------------
-    def fit(self, data: Any, **optimize_kw: Any) -> Model:
-        """Fit via :func:`mixle.inference.optimize`; the algorithm follows from the model's structure."""
+    def fit(self, data: Any, *, restarts: Any = "auto", **optimize_kw: Any) -> Model:
+        """Fit via :func:`mixle.inference.optimize`; the algorithm follows from the model's structure.
+
+        ``restarts="auto"`` (default) makes latent-variable fitting genuinely automatic: after the
+        plain fit, a family-agnostic saddle check runs (a mixture stuck at the symmetric saddle gives
+        every observation a ~uniform component posterior), and on suspicion the fit silently reruns as
+        multi-restart EM (:func:`mixle.inference.best_of`), keeping the better log-likelihood and
+        recording what happened in ``notes``. Pass an int to force that many restarts up front, or
+        ``restarts=None`` for the raw single fit."""
         from mixle.inference import optimize
 
         optimize_kw.setdefault("out", None)
         self.fitted = optimize(data, self.spec, **optimize_kw)
         self._fit_info = {"n": len(data) if hasattr(data, "__len__") else None, "when": time.time()}
+
+        want = 4 if restarts == "auto" else restarts
+        if want and (restarts != "auto" or saddle_suspect(self.fitted, data)):
+            better, delta_ll, how = self._refit_symmetry_broken(data, int(want), optimize_kw)
+            if better is not None:
+                self.fitted = better
+                why = "saddle suspected" if restarts == "auto" else "restarts requested"
+                self.notes.append(f"{why}: {how} kept (log-lik +{delta_ll:.3f})")
+            elif restarts == "auto":
+                self.notes.append("saddle suspected: symmetry-broken refits did not improve — inspect the fit")
         return self
+
+    def _refit_symmetry_broken(self, data: Any, trials: int, optimize_kw: dict) -> tuple[Any, float, str]:
+        """Escape the symmetric saddle by construction, not by re-rolling the same init.
+
+        For a mixture estimator, each attempt fits every component on its OWN random disjoint shard of
+        the data (a hard-partition init: components start different because they saw different data),
+        then runs full EM from that start. Falls back to :func:`mixle.inference.best_of` when the
+        estimator's components are not accessible. Returns ``(better, ll_gain, description)``."""
+        from mixle.inference import best_of, optimize
+
+        rng = optimize_kw.get("rng") or np.random.RandomState(1)
+        max_its = int(optimize_kw.get("max_its", 20))
+        base = self.evaluate(data)["total_log_density"]
+        rows = list(data)
+
+        comp_ests = getattr(self.spec, "estimators", None)
+        best_ll, best_model, how = base, None, ""
+        if comp_ests:
+            from mixle.stats import MixtureDistribution
+
+            k = len(comp_ests)
+            # Random disjoint shards are exchangeable samples of the SAME mixture — each component would
+            # refit the pooled law and the symmetry survives. Sort by the current (pooled/saddled) fit's
+            # log-density instead: contiguous quantile blocks live in different density regions, so the
+            # components start genuinely different. Trials differ by rotating the sorted order.
+            enc0 = self.fitted.dist_to_encoder().seq_encode(rows)
+            scores = np.asarray(self.fitted.seq_log_density(enc0), dtype=np.float64)
+            sorted_order = np.argsort(scores)
+            for _ in range(int(trials)):
+                order = np.roll(sorted_order, int(rng.randint(len(rows))))
+                shards = np.array_split(order, k)
+                try:
+                    comps = [
+                        optimize([rows[i] for i in shard], comp_ests[j], max_its=2, out=None)
+                        for j, shard in enumerate(shards)
+                    ]
+                    init = MixtureDistribution(comps, [1.0 / k] * k)
+                    cand = optimize(rows, self.spec, max_its=max_its, prev_estimate=init, out=None)
+                except Exception:  # noqa: BLE001 - a failed attempt is just not an improvement
+                    continue
+                enc = cand.dist_to_encoder().seq_encode(rows)
+                ll = float(np.sum(np.asarray(cand.seq_log_density(enc), dtype=np.float64)))
+                if ll > best_ll + 1e-6:
+                    best_ll, best_model, how = ll, cand, f"hard-partition init x{trials}"
+        if best_model is None:  # estimator shape unknown (or partitions didn't help): plain multi-restart
+            ll_new, cand = best_of(
+                rows,
+                None,
+                self.spec,
+                trials=int(trials),
+                max_its=max_its,
+                init_p=0.1,
+                delta=optimize_kw.get("delta", 1.0e-9),
+                rng=rng,
+                out=None,
+            )
+            if np.isfinite(ll_new) and ll_new > best_ll + 1e-6:
+                best_ll, best_model, how = float(ll_new), cand, f"best-of-{trials} restart"
+        if best_model is not None:
+            return best_model, float(best_ll - base), how
+        return None, 0.0, ""
 
     def _require_fitted(self) -> Any:
         if self.fitted is None:
