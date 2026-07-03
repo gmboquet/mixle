@@ -130,7 +130,7 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def exp_family_sufficient_statistics(x: Any, engine: Any) -> tuple[Any, ...]:
-        """Placeholder; the real one-hot needs the category set, so ``..._from_params`` is used."""
+        """Return a shape-only fallback; category-aware statistics come from ``..._from_params``."""
         n = len(CategoricalDistribution._ef_labels(x))
         return (engine.asarray(np.zeros(n, dtype=np.float64)),)
 

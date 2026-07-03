@@ -2,7 +2,7 @@
 
 The two differentiators in one run:
 
-  * the teacher is an **LLM** (here a local stub via ``CallableLLM``; swap in ``OpenAICompatLLM(base_url, model)``
+  * the teacher is an **LLM** (here a local ``CallableLLM``; swap in ``OpenAICompatLLM(base_url, model)``
     to use Ollama / vLLM / a hosted endpoint unchanged);
   * **active labeling** (DoE applied to the labeling decision) queries that LLM only for the most informative
     examples, reaching the same student quality as random labeling for far fewer paid calls.

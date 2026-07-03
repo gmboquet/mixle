@@ -98,8 +98,8 @@ class _LinearGaussianFactor:
         discrete: dict[int, list[Any]],
         weights: np.ndarray | None = None,
     ):
-        stub = cls(child, parents, discrete, np.zeros(1), 1.0)
-        x = stub._design(cols)
+        proto = cls(child, parents, discrete, np.zeros(1), 1.0)
+        x = proto._design(cols)
         y = np.asarray(cols[child], dtype=np.float64)
         if weights is None:
             coef, *_ = np.linalg.lstsq(x, y, rcond=None)
@@ -202,8 +202,8 @@ class _GLMFactor:
         discrete: dict[int, list[Any]],
         weights: np.ndarray | None = None,
     ):
-        stub = cls(child, parents, discrete, "binomial", [], np.zeros(1))
-        x = stub._design(cols)
+        proto = cls(child, parents, discrete, "binomial", [], np.zeros(1))
+        x = proto._design(cols)
         col = cols[child]
         levels = sorted(set(col), key=repr)
         is_count = all(isinstance(v, (int, np.integer)) and not isinstance(v, bool) and int(v) >= 0 for v in col)

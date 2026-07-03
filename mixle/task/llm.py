@@ -1,7 +1,7 @@
 """A tiny provider-agnostic LLM surface -- so a regular program can reach a small LM, and an LM can be a teacher.
 
 mixle has no LLM client of its own; this is the minimal seam. An :class:`LLM` is anything with ``complete(prompt)
--> str``. :class:`CallableLLM` wraps a local function (a llama.cpp/transformers call, or a stub in tests);
+-> str``. :class:`CallableLLM` wraps a local function (a llama.cpp/transformers call, or a test double);
 :class:`OpenAICompatLLM` posts to any OpenAI-compatible ``/v1/chat/completions`` endpoint (Ollama, vLLM, TGI,
 llama.cpp server, a hosted API) using only the standard library -- no ``openai``/``requests`` dependency.
 
