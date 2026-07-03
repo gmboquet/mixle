@@ -112,6 +112,10 @@ class NumpyEngine(ComputeEngine):
     digamma = staticmethod(scipy.special.digamma)
     betaln = staticmethod(scipy.special.betaln)
     erf = staticmethod(scipy.special.erf)
+    # optional trig tier (not in REQUIRED_OPS): directional families use these where the engine has them
+    cos = staticmethod(np.cos)
+    sin = staticmethod(np.sin)
+    arctan2 = staticmethod(np.arctan2)
 
     def index_add(self, out: np.ndarray, index: np.ndarray, values: np.ndarray) -> np.ndarray:
         """Add ``values`` into ``out`` at ``index`` using NumPy's ``add.at`` semantics."""

@@ -51,6 +51,10 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
         self._log_num = math.log1p(-self.rho * self.rho) - _LOG_2PI  # log[(1-rho^2)/(2 pi)]
         self._one_plus = 1.0 + self.rho * self.rho
+        # parameter-side trig, cached as attributes: the compute declaration exposes these (not mu) so the
+        # generated scorer sees scalar parameters and the (cos, sin) encoding needs no engine trig
+        self.cos_mu = math.cos(self.mu)
+        self.sin_mu = math.sin(self.mu)
 
     def __str__(self) -> str:
         return "WrappedCauchyDistribution(%s, %s, name=%s, keys=%s)" % (
@@ -73,6 +77,89 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
         cos_t, sin_t = x
         cos_dev = cos_t * math.cos(self.mu) + sin_t * math.sin(self.mu)  # cos(theta - mu)
         return self._log_num - np.log(self._one_plus - 2.0 * self.rho * cos_dev)
+
+    # --- compute-engine backend (numpy + torch/GPU). The encoder pre-computes (cos, sin) and the
+    # parameter-side trig is host-scalar math, so scoring needs no engine trig at all. ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+
+    @classmethod
+    def compute_declaration(cls):
+        from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
+
+        return DistributionDeclaration(
+            name="wrapped_cauchy",
+            distribution_type=cls,
+            parameters=(ParameterSpec("cos_mu"), ParameterSpec("sin_mu"), ParameterSpec("rho")),
+            statistics=(StatisticSpec("sum_cos"), StatisticSpec("sum_sin"), StatisticSpec("count")),
+            support="real",
+            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
+        )
+
+    @staticmethod
+    def backend_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
+        """Per-row circular moments in accumulator order ``(sum_cos, sum_sin, count)``."""
+        cos_t = engine.asarray(x[0])
+        sin_t = engine.asarray(x[1])
+        return cos_t, sin_t, cos_t * 0.0 + engine.asarray(1.0)
+
+    @staticmethod
+    def backend_log_density_from_params(cos_t: Any, sin_t: Any, cos_mu: Any, sin_mu: Any, rho: Any, engine: Any) -> Any:
+        """Engine-neutral wrapped-Cauchy log-density from pre-computed observation/parameter trig."""
+        cos_dev = cos_t * cos_mu + sin_t * sin_mu
+        log_num = engine.log(1.0 - rho * rho) - engine.log(engine.asarray(2.0 * math.pi))
+        return log_num - engine.log(1.0 + rho * rho - 2.0 * rho * cos_dev)
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized log-density for encoded ``(cos, sin)`` data."""
+        return self.backend_log_density_from_params(
+            engine.asarray(x[0]),
+            engine.asarray(x[1]),
+            engine.asarray(math.cos(self.mu)),
+            engine.asarray(math.sin(self.mu)),
+            engine.asarray(self.rho),
+            engine,
+        )
+
+    @classmethod
+    def backend_stacked_params(cls, dists: Sequence["WrappedCauchyDistribution"], engine: Any) -> dict[str, Any]:
+        """Stacked wrapped-Cauchy parameters (trig computed host-side) for a homogeneous mixture kernel."""
+        return {
+            "cos_mu": engine.asarray([math.cos(d.mu) for d in dists]),
+            "sin_mu": engine.asarray([math.sin(d.mu) for d in dists]),
+            "rho": engine.asarray([d.rho for d in dists]),
+        }
+
+    @classmethod
+    def backend_stacked_log_density(cls, x: Any, params: dict[str, Any], engine: Any) -> Any:
+        """Return an ``(n, k)`` matrix of wrapped-Cauchy log densities."""
+        cos_t = engine.asarray(x[0])
+        sin_t = engine.asarray(x[1])
+        return cls.backend_log_density_from_params(
+            cos_t[:, None],
+            sin_t[:, None],
+            params["cos_mu"][None, :],
+            params["sin_mu"][None, :],
+            params["rho"][None, :],
+            engine,
+        )
+
+    @classmethod
+    def backend_stacked_sufficient_statistics(
+        cls, x: Any, weights: Any, params: dict[str, Any], engine: Any
+    ) -> tuple[Any, Any, Any]:
+        """Stacked circular moments ``(sum_cos, sum_sin, count)`` using engine-resident arrays."""
+        cos_t = engine.asarray(x[0])
+        sin_t = engine.asarray(x[1])
+        ww = engine.asarray(weights)
+        return (
+            engine.sum(ww * cos_t[:, None], axis=0),
+            engine.sum(ww * sin_t[:, None], axis=0),
+            engine.sum(ww, axis=0),
+        )
 
     def sampler(self, seed: int | None = None) -> "WrappedCauchySampler":
         """Return a sampler for drawing angles from this distribution."""
