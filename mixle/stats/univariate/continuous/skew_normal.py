@@ -32,6 +32,7 @@ from mixle.stats.compute.pdist import (
 
 _B = math.sqrt(2.0 / math.pi)
 _HALF_LOG_2PI = 0.5 * math.log(2.0 * math.pi)
+_INV_SQRT2 = 1.0 / math.sqrt(2.0)
 # largest attainable |skewness| for the skew-normal (delta -> +/-1): (4-pi)/2 * b^3 / (1-b^2)^{3/2}
 _MAX_SKEW = ((4.0 - math.pi) / 2.0) * _B**3 / (1.0 - _B * _B) ** 1.5
 
@@ -73,6 +74,34 @@ class SkewNormalDistribution(SequenceEncodableProbabilityDistribution):
         """Return vectorized log-density values for sequence-encoded observations."""
         z = (np.asarray(x, dtype=np.float64) - self.loc) / self.scale
         return math.log(2.0) - self.log_scale - _HALF_LOG_2PI - 0.5 * z * z + log_ndtr(self.shape * z)
+
+    # --- compute-engine backend (numpy + torch/GPU), SCORING only: the Welford running-moment
+    # accumulator stays host-side (a bit-correct E-step fallback), so torch accelerates likelihood
+    # evaluation while estimation statistics remain exactly the legacy path. ---
+    @classmethod
+    def compute_capabilities(cls):
+        from mixle.stats.compute.capabilities import DistributionCapabilities
+
+        return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
+
+    @staticmethod
+    def _engine_log_ndtr(t: Any, engine: Any) -> Any:
+        """Stable ``log Phi(t)`` on engine ops: ``-log2 - t^2/2 + log erfcx(-t/sqrt2)``, with the
+        log-erfcx computed branch-wise so neither tail overflows."""
+        y = -t * _INV_SQRT2  # erfc argument
+        yp = engine.maximum(y, engine.asarray(0.0))
+        yn = engine.maximum(-y, engine.asarray(0.0))
+        log_erfcx_pos = engine.log(engine.erfcx(yp))
+        log_erfcx_neg = y * y + engine.log(2.0 - engine.exp(-yn * yn) * engine.erfcx(yn))
+        log_erfcx = engine.where(y >= 0.0, log_erfcx_pos, log_erfcx_neg)
+        return -math.log(2.0) - 0.5 * t * t + log_erfcx
+
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Engine-neutral vectorized skew-normal log-density for encoded data."""
+        z = (engine.asarray(x) - self.loc) / self.scale
+        return (
+            math.log(2.0) - self.log_scale - _HALF_LOG_2PI - 0.5 * z * z + self._engine_log_ndtr(self.shape * z, engine)
+        )
 
     def cdf(self, x: float) -> float:
         """Cumulative distribution function ``P(X <= x)`` (exact)."""
