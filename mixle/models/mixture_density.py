@@ -318,3 +318,65 @@ def build_conditional_flow(x_dim: int, y_dim: int, *, hidden: int = 32, layers: 
             return y
 
     return ConditionalFlow()
+
+
+# --- the discrete conditional: an autoregressive categorical conditioned on x -- exact p(y|x) over discrete y ----
+
+
+def build_conditional_autoregressive_categorical(x_dim: int, y_dim: int, n_categories: int, *, hidden: int = 64) -> Any:
+    """An autoregressive categorical conditioned on ``x``: exact ``p(y | x)`` over **discrete** ``y in {0..C-1}^y_dim``.
+
+    The conditional sibling of :func:`~mixle.models.neural_density.build_autoregressive_categorical` and the discrete
+    counterpart to :func:`build_conditional_flow`. It factorizes ``p(y | x) = prod_i p(y_i | y_{<i}, x)`` with a
+    MADE-masked net over ``y`` into which ``x`` is injected *unmasked* (degree 0, so every coordinate may depend on
+    ``x``). Each per-coordinate softmax is exactly a conditional, so the density is **exactly normalized** and
+    composes honestly. Exposes ``log_density(x, y)`` and ``sample_given(x)`` -- the contract a
+    :class:`NeuralConditionalDensity` adapts.
+    """
+    import torch
+    import torch.nn as nn
+
+    X = int(x_dim)
+    D = int(y_dim)
+    C = int(n_categories)
+
+    class MaskedLinear(nn.Linear):
+        def set_mask(self, mask: Any) -> None:
+            self.register_buffer("mask", torch.as_tensor(mask, dtype=torch.float32))
+
+        def forward(self, x: Any) -> Any:
+            return nn.functional.linear(x, self.mask * self.weight, self.bias)
+
+    class ConditionalAutoregressiveCategorical(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            m_in = np.arange(1, D + 1)
+            m_h = 1 + (np.arange(hidden) % max(D - 1, 1))
+            self.l1_y = MaskedLinear(D, hidden)  # autoregressive path over y
+            self.l1_x = nn.Linear(X, hidden)  # x is conditioning context, available to ALL coordinates (unmasked)
+            self.l2 = MaskedLinear(hidden, hidden)
+            self.lout = MaskedLinear(hidden, D * C)
+            self.l1_y.set_mask((m_h[:, None] >= m_in[None, :]).astype(float))
+            self.l2.set_mask((m_h[:, None] >= m_h[None, :]).astype(float))
+            m_out = np.repeat(m_in, C)
+            self.lout.set_mask((m_out[:, None] > m_h[None, :]).astype(float))  # strict: logits_i see y_{<i} (and x)
+            self.act = nn.Tanh()
+
+        def _logits(self, x: Any, y: Any) -> Any:
+            h = self.act(self.l1_y(y) + self.l1_x(x))
+            h = self.act(self.l2(h))
+            return self.lout(h).view(-1, D, C)  # (n, D, C)
+
+        def log_density(self, x: Any, y: Any) -> Any:
+            log_p = torch.log_softmax(self._logits(x, y), dim=-1)  # (n, D, C)
+            idx = y.long().clamp(0, C - 1).unsqueeze(-1)
+            return log_p.gather(-1, idx).squeeze(-1).sum(1)  # sum_i log p(y_i | y_{<i}, x)
+
+        def sample_given(self, x: Any) -> Any:
+            y = torch.zeros(x.shape[0], D, device=x.device)
+            for d in range(D):  # coordinate d depends on x (always) and already-filled y_{<d}
+                probs = torch.softmax(self._logits(x, y)[:, d, :], dim=-1)
+                y[:, d] = torch.multinomial(probs, 1).squeeze(-1).float()
+            return y
+
+    return ConditionalAutoregressiveCategorical()

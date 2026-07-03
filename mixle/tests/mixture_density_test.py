@@ -1,7 +1,7 @@
 """Conditional neural density adapter (mixle.models.mixture_density): wrap ANY torch p(y|x) as a mixle leaf.
 
 The point is the wrapper; build_mdn is the reference instance. The claim that earns it: a mixture density network
-captures a MULTIMODAL, HETEROSCEDASTIC conditional that a single-Gaussian NeuralLeaf structurally cannot -- and it
+captures a MULTIMODAL, HETEROSCEDASTIC conditional that a single-Gaussian NeuralGaussian structurally cannot -- and it
 still composes and fits under the same EM M-step.
 """
 
@@ -12,10 +12,17 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+import itertools  # noqa: E402
+
 from mixle.inference import optimize  # noqa: E402
-from mixle.models.mixture_density import NeuralConditionalDensity, build_conditional_flow, build_mdn  # noqa: E402
+from mixle.models.mixture_density import (  # noqa: E402
+    NeuralConditionalDensity,
+    build_conditional_autoregressive_categorical,
+    build_conditional_flow,
+    build_mdn,
+)
 from mixle.models.neural import make_mlp  # noqa: E402
-from mixle.models.neural_leaf import NeuralLeaf  # noqa: E402
+from mixle.models.neural_leaf import NeuralGaussian  # noqa: E402
 
 
 def _inverse_problem(seed, n=800):
@@ -43,7 +50,7 @@ class ConditionalDensityTest(unittest.TestCase):
         mdn = NeuralConditionalDensity(build_mdn(1, 1, k=5, hidden=32), m_steps=120, lr=5e-3)
         fit = optimize(train, mdn.estimator(), prev_estimate=mdn, max_its=8, out=None)
         # a single-Gaussian conditional leaf: one mean per t, cannot represent the multiple valid x
-        gauss = optimize(train, NeuralLeaf(make_mlp(1, [32, 32], 1), lr=1e-2).estimator(), max_its=40, out=None)
+        gauss = optimize(train, NeuralGaussian(make_mlp(1, [32, 32], 1), lr=1e-2).estimator(), max_its=40, out=None)
         self.assertGreater(_ll(fit, test) - _ll(gauss, test), 100.0)
 
     def test_samples_given_are_multimodal(self):
@@ -60,7 +67,7 @@ class ConditionalDensityTest(unittest.TestCase):
 def _within_y_curve(seed, n=800):
     """y1 | x ~ N(x, 0.4), y2 | y1 ~ N(y1^2, 0.1): y2 depends on y1 (WITHIN y), not just on x.
 
-    A single-Gaussian NeuralLeaf gives an isotropic mean f(x) -- it cannot represent the y2 = y1^2 correlation.
+    A single-Gaussian NeuralGaussian gives an isotropic mean f(x) -- it cannot represent the y2 = y1^2 correlation.
     """
     r = np.random.RandomState(seed)
     x = 1.2 * r.randn(n)
@@ -75,8 +82,8 @@ class ConditionalFlowTest(unittest.TestCase):
         train, test = _within_y_curve(0), _within_y_curve(1)
         cf = NeuralConditionalDensity(build_conditional_flow(1, 2, hidden=32, layers=6), m_steps=100, lr=5e-3)
         fit = optimize(train, cf.estimator(), prev_estimate=cf, max_its=8, out=None)
-        # NeuralLeaf: p(y|x) = N(y; mlp(x), sigma^2 I) -- isotropic, mean-only, blind to the y2=y1^2 coupling
-        gauss = optimize(train, NeuralLeaf(make_mlp(1, [32, 32], 2), lr=1e-2).estimator(), max_its=40, out=None)
+        # NeuralGaussian: p(y|x) = N(y; mlp(x), sigma^2 I) -- isotropic, mean-only, blind to the y2=y1^2 coupling
+        gauss = optimize(train, NeuralGaussian(make_mlp(1, [32, 32], 2), lr=1e-2).estimator(), max_its=40, out=None)
         self.assertGreater(_ll(fit, test) - _ll(gauss, test), 100.0)
 
     def test_samples_reproduce_the_within_y_relation(self):
@@ -87,6 +94,53 @@ class ConditionalFlowTest(unittest.TestCase):
         s = np.array([fit.sampler(i).sample_given((0.7,)) for i in range(300)])
         # at x=0.7, y1 ~ 0.7 and y2 ~ y1^2: the sampled (y1, y2) track the parabola, not an axis-aligned blob
         self.assertGreater(np.corrcoef(s[:, 0] ** 2, s[:, 1])[0, 1], 0.5)
+
+
+def _cond_discrete(seed, n=1200, xcat=3, C=4):
+    """x one-hot (xcat); y0 depends on x; y1=(y0+1)%C; y2=(y1+step)%C -- WITHIN-y coupling x alone can't predict."""
+    r = np.random.RandomState(seed)
+    out = []
+    for _ in range(n):
+        xi = r.randint(xcat)
+        onehot = np.eye(xcat)[xi]
+        y0 = (xi + r.randint(0, 2)) % C
+        y1 = (y0 + 1) % C
+        y2 = (y1 + r.randint(0, 2)) % C
+        out.append((onehot, np.array([y0, y1, y2], dtype=float)))
+    return out
+
+
+class ConditionalAutoregressiveCategoricalTest(unittest.TestCase):
+    def test_conditional_density_sums_to_one_over_y_space(self):
+        _seed()
+        # exactness of the conditional: for a fixed x, sum over ALL C^y_dim configs of y must be 1.
+        X, D, C = 3, 2, 3
+        leaf = NeuralConditionalDensity(build_conditional_autoregressive_categorical(X, D, C, hidden=16))
+        x = np.eye(X)[1]
+        ys = np.array(list(itertools.product(range(C), repeat=D)), dtype=float)
+        xs = np.repeat(x[None, :], len(ys), axis=0)
+        total = float(np.exp(leaf.seq_log_density((xs, ys))).sum())
+        self.assertAlmostEqual(total, 1.0, delta=1e-4)
+
+    def test_beats_conditional_independent_baseline(self):
+        _seed()
+        train, test = _cond_discrete(0), _cond_discrete(1)
+        car = NeuralConditionalDensity(
+            build_conditional_autoregressive_categorical(3, 3, 4, hidden=64), m_steps=120, lr=5e-3
+        )
+        fit = optimize(train, car.estimator(), prev_estimate=car, max_its=8, out=None)
+        # baseline: empirical p(y_d | x) per coordinate independently -- blind to the y2|y1, y1|y0 coupling
+        xtr = np.array([np.argmax(xy[0]) for xy in train])
+        ytr = np.array([xy[1] for xy in train], dtype=int)
+        cond = {}  # (x_cat, d) -> categorical over C
+        for xc in range(3):
+            for d in range(3):
+                cond[(xc, d)] = np.bincount(ytr[xtr == xc, d], minlength=4) / max((xtr == xc).sum(), 1)
+        indep_ll = 0.0
+        for onehot, y in test:
+            xc = int(np.argmax(onehot))
+            indep_ll += float(sum(np.log(cond[(xc, d)][int(y[d])] + 1e-12) for d in range(3)))
+        self.assertGreater(_ll(fit, test) - indep_ll, 100.0)
 
 
 class GeneralityTest(unittest.TestCase):
