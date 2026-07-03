@@ -103,6 +103,7 @@ from mixle.task.quantize import (
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
 from mixle.task.router import Router, RouterStats, route_stack
 from mixle.task.scorecard import Scorecard, scorecard
+from mixle.task.sft_plan import GenerativePlanner, sft_planner
 from mixle.task.solve import Solution, load_harvested, solve
 from mixle.task.toolcall import ToolCaller, ToolSpec, distill_tool_caller
 from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
@@ -140,6 +141,7 @@ __all__ = [
     "Router",
     "Scorecard",
     "RouterStats",
+    "GenerativePlanner",
     "Planner",
     "Solution",
     "StructuredClassifierIO",
@@ -183,6 +185,7 @@ __all__ = [
     "replace_matcher",
     "route_stack",
     "scorecard",
+    "sft_planner",
     "spec_to_estimator",
     "load_arrays",
     "load_json",
