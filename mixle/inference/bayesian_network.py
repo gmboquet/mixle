@@ -211,12 +211,14 @@ class _GLMFactor:
             from mixle.inference.glm import glm
 
             y01 = np.asarray([1.0 if v == levels[1] else 0.0 for v in col])
-            beta = glm(x, y01, family="binomial", weights=weights).coef
+            with np.errstate(all="ignore"):  # separable data diverges IRLS; the finite-gain guard rejects it
+                beta = glm(x, y01, family="binomial", weights=weights).coef
             return cls(child, parents, discrete, "binomial", levels, beta)
         if is_count and len(levels) > 2:
             from mixle.inference.glm import glm
 
-            beta = glm(x, np.asarray(col, dtype=np.float64), family="poisson", weights=weights).coef
+            with np.errstate(all="ignore"):
+                beta = glm(x, np.asarray(col, dtype=np.float64), family="poisson", weights=weights).coef
             return cls(child, parents, discrete, "poisson", [], beta)
         w = _fit_multinomial_logistic(x, np.asarray([levels.index(v) for v in col]), len(levels), weights=weights)
         return cls(child, parents, discrete, "multinomial", levels, w)
@@ -640,7 +642,10 @@ def learn_bayesian_network(
                 if q == c or q in parents[c] or _would_cycle(parents, q, c):
                     continue
                 cand = _fit_factor(c, [*parents[c], q], cols, discrete, levels, templates[c], max_its, w)
-                ll = _wsum(cand.seq_log_density(cols))
+                with np.errstate(all="ignore"):
+                    ll = _wsum(cand.seq_log_density(cols))
+                if not np.isfinite(ll):
+                    continue  # a diverged candidate fit (e.g. separable-data IRLS) loses outright
                 gain = ll - base_ll[c] - 0.5 * (cand.n_params() - factors[c].n_params()) * log_n
                 if gain > best[0]:
                     best = (gain, c, q, cand)
