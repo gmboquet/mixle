@@ -1,12 +1,12 @@
 """A streaming, non-buffering transformer-LM leaf -- the keystone that removes the host-RAM materialization wall.
 
-Where ``SoftmaxNeuralLeaf`` buffers the whole shard in the accumulator and news a fresh optimizer every M-step,
+Where ``NeuralCategorical`` buffers the whole shard in the accumulator and news a fresh optimizer every M-step,
 this **inverts the EM abstraction**: the M-step OWNS a long-lived module + optimizer, and the accumulator's
 ``seq_update`` IS one train step on a streamed micro-batch. ``value()`` returns ``(loss_sum, tokens)`` -- two
 floats, telemetry only, NEVER the corpus -- and ``estimate()`` is a no-op that wraps the live module.
 
 This deliberately voids the sufficient-statistic algebra (``value``/``combine`` are telemetry, not a foldable
-statistic): a sanctioned non-leaf carve-out (like ``NeuralLeaf.sample()`` raising), NOT an ABC change. It is the
+statistic): a sanctioned non-leaf carve-out (like ``NeuralGaussian.sample()`` raising), NOT an ABC change. It is the
 single-process prerequisite for the distributed (FSDP2) neural handle: each rank keeps its streamed shard
 resident and the only cross-rank collective becomes the in-backward gradient reduce-scatter, never a
 gather-suff-stats-to-root.
@@ -39,7 +39,7 @@ def _log_softmax(logits: np.ndarray) -> np.ndarray:
     return logits - m - np.log(np.exp(logits - m).sum(axis=1, keepdims=True))
 
 
-class StreamingTransformerLeaf(SequenceEncodableProbabilityDistribution):
+class StreamingTransformer(SequenceEncodableProbabilityDistribution):
     """Wraps a live, persistently-trained module. ``seq_log_density`` = next-token ``log p`` (eval/telemetry)."""
 
     def __init__(self, module: Any, device: str = "cpu") -> None:
@@ -57,7 +57,7 @@ class StreamingTransformerLeaf(SequenceEncodableProbabilityDistribution):
         block: int = 64,
         embedding: Any = None,
         device: str = "cpu",
-    ) -> StreamingTransformerLeaf:
+    ) -> StreamingTransformer:
         """Build the leaf from hyperparameters (no hand-built torch module) -- the declarative estimator surface.
 
         ``embedding`` optionally ties a shared :class:`~mixle.models.embedding.CategoricalEmbedding` across leaves.
@@ -68,7 +68,7 @@ class StreamingTransformerLeaf(SequenceEncodableProbabilityDistribution):
         return cls(module, device=device)
 
     def __str__(self) -> str:
-        return "StreamingTransformerLeaf()"
+        return "StreamingTransformer()"
 
     def log_density(self, xy: Any) -> float:
         return float(self.seq_log_density((np.atleast_2d(xy[0]), [int(xy[1])]))[0])
@@ -80,8 +80,8 @@ class StreamingTransformerLeaf(SequenceEncodableProbabilityDistribution):
             logits = self.module(torch.as_tensor(np.atleast_2d(x), dtype=torch.float32).to(self.device))
         return logits.argmax(1).cpu().numpy()
 
-    def sampler(self, seed: int | None = None) -> StreamingTransformerLeafSampler:
-        return StreamingTransformerLeafSampler(self, seed)
+    def sampler(self, seed: int | None = None) -> StreamingTransformerSampler:
+        return StreamingTransformerSampler(self, seed)
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
         torch = _torch()
@@ -96,22 +96,20 @@ class StreamingTransformerLeaf(SequenceEncodableProbabilityDistribution):
         y = np.asarray(y, dtype=int)
         return logp[np.arange(len(y)), y]
 
-    def estimator(self, pseudo_count: float | None = None) -> StreamingTransformerLeafEstimator:
-        return StreamingTransformerLeafEstimator(self.module, device=self.device)
+    def estimator(self, pseudo_count: float | None = None) -> StreamingTransformerEstimator:
+        return StreamingTransformerEstimator(self.module, device=self.device)
 
     def dist_to_encoder(self) -> StreamingTokenEncoder:
         return StreamingTokenEncoder()
 
 
-class StreamingTransformerLeafSampler(DistributionSampler):
-    def __init__(self, dist: StreamingTransformerLeaf, seed: int | None = None) -> None:
+class StreamingTransformerSampler(DistributionSampler):
+    def __init__(self, dist: StreamingTransformer, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
-        raise NotImplementedError(
-            "StreamingTransformerLeaf is a conditional next-token model; feed contexts to generate."
-        )
+        raise NotImplementedError("StreamingTransformer is a conditional next-token model; feed contexts to generate.")
 
 
 class StreamingTokenEncoder(DataSequenceEncoder):
@@ -127,7 +125,7 @@ class StreamingTokenEncoder(DataSequenceEncoder):
         return (x, y)
 
 
-class StreamingTransformerLeafAccumulator(SequenceEncodableStatisticAccumulator):
+class StreamingTransformerAccumulator(SequenceEncodableStatisticAccumulator):
     """``seq_update`` = ONE train step against the PERSISTENT module + optimizer; ``value()`` = telemetry only."""
 
     def __init__(self, module: Any, lr: float, device: str) -> None:
@@ -162,7 +160,7 @@ class StreamingTransformerLeafAccumulator(SequenceEncodableStatisticAccumulator)
     def seq_initialize(self, enc: Any, weights: Any, rng: Any) -> None:
         pass
 
-    def combine(self, other: Any) -> StreamingTransformerLeafAccumulator:
+    def combine(self, other: Any) -> StreamingTransformerAccumulator:
         ls, t = other
         self.loss_sum += float(ls)
         self.tokens += int(t)
@@ -171,7 +169,7 @@ class StreamingTransformerLeafAccumulator(SequenceEncodableStatisticAccumulator)
     def value(self) -> tuple[float, int]:
         return (self.loss_sum, self.tokens)  # two floats -- never the corpus
 
-    def from_value(self, v: tuple) -> StreamingTransformerLeafAccumulator:
+    def from_value(self, v: tuple) -> StreamingTransformerAccumulator:
         self.loss_sum, self.tokens = float(v[0]), int(v[1])
         return self
 
@@ -179,37 +177,37 @@ class StreamingTransformerLeafAccumulator(SequenceEncodableStatisticAccumulator)
         return StreamingTokenEncoder()
 
 
-class StreamingTransformerLeafAccumulatorFactory(StatisticAccumulatorFactory):
+class StreamingTransformerAccumulatorFactory(StatisticAccumulatorFactory):
     def __init__(self, module: Any, lr: float, device: str) -> None:
         self.module = module
         self.lr = lr
         self.device = device
 
-    def make(self) -> StreamingTransformerLeafAccumulator:
-        return StreamingTransformerLeafAccumulator(self.module, self.lr, self.device)
+    def make(self) -> StreamingTransformerAccumulator:
+        return StreamingTransformerAccumulator(self.module, self.lr, self.device)
 
 
-class StreamingTransformerLeafEstimator(ParameterEstimator):
+class StreamingTransformerEstimator(ParameterEstimator):
     def __init__(self, module: Any, lr: float = 3e-3, device: str = "cpu") -> None:
         self.module = module
         self.lr = lr
         self.device = device
 
-    def accumulator_factory(self) -> StreamingTransformerLeafAccumulatorFactory:
-        return StreamingTransformerLeafAccumulatorFactory(self.module, self.lr, self.device)
+    def accumulator_factory(self) -> StreamingTransformerAccumulatorFactory:
+        return StreamingTransformerAccumulatorFactory(self.module, self.lr, self.device)
 
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> StreamingTransformerLeaf:
+    def estimate(self, nobs: float | None, suff_stat: tuple) -> StreamingTransformer:
         # suff_stat = (loss_sum, tokens) telemetry; the module was already trained in place by seq_update -- no-op.
-        return StreamingTransformerLeaf(self.module, self.device)
+        return StreamingTransformer(self.module, self.device)
 
 
-class TransformerLMEstimator(StreamingTransformerLeafEstimator):
+class TransformerLMEstimator(StreamingTransformerEstimator):
     """A Transformer language model as a fit-ready estimator: ``TransformerLMEstimator(vocab, d_model=..., ...)``.
 
     The clean, declarative surface -- no hand-built torch module, no ``Leaf(...).estimator()`` two-step. Drops into
     ``MixtureEstimator``/``CompositeEstimator`` like any other ``*Estimator``. ``embedding`` optionally ties a
     shared :class:`~mixle.models.embedding.CategoricalEmbedding` (e.g. one word embedding across a mixture's
-    experts). ``TransformerLMEstimator(V, embedding=emb)`` and ``StreamingTransformerLeaf.from_config(V,
+    experts). ``TransformerLMEstimator(V, embedding=emb)`` and ``StreamingTransformer.from_config(V,
     embedding=emb).estimator()`` build the same thing.
     """
 
@@ -236,8 +234,8 @@ def stream_fit(
 ) -> tuple:
     """Train ``module`` by streaming micro-batches from ``token_source`` (a generator). The accumulator holds the
     PERSISTENT optimizer and trains incrementally; its payload stays ``(loss_sum, tokens)`` -- the corpus is never
-    buffered. Returns ``(StreamingTransformerLeaf, (loss_sum, tokens))``."""
-    est = StreamingTransformerLeafEstimator(module, lr=lr, device=device)
+    buffered. Returns ``(StreamingTransformer, (loss_sum, tokens))``."""
+    est = StreamingTransformerEstimator(module, lr=lr, device=device)
     acc = est.accumulator_factory().make()
     step = 0
     window_sum = 0.0
@@ -251,3 +249,8 @@ def stream_fit(
             log(step, window_sum / window_n)
             window_sum, window_n = 0.0, 0
     return est.estimate(None, acc.value()), acc.value()
+
+
+# --- back-compat aliases (the classes were renamed off the '...Leaf' suffix) ---
+StreamingTransformerLeaf = StreamingTransformer
+StreamingTransformerLeafEstimator = StreamingTransformerEstimator

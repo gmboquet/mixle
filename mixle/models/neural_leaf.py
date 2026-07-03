@@ -1,16 +1,16 @@
 """A neural network as a mixle conditional-density leaf -- the bridge that makes nets *generative* components.
 
-``NeuralLeaf(module)`` wraps a Torch module as a mixle distribution ``p(y | x) = N(y; module(x), noise^2 I)``
+``NeuralGaussian(module)`` wraps a Torch module as a mixle distribution ``p(y | x) = N(y; module(x), noise^2 I)``
 over observations ``(x, y)``. It implements the full ``SequenceEncodableProbabilityDistribution`` contract, so
 it drops into ``MixtureDistribution`` / ``CompositeDistribution`` / HMM emissions like any leaf -- but its EM
 **M-step is weighted-NLL gradient descent** on the module (warm-started across EM iterations => generalized EM).
 
-A ``MixtureDistribution`` of ``NeuralLeaf`` components is therefore a **mixture of neural experts**: the E-step
+A ``MixtureDistribution`` of ``NeuralGaussian`` components is therefore a **mixture of neural experts**: the E-step
 computes responsibilities, the M-step trains each expert by responsibility-weighted regression. Combined with
 the ``em`` move in :mod:`mixle.experimental.program`, the same model fits with EM where conjugate and gradient where neural::
 
     from mixle.stats import MixtureEstimator
-    experts = MixtureEstimator([NeuralLeaf(mlp_a).estimator(), NeuralLeaf(mlp_b).estimator()])
+    experts = MixtureEstimator([NeuralGaussian(mlp_a).estimator(), NeuralGaussian(mlp_b).estimator()])
     # ... run EM (estimate loop) -> each expert specializes, gated by the responsibilities.
 
 Requires torch (the module). The leaf is conditional: ``sampler().sample_given(x)`` draws ``y``; ``sample()``
@@ -61,7 +61,7 @@ def _resolve_device(device: Any, torch: Any) -> Any:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class NeuralLeaf(SequenceEncodableProbabilityDistribution):
+class NeuralGaussian(SequenceEncodableProbabilityDistribution):
     """``p(y | x) = N(y; module(x), noise^2 I)`` as a mixle leaf. Observation is the pair ``(x, y)``."""
 
     def __init__(
@@ -81,7 +81,7 @@ class NeuralLeaf(SequenceEncodableProbabilityDistribution):
         self.device = device  # None => CUDA if available, else CPU (see _resolve_device)
 
     def __str__(self) -> str:
-        return "NeuralLeaf(noise=%.3g)" % self.noise
+        return "NeuralGaussian(noise=%.3g)" % self.noise
 
     def _forward(self, x: np.ndarray) -> np.ndarray:
         torch = _torch()
@@ -123,35 +123,35 @@ class NeuralLeaf(SequenceEncodableProbabilityDistribution):
         sq = engine.sum(resid * resid, axis=1)
         return -0.5 * sq / (self.noise**2) - 0.5 * d * float(np.log(2.0 * np.pi * self.noise**2))
 
-    def sampler(self, seed: int | None = None) -> NeuralLeafSampler:
-        return NeuralLeafSampler(self, seed)
+    def sampler(self, seed: int | None = None) -> NeuralGaussianSampler:
+        return NeuralGaussianSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> NeuralLeafEstimator:
-        return NeuralLeafEstimator(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
+    def estimator(self, pseudo_count: float | None = None) -> NeuralGaussianEstimator:
+        return NeuralGaussianEstimator(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
 
-    def dist_to_encoder(self) -> NeuralLeafEncoder:
-        return NeuralLeafEncoder()
+    def dist_to_encoder(self) -> NeuralGaussianEncoder:
+        return NeuralGaussianEncoder()
 
 
-class NeuralLeafSampler(DistributionSampler):
-    def __init__(self, dist: NeuralLeaf, seed: int | None = None) -> None:
+class NeuralGaussianSampler(DistributionSampler):
+    def __init__(self, dist: NeuralGaussian, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
-        raise NotImplementedError("NeuralLeaf is conditional p(y|x); use sampler().sample_given(x).")
+        raise NotImplementedError("NeuralGaussian is conditional p(y|x); use sampler().sample_given(x).")
 
     def sample_given(self, x: Any) -> np.ndarray:
         mean = self.dist._forward(x)[0]
         return mean + self.dist.noise * self.rng.randn(*mean.shape)
 
 
-class NeuralLeafEncoder(DataSequenceEncoder):
+class NeuralGaussianEncoder(DataSequenceEncoder):
     def __str__(self) -> str:
-        return "NeuralLeafEncoder"
+        return "NeuralGaussianEncoder"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, NeuralLeafEncoder)
+        return isinstance(other, NeuralGaussianEncoder)
 
     def seq_encode(self, data: list) -> tuple[np.ndarray, np.ndarray]:
         x = np.array([np.atleast_1d(np.asarray(xy[0], dtype=float)) for xy in data])
@@ -159,7 +159,7 @@ class NeuralLeafEncoder(DataSequenceEncoder):
         return (x, y)
 
 
-class NeuralLeafAccumulator(SequenceEncodableStatisticAccumulator):
+class NeuralGaussianAccumulator(SequenceEncodableStatisticAccumulator):
     def __init__(self) -> None:
         self.x: list = []
         self.y: list = []
@@ -183,7 +183,7 @@ class NeuralLeafAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
         self.seq_update(enc, weights, None)
 
-    def combine(self, other: Any) -> NeuralLeafAccumulator:
+    def combine(self, other: Any) -> NeuralGaussianAccumulator:
         xo, yo, wo = other
         self.x.extend(xo)
         self.y.extend(yo)
@@ -193,21 +193,21 @@ class NeuralLeafAccumulator(SequenceEncodableStatisticAccumulator):
     def value(self) -> tuple:
         return (list(self.x), list(self.y), list(self.w))
 
-    def from_value(self, value: tuple) -> NeuralLeafAccumulator:
+    def from_value(self, value: tuple) -> NeuralGaussianAccumulator:
         self.x, self.y, self.w = list(value[0]), list(value[1]), list(value[2])
         return self
 
-    def acc_to_encoder(self) -> NeuralLeafEncoder:
-        return NeuralLeafEncoder()
+    def acc_to_encoder(self) -> NeuralGaussianEncoder:
+        return NeuralGaussianEncoder()
 
 
-class NeuralLeafAccumulatorFactory(StatisticAccumulatorFactory):
-    def make(self) -> NeuralLeafAccumulator:
-        return NeuralLeafAccumulator()
+class NeuralGaussianAccumulatorFactory(StatisticAccumulatorFactory):
+    def make(self) -> NeuralGaussianAccumulator:
+        return NeuralGaussianAccumulator()
 
 
-class NeuralLeafEstimator(ParameterEstimator):
-    """EM estimator for a :class:`NeuralLeaf`: the M-step is ``m_steps`` of weighted-NLL gradient on the module.
+class NeuralGaussianEstimator(ParameterEstimator):
+    """EM estimator for a :class:`NeuralGaussian`: the M-step is ``m_steps`` of weighted-NLL gradient on the module.
 
     The module is held (and warm-started) across EM iterations, so each M-step is a *partial* maximization
     (generalized EM). The accumulator buffers responsibility-weighted ``(x, y)`` observations.
@@ -229,14 +229,14 @@ class NeuralLeafEstimator(ParameterEstimator):
         self.name = name
         self.device = device
 
-    def accumulator_factory(self) -> NeuralLeafAccumulatorFactory:
-        return NeuralLeafAccumulatorFactory()
+    def accumulator_factory(self) -> NeuralGaussianAccumulatorFactory:
+        return NeuralGaussianAccumulatorFactory()
 
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralLeaf:
+    def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralGaussian:
         torch = _torch()
         xs, ys, ws = suff_stat
         if not xs:
-            return NeuralLeaf(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
+            return NeuralGaussian(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
         dev = _resolve_device(self.device, torch)
         self.module.to(dev)
         xt = torch.as_tensor(np.array(xs), dtype=torch.float32, device=dev)
@@ -254,4 +254,9 @@ class NeuralLeafEstimator(ParameterEstimator):
             nll.backward()
             opt.step()
         self.noise = float(torch.exp(log_noise).detach())  # warm-start noise for the next EM iteration
-        return NeuralLeaf(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
+        return NeuralGaussian(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
+
+
+# --- back-compat aliases (the classes were renamed off the '...Leaf' suffix) ---
+NeuralLeaf = NeuralGaussian
+NeuralLeafEstimator = NeuralGaussianEstimator

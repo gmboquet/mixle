@@ -42,7 +42,7 @@ def _logp_np(logits: np.ndarray, a: np.ndarray) -> np.ndarray:
     return logp[np.arange(len(a)), a]
 
 
-class DPOLeaf(SequenceEncodableProbabilityDistribution):
+class DPOModel(SequenceEncodableProbabilityDistribution):
     """DPO over ``(x, chosen, rejected)`` preference triples. ``policy`` is trained, ``ref`` is frozen."""
 
     def __init__(
@@ -56,7 +56,7 @@ class DPOLeaf(SequenceEncodableProbabilityDistribution):
         self.device = device
 
     def __str__(self) -> str:
-        return "DPOLeaf(beta=%.3g)" % self.beta
+        return "DPOModel(beta=%.3g)" % self.beta
 
     def _logits(self, module: Any, x: np.ndarray) -> np.ndarray:
         torch = _torch()
@@ -81,23 +81,23 @@ class DPOLeaf(SequenceEncodableProbabilityDistribution):
         """The policy's argmax action at ``x`` -- what the aligned policy now picks."""
         return self._logits(self.policy, x).argmax(axis=1)
 
-    def sampler(self, seed: int | None = None) -> DPOLeafSampler:
-        return DPOLeafSampler(self, seed)
+    def sampler(self, seed: int | None = None) -> DPOModelSampler:
+        return DPOModelSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> DPOLeafEstimator:
-        return DPOLeafEstimator(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
+    def estimator(self, pseudo_count: float | None = None) -> DPOModelEstimator:
+        return DPOModelEstimator(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
 
     def dist_to_encoder(self) -> DPOEncoder:
         return DPOEncoder()
 
 
-class DPOLeafSampler(DistributionSampler):
-    def __init__(self, dist: DPOLeaf, seed: int | None = None) -> None:
+class DPOModelSampler(DistributionSampler):
+    def __init__(self, dist: DPOModel, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
-        raise NotImplementedError("DPOLeaf scores preference pairs; it does not generate.")
+        raise NotImplementedError("DPOModel scores preference pairs; it does not generate.")
 
 
 class DPOEncoder(DataSequenceEncoder):
@@ -161,7 +161,7 @@ class DPOAccumulatorFactory(StatisticAccumulatorFactory):
         return DPOAccumulator()
 
 
-class DPOLeafEstimator(ParameterEstimator):
+class DPOModelEstimator(ParameterEstimator):
     """DPO M-step: ``m_steps`` of gradient on the POLICY minimizing ``-log sigmoid(beta * margin)``; ref frozen."""
 
     def __init__(self, policy: Any, ref: Any, beta: float, m_steps: int, lr: float, device: str) -> None:
@@ -175,10 +175,10 @@ class DPOLeafEstimator(ParameterEstimator):
     def accumulator_factory(self) -> DPOAccumulatorFactory:
         return DPOAccumulatorFactory()
 
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> DPOLeaf:
+    def estimate(self, nobs: float | None, suff_stat: tuple) -> DPOModel:
         torch = _torch()
         xs, chs, rjs = suff_stat
-        out = DPOLeaf(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
+        out = DPOModel(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
         if not xs:
             return out
         dev = self.device
@@ -202,3 +202,8 @@ class DPOLeafEstimator(ParameterEstimator):
             loss.backward()
             opt.step()
         return out
+
+
+# --- back-compat aliases (the classes were renamed off the '...Leaf' suffix) ---
+DPOLeaf = DPOModel
+DPOLeafEstimator = DPOModelEstimator

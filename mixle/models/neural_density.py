@@ -1,6 +1,6 @@
 """``NeuralDensity`` -- the adapter that turns ANY torch density module into a composable mixle distribution.
 
-The point is not a specific architecture; it is the *wrapper*. ``NeuralLeaf`` already adapts a conditional net
+The point is not a specific architecture; it is the *wrapper*. ``NeuralGaussian`` already adapts a conditional net
 (``p(y | x)``); this is its unconditional sibling: give it any torch module that exposes ``log_density(x) -> (n,)``
 (and, to draw samples, ``sample(n) -> (n, d)``) and you get a full five-piece mixle ``Distribution`` -- so a
 *flexible neural density* drops into a ``MixtureDistribution`` component, an HMM emission, or a
