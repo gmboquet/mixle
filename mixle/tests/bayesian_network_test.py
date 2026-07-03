@@ -1,8 +1,10 @@
 """Heterogeneous Bayesian network learning (mixle.inference.bayesian_network): regression edges + multi-parent DAG.
 
 The deepening of the dependency-structure moat: continuous dependence is parametric (linear-Gaussian), not
-quantile-binned, and a field may have several parents. Must (a) beat the binned single-parent tree on continuous
-dependence, (b) recover a node's multiple parents when orientation is forced, and (c) score/sample coherently.
+quantile-binned, and a field may have several parents. Must (a) capture continuous dependence with a parametric
+edge (far beating independence), (b) recover a node's multiple parents when orientation is forced, and (c)
+score/sample coherently. (The single-parent forest ``learn_structure`` now also uses parametric edges, so the
+DAG's distinct advantage is multi-parent structure -- see ``MultiParentTest`` -- not parametric-vs-binned.)
 """
 
 import unittest
@@ -10,7 +12,7 @@ import unittest
 import numpy as np
 
 import mixle.stats as st
-from mixle.inference import fit, learn_structure
+from mixle.inference import fit
 from mixle.inference.bayesian_network import (
     HeterogeneousBayesianNetwork,
     MixtureOfBayesianNetworks,
@@ -31,13 +33,17 @@ def _linear_pair(seed, n=800):
 
 
 class RegressionEdgeTest(unittest.TestCase):
-    def test_regression_beats_binned_tree_on_linear_dependence(self):
+    def test_regression_edge_captures_linear_dependence(self):
         train, test = _linear_pair(1), _linear_pair(2)
         bn = learn_bayesian_network(train, max_parents=1)
-        tree = learn_structure(train)  # the quantile-binned single-parent forest
         self.assertIsInstance(bn, HeterogeneousBayesianNetwork)
-        self.assertEqual(len(bn.edges()), 1)  # the two fields are linked
-        self.assertGreater(_ll(bn, test) - _ll(tree, test), 300.0)  # parametric edge is far sharper than binning
+        self.assertEqual(len(bn.edges()), 1)  # the two fields are linked by a linear-Gaussian edge
+        # the parametric edge crushes modeling the two fields independently (the dependence is worth many nats)
+        indep = fit(
+            train, st.CompositeEstimator((st.GaussianEstimator(), st.GaussianEstimator())), max_its=20, out=None
+        )
+        indep_ll = float(np.sum([indep.log_density(d) for d in test]))
+        self.assertGreater(_ll(bn, test) - indep_ll, 300.0)
 
     def test_categorical_parent_via_one_hot(self):
         # cat -> real: the CLG factor one-hot-encodes the categorical parent (a per-category mean)
