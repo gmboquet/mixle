@@ -90,6 +90,7 @@ from mixle.task.model import (
     adapter_from_spec,
     register_adapter,
 )
+from mixle.task.multilabel import MultiLabelSolution, solve_multilabel
 from mixle.task.plan import Planner, distill_planner
 
 # post-training quantization: int8/int4 MLP weights (numpy-only inference) + LNS integer log-space
@@ -148,6 +149,7 @@ __all__ = [
     "Scorecard",
     "RouterStats",
     "RegressionSolution",
+    "MultiLabelSolution",
     "GenerativePlanner",
     "Planner",
     "Solution",
@@ -211,6 +213,7 @@ __all__ = [
     "save_module",
     "solve",
     "solve_regression",
+    "solve_multilabel",
     "measure_inference_seconds",
     "measure_ops_per_second",
     "task_fingerprint",
