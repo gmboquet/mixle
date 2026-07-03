@@ -1,0 +1,216 @@
+"""``solve`` -- point mixle at a function and get back a deployable model that does its job.
+
+The closed loop the task spine was building toward, in one call. ``teacher`` is whatever currently
+performs the task -- a rule cascade, a legacy scoring routine, an expensive API. ``solve`` uses it to
+*create the dataset* (the teacher labels the example inputs), *proposes and trains* a student matched to
+the input shape (text / record / structured), *calibrates* an honest answer-or-escalate rule on held-out
+data (conformal, so "confident" has a coverage guarantee), *verifies* the student against the teacher, and
+returns a :class:`Solution`: a drop-in callable that answers locally when it is sure and falls back to the
+teacher when it is not. Wrong answers are bounded by the calibration; unfamiliar inputs route to the code
+that already works.
+
+The loop then compounds: every escalated request is a teacher-labeled example exactly where the student is
+weak. ``Solution.improve()`` re-distills with those harvested labels and promotes the new student only if
+it verifies at least as well (anti-regression) -- so the deployed thing gets cheaper the longer it runs.
+
+    def route(ticket): ...                      # 400 lines of if/elif that must not break
+    sol = solve(route, tickets)                 # dataset <- route(t) for t in tickets; train; calibrate
+    sol(ticket)                                 # answers locally or calls route() -- safe to deploy today
+    sol.report()                                # agreement, escalation rate, realized cost
+    sol.improve()                               # fold escalations back in; promote only if better
+
+``solve`` is deterministic given ``seed``. Only the student fit needs torch; the teacher stays opaque.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+
+from mixle.task.calibrate import CalibratedTaskModel
+from mixle.task.cascade import Cascade
+from mixle.task.distill import agreement, distill_from_labels, distill_records_from_labels
+from mixle.task.model import TaskModel
+
+
+def _label_with(teacher: Callable[..., Any], items: list) -> list:
+    """Label ``items`` with a per-item or batched teacher. A rigid per-item function may *raise* when
+    handed the whole list (e.g. ``ticket['amount']`` on a list), so the batched probe must catch."""
+    try:
+        out = teacher(items)
+        if isinstance(out, (list, tuple)) and len(out) == len(items):
+            return list(out)
+    except Exception:
+        pass
+    return [teacher(x) for x in items]
+
+
+def _batch_view(teacher: Callable[..., Any]) -> Callable[[list], list]:
+    """A strictly batched (list -> list) view of the teacher, safe for per-item rigid functions.
+    ``Cascade`` probes its teacher with ``teacher([x])``, which raises on e.g. dict-record rules."""
+
+    def batched(batch: list) -> list:
+        return _label_with(teacher, list(batch))
+
+    return batched
+
+
+def _input_kind(x: Any) -> str:
+    """Sniff the student path from one input: text or a (tuple/dict) record."""
+    if isinstance(x, str):
+        return "text"
+    if isinstance(x, (dict, tuple, list)):
+        return "record"
+    raise TypeError(
+        "solve() handles text or record (tuple/dict) inputs; got %r. Pass kind='text'|'record' to override."
+        % type(x).__name__
+    )
+
+
+def _fit_student(kind: str, inputs: list, labels: list, distill_kw: dict) -> TaskModel:
+    fit = distill_from_labels if kind == "text" else distill_records_from_labels
+    return fit(inputs, labels, **distill_kw)
+
+
+@dataclass
+class Solution:
+    """A deployed task: a calibrated student in front of the teacher, plus the loop to improve it.
+
+    Call it like the original function. ``promoted`` says whether the student passed verification --
+    when False the callable simply runs the teacher (an honest failure, never a silently bad model).
+    """
+
+    cascade: Cascade
+    teacher: Callable[..., Any]
+    kind: str
+    train_inputs: list
+    train_labels: list
+    cal_inputs: list
+    cal_labels: list
+    holdout_agreement: float
+    escalation_rate: float
+    promoted: bool
+    target_agreement: float | None
+    distill_kw: dict = field(default_factory=dict)
+
+    def __call__(self, x: Any) -> Any:
+        if not self.promoted:
+            return _label_with(self.teacher, [x])[0]
+        return self.cascade(x)
+
+    def report(self) -> dict:
+        """What you would want on a dashboard: verification, live escalation, realized cost."""
+        stats = self.cascade.stats
+        return {
+            "promoted": self.promoted,
+            "holdout_agreement": round(self.holdout_agreement, 4),
+            "holdout_escalation_rate": round(self.escalation_rate, 4),
+            "requests": stats.n_requests,
+            "live_escalated": stats.n_escalated,
+            "harvested_labels": len(stats.escalated_labels),
+        }
+
+    def improve(self) -> bool:
+        """Re-distill with the harvested (escalated) labels; promote only if it verifies at least as well.
+
+        Returns True when a better student was promoted. The calibration slice is never trained on, so the
+        conformal guarantee and the agreement comparison stay honest across rounds.
+        """
+        new_inputs, new_labels = self.cascade.harvested()
+        if not new_inputs:
+            return False
+        inputs = self.train_inputs + list(new_inputs)
+        labels = self.train_labels + [str(y) for y in new_labels]
+        student = _fit_student(self.kind, inputs, labels, self.distill_kw)
+        alpha = self.cascade.model.alpha
+        cal = CalibratedTaskModel(student, alpha=alpha).calibrate(self.cal_inputs, self.cal_labels)
+        agree = agreement(student, self.cal_labels, self.cal_inputs)
+        esc = cal.escalation_rate(self.cal_inputs)
+        if agree < self.holdout_agreement or esc > self.escalation_rate:
+            return False  # anti-regression: keep the current student
+        self.cascade.model = cal
+        self.train_inputs, self.train_labels = inputs, labels
+        self.holdout_agreement, self.escalation_rate = agree, esc
+        self.promoted = self.promoted or self._passes_target(agree)
+        self.cascade.stats.escalated_texts.clear()
+        self.cascade.stats.escalated_labels.clear()
+        return True
+
+    def _passes_target(self, agree: float) -> bool:
+        return self.target_agreement is None or agree >= self.target_agreement
+
+    def save(self, path: str) -> str:
+        """Persist the calibrated student (weights + calibration + manifest) as a load-anywhere artifact."""
+        return self.cascade.model.save(path)
+
+
+def solve(
+    teacher: Callable[..., Any],
+    inputs: Sequence[Any],
+    *,
+    alpha: float = 0.1,
+    target_agreement: float | None = None,
+    holdout: float = 0.25,
+    kind: str | None = None,
+    cost: Any = None,
+    seed: int = 0,
+    **distill_kw: Any,
+) -> Solution:
+    """Replace ``teacher`` (the code currently doing the job) with a calibrated, self-improving model.
+
+    Args:
+        teacher: The callable performing the task today (per-item or batched). It labels the dataset and
+            remains the fallback for inputs the student is not sure about.
+        inputs: Example inputs (text, or tuple/dict records) covering the task. The teacher labels them.
+        alpha: Escalation honesty -- answer locally only when a single label is conformally covered at
+            ``>= 1 - alpha``; otherwise fall back to the teacher.
+        target_agreement: Optional gate. If the student's held-out agreement with the teacher misses it,
+            the returned Solution routes *everything* to the teacher (``promoted=False``).
+        holdout: Fraction reserved for calibration + verification (never trained on).
+        kind: Force the student path, ``'text'`` or ``'record'``; default sniffs the first input.
+        cost: Optional :class:`~mixle.task.economics.CostModel` for realized-savings reporting.
+        seed: Split + fit determinism.
+        **distill_kw: Student knobs forwarded to distillation (``dim``, ``hidden``, ``epochs``, ``lr``, …).
+
+    Returns:
+        A :class:`Solution` -- call it like the original function; ``report()`` / ``improve()`` / ``save()``.
+    """
+    items = list(inputs)
+    if len(items) < 8:
+        raise ValueError("solve() needs at least 8 example inputs to train and calibrate honestly")
+    k = kind or _input_kind(items[0])
+    labels = [str(y) for y in _label_with(teacher, items)]
+
+    rng = np.random.RandomState(seed)
+    order = rng.permutation(len(items))
+    n_cal = max(2, int(round(len(items) * holdout)))
+    cal_idx, train_idx = order[:n_cal], order[n_cal:]
+    train_inputs = [items[i] for i in train_idx]
+    train_labels = [labels[i] for i in train_idx]
+    cal_inputs = [items[i] for i in cal_idx]
+    cal_labels = [labels[i] for i in cal_idx]
+
+    distill_kw.setdefault("seed", seed)
+    student = _fit_student(k, train_inputs, train_labels, distill_kw)
+    cal = CalibratedTaskModel(student, alpha=alpha).calibrate(cal_inputs, cal_labels)
+    agree = agreement(student, cal_labels, cal_inputs)
+    esc = cal.escalation_rate(cal_inputs)
+    promoted = target_agreement is None or agree >= target_agreement
+
+    return Solution(
+        cascade=Cascade(cal, _batch_view(teacher), cost=cost),
+        teacher=teacher,
+        kind=k,
+        train_inputs=train_inputs,
+        train_labels=train_labels,
+        cal_inputs=cal_inputs,
+        cal_labels=cal_labels,
+        holdout_agreement=float(agree),
+        escalation_rate=float(esc),
+        promoted=bool(promoted),
+        target_agreement=target_agreement,
+        distill_kw=dict(distill_kw),
+    )
