@@ -191,29 +191,13 @@ Treat the inferred shape as a starting point. Inspect it, compare it on
 held-out data, and replace pieces when the automatic guess does not match the
 domain.
 
-Optional: Neural Event Leaf
----------------------------
+Optional: Neural And Task Layers
+--------------------------------
 
-``mixle.models`` includes neural leaves for cases where a neural likelihood is
-part of the model.
-
-For example, an event row can combine a Transformer next-token leaf with a
-Gamma timing model:
-
-.. code-block:: python
-
-   from mixle.models import TransformerLMEstimator
-   from mixle.stats import CompositeEstimator, GammaEstimator
-
-   # each event: ((history_window, next_event_type), seconds_since_previous)
-   event_estimator = CompositeEstimator(
-       (
-           TransformerLMEstimator(vocab=500, d_model=128, n_layer=4, block=64),
-           GammaEstimator(),
-       )
-   )
-
-This pattern is useful for anomaly scoring in event streams, but it needs the
-``torch`` extra and the usual neural-model discipline: fixed seeds, held-out
-data, monitored training loss, and reproducible artifacts. See
-:doc:`neural-llm` only after the core distribution workflow above is clear.
+Use the neural and LLM-facing layers when the task genuinely calls for them:
+shared embeddings across language-model experts, exact neural density leaves,
+local students distilled from expensive teachers, or calibrated LLM abstention.
+Those workflows carry extra dependency and validation requirements, so keep the
+first model in ``mixle.stats`` unless the data shape demands otherwise. See
+:doc:`neural-llm`, :doc:`task-distillation`, and :doc:`uncertainty` after the
+core distribution workflow above is clear.

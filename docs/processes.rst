@@ -116,12 +116,11 @@ Process models are often only one field in a heterogeneous observation. A
 single application might combine:
 
 * a Hawkes process over event times;
-* a Transformer over event text;
 * a categorical distribution over event type;
-* a Gaussian or Gamma distribution over magnitude;
-* a calibrated task model that decides whether to escalate.
+* a positive continuous family over severity, amount, or duration;
+* a calibrated rule that escalates low-confidence records for review.
 
-That is the intended Mixle shape. Timing, content, labels, and decisions can
+That is the intended Mixle shape. Timing, labels, magnitudes, and decisions can
 remain separate components while sharing one scoring and inference story.
 
 Diagnostics
@@ -139,4 +138,3 @@ For process models, inspect more than aggregate likelihood:
 Use :doc:`analysis` for extreme-value and spatial diagnostics, :doc:`inference`
 for proper scoring and model comparison, and :doc:`production` for drift
 monitoring.
-

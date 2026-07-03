@@ -3,7 +3,7 @@ LLM Uncertainty
 
 This tutorial wraps an arbitrary LLM-like callable with
 :class:`mixle.reason.LLMUncertainty`. The goal is not to make generation
-magically reliable. The goal is to turn repeated samples into behavior:
+reliable by assertion. The goal is to turn repeated samples into behavior:
 answer, abstain, inspect disagreement, or escalate.
 
 The wrapper needs only one callable:

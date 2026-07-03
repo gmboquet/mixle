@@ -42,8 +42,8 @@ def make_lines(seed: int, n: int) -> list[str]:
     return out
 
 
-def stub_llm(prompt, system=None):
-    """Stand-in for a real extraction LLM: parses the line and returns the fields as JSON (verbatim substrings)."""
+def local_llm(prompt, system=None):
+    """Deterministic local teacher with the same callable shape as an extraction LLM."""
     text = prompt.split("Text:", 1)[-1].split("JSON:")[0]
     out = {}
     if m := re.search(r"(?:INV-|ref |invoice |Receipt )(\d{4})", text):
@@ -60,7 +60,7 @@ def stub_llm(prompt, system=None):
 
 
 def main() -> None:
-    teacher = llm_extractor(CallableLLM(stub_llm), FIELDS)
+    teacher = llm_extractor(CallableLLM(local_llm), FIELDS)
     train = make_lines(1, 400)
 
     print("1) the LLM extracts fields from a few example lines (the expensive teacher)")

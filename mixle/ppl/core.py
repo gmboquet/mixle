@@ -1989,7 +1989,7 @@ class RandomVariable:
             if seed is not None:
                 kw["prev_estimate"] = seed
         # Auto-seed latent composites (mixtures, ...) at distinct data points so EM
-        # escapes the symmetric global-mean fixed point — "it just works".
+        # avoids the symmetric global-mean fixed point.
         if (
             "prev_estimate" not in kw
             and missing != "marginalize"

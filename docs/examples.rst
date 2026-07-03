@@ -5,7 +5,7 @@ Runnable examples live in ``examples/``. They are plain Python scripts, so the
 fastest way to learn a workflow is to run the script under the same environment
 you use for tests.
 
-Start with the base-install examples. Move to Torch, task, or real-data demos
+Start with the base-install examples. Move to Torch, task, or real-data workflows
 only after the core distribution and inference path is clear.
 
 Recommended First Runs
@@ -86,8 +86,7 @@ Choose By Workflow
      - ``scaling_example.py``, ``engine_benchmark_example.py``
      - :doc:`engines`, :doc:`utilities-and-parallelism`
    * - Neural or representation workflows
-     - ``hybrid_llm_example.py``, ``shared_embedding_example.py``,
-       ``heterogeneous_representation_example.py``
+     - ``shared_embedding_example.py``, ``heterogeneous_representation_example.py``
      - :doc:`neural-llm`, :doc:`representation`
    * - LLM/task replacement
      - ``task_distill_example.py``, ``task_llm_active_example.py``,
@@ -96,7 +95,7 @@ Choose By Workflow
    * - Extraction and agent-style task behavior
      - ``task_extraction_example.py``, ``win_demo_example.py``
      - :doc:`task-serving`, :doc:`agentic-task-distillation`
-   * - Real-data task demo
+   * - Real-data task workflow
      - ``real_receipt_banking77.py``
      - :doc:`task-serving`, :doc:`maturity`
 
@@ -181,9 +180,6 @@ Complete Inventory
    * - ``hierarchical_mixture_example.py``
      - Latent models
      - Hierarchical mixture variants.
-   * - ``hybrid_llm_example.py``
-     - Neural leaf
-     - Transformer event type plus Gamma timing model.
    * - ``joint_mixture_example.py``
      - Latent models
      - Joint mixture variants.
@@ -241,7 +237,7 @@ Complete Inventory
      - Task workflow
      - LLM teacher, active labeling, local student, and calibrated cascade.
    * - ``win_demo_example.py``
-     - End-to-end demo
+     - End-to-end workflow
      - Replace a ticket router and invoice extractor with calibrated models.
 
 Representative Source
@@ -252,12 +248,6 @@ Structured HMMs:
 .. literalinclude:: ../examples/structured_hmm_example.py
    :language: python
    :caption: examples/structured_hmm_example.py
-
-Hybrid Transformer plus timing:
-
-.. literalinclude:: ../examples/hybrid_llm_example.py
-   :language: python
-   :caption: examples/hybrid_llm_example.py
 
 Active LLM distillation and cascade:
 

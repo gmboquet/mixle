@@ -114,28 +114,24 @@ loop used by ``mixle.ops.project``.
    compact = reduce_mixture(fitted_mixture, n_components=4)
    print(len(compact.w))
 
-Optional: fit a Transformer plus timing model
----------------------------------------------
+Share embeddings across language-model experts
+-----------------------------------------------
 
 This recipe uses ``mixle.models``, which is an incubating applied-helper
-namespace. Use it when a neural event-history likelihood is actually needed;
-otherwise keep the event model in ordinary ``mixle.stats`` families.
+namespace. Use it when several language-model experts should share token
+semantics instead of learning duplicate embedding tables.
 
 .. code-block:: python
 
-   from mixle.inference import optimize
-   from mixle.models import TransformerLMEstimator
-   from mixle.stats import CompositeEstimator, GammaEstimator
+   from mixle.models import CategoricalEmbedding, TransformerLMEstimator
+   from mixle.stats import MixtureEstimator
 
-   # each row: ((history_window, next_event_type), wait_seconds)
-   est = CompositeEstimator(
-       (
-           TransformerLMEstimator(vocab=500, d_model=128, n_layer=4, block=64),
-           GammaEstimator(),
-       )
-   )
-   model = optimize(events, est, max_its=20, out=None)
-   score = model.log_density(event)
+   embedding = CategoricalEmbedding(num_categories=8000, dim=256, name="word")
+   experts = [
+       TransformerLMEstimator(8000, d_model=256, n_layer=4, block=64, embedding=embedding)
+       for _ in range(3)
+   ]
+   est = MixtureEstimator(experts)
 
 Recommend a model from data
 ---------------------------

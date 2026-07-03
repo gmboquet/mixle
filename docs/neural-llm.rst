@@ -54,31 +54,29 @@ The fitted object is a conditional next-token distribution. It does not sample
 complete sequences through ``sampler``; feed contexts and use the model's
 next-token scoring or prediction behavior.
 
-Hybrid Neural-Classical Models
-------------------------------
+Shared Language-Model Experts
+-----------------------------
 
-The healthiest reason to use a neural leaf in mixle is that it is only one
-channel of the data. For event streams:
+A practical reason to use a Transformer leaf inside Mixle is to build several
+language-model experts that share part of their parameterization. Each expert
+still models the same observation shape, ``(context, next_token)``, while the
+mixture learns which expert explains each example.
 
 .. code-block:: python
 
-   from mixle.models import TransformerLMEstimator
-   from mixle.stats import CompositeEstimator, GammaEstimator
+   from mixle.models import CategoricalEmbedding, TransformerLMEstimator
+   from mixle.stats import MixtureEstimator
 
-   event_estimator = CompositeEstimator(
-       (
-           TransformerLMEstimator(vocab=500, d_model=128, n_layer=4, block=64),
-           GammaEstimator(),
-       )
-   )
+   embedding = CategoricalEmbedding(num_categories=8000, dim=256, name="word")
+   experts = [
+       TransformerLMEstimator(8000, d_model=256, n_layer=4, block=64, embedding=embedding)
+       for _ in range(3)
+   ]
+   est = MixtureEstimator(experts)
 
-One row is ``((history, next_event_type), wait_time)``. The joint score is:
-
-.. code-block:: text
-
-   log p(next_event_type | history) + log p(wait_time)
-
-This is the pattern behind ``examples/hybrid_llm_example.py``.
+This is a coherent neural-composition example: the latent mixture separates
+token-stream regimes, while ``CategoricalEmbedding`` prevents every expert from
+learning an independent vocabulary table.
 
 Neural Density Leaves
 ---------------------
@@ -264,8 +262,9 @@ Practical Checklist
 * Install ``mixle[torch]``.
 * Start with ``TransformerLMEstimator`` unless you already own the module.
 * Keep one observation as ``(context, target)`` for next-token leaves.
-* Use ``CompositeEstimator`` when the neural channel should be scored jointly
-  with non-neural fields.
+* Use neural leaves when the neural likelihood is the natural model for that
+  field or latent expert, not just to demonstrate that different APIs can be
+  forced together.
 * Use ``CategoricalEmbedding`` to tie embeddings across experts.
 * Treat ``EnergyModel`` scores as approximately normalized; validate them
   before comparing directly with exact-density leaves.
@@ -281,7 +280,6 @@ The older names ``StreamingTransformerLeaf``, ``NeuralLeaf``,
 Examples And Tests
 ------------------
 
-* ``examples/hybrid_llm_example.py``: Transformer event type plus Gamma timing.
 * ``examples/shared_embedding_example.py``: shared embeddings across LM mixture
   experts.
 * ``mixle/tests/neural_ppl_test.py``: neural PPL, streaming Transformer leaves,
