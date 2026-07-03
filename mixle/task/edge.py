@@ -15,8 +15,10 @@ This module makes both choices searchable, and makes the search itself a model:
   recipe (process), decoded from a unit cube so any optimizer can drive it.
 * :class:`DesignModel` -- the model that writes the model: GP surrogates over design -> (quality,
   budget violations), proposing the next design by feasibility-weighted expected improvement
-  (:func:`mixle.doe.propose_next_constrained`). It persists (``to_json``/``from_json``), so design
-  knowledge **accumulates across tasks** -- a warm-started search skips the designs that never work.
+  (:func:`mixle.doe.propose_next_constrained`). It persists (``to_json``/``from_json``) and keys
+  every row on a :func:`task_fingerprint`, so design knowledge **accumulates across tasks**: the
+  surrogate learns task-similarity through the fingerprint coords, and a warm-started search -- even
+  on a *different* task -- skips the designs that never work anywhere near it.
 * :func:`distill_for_edge` -- the front door: screen candidates at reduced fidelity, promote the
   promising ones to full training, return the best student that *fits the device*, with the Pareto
   front over (bytes, agreement) and the updated :class:`DesignModel`.
@@ -55,6 +57,8 @@ __all__ = [
     "distill_for_edge",
     "distill_designer",
     "footprint",
+    "task_fingerprint",
+    "FINGERPRINT_KEYS",
 ]
 
 
@@ -225,26 +229,54 @@ class DesignModel:
     down, each level a real artifact.)
     """
 
-    def __init__(self, signature: str, n_constraints: int) -> None:
+    def __init__(self, signature: str, n_constraints: int, n_fingerprint: int = 0) -> None:
         self.signature = signature
         self.n_constraints = int(n_constraints)
+        self.n_fingerprint = int(n_fingerprint)  # trailing task-fingerprint coords appended to each row
         self.X: list[list[float]] = []
         self.quality: list[float] = []
         self.violations: list[list[float]] = []
         self.tags: list[dict[str, Any]] = []
 
     # -- ledger --
-    def add(self, point: Any, quality: float, violations: Sequence[float], **tag: Any) -> None:
+    def add(
+        self,
+        point: Any,
+        quality: float,
+        violations: Sequence[float],
+        *,
+        fingerprint: Sequence[float] | None = None,
+        **tag: Any,
+    ) -> None:
         v = [float(t) for t in violations]
         if len(v) != self.n_constraints:
             raise ValueError(f"expected {self.n_constraints} violation values, got {len(v)}")
-        self.X.append([float(t) for t in np.asarray(point, dtype=np.float64).reshape(-1)])
+        fp = [float(t) for t in (fingerprint or ())]
+        if len(fp) != self.n_fingerprint:
+            raise ValueError(f"expected {self.n_fingerprint} fingerprint values, got {len(fp)}")
+        self.X.append([float(t) for t in np.asarray(point, dtype=np.float64).reshape(-1)] + fp)
         self.quality.append(float(quality))
         self.violations.append(v)
         self.tags.append(dict(tag))
 
     def __len__(self) -> int:
         return len(self.X)
+
+    def _fingerprint_bounds(
+        self, bounds: Sequence[tuple[float, float]], fingerprint: Sequence[float] | None
+    ) -> list[tuple[float, float]]:
+        """Bounds with the task-fingerprint coords pinned (degenerate ``lo == hi`` dims).
+
+        The fingerprint enters the surrogate as ordinary input coordinates -- constant within a task,
+        varying across tasks -- so one ledger serves *different* tasks: the GP learns task-similarity
+        through the fingerprint distance, and proposals condition on the current task by searching
+        only the slice at its fingerprint.
+        """
+        fp = [float(t) for t in (fingerprint or ())]
+        if len(fp) != self.n_fingerprint:
+            raise ValueError(f"expected {self.n_fingerprint} fingerprint values, got {len(fp)}")
+        # epsilon-wide, not degenerate: the doe samplers require low < high; 1e-9 is invisible to the GP
+        return list(bounds) + [(v - 1e-9, v + 1e-9) for v in fp]
 
     # -- the two model operations --
     def propose(
@@ -255,6 +287,7 @@ class DesignModel:
         n_candidates: int = 256,
         prefilter: Callable[[tuple], Any] | None = None,
         max_tries: int = 8,
+        fingerprint: Sequence[float] | None = None,
     ) -> np.ndarray:
         """The next design worth training: feasibility-weighted EI over everything seen so far.
 
@@ -263,9 +296,12 @@ class DesignModel:
         proposal it labels ``"weak"`` is vetoed and re-drawn (fresh acquisition seed), up to
         ``max_tries``. The distilled design knowledge thus skips known-bad designs before a single
         training run is spent; if every retry is vetoed the last proposal is returned anyway (the
-        judge advises, the surrogate decides).
+        judge advises, the surrogate decides). ``fingerprint`` conditions the proposal on the current
+        task (see :meth:`_fingerprint_bounds`); the returned point has design coords only.
         """
         rng = seed if isinstance(seed, RandomState) else RandomState(seed)
+        full_bounds = self._fingerprint_bounds(bounds, fingerprint)
+        n_design = len(bounds)
 
         def _one(s: Any) -> np.ndarray:
             if len(self.X) < 2:
@@ -277,22 +313,22 @@ class DesignModel:
                 return propose_next(
                     np.asarray(self.X),
                     np.asarray(self.quality),
-                    bounds,
+                    full_bounds,
                     seed=s,
                     maximize=True,
                     n_candidates=n_candidates,
-                )
+                )[:n_design]
             from mixle.doe import propose_next_constrained
 
             return propose_next_constrained(
                 np.asarray(self.X),
                 np.asarray(self.quality),
                 np.asarray(self.violations),
-                bounds,
+                full_bounds,
                 seed=s,
                 maximize=True,
                 n_candidates=n_candidates,
-            )
+            )[:n_design]
 
         point = _one(rng)
         if prefilter is None:
@@ -303,12 +339,21 @@ class DesignModel:
             point = _one(rng)
         return point
 
-    def predict(self, points: Any) -> dict[str, np.ndarray]:
-        """For untrained designs: predicted quality (mean, sd) and P(fits the device)."""
+    def predict(self, points: Any, *, fingerprint: Sequence[float] | None = None) -> dict[str, np.ndarray]:
+        """For untrained designs: predicted quality (mean, sd) and P(fits the device).
+
+        ``points`` carry design coords only; ``fingerprint`` (required when the ledger is
+        fingerprinted) selects which task's slice the prediction conditions on.
+        """
         from mixle.doe.constrained import probability_of_feasibility
         from mixle.models.gaussian_process import GaussianProcessRegressor
 
         pts = np.atleast_2d(np.asarray(points, dtype=np.float64))
+        fp = [float(t) for t in (fingerprint or ())]
+        if len(fp) != self.n_fingerprint:
+            raise ValueError(f"expected {self.n_fingerprint} fingerprint values, got {len(fp)}")
+        if fp:
+            pts = np.hstack([pts, np.tile(np.asarray(fp), (len(pts), 1))])
         X = np.asarray(self.X)
         y = np.asarray(self.quality)
         if len(self.X) < 2:
@@ -339,6 +384,7 @@ class DesignModel:
         return {
             "signature": self.signature,
             "n_constraints": self.n_constraints,
+            "n_fingerprint": self.n_fingerprint,
             "X": self.X,
             "quality": self.quality,
             "violations": self.violations,
@@ -347,12 +393,44 @@ class DesignModel:
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> DesignModel:
-        m = cls(d["signature"], int(d["n_constraints"]))
+        m = cls(d["signature"], int(d["n_constraints"]), int(d.get("n_fingerprint", 0)))
         m.X = [list(map(float, r)) for r in d["X"]]
         m.quality = [float(v) for v in d["quality"]]
         m.violations = [list(map(float, r)) for r in d["violations"]]
         m.tags = [dict(t) for t in d.get("tags", [])]
         return m
+
+
+# --- task fingerprints: how one design ledger serves many tasks -------------------------------------
+
+FINGERPRINT_KEYS = ("log10_examples", "n_labels", "n_fields", "frac_categorical", "label_entropy")
+
+
+def task_fingerprint(data: Sequence[Any], labels: Sequence[Any]) -> list[float]:
+    """A fixed small vector describing *which task this is*: the coords cross-task warm start keys on.
+
+    ``(log10 #examples, #labels, #fields, fraction of categorical fields, normalized label entropy)``
+    -- cheap invariants of the dataset, O(1)-scaled so the design surrogate's default lengthscale
+    treats similar tasks as informative neighbors and dissimilar ones as weakly coupled.
+    """
+    labels = [str(y) for y in labels]
+    counts = np.unique(labels, return_counts=True)[1].astype(float)
+    p = counts / counts.sum()
+    entropy = float(-(p * np.log(p)).sum() / np.log(len(p))) if len(p) > 1 else 0.0
+    first = data[0]
+    if isinstance(first, (dict, tuple, list)) and not isinstance(first, str):
+        values = list(first.values()) if isinstance(first, dict) else list(first)
+        n_fields = len(values)
+        frac_cat = float(np.mean([not isinstance(v, (int, float, np.integer, np.floating)) for v in values]))
+    else:  # text
+        n_fields, frac_cat = 1, 1.0
+    return [
+        float(np.log10(max(len(data), 1))),
+        float(len(p)),
+        float(n_fields),
+        frac_cat,
+        entropy,
+    ]
 
 
 # --- the front door --------------------------------------------------------------------------------
@@ -440,14 +518,19 @@ def distill_for_edge(
     rng = RandomState(seed)
     n_constraints = len(device.violations(EdgeFootprint(0, 0, True)))
     if design is None:
-        design = DesignModel(space.signature(), n_constraints)
-    elif design.signature != space.signature() or design.n_constraints != n_constraints:
+        design = DesignModel(space.signature(), n_constraints, n_fingerprint=len(FINGERPRINT_KEYS))
+    elif (
+        design.signature != space.signature()
+        or design.n_constraints != n_constraints
+        or design.n_fingerprint != len(FINGERPRINT_KEYS)
+    ):
         raise ValueError("design model was built for a different space/device shape; start a fresh one")
 
     # one teacher pass per dataset -- the search itself never re-queries the teacher
     train_labels = [str(t) for t in _as_batched(teacher)(train_data)]
     val_truth = [str(t) for t in _as_batched(teacher)(val_data)]
     label_list = list(labels) if labels is not None else sorted(set(train_labels) | set(val_truth))
+    fingerprint = task_fingerprint(train_data, train_labels)  # conditions the shared ledger on THIS task
 
     def _train(family: str, recipe: dict[str, Any]) -> TaskModel:
         if family == "structured":
@@ -493,7 +576,9 @@ def distill_for_edge(
             "footprint": fp,
         }
         trials.append(trial)
-        design.add(point, agree, viol, family=family, fidelity=fidelity, feasible=trial["feasible"])
+        design.add(
+            point, agree, viol, fingerprint=fingerprint, family=family, fidelity=fidelity, feasible=trial["feasible"]
+        )
         return trial
 
     # -- screen: LHS seed (skipped when warm knowledge already covers it) + surrogate-driven proposals
@@ -503,7 +588,7 @@ def distill_for_edge(
     for row in latin_hypercube(space.bounds(), n_seed, rng):
         _evaluate(np.asarray(row), "screen")
     for _ in range(n_iter):
-        _evaluate(design.propose(space.bounds(), seed=rng, prefilter=designer), "screen")
+        _evaluate(design.propose(space.bounds(), seed=rng, prefilter=designer, fingerprint=fingerprint), "screen")
 
     # -- promote: full-fidelity re-train of the best feasible screens (fall back to least-infeasible)
     screens = [t for t in trials if t["fidelity"] == "screen"]
