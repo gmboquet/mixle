@@ -63,6 +63,7 @@ from mixle.models.neural import (
     PoissonRegressionNeuralNetwork,
     make_mlp,
 )
+from mixle.models.neural_density import NeuralDensityLeaf, build_coupling_flow
 from mixle.models.neural_leaf import NeuralLeaf
 from mixle.models.partially_observable_markov_decision_process import (
     PartiallyObservableMarkovDecisionProcessFilterResult,
@@ -107,6 +108,7 @@ __all__ = [
     "ErdosRenyiGraphModel",
     "GaussianProcessRegressor",
     "GaussianRegressionNeuralNetwork",
+    "NeuralDensityLeaf",
     "NeuralLeaf",
     "SoftmaxNeuralLeaf",
     "StreamingTransformerLeaf",
@@ -148,6 +150,7 @@ __all__ = [
     "grammar_rule_table",
     "hard_em_stochastic_block_model",
     "learn_pc_skeleton",
+    "build_coupling_flow",
     "make_mlp",
     "mean_stick_weights",
     "orient_v_structures",
