@@ -88,6 +88,7 @@ __all__ = [
     "StructuredAdapter",
     "ProductOfExpertsFusion",
     "StructuredFusionClassifier",
+    "HybridFusionClassifier",
     "fusion_flops",
 ]
 
@@ -98,6 +99,7 @@ _LAZY = {
     "StructuredAdapter": "adapter",
     "ProductOfExpertsFusion": "fusion",
     "StructuredFusionClassifier": "fusion",
+    "HybridFusionClassifier": "fusion",
     "fusion_flops": "fusion",
 }
 
