@@ -342,6 +342,13 @@ class AutoregressiveEnumerable:
             skipped remainder is soundly bounded (``count_bracket``/``dropped_upper``: a skipped subtree
             with ``r`` remaining budget bits holds at most ``2**r`` completions); enumeration covers the
             sub-support of sequences whose every token is among its context's top-``branch_cap``.
+        batch_score_sequences: optional teacher-forcing scorer ``[sequence, ...] -> array of total log-probs``
+            -- ONE forward per sequence (all positions score in parallel) instead of one forward per token.
+            Used by :meth:`score_sequences` and, when a sequence's prefixes are not already cached, by
+            :meth:`log_density`; the substrate for draft-rescored (speculative) enumeration.
+        all_position_logprobs: optional ``sequence -> [next_logprobs result for seq[:d], d in 0..len-1]`` --
+            one forward yields the full next-token distribution at EVERY position; harvested into the
+            forward cache by :meth:`harvest`. Makes corpus-calibrated envelopes ~L-times cheaper.
 
     The model is queried lazily and **memoized by prefix**, so deepening the index (or recomputing a
     log-density) never re-runs a forward pass it has already seen. With integer tokens the histogram build
@@ -360,6 +367,8 @@ class AutoregressiveEnumerable:
         batch_size: int = 256,
         count_mode: str = "auto",
         branch_cap: int | None = None,
+        batch_score_sequences: Callable[[list[tuple]], Any] | None = None,
+        all_position_logprobs: Callable[[tuple], list[Any]] | None = None,
     ) -> None:
         if eos is None and max_len is None:
             raise ValueError("give max_len (a fixed-length model) or eos (a terminating model).")
@@ -383,6 +392,8 @@ class AutoregressiveEnumerable:
         self.batch_size = int(batch_size)
         self.count_mode = count_mode
         self.branch_cap = None if branch_cap is None else int(branch_cap)
+        self.batch_score_sequences = batch_score_sequences
+        self.all_position_logprobs = all_position_logprobs
         self._cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}  # prefix -> (tokens, log_probs), desc by lp
         self._fast: bool | None = None
         self._seek = None  # cached SeekIndex: built once, reused by unrank/count/threshold/mass_above
@@ -492,16 +503,56 @@ class AutoregressiveEnumerable:
         )
 
     def log_density(self, sequence: Iterable[Any]) -> float:
-        """Exact total log-probability of a sequence (``-inf`` if any token is off-support given its prefix)."""
+        """Exact total log-probability of a sequence (``-inf`` if any token is off-support given its prefix).
+
+        When a ``batch_score_sequences`` scorer is configured and any of the sequence's prefixes is not
+        already cached, the score comes from ONE teacher-forcing forward instead of one forward per token.
+        """
+        seq = tuple(sequence)
+        if self.batch_score_sequences is not None and any(seq[:d] not in self._cache for d in range(len(seq))):
+            return float(np.asarray(self.batch_score_sequences([seq]), dtype=float).reshape(-1)[0])
         lp = 0.0
         prefix: tuple = ()
-        for token in sequence:
+        for token in seq:
             table = dict(self._steps(prefix))
             if token not in table:
                 return _NEG_INF
             lp += table[token]
             prefix = prefix + (token,)
         return lp
+
+    def score_sequences(self, sequences: list[Any]) -> np.ndarray:
+        """Exact total log-probabilities of many sequences -- batched teacher forcing when available.
+
+        With ``batch_score_sequences`` this is one call (one forward per sequence, all positions in
+        parallel); otherwise it falls back to per-sequence :meth:`log_density` over the cached walk. The
+        rescoring primitive for draft-based (speculative) enumeration.
+        """
+        seqs = [tuple(s) for s in sequences]
+        if not seqs:
+            return np.zeros(0, dtype=float)
+        if self.batch_score_sequences is not None:
+            return np.asarray(self.batch_score_sequences(seqs), dtype=float).reshape(len(seqs))
+        return np.array([self.log_density(s) for s in seqs], dtype=float)
+
+    def harvest(self, sequence: Iterable[Any]) -> None:
+        """Cache the next-token distribution at every prefix of ``sequence`` from one forward.
+
+        Requires ``all_position_logprobs``; a no-op without it. Feeding typical sequences (a corpus, a
+        provider's fast generations) through this warms the same memo cache the count index and the
+        envelope read -- L cache entries per model call.
+        """
+        if self.all_position_logprobs is None:
+            return
+        seq = tuple(sequence)
+        need = [d for d in range(len(seq)) if seq[:d] not in self._cache]
+        if not need:
+            return
+        results = self.all_position_logprobs(seq)
+        for d, raw in enumerate(results[: len(seq)]):
+            prefix = seq[:d]
+            if prefix not in self._cache:
+                self._cache[prefix] = self._parse_steps(raw)
 
     def structural_fine_bucket(self, sequence: Iterable[Any], quantizer: Quantizer) -> int:
         return quantizer.fine_bucket(self.log_density(tuple(sequence)))
