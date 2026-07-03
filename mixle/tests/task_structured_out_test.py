@@ -106,5 +106,40 @@ class StructuredPersistenceTest(unittest.TestCase):
         self.assertEqual(set(back(hard)), {"queue", "priority"})
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class StructuredResolveTest(unittest.TestCase):
+    """prelabeled= fans harvested dicts down into every field's TRAINING split, teacher-free."""
+
+    def test_prelabeled_trains_every_field_without_teacher_calls(self):
+        from mixle.task import solve_structured
+
+        calls = {"n": 0}
+
+        def counting_teacher(t):
+            if isinstance(t, list):  # the batched probe, not a real label
+                raise TypeError("per-item teacher")
+            calls["n"] += 1
+            return _triage(t)
+
+        base = _tickets(100, seed=0)
+        harvested = _tickets(60, seed=11)
+        pre_outs = [_triage(t) for t in harvested]
+        pre_outs[0] = {"queue": pre_outs[0]["queue"]}  # a partial dict: skipped for the missing field
+
+        sol = solve_structured(
+            counting_teacher, base, tol=1e6, alpha=0.1, prelabeled=(harvested, pre_outs), seed=0, epochs=150
+        )
+        self.assertEqual(calls["n"], len(base))  # prelabeled pairs came in free
+        self.assertEqual(sol.schema, {"queue": "categorical", "priority": "numeric"})
+        # the numeric field got one fewer prelabeled pair (the partial dict), the categorical got all
+        num = sol.fields_num["priority"]
+        cat = sol.fields_cat["queue"]
+        self.assertEqual(len(num.train_inputs), len(base) - len(num.cal_inputs) + len(harvested) - 1)
+        self.assertEqual(len(cat.train_inputs), len(base) - len(cat.cal_inputs) + len(harvested))
+        for t in harvested:
+            self.assertNotIn(repr(t), [repr(c) for c in num.cal_inputs])
+            self.assertNotIn(repr(t), [repr(c) for c in cat.cal_inputs])
+
+
 if __name__ == "__main__":
     unittest.main()
