@@ -74,3 +74,59 @@ def average_causal_effect(
     ea = do(net, {treatment: a}).expectation(outcome, n=n, seed=seed)
     eb = do(net, {treatment: b}).expectation(outcome, n=n, seed=seed)
     return float(ea - eb)
+
+
+def counterfactual(net: Any, observed: tuple, interventions: dict[int, Any]) -> tuple:
+    """What THIS observed record would have been under the intervention (abduction-action-prediction).
+
+    Per Pearl's three steps, walked in topological order:
+
+      * **abduction** -- a linear-Gaussian field's exogenous noise is point-identified from the row:
+        its residual ``eps = observed - coef @ parents_observed``;
+      * **action** -- intervened fields take their ``do`` values;
+      * **prediction** -- the SAME residual replays through the counterfactual parents:
+        ``cf = coef @ parents_cf + eps``.
+
+    Honest boundaries: (1) a field that is not linear-Gaussian keeps its observed value only while its
+    parents are unchanged under the intervention (that much IS identified); if its parents change, its
+    exogenous noise cannot be recovered from one observation and this raises — use
+    :func:`average_causal_effect` for the population answer instead of a guessed individual one.
+    (2) The counterfactual is relative to the network's DAG **as given**: purely observational structure
+    learning cannot orient Markov-equivalent edges (x -> y and y -> x fit equally well), so if the
+    causal direction matters, assert it from domain knowledge rather than trusting the learned arrow.
+    """
+    from mixle.inference.bayesian_network import _LinearGaussianFactor
+
+    if not hasattr(net, "factors") or not hasattr(net, "order"):
+        raise TypeError("counterfactual() expects a learned HeterogeneousBayesianNetwork")
+    observed = tuple(observed)
+    if len(observed) != len(net.factors):
+        raise ValueError(f"observed record has {len(observed)} fields; the network has {len(net.factors)}")
+    fixed = {int(k): v for k, v in interventions.items()}
+    by_child = {f.child: f for f in net.factors}
+    cf: list[Any] = [None] * len(net.factors)
+    for i in net.order:
+        if i in fixed:
+            cf[i] = fixed[i]
+            continue
+        f = by_child[i]
+        if isinstance(f, _LinearGaussianFactor):
+            mu_obs = float(f._row([observed[p] for p in f.parents]) @ f.coef)
+            eps = float(observed[f.child]) - mu_obs  # abduction
+            mu_cf = float(f._row([cf[p] for p in f.parents]) @ f.coef)
+            cf[i] = mu_cf + eps  # action + prediction
+            continue
+        if any(not _same_value(cf[p], observed[p]) for p in getattr(f, "parents", [])):
+            raise ValueError(
+                f"counterfactual for field {i} is not point-identified: it is not linear-Gaussian and its "
+                f"parents changed under the intervention; use average_causal_effect for the population answer."
+            )
+        cf[i] = observed[i]
+    return tuple(cf)
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    try:
+        return bool(np.isclose(float(a), float(b)))
+    except (TypeError, ValueError):
+        return a == b
