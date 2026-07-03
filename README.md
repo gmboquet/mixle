@@ -51,61 +51,9 @@ Development: `git clone … && pip install -e ".[all]"`.
 
 ## Quickstart
 
-**A hybrid with a real job.** Catch anomalies in an event stream where each event has a *type* (what
-happened) and a *time* (seconds since the last one). Model both at once — a Transformer predicts the next
-event from recent history, a Gamma models the wait time — as a single distribution, a *neural marked point
-process*, fit in one call:
-
-```python
-from mixle.models import TransformerLMEstimator
-from mixle.stats import CompositeEstimator, GammaEstimator
-from mixle.inference import optimize
-
-import numpy as np
-
-# a synthetic event log: the type cycles 0 -> 1 -> ... -> 11, and the wait time grows with the type
-K, B, rng = 12, 16, np.random.RandomState(0)
-events, t, hist = [], 0, [0.0] * B
-for _ in range(1500):
-    typ  = (t + 1) % K if rng.rand() < 0.98 else rng.randint(K)   # a near-deterministic cycle
-    wait = float(rng.gamma(2.0, 0.3 + 0.25 * t))                  # the wait depends on the type
-    events.append(((np.array(hist[-B:]), typ), wait))            # ((recent history, next type), seconds since last)
-    hist.append(float(typ)); t = typ
-
-# ONE optimize() call fits both channels — the Transformer by gradient descent, the Gamma in closed form
-model = optimize(events, CompositeEstimator((
-    TransformerLMEstimator(vocab=K, d_model=96, n_layer=3, block=16, lr=0.005),   # WHAT happens next
-    GammaEstimator(),                                                            # WHEN it happens
-)), max_its=40)
-
-# the joint log-density is an anomaly score — it drops when an event is odd in WHAT, WHEN, or both
-(h, typ), wait = events[400]
-model.log_density(((h, typ),           wait))        # a normal event      -> scores high
-model.log_density(((h, typ),           wait * 40))   # anomalous timing    -> much lower
-model.log_density(((h, (typ + 5) % K), wait))        # anomalous next type -> much lower
-```
-
-The Transformer and the Gamma are just distributions, fit together in one `optimize` call — the Gamma in
-closed form, the Transformer by gradient descent. Swap the Gamma for any of ~90 families, or wrap it in a
-mixture/HMM (that latent adds the EM step). Runnable: [`examples/hybrid_llm_example.py`](https://github.com/gmboquet/mixle/blob/main/examples/hybrid_llm_example.py).
-
-**Tie a learned embedding across models.** When the mixture has several language-model experts, declare the
-word embedding once with `CategoricalEmbedding` (`mixle.ppl.Embedding` in the PPL) and hand it to each — they
-train the same token vectors jointly instead of duplicating a big parameter block, the neural analogue of the
-PPL's `name=` scalar tying:
-
-```python
-from mixle.models import CategoricalEmbedding, TransformerLMEstimator
-from mixle.stats import MixtureEstimator
-
-emb = CategoricalEmbedding(8000, 256, name="word")                    # one word embedding, declared once
-mixture = MixtureEstimator([                                          # 3 experts, every one ties it
-    TransformerLMEstimator(8000, d_model=256, embedding=emb) for _ in range(3)
-])
-```
-
-The same machinery fits an ordinary heterogeneous record just as well — each here is a
-`(category, real, variable-length count sequence)`:
+Each record here is a web session — `(device, minutes on site, [clicks per page])`: a category, a real,
+and a variable-length count sequence, with a latent user segment over the whole record. The estimator
+mirrors that shape, so one `optimize` call fits it:
 
 ```python
 from mixle.stats import *
@@ -426,7 +374,6 @@ Self-contained scripts in [examples/](https://github.com/gmboquet/mixle/tree/mai
 
 ```sh
 cd examples
-python hybrid_llm_example.py            # a Transformer LM × a Gamma, composed and fit together by EM
 python gallery_univariate_example.py    # tour the scalar families (also gallery_{multivariate,combinators,…})
 python gallery_structured_example.py    # mixtures / HMMs / LDA / latent-variable models
 python ppl_example.py                   # the equation-style mixle.ppl surface
