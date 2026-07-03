@@ -4,8 +4,10 @@ This deepens :mod:`mixle.inference.structure` (a single-parent forest with quant
 into the real thing: a **DAG** where a field may have *several* parents, and continuous dependence is a
 *parametric* conditional, not a binning. A continuous child is a conditional-linear-Gaussian node -- ``child ~
 N(w . [continuous parents, one-hot(discrete parents)] + b, sigma^2)`` -- so a real driven by two reals, or by a
-category and a real, is modeled exactly and cheaply (closed-form least squares). A discrete/count child conditions
-on the joint configuration of its discrete parents (with a marginal backoff for unseen configs).
+category and a real, is modeled exactly and cheaply (closed-form least squares). A discrete/count child with
+all-discrete parents conditions on their joint configuration (marginal backoff for unseen configs); with a
+continuous driver it becomes a GLM node (logistic / Poisson log-link / multinomial softmax), so category<->real
+dependence is representable in BOTH orientations and BIC picks the cheaper one.
 
 ``learn_bayesian_network`` grows each node's parent set greedily by description-length gain, up to ``max_parents``,
 keeping the graph acyclic. The result scores, samples, and composes like any mixle distribution -- the moat:
@@ -99,6 +101,132 @@ class _LinearGaussianFactor:
 
     def n_params(self) -> int:
         return self.coef.shape[0] + 1
+
+
+class _GLMFactor:
+    """A discrete child with at least one CONTINUOUS parent — the edge the greedy search used to refuse.
+
+    The child's kind picks the family: exactly two levels -> Bernoulli logistic; nonnegative integer
+    counts -> Poisson log-link; K>2 categorical -> multinomial logistic (softmax, class 0 reference)
+    with a tiny ridge so perfectly-separable data keeps a finite, deterministic optimum. The design
+    matrix mirrors the CLG node: continuous parents raw + one-hot(drop-first) discrete parents + 1.
+    """
+
+    def __init__(
+        self,
+        child: int,
+        parents: list[int],
+        discrete: dict[int, list[Any]],
+        kind: str,
+        levels: list[Any],
+        weights: np.ndarray,
+    ) -> None:
+        self.child = child
+        self.parents = list(parents)
+        self.discrete = discrete
+        self.kind = kind  # 'binomial' | 'poisson' | 'multinomial'
+        self.levels = list(levels)  # child levels (binomial/multinomial); [] for poisson
+        self.weights = np.asarray(weights, dtype=np.float64)  # (d,) or (K-1, d)
+
+    _row = _LinearGaussianFactor._row
+    _design = _LinearGaussianFactor._design
+
+    def _log_pmf_rows(self, x_mat: np.ndarray, values: Sequence[Any]) -> np.ndarray:
+        out = np.full(len(values), -np.inf, dtype=np.float64)
+        if self.kind == "poisson":
+            z = np.clip(x_mat @ self.weights, -700.0, 700.0)
+            for j, v in enumerate(values):
+                if isinstance(v, (int, np.integer)) and not isinstance(v, bool) and int(v) >= 0:
+                    from scipy.special import gammaln as _gammaln
+
+                    out[j] = float(v) * z[j] - np.exp(z[j]) - float(_gammaln(float(v) + 1.0))
+            return out
+        if self.kind == "binomial":
+            z = x_mat @ self.weights
+            lp1 = -np.logaddexp(0.0, -z)  # log sigmoid(z)
+            lp0 = -np.logaddexp(0.0, z)
+            for j, v in enumerate(values):
+                if v == self.levels[1]:
+                    out[j] = lp1[j]
+                elif v == self.levels[0]:
+                    out[j] = lp0[j]
+            return out
+        logits = np.concatenate([np.zeros((len(values), 1)), x_mat @ self.weights.T], axis=1)
+        logp = logits - _logsumexp_rows(logits)[:, None]
+        index = {lv: i for i, lv in enumerate(self.levels)}
+        for j, v in enumerate(values):
+            i = index.get(v)
+            if i is not None:
+                out[j] = logp[j, i]
+        return out
+
+    def seq_log_density(self, cols: list[list[Any]]) -> np.ndarray:
+        return self._log_pmf_rows(self._design(cols), cols[self.child])
+
+    def log_density(self, x: tuple) -> float:
+        row = self._row([x[p] for p in self.parents])[None, :]
+        return float(self._log_pmf_rows(row, [x[self.child]])[0])
+
+    def sample(self, x: list, rng: np.random.RandomState) -> Any:
+        row = self._row([x[p] for p in self.parents])
+        if self.kind == "poisson":
+            return int(rng.poisson(float(np.exp(np.clip(row @ self.weights, -700.0, 700.0)))))
+        if self.kind == "binomial":
+            p1 = 1.0 / (1.0 + np.exp(-float(row @ self.weights)))
+            return self.levels[1] if rng.rand() < p1 else self.levels[0]
+        logits = np.concatenate([[0.0], self.weights @ row])
+        p = np.exp(logits - np.max(logits))
+        return self.levels[int(rng.choice(len(self.levels), p=p / p.sum()))]
+
+    @classmethod
+    def fit(cls, child: int, parents: list[int], cols: list[list[Any]], discrete: dict[int, list[Any]]):
+        stub = cls(child, parents, discrete, "binomial", [], np.zeros(1))
+        x = stub._design(cols)
+        col = cols[child]
+        levels = sorted(set(col), key=repr)
+        is_count = all(isinstance(v, (int, np.integer)) and not isinstance(v, bool) and int(v) >= 0 for v in col)
+        if len(levels) == 2:
+            from mixle.inference.glm import glm
+
+            y01 = np.asarray([1.0 if v == levels[1] else 0.0 for v in col])
+            beta = glm(x, y01, family="binomial").coef
+            return cls(child, parents, discrete, "binomial", levels, beta)
+        if is_count and len(levels) > 2:
+            from mixle.inference.glm import glm
+
+            beta = glm(x, np.asarray(col, dtype=np.float64), family="poisson").coef
+            return cls(child, parents, discrete, "poisson", [], beta)
+        w = _fit_multinomial_logistic(x, np.asarray([levels.index(v) for v in col]), len(levels))
+        return cls(child, parents, discrete, "multinomial", levels, w)
+
+    def n_params(self) -> int:
+        return int(self.weights.size)
+
+
+def _logsumexp_rows(a: np.ndarray) -> np.ndarray:
+    m = np.max(a, axis=1)
+    return m + np.log(np.sum(np.exp(a - m[:, None]), axis=1))
+
+
+def _fit_multinomial_logistic(x: np.ndarray, y_idx: np.ndarray, k: int, ridge: float = 1e-6) -> np.ndarray:
+    """Softmax regression (class 0 reference) by L-BFGS on the convex ridge-penalized NLL."""
+    from scipy.optimize import minimize
+
+    n, d = x.shape
+    onehot = np.zeros((n, k))
+    onehot[np.arange(n), y_idx] = 1.0
+
+    def nll_grad(flat: np.ndarray) -> tuple[float, np.ndarray]:
+        w = flat.reshape(k - 1, d)
+        logits = np.concatenate([np.zeros((n, 1)), x @ w.T], axis=1)
+        lse = _logsumexp_rows(logits)
+        nll = float(np.sum(lse - logits[np.arange(n), y_idx]) + 0.5 * ridge * np.sum(w * w))
+        p = np.exp(logits - lse[:, None])
+        grad = (p[:, 1:] - onehot[:, 1:]).T @ x + ridge * w
+        return nll, grad.ravel()
+
+    res = minimize(nll_grad, np.zeros((k - 1) * d), jac=True, method="L-BFGS-B", options={"maxiter": 500})
+    return res.x.reshape(k - 1, d)
 
 
 class _DiscreteConditionalFactor:
@@ -364,8 +492,6 @@ def learn_bayesian_network(
             for q in range(n_fields):
                 if q == c or q in parents[c] or _would_cycle(parents, q, c):
                     continue
-                if discrete[c] and not discrete[q]:
-                    continue  # a discrete child conditions on discrete parents (a continuous driver -> a CLG child)
                 cand = _fit_factor(c, [*parents[c], q], cols, discrete, levels, templates[c], max_its)
                 ll = float(np.sum(cand.seq_log_density(cols)))
                 gain = ll - base_ll[c] - 0.5 * (cand.n_params() - factors[c].n_params()) * log_n
@@ -384,9 +510,11 @@ def learn_bayesian_network(
 def _fit_factor(child, parents, cols, discrete, levels, template, max_its):
     if not parents:
         return _MarginalFactor(child, fit(cols[child], _clone(template), max_its=max_its, out=None))
-    if discrete[child]:
-        return _DiscreteConditionalFactor.fit(child, parents, cols, template, max_its)
     disc = {p: levels[p] for p in parents if discrete[p]}
+    if discrete[child]:
+        if len(disc) == len(parents):  # all-discrete parents: the exact per-config table
+            return _DiscreteConditionalFactor.fit(child, parents, cols, template, max_its)
+        return _GLMFactor.fit(child, parents, cols, disc)  # a continuous driver: the GLM node
     return _LinearGaussianFactor.fit(child, parents, cols, disc)
 
 
