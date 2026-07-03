@@ -44,6 +44,19 @@ from mixle.task.economics import (
     cascade_cost_per_request,
     recommend_route,
 )
+
+# edge distillation: structure x training-process search under a hard device budget, steered by a
+# persistent design meta-model (the model that writes the model)
+from mixle.task.edge import (
+    DesignModel,
+    DeviceSpec,
+    EdgeDistillResult,
+    EdgeFootprint,
+    EdgeSpace,
+    distill_designer,
+    distill_for_edge,
+    footprint,
+)
 from mixle.task.extract import (
     ExtractionIO,
     distill_extractor,
@@ -80,7 +93,12 @@ __all__ = [
     "CascadeStats",
     "CostModel",
     "DensityGate",
+    "DesignModel",
     "DesignedModel",
+    "DeviceSpec",
+    "EdgeDistillResult",
+    "EdgeFootprint",
+    "EdgeSpace",
     "ExtractionIO",
     "FieldChoice",
     "HashedNGram",
@@ -103,7 +121,10 @@ __all__ = [
     "cascade_cost_per_request",
     "design_model",
     "distill",
+    "distill_designer",
     "distill_extractor",
+    "distill_for_edge",
+    "footprint",
     "distill_from_labels",
     "distill_records",
     "distill_records_from_labels",
