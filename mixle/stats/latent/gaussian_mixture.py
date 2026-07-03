@@ -118,6 +118,13 @@ class GaussianMixtureDistribution(MixtureDistribution):
         s4 = repr(self.name)
         return "GaussianMixtureDistribution(%s, %s, %s, name=%s)" % (s1, s2, s3, s4)
 
+    def density_semantics(self):
+        from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
+
+        children = list(self.components)
+        sems = [c.density_semantics() for c in children if hasattr(c, "density_semantics")]
+        return join_density_semantics(sems) if sems else DensitySemantics.EXACT
+
     def sampler(self, seed: int | None = None) -> "GaussianMixtureSampler":
         """Create GaussianMixtureSampler for sampling from GaussianMixtureDistribution instance.
 
