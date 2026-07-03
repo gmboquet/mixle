@@ -10,6 +10,8 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import mixle.stats  # noqa: F401,E402
+
 project = "mixle"
 author = "Grant Boquet"
 copyright = "2014-2026, Grant Boquet and contributors"
@@ -106,7 +108,7 @@ intersphinx_mapping = {
 html_theme = "furo"
 html_title = f"mixle {release}"
 html_logo = None
-html_favicon = str(ROOT / "mixle_icon.png")
+html_favicon = str(Path(__file__).parent / "_static" / "mixle_icon.png")
 html_static_path = ["_static"] if (Path(__file__).parent / "_static").exists() else []
 html_theme_options = {
     "sidebar_hide_name": True,

@@ -137,8 +137,8 @@ Helper Functions
 ``catalog()`` / ``what_supports`` / ``render_catalog_markdown``
     Inspect the global capability catalog and compare objects.
 
-These functions are also useful in documentation, tests, and extension work
-because they make assumptions explicit.
+These functions make assumptions explicit in reports, tests, and extension
+work.
 
 Core Probability Contracts
 --------------------------
@@ -243,4 +243,3 @@ API Reference
 * :doc:`api/mixle.capability`
 * :doc:`api/mixle.contracts`
 * :doc:`api/mixle.stats.compute.pdist`
-

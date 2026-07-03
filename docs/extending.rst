@@ -143,15 +143,15 @@ For a new encoded-data backend:
 The lower-level compute contracts, declaration metadata, encoded payloads, and
 kernel-selection machinery are documented in :doc:`compute-layer`.
 
-Documentation Requirements
---------------------------
+Public Surface Checklist
+------------------------
 
 Public extensions should update:
 
-* the relevant guide page under ``docs/``;
+* the relevant guide page;
 * :doc:`api-overview` if a new public namespace or common import is added;
 * examples or tutorials when the behavior is user-facing;
-* generated API stubs via ``make -C docs apidoc``.
+* generated API reference pages via ``make -C docs apidoc``.
 
 Testing Requirements
 --------------------

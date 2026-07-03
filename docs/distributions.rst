@@ -208,8 +208,8 @@ the capability layer:
 Do not assume a family supports every operation because it supports
 ``log_density``. Capabilities are the public way to ask.
 
-Where to Look Next
-------------------
+Related Guides
+--------------
 
 * :doc:`concepts` explains the distribution and estimator contract.
 * :doc:`stats-univariate`, :doc:`stats-structured`, and

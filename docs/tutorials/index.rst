@@ -1,24 +1,9 @@
 Tutorials
 =========
 
-These tutorials are task-oriented walkthroughs. They are meant to show how the
-pieces fit together, not to replace the reference pages. Each tutorial names the
-model shape, the inference route, and the point where you should inspect or
-validate the result.
-
-Recommended First Route
------------------------
-
-If you are new to Mixle, read these in order:
-
-1. :doc:`heterogeneous-records`
-2. :doc:`ppl-mixture`
-3. :doc:`enumeration-ranking`
-4. :doc:`production-artifacts`
-
-That path starts with the stable ``mixle.stats`` and ``mixle.inference`` core,
-then moves through symbolic model expressions, support traversal, and artifact
-handling.
+These tutorials are task-oriented walkthroughs. Each one names the model shape,
+the inference route, and the point where the result should be inspected or
+validated.
 
 Choose By Problem
 -----------------
@@ -27,7 +12,7 @@ Choose By Problem
    :header-rows: 1
 
    * - If you need to
-     - Read
+     - Walkthrough
      - Surface
    * - model records with mixed field types
      - :doc:`heterogeneous-records`
@@ -60,30 +45,6 @@ Choose By Problem
      - :doc:`evolution-and-analysis`
      - Active design/evolution workflow
 
-Learning Tracks
----------------
-
-Core probabilistic modeling
-    Start with :doc:`heterogeneous-records`, then read
-    :doc:`ppl-mixture`, :doc:`enumeration-ranking`, and
-    :doc:`relations-and-operations`.
-
-LLM and task replacement
-    Start with :doc:`llm-distillation-cascade`, then read
-    :doc:`llm-uncertainty`. For numeric replacement, multi-label tagging,
-    structured outputs, tool calls, and planning, continue with
-    :doc:`/task-serving` and
-    :doc:`/agentic-task-distillation`.
-
-Neural and representation workflows
-    Start with :doc:`hybrid-llm-events`, then read
-    :doc:`representation-and-models`, :doc:`/neural-llm`, and
-    :doc:`/representation`.
-
-Production and improvement
-    Start with :doc:`production-artifacts`, then read
-    :doc:`evolution-and-analysis`, :doc:`/production`, and :doc:`/lifecycle`.
-
 What Each Tutorial Demonstrates
 -------------------------------
 
@@ -92,7 +53,7 @@ What Each Tutorial Demonstrates
 
    * - Tutorial
      - Main idea
-     - Read next
+     - Related guides
    * - :doc:`heterogeneous-records`
      - A tuple-shaped row becomes a composite estimator, and a mixture adds a
        latent cluster over the whole record.
@@ -133,26 +94,6 @@ What Each Tutorial Demonstrates
      - Diagnostics and objective-led search promote challengers only when they
        pass a verification gate.
      - :doc:`/analysis`, :doc:`/evolution`
-
-Reference Bridges
------------------
-
-For broader reference material related to these tutorials, use:
-
-* :doc:`/quickstart` and :doc:`/concepts` for the core data-shape and
-  estimator-shape rule.
-* :doc:`/maturity` for the boundary between stable, active, and incubating
-  surfaces.
-* :doc:`/stats-univariate`, :doc:`/stats-structured`, and
-  :doc:`/stats-latent-bayes` for the distribution catalog.
-* :doc:`/inference-toolkit` for scoring, calibration, conformal prediction,
-  comparison, resampling, survival, and robust inference.
-* :doc:`/task-serving` for one-call task replacement, routers, scorecards, edge
-  deployment, and quantized local students.
-* :doc:`/reasoning-systems` for finite-hypothesis reasoning, graph-producing
-  LLMs, cross-modal retrieval, and learned shared latents.
-* :doc:`/api-overview` when you know what you want to import but not which
-  namespace owns it.
 
 .. toctree::
    :maxdepth: 1

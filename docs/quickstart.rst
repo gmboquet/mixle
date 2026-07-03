@@ -1,14 +1,9 @@
 Quickstart
 ==========
 
-This quickstart uses the stable center of Mixle: ``mixle.stats`` distributions
-and ``mixle.inference.optimize``. It fits a heterogeneous record model, scores
-new rows, samples from the fitted distribution, and inspects the fitted
-object's capabilities.
-
-The example deliberately avoids ``mixle.models`` at first. Neural leaves and
-other applied helpers are useful, but they are an incubating surface. Learn the
-distribution/estimator shape rule before reaching for them.
+This quickstart fits a heterogeneous record model with ``mixle.stats`` and
+``mixle.inference.optimize``. It scores new rows, samples from the fitted
+distribution, and inspects the fitted object's capabilities.
 
 Install
 -------
@@ -199,8 +194,8 @@ domain.
 Optional: Neural Event Leaf
 ---------------------------
 
-``mixle.models`` includes incubating neural leaves. Use them when a neural
-likelihood is genuinely part of the model, not as the default first path.
+``mixle.models`` includes neural leaves for cases where a neural likelihood is
+part of the model.
 
 For example, an event row can combine a Transformer next-token leaf with a
 Gamma timing model:
@@ -222,22 +217,3 @@ This pattern is useful for anomaly scoring in event streams, but it needs the
 ``torch`` extra and the usual neural-model discipline: fixed seeds, held-out
 data, monitored training loss, and reproducible artifacts. See
 :doc:`neural-llm` only after the core distribution workflow above is clear.
-
-What To Read Next
------------------
-
-* :doc:`maturity` explains which namespaces are stable, active, or
-  experimental.
-* :doc:`concepts` explains the distribution and estimator contract.
-* :doc:`hmms-latent` covers mixtures, HMMs, and structured transitions.
-* :doc:`neural-llm` covers Transformer leaves, shared embeddings, and DPO.
-* :doc:`representation` covers text, signal, graph, image, and scientific
-  object encoders.
-* :doc:`task-distillation` covers LLM teachers, local students, cascades, and
-  active labeling.
-* :doc:`uncertainty` and :doc:`reasoning-systems` cover semantic entropy,
-  claim reliability, graph-producing LLMs, and cross-modal evidence fusion.
-* :doc:`doe` and :doc:`evolution` cover active design, Bayesian optimization,
-  sensitivity analysis, and verify-gated model improvement.
-* :doc:`automatic-inference` covers inferred estimators and model
-  recommendation.

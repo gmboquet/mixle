@@ -55,7 +55,7 @@ Choose By Workflow
 
    * - Workflow
      - Start with
-     - Read next
+     - Related guides
    * - Heterogeneous records
      - ``auto_example.py``, ``gallery_combinators_example.py``
      - :doc:`quickstart`, :doc:`tutorials/heterogeneous-records`
@@ -116,7 +116,7 @@ dataset on first run.
    pip install datasets
 
 Use ``mixle[all]`` only when you deliberately want the full optional surface.
-For most documentation examples, a smaller extra is easier to debug.
+For most examples, a smaller extra is easier to debug.
 
 Complete Inventory
 ------------------
