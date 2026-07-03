@@ -257,6 +257,13 @@ def _isolate_global_process_state():
     e.g. a ``fit()``-based parameter-recovery test that is deterministic in isolation but flakes only in
     the full suite because an earlier test left a non-numpy default engine in place. Restoring the
     default engine, the numpy RNG state, and the numpy error mode after each test closes that hole.
+
+    Torch globals get the same treatment. The default dtype is restored (a test that sets float64 and
+    leaks it makes every float32-module test scheduled after it on that worker die with Float/Double
+    matmul errors -- a different victim set each run, depending on how xdist distributed the files).
+    The global torch RNG is re-seeded before each test and restored after, so ambient torch draws
+    depend neither on the worker's entropy-derived base seed nor on which tests ran earlier in the
+    process: a test passes or fails the same way on every worker, in every order, on every run.
     """
     import numpy as np
 
@@ -265,13 +272,14 @@ def _isolate_global_process_state():
     engine = get_default_engine()
     rng_state = np.random.get_state()
     err_mode = np.geterr()
-    torch_dtype = None
+    torch_globals = None
     try:
         import torch  # force single-threaded + deterministic before this test runs (a prior test may have changed it)
 
         torch.set_num_threads(1)  # (multi-threaded CPU matmuls aren't bit-reproducible -> training-threshold flakes)
         torch.use_deterministic_algorithms(True, warn_only=True)
-        torch_dtype = torch.get_default_dtype()  # a leaked float64 default silently retrains later students in f64
+        torch_globals = (torch.get_default_dtype(), torch.random.get_rng_state())
+        torch.manual_seed(0)  # fixed ambient stream: unseeded torch draws are identical on every worker, every run
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -280,7 +288,8 @@ def _isolate_global_process_state():
         set_default_engine(engine)
         np.random.set_state(rng_state)
         np.seterr(**err_mode)
-        if torch_dtype is not None:
+        if torch_globals is not None:
             import torch
 
-            torch.set_default_dtype(torch_dtype)
+            torch.set_default_dtype(torch_globals[0])
+            torch.random.set_rng_state(torch_globals[1])
