@@ -55,7 +55,7 @@ from mixle.enumeration.hmm_paths import HMMPathIndex, hmm_best_paths
 from mixle.enumeration.model_enumeration import best_first_decode, quantized_best_first_decode
 
 # --- the count-budget seek / unrank index + the count semiring (rank-by-index machinery) ---
-from mixle.enumeration.quantization.core import count_budget_index
+from mixle.enumeration.quantization.core import count_budget_index, logit_error_bucket_slack
 from mixle.enumeration.quantization.semiring import CountSemiring, DecomposableSemiring, TropicalSemiring
 from mixle.enumeration.rescore import RescoredIndex
 from mixle.enumeration.seek_index import SeekIndex
@@ -84,6 +84,7 @@ __all__ = [
     # rank-by-index (count-budget unranking)
     "count_budget_index",
     "SeekIndex",
+    "logit_error_bucket_slack",
     "quantized_index",
     "QuantizedEnumerationIndex",
     "LazyQuantizedEnumerationIndex",

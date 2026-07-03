@@ -671,6 +671,27 @@ def distinct_budget_stream(
     return gen()
 
 
+def logit_error_bucket_slack(eps_nats: float, steps: int, quantizer: Quantizer) -> int:
+    """Sound bucket-shift bound when step log-probabilities carry up to ``eps_nats`` of error each.
+
+    The license to run enumeration forwards on a **quantized model** (int8/int4 inference, a distilled
+    twin): enumeration never needs logits more accurate than the fine-bucket width. If every step
+    log-probability is within ``eps_nats`` of the true model's, a ``steps``-long value's accumulated
+    fine bucket shifts by at most ``ceil(steps * eps_nats / ln2 * fine_per_bit)`` buckets -- this bound.
+    It composes additively with the existing ``steps``-floor structural smear, so every count / rank /
+    mass bracket in this package widens by exactly this many buckets and remains sound.
+
+    Practical reading: with the default quantizer (1/8-bit fine buckets) a per-step logit error of
+    ~0.01 nats (typical of int8 inference) costs ``ceil(steps * 0.115)`` buckets -- about one bucket per
+    nine steps -- while the forwards run 2-4x faster.
+    """
+    if eps_nats < 0:
+        raise ValueError("eps_nats must be non-negative")
+    if steps < 0:
+        raise ValueError("steps must be non-negative")
+    return int(math.ceil(float(steps) * (float(eps_nats) / _LOG2) * quantizer.fine_per_bit() - _TOL))
+
+
 def _two_pow(bits: float) -> int:
     """2**bits as an exact integer ceiling (budget is a count threshold)."""
     b = float(bits)
