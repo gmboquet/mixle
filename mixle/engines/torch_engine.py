@@ -202,12 +202,15 @@ class TorchEngine(ComputeEngine):
             rv = x
             for one_dim in sorted((int(d) for d in dim), reverse=True):
                 rv = torch.max(rv, dim=one_dim, **kwargs)
-                rv = rv.values if hasattr(rv, "values") else rv
+                rv = rv.values if isinstance(rv, tuple) else rv
             return rv
         if dim is not None:
             kwargs["dim"] = dim
         rv = torch.max(x, *args, **kwargs)
-        return rv.values if hasattr(rv, "values") else rv
+        # torch.max(x) with no dim returns a plain Tensor, and Tensor.values is the SPARSE accessor
+        # method — hasattr would hand that method back uncalled. Only the dim reduction returns the
+        # (values, indices) named tuple, so unwrap on tuple-ness, never on attribute presence.
+        return rv.values if isinstance(rv, tuple) else rv
 
     dot = staticmethod(lambda x, y: torch.dot(x, y))
     matmul = staticmethod(lambda x, y: torch.matmul(x, y))
