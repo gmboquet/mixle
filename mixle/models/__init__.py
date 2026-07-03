@@ -64,7 +64,7 @@ from mixle.models.neural import (
     PoissonRegressionNeuralNetwork,
     make_mlp,
 )
-from mixle.models.neural_density import NeuralDensity, build_coupling_flow, build_vae
+from mixle.models.neural_density import NeuralDensity, build_coupling_flow, build_maf, build_vae
 from mixle.models.neural_leaf import NeuralLeaf
 from mixle.models.partially_observable_markov_decision_process import (
     PartiallyObservableMarkovDecisionProcessFilterResult,
@@ -153,6 +153,7 @@ __all__ = [
     "hard_em_stochastic_block_model",
     "learn_pc_skeleton",
     "build_coupling_flow",
+    "build_maf",
     "build_mdn",
     "build_vae",
     "make_mlp",
