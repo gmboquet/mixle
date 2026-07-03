@@ -1,0 +1,91 @@
+"""ProductOfExpertsFusion / StructuredFusionClassifier -- the trainable Level-3 fusion primitive.
+
+Locks: the fusion equals the analytic Gaussian product-of-experts, it is permutation-invariant and O(N)
+(not O(N^2)), it is differentiable, and the classifier learns an exchangeable-evidence task from scratch.
+"""
+
+import importlib.util
+import unittest
+
+import numpy as np
+
+_HAS_TORCH = importlib.util.find_spec("torch") is not None
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class ProductOfExpertsFusionTest(unittest.TestCase):
+    def test_matches_analytic_gaussian_product_of_experts(self):
+        import torch
+
+        from mixle.reason import ProductOfExpertsFusion
+
+        torch.manual_seed(0)
+        mu = torch.randn(4, 5, 3)  # (batch, n_experts, latent)
+        log_prec = torch.randn(4, 5, 3)
+        prec = torch.nn.functional.softplus(log_prec)
+        fused_mu, fused_prec = ProductOfExpertsFusion(prior_prec=1.0)(mu, log_prec)
+        # analytic PoE: precisions add (+ prior), mean is precision-weighted
+        want_prec = prec.sum(1) + 1.0
+        want_mu = (prec * mu).sum(1) / want_prec
+        torch.testing.assert_close(fused_prec, want_prec)
+        torch.testing.assert_close(fused_mu, want_mu)
+
+    def test_permutation_invariant_and_differentiable(self):
+        import torch
+
+        from mixle.reason import ProductOfExpertsFusion
+
+        torch.manual_seed(1)
+        mu = torch.randn(2, 6, 4, requires_grad=True)
+        log_prec = torch.randn(2, 6, 4)
+        f = ProductOfExpertsFusion()
+        a_mu, _ = f(mu, log_prec)
+        perm = torch.randperm(6)
+        b_mu, _ = f(mu[:, perm], log_prec[:, perm])
+        torch.testing.assert_close(a_mu, b_mu)  # order of the experts does not matter
+        a_mu.sum().backward()  # gradients flow back to the experts (encoders train through fusion)
+        self.assertIsNotNone(mu.grad)
+        self.assertGreater(mu.grad.abs().sum().item(), 0.0)
+
+    def test_fusion_flops_is_linear_not_quadratic(self):
+        from mixle.reason import fusion_flops
+
+        self.assertEqual(fusion_flops(64, 16), 64 * 16)  # PoE: O(N*M)
+        self.assertEqual(fusion_flops(64, 16, attention=True), 64 * 64 * 16)  # attention: O(N^2*M)
+        # the gap grows with token count -- the whole point at many-patch/many-token scale
+        self.assertGreater(fusion_flops(256, 16, attention=True), 60 * fusion_flops(256, 16))
+
+    def test_classifier_learns_exchangeable_evidence_from_scratch(self):
+        import torch
+
+        from mixle.reason import StructuredFusionClassifier
+
+        torch.manual_seed(0)
+        rng = np.random.RandomState(0)
+        k, latent, n_tok, dtok = 6, 12, 16, 5
+        protos = rng.randn(k, latent).astype(np.float32)
+        proj = (rng.randn(n_tok, dtok, latent) * 0.6).astype(np.float32)
+
+        def batch(n, seed):
+            r = np.random.RandomState(seed)
+            y = r.randint(0, k, n)
+            x = np.einsum("ndl,bl->bnd", proj, protos[y]) + r.randn(n, n_tok, dtok).astype(np.float32) * 1.0
+            return torch.tensor(x.astype(np.float32)), torch.tensor(y)
+
+        model = StructuredFusionClassifier(dtok, latent, k)
+        xtr, ytr = batch(1500, 1)
+        opt = torch.optim.Adam(model.parameters(), lr=3e-3)
+        for _ in range(60):
+            for i in range(0, len(xtr), 128):
+                loss = torch.nn.functional.cross_entropy(model(xtr[i : i + 128]), ytr[i : i + 128])
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+        xte, yte = batch(1000, 2)
+        with torch.no_grad():
+            acc = (model(xte).argmax(1) == yte).float().mean().item()
+        self.assertGreater(acc, 0.8)  # fusing partial views recovers the class
+
+
+if __name__ == "__main__":
+    unittest.main()
