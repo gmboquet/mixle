@@ -107,6 +107,98 @@ class LearnedPolicy:
         return float(np.mean(near)) if near else fallback
 
 
+def _expand_action_features(feats: dict[str, Any]) -> dict[str, float]:
+    """One-hot the categorical ``kind`` so the numeric featurizer keeps the action-type signal."""
+    out: dict[str, float] = {}
+    for kk, vv in feats.items():
+        if kk == "kind":
+            out[f"kind={vv}"] = 1.0
+        elif isinstance(vv, (int, float, bool, np.integer, np.floating)):
+            out[kk] = float(vv)
+    return out
+
+
+@dataclass
+class LearnedAcquisition:
+    """A history-based action scorer for the reasoner: learns which actions pay off, else defers.
+
+    Drop-in for :func:`mixle.substrate.act.score_action` (call it as ``scorer=policy`` in ``investigate``).
+    From ``route`` telemetry -- each row a fired action's ``(features={kind,cost,overlap}, value)`` -- it
+    estimates the expected *yield* of an action in a query's feature region and scores it ``yield / cost``.
+    Where nearby history is too thin, it FALLS BACK to the static lexical scorer: the same never-worse
+    discipline as :class:`LearnedPolicy`, now on the reasoner's acquisition decisions (J3)."""
+
+    keys: list[str]
+    vecs: np.ndarray  # (n, d) standardized historical action-feature vectors
+    values: np.ndarray  # (n,) realized yield of each historical action (higher is better)
+    static: Callable[[Any, str], float]  # fallback scorer (action, question) -> float
+    mean: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    scale: np.ndarray = field(default_factory=lambda: np.ones(0))
+    k: int = 8
+    min_neighbors: int = 4
+
+    def _neighbors(self, vec: np.ndarray) -> np.ndarray:
+        z = (vec - self.mean) / self.scale
+        d = np.linalg.norm(self.vecs - z[None, :], axis=1)
+        return np.argsort(d)[: self.k]
+
+    def expected_yield(self, features: dict[str, Any]) -> float | None:
+        """Estimated yield of an action with these features, or None when history is too thin to say."""
+        if len(self.values) < self.min_neighbors:
+            return None
+        idx = self._neighbors(_featurize(_expand_action_features(features), self.keys))
+        if len(idx) < self.min_neighbors:
+            return None
+        return float(np.mean(self.values[idx]))
+
+    def __call__(self, action: Any, question: str) -> float:
+        from mixle.substrate.act import action_features
+
+        feats = action_features(action, question)
+        ey = self.expected_yield(feats)
+        if ey is None:
+            return self.static(action, question)  # never-worse: defer where evidence is thin
+        return ey / max(float(feats.get("cost", 1.0)), 1e-9)
+
+
+def learn_action_policy(
+    rows: list[tuple[dict[str, Any], str, dict[str, Any]]],
+    static_scorer: Callable[[Any, str], float] | None = None,
+    *,
+    value_key: str = "value",
+    k: int = 8,
+    min_neighbors: int = 4,
+) -> LearnedAcquisition:
+    """Learn a reasoner acquisition policy from ``route`` telemetry ``(features, kind, outcome)`` rows.
+
+    ``static_scorer`` is the fall-back when history is thin (default :func:`mixle.substrate.act.score_action`).
+    ``value_key`` names the outcome field to MAXIMIZE (default ``"value"`` -- did the action yield
+    evidence). Returns a :class:`LearnedAcquisition` usable directly as ``investigate(..., scorer=policy)``.
+    """
+    if not rows:
+        raise ValueError("learn_action_policy needs telemetry rows")
+    if static_scorer is None:
+        from mixle.substrate.act import score_action as static_scorer  # noqa: N806
+    expanded = [_expand_action_features(feats) for feats, _c, _o in rows]
+    keys = sorted({k2 for feats in expanded for k2 in feats})
+    vecs = np.stack([_featurize(feats, keys) for feats in expanded])
+    values = np.asarray([float(o.get(value_key, 0.0)) for _f, _c, o in rows], dtype=np.float64)
+    mean = vecs.mean(axis=0)
+    scale = vecs.std(axis=0)
+    scale = np.where(scale < 1e-9, 1.0, scale)
+    z = (vecs - mean) / scale
+    return LearnedAcquisition(
+        keys=keys,
+        vecs=z,
+        values=values,
+        static=static_scorer,
+        mean=mean,
+        scale=scale,
+        k=k,
+        min_neighbors=min_neighbors,
+    )
+
+
 def learn_placement_policy(
     rows: list[tuple[dict[str, Any], str, dict[str, Any]]],
     static_policy: Callable[[dict[str, Any]], str],
