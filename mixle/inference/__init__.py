@@ -168,9 +168,12 @@ from mixle.inference.placement import BlockPlacement, PlacementPlan, PoolSpec, p
 from mixle.inference.planning import (
     BlockPlan,
     EstimationCertificate,
+    EstimationSchedule,
     Guarantee,
+    SchedulePass,
     certify,
     plan_estimation,
+    schedule,
 )
 from mixle.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
 
@@ -340,6 +343,9 @@ __all__ = [
     # estimation planning + certificates (the right-method-provably keystone)
     "certify",
     "plan_estimation",
+    "schedule",
+    "EstimationSchedule",
+    "SchedulePass",
     "EstimationCertificate",
     "BlockPlan",
     "Guarantee",

@@ -161,6 +161,40 @@ class ProcessClassificationTest(unittest.TestCase):
         self.assertIn("renewal_mle", block.method)
 
 
+class ScheduleTest(unittest.TestCase):
+    """Planner v2 (A3): block-coordinate schedules for latent models."""
+
+    def test_fully_observed_model_is_one_shot(self):
+        from mixle.inference import schedule
+
+        g = optimize([float(np.random.RandomState(i).randn()) for i in range(100)], st.GaussianEstimator(), out=None)
+        s = schedule(g)
+        self.assertFalse(s.latent)
+        self.assertEqual([p.repeat for p in s.passes], ["once"])
+        self.assertIn("one-shot", s.describe())
+
+    def test_mixture_schedules_the_em_loop_explicitly(self):
+        from mixle.inference import schedule
+
+        data = [float(x) for x in np.random.RandomState(0).normal(0, 1, 200)]
+        m = optimize(data, st.MixtureEstimator([st.GaussianEstimator(), st.GaussianEstimator()]), out=None, max_its=5)
+        s = schedule(m)
+        self.assertTrue(s.latent)
+        kinds = [p.kind for p in s.per_round]
+        self.assertEqual(kinds[0], "estep")  # E-step first
+        self.assertEqual(kinds.count("mstep"), 2)  # one closed-form M-step per component, per round
+        self.assertTrue(all(p.placement == "local" for p in s.passes))  # nothing here needs a pool
+        self.assertIn("EM loop", s.describe())
+
+    def test_bn_schedules_independent_per_factor_passes(self):
+        from mixle.inference import learn_bayesian_network, schedule
+
+        rows = [(["a", "b"][i % 2], float(i % 2 * 10 + np.random.RandomState(i).randn())) for i in range(100)]
+        s = schedule(learn_bayesian_network(rows, max_parents=1))
+        self.assertFalse(s.latent)
+        self.assertEqual(len(s.passes), 2)  # one pass per factor, no loop
+
+
 class FacadeTest(unittest.TestCase):
     def test_model_fit_attaches_a_certificate(self):
         from mixle import Model
