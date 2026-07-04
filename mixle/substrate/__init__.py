@@ -9,6 +9,7 @@ build on.
 
 from __future__ import annotations
 
+from mixle.substrate.answer import Answer, answer_from_substrate
 from mixle.substrate.context import ContextBudget, ContextPacket, assemble_context, compress_text
 from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
 from mixle.substrate.ingest import ingest_artifacts, ingest_documents, ingest_traces
@@ -31,4 +32,6 @@ __all__ = [
     "multihop",
     "HopChain",
     "HopStep",
+    "answer_from_substrate",
+    "Answer",
 ]
