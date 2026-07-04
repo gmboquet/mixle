@@ -145,6 +145,7 @@ from mixle.inference.nonparametric import (
     sign_test,
     wilcoxon_signed_rank,
 )
+from mixle.inference.orchestration import LearnedPolicy, learn_placement_policy
 
 # ordinal (cumulative-link) regression + rank-concordance measures
 from mixle.inference.ordinal import (
@@ -335,6 +336,9 @@ __all__ = [
     "PlacementPlan",
     "BlockPlacement",
     "PoolSpec",
+    # learned orchestration -- the platform's own decisions as models trained on telemetry (never-worse)
+    "learn_placement_policy",
+    "LearnedPolicy",
     # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
     "posterior",
     "ParameterPosterior",
