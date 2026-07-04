@@ -38,6 +38,7 @@ from mixle.inference.bayesian_network import (
 # belief states: a distribution over a latent, updated by evidence (the assimilation step)
 from mixle.inference.belief import BeliefState, GaussianBelief, as_belief
 from mixle.inference.blackbox import LaplacePosterior, laplace_posterior
+from mixle.inference.calibrate_fit import CalibrationReport, calibration_report
 
 # calibration diagnostics — "is my probability / interval actually calibrated?"
 from mixle.inference.calibration import (
@@ -326,6 +327,9 @@ __all__ = [
     # uq() -- one verb, method auto-selected (Laplace / conformal / semantic entropy)
     "uq",
     "UQResult",
+    # calibration as a post-condition of fitting (is the model's uncertainty honest on holdout?)
+    "calibration_report",
+    "CalibrationReport",
     # placement planning -- the local-vs-pool axis of the estimation plan (99/1 topology)
     "plan_placement",
     "PlacementPlan",
