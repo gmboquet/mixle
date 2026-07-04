@@ -65,6 +65,7 @@ from mixle.inference.conformal import (
     split_conformal,
     weighted_conformal,
 )
+from mixle.inference.create import CreatedModel, create
 from mixle.inference.cross_validation import (
     NestedFold,
     blocked_kfold,
@@ -348,6 +349,9 @@ __all__ = [
     # synthesize() -- a dataset factory: sample, label, keep only what verifies
     "synthesize",
     "Dataset",
+    # create() -- data (+ budget/device) to a certified model artifact
+    "create",
+    "CreatedModel",
     # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
     "posterior",
     "ParameterPosterior",
