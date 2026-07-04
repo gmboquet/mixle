@@ -660,6 +660,10 @@ __all__ = [
     "BirthDeathSamplingSampler",
     "BirthDeathSamplingEstimator",
     "BirthDeathSamplingDataEncoder",
+    "ContinuousTimeMarkovChainDistribution",
+    "ContinuousTimeMarkovChainSampler",
+    "ContinuousTimeMarkovChainEstimator",
+    "ContinuousTimeMarkovChainDataEncoder",
     "InhomogeneousPoissonProcessDistribution",
     "InhomogeneousPoissonProcessSampler",
     "InhomogeneousPoissonProcessEstimator",
@@ -1378,6 +1382,12 @@ from mixle.stats.processes.chinese_restaurant_process import (
     ChineseRestaurantProcessDistribution,
     ChineseRestaurantProcessEstimator,
     ChineseRestaurantProcessSampler,
+)
+from mixle.stats.processes.ctmc import (
+    ContinuousTimeMarkovChainDataEncoder,
+    ContinuousTimeMarkovChainDistribution,
+    ContinuousTimeMarkovChainEstimator,
+    ContinuousTimeMarkovChainSampler,
 )
 from mixle.stats.processes.hawkes_process import (
     HawkesProcessDataEncoder,

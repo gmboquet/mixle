@@ -194,6 +194,18 @@ def _classify_process(obj: Any, name: str) -> BlockPlan | None:
             placement="local",
             reason="inhomogeneous Poisson -- closed-form per-bin rate MLE (Poisson-concave, unique global)",
         )
+    if kind == "ContinuousTimeMarkovChainDistribution":
+        # q_ij = n_ij / T_i: each off-diagonal rate is an independent closed-form Poisson-rate MLE
+        # (strictly concave), so the generator estimate is the unique global optimum.
+        return BlockPlan(
+            name,
+            kind,
+            "closed_form_counts",
+            Guarantee.GLOBAL_UNIQUE,
+            gradient=False,
+            placement="local",
+            reason="CTMC generator -- closed-form q_ij = n_ij / T_i (independent Poisson rates, unique global)",
+        )
     if kind == "BirthDeathSamplingDistribution":
         # each rate = (event count of that type) / integral_n: a closed-form Poisson-rate MLE per type,
         # strictly concave, hence the unique global for its objective.
