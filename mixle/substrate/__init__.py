@@ -35,6 +35,7 @@ from mixle.substrate.ingest import (
     ingest_records,
     ingest_traces,
 )
+from mixle.substrate.interop import ExternalAnswer, ExternalModel, external_action
 from mixle.substrate.multihop import HopChain, HopStep, multihop
 from mixle.substrate.reasoner import Reasoner
 from mixle.substrate.retrieve import Retrieval, retrieve
@@ -108,4 +109,7 @@ __all__ = [
     "scan_substrate",
     "SecretScan",
     "SecretFinding",
+    "ExternalModel",
+    "ExternalAnswer",
+    "external_action",
 ]
