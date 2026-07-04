@@ -73,9 +73,14 @@ class Reasoner:
         self.scorer = scorer
         return self
 
-    def ask(self, question: str, **overrides: Any) -> Investigation:
+    def ask(self, question: str, *, verify: bool = False, **overrides: Any) -> Investigation:
         """Answer ``question`` over the configured action space, or abstain. ``overrides`` pass through to
-        :func:`investigate` (e.g. ``budget_cost``, ``min_confidence``, ``target_confidence``, ``max_actions``)."""
+        :func:`investigate` (e.g. ``budget_cost``, ``min_confidence``, ``target_confidence``, ``max_actions``).
+
+        With ``verify=True`` and a substrate configured, the (non-abstained) answer is run back through
+        :func:`~mixle.substrate.factuality.check_factuality` and the :class:`FactualityReceipt` is attached
+        to ``Investigation.factuality`` -- the reasoner grounds its own answer's claims and reports which it
+        can cite. It does not suppress the answer; the receipt is there for the caller to gate on."""
         kw: dict[str, Any] = {
             "budget_cost": self.budget_cost,
             "min_confidence": self.min_confidence,
@@ -83,4 +88,9 @@ class Reasoner:
             "telemetry": self.telemetry,
         }
         kw.update(overrides)
-        return investigate(question, self._actions, self.answerer, **kw)
+        inv = investigate(question, self._actions, self.answerer, **kw)
+        if verify and inv.answer is not None and self.substrate is not None:
+            from mixle.substrate.factuality import check_factuality
+
+            inv.factuality = check_factuality(self.substrate, inv.answer)
+        return inv
