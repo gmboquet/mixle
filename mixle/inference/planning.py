@@ -191,9 +191,21 @@ def _classify_process(obj: Any, name: str) -> BlockPlan | None:
             placement="local",
             reason="inhomogeneous Poisson -- closed-form per-bin rate MLE (Poisson-concave, unique global)",
         )
-    if kind == "HawkesProcessDistribution":
-        # Veen-Schoenberg / Lewis-Mohler EM over the latent branching structure: the self-excitation
-        # makes the likelihood non-convex, so EM converges to a stationary point, not a certified global.
+    if kind == "BirthDeathSamplingDistribution":
+        # each rate = (event count of that type) / integral_n: a closed-form Poisson-rate MLE per type,
+        # strictly concave, hence the unique global for its objective.
+        return BlockPlan(
+            name,
+            kind,
+            "closed_form_counts",
+            Guarantee.GLOBAL_UNIQUE,
+            gradient=False,
+            placement="local",
+            reason="birth-death -- closed-form per-type rate MLE (count / exposure; Poisson-concave, unique)",
+        )
+    if kind in ("HawkesProcessDistribution", "MultivariateHawkesProcessDistribution", "PowerLawHawkesDistribution"):
+        # Veen-Schoenberg / Lewis-Mohler branching EM (ML for the power-law kernel): the self-excitation
+        # makes the likelihood non-convex, so it converges to a stationary point, not a certified global.
         return BlockPlan(
             name,
             kind,
@@ -201,7 +213,27 @@ def _classify_process(obj: Any, name: str) -> BlockPlan | None:
             Guarantee.STATIONARY,
             gradient=False,
             placement="local",
-            reason="self-exciting Hawkes -- EM over latent branching; non-convex likelihood (stationary point)",
+            reason="self-exciting Hawkes -- branching EM/ML; non-convex likelihood (stationary point)",
+        )
+    if kind == "RenewalProcessDistribution":
+        # the M-step feeds the inter-arrival gaps to the inter-arrival family's own estimator (the standard
+        # renewal MLE); the censored boundary term is O(1/n_events) and not in the M-step. So the renewal
+        # guarantee IS the inter-arrival family's guarantee -- delegate to it honestly.
+        inner = getattr(obj, "interarrival", None)
+        inner_plan = _classify_leaf(inner, name) if inner is not None else None
+        guarantee = inner_plan.guarantee if inner_plan is not None else Guarantee.STATIONARY
+        inner_kind = type(inner).__name__ if inner is not None else "unknown"
+        return BlockPlan(
+            name,
+            kind,
+            f"renewal_mle[{inner_kind}]",
+            guarantee,
+            gradient=inner_plan.gradient if inner_plan is not None else False,
+            placement="local",
+            reason=(
+                f"renewal process -- M-step is the inter-arrival ({inner_kind}) MLE; boundary term O(1/n); "
+                f"inherits its guarantee"
+            ),
         )
     return None
 
