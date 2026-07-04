@@ -1,19 +1,17 @@
-"""Structure learning over embedded heterogeneous fields -- text becomes a first-class graph node.
+"""Structure learning over embedded heterogeneous fields -- text enters the graph as a VECTOR node.
 
-:func:`mixle.inference.learn_bayesian_network` handles flat records of categoricals, counts, and
-reals -- but a free-text field (a description, a log line, a title) has no place in that record: it
-is not discrete (unbounded distinct values) and ``float()`` of it is meaningless, so today such a
-field cannot participate in structure discovery at all. This module couples the structure learner to
-:mod:`mixle.represent`: each text field is embedded (:func:`mixle.represent.fit_embedder`), the
-embeddings are clustered (seeded Lloyd k-means on the unit sphere), and the field enters the record
-as its CLUSTER CODE -- a plain categorical the graph machinery already knows how to relate to every
-other field in both directions (table factors, GLM nodes, CLG one-hots). The learned edges answer
-"does what the text says relate to the price / the label / the count?", with per-cluster
-representative examples for reading the discovered structure.
+:func:`mixle.inference.learn_bayesian_network` handles flat records of categoricals, counts, reals,
+and (since workstream C1) fixed-length vectors -- but a free-text field (a description, a log line, a
+title) is none of those. This module couples the structure learner to :mod:`mixle.represent`: each
+text field is embedded (:func:`mixle.represent.fit_embedder`) and the field enters the record as its
+EMBEDDING VECTOR -- a first-class multivariate node the graph relates to every other field via
+multivariate conditional-linear-Gaussian factors (as a child) and by splicing its components into the
+design matrix (as a parent). This replaces the earlier cluster-code proxy, which threw away all
+within-cluster structure (its resolution was ``n_clusters``); the vector node keeps the full
+embedding, so a text field can drive a real number continuously and be driven by one.
 
-Honest scope: the returned model scores the PROXY record (text collapsed to its cluster code), so its
-``log_density`` is a joint over (codes, other fields) -- a coarse but calibrated view; it is exactly
-as fine as ``n_clusters``. Sampling returns proxy codes, not text.
+For interpretability, ``describe()`` still surfaces representative examples per embedding cluster
+(nearest-centroid), but the MODEL uses the vector, not the code.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ from mixle.inference.structure import _is_discrete
 
 
 def _lloyd(vectors: np.ndarray, k: int, seed: int, iters: int = 25) -> np.ndarray:
-    """Seeded k-means centroids on unit vectors (Euclidean Lloyd == cosine ordering on the sphere)."""
+    """Seeded k-means centroids on unit vectors (for readable per-cluster representatives only)."""
     rng = np.random.RandomState(seed)
     k = min(int(k), len(vectors))
     centroids = vectors[rng.choice(len(vectors), size=k, replace=False)].copy()
@@ -39,31 +37,29 @@ def _lloyd(vectors: np.ndarray, k: int, seed: int, iters: int = 25) -> np.ndarra
             if len(members):
                 c = members.mean(axis=0)
                 centroids[j] = c / max(float(np.linalg.norm(c)), 1e-12)
-            else:  # a starved centroid restarts on the point farthest from its cluster
+            else:
                 centroids[j] = vectors[int(np.argmin(np.max(vectors @ centroids.T, axis=1)))]
     return centroids
 
 
 @dataclass
 class EmbeddedFieldCodec:
-    """One text field's bridge into the graph: embed, then nearest-centroid cluster code."""
+    """One text field's bridge into the graph: embed to a vector; centroids are for interpretability."""
 
     field: int
     embedder: Any
     centroids: np.ndarray
-    representatives: list[str]  # one training example per cluster, nearest its centroid
+    representatives: list[str]  # one training example per cluster, nearest its centroid (for describe())
 
-    def code(self, value: Any) -> str:
-        vec = self.embedder.transform(str(value))
-        return f"c{int(np.argmax(self.centroids @ vec))}"
+    def vector(self, value: Any) -> np.ndarray:
+        return np.asarray(self.embedder.transform(str(value)), dtype=np.float64)
 
-    def codes(self, values: Sequence[Any]) -> list[str]:
-        vecs = self.embedder.transform([str(v) for v in values])
-        return [f"c{int(j)}" for j in np.argmax(vecs @ self.centroids.T, axis=1)]
+    def vectors(self, values: Sequence[Any]) -> np.ndarray:
+        return np.asarray(self.embedder.transform([str(v) for v in values]), dtype=np.float64)
 
 
 class EmbeddedStructureModel:
-    """A discovered dependency graph over records whose text fields ride in as cluster codes."""
+    """A discovered dependency graph over records whose text fields ride in as embedding VECTORS."""
 
     def __init__(self, net: Any, codecs: dict[int, EmbeddedFieldCodec]) -> None:
         self.net = net
@@ -74,17 +70,18 @@ class EmbeddedStructureModel:
         return f"EmbeddedStructureModel(text_fields={sorted(self.codecs)}, edges=[{e or 'none'}])"
 
     def encode_record(self, x: tuple) -> tuple:
-        """The proxy record: text fields replaced by their cluster codes."""
+        """The record with each text field replaced by its embedding vector."""
         vals = list(x)
         for i, codec in self.codecs.items():
-            vals[i] = codec.code(vals[i])
+            vals[i] = codec.vector(vals[i])
         return tuple(vals)
 
     def encode_records(self, rows: Sequence[tuple]) -> list[tuple]:
         rows = [list(r) for r in rows]
         for i, codec in self.codecs.items():
-            for r, code in zip(rows, codec.codes([r[i] for r in rows])):
-                r[i] = code
+            vecs = codec.vectors([r[i] for r in rows])
+            for r, v in zip(rows, vecs):
+                r[i] = v
         return [tuple(r) for r in rows]
 
     def edges(self) -> list[tuple[int, int]]:
@@ -94,8 +91,8 @@ class EmbeddedStructureModel:
         return float(self.net.log_density(self.encode_record(x)))
 
     def seq_log_density(self, rows: Sequence[tuple]) -> np.ndarray:
-        proxies = self.encode_records(list(rows))
-        return np.asarray(self.net.seq_log_density(self.net.dist_to_encoder().seq_encode(proxies)))
+        embedded = self.encode_records(list(rows))
+        return np.asarray(self.net.seq_log_density(self.net.dist_to_encoder().seq_encode(embedded)))
 
     def describe(self) -> dict[str, Any]:
         """The discovered structure with per-cluster representative examples for each text field."""
@@ -122,10 +119,10 @@ def learn_structure_embedded(
     Args:
         data: flat tuple records; text fields may hold arbitrary strings.
         text_fields: which field indices to embed, or ``"auto"`` -- every string-valued field with too
-            many distinct values to be a categorical (the exact fields the plain structure learner
-            cannot accept today).
-        n_clusters: cluster-code vocabulary per text field (the proxy's resolution).
-        embed_dim: embedding dimension for :func:`mixle.represent.fit_embedder`.
+            many distinct values to be a categorical.
+        n_clusters: number of representative clusters surfaced by ``describe()`` (interpretability only;
+            the model uses the full embedding vector, not a cluster code).
+        embed_dim: embedding dimension for :func:`mixle.represent.fit_embedder` -- the vector node's dim.
         **embed_kw: forwarded to ``fit_embedder`` (``epochs``, ``hidden``, ``feature_dim``, ...).
     """
     from mixle.inference.bayesian_network import learn_bayesian_network
@@ -160,6 +157,6 @@ def learn_structure_embedded(
         codecs[i] = EmbeddedFieldCodec(field=i, embedder=emb, centroids=centroids, representatives=reps)
 
     model = EmbeddedStructureModel(net=None, codecs=codecs)  # encode_records needs only the codecs
-    proxies = model.encode_records(rows)
-    model.net = learn_bayesian_network(proxies, max_parents=max_parents)
+    embedded = model.encode_records(rows)
+    model.net = learn_bayesian_network(embedded, max_parents=max_parents)
     return model

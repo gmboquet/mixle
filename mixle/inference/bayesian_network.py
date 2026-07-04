@@ -53,25 +53,158 @@ class _MarginalFactor:
         return _num_free_params(self.dist)
 
 
+def _design_row(parents: list[int], values: Sequence[Any], discrete: dict, vec_dims: dict) -> np.ndarray:
+    """A design row from a record's parent values: vector parents contribute all components, discrete
+    parents one-hot (drop-first), continuous parents their raw value, then a trailing intercept."""
+    feats: list[float] = []
+    for p, v in zip(parents, values):
+        if p in vec_dims:
+            feats.extend(float(c) for c in np.asarray(v, dtype=np.float64).ravel())
+        elif p in discrete:
+            feats.extend(1.0 if v == lv else 0.0 for lv in discrete[p][1:])  # drop-first
+        else:
+            feats.append(float(v))
+    feats.append(1.0)
+    return np.asarray(feats, dtype=np.float64)
+
+
+class _VectorMarginalFactor:
+    """A vector-valued field's marginal: a multivariate Gaussian (closed-form mean + covariance)."""
+
+    def __init__(self, child: int, mean: np.ndarray, cov: np.ndarray) -> None:
+        self.child = child
+        self.parents: list[int] = []
+        self.mean = np.asarray(mean, dtype=np.float64)
+        self.cov = np.asarray(cov, dtype=np.float64)
+        self._prec = np.linalg.inv(self.cov)
+        self._logdet = float(np.linalg.slogdet(self.cov)[1])
+        self._chol = np.linalg.cholesky(self.cov)
+
+    def _mvn_ll(self, y: np.ndarray) -> np.ndarray:
+        d = self.mean.shape[0]
+        delta = y - self.mean
+        quad = np.einsum("ni,ij,nj->n", delta, self._prec, delta)
+        return -0.5 * (d * _LOG_2PI + self._logdet + quad)
+
+    def seq_log_density(self, cols: list[list[Any]]) -> np.ndarray:
+        return self._mvn_ll(np.asarray(cols[self.child], dtype=np.float64))
+
+    def log_density(self, x: tuple) -> float:
+        return float(self._mvn_ll(np.asarray(x[self.child], dtype=np.float64)[None, :])[0])
+
+    def sample(self, x: list, rng: np.random.RandomState) -> np.ndarray:
+        return self.mean + self._chol @ rng.randn(self.mean.shape[0])
+
+    @classmethod
+    def fit(cls, child: int, cols: list[list[Any]], weights: np.ndarray | None = None):
+        y = np.asarray(cols[child], dtype=np.float64)
+        if weights is None:
+            mean = y.mean(axis=0)
+            cov = np.cov(y, rowvar=False)
+        else:
+            w = np.asarray(weights, dtype=np.float64)
+            sw = w.sum()
+            mean = (w[:, None] * y).sum(axis=0) / max(sw, 1e-12)
+            delta = y - mean
+            cov = (w[:, None, None] * np.einsum("ni,nj->nij", delta, delta)).sum(axis=0) / max(sw, 1e-12)
+        cov = np.atleast_2d(cov) + 1e-6 * np.eye(y.shape[1])
+        return cls(child, mean, cov)
+
+    def n_params(self) -> int:
+        d = self.mean.shape[0]
+        return d + d * (d + 1) // 2
+
+
+class _VectorCLGFactor:
+    """A vector child as a multivariate linear-Gaussian of its parents: ``Y ~ N(W x + b, Sigma)``.
+
+    Closed-form multivariate least squares for ``[W|b]`` and a residual covariance for ``Sigma`` --
+    the vector-valued generalization of :class:`_LinearGaussianFactor`, so an embedding field can be
+    driven by (or drive) any other field in the graph."""
+
+    def __init__(self, child, parents, discrete, vec_dims, coef, cov) -> None:
+        self.child = child
+        self.parents = list(parents)
+        self.discrete = discrete
+        self.vec_dims = vec_dims
+        self.coef = np.asarray(coef, dtype=np.float64)  # (p_feats, d)
+        self.cov = np.asarray(cov, dtype=np.float64)  # (d, d)
+        self._prec = np.linalg.inv(self.cov)
+        self._logdet = float(np.linalg.slogdet(self.cov)[1])
+        self._chol = np.linalg.cholesky(self.cov)
+
+    def _design(self, cols: list[list[Any]]) -> np.ndarray:
+        n = len(cols[self.child])
+        return np.stack(
+            [
+                _design_row(self.parents, [cols[p][j] for p in self.parents], self.discrete, self.vec_dims)
+                for j in range(n)
+            ]
+        )
+
+    def _mvn_ll(self, y: np.ndarray, mu: np.ndarray) -> np.ndarray:
+        d = y.shape[1]
+        delta = y - mu
+        quad = np.einsum("ni,ij,nj->n", delta, self._prec, delta)
+        return -0.5 * (d * _LOG_2PI + self._logdet + quad)
+
+    def seq_log_density(self, cols: list[list[Any]]) -> np.ndarray:
+        y = np.asarray(cols[self.child], dtype=np.float64)
+        return self._mvn_ll(y, self._design(cols) @ self.coef)
+
+    def log_density(self, x: tuple) -> float:
+        row = _design_row(self.parents, [x[p] for p in self.parents], self.discrete, self.vec_dims)[None, :]
+        y = np.asarray(x[self.child], dtype=np.float64)[None, :]
+        return float(self._mvn_ll(y, row @ self.coef)[0])
+
+    def sample(self, x: list, rng: np.random.RandomState) -> np.ndarray:
+        row = _design_row(self.parents, [x[p] for p in self.parents], self.discrete, self.vec_dims)
+        return row @ self.coef + self._chol @ rng.randn(self.coef.shape[1])
+
+    @classmethod
+    def fit(cls, child, parents, cols, discrete, vec_dims, weights=None):
+        proto = cls(child, parents, discrete, vec_dims, np.zeros((1, 1)), np.eye(1))
+        x = proto._design(cols)
+        y = np.asarray(cols[child], dtype=np.float64)
+        if weights is None:
+            coef, *_ = np.linalg.lstsq(x, y, rcond=None)
+            resid = y - x @ coef
+            cov = np.cov(resid, rowvar=False)
+        else:
+            w = np.asarray(weights, dtype=np.float64)
+            sw = np.sqrt(np.maximum(w, 0.0))
+            coef, *_ = np.linalg.lstsq(x * sw[:, None], y * sw[:, None], rcond=None)
+            resid = y - x @ coef
+            cov = (w[:, None, None] * np.einsum("ni,nj->nij", resid, resid)).sum(axis=0) / max(w.sum(), 1e-12)
+        cov = np.atleast_2d(cov) + 1e-6 * np.eye(y.shape[1])
+        return cls(child, parents, discrete, vec_dims, coef, cov)
+
+    def n_params(self) -> int:
+        d = self.coef.shape[1]
+        return int(self.coef.size) + d * (d + 1) // 2
+
+
 class _LinearGaussianFactor:
     """A continuous child as a linear-Gaussian of its parents (continuous raw + one-hot discrete): the CLG node."""
 
-    def __init__(self, child: int, parents: list[int], discrete: dict[int, list[Any]], coef: np.ndarray, sigma: float):
+    def __init__(
+        self,
+        child: int,
+        parents: list[int],
+        discrete: dict[int, list[Any]],
+        coef: np.ndarray,
+        sigma: float,
+        vec_dims: dict | None = None,
+    ):
         self.child = child
         self.parents = list(parents)
         self.discrete = discrete  # parent idx -> its sorted levels (one-hot, drop-first); absent => continuous
+        self.vec_dims = vec_dims or {}  # parent idx -> dim, for vector-valued parents
         self.coef = coef  # (d+1,) : weights then intercept
         self.sigma = float(sigma)
 
     def _row(self, values: Sequence[Any]) -> np.ndarray:
-        feats: list[float] = []
-        for p, v in zip(self.parents, values):
-            if p in self.discrete:
-                levels = self.discrete[p]
-                feats.extend(1.0 if v == lv else 0.0 for lv in levels[1:])  # drop-first
-            else:
-                feats.append(float(v))
-        return np.asarray([*feats, 1.0], dtype=np.float64)
+        return _design_row(self.parents, values, self.discrete, self.vec_dims)
 
     def _design(self, cols: list[list[Any]]) -> np.ndarray:
         return np.stack([self._row([cols[p][j] for p in self.parents]) for j in range(len(cols[self.child]))])
@@ -97,8 +230,9 @@ class _LinearGaussianFactor:
         cols: list[list[Any]],
         discrete: dict[int, list[Any]],
         weights: np.ndarray | None = None,
+        vec_dims: dict | None = None,
     ):
-        proto = cls(child, parents, discrete, np.zeros(1), 1.0)
+        proto = cls(child, parents, discrete, np.zeros(1), 1.0, vec_dims=vec_dims)
         x = proto._design(cols)
         y = np.asarray(cols[child], dtype=np.float64)
         if weights is None:
@@ -112,7 +246,7 @@ class _LinearGaussianFactor:
             resid = y - x @ coef
             var = float(np.sum(w * resid**2) / max(np.sum(w), 1e-12))
             sigma = float(np.sqrt(max(var, 1e-6)))
-        return cls(child, parents, discrete, coef, sigma)
+        return cls(child, parents, discrete, coef, sigma, vec_dims=vec_dims)
 
     def n_params(self) -> int:
         return self.coef.shape[0] + 1
@@ -135,10 +269,12 @@ class _GLMFactor:
         kind: str,
         levels: list[Any],
         weights: np.ndarray,
+        vec_dims: dict | None = None,
     ) -> None:
         self.child = child
         self.parents = list(parents)
         self.discrete = discrete
+        self.vec_dims = vec_dims or {}  # parent idx -> dim, for vector-valued parents
         self.kind = kind  # 'binomial' | 'poisson' | 'multinomial'
         self.levels = list(levels)  # child levels (binomial/multinomial); [] for poisson
         self.weights = np.asarray(weights, dtype=np.float64)  # (d,) or (K-1, d)
@@ -201,8 +337,9 @@ class _GLMFactor:
         cols: list[list[Any]],
         discrete: dict[int, list[Any]],
         weights: np.ndarray | None = None,
+        vec_dims: dict | None = None,
     ):
-        proto = cls(child, parents, discrete, "binomial", [], np.zeros(1))
+        proto = cls(child, parents, discrete, "binomial", [], np.zeros(1), vec_dims=vec_dims)
         x = proto._design(cols)
         col = cols[child]
         levels = sorted(set(col), key=repr)
@@ -213,15 +350,15 @@ class _GLMFactor:
             y01 = np.asarray([1.0 if v == levels[1] else 0.0 for v in col])
             with np.errstate(all="ignore"):  # separable data diverges IRLS; the finite-gain guard rejects it
                 beta = glm(x, y01, family="binomial", weights=weights).coef
-            return cls(child, parents, discrete, "binomial", levels, beta)
+            return cls(child, parents, discrete, "binomial", levels, beta, vec_dims=vec_dims)
         if is_count and len(levels) > 2:
             from mixle.inference.glm import glm
 
             with np.errstate(all="ignore"):
                 beta = glm(x, np.asarray(col, dtype=np.float64), family="poisson", weights=weights).coef
-            return cls(child, parents, discrete, "poisson", [], beta)
+            return cls(child, parents, discrete, "poisson", [], beta, vec_dims=vec_dims)
         w = _fit_multinomial_logistic(x, np.asarray([levels.index(v) for v in col]), len(levels), weights=weights)
-        return cls(child, parents, discrete, "multinomial", levels, w)
+        return cls(child, parents, discrete, "multinomial", levels, w, vec_dims=vec_dims)
 
     def n_params(self) -> int:
         return int(self.weights.size)
@@ -614,10 +751,17 @@ def learn_bayesian_network(
     n_eff = float(n) if w is None else float(np.sum(w))
     import mixle.stats as st
 
-    discrete = [_is_discrete(c) for c in cols]
+    # a vector-valued field (fixed-length numeric sequence, e.g. an embedding) is neither discrete nor a
+    # scalar Gaussian -- it becomes a multivariate-Gaussian marginal / multivariate CLG node, and its
+    # components splice into the design matrix when it is a parent (workstream C1: cross-modal graph).
+    vec_dims: dict[int, int] = {i: _vector_dim(cols[i]) for i in range(n_fields) if _is_vector_col(cols[i])}
+    discrete = [(i not in vec_dims and _is_discrete(c)) for i, c in enumerate(cols)]
     # continuous fields get a Gaussian marginal (defined on all of R, consistent with the CLG children) so a
     # mixture component can score every point; discrete fields keep the automatic family (categorical/count).
-    templates = [_field_estimator(cols[i]) if discrete[i] else st.GaussianEstimator() for i in range(n_fields)]
+    templates = [
+        None if i in vec_dims else (_field_estimator(cols[i]) if discrete[i] else st.GaussianEstimator())
+        for i in range(n_fields)
+    ]
     levels = {i: sorted(set(cols[i])) for i in range(n_fields) if discrete[i]}
 
     def _wsum(ll: np.ndarray) -> float:
@@ -627,7 +771,7 @@ def learn_bayesian_network(
     factors: list[Any] = [None] * n_fields
     base_ll = np.zeros(n_fields)
     for c in range(n_fields):
-        factors[c] = _fit_factor(c, [], cols, discrete, levels, templates[c], max_its, w)
+        factors[c] = _fit_factor(c, [], cols, discrete, levels, templates[c], max_its, w, vec_dims)
         base_ll[c] = _wsum(factors[c].seq_log_density(cols))
 
     # global greedy: each round add the single best-penalized-gain edge over the WHOLE graph, so the cheaper
@@ -641,7 +785,7 @@ def learn_bayesian_network(
             for q in range(n_fields):
                 if q == c or q in parents[c] or _would_cycle(parents, q, c):
                     continue
-                cand = _fit_factor(c, [*parents[c], q], cols, discrete, levels, templates[c], max_its, w)
+                cand = _fit_factor(c, [*parents[c], q], cols, discrete, levels, templates[c], max_its, w, vec_dims)
                 with np.errstate(all="ignore"):
                     ll = _wsum(cand.seq_log_density(cols))
                 if not np.isfinite(ll):
@@ -659,15 +803,41 @@ def learn_bayesian_network(
     return HeterogeneousBayesianNetwork(factors)
 
 
-def _fit_factor(child, parents, cols, discrete, levels, template, max_its, weights=None):
+def _is_vector_col(col: Sequence[Any]) -> bool:
+    """A field is vector-valued iff every value is the same-length (>=2) numeric sequence."""
+    first = col[0]
+    if isinstance(first, str) or np.isscalar(first):
+        return False
+    try:
+        d = len(first)
+    except TypeError:
+        return False
+    if d < 2 or not isinstance(first[0], (int, float, np.integer, np.floating)):
+        return False
+    return all(hasattr(v, "__len__") and len(v) == d and not isinstance(v, str) for v in col)
+
+
+def _vector_dim(col: Sequence[Any]) -> int:
+    return len(col[0])
+
+
+def _fit_factor(child, parents, cols, discrete, levels, template, max_its, weights=None, vec_dims=None):
+    vec_dims = vec_dims or {}
+    if child in vec_dims:  # a vector-valued child: multivariate-Gaussian marginal or multivariate CLG
+        if not parents:
+            return _VectorMarginalFactor.fit(child, cols, weights)
+        disc = {p: levels[p] for p in parents if discrete[p]}
+        vpar = {p: vec_dims[p] for p in parents if p in vec_dims}
+        return _VectorCLGFactor.fit(child, parents, cols, disc, vpar, weights)
     if not parents:
         return _MarginalFactor(child, _leaf_fit(cols[child], template, max_its, weights))
     disc = {p: levels[p] for p in parents if discrete[p]}
+    vpar = {p: vec_dims[p] for p in parents if p in vec_dims}
     if discrete[child]:
         if len(disc) == len(parents):  # all-discrete parents: the exact per-config table
             return _DiscreteConditionalFactor.fit(child, parents, cols, template, max_its, weights)
-        return _GLMFactor.fit(child, parents, cols, disc, weights)  # a continuous driver: the GLM node
-    return _LinearGaussianFactor.fit(child, parents, cols, disc, weights)
+        return _GLMFactor.fit(child, parents, cols, disc, weights, vec_dims=vpar)  # a continuous/vector driver
+    return _LinearGaussianFactor.fit(child, parents, cols, disc, weights, vec_dims=vpar)
 
 
 def _would_cycle(parents: list[list[int]], new_parent: int, child: int) -> bool:

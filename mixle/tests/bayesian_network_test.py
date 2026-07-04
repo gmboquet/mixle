@@ -254,5 +254,44 @@ class GLMFactorTest(unittest.TestCase):
         self.assertIn((1, 2), net.edges())  # the continuous driver reaches the discrete child
 
 
+class VectorNodeTest(unittest.TestCase):
+    """Vector-valued fields (embeddings) as first-class nodes: multivariate marginal / CLG, both directions."""
+
+    def _records(self, n, seed):
+        r = np.random.RandomState(seed)
+        out = []
+        for _ in range(n):
+            cat = ["a", "b", "c"][r.randint(0, 3)]
+            center = {"a": [2, 0, 0, 0], "b": [0, 2, 0, 0], "c": [0, 0, 2, 0]}[cat]
+            vec = np.asarray(center, dtype=float) + 0.3 * r.randn(4)
+            price = float(2.0 * vec[0] - 1.0 * vec[1] + 0.4 * r.randn())
+            out.append((cat, vec, price))
+        return out
+
+    def test_vector_is_both_a_clg_child_and_a_continuous_parent(self):
+        net = learn_bayesian_network(self._records(500, 0), max_parents=2)
+        kinds = {f.child: type(f).__name__ for f in net.factors}
+        self.assertEqual(kinds[1], "_VectorCLGFactor")  # the vector is driven by the category (multivariate CLG)
+        self.assertIn((0, 1), net.edges())  # cat -> vector
+        self.assertTrue(any(1 in f.parents for f in net.factors if f.child == 2))  # vector -> price
+
+    def test_scores_and_samples_coherently(self):
+        net = learn_bayesian_network(self._records(400, 0), max_parents=2)
+        test = self._records(200, 1)
+        ll = net.seq_log_density(net.dist_to_encoder().seq_encode(test))
+        self.assertTrue(np.isfinite(ll).all())
+        rows = net.sampler(seed=3).sample(5)
+        self.assertEqual(np.asarray(rows[0][1]).shape, (4,))  # sampled vector has the right dim
+        self.assertTrue(np.isfinite(net.log_density(rows[0])))
+
+    def test_vector_marginal_when_independent(self):
+        r = np.random.RandomState(2)
+        data = [(float(r.randn()), (r.randn(3)).astype(float)) for _ in range(300)]  # scalar and vector, independent
+        net = learn_bayesian_network(data, max_parents=1)
+        vfac = [f for f in net.factors if f.child == 1]
+        self.assertEqual(type(vfac[0]).__name__, "_VectorMarginalFactor")  # no spurious edge -> a bare MVN marginal
+        self.assertEqual(net.edges(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
