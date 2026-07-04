@@ -149,6 +149,17 @@ class ProcessClassificationTest(unittest.TestCase):
         self.assertIn("No gradient descent", certify(self._ip()).why_not_adam())
         self.assertIn("No gradient descent", certify(self._hawkes()).why_not_adam())
 
+    def test_renewal_inherits_its_interarrival_guarantee(self):
+        from mixle.stats.processes.renewal_process import RenewalProcessEstimator as RPE
+
+        rng = np.random.RandomState(0)
+        data = [np.cumsum(rng.exponential(1.0, rng.poisson(12) + 1)).tolist() for _ in range(40)]
+        model = optimize(data, RPE(st.ExponentialEstimator(), window=15.0), out=None, max_its=5)
+        block = certify(model).blocks[0]
+        # exponential inter-arrivals are exp-family -> the renewal MLE is GLOBAL_UNIQUE too
+        self.assertEqual(block.guarantee, Guarantee.GLOBAL_UNIQUE)
+        self.assertIn("renewal_mle", block.method)
+
 
 class FacadeTest(unittest.TestCase):
     def test_model_fit_attaches_a_certificate(self):
