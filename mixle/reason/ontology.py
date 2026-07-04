@@ -210,3 +210,80 @@ class OntologyConstrainedKG:
             return None
         best = max(post.items(), key=lambda kv: kv[1])
         return best
+
+
+@dataclass
+class ConstrainedDecode:
+    """The result of ontology-constrained LLM decoding: what survived, what the schema rejected, and why."""
+
+    facts: list[tuple[Any, float]]  # accepted (triple, confidence) pairs, best-first
+    rejected: list[dict[str, Any]]  # ontology-violating triples with named reasons
+    below_floor: list[tuple[Any, float]]  # consistent but under-confident facts (withheld, not asserted)
+    n_samples: int
+
+    def asserted(self) -> list[Any]:
+        return [t for t, _ in self.facts]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "facts": [{"triple": list(t), "confidence": round(c, 4)} for t, c in self.facts],
+            "rejected": self.rejected,
+            "below_floor": [{"triple": list(t), "confidence": round(c, 4)} for t, c in self.below_floor],
+            "n_samples": self.n_samples,
+        }
+
+
+def constrained_decode(
+    llm: Any,
+    prompt: str,
+    ontology: Ontology,
+    types: dict[str, str],
+    *,
+    n: int | None = None,
+    floor: float = 0.5,
+    calibrator: Any = None,
+) -> ConstrainedDecode:
+    """Ontology-constrained decoding (D2): an LLM may only assert schema-consistent, confident facts.
+
+    Samples ``llm`` (a :class:`~mixle.reason.graph_llm.GraphLLM`) ``n`` times, masks every sampled
+    graph through :meth:`Ontology.filter_triples` (violating triples are REJECTED with named reasons --
+    the typed-grammar mask applied post-parse), then marginalizes the constrained graphs into a
+    :class:`~mixle.reason.graph_llm.GraphDistribution` and keeps only facts whose edge marginal clears
+    ``floor`` -- the calibrated confidence floor (pass a fitted ``calibrator`` from
+    :func:`~mixle.reason.graph_llm.fit_fact_calibrator` to apply the floor on CALIBRATED truth
+    probability rather than the raw marginal). Consistent-but-underconfident facts are reported as
+    withheld, never silently dropped: the decode says what it refused to assert and why.
+    """
+    import numpy as np  # noqa: F811 - local so the module stays import-light
+
+    from mixle.reason.graph_llm import canonical_graph
+
+    graphs = llm.sample_graphs(prompt, n)
+    n_samples = len(graphs)
+    constrained: list[frozenset] = []
+    rejected_all: dict[tuple, dict[str, Any]] = {}
+    for g in graphs:
+        kept, rejected = ontology.filter_triples(g, types)
+        for rj in rejected:
+            rejected_all.setdefault(tuple(rj["triple"]), rj)
+        constrained.append(canonical_graph(kept))
+
+    dist = llm.distribution(prompt, graphs=constrained)
+    marginals = dist.edge_marginals()
+
+    def confidence(marg: float) -> float:
+        if calibrator is None:
+            return float(marg)
+        out = calibrator.predict(np.asarray([marg]))
+        return float(np.asarray(out).reshape(-1)[0])
+
+    facts: list[tuple[Any, float]] = []
+    withheld: list[tuple[Any, float]] = []
+    for triple, marg in marginals.items():
+        conf = confidence(float(marg))
+        (facts if conf >= floor else withheld).append((triple, conf))
+    facts.sort(key=lambda tc: -tc[1])
+    withheld.sort(key=lambda tc: -tc[1])
+    return ConstrainedDecode(
+        facts=facts, rejected=list(rejected_all.values()), below_floor=withheld, n_samples=n_samples
+    )
