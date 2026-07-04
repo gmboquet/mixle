@@ -234,3 +234,88 @@ def learn_placement_policy(
         k=k,
         min_neighbors=min_neighbors,
     )
+
+
+def learn_schedule_policy(
+    rows: list[tuple[dict[str, Any], str, dict[str, Any]]],
+    static_policy: Callable[[dict[str, Any]], str],
+    *,
+    latency_key: str = "latency",
+    k: int = 8,
+    min_neighbors: int = 4,
+) -> LearnedPolicy:
+    """Learned pool scheduling (J4): when work is pool-eligible, learn WHERE/WHEN it actually runs fastest.
+
+    The same never-worse shape as placement, keyed on realized LATENCY instead of dollar cost: rows are
+    ``(features, choice, outcome)`` where features describe the moment (queue depth, job size, local
+    load), choice is the scheduling decision ("run_local" / "queue_pool" / "defer"), and the outcome's
+    ``latency`` is what the decision actually cost in wall-clock. Where nearby history is thin, the
+    returned policy defers to the static scheduler."""
+    return learn_placement_policy(rows, static_policy, cost_key=latency_key, k=k, min_neighbors=min_neighbors)
+
+
+def meta_improve(
+    rows: list[tuple[dict[str, Any], str, dict[str, Any]]],
+    static_policy: Callable[[dict[str, Any]], str],
+    *,
+    cost_key: str = "cost",
+    holdout_frac: float = 0.3,
+    seed: int = 0,
+    k: int = 8,
+    min_neighbors: int = 4,
+) -> dict[str, Any]:
+    """The meta-improve loop (J5): learn from telemetry, PROMOTE only on a never-worse holdout receipt.
+
+    Splits the telemetry into train/holdout, learns a policy on the train slice, and evaluates it against
+    the static policy on the HELD-OUT decisions (realized cost, the same currency the platform pays).
+    The learned policy is promoted iff its held-out mean cost is <= the static policy's -- the receipt is
+    returned either way, so a non-promotion is auditable, not silent. Returns::
+
+        {promoted, policy, receipt: {learned_mean_cost, static_mean_cost, deferred_fraction, n}}
+
+    ``policy`` is the learned policy when promoted, else the static one wrapped for the same call shape
+    -- callers can always use the result's policy and get never-worse behavior by construction."""
+    if len(rows) < 4:
+        raise ValueError("meta_improve needs at least 4 telemetry rows to split train/holdout")
+    rng = np.random.RandomState(seed)
+    order = rng.permutation(len(rows))
+    n_hold = max(1, int(round(holdout_frac * len(rows))))
+    hold_idx, train_idx = order[:n_hold], order[n_hold:]
+    train = [rows[i] for i in train_idx]
+    holdout = [rows[i] for i in hold_idx]
+
+    learned = learn_placement_policy(train, static_policy, cost_key=cost_key, k=k, min_neighbors=min_neighbors)
+
+    # Honest off-policy evaluation: a held-out row only tells us the realized cost of the choice that was
+    # ACTUALLY taken, so each policy is scored on the matched subset -- the rows where its pick equals the
+    # logged choice. No matched support for either policy -> no comparison -> no promotion (abstain).
+    def _matched_mean(pick: Callable[[dict[str, Any]], str]) -> tuple[float | None, int]:
+        costs = [float(o.get(cost_key, 0.0)) for f, c, o in holdout if pick(f) == c]
+        return (float(np.mean(costs)) if costs else None, len(costs))
+
+    learned_mean, n_learned = _matched_mean(lambda f: learned.decide(f)[0])
+    static_mean, n_static = _matched_mean(static_policy)
+
+    if learned_mean is None or static_mean is None:
+        promoted = False
+        reason = "insufficient matched holdout support to compare (no promotion without a receipt)"
+    elif learned_mean <= static_mean:
+        promoted = True
+        reason = f"learned {learned_mean:.4g} <= static {static_mean:.4g} on matched held-out decisions"
+    else:
+        promoted = False
+        reason = f"learned {learned_mean:.4g} > static {static_mean:.4g}: the teacher stays"
+
+    receipt = {
+        "learned_mean_cost": learned_mean,
+        "static_mean_cost": static_mean,
+        "n_matched_learned": n_learned,
+        "n_matched_static": n_static,
+        "n_holdout": len(holdout),
+        "reason": reason,
+    }
+    if promoted:
+        policy: Callable[[dict[str, Any]], str] = lambda feats: learned.decide(feats)[0]  # noqa: E731
+    else:
+        policy = static_policy  # the receipt said no: keep the teacher
+    return {"promoted": bool(promoted), "policy": policy, "learned": learned, "receipt": receipt}

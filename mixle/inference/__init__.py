@@ -151,6 +151,8 @@ from mixle.inference.orchestration import (
     LearnedPolicy,
     learn_action_policy,
     learn_placement_policy,
+    learn_schedule_policy,
+    meta_improve,
 )
 
 # ordinal (cumulative-link) regression + rank-concordance measures
@@ -357,6 +359,8 @@ __all__ = [
     "LearnedPolicy",
     "learn_action_policy",
     "LearnedAcquisition",
+    "learn_schedule_policy",
+    "meta_improve",
     # simulate() -- a fitted model as a runtime data generator with causal intervention scenarios
     "simulate",
     "Simulator",
