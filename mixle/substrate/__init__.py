@@ -9,6 +9,7 @@ build on.
 
 from __future__ import annotations
 
+from mixle.substrate.context import ContextBudget, ContextPacket, assemble_context
 from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
 from mixle.substrate.ingest import ingest_artifacts, ingest_documents, ingest_traces
 
@@ -19,4 +20,7 @@ __all__ = [
     "ingest_documents",
     "ingest_artifacts",
     "ingest_traces",
+    "ContextPacket",
+    "ContextBudget",
+    "assemble_context",
 ]
