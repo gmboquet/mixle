@@ -116,5 +116,59 @@ class ConstrainedKGTest(unittest.TestCase):
         self.assertGreater(p, 0.5)
 
 
+class ConstrainedDecodeTest(unittest.TestCase):
+    def _decode(self, floor=0.5):
+        from mixle.reason.graph_llm import GraphLLM
+        from mixle.reason.ontology import constrained_decode
+
+        ont = (
+            Ontology()
+            .add_class("Person")
+            .add_class("City")
+            .add_relation("lives_in", "Person", "City")
+            .add_relation("born_in", "Person", "City")
+        )
+        types = {"ada": "Person", "paris": "City", "lyon": "City"}
+        rng = np.random.RandomState(0)
+
+        def generate(prompt):
+            out = ["ada|lives_in|paris"]  # reliable fact
+            if rng.rand() < 0.5:
+                out.append("paris|lives_in|ada")  # schema-violating hallucination
+            if rng.rand() < 0.2:
+                out.append("ada|born_in|lyon")  # under-confident fact
+            return ";".join(out)
+
+        def parse(s):
+            return [tuple(t.split("|")) for t in s.split(";") if t]
+
+        llm = GraphLLM(generate, parse, n=25)
+        return constrained_decode(llm, "facts about ada", ont, types, floor=floor)
+
+    def test_reliable_consistent_fact_is_asserted(self):
+        dec = self._decode()
+        self.assertIn(("ada", "lives_in", "paris"), dec.asserted())
+        self.assertEqual(dec.facts[0][1], 1.0)  # asserted in every sample
+
+    def test_schema_violating_hallucination_is_rejected_with_reason(self):
+        dec = self._decode()
+        rejected = {tuple(r["triple"]) for r in dec.rejected}
+        self.assertIn(("paris", "lives_in", "ada"), rejected)
+        self.assertNotIn(("paris", "lives_in", "ada"), dec.asserted())  # never asserted
+        reason = next(r for r in dec.rejected if tuple(r["triple"]) == ("paris", "lives_in", "ada"))
+        self.assertIn("domain", reason["problems"][0])  # the WHY is named
+
+    def test_underconfident_fact_is_withheld_not_silently_dropped(self):
+        dec = self._decode()
+        withheld = {t for t, _ in dec.below_floor}
+        self.assertIn(("ada", "born_in", "lyon"), withheld)
+        self.assertNotIn(("ada", "born_in", "lyon"), dec.asserted())
+
+    def test_floor_zero_asserts_all_consistent_facts(self):
+        dec = self._decode(floor=0.0)
+        self.assertIn(("ada", "born_in", "lyon"), dec.asserted())  # now above the (zero) floor
+        self.assertEqual(dec.below_floor, [])
+
+
 if __name__ == "__main__":
     unittest.main()
