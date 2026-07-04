@@ -36,6 +36,7 @@ from mixle.substrate.ingest import (
     ingest_traces,
 )
 from mixle.substrate.interop import ExternalAnswer, ExternalModel, external_action
+from mixle.substrate.kg_rag import kg_action, link_entities, retrieve_triples
 from mixle.substrate.multihop import HopChain, HopStep, multihop
 from mixle.substrate.reasoner import Reasoner
 from mixle.substrate.retrieve import Retrieval, retrieve
@@ -112,4 +113,7 @@ __all__ = [
     "ExternalModel",
     "ExternalAnswer",
     "external_action",
+    "kg_action",
+    "link_entities",
+    "retrieve_triples",
 ]
