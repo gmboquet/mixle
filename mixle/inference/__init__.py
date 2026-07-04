@@ -262,6 +262,7 @@ from mixle.inference.uncertainty import (
     predictive_distribution,
     semantic_entropy,
 )
+from mixle.inference.uq import UQResult, uq
 from mixle.stats.bayes.conjugate import (
     ConjugatePosterior,
     MixtureConjugatePosterior,
@@ -321,6 +322,9 @@ __all__ = [
     "EstimationCertificate",
     "BlockPlan",
     "Guarantee",
+    # uq() -- one verb, method auto-selected (Laplace / conformal / semantic entropy)
+    "uq",
+    "UQResult",
     # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
     "posterior",
     "ParameterPosterior",
