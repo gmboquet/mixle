@@ -154,6 +154,13 @@ from mixle.inference.ordinal import (
     ordinal_regression,
     somers_d,
 )
+from mixle.inference.planning import (
+    BlockPlan,
+    EstimationCertificate,
+    Guarantee,
+    certify,
+    plan_estimation,
+)
 from mixle.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
 
 # closed-form variational projections — compress a structured teacher onto a smaller student exactly
@@ -308,6 +315,12 @@ __all__ = [
     # MLOps / production layer (provenance, drift, registry, serving, monitor) lives in the
     # mixle.inference.production subpackage -- imported as `from mixle.inference.production import ...`.
     "production",
+    # estimation planning + certificates (the right-method-provably keystone)
+    "certify",
+    "plan_estimation",
+    "EstimationCertificate",
+    "BlockPlan",
+    "Guarantee",
     # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
     "posterior",
     "ParameterPosterior",
