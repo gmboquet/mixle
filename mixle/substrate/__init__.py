@@ -12,6 +12,7 @@ from __future__ import annotations
 from mixle.substrate.context import ContextBudget, ContextPacket, assemble_context, compress_text
 from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
 from mixle.substrate.ingest import ingest_artifacts, ingest_documents, ingest_traces
+from mixle.substrate.multihop import HopChain, HopStep, multihop
 from mixle.substrate.retrieve import Retrieval, retrieve
 
 __all__ = [
@@ -27,4 +28,7 @@ __all__ = [
     "compress_text",
     "retrieve",
     "Retrieval",
+    "multihop",
+    "HopChain",
+    "HopStep",
 ]
