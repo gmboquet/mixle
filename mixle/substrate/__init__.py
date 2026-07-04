@@ -38,6 +38,7 @@ from mixle.substrate.multihop import HopChain, HopStep, multihop
 from mixle.substrate.reasoner import Reasoner
 from mixle.substrate.retrieve import Retrieval, retrieve
 from mixle.substrate.spaces import PUBLIC, Space, history, merge_versions, publish, version_of, visible_scopes
+from mixle.substrate.trust import LineageReport, audit_substrate, verify_lineage
 
 __all__ = [
     "MODALITIES",
@@ -82,4 +83,7 @@ __all__ = [
     "history",
     "version_of",
     "PUBLIC",
+    "verify_lineage",
+    "audit_substrate",
+    "LineageReport",
 ]
