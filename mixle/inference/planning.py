@@ -172,6 +172,40 @@ def _has_exact_density(obj: Any) -> bool:
         return False
 
 
+def _classify_process(obj: Any, name: str) -> BlockPlan | None:
+    """Point-process / temporal families whose estimator is known -> an honest, specific guarantee.
+
+    These do not advertise ExponentialFamily, so without this they fall through to the conservative
+    STATIONARY default -- which UNDER-states the ones with a genuine closed-form MLE and leaves the
+    genuinely non-convex ones unlabeled. Each verdict is grounded in the family's actual estimator."""
+    kind = type(obj).__name__
+    if kind == "InhomogeneousPoissonProcessDistribution":
+        # piecewise-constant intensity: rate[b] = count[b] / (width[b] * n_realizations). The Poisson
+        # log-likelihood is strictly concave in each per-bin rate, so this closed form is the unique MLE.
+        return BlockPlan(
+            name,
+            kind,
+            "closed_form_counts",
+            Guarantee.GLOBAL_UNIQUE,
+            gradient=False,
+            placement="local",
+            reason="inhomogeneous Poisson -- closed-form per-bin rate MLE (Poisson-concave, unique global)",
+        )
+    if kind == "HawkesProcessDistribution":
+        # Veen-Schoenberg / Lewis-Mohler EM over the latent branching structure: the self-excitation
+        # makes the likelihood non-convex, so EM converges to a stationary point, not a certified global.
+        return BlockPlan(
+            name,
+            kind,
+            "em_branching",
+            Guarantee.STATIONARY,
+            gradient=False,
+            placement="local",
+            reason="self-exciting Hawkes -- EM over latent branching; non-convex likelihood (stationary point)",
+        )
+    return None
+
+
 def _classify_leaf(obj: Any, name: str) -> BlockPlan:
     """One non-composite block -> its estimation method and guarantee (honest, capability-driven)."""
     kind = type(obj).__name__
@@ -185,6 +219,9 @@ def _classify_leaf(obj: Any, name: str) -> BlockPlan:
             placement="pool_eligible",
             reason="torch module fit by gradient descent -- no global optimum guarantee",
         )
+    process = _classify_process(obj, name)
+    if process is not None:
+        return process
     if _is_exp_family(obj):
         return BlockPlan(
             name,
