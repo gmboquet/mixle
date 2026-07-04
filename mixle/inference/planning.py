@@ -36,8 +36,11 @@ __all__ = [
     "Guarantee",
     "BlockPlan",
     "EstimationCertificate",
+    "EstimationSchedule",
+    "SchedulePass",
     "certify",
     "plan_estimation",
+    "schedule",
 ]
 
 
@@ -418,3 +421,76 @@ def certify(model: Any, *, escape_tested: bool = False) -> EstimationCertificate
 def plan_estimation(model: Any, *, escape_tested: bool = False) -> EstimationCertificate:
     """Alias for :func:`certify` -- the pre-fit planning view over a distribution prototype."""
     return certify(model, escape_tested=escape_tested)
+
+
+@dataclass
+class SchedulePass:
+    """One pass of the estimation schedule: what runs, on which block, how, where, and how often."""
+
+    order: int
+    kind: str  # 'estep' | 'mstep' | 'independent' | 'gradient'
+    block: str
+    method: str
+    placement: str  # 'local' | 'pool_eligible'
+    repeat: str  # 'per_round' (inside the EM loop) | 'once'
+
+
+@dataclass
+class EstimationSchedule:
+    """The block-coordinate schedule planner v2 produces (A3): ordered passes + the loop structure.
+
+    A fully-factorized model schedules one independent pass per block (no loop). A latent model
+    schedules the EM loop explicitly: an E-step over the latent, then one M-step pass PER BLOCK per
+    round -- each M-step named with its own method, so the schedule shows exactly where the closed
+    forms live inside the iteration (and which pass, if any, is the gradient block a pool would take).
+    """
+
+    passes: list[SchedulePass] = field(default_factory=list)
+    latent: bool = False  # whether the schedule is an EM loop (vs one-shot independent passes)
+
+    @property
+    def per_round(self) -> list[SchedulePass]:
+        return [p for p in self.passes if p.repeat == "per_round"]
+
+    @property
+    def gradient_passes(self) -> list[SchedulePass]:
+        return [p for p in self.passes if p.kind == "gradient"]
+
+    def describe(self) -> str:
+        if not self.latent:
+            steps = "; ".join(f"{p.block}: {p.method}" for p in self.passes)
+            return f"one-shot ({len(self.passes)} independent block(s)): {steps}"
+        msteps = [p for p in self.per_round if p.kind in ("mstep", "gradient")]
+        inner = "; ".join(f"{p.block}: {p.method}" + (" [pool]" if p.placement != "local" else "") for p in msteps)
+        return f"EM loop until converged -- each round: E-step, then {len(msteps)} M-step(s): {inner}"
+
+
+def schedule(model: Any, *, escape_tested: bool = False) -> EstimationSchedule:
+    """Plan the block-coordinate estimation schedule for ``model`` (planner v2, A3).
+
+    Built from the same block classification as :func:`certify`: EM blocks make the schedule a loop
+    (E-step + per-block M-steps, repeated until convergence); without a latent block every block is one
+    independent pass. Gradient blocks appear as explicit ``gradient`` passes with their pool placement,
+    so the schedule is also the offload plan for the hybrid case."""
+    cert = certify(model, escape_tested=escape_tested)
+    em_blocks = [b for b in cert.blocks if b.method == "em"]
+    param_blocks = [b for b in cert.blocks if b.method != "em"]
+
+    passes: list[SchedulePass] = []
+    if em_blocks:
+        order = 0
+        for em in em_blocks:
+            passes.append(
+                SchedulePass(order, "estep", em.name, "posterior_responsibilities", em.placement, "per_round")
+            )
+            order += 1
+        for b in param_blocks:
+            kind = "gradient" if b.gradient else "mstep"
+            passes.append(SchedulePass(order, kind, b.name, b.method, b.placement, "per_round"))
+            order += 1
+        return EstimationSchedule(passes=passes, latent=True)
+
+    for i, b in enumerate(param_blocks):
+        kind = "gradient" if b.gradient else "independent"
+        passes.append(SchedulePass(i, kind, b.name, b.method, b.placement, "once"))
+    return EstimationSchedule(passes=passes, latent=False)
