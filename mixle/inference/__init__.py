@@ -146,7 +146,12 @@ from mixle.inference.nonparametric import (
     sign_test,
     wilcoxon_signed_rank,
 )
-from mixle.inference.orchestration import LearnedPolicy, learn_placement_policy
+from mixle.inference.orchestration import (
+    LearnedAcquisition,
+    LearnedPolicy,
+    learn_action_policy,
+    learn_placement_policy,
+)
 
 # ordinal (cumulative-link) regression + rank-concordance measures
 from mixle.inference.ordinal import (
@@ -343,6 +348,8 @@ __all__ = [
     # learned orchestration -- the platform's own decisions as models trained on telemetry (never-worse)
     "learn_placement_policy",
     "LearnedPolicy",
+    "learn_action_policy",
+    "LearnedAcquisition",
     # simulate() -- a fitted model as a runtime data generator with causal intervention scenarios
     "simulate",
     "Simulator",

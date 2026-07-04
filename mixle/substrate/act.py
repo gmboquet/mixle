@@ -109,17 +109,22 @@ def investigate(
     min_evidence: int = 1,
     min_confidence: float = 0.15,
     max_actions: int | None = None,
+    scorer: Callable[[Action, str], float] | None = None,
     telemetry: Any = None,
 ) -> Investigation:
     """Answer ``question`` by firing evidence-acquiring ``actions`` under a cost budget, or abstain.
 
-    Actions are ordered by :func:`score_action` (EIG-per-cost) and fired highest-first until the cost
-    budget or ``max_actions`` is exhausted, or enough evidence is gathered. The ``answerer``
-    (``(question, evidence_text) -> str``) is called ONLY when at least ``min_evidence`` fragments were
-    acquired and confidence clears ``min_confidence`` -- otherwise it abstains rather than guess. The
-    returned :class:`Investigation` carries the ordered action trace as provenance.
+    Actions are ordered by ``scorer`` (default :func:`score_action`, EIG-per-cost) and fired
+    highest-first until the cost budget or ``max_actions`` is exhausted, or enough evidence is gathered.
+    ``scorer`` is the seam to a LEARNED acquisition policy (:func:`mixle.inference.learn_action_policy`):
+    swap it and the loop is unchanged. The ``answerer`` (``(question, evidence_text) -> str``) is called
+    ONLY when at least ``min_evidence`` fragments were acquired and confidence clears ``min_confidence``
+    -- otherwise it abstains rather than guess. The returned :class:`Investigation` carries the ordered
+    action trace as provenance, and each fired action emits a ``route`` telemetry row so a policy can be
+    learned from what actually paid off.
     """
-    ranked = sorted(actions, key=lambda a: score_action(a, question), reverse=True)
+    score = scorer or score_action
+    ranked = sorted(actions, key=lambda a: score(a, question), reverse=True)
     if max_actions is not None:
         ranked = ranked[:max_actions]
 
@@ -128,7 +133,7 @@ def investigate(
     for action in ranked:
         if budget_cost is not None and spent + action.cost > budget_cost:
             continue
-        sc = score_action(action, question)
+        sc = score(action, question)
         if sc <= 0.0:
             continue
         try:
@@ -137,6 +142,7 @@ def investigate(
             fragments = []
         spent += action.cost
         steps.append(Step(action=action.name, kind=action.kind, fragments=fragments, cost=action.cost, score=sc))
+        _emit_route(telemetry, question, action, fragments)
 
     evidence = [f for s in steps for f in s.fragments]
     # confidence: best action score that actually returned evidence, damped by how much we gathered
@@ -276,6 +282,32 @@ def delegate_action(
         return [f"{tag} => {result}"]
 
     return Action(name=name, kind="delegate", run=_run, cost=cost, description=description)
+
+
+def action_features(action: Action, question: str) -> dict[str, Any]:
+    """The features a learned acquisition policy keys on: the action's kind, cost, and query overlap."""
+    q = _tokens(question)
+    overlap = len(q & _tokens(action.description)) / len(q) if q else 0.0
+    return {"kind": action.kind, "cost": float(action.cost), "overlap": round(overlap, 4)}
+
+
+def _emit_route(telemetry: Any, question: str, action: Action, fragments: list[str]) -> None:
+    """Emit one ``route`` row per fired action: which action, on what query features, and what it yielded.
+
+    This is the training data for the learned acquisition policy (J3): the ``value`` outcome is whether
+    the action produced usable evidence, so a policy can learn which actions pay off where."""
+    try:
+        from mixle.telemetry import record
+
+        rec = telemetry.record if telemetry is not None else record
+        rec(
+            "route",
+            features=action_features(action, question),
+            choice=action.kind,
+            outcome={"value": 1.0 if fragments else 0.0, "n_fragments": len(fragments)},
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never break the reasoner
+        pass
 
 
 def _emit(telemetry: Any, inv: Investigation) -> None:
