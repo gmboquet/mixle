@@ -38,6 +38,15 @@ from mixle.substrate.ingest import (
 from mixle.substrate.multihop import HopChain, HopStep, multihop
 from mixle.substrate.reasoner import Reasoner
 from mixle.substrate.retrieve import Retrieval, retrieve
+from mixle.substrate.security import (
+    SecretFinding,
+    SecretScan,
+    detect_secrets,
+    redact_secrets,
+    safe_text,
+    scan_item,
+    scan_substrate,
+)
 from mixle.substrate.spaces import PUBLIC, Space, history, merge_versions, publish, version_of, visible_scopes
 from mixle.substrate.trust import LineageReport, audit_substrate, verify_lineage
 
@@ -92,4 +101,11 @@ __all__ = [
     "approve",
     "reject",
     "pending",
+    "detect_secrets",
+    "redact_secrets",
+    "safe_text",
+    "scan_item",
+    "scan_substrate",
+    "SecretScan",
+    "SecretFinding",
 ]
