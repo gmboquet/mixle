@@ -279,6 +279,9 @@ def _stats_public_distribution_catalog():
         "BirthDeathSamplingDistribution": stats.BirthDeathSamplingDistribution(
             0.6, 0.3, 0.2, initial_population=2, horizon=5.0
         ),
+        "ContinuousTimeMarkovChainDistribution": stats.ContinuousTimeMarkovChainDistribution(
+            np.array([[0.0, 2.0, 0.5], [1.0, 0.0, 1.5], [0.3, 0.7, 0.0]]), horizon=5.0
+        ),
         "InhomogeneousPoissonProcessDistribution": stats.InhomogeneousPoissonProcessDistribution(
             [1.0, 3.0, 0.5], t_max=3.0
         ),
