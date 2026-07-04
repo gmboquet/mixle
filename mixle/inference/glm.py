@@ -276,8 +276,11 @@ def glm(
         wls_w = w * dmu**2 / var
         z = (eta - off) + (y - mu) / dmu
         XtW = X.T * wls_w
-        beta = _solve_psd(XtW @ X, XtW @ z)
-        eta = X @ beta + off
+        new_beta = _solve_psd(XtW @ X, XtW @ z)
+        new_eta = X @ new_beta + off
+        if not (np.all(np.isfinite(new_beta)) and np.all(np.isfinite(new_eta))):
+            break  # divergence (e.g. complete separation): keep the last finite iterate
+        beta, eta = new_beta, new_eta
         mu = lk.inv(eta)
         dev = float(np.sum(w * fam.unit_deviance(y, mu)))
         if np.abs(dev - dev_old) <= tol * (np.abs(dev) + 0.1):
@@ -286,7 +289,7 @@ def glm(
 
     dmu = lk.mu_eta(eta)
     var = fam.variance(mu)
-    wls_w = w * dmu**2 / var
+    wls_w = np.nan_to_num(w * dmu**2 / var, nan=0.0, posinf=0.0, neginf=0.0)
     xtwx_inv = np.linalg.pinv((X.T * wls_w) @ X)  # pinv: robust to collinear high-dim parents
     dev = float(np.sum(w * fam.unit_deviance(y, mu)))
     if fam.estimate_dispersion:
