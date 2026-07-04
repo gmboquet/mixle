@@ -206,6 +206,7 @@ from mixle.inference.scoring import (
 # verifier-based selection — the generic best-of-N test-time-compute selector
 from mixle.inference.select import SelectionResult, select_best
 from mixle.inference.simulate import Scenario, Simulator, simulate
+from mixle.inference.skill import Skill, SkillRegistry, default_registry, skill
 
 # online / streaming estimators (single discoverable surface for the streaming drivers)
 from mixle.inference.streaming import IncrementalEstimator, StreamingEstimator
@@ -352,6 +353,11 @@ __all__ = [
     # create() -- data (+ budget/device) to a certified model artifact
     "create",
     "CreatedModel",
+    # skill() -- package a fitted model / function as a named, reusable, indexed verb
+    "skill",
+    "Skill",
+    "SkillRegistry",
+    "default_registry",
     # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
     "posterior",
     "ParameterPosterior",
