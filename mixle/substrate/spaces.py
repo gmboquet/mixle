@@ -48,6 +48,13 @@ def publish(
         if from_scope is not None and item.scope != from_scope:
             continue
         prov = dict(item.provenance)
+        # versioned + audited: every share bumps the version and appends to the history, so a re-published
+        # item never silently overwrites its predecessor -- the prior state is always recoverable (P2).
+        version = int(prov.get("version", 0)) + 1
+        history = list(prov.get("version_history", []))
+        history.append({"version": version, "published_by": by, "published_from": item.scope, "to": to})
+        prov["version"] = version
+        prov["version_history"] = history
         prov["published_by"] = by
         prov["published_from"] = item.scope
         substrate.put(
@@ -65,6 +72,74 @@ def publish(
         )
         published.append(item_id)
     return published
+
+
+def version_of(item: Any) -> int:
+    """The share version of an item (0 if never published) -- a monotonic counter bumped by each publish."""
+    prov = getattr(item, "provenance", {}) or {}
+    return int(prov.get("version", 0))
+
+
+def history(substrate: Substrate, item_id: str) -> list[dict[str, Any]]:
+    """The full publish history of an item: every version with who shared it, from where, to where."""
+    item = substrate.get(item_id)
+    if item is None:
+        return []
+    return list(item.provenance.get("version_history", []))
+
+
+def merge_versions(
+    substrate: Substrate, keep_id: str, other_id: str, *, by: str | None = None, prefer: str = "latest"
+) -> str | None:
+    """Reconcile two versions of the same knowledge into one, keeping full lineage (no silent loss, P2).
+
+    Merges ``other_id`` into ``keep_id``: unions tags and links, keeps the text/payload of whichever has
+    the higher version (``prefer="latest"``) or of ``keep`` (``prefer="keep"``), bumps the surviving
+    item's version, records BOTH parents in the history, and removes the merged-away item. Returns the
+    surviving id, or None if either is missing. Two teams that independently edited a shared item can be
+    reconciled without either edit vanishing unrecorded."""
+    keep = substrate.get(keep_id)
+    other = substrate.get(other_id)
+    if keep is None or other is None:
+        return None
+
+    take_other = prefer == "latest" and version_of(other) > version_of(keep)
+    winner_text = other.text if take_other else keep.text
+    winner_payload = other.payload if take_other else keep.payload
+
+    prov = dict(keep.provenance)
+    version = max(version_of(keep), version_of(other)) + 1
+    history_list = list(prov.get("version_history", []))
+    history_list.append(
+        {
+            "version": version,
+            "merged_by": by,
+            "merged_from": other_id,
+            "parents": [
+                {"id": keep_id, "version": version_of(keep)},
+                {"id": other_id, "version": version_of(other)},
+            ],
+        }
+    )
+    prov["version"] = version
+    prov["version_history"] = history_list
+    prov["merged"] = True
+
+    substrate.put(
+        SubstrateItem(
+            id=keep.id,
+            kind=keep.kind,
+            text=winner_text,
+            payload=winner_payload,
+            provenance=prov,
+            tags=sorted(set(keep.tags) | set(other.tags)),
+            links=sorted(set(keep.links) | set(other.links)),
+            scope=keep.scope,
+            created_at=keep.created_at,
+        )
+    )
+    substrate.remove(other_id)
+    return keep_id
 
 
 class Space:
