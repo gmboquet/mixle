@@ -27,6 +27,7 @@ from mixle.substrate.answer import Answer, answer_from_substrate
 from mixle.substrate.context import ContextBudget, ContextPacket, assemble_context, compress_text
 from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
 from mixle.substrate.factuality import ClaimVerdict, FactualityReceipt, check_factuality
+from mixle.substrate.freshness import Freshness, check_freshness, content_hash, freshness_report
 from mixle.substrate.governance import Governance, approve, pending, propose, reject
 from mixle.substrate.ingest import (
     ingest_artifacts,
@@ -116,4 +117,8 @@ __all__ = [
     "kg_action",
     "link_entities",
     "retrieve_triples",
+    "check_freshness",
+    "freshness_report",
+    "content_hash",
+    "Freshness",
 ]
