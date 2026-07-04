@@ -2,7 +2,7 @@
 
 import unittest
 
-from mixle.substrate import ContextBudget, Substrate, assemble_context, ingest_documents
+from mixle.substrate import ContextBudget, Substrate, assemble_context, compress_text, ingest_documents
 from mixle.telemetry import Telemetry
 
 try:
@@ -78,6 +78,50 @@ class TelemetryTest(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].features["budget_chars"], 200)
         self.assertIn("n_selected", events[0].outcome)
+
+
+class CompressionTest(unittest.TestCase):
+    """O3: receipted extractive compression -- fit more sources, measure what's kept."""
+
+    def _shop(self):
+        s = Substrate()
+        s.add(
+            "text",
+            "The company was founded in 1998. Our headquarters are in Denver. "
+            "The refund policy allows returns within 30 days of purchase. We have 200 employees.",
+        )
+        s.add(
+            "text",
+            "Shipping is handled by a third party. Orders ship in 2 business days. "
+            "Refunds for defective items are processed immediately without a restocking fee.",
+        )
+        s.add("text", "Our mascot is a golden retriever named Max. He visits on Fridays.")
+        return s
+
+    def test_compression_covers_more_sources_within_budget(self):
+        s = self._shop()
+        plain = assemble_context(
+            s, "refund policy defective items", budget=ContextBudget(max_chars=240), compress=False
+        )
+        comp = assemble_context(s, "refund policy defective items", budget=ContextBudget(max_chars=240), compress=True)
+        self.assertLessEqual(comp.used_chars, 240)
+        self.assertGreater(len(comp), len(plain))  # more sources fit once each is summarized
+        self.assertTrue(comp.compressed)
+        self.assertLess(comp.compression_ratio, 1.0)
+
+    def test_preservation_receipt_keeps_relevant_content(self):
+        s = self._shop()
+        comp = assemble_context(s, "refund policy defective items", budget=ContextBudget(max_chars=240), compress=True)
+        self.assertIn("refund", comp.render().lower())  # the query-relevant sentences survived
+        self.assertGreaterEqual(min(comp.preservation()), 0.5)  # each item kept >= half its query terms
+
+    def test_standalone_compressor_prefix_matches_morphology(self):
+        out = compress_text("The sky is blue. Refunds are given within 30 days. Cats are cute.", "refund policy", 45)
+        self.assertIn("refund", out.lower())  # 'refund' matches 'refunds' by prefix
+        self.assertLessEqual(len(out), 45)
+
+    def test_short_text_is_returned_unchanged(self):
+        self.assertEqual(compress_text("brief note", "anything", 100), "brief note")
 
 
 @unittest.skipUnless(_HAS_TORCH, "semantic retrieval needs the represent embedder")
