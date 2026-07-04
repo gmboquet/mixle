@@ -174,6 +174,13 @@ from mixle.inference.posterior import ParameterPosterior, PredictivePosterior, p
 
 # closed-form variational projections — compress a structured teacher onto a smaller student exactly
 from mixle.inference.project import collapse_mixture, fisher_merge, gaussian_kl, moment_project, reduce_mixture
+from mixle.inference.reproduce import (
+    ReproReceipt,
+    data_fingerprint,
+    param_fingerprint,
+    record_fit,
+    verify_reproducible,
+)
 
 # bootstrap / permutation inference for arbitrary statistics (distribution-free uncertainty)
 from mixle.inference.resampling import (
@@ -369,6 +376,12 @@ __all__ = [
     "posterior",
     "ParameterPosterior",
     "PredictivePosterior",
+    # reproducibility receipts -- record a fit, replay it, check it comes out bit-for-bit
+    "record_fit",
+    "verify_reproducible",
+    "ReproReceipt",
+    "data_fingerprint",
+    "param_fingerprint",
     # belief states (distribution over a latent, updated by evidence)
     "BeliefState",
     "GaussianBelief",
