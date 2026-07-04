@@ -26,6 +26,7 @@ from mixle.substrate.act import (
 from mixle.substrate.answer import Answer, answer_from_substrate
 from mixle.substrate.context import ContextBudget, ContextPacket, assemble_context, compress_text
 from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
+from mixle.substrate.factuality import ClaimVerdict, FactualityReceipt, check_factuality
 from mixle.substrate.ingest import (
     ingest_artifacts,
     ingest_documents,
@@ -70,4 +71,7 @@ __all__ = [
     "create_action",
     "delegate_action",
     "Reasoner",
+    "check_factuality",
+    "FactualityReceipt",
+    "ClaimVerdict",
 ]
