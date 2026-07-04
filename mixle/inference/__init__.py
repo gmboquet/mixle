@@ -230,6 +230,7 @@ from mixle.inference.survival import (
     nelson_aalen,
     to_person_period,
 )
+from mixle.inference.synthesize import Dataset, synthesize
 
 # sampling-based inference — the engine-agnostic NUTS/ADVI facade (target must be sampleable/differentiable)
 from mixle.inference.target import (
@@ -344,6 +345,9 @@ __all__ = [
     "simulate",
     "Simulator",
     "Scenario",
+    # synthesize() -- a dataset factory: sample, label, keep only what verifies
+    "synthesize",
+    "Dataset",
     # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
     "posterior",
     "ParameterPosterior",
