@@ -51,6 +51,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "structure_embedded_test.py": ("torch", "integration", "slow"),
     "estimation_structure_default_test.py": ("integration", "slow"),
     "planning_test.py": ("planner",),
+    "uq_test.py": ("torch", "integration", "slow"),
     "infer_backends_test.py": ("numba", "integration", "slow"),
     "kent_test.py": ("distribution", "stochastic", "slow"),
     "knowledge_graph_test.py": ("graph", "stochastic", "slow"),
