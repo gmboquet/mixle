@@ -402,18 +402,31 @@ def _walk(obj: Any, name: str, blocks: list[BlockPlan], escape_tested: bool) -> 
     blocks.append(_classify_leaf(obj, name.rstrip(".") if name else kind))
 
 
-def certify(model: Any, *, escape_tested: bool = False) -> EstimationCertificate:
+def certify(model: Any, *, escape_tested: bool = False, penalized: str | bool = False) -> EstimationCertificate:
     """Return the :class:`EstimationCertificate` for a fitted model (or distribution prototype).
 
     Walks the model's block structure and classifies each block's estimation method + guarantee from
     its capability signals -- no fitting is done here, only inspection. Pass ``escape_tested=True``
     when the fit ran saddle-escape restarts (:meth:`mixle.Model.fit` sets this automatically), which
     upgrades EM blocks from ``STATIONARY`` to ``STATIONARY_ESCAPE_TESTED``.
+
+    Pass ``penalized`` (a reason string, or True) when the fit optimized a PENALIZED objective -- soft
+    constraints, conservation/PINN residual factors, potentials (E2). The optimum is then of the
+    penalized surrogate, NOT the likelihood, so no block may claim more than STATIONARY however clean
+    its own solver is: every stronger block is downgraded with the penalty named in its reason.
     """
     blocks: list[BlockPlan] = []
     _walk(model, "", blocks, escape_tested)
     if not blocks:  # nothing structural detected -> treat the whole object as one leaf
         blocks.append(_classify_leaf(model, type(model).__name__))
+    if penalized:
+        why = penalized if isinstance(penalized, str) else "soft-constraint / residual penalty"
+        for b in blocks:
+            if b.guarantee > Guarantee.STATIONARY:
+                b.guarantee = Guarantee.STATIONARY
+                b.reason += (
+                    f" [DOWNGRADED: penalized objective ({why}) -- optimum of the surrogate, not the likelihood]"
+                )
     aggregate = min((b.guarantee for b in blocks), default=Guarantee.HEURISTIC)
     return EstimationCertificate(guarantee=aggregate, blocks=blocks, escape_tested=escape_tested)
 

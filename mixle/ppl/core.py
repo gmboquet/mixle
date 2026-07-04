@@ -1138,6 +1138,11 @@ class RandomVariable:
 
     __slots__ = ("_kind", "_family", "_args", "_name", "_keys", "_dist", "_result", "_cache", "_scope", "_reparam")
 
+    @property
+    def certificate(self):
+        """The estimation certificate, when a fit attached one (penalized fits downgrade honestly; E2)."""
+        return self._cache.get("certificate")
+
     def __init__(
         self,
         kind,
@@ -1968,7 +1973,19 @@ class RandomVariable:
                 )
         fitter = _FITTERS.get(how)
         if fitter is not None:
-            return fitter(self, data, **kw)
+            result = fitter(self, data, **kw)
+            if has_constraints or has_potentials:
+                # E2: a penalized objective (soft constraints / residual factors / potentials) means the
+                # optimum is of the surrogate, not the likelihood -- the certificate downgrades honestly.
+                try:
+                    from mixle.inference.planning import certify as _certify
+
+                    target = getattr(result, "_dist", None) or getattr(result, "dist", None) or result
+                    why = "soft constraints" if has_constraints else "custom potential"
+                    result._cache["certificate"] = _certify(target, penalized=why)
+                except Exception:  # noqa: BLE001 - certification must never break a fit
+                    pass
+            return result
         # EM / MLE path
         est = lower(self, target="estimator")
         if missing == "marginalize":
