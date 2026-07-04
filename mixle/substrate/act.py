@@ -223,6 +223,61 @@ def simulate_action(
     return Action(name=nm, kind="simulate", run=_run, cost=cost, description=description)
 
 
+def create_action(
+    build: Callable[[str], Any],
+    *,
+    name: str = "create",
+    cost: float = 4.0,
+    description: str = "",
+    report: Callable[[Any], str] | None = None,
+) -> Action:
+    """A CREATE action that builds a model / dataset on demand and reports what it made.
+
+    ``build(question) -> artifact`` fits/synthesizes something (e.g. via :func:`mixle.inference.create`
+    or :func:`mixle.inference.synthesize`); ``report`` renders the artifact to an evidence fragment
+    (default: a certificate/guarantee summary when present, else ``repr``). Creation is the most
+    expensive action, so it defaults to ``cost=4`` -- the reasoner reaches for it only when cheaper
+    retrieve/compute/simulate actions cannot answer."""
+
+    def _default_report(artifact: Any) -> str:
+        guarantee = getattr(artifact, "guarantee", None)
+        if guarantee is not None:
+            why = artifact.why() if hasattr(artifact, "why") else ""
+            return f"{name} => built a model (guarantee {guarantee}). {why}".strip()
+        n = len(artifact) if hasattr(artifact, "__len__") else "?"
+        return f"{name} => built an artifact ({n} rows/items)"
+
+    render = report or _default_report
+
+    def _run(question: str) -> list[str]:
+        return [render(build(question))]
+
+    return Action(name=name, kind="create", run=_run, cost=cost, description=description)
+
+
+def delegate_action(
+    delegate: Callable[[str], Any],
+    *,
+    name: str = "delegate",
+    cost: float = 8.0,
+    description: str = "",
+    priced: bool = True,
+) -> Action:
+    """A DELEGATE action that hands the question to an external worker (pool job / remote tool / agent).
+
+    ``delegate(question) -> answer`` is any priced external capability. This is the reasoner's most
+    expensive move (default ``cost=8``) and the escalation of last resort: it fires only when nothing
+    local clears the bar, honoring the 99%-local topology. ``priced=True`` records that the call incurs
+    real spend (the pool/interop layers own the actual budget-reject + confirm rails)."""
+
+    def _run(question: str) -> list[str]:
+        result = delegate(question)
+        tag = "delegate (priced)" if priced else "delegate"
+        return [f"{tag} => {result}"]
+
+    return Action(name=name, kind="delegate", run=_run, cost=cost, description=description)
+
+
 def _emit(telemetry: Any, inv: Investigation) -> None:
     try:
         from mixle.telemetry import record

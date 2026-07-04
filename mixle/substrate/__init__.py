@@ -14,6 +14,8 @@ from mixle.substrate.act import (
     Investigation,
     Step,
     compute_action,
+    create_action,
+    delegate_action,
     investigate,
     retrieve_action,
     score_action,
@@ -60,4 +62,6 @@ __all__ = [
     "retrieve_action",
     "compute_action",
     "simulate_action",
+    "create_action",
+    "delegate_action",
 ]
