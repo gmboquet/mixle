@@ -37,6 +37,7 @@ from mixle.substrate.ingest import (
 from mixle.substrate.multihop import HopChain, HopStep, multihop
 from mixle.substrate.reasoner import Reasoner
 from mixle.substrate.retrieve import Retrieval, retrieve
+from mixle.substrate.spaces import PUBLIC, Space, publish, visible_scopes
 
 __all__ = [
     "MODALITIES",
@@ -74,4 +75,8 @@ __all__ = [
     "check_factuality",
     "FactualityReceipt",
     "ClaimVerdict",
+    "Space",
+    "publish",
+    "visible_scopes",
+    "PUBLIC",
 ]
