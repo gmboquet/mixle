@@ -117,6 +117,94 @@ def ingest_traces(
     return ids
 
 
+def ingest_records(
+    substrate: Substrate,
+    records: Sequence[Any],
+    *,
+    source: str = "records",
+    scope: str = "local",
+    text_fields: Sequence[str] | None = None,
+) -> list[str]:
+    """Add a sequence of records (dicts or tuples) to the substrate as ``kind="record"`` items.
+
+    Each record's payload is stored structured; its retrievable text surface is the ``text_fields``
+    (for dict records) joined, else the whole serialized record -- so records are searchable by content.
+    """
+    ids: list[str] = []
+    for i, rec in enumerate(records):
+        if isinstance(rec, dict):
+            payload = dict(rec)
+            surface = " ".join(str(rec[f]) for f in (text_fields or rec) if f in rec)
+        else:
+            payload = {"values": list(rec) if isinstance(rec, (list, tuple)) else [rec]}
+            surface = " ".join(_stringify(v) for v in payload["values"])
+        item = SubstrateItem(
+            kind="record",
+            text=surface,
+            payload=payload,
+            scope=scope,
+            provenance={"source": source, "index": i, "ingested_at": time.time()},
+        )
+        ids.append(substrate.put(item))
+    return ids
+
+
+def ingest_file(
+    substrate: Substrate,
+    path: str,
+    *,
+    kind: str | None = None,
+    source: str | None = None,
+    scope: str = "local",
+) -> list[str]:
+    """Ingest a data file into the substrate. Format inferred from the extension unless ``kind`` forces it.
+
+    ``.txt``/``.md`` -> one ``text`` item per non-empty line; ``.jsonl`` -> one item per JSON line
+    (a string / ``{"text": ...}`` becomes a text item, any other object a record item); ``.csv`` ->
+    one ``record`` item per row keyed by the header. ``source`` defaults to the file path.
+    """
+    p = Path(path)
+    if not p.exists():
+        return []
+    src = source or str(p)
+    fmt = (kind or p.suffix.lstrip(".")).lower()
+
+    if fmt in ("txt", "md", "text"):
+        lines = [ln.strip() for ln in p.read_text().splitlines() if ln.strip()]
+        return ingest_documents(substrate, lines, source=src, scope=scope)
+
+    if fmt in ("jsonl", "ndjson"):
+        docs: list[str | dict[str, Any]] = []
+        recs: list[dict[str, Any]] = []
+        with open(p) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:  # noqa: BLE001 - skip a malformed line, do not fail the file
+                    continue
+                if isinstance(row, str) or (isinstance(row, dict) and set(row) <= {"text", "tags", "payload"}):
+                    docs.append(row)
+                elif isinstance(row, dict):
+                    recs.append(row)
+                else:
+                    docs.append(_stringify(row))
+        ids = ingest_documents(substrate, docs, source=src, scope=scope) if docs else []
+        ids += ingest_records(substrate, recs, source=src, scope=scope) if recs else []
+        return ids
+
+    if fmt == "csv":
+        import csv
+
+        with open(p, newline="") as f:
+            rows = list(csv.DictReader(f))
+        return ingest_records(substrate, rows, source=src, scope=scope)
+
+    raise ValueError(f"unsupported file format {fmt!r}; use txt/md, jsonl, or csv (or pass kind=)")
+
+
 def _manifest_summary(name: str, manifest: dict[str, Any], meta: dict[str, Any]) -> str:
     parts = [name]
     kind = manifest.get("mixle_artifact") or manifest.get("kind")
