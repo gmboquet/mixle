@@ -118,6 +118,38 @@ class GradientAuditTest(unittest.TestCase):
         self.assertIn("required gradient descent", cert.why_not_adam())
 
 
+class ProcessClassificationTest(unittest.TestCase):
+    def _ip(self):
+        from mixle.stats.processes.inhomogeneous_poisson import InhomogeneousPoissonProcessEstimator as IPE
+
+        rng = np.random.RandomState(0)
+        data = [np.sort(rng.uniform(0, 10, rng.poisson(20))).tolist() for _ in range(30)]
+        return optimize(data, IPE(num_bins=5, t_max=10.0), out=None, max_its=5)
+
+    def _hawkes(self):
+        from mixle.stats.processes.hawkes_process import HawkesProcessEstimator as HE
+
+        rng = np.random.RandomState(1)
+        data = [np.sort(rng.uniform(0, 10, rng.poisson(15))).tolist() for _ in range(30)]
+        return optimize(data, HE(window=10.0), out=None, max_its=5)
+
+    def test_inhomogeneous_poisson_is_global_unique_closed_form(self):
+        block = certify(self._ip()).blocks[0]
+        self.assertEqual(block.guarantee, Guarantee.GLOBAL_UNIQUE)  # closed-form per-bin rate MLE
+        self.assertEqual(block.method, "closed_form_counts")
+        self.assertFalse(block.gradient)
+
+    def test_hawkes_is_stationary_non_convex_em(self):
+        block = certify(self._hawkes()).blocks[0]
+        self.assertEqual(block.guarantee, Guarantee.STATIONARY)  # non-convex, EM stationary point
+        self.assertEqual(block.method, "em_branching")
+        self.assertIn("non-convex", block.reason)
+
+    def test_neither_process_used_gradient_descent(self):
+        self.assertIn("No gradient descent", certify(self._ip()).why_not_adam())
+        self.assertIn("No gradient descent", certify(self._hawkes()).why_not_adam())
+
+
 class FacadeTest(unittest.TestCase):
     def test_model_fit_attaches_a_certificate(self):
         from mixle import Model
