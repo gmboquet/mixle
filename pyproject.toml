@@ -60,6 +60,9 @@ gmpy2 = ["gmpy2>=2.1"]
 spark = ["pyspark>=3.4"]
 dask = ["dask>=2023.5.0", "distributed>=2023.5.0"]
 torch = ["torch>=2.0"]
+# the assembled laptop scientist (mixle.scientist): real open-weight encoders + a local LLM as typed
+# leaves. Weights load from the local HF cache; nothing is downloaded at import.
+scientist = ["torch>=2.0", "transformers>=4.40", "sentence-transformers>=3.0", "datasets>=2.14"]
 # Documentation build (Sphinx site): the Furo theme + MyST markdown; autodoc mocks the heavy back-ends.
 docs = ["sphinx>=7", "furo", "myst-parser>=2"]
 # JaxEngine (XLA arrays, functional autograd) + the NumPyro NUTS sampler backend (how="nuts", backend="jax").
