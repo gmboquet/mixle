@@ -29,6 +29,14 @@ from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
 from mixle.substrate.factuality import ClaimVerdict, FactualityReceipt, check_factuality
 from mixle.substrate.freshness import Freshness, check_freshness, content_hash, freshness_report
 from mixle.substrate.governance import Governance, approve, pending, propose, reject
+from mixle.substrate.harness import (
+    Harness,
+    HarnessResult,
+    find_harnesses,
+    monitoring_harness,
+    register_harness,
+    support_triage_harness,
+)
 from mixle.substrate.ingest import (
     ingest_artifacts,
     ingest_documents,
@@ -121,4 +129,10 @@ __all__ = [
     "freshness_report",
     "content_hash",
     "Freshness",
+    "Harness",
+    "HarnessResult",
+    "support_triage_harness",
+    "monitoring_harness",
+    "register_harness",
+    "find_harnesses",
 ]
