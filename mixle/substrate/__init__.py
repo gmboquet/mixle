@@ -9,6 +9,16 @@ build on.
 
 from __future__ import annotations
 
+from mixle.substrate.act import (
+    Action,
+    Investigation,
+    Step,
+    compute_action,
+    investigate,
+    retrieve_action,
+    score_action,
+    simulate_action,
+)
 from mixle.substrate.answer import Answer, answer_from_substrate
 from mixle.substrate.context import ContextBudget, ContextPacket, assemble_context, compress_text
 from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
@@ -42,4 +52,12 @@ __all__ = [
     "HopStep",
     "answer_from_substrate",
     "Answer",
+    "investigate",
+    "Investigation",
+    "Action",
+    "Step",
+    "score_action",
+    "retrieve_action",
+    "compute_action",
+    "simulate_action",
 ]
