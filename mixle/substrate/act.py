@@ -27,10 +27,16 @@ from dataclasses import dataclass, field
 from typing import Any
 
 _WORD = re.compile(r"[a-z0-9]+")
+# a minimal stoplist so common function words don't manufacture spurious overlap (e.g. matching an
+# action to a question purely on "the"/"is"); relevance should reflect content words, not glue.
+_STOP = frozenset(
+    "a an and are as at be by do does for from how in is of on or the to was what when where which who "
+    "will with you your this that".split()
+)
 
 
 def _tokens(text: str) -> set[str]:
-    return set(_WORD.findall(text.lower()))
+    return {t for t in _WORD.findall(text.lower()) if t not in _STOP}
 
 
 @dataclass
@@ -53,7 +59,8 @@ class Step:
     kind: str
     fragments: list[str]
     cost: float
-    score: float
+    score: float  # ordering priority: relevance / cost (why this action was tried when)
+    relevance: float = 0.0  # on-topic-ness independent of cost (what confidence is earned from)
 
 
 @dataclass
@@ -90,6 +97,28 @@ class Investigation:
         }
 
 
+def _n_fragments(steps: list[Step]) -> int:
+    return sum(len(s.fragments) for s in steps)
+
+
+def _confidence(steps: list[Step], min_evidence: int) -> float:
+    """Best productive action's RELEVANCE, damped by how much evidence was gathered vs required.
+
+    Confidence keys on relevance, not the cost-discounted ordering score -- an expensive but on-topic
+    action (a priced delegate that actually answers) earns full confidence, it is merely tried last."""
+    productive = [s.relevance for s in steps if s.fragments]
+    top = max(productive, default=0.0)
+    n = _n_fragments(steps)
+    return round(min(1.0, top) * min(1.0, n / max(min_evidence, 1)), 4)
+
+
+def relevance_of(action: Action, question: str) -> float:
+    """How on-topic an action is for a question (lexical overlap + its base floor), ignoring cost."""
+    q = _tokens(question)
+    overlap = len(q & _tokens(action.description)) / len(q) if q else 0.0
+    return action.base_score + overlap
+
+
 def score_action(action: Action, question: str) -> float:
     """EIG-per-cost proxy: lexical relevance of the action to the question, divided by its cost.
 
@@ -108,6 +137,7 @@ def investigate(
     budget_cost: float | None = None,
     min_evidence: int = 1,
     min_confidence: float = 0.15,
+    target_confidence: float | None = None,
     max_actions: int | None = None,
     scorer: Callable[[Action, str], float] | None = None,
     telemetry: Any = None,
@@ -115,15 +145,18 @@ def investigate(
     """Answer ``question`` by firing evidence-acquiring ``actions`` under a cost budget, or abstain.
 
     Actions are ordered by ``scorer`` (default :func:`score_action`, EIG-per-cost) and fired
-    highest-first until the cost budget or ``max_actions`` is exhausted, or enough evidence is gathered.
-    ``scorer`` is the seam to a LEARNED acquisition policy (:func:`mixle.inference.learn_action_policy`):
-    swap it and the loop is unchanged. The ``answerer`` (``(question, evidence_text) -> str``) is called
-    ONLY when at least ``min_evidence`` fragments were acquired and confidence clears ``min_confidence``
-    -- otherwise it abstains rather than guess. The returned :class:`Investigation` carries the ordered
-    action trace as provenance, and each fired action emits a ``route`` telemetry row so a policy can be
-    learned from what actually paid off.
+    highest-first. The loop STOPS EARLY once it holds at least ``min_evidence`` fragments AND confidence
+    clears ``target_confidence`` (default: ``min_confidence``) -- so it spends the fewest, cheapest
+    actions that suffice and only reaches for the expensive ones when the cheap ones fell short. It also
+    stops at the cost budget or ``max_actions``. ``scorer`` is the seam to a LEARNED acquisition policy
+    (:func:`mixle.inference.learn_action_policy`): swap it and the loop is unchanged. The ``answerer``
+    (``(question, evidence_text) -> str``) is called ONLY when the evidence clears the bar -- otherwise
+    it abstains rather than guess. The returned :class:`Investigation` carries the ordered action trace
+    as provenance, and each fired action emits a ``route`` telemetry row so a policy can be learned from
+    what actually paid off.
     """
     score = scorer or score_action
+    stop_at = target_confidence if target_confidence is not None else min_confidence
     ranked = sorted(actions, key=lambda a: score(a, question), reverse=True)
     if max_actions is not None:
         ranked = ranked[:max_actions]
@@ -141,14 +174,23 @@ def investigate(
         except Exception:  # noqa: BLE001 - one broken action must not sink the whole investigation
             fragments = []
         spent += action.cost
-        steps.append(Step(action=action.name, kind=action.kind, fragments=fragments, cost=action.cost, score=sc))
+        steps.append(
+            Step(
+                action=action.name,
+                kind=action.kind,
+                fragments=fragments,
+                cost=action.cost,
+                score=sc,
+                relevance=relevance_of(action, question),
+            )
+        )
         _emit_route(telemetry, question, action, fragments)
+        # early stop: enough evidence above the bar means the remaining (costlier) actions are wasted spend
+        if _n_fragments(steps) >= min_evidence and _confidence(steps, min_evidence) >= stop_at:
+            break
 
     evidence = [f for s in steps for f in s.fragments]
-    # confidence: best action score that actually returned evidence, damped by how much we gathered
-    productive = [s.score for s in steps if s.fragments]
-    top = max(productive, default=0.0)
-    confidence = round(min(1.0, top) * min(1.0, len(evidence) / max(min_evidence, 1)), 4)
+    confidence = _confidence(steps, min_evidence)
 
     if len(evidence) < min_evidence or confidence < min_confidence:
         inv = Investigation(
@@ -182,15 +224,25 @@ def investigate(
 
 
 def retrieve_action(
-    substrate: Any, *, name: str = "retrieve", k: int = 6, scope: str | None = None, cost: float = 1.0
+    substrate: Any,
+    *,
+    name: str = "retrieve",
+    k: int = 6,
+    scope: str | None = None,
+    cost: float = 1.0,
+    min_score: float = 0.0,
 ) -> Action:
-    """A RETRIEVE action over a :class:`~mixle.substrate.Substrate` (the always-available floor action)."""
+    """A RETRIEVE action over a :class:`~mixle.substrate.Substrate` (the always-available floor action).
+
+    ``min_score`` filters out weak matches: a tiny embedder returns SOMETHING for every query, so a
+    positive floor keeps genuinely-irrelevant items from becoming false evidence. It defaults to 0.0
+    (keep everything) but a small positive value makes retrieval honest on a noisy index."""
 
     def _run(question: str) -> list[str]:
         from mixle.substrate.retrieve import retrieve
 
         r = retrieve(substrate, question, k=k, scope=scope)
-        return [it.text for it in r.items if it.text]
+        return [it.text for it, sc in zip(r.items, r.scores) if it.text and sc >= min_score]
 
     return Action(name=name, kind="retrieve", run=_run, cost=cost, description="", base_score=0.35)
 
