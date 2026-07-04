@@ -12,7 +12,13 @@ from __future__ import annotations
 from mixle.substrate.answer import Answer, answer_from_substrate
 from mixle.substrate.context import ContextBudget, ContextPacket, assemble_context, compress_text
 from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
-from mixle.substrate.ingest import ingest_artifacts, ingest_documents, ingest_traces
+from mixle.substrate.ingest import (
+    ingest_artifacts,
+    ingest_documents,
+    ingest_file,
+    ingest_records,
+    ingest_traces,
+)
 from mixle.substrate.multihop import HopChain, HopStep, multihop
 from mixle.substrate.retrieve import Retrieval, retrieve
 
@@ -23,6 +29,8 @@ __all__ = [
     "ingest_documents",
     "ingest_artifacts",
     "ingest_traces",
+    "ingest_file",
+    "ingest_records",
     "ContextPacket",
     "ContextBudget",
     "assemble_context",
