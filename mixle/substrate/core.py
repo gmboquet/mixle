@@ -124,7 +124,10 @@ class Substrate:
     def reindex(self) -> None:
         """(Re)fit the embedding index over the current text-bearing items. Idempotent, lazy-called."""
         items = self._text_items(scope=None)
-        if len(items) < 4:  # too few for a learned embedder -> lexical search only
+        if len(items) < 8:  # tiny corpus: a learned embedder scores junk queries near real docs
+            # (an out-of-vocabulary query lands close to SOMETHING when there are only a handful of
+            # vectors), so retrieval stays on the deterministic lexical path until the corpus can
+            # actually support an embedding -- the no-fuzzy-embedder-on-a-tiny-corpus discipline.
             self._embedder, self._embed_ids, self._dirty = None, [i.id for i in items], False
             return
         from mixle.represent import fit_embedder
@@ -191,13 +194,38 @@ class Substrate:
         self.root, self._dirty = target, True
 
 
+# a minimal stoplist so shared function words can't manufacture relevance ("what is the ..." must not
+# match a document on "is"/"the" alone) -- the same discipline the reasoner's action scorer applies.
+_STOPWORDS = frozenset(
+    "a an and are as at be by do does for from how in is of on or the to was what when where which who "
+    "will with you your this that it its my".split()
+)
+
+
+def _content_tokens(text: str) -> set[str]:
+    return {t for t in text.lower().split() if t not in _STOPWORDS}
+
+
+def _token_matches(q_tok: str, toks: set[str]) -> bool:
+    """Exact or prefix-morphology match ('refund' ~ 'refunds' ~ 'refund-router'), min stem length 4."""
+    if q_tok in toks:
+        return True
+    if len(q_tok) < 4:
+        return False
+    return any(t.startswith(q_tok) or (len(t) >= 4 and q_tok.startswith(t)) for t in toks)
+
+
 def _lexical_score(query: str, item: SubstrateItem) -> float:
-    """Token-overlap relevance over an item's text + serialized payload + tags (the no-embedding path)."""
-    q = set(str(query).lower().split())
+    """Content-token overlap over an item's text + serialized payload + tags (the no-embedding path).
+
+    Stopwords are excluded on BOTH sides, so relevance reflects content words (a query of only
+    stopwords scores 0 everywhere); tokens match exactly or by prefix morphology, the same
+    discipline the O3 compressor uses ('refund' ~ 'refunds')."""
+    q = _content_tokens(str(query))
     if not q:
         return 0.0
-    surface = " ".join([item.text, json.dumps(item.payload), " ".join(item.tags)]).lower()
-    toks = set(surface.split())
+    surface = " ".join([item.text, json.dumps(item.payload), " ".join(item.tags)])
+    toks = _content_tokens(surface)
     if not toks:
         return 0.0
-    return len(q & toks) / len(q)
+    return sum(1.0 for t in q if _token_matches(t, toks)) / len(q)
