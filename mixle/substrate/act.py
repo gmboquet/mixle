@@ -73,6 +73,7 @@ class Investigation:
     confidence: float
     steps: list[Step] = field(default_factory=list)
     note: str = ""
+    factuality: Any = None  # optional FactualityReceipt when the answer was verified against a substrate
 
     @property
     def evidence(self) -> list[str]:
