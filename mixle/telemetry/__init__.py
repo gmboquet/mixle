@@ -22,8 +22,11 @@ from mixle.telemetry.core import (
     record,
     set_default_recorder,
 )
+from mixle.telemetry.dashboard import dashboard, render_dashboard
 
 __all__ = [
+    "dashboard",
+    "render_dashboard",
     "Event",
     "Telemetry",
     "record",
