@@ -110,6 +110,15 @@ def create(
         except Exception:  # noqa: BLE001 - UQ is optional; absence is honest, not a crash
             uq_handle = None
 
+    # M2 precondition: pooling rows into one model assumes exchangeability -- test it, record the
+    # verdict next to the artifact (a warning, never a silent refusal).
+    try:
+        from mixle.data.exchangeability import exchangeability_check
+
+        exch = exchangeability_check(rows, seed=seed).as_dict()
+    except Exception:  # noqa: BLE001 - the precondition check must never break a fit
+        exch = None
+
     return CreatedModel(
         model=model,
         certificate=cert,
@@ -123,5 +132,6 @@ def create(
             "budget": repr(budget) if budget is not None else None,
             "device": repr(device) if device is not None else None,
             "seed": seed,
+            "exchangeability": exch,
         },
     )

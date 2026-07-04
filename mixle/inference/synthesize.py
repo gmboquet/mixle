@@ -158,11 +158,23 @@ def synthesize(
 
     accepted = len(inputs)
     rate = accepted / (accepted + rejected) if (accepted + rejected) else 1.0
+
+    # M2 precondition: "more rows like these" assumes the source rows are exchangeable -- when the source
+    # is real data, test that and record the verdict with the dataset (a warning, never a refusal).
+    exch = None
+    if real_inputs is not None:
+        try:
+            from mixle.data.exchangeability import exchangeability_check
+
+            exch = exchangeability_check(real_inputs, seed=seed).as_dict()
+        except Exception:  # noqa: BLE001 - the precondition check must never break synthesis
+            exch = None
+
     return Dataset(
         inputs=inputs,
         labels=labels,
         verify=verify,
         acceptance_rate=float(rate),
         n_rejected=rejected,
-        provenance={"requested": n, "produced": accepted, "tried": tried, "seed": seed},
+        provenance={"requested": n, "produced": accepted, "tried": tried, "seed": seed, "exchangeability": exch},
     )
