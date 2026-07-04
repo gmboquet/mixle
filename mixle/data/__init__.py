@@ -9,6 +9,7 @@ input/representation helpers (not probability distributions), so they live outsi
 
 from mixle.data.core import DataSource, LazySource, MaterializedSource, as_source
 from mixle.data.encoded_io import load_encoded, save_encoded
+from mixle.data.exchangeability import ExchangeabilityReport, exchangeability_check
 from mixle.data.hashing import dataset_hash, model_hash
 from mixle.data.schema import (
     Boolean,
@@ -30,6 +31,9 @@ from mixle.data.structure import EXCHANGEABLE, IID, SEQUENTIAL, SampleStructure,
 from mixle.data.validate import DataReport, check_dataset
 
 __all__ = [
+    # exchangeability preconditions (M2)
+    "exchangeability_check",
+    "ExchangeabilityReport",
     # core abstraction
     "DataSource",
     "MaterializedSource",
