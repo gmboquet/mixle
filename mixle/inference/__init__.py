@@ -154,6 +154,7 @@ from mixle.inference.ordinal import (
     ordinal_regression,
     somers_d,
 )
+from mixle.inference.placement import BlockPlacement, PlacementPlan, PoolSpec, plan_placement
 from mixle.inference.planning import (
     BlockPlan,
     EstimationCertificate,
@@ -325,6 +326,11 @@ __all__ = [
     # uq() -- one verb, method auto-selected (Laplace / conformal / semantic entropy)
     "uq",
     "UQResult",
+    # placement planning -- the local-vs-pool axis of the estimation plan (99/1 topology)
+    "plan_placement",
+    "PlacementPlan",
+    "BlockPlacement",
+    "PoolSpec",
     # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
     "posterior",
     "ParameterPosterior",
