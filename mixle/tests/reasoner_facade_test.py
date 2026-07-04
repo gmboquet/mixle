@@ -73,6 +73,17 @@ class ReasonerTest(unittest.TestCase):
         r = Reasoner(_echo, skills=_skills())
         self.assertTrue(all(a.kind != "retrieve" for a in r.actions))  # no store -> no retrieve action
 
+    def test_verify_attaches_a_grounded_factuality_receipt(self):
+        # an answerer that echoes the retrieved evidence produces a fully grounded answer
+        r = Reasoner(lambda q, ctx: ctx.splitlines()[0] if ctx else "none", substrate=_sub(), retrieve_min_score=0.2)
+        inv = r.ask("when are refunds processed", verify=True)
+        self.assertIsNotNone(inv.factuality)
+        self.assertTrue(inv.factuality.is_grounded())
+
+    def test_no_verify_leaves_factuality_none(self):
+        r = Reasoner(_echo, substrate=_sub(), retrieve_min_score=0.2)
+        self.assertIsNone(r.ask("when are refunds processed").factuality)
+
 
 if __name__ == "__main__":
     unittest.main()
