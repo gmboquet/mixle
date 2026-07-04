@@ -133,5 +133,42 @@ class CreateAndDelegateTest(unittest.TestCase):
         )  # escalation of last resort under the 99%-local topology
 
 
+class EarlyStopTest(unittest.TestCase):
+    def test_stops_after_the_cheapest_sufficient_action(self):
+        cheap = Action("cheap", "compute", run=lambda q: ["hit"], cost=1.0, description="answer the question")
+        pricey = Action("pricey", "delegate", run=lambda q: ["also"], cost=8.0, description="answer the question")
+        inv = investigate("answer the question", [cheap, pricey], _echo)
+        self.assertEqual([s.action for s in inv.steps], ["cheap"])  # never fired the pricey one
+        self.assertEqual(inv.spent, 1.0)
+
+    def test_escalates_only_when_cheaper_actions_return_nothing(self):
+        empty = Action("empty", "compute", run=lambda q: [], cost=1.0, description="answer the question")
+        pricey = Action("pricey", "delegate", run=lambda q: ["the answer"], cost=8.0, description="answer the question")
+        inv = investigate("answer the question", [empty, pricey], _echo)
+        self.assertFalse(inv.abstained)
+        self.assertIn("the answer", " ".join(inv.evidence))  # forced to the expensive action, correctly
+
+    def test_confidence_tracks_relevance_not_cost(self):
+        # a costly but perfectly on-topic action earns full confidence (it is merely tried last)
+        pricey = Action("p", "delegate", run=lambda q: ["x"], cost=100.0, description="proprietary tax rule")
+        inv = investigate("proprietary tax rule", [pricey], _echo, min_confidence=0.4)
+        self.assertFalse(inv.abstained)
+        self.assertGreaterEqual(inv.confidence, 0.9)
+
+    def test_retrieve_min_score_filters_false_positives(self):
+        s = Substrate()
+        s.add(kind="text", text="Refunds are processed within 30 days.")
+        s.add(kind="text", text="Support is staffed during business hours.")
+        act = retrieve_action(s, min_score=0.2)
+        # an unrelated query yields weak scores below the floor -> no false evidence
+        self.assertEqual(act.run("proprietary tax rule"), [])
+        self.assertTrue(act.run("when are refunds processed"))  # a real match still comes through
+
+    def test_stopwords_do_not_manufacture_overlap(self):
+        a = Action("a", "compute", run=lambda q: ["x"], cost=1.0, description="forecast the spend")
+        # "what is the" shares only stopwords with the description -> zero relevance
+        self.assertEqual(score_action(a, "what is the tax"), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
