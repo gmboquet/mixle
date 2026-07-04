@@ -34,6 +34,7 @@ from mixle.substrate.ingest import (
     ingest_traces,
 )
 from mixle.substrate.multihop import HopChain, HopStep, multihop
+from mixle.substrate.reasoner import Reasoner
 from mixle.substrate.retrieve import Retrieval, retrieve
 
 __all__ = [
@@ -68,4 +69,5 @@ __all__ = [
     "simulate_action",
     "create_action",
     "delegate_action",
+    "Reasoner",
 ]
