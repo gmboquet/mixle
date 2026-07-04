@@ -4,6 +4,7 @@ import unittest
 
 import numpy as np
 
+from mixle.inference import create as create_model
 from mixle.inference import learn_bayesian_network, simulate
 from mixle.inference.skill import SkillRegistry, skill
 from mixle.substrate import Substrate
@@ -11,6 +12,8 @@ from mixle.substrate.act import (
     Action,
     Investigation,
     compute_action,
+    create_action,
+    delegate_action,
     investigate,
     retrieve_action,
     score_action,
@@ -100,6 +103,34 @@ class InvestigateTest(unittest.TestCase):
         inv = investigate("convert the temperature", self._actions(), _echo)
         trace = inv.trace()
         self.assertTrue(all("action" in t and "kind" in t for t in trace))
+
+
+class CreateAndDelegateTest(unittest.TestCase):
+    def test_create_action_reports_a_built_models_guarantee(self):
+        def _build(q):
+            return create_model([float(x) for x in np.random.RandomState(0).normal(5, 2, 200)], seed=0)
+
+        act = create_action(_build, description="build a spend model from data", cost=4.0)
+        inv = investigate("build a spend model from data", [act], _echo, min_confidence=0.0)
+        self.assertFalse(inv.abstained)
+        self.assertIn("guarantee", " ".join(inv.evidence))
+
+    def test_create_is_costlier_than_retrieve(self):
+        r = retrieve_action(Substrate())
+        c = create_action(lambda q: [1, 2, 3], description="x")
+        self.assertGreater(c.cost, r.cost)  # creation is the expensive action
+
+    def test_delegate_action_marks_priced_escalation(self):
+        act = delegate_action(lambda q: "remote says 42", description="ask the remote solver", priced=True)
+        inv = investigate("ask the remote solver please", [act], _echo, min_confidence=0.0)
+        self.assertIn("priced", " ".join(inv.evidence))
+        self.assertEqual(inv.steps[0].kind, "delegate")
+
+    def test_delegate_is_the_most_expensive_by_default(self):
+        self.assertGreater(
+            delegate_action(lambda q: "x").cost,
+            create_action(lambda q: "y").cost,
+        )  # escalation of last resort under the 99%-local topology
 
 
 if __name__ == "__main__":
