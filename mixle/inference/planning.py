@@ -262,6 +262,26 @@ def _classify_bn_factor(fac: Any, name: str) -> BlockPlan:
             placement="local",
             reason="discrete conditional table -- closed-form per-configuration counts (unique)",
         )
+    if kind == "_VectorMarginalFactor":
+        return BlockPlan(
+            name,
+            "MVN",
+            "closed_form_mle",
+            Guarantee.GLOBAL_UNIQUE,
+            gradient=False,
+            placement="local",
+            reason="multivariate-Gaussian marginal -- closed-form mean + covariance (unique)",
+        )
+    if kind == "_VectorCLGFactor":
+        return BlockPlan(
+            name,
+            "vector_CLG",
+            "least_squares",
+            Guarantee.GLOBAL_UNIQUE,
+            gradient=False,
+            placement="local",
+            reason="multivariate conditional-linear-Gaussian -- multivariate least squares (unique closed form)",
+        )
     return _classify_leaf(fac, name)
 
 
