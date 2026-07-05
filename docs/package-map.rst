@@ -3,14 +3,16 @@ Package Map
 
 ``mixle`` is broad because it is meant to keep heterogeneous modeling work in a
 single composable environment. The package is easier to navigate if you think of
-it as five layers:
+it as seven layers:
 
 1. the user-facing lifecycle and recommendation surface;
 2. composable probability distributions and estimators;
 3. inference, enumeration, uncertainty, and operations over those models;
 4. applied neural, LLM, task, reasoning, design, and evolution workflows built
    on the same contracts where practical;
-5. compute, serialization, data, and parallel runtime support.
+5. substrate, skill, pool, and telemetry surfaces around local applications;
+6. compute, serialization, data, and parallel runtime support;
+7. optional assembled applications such as ``mixle.scientist``.
 
 The generated API reference is available at :doc:`api/modules`. This page is a
 human map for choosing where to start.
@@ -87,8 +89,9 @@ Inference is split by kind of question rather than by data type:
      - Use it for
    * - ``mixle.inference``
      - ``optimize``, EM, streaming estimation, priors, calibration,
-       conformal prediction, MCMC, model comparison, forecasting, and
-       diagnostics.
+       conformal prediction, MCMC, model comparison, forecasting,
+       diagnostics, certified model creation, simulation, verified synthesis,
+       reproducibility receipts, skills, placement plans, and UQ dispatch.
    * - ``mixle.enumeration``
      - Top-k, rank, seek, nucleus traversal, HMM paths, assignments, graph
        structures, and quantized support traversal.
@@ -100,8 +103,8 @@ Inference is split by kind of question rather than by data type:
        distributions, and inference targets.
 
 The main guides are :doc:`automatic-inference`, :doc:`inference`,
-:doc:`inference-toolkit`, :doc:`enumeration`, :doc:`operations`, and
-:doc:`ppl`.
+:doc:`inference-toolkit`, :doc:`enumeration`, :doc:`operations`,
+:doc:`reasoning-ecosystem`, and :doc:`ppl`.
 
 Applied Neural, LLM, And Task Workflows
 ---------------------------------------
@@ -125,7 +128,8 @@ they are part of the main Mixle story rather than miscellaneous extras:
        calling, planning, artifacts, and scorecards.
    * - ``mixle.reason``
      - LLM uncertainty, semantic entropy, claim reliability, finite-hypothesis
-       reasoning, graph-producing LLMs, and cross-modal latent evidence.
+       reasoning, graph-producing LLMs, typed ontologies, and cross-modal
+       latent evidence.
    * - ``mixle.represent``
      - Segmenters, embeddings, heterogeneous encoders, vector quantizers, and
        cross-modal representations, including posterior-affinity retrieval.
@@ -134,6 +138,39 @@ Use :doc:`neural-llm`, :doc:`task-distillation`, :doc:`task-serving`,
 :doc:`uncertainty`, :doc:`reasoning-systems`, and :doc:`representation` for the
 narrative guides. Use :doc:`maturity` to decide how much validation each
 surface needs.
+
+Local Application Runtime
+-------------------------
+
+Version 0.6.2 adds local application surfaces around fitted models:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Namespace
+     - Use it for
+   * - ``mixle.substrate``
+     - Typed, scoped, provenanced storage for documents, records, artifacts,
+       traces, context packets, graph facts, retrieval, multi-hop evidence,
+       factuality checks, lineage audits, secret scans, sharing, and
+       governance.
+   * - ``mixle.inference.skill``
+     - Packaging a fitted model, created artifact, or callable as a named
+       reusable capability with certificate/provenance metadata.
+   * - ``mixle.pool``
+     - Local-or-pool job submission, budget checks, explicit confirmation for
+       billable backends, and artifact return.
+   * - ``mixle.telemetry``
+     - Local JSONL decision events for fits, placement, routing, context,
+       reasoning, escalation, pool jobs, and drift.
+   * - ``mixle.scientist``
+     - Optional assembled local scientific workflow using cached open-weight
+       encoders, certified heads, substrate-backed reasoning, and edge
+       distillation receipts.
+
+Use :doc:`reasoning-ecosystem` for the narrative guide and
+:doc:`api/mixle.substrate`, :doc:`api/mixle.pool`, :doc:`api/mixle.telemetry`,
+and :doc:`api/mixle.scientist` for API reference.
 
 Scientific Design And Analysis
 ------------------------------
@@ -147,7 +184,8 @@ Mixle also includes scientific modeling support:
      - Use it for
    * - ``mixle.process``
      - Temporal point processes, renewal processes, Hawkes processes,
-       birth-death processes, and random partitions.
+       birth-death processes, continuous-time Markov chains, and random
+       partitions.
    * - ``mixle.relations``
      - Assignment, shortest path, edit distance, Viterbi path, spanning tree,
        subset, and ranking relation solvers.
@@ -178,8 +216,8 @@ library, and deployment format:
    * - Namespace
      - Use it for
    * - ``mixle.data``
-     - Schemas, validation, hashes, encoded IO, structured data sources, and
-       stream token sources.
+     - Schemas, validation, exchangeability checks, hashes, encoded IO,
+       structured data sources, and stream token sources.
    * - ``mixle.engines``
      - NumPy, Torch, JAX, symbolic, bit-packed, high-precision, LNS, and
        precision-planning engines.
@@ -225,6 +263,9 @@ Choosing An Entry Point
      - ``mixle.task.solve`` and :doc:`task-serving`.
    * - You need uncertainty-aware LLM behavior
      - ``mixle.reason`` and :doc:`uncertainty`.
+   * - You need a local knowledge/reasoning application shell
+     - ``mixle.substrate``, ``mixle.inference.skill``, ``mixle.pool``,
+       ``mixle.telemetry``, and :doc:`reasoning-ecosystem`.
    * - You need speed or scale
      - :doc:`compute-layer`, :doc:`engines`, and
        :doc:`utilities-and-parallelism`.

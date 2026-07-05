@@ -171,6 +171,58 @@ fresh process, and called as a function.
    local = TaskModel.load("spam_student")
    print(local("free prize click now"))
 
+Torch Representation Distillation
+---------------------------------
+
+The label-distillation path above asks a teacher for outputs and trains a
+small task artifact. Version 0.6.2 also adds ``mixle.task.distill_methods`` for
+classic Torch-to-Torch knowledge distillation when you already have a trained
+teacher module and an untrained student module.
+
+.. code-block:: python
+
+   from mixle.task.distill_methods import response_distill
+
+   result = response_distill(
+       student,
+       teacher,
+       x_train,
+       y_train,
+       temperature=4.0,
+       alpha=0.9,
+       epochs=300,
+       seed=0,
+   )
+
+   print(result.metric, result.before, result.after, result.improved)
+
+Available methods include:
+
+``response_distill``
+    Hinton-style soft-target response distillation, optionally mixed with hard
+    labels.
+
+``multi_teacher_distill``
+    Soft-target distillation from an averaged or weighted teacher ensemble.
+
+``hint_distill``
+    FitNets-style feature matching through intermediate-layer hooks.
+
+``attention_transfer``
+    Spatial attention-map transfer between teacher and student layers.
+
+``relational_distill``
+    Batch-relationship distillation through distances and angles in feature
+    space.
+
+``sequence_level_distill``
+    Sequence-level distillation for small language-model students.
+
+These methods return ``DistillResult`` records with before/after fidelity
+numbers and a training-loss history. They require Torch and are not task
+``Solution`` objects; use them to train or compress modules before wrapping the
+result in a Mixle model, skill, or service boundary.
+
 Generative Text Students
 ------------------------
 

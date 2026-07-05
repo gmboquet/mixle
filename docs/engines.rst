@@ -51,6 +51,27 @@ Move data folding to a backend separately:
 ``engine=`` controls array math. ``backend=`` controls where encoded data are
 processed.
 
+Torch DTensor Sharding
+----------------------
+
+``TorchEngine`` can represent component-sharded work through Torch DTensor when
+the installed Torch version supports the operations Mixle needs. In 0.6.2 the
+fully sharded component path is explicitly gated to Torch 2.5 or newer. Older
+Torch versions expose partial DTensor APIs but lack sharding strategies for
+operations used by mixture E-steps, which can otherwise fail deep inside Torch.
+
+When the gate rejects a DTensor component-sharding request, use the
+engine-agnostic route instead:
+
+.. code-block:: python
+
+   model = optimize(data, estimator, backend="model_parallel", out=None)
+
+The native model-parallel backend is the portable choice across Torch versions
+and devices. Use DTensor sharding only when the Torch runtime is new enough and
+you have a specific reason to keep component tensors resident in a distributed
+Torch mesh.
+
 Engine Detection
 ----------------
 
@@ -128,6 +149,8 @@ Practical Guidance
 * Start with the default NumPy path until the model shape is correct.
 * Use ``TorchEngine`` for neural leaves and GPU-backed numeric work.
 * Use ``backend=`` for parallel or distributed data folding.
+* Use ``backend="model_parallel"`` for portable component parallelism across
+  Torch versions.
 * Use symbolic export for inspection, not for production scoring.
 * Keep host/device boundaries explicit with ``to_numpy``.
 * Use ``mixle.describe(model)`` to check whether a model supports backend

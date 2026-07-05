@@ -22,10 +22,13 @@ Subpackages
    mixle.inference
    mixle.models
    mixle.ppl
+   mixle.pool
    mixle.reason
    mixle.represent
    mixle.stats
+   mixle.substrate
    mixle.task
+   mixle.telemetry
    mixle.utils
 
 Submodules
@@ -42,3 +45,4 @@ Submodules
    mixle.process
    mixle.program
    mixle.relations
+   mixle.scientist

@@ -50,9 +50,21 @@ from mixle.reason.llm import (
     information_corroborator,
     sentence_claims,
 )
+from mixle.reason.ontology import (
+    AXIOMS,
+    ConstrainedDecode,
+    Ontology,
+    OntologyConstrainedKG,
+    constrained_decode,
+)
 from mixle.reason.store import CrossModalStore, RetrievalStep
 
 __all__ = [
+    "Ontology",
+    "OntologyConstrainedKG",
+    "constrained_decode",
+    "ConstrainedDecode",
+    "AXIOMS",
     "NonlinearEvidence",
     "DiscreteAnswer",
     "model_evidence",

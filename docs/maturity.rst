@@ -38,7 +38,7 @@ Maturity Map
        layer. Good for experiments, but check the generated model and route.
    * - ``mixle.process``
      - Active development
-     - Stochastic-process families and temporal/event models.
+     - Stochastic-process families, temporal/event models, and CTMCs.
    * - ``mixle.models``
      - Incubating applied helpers
      - Neural leaves, language-model helpers, Gaussian processes, random
@@ -48,8 +48,19 @@ Maturity Map
    * - ``mixle.task`` and ``mixle.reason``
      - Active application/research workflows
      - Task distillation, LLM uncertainty, semantic entropy, cascades,
-       extraction, graph-producing LLMs, evidence fusion, and reasoning
-       workflows.
+       extraction, graph-producing LLMs, typed ontologies, evidence fusion,
+       and reasoning workflows.
+   * - ``mixle.substrate``, ``mixle.pool``, and ``mixle.telemetry``
+     - New local application runtime
+     - Provenanced local knowledge stores, action-based reasoners, reusable
+       skills, local-or-pool job boundaries, and decision telemetry. Validate
+       retrieval, routing, scope, and governance behavior in the target
+       application.
+   * - ``mixle.scientist``
+     - Optional assembled workflow
+     - Local scientific reasoning with cached encoders, certified heads, and
+       substrate-backed answering. Requires optional heavy dependencies and
+       local model weights.
    * - ``mixle.doe`` and ``mixle.evolve``
      - Active application/research workflows
      - Scientific design, Bayesian optimization, model-improvement loops, and
@@ -93,3 +104,21 @@ For ordinary distribution modeling, start with ``mixle.stats`` and
 ``mixle.inference``. Reach for ``mixle.models`` when the problem specifically
 needs a neural leaf, Gaussian process, graph model, grammar, random forest,
 DPM, POMDP, or other applied helper.
+
+How To Treat The v0.6.2 Runtime Surfaces
+----------------------------------------
+
+The substrate, reasoner, pool, telemetry, and scientist layers are application
+surfaces. They are valuable because they connect fitted models to knowledge,
+skills, evidence, and deployment decisions, but they need application-level
+validation:
+
+* check retrieval quality and abstention thresholds with representative
+  questions;
+* audit scope and sharing behavior before storing sensitive data;
+* treat pool placement as a priced decision and keep explicit confirmation for
+  billable backends;
+* inspect telemetry logs before training learned routing or placement policy;
+* reload and re-score neural artifacts after serialization;
+* keep local model weights and optional dependencies pinned in deployment
+  environments.

@@ -47,6 +47,8 @@ class GenerativeTextIO:
 
     def logits_batch(self, model: Any, raw_inputs: list[Any]) -> np.ndarray:
         """``log P(tokens, label)`` per label -- an ``(m, K)`` matrix (multinomial: sum of token logs)."""
+        if not raw_inputs:  # empty batch: (0, K), skip the per-class encode/score
+            return np.empty((0, len(self.labels)), dtype=np.float64)
         rows = [self._tokens(t) for t in raw_inputs]
         flat = [w for row in rows for w in row]
         doc = np.repeat(np.arange(len(rows)), [len(r) for r in rows])

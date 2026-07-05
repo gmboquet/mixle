@@ -67,10 +67,12 @@ class Model:
         self.fitted: Any = None
         self.notes: list[str] = list(notes or [])
         self.frontier: list[dict[str, Any]] | None = None  # candidate ranking when built by propose()
+        self.certificate: Any = None  # EstimationCertificate attached by fit() -- how each block was solved
+        self.calibration: Any = None  # CalibrationReport attached by fit(calibrate=...) -- is the UQ honest
         self._fit_info: dict[str, Any] = {}
 
     # --- fit / use -------------------------------------------------------------------------------
-    def fit(self, data: Any, *, restarts: Any = "auto", **optimize_kw: Any) -> Model:
+    def fit(self, data: Any, *, restarts: Any = "auto", calibrate: float | bool = False, **optimize_kw: Any) -> Model:
         """Fit via :func:`mixle.inference.optimize`; the algorithm follows from the model's structure.
 
         ``restarts="auto"`` (default) makes latent-variable fitting genuinely automatic: after the
@@ -78,22 +80,54 @@ class Model:
         every observation a ~uniform component posterior), and on suspicion the fit silently reruns as
         multi-restart EM (:func:`mixle.inference.best_of`), keeping the better log-likelihood and
         recording what happened in ``notes``. Pass an int to force that many restarts up front, or
-        ``restarts=None`` for the raw single fit."""
-        from mixle.inference import optimize
+        ``restarts=None`` for the raw single fit.
+
+        ``calibrate`` (opt-in, default off): reserve a holdout slice (a fraction, or ``True`` for
+        25%), fit on the rest, and attach a :class:`~mixle.inference.CalibrationReport` on
+        ``self.calibration`` measuring whether the model's uncertainty is honest on the held-out data
+        (PIT test + held-out log-density). Off by default because it costs training data."""
+        from mixle.inference import certify, optimize
 
         optimize_kw.setdefault("out", None)
-        self.fitted = optimize(data, self.spec, **optimize_kw)
-        self._fit_info = {"n": len(data) if hasattr(data, "__len__") else None, "when": time.time()}
 
+        cal_frac = 0.25 if calibrate is True else float(calibrate or 0.0)
+        cal_holdout: list[Any] = []
+        fit_data = data
+        if cal_frac > 0.0 and hasattr(data, "__len__") and len(data) >= 8:
+            rows = list(data)
+            rng = optimize_kw.get("rng") or np.random.RandomState(0)
+            order = rng.permutation(len(rows))
+            n_cal = max(2, int(round(len(rows) * cal_frac)))
+            cal_holdout = [rows[i] for i in order[:n_cal]]
+            fit_data = [rows[i] for i in order[n_cal:]]
+
+        self.fitted = optimize(fit_data, self.spec, **optimize_kw)
+        self._fit_info = {"n": len(fit_data) if hasattr(fit_data, "__len__") else None, "when": time.time()}
+
+        escape_tested = False
         want = 4 if restarts == "auto" else restarts
         if want and (restarts != "auto" or saddle_suspect(self.fitted, data)):
             better, delta_ll, how = self._refit_symmetry_broken(data, int(want), optimize_kw)
             if better is not None:
                 self.fitted = better
+                escape_tested = True
                 why = "saddle suspected" if restarts == "auto" else "restarts requested"
                 self.notes.append(f"{why}: {how} kept (log-lik +{delta_ll:.3f})")
             elif restarts == "auto":
                 self.notes.append("saddle suspected: symmetry-broken refits did not improve — inspect the fit")
+        # the estimation certificate: which method solved each block, how strong the guarantee, and
+        # exactly where (if anywhere) gradient descent was unavoidable. Cheap inspection, computed once.
+        try:
+            self.certificate = certify(self.fitted, escape_tested=escape_tested)
+        except Exception:  # noqa: BLE001 - certification is a report; never let it break a fit
+            self.certificate = None
+        if cal_holdout:
+            from mixle.inference import calibration_report
+
+            try:
+                self.calibration = calibration_report(self.fitted, cal_holdout)
+            except Exception:  # noqa: BLE001 - a calibration report never breaks a fit
+                self.calibration = None
         return self
 
     def _refit_symmetry_broken(self, data: Any, trials: int, optimize_kw: dict) -> tuple[Any, float, str]:

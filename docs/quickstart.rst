@@ -191,6 +191,25 @@ Treat the inferred shape as a starting point. Inspect it, compare it on
 held-out data, and replace pieces when the automatic guess does not match the
 domain.
 
+Create a Certified Artifact
+---------------------------
+
+When the fit should carry an explicit certificate and optional post-fit checks,
+use ``create`` after the core workflow is clear:
+
+.. code-block:: python
+
+   from mixle.inference import create
+
+   artifact = create(rows, calibrate=0.2, quantify_uq=True, seed=0)
+
+   print(artifact.guarantee)
+   print(artifact.is_calibrated())
+
+``create`` still delegates to the same fitting machinery. It adds an artifact
+boundary: estimation certificate, optional calibration, optional UQ, and
+provenance including row counts and exchangeability diagnostics.
+
 Optional: Neural And Task Layers
 --------------------------------
 

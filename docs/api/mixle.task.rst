@@ -20,6 +20,7 @@ Submodules
    mixle.task.density
    mixle.task.design
    mixle.task.distill
+   mixle.task.distill_methods
    mixle.task.economics
    mixle.task.edge
    mixle.task.extract

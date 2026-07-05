@@ -86,6 +86,19 @@ For compact HMMs, ``mixle.ppl`` is often the clearest surface:
 ``Markov`` lowers to the same latent estimator machinery as the explicit stats
 surface.
 
+Default HMM Execution
+---------------------
+
+When Numba is installed, HMM distributions now default to the Numba encoder and
+Baum-Welch path, matching the estimator default. This matters for the common
+workflow where an initialized HMM is passed as ``prev_estimate``: the encoder
+comes from the distribution, so the distribution and estimator must agree on
+the fast path.
+
+Explicit settings still win. Pass ``use_numba=False`` on the HMM family when
+you need the pure NumPy path for debugging, parity checks, or an environment
+where compiled kernels are not desirable.
+
 Structured HMMs
 ---------------
 
