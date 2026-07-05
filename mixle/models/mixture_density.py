@@ -187,17 +187,19 @@ class NeuralConditionalDensityAccumulator(SequenceEncodableStatisticAccumulator)
         self.y: list = []
         self.w: list = []
 
+    # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
     def update(self, xy: Any, weight: float, estimate: Any) -> None:
-        self.x.append(np.atleast_1d(np.asarray(xy[0], dtype=float)))
-        self.y.append(np.atleast_1d(np.asarray(xy[1], dtype=float)))
-        self.w.append(float(weight))
+        self.x.append(np.atleast_1d(np.asarray(xy[0], dtype=float))[None, ...])
+        self.y.append(np.atleast_1d(np.asarray(xy[1], dtype=float))[None, ...])
+        self.w.append(np.asarray([float(weight)], dtype=float))
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
         x, y = enc
-        for i in range(len(x)):
-            self.x.append(np.atleast_1d(x[i]))
-            self.y.append(np.atleast_1d(y[i]))
-            self.w.append(float(weights[i]))
+        xb = np.asarray(x, dtype=float)
+        yb = np.asarray(y, dtype=float)
+        self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
+        self.y.append(yb.reshape(yb.shape[0], 1) if yb.ndim == 1 else yb)
+        self.w.append(np.asarray(weights, dtype=float).ravel())
 
     def initialize(self, xy: Any, weight: float, rng: Any) -> None:
         self.update(xy, weight, None)
@@ -207,16 +209,23 @@ class NeuralConditionalDensityAccumulator(SequenceEncodableStatisticAccumulator)
 
     def combine(self, other: Any) -> NeuralConditionalDensityAccumulator:
         xo, yo, wo = other
-        self.x.extend(xo)
-        self.y.extend(yo)
-        self.w.extend(wo)
+        if len(xo):
+            self.x.append(np.asarray(xo, dtype=float))
+            self.y.append(np.asarray(yo, dtype=float))
+            self.w.append(np.asarray(wo, dtype=float).ravel())
         return self
 
     def value(self) -> tuple:
-        return (list(self.x), list(self.y), list(self.w))
+        x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
+        y = np.concatenate(self.y, axis=0) if self.y else np.zeros((0, 0))
+        w = np.concatenate(self.w) if self.w else np.zeros((0,))
+        return (x, y, w)
 
     def from_value(self, value: tuple) -> NeuralConditionalDensityAccumulator:
-        self.x, self.y, self.w = list(value[0]), list(value[1]), list(value[2])
+        x, y, w = value
+        self.x = [np.asarray(x, dtype=float)] if len(x) else []
+        self.y = [np.asarray(y, dtype=float)] if len(y) else []
+        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
         return self
 
     def acc_to_encoder(self) -> NeuralConditionalDensityEncoder:
@@ -251,10 +260,10 @@ class NeuralConditionalDensityEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralConditionalDensity:
         torch = _torch()
         xs, ys, ws = suff_stat
-        if not xs:
+        if len(xs) == 0:
             return self._make()
-        x = torch.as_tensor(np.stack(xs), dtype=torch.float32, device=self.device)
-        y = torch.as_tensor(np.stack(ys), dtype=torch.float32, device=self.device)
+        x = torch.as_tensor(np.asarray(xs, dtype=float), dtype=torch.float32, device=self.device)
+        y = torch.as_tensor(np.asarray(ys, dtype=float), dtype=torch.float32, device=self.device)
         w = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32, device=self.device)
         w = w / w.sum().clamp(min=1e-8)
         self.module.to(self.device).train()
