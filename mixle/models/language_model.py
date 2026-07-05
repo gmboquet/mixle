@@ -61,10 +61,63 @@ class LM:
         from mixle.models.transformer import build_causal_lm
 
         self.vocab = int(vocab)
+        self.d_model = int(d_model)
+        self.n_layer = int(n_layer)
+        self.n_head = int(n_head)
         self.block = int(block)
         self.device = device
         # embedding=CategoricalEmbedding ties one word embedding across LMs (e.g. a mixture's per-cluster experts)
         self.module = build_causal_lm(self.vocab, d_model, n_layer, n_head, self.block, embedding=embedding)
+
+    def _check_ids(self, ids: Any, where: str) -> np.ndarray:
+        """Validate that every token id is a nonnegative int below ``vocab``; raise naming the offending id."""
+        arr = np.asarray([int(t) for t in ids], dtype=np.int64)
+        if arr.size:
+            bad = arr[(arr < 0) | (arr >= self.vocab)]
+            if bad.size:
+                raise ValueError("%s: token id %d is outside the vocabulary [0, %d)" % (where, int(bad[0]), self.vocab))
+        return arr
+
+    def to_dict(self) -> dict:
+        """Serialize the hyperparameters + trained weights so the LM survives a process boundary.
+
+        The token embedding may be tied across LMs (``embedding=``); ``from_dict`` rebuilds an untied module and
+        loads the saved ``state_dict`` into it, so a round-tripped LM is standalone (any external tie is dropped).
+        """
+        torch = _torch()
+        state = {k: v.cpu() for k, v in self.module.state_dict().items()}
+        return {
+            "vocab": self.vocab,
+            "d_model": self.d_model,
+            "n_layer": self.n_layer,
+            "n_head": self.n_head,
+            "block": self.block,
+            "device": self.device,
+            "state_dict": state,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> LM:
+        """Rebuild an LM from :meth:`to_dict` output (fresh module, saved weights loaded in)."""
+        lm = cls(
+            vocab=payload["vocab"],
+            d_model=payload["d_model"],
+            n_layer=payload["n_layer"],
+            n_head=payload["n_head"],
+            block=payload["block"],
+            device=payload.get("device", "cpu"),
+        )
+        lm.module.load_state_dict(payload["state_dict"])
+        return lm
+
+    def save(self, path: str) -> None:
+        """Persist the trained LM to ``path`` via ``torch.save`` (hyperparameters + weights)."""
+        _torch().save(self.to_dict(), path)
+
+    @classmethod
+    def load(cls, path: str) -> LM:
+        """Load an LM previously written by :meth:`save`."""
+        return cls.from_dict(_torch().load(path, weights_only=False))
 
     def fit(
         self,
@@ -78,6 +131,7 @@ class LM:
         shuffle: bool = True,
     ) -> LM:
         """Pretrain (or continue) on a token-id array via the streaming estimator; the corpus is never buffered."""
+        self._check_ids(token_ids, "fit")
         if distributed:
             from mixle.models.streaming_transformer_leaf import StreamingTransformerLeafEstimator
             from mixle.stats.compute.sequence import seq_estimate
@@ -120,9 +174,14 @@ class LM:
         Include your end-of-sequence token in each completion so ``generate(stop_id=...)`` knows where to stop.
         """
         torch = _torch()
+        pairs = list(pairs)
+        if not pairs:
+            return self  # nothing to fine-tune on
         rng = np.random.RandomState(seed)
         rows, tmask = [], []
         for prompt, completion in pairs:
+            self._check_ids(prompt, "fit_pairs (prompt)")
+            self._check_ids(completion, "fit_pairs (completion)")
             seq = [int(t) for t in prompt] + [int(t) for t in completion]
             keep = [False] * (len(seq) if mask_prompt else 0)
             if mask_prompt:
@@ -181,6 +240,9 @@ class LM:
         so callers can strip it -- and its presence distinguishes 'finished' from 'ran out of budget').
         """
         torch = _torch()
+        self._check_ids(prompt_ids, "generate")
+        if stop_id is not None:
+            self._check_ids([stop_id], "generate (stop_id)")
         rng = np.random.RandomState(seed)
         self.module.to(self.device).eval()
         w = [int(t) for t in prompt_ids]
@@ -208,7 +270,12 @@ class LM:
         """Mean next-token negative log-likelihood (nats/token) on a token-id array."""
         from mixle.models.streaming_transformer_leaf import StreamingTransformerLeaf
 
-        ids = np.asarray(token_ids)
+        ids = self._check_ids(token_ids, "nll")
+        if len(ids) <= self.block:
+            raise ValueError(
+                "nll needs more than block=%d tokens to score at least one next-token target; got %d"
+                % (self.block, len(ids))
+            )
         ctx = np.stack([ids[i : i + self.block] for i in range(len(ids) - self.block)]).astype("float32")
         leaf = StreamingTransformerLeaf(self.module, self.device)
         return float(-np.mean(leaf.seq_log_density((ctx, ids[self.block :]))))

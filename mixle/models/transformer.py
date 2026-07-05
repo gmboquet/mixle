@@ -8,32 +8,28 @@ standard ``estimate()`` loop whose cross-entropy is ``-log p`` -- no new trainin
 
 Attention is ``F.scaled_dot_product_attention`` (the FlashAttention dispatch on CUDA). At frontier scale the
 same module is what a vendored TorchTitan/Megatron trainer shards (FSDP2/TP/PP); here it runs single-process.
+
+The ``nn.Module`` subclasses are defined at MODULE level (not nested inside ``build_causal_lm``) so a trained
+LM pickles/saves: a function-local class has no importable qualname and ``torch.save``/``pickle`` cannot find it.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-
-def build_causal_lm(
-    vocab: int, d_model: int = 128, n_layer: int = 3, n_head: int = 4, block: int = 64, embedding: Any = None
-) -> Any:
-    """Build a causal decoder-only Transformer LM (token+pos embeddings, pre-norm blocks, weight-tied head).
-
-    ``embedding`` optionally injects a *shared* token ``nn.Embedding`` (``vocab x d_model``) to use in place of a
-    fresh one -- so several language models can tie the same word embedding and train it jointly (the weight-tied
-    head follows it). Its shape must match ``(vocab, d_model)``.
-    """
+try:
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
 
-    from mixle.models.embedding import resolve_embedding
+    _HAS_TORCH = True
+except ImportError:  # pragma: no cover - torch is optional
+    _HAS_TORCH = False
 
-    embedding = resolve_embedding(embedding, vocab, d_model)  # CategoricalEmbedding | nn.Embedding | None -> module
+if _HAS_TORCH:
 
     class CausalAttention(nn.Module):
-        def __init__(self) -> None:
+        def __init__(self, d_model: int, n_head: int) -> None:
             super().__init__()
             self.h = n_head
             self.qkv = nn.Linear(d_model, 3 * d_model)
@@ -46,11 +42,11 @@ def build_causal_lm(
             return self.proj(o.transpose(1, 2).reshape(b, t, d))
 
     class Block(nn.Module):
-        def __init__(self) -> None:
+        def __init__(self, d_model: int, n_head: int) -> None:
             super().__init__()
             self.ln1 = nn.LayerNorm(d_model)
             self.ln2 = nn.LayerNorm(d_model)
-            self.attn = CausalAttention()
+            self.attn = CausalAttention(d_model, n_head)
             self.mlp = nn.Sequential(nn.Linear(d_model, 4 * d_model), nn.GELU(), nn.Linear(4 * d_model, d_model))
 
         def forward(self, x: Any) -> Any:
@@ -58,11 +54,19 @@ def build_causal_lm(
             return x + self.mlp(self.ln2(x))
 
     class CausalLM(nn.Module):
-        def __init__(self) -> None:
+        def __init__(
+            self, vocab: int, d_model: int, n_layer: int, n_head: int, block: int, embedding: Any = None
+        ) -> None:
             super().__init__()
+            # record the shape so a trained module can be rebuilt from hyperparameters on load
+            self.vocab = int(vocab)
+            self.d_model = int(d_model)
+            self.n_layer = int(n_layer)
+            self.n_head = int(n_head)
+            self.block = int(block)
             self.tok = embedding if embedding is not None else nn.Embedding(vocab, d_model)
             self.pos = nn.Embedding(block, d_model)
-            self.blocks = nn.ModuleList([Block() for _ in range(n_layer)])
+            self.blocks = nn.ModuleList([Block(d_model, n_head) for _ in range(n_layer)])
             self.ln = nn.LayerNorm(d_model)
             self.head = nn.Linear(d_model, vocab, bias=False)
             self.head.weight = self.tok.weight  # weight tying
@@ -76,4 +80,17 @@ def build_causal_lm(
                 h = blk(h)
             return self.head(self.ln(h))[:, -1]  # next-token logits from the last position -> (batch, vocab)
 
-    return CausalLM()
+
+def build_causal_lm(
+    vocab: int, d_model: int = 128, n_layer: int = 3, n_head: int = 4, block: int = 64, embedding: Any = None
+) -> Any:
+    """Build a causal decoder-only Transformer LM (token+pos embeddings, pre-norm blocks, weight-tied head).
+
+    ``embedding`` optionally injects a *shared* token ``nn.Embedding`` (``vocab x d_model``) to use in place of a
+    fresh one -- so several language models can tie the same word embedding and train it jointly (the weight-tied
+    head follows it). Its shape must match ``(vocab, d_model)``.
+    """
+    from mixle.models.embedding import resolve_embedding
+
+    embedding = resolve_embedding(embedding, vocab, d_model)  # CategoricalEmbedding | nn.Embedding | None -> module
+    return CausalLM(vocab, d_model, n_layer, n_head, block, embedding=embedding)
