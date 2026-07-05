@@ -276,6 +276,14 @@ class LM:
                 "nll needs more than block=%d tokens to score at least one next-token target; got %d"
                 % (self.block, len(ids))
             )
-        ctx = np.stack([ids[i : i + self.block] for i in range(len(ids) - self.block)]).astype("float32")
         leaf = StreamingTransformerLeaf(self.module, self.device)
-        return float(-np.mean(leaf.seq_log_density((ctx, ids[self.block :]))))
+        n = len(ids) - self.block
+        # Stream the (n, block) context windows in chunks rather than materializing the whole matrix (which was
+        # ~2GB at 1M tokens, block=512); accumulate the summed log-density and divide by the token count.
+        total = 0.0
+        chunk = 4096
+        for start in range(0, n, chunk):
+            stop = min(start + chunk, n)
+            ctx = np.stack([ids[i : i + self.block] for i in range(start, stop)]).astype("float32")
+            total += float(np.sum(leaf.seq_log_density((ctx, ids[self.block + start : self.block + stop]))))
+        return -total / n
