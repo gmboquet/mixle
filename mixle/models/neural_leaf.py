@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.models._neural_serial import check_finite, decode_module, encode_module
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -64,6 +65,8 @@ def _resolve_device(device: Any, torch: Any) -> Any:
 class NeuralGaussian(SequenceEncodableProbabilityDistribution):
     """``p(y | x) = N(y; module(x), noise^2 I)`` as a mixle leaf. Observation is the pair ``(x, y)``."""
 
+    __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
+
     def __init__(
         self,
         module: Any,
@@ -97,8 +100,9 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
         x, y = enc
+        check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "NeuralGaussian.seq_log_density (x)")
         mean = self._forward(x)
-        y = np.atleast_2d(np.asarray(y, dtype=float))
+        y = check_finite(np.atleast_2d(np.asarray(y, dtype=float)), "NeuralGaussian.seq_log_density (y)")
         d = y.shape[1]
         sq = ((y - mean) ** 2).sum(axis=1)
         return -0.5 * sq / (self.noise**2) - 0.5 * d * np.log(2.0 * np.pi * self.noise**2)
@@ -131,6 +135,38 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> NeuralGaussianEncoder:
         return NeuralGaussianEncoder()
+
+    # --- serialization: persist hparams + the module (as portable bytes); registered below so a mixture holding
+    # this leaf round-trips through to_dict/to_json/pickle as well. ---
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state["module"] = encode_module(self.module)
+        return state
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.module = decode_module(state["module"])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "noise": self.noise,
+            "m_steps": self.m_steps,
+            "lr": self.lr,
+            "name": self.name,
+            "device": self.device,
+            "module": encode_module(self.module),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> NeuralGaussian:
+        return cls(
+            decode_module(payload["module"]),
+            noise=payload["noise"],
+            m_steps=payload["m_steps"],
+            lr=payload["lr"],
+            name=payload["name"],
+            device=payload["device"],
+        )
 
 
 class NeuralGaussianSampler(DistributionSampler):
@@ -255,6 +291,18 @@ class NeuralGaussianEstimator(ParameterEstimator):
             opt.step()
         self.noise = float(torch.exp(log_noise).detach())  # warm-start noise for the next EM iteration
         return NeuralGaussian(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
+
+
+def _register_serializable() -> None:
+    # mixle.models classes aren't in the stats/analysis auto-walk, so opt in explicitly for to_json/from_json.
+    try:
+        from mixle.utils.serialization import register_serializable_class
+    except Exception:  # pragma: no cover
+        return
+    register_serializable_class(NeuralGaussian)
+
+
+_register_serializable()
 
 
 # --- back-compat aliases (the classes were renamed off the '...Leaf' suffix) ---
