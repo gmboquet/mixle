@@ -3,7 +3,7 @@
 Defines the IntegerChowLiuTreeDistribution, IntegerChowLiuTreeSampler, IntegerChowLiuTreeAccumulatorFactory, IntegerChowLiuTreeAccumulator, IntegerChowLiuTreeEstimator, and
 the IntegerChowLiuTreeDataEncoder classes for use with mixle.
 
-PySparkPlug supports Chow & Liu trees [1] through the IntegerChowLiuTree (Integer Chow Liu Tree) class of objects. IntegerChowLiuTrees model
+mixle supports Chow & Liu trees [1] through the IntegerChowLiuTree (Integer Chow Liu Tree) class of objects. IntegerChowLiuTrees model
 non-Markov conditional dependence for fixed-length sequences of integers with the likelihood functions of the form
 
     P(x_1, x_2,..,x_n) = P(x_i1) P(x_{i_2}|x_{j_2})*...*P(x_{i_n}|x_{j_n}),
