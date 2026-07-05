@@ -433,12 +433,20 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
     def backend_stacked_sufficient_statistics(
         cls, x: Any, weights: Any, params: dict[str, Any], engine: Any
     ) -> tuple[Any, ...]:
-        """Return component-stacked legacy sufficient statistics on the active engine."""
+        """Return component-stacked legacy sufficient statistics on the active engine.
+
+        The weighted second moment ``sum_n w[n,k] x_n x_n^T`` is accumulated per
+        component as a gemm ``(x * w[:, k]).T @ x`` instead of reducing a per-sample,
+        per-component ``(n, k, dim, dim)`` outer-product tensor. That intermediate is
+        ``N*K*dim*dim`` (~20 GB at n=2e4, k=8, dim=128 — it OOMs a GPU); the per-component
+        gemm holds only an ``(n, dim)`` temporary and hands the reduction to BLAS/cuBLAS.
+        The first moment is likewise ``w.T @ x`` rather than a reduced ``(n, k, dim)`` tensor.
+        """
         xx = engine.asarray(x)
         ww = engine.asarray(weights)
-        sum_x = engine.sum(ww[:, :, None] * xx[:, None, :], axis=0)
-        outer = xx[:, :, None] * xx[:, None, :]
-        sum_xx = engine.sum(ww[:, :, None, None] * outer[:, None, :, :], axis=0)
+        k = int(ww.shape[1])
+        sum_x = engine.matmul(ww.T, xx)
+        sum_xx = engine.stack([engine.matmul((xx * ww[:, j : j + 1]).T, xx) for j in range(k)], axis=0)
         counts = engine.sum(ww, axis=0)
         return sum_x, sum_xx, counts
 

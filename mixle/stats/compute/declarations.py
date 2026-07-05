@@ -784,6 +784,19 @@ def _generated_exp_family_scalar_expression(
 
 def _generated_exp_family_pair_term(stat: Any, eta: Any, engine: Any, stacked: bool) -> Any:
     stat_arr = engine.asarray(stat)
+    stat_shape = tuple(getattr(stat_arr, "shape", ()))
+    if stacked and len(stat_shape) >= 2 and not isinstance(eta, (str, bytes, bool, int, float, np.number)):
+        # Stacked Frobenius inner product <stat[n], eta[k]> summed over the feature
+        # axes. stat is (n, *feat), the raw natural parameter eta is (k, *feat), and
+        # the result is (n, k). Computed as a single matmul over the flattened feature
+        # axes so the (n, k, *feat) broadcast tensor is never materialized — for a
+        # matrix (second-moment) statistic that intermediate is N*K*dim*dim (~20 GB at
+        # n=2e4, k=8, dim=128, which OOMs a GPU); the gemm result is only (n, k).
+        eta_arr = engine.asarray(eta)
+        eta_shape = tuple(getattr(eta_arr, "shape", ()))
+        if len(eta_shape) >= 1 and eta_shape[1:] == stat_shape[1:]:
+            n_rows, k = stat_shape[0], eta_shape[0]
+            return engine.matmul(stat_arr.reshape(n_rows, -1), eta_arr.reshape(k, -1).T)
     eta_arr = _generated_param_arg(eta, engine) if stacked else eta
     product = stat_arr[:, None] * eta_arr if stacked else stat_arr * eta_arr
     shape = tuple(getattr(product, "shape", ()))
@@ -1402,6 +1415,15 @@ def _generated_param_arg(value: Any, engine: Any) -> Any:
     raise ValueError("generated stacked scoring currently supports scalar/vector/matrix per-component parameters only.")
 
 
+def _astype(x: Any, dtype: Any) -> Any:
+    """Cast an engine array to ``dtype`` (float64 accumulator) across numpy/torch/jax; no-op if None."""
+    if dtype is None:
+        return x
+    if hasattr(x, "astype"):  # numpy / jax
+        return x.astype(dtype)
+    return x.to(dtype)  # torch
+
+
 def _weighted_component_sum(stat: Any, spec: StatisticSpec, weights: Any, engine: Any) -> Any:
     # Accumulate the over-observations reduction in float64 (no-op for full-precision engines) so a
     # reduced-precision component fit does not drift on large N.
@@ -1414,8 +1436,16 @@ def _weighted_component_sum(stat: Any, spec: StatisticSpec, weights: Any, engine
     elif spec.kind in ("vector_moment", "matrix_moment"):
         if not weights_shape or shape[0] != weights_shape[0]:
             raise ValueError("generated %s statistics must have a row axis." % spec.kind)
-        extra_axes = (None,) * (len(shape) - 1)
-        return engine.sum(weights[(slice(None), slice(None)) + extra_axes] * arr[:, None, ...], axis=0, dtype=acc)
+        # The weighted component sum sum_n w[n,k] * arr[n, ...] -> (K, *trailing) computed as a MATMUL
+        # over the flattened trailing axes (w.T @ arr_flat), NOT a (K,)-fold broadcast. The broadcast
+        # form materialized an (N, K, *trailing) intermediate that OOMs the GPU for matrix moments
+        # (N*K*dim*dim -- e.g. 21 GB at N=2e4, K=8, dim=128); the matmul only ever holds (K, prod). It
+        # is bit-identical, and the float64 accumulation is preserved by casting to the accumulator dtype.
+        n_rows, k = shape[0], weights_shape[1]
+        w = _astype(engine.asarray(weights), acc)
+        a = _astype(engine.asarray(arr), acc)
+        out = engine.matmul(w.T, a.reshape(n_rows, -1))
+        return out.reshape((k, *shape[1:]))
     elif len(shape) != 2 or shape != weights_shape:
         raise ValueError(
             "generated sufficient statistics must be row, row-component, or declared vector/matrix arrays."
