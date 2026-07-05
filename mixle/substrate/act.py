@@ -74,6 +74,7 @@ class Investigation:
     steps: list[Step] = field(default_factory=list)
     note: str = ""
     factuality: Any = None  # optional FactualityReceipt when the answer was verified against a substrate
+    proposal: Any = None  # optional ResearchProposal attached to an abstention ("here is how to find out")
 
     @property
     def evidence(self) -> list[str]:
