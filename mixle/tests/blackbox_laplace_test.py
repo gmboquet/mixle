@@ -48,6 +48,37 @@ class BlackboxLaplaceTest(unittest.TestCase):
         m = laplace_posterior(fit, data).sample(1, rng=np.random.RandomState(5))
         self.assertEqual(len(m.components), 2)  # a valid posterior draw rebuilt into a fitted mixture
 
+    def test_bayesian_network_gets_a_parameter_posterior(self):
+        # a learned heterogeneous DAG (categorical marginal + conditional-linear-Gaussian edges) is now
+        # flattenable, so uq(model, data) / create(..., quantify_uq=True) attach a real posterior, not None.
+        from mixle.inference.bayesian_network import learn_bayesian_network
+
+        rng = np.random.RandomState(0)
+        plan_spend_records = []
+        for _ in range(400):
+            plan = rng.choice(["free", "pro", "enterprise"], p=[0.5, 0.3, 0.2])
+            base = {"free": 10.0, "pro": 50.0, "enterprise": 200.0}[plan]
+            spend = base + rng.normal(0, 5)
+            seats = 0.5 * spend + rng.normal(0, 3)
+            plan_spend_records.append((plan, float(spend), float(seats)))
+
+        bn = learn_bayesian_network(plan_spend_records, max_parents=2)
+
+        # flatten round-trips exactly: same joint log-likelihood after params -> vector -> params
+        u0, rebuild = _flatten(bn)
+        self.assertGreater(len(u0), 0)
+        back, _ = rebuild(u0)
+        enc0 = bn.dist_to_encoder().seq_encode(plan_spend_records)
+        enc1 = back.dist_to_encoder().seq_encode(plan_spend_records)
+        self.assertAlmostEqual(
+            float(np.sum(bn.seq_log_density(enc0))), float(np.sum(back.seq_log_density(enc1))), places=6
+        )
+
+        post = laplace_posterior(bn, plan_spend_records)
+        self.assertIsNotNone(post)  # the uq handle a BN used to get None for
+        draw = post.sample(1, rng=np.random.RandomState(1))
+        self.assertEqual(len(draw.factors), len(bn.factors))  # a valid draw rebuilt into a network
+
     def test_unsupported_structure_raises_clearly(self):
         hmm = S.HiddenMarkovModelDistribution(
             [S.GaussianDistribution(-1, 1), S.GaussianDistribution(1, 1)], [0.5, 0.5], [[0.7, 0.3], [0.3, 0.7]]
