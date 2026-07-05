@@ -1,14 +1,13 @@
-"""Calibration as a post-condition of fitting (B2) -- is the fitted model's uncertainty honest?
+"""Calibration reports as a post-condition of fitting.
 
-A fit tells you the parameters; it does not tell you whether the model's PROBABILITIES are trustworthy
-on data it did not see. :func:`calibration_report` answers that on held-out data: for a model with a
-predictive CDF it runs the probability-integral-transform (PIT) test -- a calibrated continuous
-predictive has Uniform(0,1) PIT values, so the deviation from uniform is a calibration error -- and it
-always reports the held-out mean log-density (a proper score) as the baseline quality number.
+A fit provides parameters; it does not by itself show whether predictive
+probabilities are calibrated on held-out data. :func:`calibration_report`
+returns the held-out mean log-density and, when the model exposes a predictive
+CDF, a probability-integral-transform (PIT) calibration check.
 
-This is the seam for "calibration everywhere": :meth:`mixle.Model.fit(calibrate=...)` reserves a slice,
-fits on the rest, and attaches the report to the model, so a fit's honesty is answerable from the
-model object -- opt-in (it costs held-out data), never the silent default.
+Calibration is opt-in because it reserves held-out data. When requested through
+the higher-level fitting surfaces, the resulting report is attached to the
+model or artifact.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ __all__ = ["CalibrationReport", "calibration_report"]
 
 @dataclass
 class CalibrationReport:
-    """Whether a fitted model's uncertainty is honest on held-out data (PIT + proper score).
+    """Whether a fitted model's uncertainty is calibrated on held-out data.
 
     ``pit_error`` is the total-variation distance of the PIT histogram from uniform (0 = perfectly
     calibrated). It has a finite-sample floor ~``sqrt(bins/n)`` even for a perfect model, so

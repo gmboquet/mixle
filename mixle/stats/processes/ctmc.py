@@ -1,4 +1,4 @@
-"""Continuous-time Markov chain (CTMC) over fully-observed trajectories (E3, marked/temporal processes).
+"""Continuous-time Markov chain (CTMC) over fully observed trajectories.
 
 A CTMC on ``K`` states is governed by a generator matrix ``Q``: off-diagonal ``q_ij >= 0`` is the rate
 of jumping ``i -> j``, and ``q_ii = -sum_{j!=i} q_ij``. A fully-observed trajectory is the initial state
@@ -7,12 +7,12 @@ plus the sequence of ``(dwell_time, next_state)`` jumps; its log-likelihood is
     log L = sum_{i!=j} n_ij * log q_ij  -  sum_i q_i * T_i,      q_i = -q_ii = sum_{j!=i} q_ij,
 
 where ``n_ij`` is the number of observed ``i->j`` transitions and ``T_i`` the total time spent in ``i``.
-This is exactly a collection of independent Poisson-rate likelihoods, so the MLE is CLOSED FORM and
+This is a collection of independent Poisson-rate likelihoods, so the MLE is closed form and
 unique: ``q_ij = n_ij / T_i``. The estimator therefore certifies ``GLOBAL_UNIQUE`` (see
 :func:`mixle.inference.certify`, which classifies this family). Data type: ``(s0, [(dt, s1), (dt, s2),
 ...])`` -- the initial state and the observed jumps.
 
-Follows the standard mixle distribution contract (Distribution / Sampler / Accumulator / Factory /
+The family follows the standard Mixle distribution contract (Distribution / Sampler / Accumulator / Factory /
 Estimator / DataEncoder) so it composes with ``optimize`` / ``seq_log_density`` / the PPL surface like
 every other family.
 """

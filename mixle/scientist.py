@@ -1,26 +1,17 @@
-"""``Scientist`` -- the assembled laptop product: cross-modal scientific reasoning with verified answers.
+"""Optional local scientific-assistant workflow.
 
-This is the thing the frontier-ecosystem workplan was the supply chain FOR. One object that, on a
-laptop, with no network:
+``Scientist`` assembles several Mixle surfaces into one offline-oriented object:
 
-  * PERCEIVES real modalities through real open-weight encoders (CLIP ViT-B/32 for images, MiniLM for
-    text) mounted as typed leaves -- the C2 contract with genuine towers, not stand-ins;
-  * LEARNS certified models over what it perceives (``study``: closed-form / convex heads over encoder
-    latents, with an estimation certificate, calibration, and conformal abstention -- never ADAM where
-    something provable exists);
-  * REASONS over a knowledge substrate + its own fitted skills + physics solvers (``ask``: the
-    evidence-buying action loop, answering through a REAL local LLM whose semantic-entropy UQ gates
-    whether it may speak);
-  * VERIFIES every answer (factuality receipts against the substrate; no answer without provenance;
-    abstention instead of fabrication).
+* modality encoders for images and text, loaded from the local Hugging Face
+  cache when available;
+* certified heads over encoder latents through ``study``;
+* a substrate-backed ``ask`` workflow using local evidence, skills, and an
+  optional local language model;
+* factuality and provenance checks for produced answers.
 
-The frontier claim this system makes -- and PROVES in its receipts rather than asserts -- is task-level:
-on scientific tasks (calibrated cross-modal prediction, parameter inversion with coverage, grounded QA)
-it delivers verification no frontier LLM provides, at laptop cost. It does not claim open-ended
-generative parity with hundred-billion-parameter models; it claims *trustworthy answers where the
-answer can be checked*, which is what science requires.
-
-Heavy assets (CLIP / MiniLM / SmolLM2) are lazy-loaded from the local HF cache and shared per process.
+The module is intentionally optional. Heavy assets such as CLIP, MiniLM, and
+SmolLM2 are lazy-loaded and shared per process, and the package sets offline
+Hugging Face defaults at import time.
 """
 
 from __future__ import annotations

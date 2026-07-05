@@ -1,16 +1,14 @@
-"""Promotion gates + org governance for shared knowledge (P3).
+"""Promotion gates for shared substrate knowledge.
 
-P1 lets a team ``publish`` an item straight into a shared scope. That is right for a team's own space,
-but org-level scopes (a company-wide ontology, a curated skill library) need a GATE: nothing enters
-until an authorized approver signs off. This module adds that workflow -- :func:`propose` marks an item
-as pending promotion to a scope (it is NOT yet visible there); :func:`approve` promotes it, but only if
-the approver is in that scope's approver set, and stamps who approved it; :func:`reject` records a
-refusal. :func:`pending` lists what awaits review.
+Teams can publish items into shared scopes, while curated scopes can require an
+explicit approval step. :func:`propose` marks an item as pending promotion,
+:func:`approve` promotes it when the approver is authorized for the target
+scope, :func:`reject` records a refusal, and :func:`pending` lists items awaiting
+review.
 
-Approval delegates the actual scope change to P1's :func:`~mixle.substrate.spaces.publish`, so a promoted
-item inherits the same versioned, audited sharing -- the gate governs WHO may share into a curated scope,
-on top of the audit trail that records the sharing itself. This is the P3 seed: promotion gates at team /
-org scope with an approver ACL. Skill / ontology curation is the same gate over ``artifact`` / KG items.
+Approved promotion delegates the scope change to
+:func:`~mixle.substrate.spaces.publish`, preserving the same provenance trail as
+ordinary sharing.
 """
 
 from __future__ import annotations

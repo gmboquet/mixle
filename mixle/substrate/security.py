@@ -1,4 +1,4 @@
-"""Secret detection + redaction for the substrate (trust / security, N3).
+"""Secret detection and redaction for substrate text.
 
 Knowledge flows into the substrate from documents, traces, and tool outputs -- exactly the places a
 leaked credential hides. :func:`detect_secrets` scans text for well-known secret shapes (API keys,

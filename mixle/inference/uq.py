@@ -1,9 +1,8 @@
-"""``uq()`` -- one verb for uncertainty over any predictor, method auto-selected by what it is.
+"""Unified uncertainty dispatch for models, predictors, ensembles, and LLM-style callables.
 
-Uncertainty quantification in mixle is scattered across the pieces that produce it: Laplace posteriors
-over model parameters, split conformal for point predictors, semantic entropy for stochastic
-generators. ``uq(thing, data)`` is the single front door: it inspects ``thing`` and routes to the
-right method, returning a :class:`UQResult` with calibrated, measurable receipts.
+``uq(thing, data)`` inspects the object it receives and routes to a compatible
+uncertainty method, returning a :class:`UQResult` with the method name and the
+quantities needed for downstream checks.
 
   * a fitted mixle model (has ``seq_log_density``) -> a Laplace parameter posterior; sample fitted
     models, read any summary, get a credible interval (epistemic uncertainty over parameters).
@@ -13,8 +12,8 @@ right method, returning a :class:`UQResult` with calibrated, measurable receipts
   * an LLM-style callable over prompts (returns a string, or samples of strings) -> semantic entropy
     over meaning classes; ``confident(prompt)`` abstains when the model disagrees with itself.
 
-The method is chosen from capability, not declared by the caller -- the same call shape works for all
-three, and every result carries the numbers to check its own calibration.
+The method is chosen from observed capability rather than a caller-supplied
+mode string.
 """
 
 from __future__ import annotations

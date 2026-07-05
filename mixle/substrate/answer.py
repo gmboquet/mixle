@@ -1,16 +1,9 @@
-"""Answer a question from the substrate -- retrieve, assemble, answer or ABSTAIN, always cite (S3 seed).
+"""Answer a question from substrate evidence with citations.
 
-This composes the substrate stack into one honest front door: given a question and a pluggable
-``answerer`` (any callable ``(question, context) -> str`` -- a local student, an LLM, a rule), it
-retrieves the evidence (single-shot or multi-hop), assembles a budgeted context packet, and either
-answers FROM that evidence or ABSTAINS when the evidence is too thin. The result carries the full
-evidence chain, so an answer is never returned without a traceable route from the question to the
-knowledge it rests on -- the no-answer-without-provenance rule made operational.
-
-This is the seed of the reasoner's evidence loop (S3): RETRIEVE is wired here; COMPUTE / SIMULATE /
-CREATE / DELEGATE as evidence-acquiring actions layer on top. The answerer is intentionally external
-so this stays model-agnostic and 99%-local -- a tiny distilled student answers most questions on the
-laptop; only genuinely hard ones need escalation.
+Given a question and a pluggable ``answerer`` callable, this module retrieves
+evidence, assembles a budgeted context packet, and either returns an answer from
+that evidence or abstains when the evidence is too thin. The result carries the
+evidence chain and citations back to substrate items.
 """
 
 from __future__ import annotations
@@ -25,7 +18,7 @@ from mixle.substrate.core import Substrate, SubstrateItem
 
 @dataclass
 class Answer:
-    """A cited answer (or an honest abstention) with the evidence it rests on and a confidence."""
+    """A cited answer or abstention with the evidence it rests on and a confidence."""
 
     question: str
     answer: str | None  # None when abstained
@@ -72,7 +65,7 @@ def answer_from_substrate(
         hops: 1 = single-shot :func:`retrieve`; >1 = :func:`multihop` chaining that many hops.
         min_evidence: minimum retrieved items required to attempt an answer.
         min_confidence: retrieval-strength floor below which it abstains rather than guess.
-        compress: compress the context to fit more sources under budget (workstream O3).
+        compress: compress the context to fit more sources under budget.
         scope: restrict to a team/access scope.
     """
     budget = budget or ContextBudget()

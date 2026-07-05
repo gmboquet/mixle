@@ -1,19 +1,17 @@
-"""``skill()`` -- package a fitted model / subgraph as a named, reusable, indexed verb (F4).
+"""Package a fitted model or callable as a reusable skill.
 
-The creation verb for *capabilities*. A fitted artifact answers exactly one question well; :func:`skill`
-wraps it as a :class:`Skill` -- a named, described, provenanced callable -- and drops it into a
-:class:`SkillRegistry` so it can be *found and reused* later instead of re-fit from scratch. A skill
-carries the estimation certificate of whatever it wraps, so "reuse this skill" also means "inherit its
-guarantee"; and it carries provenance (what data / task it came from), so reuse is auditable.
+``skill`` wraps a model, subgraph, or plain callable as a named
+:class:`Skill` and stores it in a :class:`SkillRegistry`. Skills carry
+description, tags, provenance, and any estimation certificate inherited from
+the wrapped object, so reuse remains auditable.
 
-``find(query)`` ranks skills by a lexical overlap of the query against each skill's name + description +
-tags -- a deliberately tiny, dependency-free matcher (the same "no fuzzy embedder on a tiny corpus"
-discipline used across the substrate). The seam to embedding retrieval is :meth:`SkillRegistry.index`,
-which mirrors each skill into a :class:`~mixle.substrate.Substrate` when a stronger recall is wanted.
+``find(query)`` ranks skills by lexical overlap against the skill name,
+description, and tags. :meth:`SkillRegistry.index` can also mirror skills into a
+:class:`~mixle.substrate.Substrate` when a workflow wants retrieval over the
+same capability catalog.
 
-The wrapped callable is resolved from the object: an explicit ``call=`` wins; else a model's ``predict``
-/ ``__call__`` / ``sampler`` is used; else a plain function is taken as-is. So both "a fitted subgraph"
-and "a hand-written verb" become the same reusable, certificate-bearing unit.
+The wrapped callable is resolved from the object: explicit ``call=`` wins, then
+``predict`` or ``__call__``, then ``sampler`` for generative models.
 """
 
 from __future__ import annotations

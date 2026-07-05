@@ -1,19 +1,15 @@
-"""``create()`` -- data (+ budget + device) to a *certified* model artifact (F3).
+"""Certified model creation from data.
 
-The creation verb for *models*. Point it at data and it does the whole responsible-fit pipeline in one
-call: infer the model shape (automatic families + cross-field structure via ``optimize``), fit it with
-a *planned* estimator (closed-form / convex / EM wherever possible -- never ADAM where something
-stronger exists), then attach the post-conditions that make an artifact trustworthy:
+``create`` fits a model through the ordinary Mixle inference machinery and
+returns a :class:`CreatedModel` artifact rather than a bare distribution. The
+artifact contains the fitted model, an estimation certificate, optional
+calibration, optional uncertainty quantification, and provenance.
 
-* an :class:`~mixle.inference.EstimationCertificate` (the guarantee ladder + why-not-ADAM receipt);
-* an optional **calibration** report (PIT / reliability on a reserved holdout);
-* an optional **UQ** handle (Laplace posterior / conformal / semantic entropy, auto-selected).
-
-The result is a :class:`CreatedModel`: the fitted model plus its certificate, calibration, UQ, and a
-provenance record -- a self-describing artifact, not a bare distribution. ``budget`` / ``device`` are
-recorded as constraints and cap the structure search (a seam onto the edge-distillation strategy in
-:mod:`mixle.task.edge` when labels + a hard device envelope are supplied); today they bias ``create``
-toward a smaller, independence-first model so the artifact fits the stated envelope.
+The ``budget`` and ``device`` arguments are recorded as constraints and bias the
+automatic structure search toward smaller, independence-first models. They do
+not replace task-specific compression or edge-distillation workflows; they make
+the creation boundary explicit when a caller already knows the deployment
+envelope.
 """
 
 from __future__ import annotations
@@ -39,7 +35,7 @@ class CreatedModel:
         return self.certificate.guarantee
 
     def why(self) -> str:
-        """One line on how it was estimated -- the why-not-ADAM receipt from the certificate."""
+        """One line summarizing how the artifact was estimated."""
         return self.certificate.why_not_adam() if hasattr(self.certificate, "why_not_adam") else ""
 
     def is_calibrated(self) -> bool | None:
@@ -75,8 +71,8 @@ def create(
     rows = list(data)
     constrained = budget is not None or device is not None
     # A budget/device envelope caps model complexity: keep fields independent (structure search off) so
-    # the artifact stays small. This is the honest v1 of the edge strategy -- a real seam onto
-    # mixle.task.edge when labels + a hard footprint are supplied.
+    # the artifact stays small. Task-specific compression still belongs in
+    # mixle.task.edge when labels and a hard footprint are supplied.
     structure = "off" if constrained else "auto"
 
     fit_rows, holdout = rows, None

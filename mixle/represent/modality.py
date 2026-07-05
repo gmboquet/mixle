@@ -1,19 +1,16 @@
-"""Modality leaves -- turn an image or a signal into a fixed-dim vector the graph can relate (C2).
+"""Deterministic modality vectorization helpers.
 
-The cross-modal graph (workstream C1) made a fixed-length vector a first-class node: a
-conditional-linear-Gaussian factor can drive it or be driven by it. C2 gives the OTHER modalities a
-way in. :func:`vectorize` maps a raw item of any modality to a fixed ``dim`` vector:
+:func:`vectorize` maps a raw item to a fixed-length vector that can be used by
+structure-learning and heterogeneous Bayesian-network workflows:
 
   * ``text`` / ``record`` -> the learned embedding (:func:`mixle.represent.fit_embedder`);
   * ``image`` (a 2-D or 3-D numeric array) -> grid-pooled intensities (a coarse, deterministic,
     torch-free descriptor that captures brightness / spatial layout);
   * ``signal`` (a 1-D numeric array) -> per-window statistics (mean, energy, range) across the trace.
 
-The image/signal descriptors are the honest v1 "featurizer" tier -- deterministic and dependency-free,
-the same role ``HashedNGram`` plays for text. A learned encoder (the heterogeneous
-segmenter+embedding stack) is a drop-in upgrade behind the same ``vectorize`` surface. Once vectorized,
-an image or signal field is just a vector node: it participates in structure discovery, is scored,
-sampled, and carries UQ like any other.
+The image and signal descriptors are deterministic and dependency-free. They
+are intended as a baseline vectorization layer; learned encoders can be placed
+behind the same ``vectorize`` surface when a workflow needs richer features.
 """
 
 from __future__ import annotations

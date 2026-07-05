@@ -1,17 +1,13 @@
-"""ContextPacket + assembly-on-route -- a budgeted, provenanced view of the substrate for a target (O2).
+"""Budgeted, provenanced context packets assembled from the substrate.
 
-When the orchestrator routes work to a target -- a tiny student, an LLM, a pool job, another agent, a
-human -- it builds the CONTEXT that target needs at the size it can afford. A :class:`ContextPacket`
-is that view: the task, the substrate items selected for it (in relevance order), the budget, and the
-provenance of every included piece. Targets declare a :class:`ContextBudget` the way devices declare a
-DeviceSpec: how many characters/items they can take and in what shape (passages for an LLM, a brief
-for a human, features for a student).
+A :class:`ContextPacket` is a task-specific view of selected substrate items:
+the task, items in relevance order, rendered text, budget, and provenance for
+the included evidence. A :class:`ContextBudget` describes how much context a
+target can accept and in what shape.
 
-Assembly is retrieval (:meth:`Substrate.search`) + greedy budgeted selection: the most relevant items
-are packed until the budget is hit, so the packet is always the best-affordable view rather than a
-blind top-k. Every assembly emits a ``context`` telemetry event (what budget, how much was used, how
-many items) -- the history the learned context-assembly policy (workstream J) will train on. Nothing
-is included without provenance: the reasoner can cite where every piece came from.
+Assembly combines substrate retrieval with greedy budgeted selection. The most
+relevant items are packed until the budget is reached, and an optional telemetry
+event records the budget, usage, and number of selected items.
 """
 
 from __future__ import annotations
@@ -196,9 +192,10 @@ def assemble_context(
 
     Retrieves relevant items (:meth:`Substrate.search`), then packs them in descending relevance until
     the character budget or item cap is reached -- always keeping at least the single most relevant
-    item so a tiny budget still yields something. With ``compress=True`` (workstream O3), an item too
-    big to fit whole is extractively summarized to its query-relevant sentences instead of dropped, so
-    MORE sources fit; ``packet.preservation()`` receipts what was kept. Emits a ``context`` event.
+    item so a tiny budget still yields something. With ``compress=True``, an
+    item too large to fit whole is extractively summarized to its query-relevant
+    sentences instead of dropped; ``packet.preservation()`` reports what was
+    kept. Emits a ``context`` event when telemetry is supplied.
     """
     budget = budget or ContextBudget()
     hits = substrate.search(task, k=max(budget.max_items * 2, 8), kind=kind, scope=scope)

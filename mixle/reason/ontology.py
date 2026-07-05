@@ -1,4 +1,4 @@
-"""Ontology objects -- classes, relations, and axioms as typed constraints on knowledge (D1).
+"""Ontology objects for typed constraints on knowledge graphs.
 
 A knowledge graph without a schema will happily assert ``(paris, employs, france)``. An
 :class:`Ontology` is the typed contract that rules such triples out *structurally*: a class hierarchy,
@@ -7,12 +7,12 @@ asymmetric, irreflexive), and disjoint-class declarations. :meth:`Ontology.check
 violation of one assertion; :meth:`Ontology.check_graph` audits a whole triple set, including the
 cross-triple axioms (a functional relation asserted with two different tails).
 
-The same contract turns a fitted KG embedding into an *ontology-typed distribution* (the plan's
-``Graph(ontology)`` type): :class:`OntologyConstrainedKG` wraps a
+The same contract turns a fitted KG embedding into an ontology-constrained
+distribution: :class:`OntologyConstrainedKG` wraps a
 :class:`~mixle.stats.graphs.knowledge_graph.KnowledgeGraphDistribution` and masks the tail posterior to
 range-conforming entities, renormalizing -- so the model literally cannot place probability on a triple
-the ontology forbids. This is also the substrate D2 stands on: constrained decoding is this same mask
-applied to generated triples.
+the ontology forbids. Constrained extraction or decoding can apply the same
+mask before accepting generated triples.
 
 Everything is symbolic and dependency-free: entities/relations are strings, entity types are supplied
 as a ``{entity: class}`` map (the entity-linking output). Violations are named, never silent.

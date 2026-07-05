@@ -1,17 +1,13 @@
-"""Interop: wrap an EXTERNAL model/agent as a UQ-carrying, self-doubting reasoner delegate (Q).
+"""External model interop for reasoner delegation.
 
-A reasoner can ``delegate`` to an external worker -- another agent, a hosted LLM, a remote tool. But an
-external model is untrusted: it may confidently hallucinate. :class:`ExternalModel` wraps any external
-``generate`` callable so every answer carries its OWN uncertainty -- semantic entropy over resampled
-answers (via :func:`mixle.inference.uq`), the model's disagreement with itself. :func:`external_action`
-turns that into a reasoner :class:`~mixle.substrate.act.Action`: it calls the external model, and when
-the model is NOT confident (entropy above a calibrated cutoff) it contributes NO evidence, so the
-reasoner never trusts a self-contradicting external answer -- it falls through to abstain instead.
+:class:`ExternalModel` wraps a ``generate`` callable from an external model,
+agent, hosted LLM, or remote tool. It can estimate semantic uncertainty by
+sampling multiple answers and clustering them through an equivalence function.
 
-This is the interop half of the 99%-local topology: external capability is reachable (A2A / remote tool
-/ hosted LLM), but it enters the evidence loop only with a UQ receipt attached and only when it clears
-the same honesty bar as everything local. The cost stays high (external calls are the escalation of last
-resort), and an uncertain external answer is treated as no answer, not a guess.
+:func:`external_action` adapts the wrapper into a reasoner
+:class:`~mixle.substrate.act.Action`. When the external model is above its
+uncertainty cutoff, the action contributes no evidence, allowing the reasoner
+to continue or abstain.
 """
 
 from __future__ import annotations

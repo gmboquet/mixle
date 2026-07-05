@@ -1,15 +1,13 @@
-"""``simulate()`` -- turn a fitted model into a reusable simulator with scenarios (F1).
+"""Turn a fitted model into a reusable simulator with scenarios.
 
-A fitted model is already a generative object (it samples). :func:`simulate` packages that into a
-:class:`Simulator`: a thing you run to produce synthetic data, under a BASELINE or under named
-SCENARIOS that intervene on fields (Pearl's ``do`` operator, for a learned Bayesian network). So a
-model discovered from data becomes a runtime data generator you can ask "what would the data look
-like if we forced this field to that value?" -- runtime simulation creation, with the intervention
-semantics carried by the graph, not hand-coded.
+A fitted generative model already has sampling behavior. :func:`simulate`
+packages that behavior into a :class:`Simulator` that can produce baseline
+synthetic data and, for learned Bayesian networks, named intervention
+scenarios.
 
-Non-graph models simulate their baseline distribution (interventions need the causal structure a
-:class:`~mixle.inference.HeterogeneousBayesianNetwork` provides). The simulator is model-agnostic
-otherwise: anything with a ``sampler`` runs.
+Non-graph models simulate from their baseline distribution. Interventions
+require the causal structure exposed by
+:class:`~mixle.inference.HeterogeneousBayesianNetwork`.
 """
 
 from __future__ import annotations
