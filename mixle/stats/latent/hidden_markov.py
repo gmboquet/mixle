@@ -281,7 +281,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         name: str | None = None,
         terminal_values: set[T] | None = None,
-        use_numba: bool = False,
+        use_numba: bool | None = None,
         weights: Sequence[float] | np.ndarray = MISSING,
         prior=None,
         terminal_states: set[int] | Sequence[int] | None = None,
@@ -324,7 +324,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         """
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
         transitions = require("transitions", transitions, default=MISSING)
-        self.use_numba = use_numba
+        # Default to numba when it is installed (matching HiddenMarkovEstimator). The distribution's
+        # encoder drives optimize(prev_estimate=init) encoding, so a use_numba=False default here silently
+        # forced the ~6x-slower numpy Baum-Welch even when the estimator wanted numba; None -> HAS_NUMBA
+        # keeps the two consistent. The numba and numpy paths are bit-identical (only speed differs).
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
 
         with np.errstate(divide="ignore"):
             self.topics = topics
