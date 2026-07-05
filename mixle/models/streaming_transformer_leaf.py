@@ -165,7 +165,15 @@ class StreamingTransformerAccumulator(SequenceEncodableStatisticAccumulator):
         xt = torch.as_tensor(np.asarray(x), dtype=torch.float32).to(self.device)
         yt = torch.as_tensor(np.asarray(y), dtype=torch.long).to(self.device)
         self.opt.zero_grad()
-        loss = self.ce(self.module(xt), yt)
+        logits = self.module(xt)
+        if weights is None:
+            loss = self.ce(logits, yt)  # pure-streaming path unchanged (uniform)
+        else:
+            # per-token responsibility (mixture expert / streaming decay / sample weight): weighted mean, so the
+            # gradient scale matches the unweighted mean when the weights are uniform (bit-identical then).
+            wt = torch.as_tensor(np.asarray(weights, dtype=float), dtype=torch.float32).to(self.device).ravel()
+            per = torch.nn.functional.cross_entropy(logits, yt, reduction="none")
+            loss = (wt * per).sum() / wt.sum().clamp(min=1e-8)
         loss.backward()
         self.opt.step()
         self.last_loss = float(loss.detach())
@@ -173,7 +181,7 @@ class StreamingTransformerAccumulator(SequenceEncodableStatisticAccumulator):
         self.tokens += int(len(yt))
 
     def update(self, x: Any, weight: float, estimate: Any) -> None:
-        self.seq_update((np.atleast_2d(x[0]), [int(x[1])]), None, estimate)
+        self.seq_update((np.atleast_2d(x[0]), [int(x[1])]), [float(weight)], estimate)
 
     def initialize(self, x: Any, weight: float, rng: Any) -> None:
         pass  # streaming: no separate initialization pass
