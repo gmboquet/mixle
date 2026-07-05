@@ -1,0 +1,25 @@
+{
+  "note": "mixle full-covariance GMM on the torch-CUDA engine. Data panel measured on an RTX 2080 Ti; the dim-128 memory fix separately verified on an RTX 3060. Same data/init/iterations as the CPU benchmark. Captured from gpu_scaling.py; the dim panel on the 2080 Ti box aborted on a flaky-hardware CUDA fault after the data panel completed, so it is reported from the RTX 3060 verification instead.",
+  "gpu": "NVIDIA RTX 2080 Ti",
+  "panels": {
+    "scale_n": {
+      "axis": "n",
+      "fixed": {"dim": 64, "k": 16, "its": 12},
+      "points": [
+        {"n": 50000, "gpu": 3.384, "throughput_Mri_s": 0.177, "gpu_peak_gb": 1.70},
+        {"n": 200000, "gpu": 8.897, "throughput_Mri_s": 0.270, "gpu_peak_gb": 6.77},
+        {"n": 500000, "gpu": 20.210, "throughput_Mri_s": 0.297, "gpu_peak_gb": 16.91},
+        {"n": 1000000, "gpu": null, "oom": true, "note": "dense (N, dim, dim) sufficient statistic = 32 GB; needs chunking over N"}
+      ]
+    },
+    "dim128_fix": {
+      "gpu": "NVIDIA RTX 3060",
+      "config": {"n": 20000, "k": 8, "dim": 128, "covariance": "full"},
+      "peak_gb": 2.674,
+      "pre_fix_intermediate_gb": 21.0,
+      "pre_fix_status": "OOM (19.53 GiB single allocation)",
+      "ll_delta_vs_cpu": 2.5e-13,
+      "commit": "825165c"
+    }
+  }
+}
