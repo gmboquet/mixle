@@ -1,0 +1,82 @@
+=== mixle scaling+profile: cpus=16 gpu=True heavy=True reps=3 ===
+
+== D. data scaling: fit time vs N (slope ~ empirical complexity) ==
+  gmm      N=   2000 :      2.8 ms  (0.70M rows/s)
+  gmm      N=   8000 :      8.1 ms  (0.98M rows/s)
+  gmm      N=  32000 :     33.4 ms  (0.96M rows/s)
+  gmm      N= 128000 :    142.0 ms  (0.90M rows/s)
+  gmm      -> log-log slope 0.95 (1.0 = linear in N)
+  mvn_mix  N=   2000 :     13.1 ms  (0.15M rows/s)
+  mvn_mix  N=   8000 :     47.0 ms  (0.17M rows/s)
+  mvn_mix  N=  32000 :    194.2 ms  (0.16M rows/s)
+  mvn_mix  N= 128000 :    943.6 ms  (0.14M rows/s)
+  mvn_mix  -> log-log slope 1.03 (1.0 = linear in N)
+  hmm      N=   2000 :    225.0 ms  (0.01M rows/s)
+  hmm      N=   8000 :    885.4 ms  (0.01M rows/s)
+  hmm      N=  32000 :   4157.0 ms  (0.01M rows/s)
+  hmm      N= 128000 :  18483.8 ms  (0.01M rows/s)
+  hmm      -> log-log slope 1.07 (1.0 = linear in N)
+
+== K. model scaling ==
+  gmm K=   2 (N=16000):      5.7 ms
+  gmm K=   8 (N=16000):     12.2 ms
+  gmm K=  32 (N=16000):     66.5 ms
+  gmm K= 128 (N=16000):    270.0 ms
+  gmm vs K -> slope 0.96
+  mvn dim=   4 (N=8000,K=4):     12.6 ms
+  mvn dim=  16 (N=8000,K=4):     30.2 ms
+  mvn dim=  64 (N=8000,K=4):    206.1 ms
+  mvn dim= 256 (N=8000,K=4):   2869.1 ms
+  mvn vs dim -> slope 1.31 (2.0 = quadratic = covariance-bound)
+
+== W. worker scaling: strong scaling (fixed problem, more workers) ==
+  local (1 worker)          :      606 ms  [baseline]
+  model_parallel            :      677 ms  speedup 0.89x
+
+== E. engine scaling: numpy vs torch-cpu vs GPU (where does the accelerator win?) ==
+  MVN dim=16   numpy      :      157 ms
+  MVN dim=16   torch-cpu  :     1733 ms
+  MVN dim=16   torch-cuda :       84 ms
+  MVN dim=128  numpy      :     3371 ms
+  MVN dim=128  torch-cpu  :   105994 ms
+  MVN dim=128  torch-cuda : CRASH OutOfMemoryError: CUDA out of memory. Tried to allocate 19.53 GiB. G
+
+== P. profiling: where the time actually goes (top functions by cumtime) ==
+
+  [gmm] top by cumulative time:
+      0.306s cum   0.000s self  estimation.py:570(optimize)
+      0.302s cum   0.000s self  estimation.py:426(_fused_em_loop)
+      0.302s cum   0.000s self  estimation.py:330(_em_loop)
+      0.279s cum   0.000s self  estimation.py:262(_local_fused_step)
+      0.276s cum   0.135s self  mixture.py:1064(seq_update)
+      0.076s cum   0.076s self  ~:0(<method 'reduce' of 'numpy.ufunc' objects>)
+      0.064s cum   0.046s self  gaussian.py:505(seq_update)
+      0.036s cum   0.000s self  ~:0(<method 'sum' of 'numpy.ndarray' objects>)
+      0.036s cum   0.000s self  _methods.py:51(_sum)
+      0.032s cum   0.000s self  ~:0(<method 'max' of 'numpy.ndarray' objects>)
+
+  [mvn_mix] top by cumulative time:
+      5.102s cum   0.000s self  estimation.py:570(optimize)
+      5.098s cum   0.000s self  estimation.py:426(_fused_em_loop)
+      5.098s cum   0.000s self  estimation.py:330(_em_loop)
+      4.982s cum   0.000s self  estimation.py:262(_local_fused_step)
+      4.973s cum   0.027s self  mixture.py:1064(seq_update)
+      4.043s cum   0.097s self  multivariate_gaussian.py:631(seq_update)
+      3.902s cum   0.000s self  einsumfunc.py:1057(einsum)
+      3.902s cum   3.902s self  ~:0(<built-in method numpy._core._multiarray_umath.c_einsum>)
+      1.003s cum   0.200s self  multivariate_gaussian.py:367(seq_log_density)
+      0.751s cum   0.002s self  _util.py:1149(wrapper)
+
+  [hmm] top by cumulative time:
+      0.810s cum   0.000s self  estimation.py:570(optimize)
+      0.708s cum   0.000s self  estimation.py:426(_fused_em_loop)
+      0.708s cum   0.000s self  estimation.py:330(_em_loop)
+      0.691s cum   0.000s self  estimation.py:262(_local_fused_step)
+      0.689s cum   0.281s self  hidden_markov.py:2530(seq_update)
+      0.338s cum   0.338s self  ~:0(<method 'reduce' of 'numpy.ufunc' objects>)
+      0.264s cum   0.001s self  ~:0(<method 'sum' of 'numpy.ndarray' objects>)
+      0.263s cum   0.001s self  _methods.py:51(_sum)
+      0.102s cum   0.000s self  sequence.py:32(seq_encode)
+      0.102s cum   0.000s self  hidden_markov.py:3434(seq_encode)
+
+SCALE_JSON {"data": {"gmm": {"N": [2000, 8000, 32000, 128000], "sec": [0.0028422041796147823, 0.0081367208622396, 0.03339334391057491, 0.14196021296083927], "slope": 0.9482019533423187}, "mvn_mix": {"N": [2000, 8000, 32000, 128000], "sec": [0.013127346988767385, 0.04700459772720933, 0.19417769508436322, 0.9435797012411058], "slope": 1.0274497499365194}, "hmm": {"N": [2000, 8000, 32000, 128000], "sec": [0.22498289262875915, 0.8854219359345734, 4.156993470154703, 18.483832912985235], "slope": 1.0656008987077488}}, "model": {"gmm_K": {"K": [2, 8, 32, 128], "sec": [0.005704913288354874, 0.012153440155088902, 0.06646341504529119, 0.27000661194324493], "slope": 0.957256679314374}, "mvn_dim": {"dim": [4, 16, 64, 256], "sec": [0.012624101247638464, 0.030164638068526983, 0.20606475276872516, 2.8691472858190536], "slope": 1.3128530095934807}}, "worker": {"local": 0.6055195042863488, "model_parallel": 0.6774628751445562, "mpi": {}}, "engine": {"mvn_dim16": {"numpy": 0.15675437962636352, "torch-cpu": 1.7332013226114213, "torch-cuda": 0.08357319817878306}, "mvn_dim128": {"numpy": 3.370856937021017, "torch-cpu": 105.99426243663765, "torch-cuda": "CRASH: OutOfMemoryError"}}, "profile": {"gmm": [{"cum": 0.306, "tot": 0.0002, "ncalls": 1, "where": "estimation.py:570(optimize)"}, {"cum": 0.3016, "tot": 0.0, "ncalls": 1, "where": "estimation.py:426(_fused_em_loop)"}, {"cum": 0.3016, "tot": 0.0, "ncalls": 1, "where": "estimation.py:330(_em_loop)"}, {"cum": 0.2788, "tot": 0.0001, "ncalls": 8, "where": "estimation.py:262(_local_fused_step)"}, {"cum": 0.2761, "tot": 0.1352, "ncalls": 8, "where": "mixture.py:1064(seq_update)"}, {"cum": 0.0756, "tot": 0.0756, "ncalls": 310, "where": "~:0(<method 'reduce' of 'numpy.ufunc' objects>)"}, {"cum": 0.0641, "tot": 0.0462, "ncalls": 128, "where": "gaussian.py:505(seq_update)"}, {"cum": 0.036, "tot": 0.0001, "ncalls": 273, "where": "~:0(<method 'sum' of 'numpy.ndarray' objects>)"}, {"cum": 0.0359, "tot": 0.0001, "ncalls": 273, "where": "_methods.py:51(_sum)"}, {"cum": 0.032, "tot": 0.0, "ncalls": 9, "where": "~:0(<method 'max' of 'numpy.ndarray' objects>)"}, {"cum": 0.032, "tot": 0.0, "ncalls": 9, "where": "_methods.py:43(_amax)"}, {"cum": 0.0228, "tot": 0.0, "ncalls": 1, "where": "sequence.py:115(seq_log_density_sum)"}, {"cum": 0.0228, "tot": 0.0158, "ncalls": 1, "where": "mixture.py:458(seq_log_density)"}, {"cum": 0.0194, "tot": 0.0194, "ncalls": 144, "where": "gaussian.py:247(seq_log_density)"}], "mvn_mix": [{"cum": 5.1021, "tot": 0.0001, "ncalls": 1, "where": "estimation.py:570(optimize)"}, {"cum": 5.0983, "tot": 0.0001, "ncalls": 1, "where": "estimation.py:426(_fused_em_loop)"}, {"cum": 5.0983, "tot": 0.0, "ncalls": 1, "where": "estimation.py:330(_em_loop)"}, {"cum": 4.982, "tot": 0.0001, "ncalls": 8, "where": "estimation.py:262(_local_fused_step)"}, {"cum": 4.9733, "tot": 0.0272, "ncalls": 8, "where": "mixture.py:1064(seq_update)"}, {"cum": 4.043, "tot": 0.0974, "ncalls": 64, "where": "multivariate_gaussian.py:631(seq_update)"}, {"cum": 3.9023, "tot": 0.0001, "ncalls": 64, "where": "einsumfunc.py:1057(einsum)"}, {"cum": 3.9022, "tot": 3.9022, "ncalls": 64, "where": "~:0(<built-in method numpy._core._multiarray_umath.c_einsum>)"}, {"cum": 1.003, "tot": 0.2003, "ncalls": 72, "where": "multivariate_gaussian.py:367(seq_log_density)"}, {"cum": 0.751, "tot": 0.0015, "ncalls": 200, "where": "_util.py:1149(wrapper)"}, {"cum": 0.7496, "tot": 0.0003, "ncalls": 136, "where": "_decomp_cholesky.py:188(cho_solve)"}, {"cum": 0.7469, "tot": 0.6972, "ncalls": 136, "where": "_decomp_cholesky.py:233(_cho_solve)"}, {"cum": 0.1162, "tot": 0.0, "ncalls": 1, "where": "sequence.py:115(seq_log_density_sum)"}, {"cum": 0.1162, "tot": 0.0033, "ncalls": 1, "where": "mixture.py:458(seq_log_density)"}], "hmm": [{"cum": 0.8101, "tot": 0.0001, "ncalls": 1, "where": "estimation.py:570(optimize)"}, {"cum": 0.7083, "tot": 0.0, "ncalls": 1, "where": "estimation.py:426(_fused_em_loop)"}, {"cum": 0.7083, "tot": 0.0, "ncalls": 1, "where": "estimation.py:330(_em_loop)"}, {"cum": 0.691, "tot": 0.0001, "ncalls": 8, "where": "estimation.py:262(_local_fused_step)"}, {"cum": 0.6889, "tot": 0.2808, "ncalls": 8, "where": "hidden_markov.py:2530(seq_update)"}, {"cum": 0.3379, "tot": 0.3379, "ncalls": 4006, "where": "~:0(<method 'reduce' of 'numpy.ufunc' objects>)"}, {"cum": 0.2642, "tot": 0.0008, "ncalls": 3493, "where": "~:0(<method 'sum' of 'numpy.ndarray' objects>)"}, {"cum": 0.2633, "tot": 0.0007, "ncalls": 3493, "where": "_methods.py:51(_sum)"}, {"cum": 0.1017, "tot": 0.0, "ncalls": 1, "where": "sequence.py:32(seq_encode)"}, {"cum": 0.1015, "tot": 0.0003, "ncalls": 1, "where": "hidden_markov.py:3434(seq_encode)"}, {"cum": 0.1012, "tot": 0.079, "ncalls": 1, "where": "hidden_markov.py:3358(_seq_encode)"}, {"cum": 0.0675, "tot": 0.0001, "ncalls": 16, "where": "hidden_markov.py:122(_par_states)"}, {"cum": 0.0633, "tot": 0.0001, "ncalls": 482, "where": "~:0(<method 'max' of 'numpy.ndarray' objects>)"}, {"cum": 0.0631, "tot": 0.0001, "ncalls": 482, "where": "_methods.py:43(_amax)"}]}}
