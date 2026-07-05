@@ -126,6 +126,43 @@ responsibility-weighted negative log-likelihood, so the leaf can sit inside a
 mixture or another latent wrapper, but it should be treated as an incubating
 Torch-backed surface with the usual training and reproducibility checks.
 
+Constructible Neural Density Families
+-------------------------------------
+
+Version 0.6.2 adds direct distribution classes for common neural density
+families. Use them when the model tree should contain a neural density leaf
+without first building a Torch module and then wrapping it.
+
+.. code-block:: python
+
+   from mixle.models import Flow, VAE
+   from mixle.stats import MixtureDistribution
+
+   prior_shape = MixtureDistribution(
+       [Flow(dim=4, hidden=64, layers=4), VAE(dim=4, latent=2)],
+       [0.5, 0.5],
+   )
+   estimator = prior_shape.estimator()
+
+Available constructible families are:
+
+``Flow``
+    Exact continuous density via a RealNVP-style coupling flow.
+
+``MAF``
+    Exact continuous density via a masked autoregressive flow.
+
+``VAE``
+    Latent-variable density with an ELBO-style lower-bound score. Compare it
+    against other bounded neural leaves carefully; it is not an exact
+    likelihood like a flow.
+
+``DiscreteAR``
+    Exact normalized autoregressive density over fixed-length discrete vectors.
+
+These classes still use the same ``NeuralDensityEstimator`` route underneath,
+so EM responsibilities and sample weights reach the neural M-step.
+
 Energy Models
 -------------
 
@@ -168,6 +205,11 @@ sufficient statistics.
 Use ``TransformerLMEstimator`` first. Reach for ``StreamingTransformer``
 when you need to bring your own module, control streaming behavior, or share a
 live module across a larger fitting loop.
+
+In 0.6.2, streaming Transformer accumulation preserves sample weights. When the
+leaf sits below a mixture or HMM, EM responsibilities are passed into the
+streaming update instead of being discarded. That makes the streaming adapter
+consistent with the other neural leaves for latent-model M-steps.
 
 Shared Embeddings
 -----------------
@@ -245,7 +287,29 @@ Preference Optimization
    model = estimate(preference_triples, leaf.estimator())
 
 Use it when the learning signal is comparative preference rather than a
-categorical label.
+categorical label. In v0.6.2, DPO accumulation preserves per-pair weights, so
+responsibilities, streaming decay, or sample weights affect the DPO loss
+instead of being dropped.
+
+Serialization And Artifacts
+---------------------------
+
+The neural surface now supports more durable round trips:
+
+* ``LM`` objects can serialize trained state and guard edge cases such as empty
+  sequences.
+* ``StreamingTransformer`` and ``DPOModel`` expose ``to_dict``/``to_json``
+  style state.
+* ``NeuralGaussian``, ``NeuralCategorical``, ``NeuralDensity``,
+  ``NeuralConditionalDensity``, ``EnergyModel``, and related density leaves
+  can round-trip through pickle and JSON-style state where the module builder
+  is registered.
+* The constructible families ``VAE``, ``Flow``, ``MAF``, and ``DiscreteAR`` are
+  registered with the serialization layer.
+
+Treat serialization as an artifact boundary, not a quality guarantee. Reload
+the model in a fresh process and rerun a small scoring or prediction check
+before relying on it in a service.
 
 How Neural Leaves Compose with Latents
 --------------------------------------
@@ -266,8 +330,12 @@ Practical Checklist
   field or latent expert, not just to demonstrate that different APIs can be
   forced together.
 * Use ``CategoricalEmbedding`` to tie embeddings across experts.
+* Prefer ``Flow``, ``MAF``, ``VAE``, or ``DiscreteAR`` when a common neural
+  density family is the intended distribution.
 * Treat ``EnergyModel`` scores as approximately normalized; validate them
   before comparing directly with exact-density leaves.
+* Verify serialized neural artifacts after load, especially when optional
+  Torch or device state is involved.
 * Fix seeds, record training settings, and evaluate on held-out data.
 * Use ``mixle.describe(model)`` after fitting to see what query capabilities
   the resulting object supports.
@@ -284,3 +352,7 @@ Examples And Tests
   experts.
 * ``mixle/tests/neural_ppl_test.py``: neural PPL, streaming Transformer leaves,
   EWC, DPO, and the direct ``LM`` surface.
+* ``mixle/tests/neural_families_test.py``: constructible neural-density
+  families.
+* ``mixle/tests/neural_leaf_serialization_test.py`` and
+  ``mixle/tests/lm_serialization_test.py``: neural and LM artifact round trips.

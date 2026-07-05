@@ -26,6 +26,22 @@ Entry Points
      - you want repeated random starts for a latent model
    * - ``StreamingEstimator`` / ``BayesianStreamingEstimator`` / ``IncrementalEstimator``
      - data arrive in batches or posterior state should carry forward
+   * - ``create(data, ...)``
+     - you want a certified fitted artifact with optional calibration and UQ
+       post-conditions
+   * - ``simulate(model)``
+     - you want to turn a fitted generative model into a reusable simulator
+   * - ``synthesize(source, label=..., verify=...)``
+     - you want a verified synthetic or teacher-labeled dataset
+   * - ``certify(model)`` / ``plan_placement(certificate)``
+     - you want an auditable estimate of how each block was solved and where
+       it should run
+   * - ``record_fit`` / ``verify_reproducible``
+     - you want to replay a fit and check that the same parameters are
+       recoverable
+   * - ``uq(thing, data)``
+     - you want method-selected uncertainty over a fitted model, point
+       predictor, ensemble, or LLM-style callable
 
 Estimator, Prototype, or Inferred Model
 ---------------------------------------
@@ -71,6 +87,36 @@ At a high level, ``optimize``:
 
 The same outer loop supports closed-form leaves, mixtures, HMMs, variational
 families, MAP objectives, neural leaves, and distributed encoded data.
+
+Certified Creation
+------------------
+
+``create`` is the higher-level creation verb. It infers and fits a model,
+attaches an estimation certificate, and can reserve held-out data for a
+calibration report or attach a UQ handle.
+
+.. code-block:: python
+
+   from mixle.inference import create
+
+   artifact = create(rows, calibrate=0.2, quantify_uq=True, seed=0)
+
+   print(artifact.guarantee)
+   print(artifact.why())
+   print(artifact.is_calibrated())
+
+The returned ``CreatedModel`` is deliberately not just the fitted distribution.
+It carries:
+
+* ``model``: the fitted model;
+* ``certificate``: how each estimation block was solved;
+* ``calibration``: optional held-out PIT/log-density report;
+* ``uq``: optional uncertainty object;
+* ``provenance``: record counts, seed, budget/device constraints, and the
+  exchangeability check when applicable.
+
+Use ``optimize`` when you need direct control over the estimator route. Use
+``create`` when the artifact boundary and post-conditions matter.
 
 Common Fit Knobs
 ----------------
@@ -192,6 +238,42 @@ route or should fall back to a numerical approximation.
 For gradient objectives, see ``mixle.inference.gradient_fit`` and
 ``mixle.inference.target``.
 
+Certificates And Placement
+--------------------------
+
+``certify`` classifies the fitted model's estimation blocks along an ordered
+guarantee ladder:
+
+``HEURISTIC``
+    Gradient descent or another heuristic local route.
+
+``STATIONARY``
+    EM or coordinate ascent fixed point.
+
+``STATIONARY_ESCAPE_TESTED``
+    EM with explicit restart or saddle-escape testing.
+
+``GLOBAL``
+    Convex objective such as least squares or IRLS.
+
+``GLOBAL_UNIQUE``
+    Closed-form unique optimum, such as many exponential-family and
+    count-rate MLEs.
+
+.. code-block:: python
+
+   from mixle.inference import PoolSpec, certify, plan_placement
+
+   certificate = certify(model)
+   placement = plan_placement(certificate, PoolSpec(available=False))
+
+   print(certificate.table())
+   print(placement.report())
+
+Placement is advisory: closed-form, convex, and EM blocks stay local; gradient
+blocks can become pool-eligible when a pool is configured and the estimated
+work clears the threshold.
+
 Streaming
 ---------
 
@@ -208,6 +290,87 @@ posterior forward as the next batch's prior.
 
 Use streaming when the dataset is naturally batched, too large for one pass, or
 needs recursive updating.
+
+Simulation And Verified Synthesis
+---------------------------------
+
+``simulate`` packages a fitted generative model as a data generator. For
+Bayesian-network-like models, named scenarios can apply interventions.
+
+.. code-block:: python
+
+   from mixle.inference import simulate
+
+   sim = simulate(model)
+   baseline_rows = sim.run(100, seed=0)
+
+For learned Bayesian networks, ``sim.scenario(name, interventions)`` registers
+a named ``do``-operator scenario and ``compare`` estimates scenario effects.
+
+``synthesize`` builds a dataset by drawing inputs, optionally labeling them
+with a teacher, and keeping only rows that pass a verifier:
+
+.. code-block:: python
+
+   from mixle.inference import synthesize
+
+   def draw(rng):
+       return float(rng.normal())
+
+   dataset = synthesize(
+       draw,
+       label=lambda x: "positive" if x > 0 else "negative",
+       verify=lambda x, y: y in {"positive", "negative"},
+       n=50,
+       seed=0,
+   )
+
+   print(dataset.acceptance_rate)
+   print(dataset.recheck())
+
+When the source is a list of real rows, ``synthesize`` records an
+exchangeability check in the dataset provenance because sampling "more rows
+like these" assumes the source rows can be pooled.
+
+Reproducibility Receipts
+------------------------
+
+``record_fit`` captures the data fingerprint, seed, estimator type, and fitted
+parameter fingerprint. ``verify_reproducible`` refits and checks whether the
+same parameters are recovered.
+
+.. code-block:: python
+
+   from mixle.inference import record_fit, verify_reproducible
+
+   receipt = record_fit(model, rows, seed=0, estimator=estimator)
+   check = verify_reproducible(estimator, rows, receipt, seed=0)
+
+   print(check["reproducible"])
+
+Fingerprints round floating-point values to a fixed precision before hashing,
+so last-bit platform noise does not invalidate an otherwise equivalent fit.
+
+Uncertainty Dispatch
+--------------------
+
+``uq`` chooses an uncertainty route from the object it receives:
+
+* fitted Mixle model plus fitting data: Laplace parameter posterior;
+* point predictor or Torch module plus ``(X_cal, y_cal)``: split-conformal
+  prediction intervals;
+* list of predictors: ensemble disagreement plus conformal intervals;
+* LLM-like callable: semantic entropy over sampled generations.
+
+.. code-block:: python
+
+   from mixle.inference import uq
+
+   uncertainty = uq(model, rows)
+   lo, hi = uncertainty.credible_interval(lambda m: float(m.log_density(rows[0])))
+
+Use specialized UQ functions when you already know the route. Use ``uq`` when
+the caller owns a heterogeneous object and wants a single front door.
 
 Backends and Engines
 --------------------
@@ -226,6 +389,40 @@ encoded-data backend.
 
 Use :doc:`engines` for engine details and :doc:`data` for sources and encoded
 payloads.
+
+Learned Orchestration
+---------------------
+
+``mixle.inference.orchestration`` learns from telemetry rows produced by the
+runtime layer. The initial policies defer to static rules when the feature
+region is thin, and use historical outcomes only where nearby examples support
+the learned decision.
+
+.. code-block:: python
+
+   from mixle.inference import learn_action_policy
+   from mixle.telemetry import Telemetry
+
+   telemetry = Telemetry()
+   rows = telemetry.training_rows("route")
+   # policy = learn_action_policy(rows)
+
+Use these helpers with :doc:`reasoning-ecosystem`. They are for application
+routing, placement, and scheduling decisions, not for replacing the statistical
+fit route itself.
+
+Event Studies
+-------------
+
+``hierarchical_event_study`` estimates confirmed-exposure influence from
+per-subject pre/post effects and optional exposed-non-actor controls. Helpers
+compute Gaussian mean shifts and Poisson log-rate shifts, then pool them with a
+random-effects meta-analysis and report a difference-in-differences contrast
+when controls are present.
+
+Use this for timestamped interventions with a defensible exposure time. The
+result includes a sensitivity bound via ``tipping_drift``; it does not remove
+the need for study-design assumptions.
 
 Diagnostics and Comparison
 --------------------------
@@ -271,3 +468,20 @@ API Map
      - :doc:`inference-toolkit`, ``mixle.inference.diagnostics``, scoring, calibration, model comparison
    * - production
      - ``mixle.inference.production``
+   * - creation and certificates
+     - ``create``, ``CreatedModel``, ``certify``, ``plan_estimation``,
+       ``schedule``, ``plan_placement``
+   * - simulation and synthesis
+     - ``simulate``, ``Simulator``, ``synthesize``, ``Dataset``
+   * - reproducibility
+     - ``record_fit``, ``verify_reproducible``, ``ReproReceipt``
+   * - UQ dispatch
+     - ``uq``, ``UQResult``
+   * - learned orchestration
+     - ``learn_action_policy``, ``learn_placement_policy``,
+       ``learn_schedule_policy``, ``meta_improve``
+   * - reusable capabilities
+     - ``skill``, ``Skill``, ``SkillRegistry``
+   * - event studies
+     - ``gaussian_effect``, ``poisson_lograte_effect``,
+       ``hierarchical_event_study``, ``tipping_drift``

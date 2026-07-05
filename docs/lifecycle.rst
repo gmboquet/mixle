@@ -39,6 +39,23 @@ Basic Flow
 Fitting delegates to ``mixle.inference.optimize``. Scoring, sampling,
 enumeration, and posterior calls delegate to the fitted distribution.
 
+Certified Creation Alternative
+------------------------------
+
+Use ``mixle.inference.create`` when you want a fitted artifact plus explicit
+post-conditions rather than a convenience lifecycle facade.
+
+.. code-block:: python
+
+   from mixle.inference import create
+
+   artifact = create(rows, calibrate=0.2, quantify_uq=True, seed=0)
+   print(artifact.certificate.table())
+
+``CreatedModel`` carries the fitted model, an estimation certificate, optional
+calibration and UQ objects, and provenance. ``Model`` is still the shorter
+interactive facade; ``create`` is the stronger artifact boundary.
+
 Proposal Frontier
 -----------------
 
@@ -141,6 +158,31 @@ time, fit metadata, notes, and artifact schema name. This is a lightweight
 lifecycle artifact, not a full model registry. For production registry,
 provenance, drift, and serving concepts, see :doc:`production`.
 
+Reusable Skills
+---------------
+
+``mixle.inference.skill`` wraps a fitted model, ``CreatedModel``, or callable
+as a named capability. A skill can be registered, searched by query, indexed
+into a substrate, and used as a compute action by a reasoner.
+
+.. code-block:: python
+
+   from mixle.inference import SkillRegistry, skill
+
+   registry = SkillRegistry()
+   sk = skill(
+       "sample-customers",
+       model.fitted,
+       description="sample synthetic customer rows",
+       registry=registry,
+   )
+
+   print(registry.find("customer sample"))
+
+Use skills when the fitted artifact becomes an application verb. Use
+``Model.deploy`` or ``Registry`` when the artifact is primarily a model
+version.
+
 When To Use Lower-Level APIs
 ----------------------------
 
@@ -166,4 +208,5 @@ API Reference
 * :doc:`api/mixle.task.recommend`
 * :doc:`api/mixle.task.design`
 * :doc:`api/mixle.task.solve`
-
+* :doc:`api/mixle.inference.create`
+* :doc:`api/mixle.inference.skill`

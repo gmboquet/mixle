@@ -304,6 +304,11 @@ Quantized students use ``QuantizedMLP`` and ``QuantizedClassifierIO``. They
 store arrays rather than Torch modules and can qualify for ``torch_free``
 devices.
 
+Version 0.6.2 tightened this artifact path: int4 weights are packed in the
+arrays payload, extreme outlier weights can be clipped before quantization with
+``clip_percentile``, and empty batches return correctly shaped probability
+arrays instead of failing during reshape.
+
 ``lns_classifier`` and ``LNSStructuredClassifierIO`` provide integer log-space
 execution for structured students where the model is a sum of factor
 log-densities.
@@ -367,6 +372,11 @@ Task artifacts are durable. Relevant helpers include:
 
 Use artifact helpers when adding a new student payload type. Ordinary users
 usually call ``TaskModel.save`` and ``TaskModel.load``.
+
+Calibrated artifacts preserve non-finite conformal thresholds such as
+``qhat=inf`` with a JSON-safe sentinel and restore them as ``float("inf")``.
+That keeps small or difficult calibration splits loadable without pretending
+the model is locally answerable.
 
 Economics And Route Planning
 ----------------------------

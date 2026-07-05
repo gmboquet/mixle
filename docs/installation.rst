@@ -29,6 +29,10 @@ Install only the optional integrations you need:
    * - ``torch``
      - Torch engine, GPU/autograd, neural and Transformer leaves
      - using :doc:`neural-llm` or task distillation
+   * - ``scientist``
+     - Torch, Transformers, sentence-transformers, and datasets
+     - running :mod:`mixle.scientist`, ``laptop_scientist.py``, or foundation
+       capability distillation workflows
    * - ``numba``
      - JIT hot paths and TBB support
      - large local fits need faster kernels
@@ -56,8 +60,14 @@ Common installs:
 .. code-block:: sh
 
    pip install "mixle[torch]"
+   pip install "mixle[scientist]"
    pip install "mixle[spark]"
    pip install "mixle[all]"
+
+The ``scientist`` extra installs Python packages only. The assembled
+``mixle.scientist`` workflow loads open-weight models from the local Hugging
+Face cache and sets offline defaults at import time; prepare those weights
+explicitly before depending on that workflow.
 
 Development Install
 -------------------

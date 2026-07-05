@@ -25,6 +25,7 @@ Submodules
    mixle.models.mixture_density
    mixle.models.neural
    mixle.models.neural_density
+   mixle.models.neural_families
    mixle.models.neural_leaf
    mixle.models.partially_observable_markov_decision_process
    mixle.models.random_forest

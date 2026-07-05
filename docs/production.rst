@@ -17,6 +17,8 @@ Production concerns are grouped into five areas:
 * registry and alias promotion;
 * scoring services with activity logs;
 * drift detection and retrain/swap monitoring.
+* reproducibility receipts and local telemetry where the broader runtime layer
+  is used.
 
 Fit with Provenance
 -------------------
@@ -89,7 +91,30 @@ as ``production`` so serving code can load the currently promoted version.
    prod_model, prod_header = registry.current("events", alias="production")
 
 The registry is filesystem-backed and serializes models through mixle's
-serialization registry.
+serialization registry. Model names, versions, and aliases are constrained to
+single path components. An unsafe name such as ``"../model"`` raises
+``ValueError``, and unknown names or versions raise clear ``KeyError``
+messages rather than leaking store paths.
+
+Reproducibility Receipts
+------------------------
+
+Use ``record_fit`` when the fit itself must be replayable, not merely stored.
+
+.. code-block:: python
+
+   from mixle.inference import record_fit, verify_reproducible
+
+   receipt = record_fit(model, data, seed=1, estimator=estimator)
+   check = verify_reproducible(estimator, data, receipt, seed=1)
+
+   print(receipt.as_dict())
+   print(check["reproducible"])
+
+The receipt records a data fingerprint, seed, estimator type, and parameter
+fingerprint. It complements provenance headers: the header describes the
+training run, while the reproducibility receipt checks whether the same fit can
+be recovered.
 
 Checkpointing Long Fits
 -----------------------
@@ -131,6 +156,9 @@ Service
 Activity logs include record count, wall time, mean log likelihood, and the
 number of unscorable records. A JSONL log path can be supplied for persistent
 activity records.
+
+For application-level route, placement, context, pool, and reasoning events,
+use :mod:`mixle.telemetry` and the workflow in :doc:`reasoning-ecosystem`.
 
 Load from a Registry Alias
 --------------------------
@@ -206,10 +234,14 @@ API Map
    * - ``verify_lineage``
      - verify convergence/model-hash lineage
    * - ``Registry``
-     - versioned model store and alias promotion
+     - versioned model store and alias promotion with safe path components
    * - ``Service``
      - batch scoring with activity logging and health summaries
    * - ``detect_drift``, ``score_drift``, ``DriftReport``
      - drift detection from model scores and feature shifts
    * - ``Monitor``
      - drift-triggered retrain/swap loop
+   * - ``record_fit``, ``verify_reproducible``, ``ReproReceipt``
+     - replay and verify fitted parameter recovery
+   * - ``Telemetry``, ``record``
+     - local decision events for reasoning, routing, placement, and pool jobs
