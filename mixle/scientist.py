@@ -198,6 +198,89 @@ def study(
     return model
 
 
+# -- edge distillation: a foundation capability -> a torch-free, KB-sized artifact -------------------
+
+
+@dataclass
+class EdgeArtifact:
+    """A capability compressed to run on a constrained device: the student + its footprint + retention."""
+
+    model: Any  # the deployed student: call it on a raw input, no torch / no foundation model needed
+    bytes: int
+    torch_free: bool
+    family: str
+    teacher_accuracy: float
+    student_accuracy: float
+    agreement: float  # fraction of inputs where the student matches the teacher
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def retention(self) -> float:
+        """The share of the teacher's accuracy the edge student keeps -- the compression's honest cost."""
+        return self.student_accuracy / self.teacher_accuracy if self.teacher_accuracy else 0.0
+
+    def render(self) -> str:
+        return (
+            f"edge student ({self.family}, {self.bytes} bytes, torch_free={self.torch_free}): "
+            f"teacher {self.teacher_accuracy:.3f} -> student {self.student_accuracy:.3f} "
+            f"({self.retention:.0%} retained, {self.agreement:.3f} agreement)"
+        )
+
+
+def distill_to_edge(
+    teacher_predict: Any,
+    train_inputs: Any,
+    val_inputs: Any,
+    val_truth: Any,
+    *,
+    max_bytes: int = 500_000,
+    torch_free: bool = True,
+    n_init: int = 3,
+    n_iter: int = 3,
+    seed: int = 0,
+) -> EdgeArtifact:
+    """Compress a foundation capability into a torch-free edge artifact, with a retention receipt.
+
+    ``teacher_predict`` is the capability (a raw_input -> label callable -- e.g. CLIP zero-shot, or a
+    MiniLM + certified head). Its labels on ``train_inputs`` are the distillation target; the student
+    learns them from the RAW inputs under a device byte budget, so the deployed artifact needs neither
+    torch nor the foundation model. The receipt measures what survives: student accuracy vs the teacher's,
+    and their agreement. Honest boundary: this works only when the student's own features carry the
+    signal (text n-grams do; raw pooled pixels do NOT recover a vision foundation model)."""
+    from mixle.task.edge import DeviceSpec, distill_for_edge
+
+    truth = np.asarray(list(val_truth))
+    train_labels = [teacher_predict(x) for x in train_inputs]
+    val_labels = [teacher_predict(x) for x in val_inputs]
+    teacher_acc = float((np.asarray(val_labels) == truth).mean())
+
+    res = distill_for_edge(
+        None,
+        list(train_inputs),
+        list(val_inputs),
+        DeviceSpec(torch_free=torch_free, max_bytes=max_bytes),
+        train_labels=train_labels,
+        val_labels=val_labels,
+        n_init=n_init,
+        n_iter=n_iter,
+        seed=seed,
+    )
+    pred = np.asarray([res.model(x) for x in val_inputs])
+    # labels may be ints or strings depending on the teacher; compare as strings to stay type-agnostic
+    student_acc = float((pred.astype(str) == truth.astype(str)).mean())
+    agreement = float((pred.astype(str) == np.asarray(val_labels).astype(str)).mean())
+    return EdgeArtifact(
+        model=res.model,
+        bytes=int(res.footprint.bytes),
+        torch_free=bool(res.footprint.torch_free),
+        family=res.family,
+        teacher_accuracy=teacher_acc,
+        student_accuracy=student_acc,
+        agreement=agreement,
+        provenance={"max_bytes": max_bytes, "n_train": len(train_inputs), "seed": seed},
+    )
+
+
 # -- research proposals + conjectures (the don't-know-but-here's-how half) ---------------------------
 
 
@@ -428,3 +511,10 @@ class Scientist:
     @staticmethod
     def study(latents: np.ndarray, labels: Any, **kw: Any) -> StudiedModel:
         return study(latents, labels, **kw)
+
+    @staticmethod
+    def distill_to_edge(
+        teacher_predict: Any, train_inputs: Any, val_inputs: Any, val_truth: Any, **kw: Any
+    ) -> EdgeArtifact:
+        """Compress a foundation capability into a torch-free edge artifact (see :func:`distill_to_edge`)."""
+        return distill_to_edge(teacher_predict, train_inputs, val_inputs, val_truth, **kw)

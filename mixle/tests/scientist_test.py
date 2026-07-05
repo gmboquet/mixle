@@ -145,5 +145,47 @@ class ProposeAndWonderTest(unittest.TestCase):
             self.assertIsNotNone(c.proposal)  # each carries a proposed test
 
 
+class EdgeDistillationTest(unittest.TestCase):
+    """Foundation-on-laptop (a foundation capability, CPU) compressed to a torch-free edge artifact."""
+
+    @classmethod
+    def setUpClass(cls):
+        from datasets import load_dataset
+
+        from mixle.scientist import encode_texts, study
+
+        ds = load_dataset("banking77", split="train")
+        te = load_dataset("banking77", split="test")
+        tr = [(r["text"], r["label"]) for r in ds if r["label"] < 20][:1200]
+        ts = [(r["text"], r["label"]) for r in te if r["label"] < 20][:400]
+        cls.xtr = [t for t, _ in tr]
+        cls.xte = [t for t, _ in ts]
+        cls.yte = [lab for _, lab in ts]
+        head = study(encode_texts(cls.xtr), [lab for _, lab in tr], alpha=0.1)
+        cache: dict = {}
+
+        def teacher(x):
+            if x not in cache:
+                cache[x] = int(head.predict(encode_texts([x]))[0])
+            return cache[x]
+
+        cls.teacher = staticmethod(teacher)  # keep it a plain callable, not a bound method
+
+    def test_edge_student_is_torch_free_and_tiny(self):
+        from mixle.scientist import distill_to_edge
+
+        art = distill_to_edge(self.teacher, self.xtr, self.xte, self.yte, max_bytes=500_000, seed=0)
+        self.assertTrue(art.torch_free)  # deploys with NO torch and NO foundation model
+        self.assertLess(art.bytes, 500_000)  # kilobyte-scale, fits the device budget
+
+    def test_edge_student_retains_most_of_the_capability(self):
+        from mixle.scientist import distill_to_edge
+
+        art = distill_to_edge(self.teacher, self.xtr, self.xte, self.yte, max_bytes=500_000, seed=0)
+        self.assertGreater(art.teacher_accuracy, 0.85)  # the foundation capability is strong
+        self.assertGreater(art.retention, 0.9)  # the edge student keeps >90% of it
+        self.assertGreater(art.agreement, 0.85)  # and it actually mimics the teacher
+
+
 if __name__ == "__main__":
     unittest.main()
