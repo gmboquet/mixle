@@ -43,7 +43,6 @@ exclude_patterns = [
     "ABSTRACTIONS.md",
     "ARCHITECTURE.md",
     "CAPABILITIES.md",
-    "LEDGER.md",
     "WORKPLAN.md",
     "interfaces/*.md",
     "interfaces/sections/*.md",
