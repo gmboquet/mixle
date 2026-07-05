@@ -1,10 +1,9 @@
-"""Dashboards over receipts (L2) -- the telemetry stream summarized into one auditable view.
+"""Summaries and markdown rendering for telemetry streams.
 
-Every decision the platform makes (fit, placement, route, escalation, pool job, reasoner step) lands in
-the telemetry stream; :func:`dashboard` folds that stream into a receipt summary -- per-kind counts,
-choice distributions, cost/latency totals, abstention rates -- and :func:`render_dashboard` renders it
-as plain markdown, so "what has the system been deciding, and what did it cost" is one call, not a
-spelunking session. Pure fold over :meth:`Telemetry.events`; no display dependencies.
+:func:`dashboard` folds telemetry events into per-kind counts, choice
+distributions, cost/latency totals, and abstention rates. :func:`render_dashboard`
+renders the same summary as plain markdown. The implementation is a pure fold
+over :meth:`Telemetry.events` and has no display dependencies.
 """
 
 from __future__ import annotations

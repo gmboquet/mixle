@@ -1,9 +1,9 @@
-"""Event schema + local-first recorder for platform telemetry (workstream L1).
+"""Event schema and local-first recorder for platform telemetry.
 
-An :class:`Event` is a typed, timestamped decision record: what kind of decision, the FEATURES it was
-made from, the CHOICE, and (optionally, filled in later) the OUTCOME. A :class:`Telemetry` recorder
-buffers events and appends them to a JSONL log. The learned-orchestration workstream (J) reads these
-back as ``(features, choice, outcome)`` training rows.
+An :class:`Event` is a typed, timestamped decision record containing the
+decision kind, the features used, the selected choice, and an optional outcome.
+A :class:`Telemetry` recorder buffers events and can append them to a JSONL log
+for dashboards or learned policies.
 """
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ class Telemetry:
                 yield ev
 
     def training_rows(self, kind: str) -> list[tuple[dict[str, Any], Any, dict[str, Any]]]:
-        """The ``(features, choice, outcome)`` triples for a decision kind -- what workstream J learns on."""
+        """The ``(features, choice, outcome)`` triples for a decision kind."""
         return [(ev.features, ev.choice, ev.outcome) for ev in self.events(kind=kind)]
 
     def __len__(self) -> int:

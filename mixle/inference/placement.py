@@ -1,16 +1,14 @@
-"""Placement planning -- the 99/1 topology axis of the estimation plan (A4).
+"""Placement planning for certified estimation blocks.
 
-The certificate (:mod:`mixle.inference.planning`) says which method solves each block and how strong
-the guarantee is. Placement adds the second axis: WHERE each block runs. The rule, enforced here:
+The estimation certificate identifies how each block is solved and whether it
+is eligible for offloading. Placement adds the execution decision: local or
+pool. Blocks stay local by default. A block is assigned to the pool only when it
+is pool-eligible, a pool is configured, and the estimated work clears the
+round-trip cost threshold.
 
-    Everything runs local by default. A block is OFFLOADED to the pool only when it is genuinely
-    heavy AND pool-eligible (a gradient residual the certificate already flagged) AND a pool is
-    configured AND the economics price the round-trip as worth it.
-
-So closed-form / conjugate / convex / EM blocks -- which are exactly what makes 99% of the work fit
-on a laptop -- stay local, always. Only the gradient blocks the certificate isolated are candidates
-for the small GPU pool. The result is a :class:`PlacementPlan`: per-block placement + a priced
-reason, plus the pool jobs to submit. With no pool configured it degrades to all-local, unchanged.
+The result is a :class:`PlacementPlan` with per-block placement, an estimated
+cost, and a human-readable reason. With no pool configured, the plan is
+all-local.
 """
 
 from __future__ import annotations
@@ -105,9 +103,8 @@ class PlacementPlan:
 def _est_tflop(block: BlockPlan) -> float:
     """A coarse TFLOP estimate for a gradient block from its resource profile, if any.
 
-    v1: reads an ``est_tflop`` hint off the block's reason/metadata when present, else a conservative
-    default that keeps small blocks local. Real profiles arrive with the capability-schema resource
-    fields (workstream A1); this is the seam they plug into.
+    Reads an ``est_tflop`` hint from the block reason or metadata when present;
+    otherwise returns a conservative default that keeps small blocks local.
     """
     toks = block.reason.replace("(", " ").replace(")", " ").replace("~", " ").split()
     for i, token in enumerate(toks):

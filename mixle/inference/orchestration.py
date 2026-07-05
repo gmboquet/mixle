@@ -1,17 +1,14 @@
-"""Learned orchestration -- the platform's own decisions become models trained on its telemetry (J2).
+"""Learned orchestration from telemetry.
 
-The static planner policy (:func:`mixle.inference.plan_placement`) decides local-vs-pool from rules.
-:class:`LearnedPolicy` learns to do better from HISTORY: given telemetry rows ``(features, choice,
-outcome)``, it estimates, for a query's feature region, which choice actually gave the better outcome
-(lower cost) and picks that -- but only when it has enough nearby history to be confident. When the
-feature region is unfamiliar, it FALLS BACK to the static policy. That fallback is the never-worse
-guarantee made structural: the learned policy can only improve on the static one where the data
-supports it, and defers everywhere else -- the same discipline tier-0 routing uses against a frontier
-model, now applied to the platform's own placement decisions.
+The static placement policy decides local-versus-pool execution from rules.
+:class:`LearnedPolicy` can improve that decision from historical telemetry rows
+of the form ``(features, choice, outcome)``. For a new feature vector it looks
+up nearby historical decisions, estimates which choice had lower realized cost,
+and uses the learned choice only when there is enough comparable evidence.
 
-This is the J2 seed. The same shape (telemetry -> policy + conformal fall-back) learns routing across
-model versions (J3) and pool scheduling (J4); a learned policy is promoted over the static one only
-when receipted never-worse on held-out decisions (realized cost/latency/quality).
+When the nearby history is sparse or ambiguous, the policy defers to the static
+fallback. This keeps learned orchestration an incremental optimization around a
+known policy rather than an unbounded replacement.
 """
 
 from __future__ import annotations

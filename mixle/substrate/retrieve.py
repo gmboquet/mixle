@@ -1,15 +1,10 @@
-"""All-data retrieval -- one planned query surface over every kind in the substrate (S1).
+"""Cross-kind retrieval over substrate items.
 
-:meth:`Substrate.search` ranks all items together with one score, so whichever kind ranks highest
-(usually embedding-scored text) crowds out the rest. But a question is often answered by knowledge
-spread ACROSS kinds: a document explains the concept, an artifact is the model that computes it, a
-trace shows how it was handled before. :func:`retrieve` is the planned front door: it queries the
-kinds that matter, weights them, and DIVERSIFIES the result so it spans modalities instead of
-returning the top-k of a single kind. The result is a typed :class:`Retrieval` with per-kind grouping
-and provenance, one hop from a :class:`~mixle.substrate.context.ContextPacket`.
-
-This is the S1 seed for all-data RAG; planned MULTI-HOP acquisition across typed indices (S2) and the
-reasoner's evidence-buying action space (S3) build on this surface.
+:func:`retrieve` queries the substrate across selected item kinds, applies
+per-kind weights, and diversifies results so evidence can span documents,
+records, artifacts, traces, and other modalities. The returned
+:class:`Retrieval` preserves merged relevance order, per-kind grouping, scores,
+and provenance.
 """
 
 from __future__ import annotations

@@ -1,17 +1,14 @@
-"""The pool plane -- offload a unit of work and get an artifact back into your own registry (H1).
+"""Pool jobs, results, and backend protocol.
 
-The 99/1 topology: everything runs local by default; a block or verb is OFFLOADED to a small shared
-GPU pool only when the planner names the reason and the economics price it worth the round-trip. This
-module is the abstraction that makes that mechanical: a :class:`PoolJob` = a runnable unit + inputs
-manifest + budget + placement REASON; a :class:`Backend` executes it and returns a
-:class:`PoolResult` whose ``artifact`` round-trips home. Nothing lives only in the pool -- every
-result is an artifact the submitter uses locally afterward.
+A :class:`PoolJob` describes a runnable unit of work, its input manifest, the
+placement reason, estimated cost, and budget. A :class:`Backend` executes the
+job and returns a :class:`PoolResult` whose ``artifact`` can be used by the
+submitter locally.
 
-v1 (this stub) ships the :class:`LocalBackend`: the "pool" is your own machine when no GPU pool is
-configured, so the abstraction is exercised end-to-end and degrades gracefully to all-local. A real
-vast.ai / self-hosted GPU backend (workstream H2) plugs into the same :class:`Backend` protocol; the
-governance rails it needs are already here -- a ``billable`` backend REQUIRES an explicit ``confirm``
-(dry-run + confirm enforced in software, not habit) and a job over budget is rejected before it runs.
+The included :class:`LocalBackend` runs jobs in-process and is useful for tests
+or systems without a remote pool. Billable backends must require explicit
+confirmation, and jobs whose estimated cost exceeds their budget are rejected
+before execution.
 """
 
 from __future__ import annotations
@@ -67,8 +64,9 @@ class Backend(Protocol):
 class LocalBackend:
     """The pool degraded to this machine: runs the job in-process, free, no confirm needed.
 
-    This is what a user with no GPU pool configured gets -- the abstraction works end-to-end and every
-    result is a real local artifact. ``clock`` is injectable for deterministic timing in tests.
+    This is what a user with no remote pool configured gets: the abstraction
+    works end-to-end and every result is a real local artifact. ``clock`` is
+    injectable for deterministic timing in tests.
     """
 
     billable = False

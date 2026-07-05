@@ -364,7 +364,7 @@ __all__ = [
     # calibration as a post-condition of fitting (is the model's uncertainty honest on holdout?)
     "calibration_report",
     "CalibrationReport",
-    # placement planning -- the local-vs-pool axis of the estimation plan (99/1 topology)
+    # placement planning -- the local-vs-pool axis of the estimation plan
     "plan_placement",
     "PlacementPlan",
     "BlockPlacement",

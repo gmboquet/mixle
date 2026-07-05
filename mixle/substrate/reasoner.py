@@ -1,15 +1,12 @@
-"""``Reasoner`` -- a deployable shell that bundles a substrate, skills, and actions behind ``.ask`` (R).
+"""Reasoner facade over a substrate, skills, and configured actions.
 
-:func:`investigate` is the loop; :class:`Reasoner` is the *product* around it -- the tiny-agent harness a
-consumer actually deploys. You hand it a knowledge store and a skill registry, it wires the standard
-action space (RETRIEVE over the store, one COMPUTE per registered skill, plus any simulators / creators /
-delegates you attach), and then ``ask(question)`` runs the whole evidence-buying loop and returns a cited
-:class:`~mixle.substrate.act.Investigation`. Attach a learned acquisition policy and the same object routes
-by learned expected-gain instead of the lexical prior -- the never-worse upgrade, transparent to the caller.
+:func:`investigate` runs the action loop. :class:`Reasoner` packages that loop
+behind ``ask(question)`` by wiring retrieval over a substrate, compute actions
+for registered skills, and any additional simulator, creator, or delegate
+actions supplied by the caller.
 
-This is the shell the workplan's Harness product slots into: a fixed answerer (a 99%-local student), a
-whitelisted set of actions, an escalation cost budget, and one method. Everything it does is provenanced
-(every answer carries its action trace) and honest (it abstains rather than guess).
+The result of ``ask`` is an :class:`~mixle.substrate.act.Investigation` carrying
+the selected evidence, action trace, answer, and abstention state.
 """
 
 from __future__ import annotations
@@ -69,7 +66,7 @@ class Reasoner:
         return self
 
     def use_policy(self, scorer: Callable[[Action, str], float]) -> Reasoner:
-        """Route by a learned acquisition policy instead of the lexical prior (never-worse). Chainable."""
+        """Route by a learned acquisition policy instead of the lexical prior. Chainable."""
         self.scorer = scorer
         return self
 

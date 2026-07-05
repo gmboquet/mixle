@@ -753,7 +753,7 @@ def learn_bayesian_network(
 
     # a vector-valued field (fixed-length numeric sequence, e.g. an embedding) is neither discrete nor a
     # scalar Gaussian -- it becomes a multivariate-Gaussian marginal / multivariate CLG node, and its
-    # components splice into the design matrix when it is a parent (workstream C1: cross-modal graph).
+    # components splice into the design matrix when it is a parent in a cross-modal graph.
     vec_dims: dict[int, int] = {i: _vector_dim(cols[i]) for i in range(n_fields) if _is_vector_col(cols[i])}
     discrete = [(i not in vec_dims and _is_discrete(c)) for i, c in enumerate(cols)]
     # continuous fields get a Gaussian marginal (defined on all of R, consistent with the CLG children) so a

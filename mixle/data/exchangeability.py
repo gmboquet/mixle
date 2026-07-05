@@ -1,19 +1,21 @@
-"""Exchangeability checks -- the precondition synthesize()/create() actually rest on (M2).
+"""Exchangeability diagnostics for fitted and synthetic-data workflows.
 
-Fitting one distribution to a dataset, or synthesizing "more rows like these", silently assumes the rows
-are EXCHANGEABLE -- that order carries no information. When the data has a trend or a regime shift, that
-assumption is false and the synthetic rows / fitted marginal quietly misrepresent the process.
-:func:`exchangeability_check` tests the assumption instead of assuming it: a permutation test of the
-rank correlation between value and POSITION (trend), plus a first-half/second-half location shift test
-(regime change), per numeric field. The verdict is a taxonomy label:
+Fitting one distribution to a dataset, or synthesizing "more rows like these",
+assumes that row order does not carry information. When the data has a trend or
+a regime shift, that assumption is false and a pooled marginal model can
+misrepresent the process.
 
-  * ``exchangeable``       -- no order signal found at the tested level;
-  * ``trend``              -- value co-moves with position (fit a temporal model, don't pool);
-  * ``shift``              -- the halves differ in location (a regime change; don't pool across it);
+:func:`exchangeability_check` tests the assumption with numeric probes: a
+permutation test for rank correlation between value and row position, plus a
+first-half/second-half location-shift test. The aggregate label is one of:
 
-:func:`mixle.inference.create` and :func:`mixle.inference.synthesize` run this check and RECORD the
-verdict in their provenance -- a warning, never a silent refusal: the caller sees "you pooled
-non-exchangeable data" next to the artifact instead of discovering it in production.
+* ``exchangeable``: no order signal found at the tested level;
+* ``trend``: value co-moves with position;
+* ``shift``: the halves differ in location.
+
+:func:`mixle.inference.create` and :func:`mixle.inference.synthesize` record
+the verdict in provenance so downstream consumers can see when pooling deserves
+review.
 """
 
 from __future__ import annotations

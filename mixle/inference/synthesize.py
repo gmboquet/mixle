@@ -1,22 +1,19 @@
-"""``synthesize()`` -- a dataset factory: sample inputs, label them, keep only what verifies (F2).
+"""Verified synthetic dataset creation.
 
-The creation verb for *data*. Give it a generative source (a fitted model, or real records it should
-learn a generator from) and it produces fresh inputs; give it a ``label`` callable (a teacher) and it
-labels them; give it a ``verify`` predicate and it *rejection-samples* -- only rows that pass the
-verifier enter the dataset. The verifier travels with the result, so a consumer can re-check every row
-(the verified-data-factory discipline: never ship a synthetic row you cannot re-verify).
+``synthesize`` draws inputs from a generative source, optionally labels them
+with a teacher callable, and optionally filters them through a verifier. The
+result is a :class:`Dataset` that carries its verifier so consumers can recheck
+rows independently.
 
-This is the same loop behind ``mixle.task.solve(synthesize=...)`` promoted to a first-class verb, so it
-can feed a fit, an eval set, or an active-acquisition round independent of any one task. Sources:
+Supported sources include:
 
-* a **fitted model** with a ``sampler`` -- sampled directly;
-* a **list of real inputs** -- a generative model is inferred over them
-  (:func:`mixle.utils.automatic.get_estimator`) and sampled, deduped against the reals;
-* a **callable** ``() -> input`` (or ``rng -> input``) -- called per draw (a hand-written simulator).
+* a fitted model with a ``sampler``;
+* a list of real inputs, from which a generator is inferred and sampled;
+* a callable ``() -> input`` or ``rng -> input``.
 
-Everything is optional past the source: no ``label`` gives an unlabeled dataset; no ``verify`` accepts
-every draw (acceptance rate 1.0). ``max_tries`` bounds the rejection loop so an impossible verifier
-fails loudly with a partial dataset rather than looping forever.
+Without ``label`` the result is unlabeled. Without ``verify`` every draw is
+accepted. ``max_tries`` bounds rejection sampling so an impossible verifier
+returns a clear failure instead of looping indefinitely.
 """
 
 from __future__ import annotations
@@ -55,10 +52,11 @@ class Dataset:
         return list(zip(self.inputs, self.labels))
 
     def recheck(self) -> bool:
-        """Re-run the attached verifier over every row -- the consumer's independent audit.
+        """Re-run the attached verifier over every row.
 
-        Returns True iff every row still passes (or there is no verifier, vacuously). This is the
-        point of shipping the verifier with the data: trust is re-derivable, not asserted."""
+        Returns True when every row still passes, or when no verifier is
+        attached.
+        """
         if self.verify is None:
             return True
         return all(_check(self.verify, x, y) for x, y in _rows(self.inputs, self.labels))
