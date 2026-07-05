@@ -361,10 +361,16 @@ class TorchEngine(ComputeEngine):
 
 
 def _dtensor_api():
+    # torch >= 2.5 exposes DTensor under the public ``torch.distributed.tensor``; torch 2.0-2.4 ship the
+    # same symbols only under the private ``torch.distributed._tensor`` (the public module exists but is
+    # empty). Try the public path first, then fall back, so multi-GPU sharding works on both.
     try:
         from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
-    except ImportError as e:  # pragma: no cover - depends on torch build
-        raise ImportError("TorchEngine mesh placement requires torch.distributed.tensor.") from e
+    except ImportError:
+        try:
+            from torch.distributed._tensor import DTensor, Replicate, Shard, distribute_tensor
+        except ImportError as e:  # pragma: no cover - depends on torch build
+            raise ImportError("TorchEngine mesh placement requires torch.distributed.tensor.") from e
     return DTensor, Shard, Replicate, distribute_tensor
 
 
