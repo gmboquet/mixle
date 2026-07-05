@@ -85,6 +85,15 @@ from mixle.inference.decision import RiskProfile, bayes_action
 from mixle.inference.em import EMStrategy, run_em
 from mixle.inference.errors_in_variables import DemingFit, deming_regression, propagate_uncertainty, simex
 from mixle.inference.estimation import BayesianStreamingEstimator, EMStep, best_of, fit, optimize
+
+# hierarchical within-subject event study / difference-in-differences (confirmed-exposure influence)
+from mixle.inference.event_study import (
+    EventStudyResult,
+    gaussian_effect,
+    hierarchical_event_study,
+    poisson_lograte_effect,
+    tipping_drift,
+)
 from mixle.inference.explain import Explanation, explain
 from mixle.inference.fisher import FisherView, FixedFisherView, to_fisher
 from mixle.inference.forecast import Forecast, forecast
@@ -581,4 +590,10 @@ __all__ = [
     "available_backends",
     "InferenceBackend",
     "register_inference_backend",
+    # hierarchical within-subject event study / difference-in-differences
+    "EventStudyResult",
+    "gaussian_effect",
+    "poisson_lograte_effect",
+    "hierarchical_event_study",
+    "tipping_drift",
 ]
