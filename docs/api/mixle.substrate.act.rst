@@ -1,7 +1,7 @@
-mixle.utils.builder module
+mixle.substrate.act module
 ==========================
 
-.. automodule:: mixle.utils.builder
+.. automodule:: mixle.substrate.act
    :members:
    :show-inheritance:
    :undoc-members:

@@ -22,6 +22,7 @@ Submodules
 
    mixle.data.core
    mixle.data.encoded_io
+   mixle.data.exchangeability
    mixle.data.hashing
    mixle.data.partition
    mixle.data.schema

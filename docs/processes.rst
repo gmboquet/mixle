@@ -14,6 +14,7 @@ The public namespace re-exports:
 * ``InhomogeneousPoissonProcessDistribution``;
 * ``RenewalProcessDistribution``;
 * ``BirthDeathSamplingDistribution``;
+* ``ContinuousTimeMarkovChainDistribution``;
 * ``ChineseRestaurantProcessDistribution``.
 
 When To Use A Process Model
@@ -46,6 +47,9 @@ history or trajectory. The timing is part of the likelihood.
    * - Birth-death sampling
      - Counts evolve through arrivals and removals
      - Trajectory likelihood depends on birth and death rates.
+   * - Continuous-time Markov chain
+     - State trajectories are fully observed with dwell times
+     - Transition rates are estimated from jump counts and state exposure.
    * - Chinese restaurant process
      - Partitions grow sequentially
      - New clusters appear with concentration-controlled probability.
@@ -99,6 +103,33 @@ Examples include:
 * population dynamics;
 * open/closed case counts.
 
+Continuous-Time Markov Chains
+-----------------------------
+
+``ContinuousTimeMarkovChainDistribution`` models fully observed trajectories
+with an initial state and a sequence of ``(dwell_time, next_state)`` jumps.
+The generator matrix has off-diagonal rates ``q_ij`` and diagonal entries
+derived from total exit rates.
+
+.. code-block:: python
+
+   from mixle.inference import optimize
+   from mixle.stats.processes.ctmc import ContinuousTimeMarkovChainEstimator
+
+   trajectories = [
+       (0, [(0.8, 1), (1.2, 0), (0.5, 2)]),
+       (1, [(1.0, 0), (0.7, 2)]),
+   ]
+
+   est = ContinuousTimeMarkovChainEstimator(num_states=3)
+   ctmc = optimize(trajectories, est, max_its=1, out=None)
+   print(ctmc.generator)
+
+For fully observed trajectories, the MLE is closed form:
+``q_ij = n_ij / T_i``, where ``n_ij`` is the observed transition count and
+``T_i`` is total dwell time in state ``i``. ``mixle.inference.certify`` reports
+this family as ``GLOBAL_UNIQUE``.
+
 Chinese Restaurant Processes
 ----------------------------
 
@@ -134,6 +165,20 @@ For process models, inspect more than aggregate likelihood:
 * hold out contiguous time ranges;
 * compare a self-exciting model against an inhomogeneous Poisson baseline;
 * verify calibration of predicted counts or intervals.
+* for CTMCs, compare simulated dwell times and transition counts against
+  held-out trajectories.
+
+Certification
+-------------
+
+Process families now participate in estimation certificates:
+
+* inhomogeneous Poisson, birth-death, and CTMC fits are classified as
+  ``GLOBAL_UNIQUE`` when their closed-form count/exposure MLE applies;
+* Hawkes variants are classified as ``STATIONARY`` because branching EM or
+  ML over self-excitation is non-convex;
+* renewal-process certificates inherit the guarantee of the interarrival
+  family used in the M-step.
 
 Use :doc:`analysis` for extreme-value and spatial diagnostics, :doc:`inference`
 for proper scoring and model comparison, and :doc:`production` for drift

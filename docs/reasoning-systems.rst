@@ -4,8 +4,13 @@ Reasoning Systems
 The :doc:`uncertainty` page introduces LLM uncertainty and linear-Gaussian
 evidence fusion. ``mixle.reason`` also includes a broader reasoning system:
 finite-hypothesis reasoning, cross-modal retrieval as evidence selection,
-knowledge-graph-producing LLMs, acquisition planning, amortized encoders, and a
-trainable cross-modal latent model.
+knowledge-graph-producing LLMs, typed ontologies, acquisition planning,
+amortized encoders, and a trainable cross-modal latent model.
+
+Use this page for probabilistic reasoning and evidence representations. Use
+:doc:`reasoning-ecosystem` for the application shell around those ideas:
+substrate storage, reasoner actions, skills, pool jobs, telemetry, and the
+optional ``Scientist`` workflow.
 
 Discrete Reasoning
 ------------------
@@ -111,6 +116,36 @@ graphs rather than strings.
 This is useful when generated text needs fact-level reliability rather than a
 single answer confidence.
 
+Ontologies And Typed Graphs
+---------------------------
+
+``Ontology`` provides symbolic constraints over graph facts: classes,
+subclass relations, relation signatures, relation axioms, and disjointness.
+It can audit triples before they become substrate knowledge or before a graph
+completion is accepted.
+
+.. code-block:: python
+
+   from mixle.reason.ontology import Ontology
+
+   ontology = (
+       Ontology()
+       .add_class("Person")
+       .add_class("Organization")
+       .add_relation("works_at", "Person", "Organization", "functional")
+   )
+
+   problems = ontology.check_triple(
+       "ada",
+       "works_at",
+       "acme",
+       {"ada": "Person", "acme": "Organization"},
+   )
+
+``OntologyConstrainedKG`` wraps a fitted knowledge-graph distribution and masks
+tail completions to range-conforming entities. This makes the schema part of
+the probability query rather than an after-the-fact filter.
+
 Amortized Encoders
 ------------------
 
@@ -162,6 +197,8 @@ Use:
 
 * ``LLMUncertainty`` for answer-or-abstain over sampled text answers;
 * ``GraphLLM`` when generated information should be represented as facts;
+* ``Ontology`` when graph facts need typed constraints before they are stored
+  or completed;
 * ``reason`` for continuous linear-Gaussian latent fusion;
 * ``reason_discrete`` for finite hypotheses;
 * ``CrossModalStore`` for retrieval that decides when raw evidence is worth
@@ -178,6 +215,7 @@ Generated reference pages:
 * :doc:`api/mixle.reason.core`;
 * :doc:`api/mixle.reason.discrete`;
 * :doc:`api/mixle.reason.graph_llm`;
+* :doc:`api/mixle.reason.ontology`;
 * :doc:`api/mixle.reason.store`;
 * :doc:`api/mixle.reason.encoder`;
 * :doc:`api/mixle.reason.model`.
@@ -202,5 +240,7 @@ Reasoning API Inventory
      - Claim/factuality helper and overlap scoring.
    * - ``canonical_graph``
      - Normalize graph outputs before graph-level uncertainty or calibration.
+   * - ``Ontology``, ``OntologyConstrainedKG``
+     - Typed graph constraints and ontology-masked KG completion.
    * - ``ScaledEmbedding``
      - Embedding wrapper used by shared latent and cross-modal models.

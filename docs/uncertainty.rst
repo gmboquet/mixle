@@ -10,9 +10,38 @@ This page covers:
 * uncertainty over LLM answers;
 * claim-level reliability for generated text;
 * epistemic versus aleatoric decomposition;
+* the ``uq`` dispatcher for fitted models, point predictors, ensembles, and
+  LLM-like callables;
 * conformal answer-or-abstain behavior;
 * cross-modal latent evidence fusion;
 * calibrated task cascades.
+
+Unified ``uq`` Dispatcher
+-------------------------
+
+``mixle.inference.uq`` provides one front door when the caller owns a
+heterogeneous predictor and wants Mixle to choose an uncertainty route from the
+object's capabilities.
+
+.. code-block:: python
+
+   from mixle.inference import uq
+
+   fitted_uq = uq(model, training_rows)
+   interval_uq = uq(point_predictor, (x_cal, y_cal), alpha=0.1)
+   llm_uq = uq(generate, example_prompts, alpha=0.1)
+
+``UQResult`` exposes method-specific accessors:
+
+* ``sample_models`` and ``credible_interval`` for fitted Mixle models through a
+  Laplace parameter posterior;
+* ``interval`` and ``epistemic_std`` for point predictors or ensembles through
+  split conformal calibration;
+* ``semantic_entropy`` and ``confident`` for LLM-style generation callables.
+
+Use the specialized APIs below when you already know the exact uncertainty
+method. Use ``uq`` when the application boundary should accept several kinds
+of predictor behind one call.
 
 LLMUncertainty
 --------------
@@ -269,6 +298,8 @@ Choosing the Right Tool
      - Use
    * - Does the LLM know the answer?
      - ``LLMUncertainty.assess`` and semantic entropy
+   * - I have a fitted model or predictor and want Mixle to pick a UQ route
+     - ``mixle.inference.uq``
    * - Should the LLM answer or abstain?
      - ``LLMUncertainty.calibrate`` and ``answer``
    * - Which claim in this answer is suspect?
