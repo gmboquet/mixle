@@ -22,6 +22,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.models._neural_serial import check_finite, decode_module, encode_module
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -38,11 +39,46 @@ def _torch() -> Any:
     return torch
 
 
+# --- module-class hoisting (see mixle.models.neural_density for the rationale): the wrapped nn.Module classes are
+# reachable at MODULE level so a leaf -- and any mixture holding one -- pickles for distributed EM. Built on first
+# use, resolved by name via __getattr__ so unpickling in a fresh interpreter works. ---
+
+_MODULE_CLASS_CACHE: dict[str, Any] = {}
+_MODULE_CLASS_FACTORIES: dict[str, Any] = {}
+
+
+def _register_module_class(name: str, factory: Any) -> None:
+    _MODULE_CLASS_FACTORIES[name] = factory
+
+
+def _module_class(name: str) -> Any:
+    cls = _MODULE_CLASS_CACHE.get(name)
+    if cls is not None:
+        return cls
+    import torch
+    import torch.nn as nn
+
+    cls = _MODULE_CLASS_FACTORIES[name](torch, nn)
+    cls.__module__ = __name__
+    cls.__qualname__ = name
+    cls.__name__ = name
+    _MODULE_CLASS_CACHE[name] = cls
+    return cls
+
+
+def __getattr__(name: str) -> Any:  # PEP 562: lets ``pickle`` resolve the hoisted module classes by name
+    if name in _MODULE_CLASS_FACTORIES:
+        return _module_class(name)
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))
+
+
 class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
     """Wrap a torch conditional-density ``module`` (``module.log_density(x, y) -> (n,)``) as a mixle leaf.
 
     Observations are pairs ``(x, y)``. The module must also expose ``sample_given(x) -> (n, d)`` to draw ``y``.
     """
+
+    __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
 
     def __init__(
         self, module: Any, *, m_steps: int = 60, lr: float = 5e-3, device: str = "cpu", name: str | None = None
@@ -63,9 +99,11 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, enc: Any) -> np.ndarray:
         torch = _torch()
         xs, ys = enc
+        xx = check_finite(np.atleast_2d(np.asarray(xs, dtype=float)), "NeuralConditionalDensity.seq_log_density (x)")
+        yy = check_finite(np.atleast_2d(np.asarray(ys, dtype=float)), "NeuralConditionalDensity.seq_log_density (y)")
         self.module.to(self.device).eval()
-        xt = torch.as_tensor(np.atleast_2d(np.asarray(xs, dtype=float)), dtype=torch.float32, device=self.device)
-        yt = torch.as_tensor(np.atleast_2d(np.asarray(ys, dtype=float)), dtype=torch.float32, device=self.device)
+        xt = torch.as_tensor(xx, dtype=torch.float32, device=self.device)
+        yt = torch.as_tensor(yy, dtype=torch.float32, device=self.device)
         with torch.no_grad():
             return self.module.log_density(xt, yt).cpu().numpy().reshape(-1)
 
@@ -79,6 +117,36 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> NeuralConditionalDensityEncoder:
         return NeuralConditionalDensityEncoder()
+
+    # --- serialization: persist hparams + the module (as portable bytes); registered below so a mixture holding
+    # this leaf round-trips through to_dict/to_json/pickle as well. ---
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state["module"] = encode_module(self.module)
+        return state
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.module = decode_module(state["module"])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "m_steps": self.m_steps,
+            "lr": self.lr,
+            "device": self.device,
+            "name": self.name,
+            "module": encode_module(self.module),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> NeuralConditionalDensity:
+        return cls(
+            decode_module(payload["module"]),
+            m_steps=payload["m_steps"],
+            lr=payload["lr"],
+            device=payload["device"],
+            name=payload["name"],
+        )
 
 
 class NeuralConditionalDensitySampler(DistributionSampler):
@@ -211,19 +279,23 @@ def build_mdn(x_dim: int, y_dim: int, *, k: int = 5, hidden: int = 32, layers: i
     ``sample_given(x)`` (pick a component by ``pi``, then a Gaussian), the contract a
     :class:`NeuralConditionalDensity` adapts.
     """
-    import torch
-    import torch.nn as nn
+    return _module_class("MixtureDensityNetwork")(x_dim, y_dim, k, hidden, layers)
 
+
+def _build_mdn_class(torch: Any, nn: Any) -> Any:
     class MixtureDensityNetwork(nn.Module):
-        def __init__(self) -> None:
+        def __init__(self, x_dim: int, y_dim: int, k: int = 5, hidden: int = 32, layers: int = 2) -> None:
             super().__init__()
+            self.x_dim = int(x_dim)
             self.k = int(k)
             self.y_dim = int(y_dim)
+            self.hidden = int(hidden)
+            self.n_layers = int(layers)
             body: list[nn.Module] = []
-            d = int(x_dim)
-            for _ in range(int(layers)):
-                body += [nn.Linear(d, hidden), nn.Tanh()]
-                d = hidden
+            d = self.x_dim
+            for _ in range(self.n_layers):
+                body += [nn.Linear(d, self.hidden), nn.Tanh()]
+                d = self.hidden
             self.body = nn.Sequential(*body)
             self.head_logits = nn.Linear(d, self.k)
             self.head_mu = nn.Linear(d, self.k * self.y_dim)
@@ -251,7 +323,10 @@ def build_mdn(x_dim: int, y_dim: int, *, k: int = 5, hidden: int = 32, layers: i
             sig_c = torch.exp(log_sigma.gather(1, idx).squeeze(1))
             return mu_c + sig_c * torch.randn_like(mu_c)
 
-    return MixtureDensityNetwork()
+    return MixtureDensityNetwork
+
+
+_register_module_class("MixtureDensityNetwork", _build_mdn_class)
 
 
 # --- the exact counterpart: a conditional normalizing flow -- exact p(y|x) with within-y structure -------------
@@ -267,16 +342,19 @@ def build_conditional_flow(x_dim: int, y_dim: int, *, hidden: int = 32, layers: 
     (so it composes honestly, unlike a bound). Needs ``y_dim >= 2`` for the coupling to be non-trivial. Exposes
     ``log_density(x, y)`` and ``sample_given(x)`` -- the contract a :class:`NeuralConditionalDensity` adapts.
     """
-    import torch
-    import torch.nn as nn
+    return _module_class("ConditionalFlow")(x_dim, y_dim, hidden, layers)
 
+
+def _build_conditional_flow_class(torch: Any, nn: Any) -> Any:
     class ConditionalFlow(nn.Module):
-        def __init__(self) -> None:
+        def __init__(self, x_dim: int, y_dim: int, hidden: int = 32, layers: int = 4) -> None:
             super().__init__()
             self.x_dim = int(x_dim)
             self.y_dim = int(y_dim)
+            self.hidden = int(hidden)
+            self.layers = int(layers)
             masks = []
-            for k in range(int(layers)):
+            for k in range(self.layers):
                 m = torch.zeros(self.y_dim)
                 m[k % self.y_dim :: 2] = 1.0  # alternating coordinate masks
                 masks.append(m)
@@ -284,11 +362,11 @@ def build_conditional_flow(x_dim: int, y_dim: int, *, hidden: int = 32, layers: 
 
             def net() -> nn.Module:
                 return nn.Sequential(
-                    nn.Linear(self.y_dim + self.x_dim, hidden), nn.Tanh(), nn.Linear(hidden, self.y_dim)
+                    nn.Linear(self.y_dim + self.x_dim, self.hidden), nn.Tanh(), nn.Linear(self.hidden, self.y_dim)
                 )
 
-            self.s = nn.ModuleList([net() for _ in range(int(layers))])
-            self.t = nn.ModuleList([net() for _ in range(int(layers))])
+            self.s = nn.ModuleList([net() for _ in range(self.layers)])
+            self.t = nn.ModuleList([net() for _ in range(self.layers)])
 
         def _normalize(self, x: Any, y: Any) -> tuple[Any, Any]:
             z = y
@@ -317,7 +395,10 @@ def build_conditional_flow(x_dim: int, y_dim: int, *, hidden: int = 32, layers: 
                 y = ym + (1.0 - m) * (y * torch.exp(s) + t)  # inverse of _normalize
             return y
 
-    return ConditionalFlow()
+    return ConditionalFlow
+
+
+_register_module_class("ConditionalFlow", _build_conditional_flow_class)
 
 
 # --- the discrete conditional: an autoregressive categorical conditioned on x -- exact p(y|x) over discrete y ----
@@ -333,29 +414,40 @@ def build_conditional_autoregressive_categorical(x_dim: int, y_dim: int, n_categ
     composes honestly. Exposes ``log_density(x, y)`` and ``sample_given(x)`` -- the contract a
     :class:`NeuralConditionalDensity` adapts.
     """
-    import torch
-    import torch.nn as nn
+    return _module_class("ConditionalAutoregressiveCategorical")(x_dim, y_dim, n_categories, hidden)
 
-    X = int(x_dim)
-    D = int(y_dim)
-    C = int(n_categories)
 
-    class MaskedLinear(nn.Linear):
+def _build_cond_masked_linear_class(torch: Any, nn: Any) -> Any:
+    class CondMaskedLinear(nn.Linear):
         def set_mask(self, mask: Any) -> None:
             self.register_buffer("mask", torch.as_tensor(mask, dtype=torch.float32))
 
         def forward(self, x: Any) -> Any:
             return nn.functional.linear(x, self.mask * self.weight, self.bias)
 
+    return CondMaskedLinear
+
+
+_register_module_class("CondMaskedLinear", _build_cond_masked_linear_class)
+
+
+def _build_conditional_autoregressive_categorical_class(torch: Any, nn: Any) -> Any:
+    MaskedLinear = _module_class("CondMaskedLinear")
+
     class ConditionalAutoregressiveCategorical(nn.Module):
-        def __init__(self) -> None:
+        def __init__(self, x_dim: int, y_dim: int, n_categories: int, hidden: int = 64) -> None:
             super().__init__()
+            self.X = int(x_dim)
+            self.D = int(y_dim)
+            self.C = int(n_categories)
+            self.hidden = int(hidden)
+            X, D, C, hid = self.X, self.D, self.C, self.hidden
             m_in = np.arange(1, D + 1)
-            m_h = 1 + (np.arange(hidden) % max(D - 1, 1))
-            self.l1_y = MaskedLinear(D, hidden)  # autoregressive path over y
-            self.l1_x = nn.Linear(X, hidden)  # x is conditioning context, available to ALL coordinates (unmasked)
-            self.l2 = MaskedLinear(hidden, hidden)
-            self.lout = MaskedLinear(hidden, D * C)
+            m_h = 1 + (np.arange(hid) % max(D - 1, 1))
+            self.l1_y = MaskedLinear(D, hid)  # autoregressive path over y
+            self.l1_x = nn.Linear(X, hid)  # x is conditioning context, available to ALL coordinates (unmasked)
+            self.l2 = MaskedLinear(hid, hid)
+            self.lout = MaskedLinear(hid, D * C)
             self.l1_y.set_mask((m_h[:, None] >= m_in[None, :]).astype(float))
             self.l2.set_mask((m_h[:, None] >= m_h[None, :]).astype(float))
             m_out = np.repeat(m_in, C)
@@ -365,18 +457,33 @@ def build_conditional_autoregressive_categorical(x_dim: int, y_dim: int, n_categ
         def _logits(self, x: Any, y: Any) -> Any:
             h = self.act(self.l1_y(y) + self.l1_x(x))
             h = self.act(self.l2(h))
-            return self.lout(h).view(-1, D, C)  # (n, D, C)
+            return self.lout(h).view(-1, self.D, self.C)  # (n, D, C)
 
         def log_density(self, x: Any, y: Any) -> Any:
             log_p = torch.log_softmax(self._logits(x, y), dim=-1)  # (n, D, C)
-            idx = y.long().clamp(0, C - 1).unsqueeze(-1)
+            idx = y.long().clamp(0, self.C - 1).unsqueeze(-1)
             return log_p.gather(-1, idx).squeeze(-1).sum(1)  # sum_i log p(y_i | y_{<i}, x)
 
         def sample_given(self, x: Any) -> Any:
-            y = torch.zeros(x.shape[0], D, device=x.device)
-            for d in range(D):  # coordinate d depends on x (always) and already-filled y_{<d}
+            y = torch.zeros(x.shape[0], self.D, device=x.device)
+            for d in range(self.D):  # coordinate d depends on x (always) and already-filled y_{<d}
                 probs = torch.softmax(self._logits(x, y)[:, d, :], dim=-1)
                 y[:, d] = torch.multinomial(probs, 1).squeeze(-1).float()
             return y
 
-    return ConditionalAutoregressiveCategorical()
+    return ConditionalAutoregressiveCategorical
+
+
+_register_module_class("ConditionalAutoregressiveCategorical", _build_conditional_autoregressive_categorical_class)
+
+
+def _register_serializable() -> None:
+    # mixle.models classes aren't in the stats/analysis auto-walk, so opt in explicitly for to_json/from_json.
+    try:
+        from mixle.utils.serialization import register_serializable_class
+    except Exception:  # pragma: no cover
+        return
+    register_serializable_class(NeuralConditionalDensity)
+
+
+_register_serializable()

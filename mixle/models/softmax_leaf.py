@@ -21,6 +21,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.models._neural_serial import check_finite, decode_module, encode_module
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -48,6 +49,8 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
     ``batch_size`` (None = full batch) makes the M-step minibatch SGD over ``m_steps`` passes -- needed to train a
     real conv net on a large image set; ``device`` (e.g. ``"mps"``/``"cuda"``) runs it on the GPU.
     """
+
+    __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
 
     def __init__(
         self,
@@ -84,6 +87,7 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
         x, y = enc
+        check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "NeuralCategorical.seq_log_density")
         logp = _log_softmax(self._logits(x))
         y = np.asarray(y, dtype=int)
         return logp[np.arange(len(y)), y]
@@ -100,6 +104,38 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> NeuralCategoricalEncoder:
         return NeuralCategoricalEncoder()
+
+    # --- serialization: persist hparams + the module (as portable bytes); registered below so a mixture holding
+    # this leaf round-trips through to_dict/to_json/pickle as well. ---
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state["module"] = encode_module(self.module)
+        return state
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.module = decode_module(state["module"])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "m_steps": self.m_steps,
+            "lr": self.lr,
+            "name": self.name,
+            "batch_size": self.batch_size,
+            "device": self.device,
+            "module": encode_module(self.module),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> NeuralCategorical:
+        return cls(
+            decode_module(payload["module"]),
+            m_steps=payload["m_steps"],
+            lr=payload["lr"],
+            name=payload["name"],
+            batch_size=payload["batch_size"],
+            device=payload["device"],
+        )
 
 
 class NeuralCategoricalSampler(DistributionSampler):
@@ -241,6 +277,18 @@ class NeuralCategoricalEstimator(ParameterEstimator):
                 loss.backward()
                 opt.step()
         return out
+
+
+def _register_serializable() -> None:
+    # mixle.models classes aren't in the stats/analysis auto-walk, so opt in explicitly for to_json/from_json.
+    try:
+        from mixle.utils.serialization import register_serializable_class
+    except Exception:  # pragma: no cover
+        return
+    register_serializable_class(NeuralCategorical)
+
+
+_register_serializable()
 
 
 # --- back-compat aliases (the classes were renamed off the '...Leaf' suffix) ---
