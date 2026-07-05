@@ -86,8 +86,20 @@ Choose By Workflow
      - ``scaling_example.py``, ``engine_benchmark_example.py``
      - :doc:`engines`, :doc:`utilities-and-parallelism`
    * - Neural or representation workflows
-     - ``shared_embedding_example.py``, ``heterogeneous_representation_example.py``
+     - ``shared_embedding_example.py``, ``heterogeneous_representation_example.py``,
+       ``cross_modal_fit_receipt.py``
      - :doc:`neural-llm`, :doc:`representation`
+   * - Local reasoning ecosystem
+     - ``frontier_ecosystem_demo.py``, ``reasoner_investigation_demo.py``,
+       ``flagship_triage_app.py``, ``flagship_kg_agent.py``
+     - :doc:`reasoning-ecosystem`, :doc:`reasoning-systems`
+   * - Local scientist and edge distillation
+     - ``laptop_scientist.py``, ``foundation_to_edge.py``,
+       ``vision_edge_distillation/``
+     - :doc:`reasoning-ecosystem`, :doc:`task-distillation`
+   * - Scientific inverse problems
+     - ``flagship_physics_inverse.py``, ``skeptic_challenge_example.py``
+     - :doc:`inference`, :doc:`ppl`, :doc:`uncertainty`
    * - LLM/task replacement
      - ``task_distill_example.py``, ``task_llm_active_example.py``,
        ``task_cascade_economics_example.py``
@@ -107,11 +119,15 @@ neural students, neural leaves, representation models, or neural-density
 teachers generally need ``mixle[torch]``. The real-data Banking77 receipt
 additionally needs the Hugging Face ``datasets`` package and downloads the
 dataset on first run.
+The ``laptop_scientist.py`` and ``foundation_to_edge.py`` workflows need the
+``scientist`` extra and local Hugging Face model weights where noted by the
+scripts.
 
 .. code-block:: sh
 
    pip install -e .
    pip install -e ".[torch]"
+   pip install -e ".[scientist]"
    pip install datasets
 
 Use ``mixle[all]`` only when you deliberately want the full optional surface.
@@ -129,6 +145,10 @@ Complete Inventory
    * - ``auto_example.py``
      - Automatic inference
      - Infer an estimator shape for mixed Python records.
+   * - ``cross_modal_fit_receipt.py``
+     - Cross-modal inference
+     - Fit a heterogeneous Bayesian network over categorical, image-vector,
+       signal-vector, and continuous fields.
    * - ``doe_example.py``
      - Design of experiments
      - Latin hypercube designs, Bayesian optimization, and sensitivity.
@@ -144,6 +164,24 @@ Complete Inventory
    * - ``extensibility_seams_example.py``
      - Extension
      - Show where new families and backends attach.
+   * - ``flagship_kg_agent.py``
+     - Reasoning ecosystem
+     - Ontology-constrained graph facts, KG completion, and cited KG-RAG.
+   * - ``flagship_physics_inverse.py``
+     - Scientific inference
+     - Bayesian inverse problem with coverage-oriented uncertainty checks.
+   * - ``flagship_triage_app.py``
+     - Reasoning ecosystem
+     - Support triage over substrate, skills, pool-style jobs, monitoring, and
+       grounded answering.
+   * - ``foundation_to_edge.py``
+     - Edge distillation
+     - Distill a foundation-model capability into a smaller local artifact and
+       report retained accuracy.
+   * - ``frontier_ecosystem_demo.py``
+     - Local reasoning ecosystem
+     - End-to-end tour of substrate, creation, simulation, skills, reasoning,
+       telemetry, and governance surfaces.
    * - ``gallery_combinators_example.py``
      - Distribution gallery
      - Composite, record, sequence, optional, and transformed families.
@@ -183,6 +221,10 @@ Complete Inventory
    * - ``joint_mixture_example.py``
      - Latent models
      - Joint mixture variants.
+   * - ``laptop_scientist.py``
+     - Local scientist
+     - Optional assembled workflow for cached encoders, local answering, and
+       verified scientific responses.
    * - ``latent_variable_models_example.py``
      - Latent models
      - Latent families beyond the first HMM path.
@@ -206,6 +248,10 @@ Complete Inventory
    * - ``real_receipt_banking77.py``
      - Real-data task workflow
      - Banking77 intent classification through the ``solve`` loop.
+   * - ``reasoner_investigation_demo.py``
+     - Reasoning ecosystem
+     - Evidence acquisition over retrieve, compute, simulate, and delegate
+       actions with abstention.
    * - ``scaling_example.py``
      - Parallelism
      - Same ``optimize`` call on local and multiprocessing backends.
@@ -215,6 +261,9 @@ Complete Inventory
    * - ``shared_embedding_example.py``
      - Neural leaf
      - Mixture of language-model experts with one shared embedding.
+   * - ``skeptic_challenge_example.py``
+     - Verification workflow
+     - Stress-check claims and examples against explicit evidence.
    * - ``structure_learning_example.py``
      - Applied models
      - Dependency and structure learning before modeling.
@@ -236,9 +285,18 @@ Complete Inventory
    * - ``task_llm_active_example.py``
      - Task workflow
      - LLM teacher, active labeling, local student, and calibrated cascade.
+   * - ``vision_edge_distillation/``
+     - Edge distillation
+     - Train and verify a compact vision student from cached or reproduced
+       foundation-model features.
    * - ``win_demo_example.py``
      - End-to-end workflow
      - Replace a ticket router and invoice extractor with calibrated models.
+
+Benchmark and distributed-stress harnesses that were previously under
+``examples/`` have been moved to gitignored benchmark areas. The tracked
+examples page now focuses on scripts intended to be read and run as
+documentation.
 
 Representative Source
 ---------------------

@@ -25,6 +25,22 @@ Fit a model
    * - Stream updates
      - ``from mixle.inference import StreamingEstimator``
      - Online or mini-batch estimation.
+   * - Create a certified artifact
+     - ``from mixle.inference import create``
+     - Fits a model and attaches certificate, optional calibration, UQ, and
+       provenance.
+   * - Simulate from a fitted model
+     - ``from mixle.inference import simulate``
+     - Packages a model as a baseline/scenario simulator.
+   * - Build a verified synthetic dataset
+     - ``from mixle.inference import synthesize``
+     - Draws inputs, optionally labels them, and keeps rows that verify.
+   * - Record and replay a fit
+     - ``from mixle.inference import record_fit, verify_reproducible``
+     - Stores and checks data/parameter fingerprints.
+   * - Certify and place estimation blocks
+     - ``from mixle.inference import certify, plan_placement``
+     - Reports estimation guarantees and local/pool placement.
    * - Use gradient MAP/MLE
      - ``from mixle.inference.gradient_fit import fit_map, fit_mle``
      - For differentiable parameter objectives.
@@ -96,6 +112,9 @@ larger model. For ordinary distribution work, prefer ``mixle.stats`` first.
    * - Unconditional neural density
      - ``from mixle.models import NeuralDensity, build_maf, build_coupling_flow``
      - Wrap exact-density Torch modules as Mixle leaves.
+   * - Constructible neural density families
+     - ``from mixle.models import VAE, Flow, MAF, DiscreteAR``
+     - Use common neural-density families directly as distribution objects.
    * - Conditional neural density
      - ``from mixle.models import NeuralConditionalDensity, build_mdn, build_conditional_flow``
      - Model ``p(y | x)`` with an MDN or exact conditional flow.
@@ -168,6 +187,12 @@ codebook in that space. ``PosteriorRetriever`` uses a fitted mixture's
 posterior affinity to retrieve or rerank heterogeneous records by what the
 model believes is similar.
 
+For deterministic image and signal baselines:
+
+.. code-block:: python
+
+   from mixle.represent.modality import image_features, signal_features, vectorize
+
 Design and distill tasks
 ------------------------
 
@@ -226,6 +251,42 @@ Design and distill tasks
    * - Train from agent history
      - ``from mixle.task import harvest_agent_traces``
      - Build deterministic teachers from stored tool-use traces.
+   * - Distill one Torch module into another
+     - ``from mixle.task.distill_methods import response_distill, hint_distill``
+     - Classic KD, feature matching, attention transfer, relational KD, and
+       sequence-level distillation.
+
+Build a local reasoning application
+-----------------------------------
+
+.. list-table::
+   :header-rows: 1
+
+   * - Task
+     - Import
+     - Notes
+   * - Store and retrieve typed knowledge
+     - ``from mixle.substrate import Substrate, retrieve``
+     - Local scoped store for documents, records, artifacts, traces, and
+       context packets.
+   * - Ask over evidence and skills
+     - ``from mixle.substrate import Reasoner, investigate``
+     - Fires retrieve/compute/simulate/create/delegate actions under a budget.
+   * - Package a model as a capability
+     - ``from mixle.inference import skill, SkillRegistry``
+     - Named callable with provenance and inherited certificate metadata.
+   * - Check answer factuality
+     - ``from mixle.substrate import check_factuality``
+     - Claim-level support from substrate evidence.
+   * - Apply ontology constraints
+     - ``from mixle.reason.ontology import Ontology``
+     - Typed relation constraints and graph-fact auditing.
+   * - Submit local-or-pool work
+     - ``from mixle.pool import PoolJob, submit``
+     - Budgeted job abstraction with local fallback.
+   * - Record decision telemetry
+     - ``from mixle.telemetry import Telemetry, record``
+     - JSONL events for routing, placement, reasoning, pool jobs, and drift.
 
 Quantify LLM and reasoning uncertainty
 --------------------------------------
@@ -297,13 +358,14 @@ Model temporal processes
 .. code-block:: python
 
    from mixle.process import (
-       HawkesProcessDistribution,
-       InhomogeneousPoissonProcessDistribution,
-       RenewalProcessDistribution,
+       ContinuousTimeMarkovChainDistribution,
+      HawkesProcessDistribution,
+      InhomogeneousPoissonProcessDistribution,
+      RenewalProcessDistribution,
    )
 
 The process namespace collects event-time, renewal, self-exciting,
-birth-death, and random-partition families.
+birth-death, CTMC, and random-partition families.
 
 Analyze diagnostics and data structure
 --------------------------------------

@@ -23,6 +23,10 @@ Core Objects
     The exchangeability assumption for a dataset: ``IID``, ``EXCHANGEABLE``,
     ``SEQUENTIAL``, or a partially exchangeable grouping.
 
+``exchangeability_check``
+    A permutation-based diagnostic for whether numeric row order carries trend
+    or regime-shift information.
+
 ``dataset_hash`` and ``model_hash``
     Stable identifiers used by provenance, registries, drift checks, and
     reproducibility workflows.
@@ -96,6 +100,40 @@ Sample structure tells mixle how records may be partitioned or interpreted.
 Structure-aware partitioning matters for streaming, distributed fitting, and
 validation. It prevents sequence or group boundaries from being broken
 accidentally.
+
+Exchangeability Diagnostics
+---------------------------
+
+Many high-level verbs assume rows can be pooled into one model or sampled as
+"more rows like these." ``exchangeability_check`` tests that assumption for
+numeric scalar or tuple/list fields by looking for order trends and first-half
+versus second-half shifts.
+
+.. code-block:: python
+
+   from mixle.data import exchangeability_check
+
+   report = exchangeability_check(values, alpha=0.01, seed=0)
+   print(report.label)
+   print(report.as_dict())
+
+The report label is one of:
+
+``exchangeable``
+    No order signal was found at the tested level.
+
+``trend``
+    Values co-move with row position; fit a temporal or sequential model
+    instead of pooling silently.
+
+``shift``
+    The early and late halves differ in location; treat the rows as a regime
+    change unless the split is intended.
+
+``mixle.inference.create`` and ``mixle.inference.synthesize`` run this check
+when applicable and store the verdict in provenance. It is a warning signal,
+not an automatic refusal, because some applications intentionally pool after
+domain review.
 
 Encoded Data
 ------------
@@ -179,6 +217,8 @@ API Map
      - additional schema types and the base field-type protocol
    * - ``IID``, ``EXCHANGEABLE``, ``SEQUENTIAL``, ``partially_exchangeable``
      - sample-structure declarations
+   * - ``exchangeability_check``, ``ExchangeabilityReport``
+     - row-order diagnostics used by creation and synthesis provenance
    * - ``check_dataset``, ``DataReport``
      - validation and diagnostics
    * - ``dataset_hash``, ``model_hash``

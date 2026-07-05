@@ -18,6 +18,7 @@ Submodules
    mixle.represent.graph
    mixle.represent.heterogeneous
    mixle.represent.learned_segment
+   mixle.represent.modality
    mixle.represent.posterior
    mixle.represent.quantize
    mixle.represent.segment
