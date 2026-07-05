@@ -10,12 +10,14 @@ Answers two questions the workplan raised, each measured on real data, no networ
      the receipt says exactly when:
        * TEXT (banking77 intent classification): YES. A MiniLM+head teacher (95%) distills into a ~48 KB
          TORCH-FREE student that keeps ~97% of the accuracy -- because text n-grams carry the signal.
-       * VISION (CIFAR-10) onto raw pooled pixels: NO. The capability lives in CLIP's learned features;
-         a kilobyte student on pooled pixels recovers almost nothing. The honest edge deployment for
-         vision keeps the encoder.
+       * VISION (CIFAR-10) onto raw pooled pixels: NO -- the capability lives in CLIP's learned features,
+         which a kilobyte pixel-student cannot reconstruct. BUT it is not lost: one GPU pass of FEATURE
+         distillation (see vision_edge_distillation/) yields a 5 MB student at 93% of CLIP's zero-shot,
+         then verified on this laptop's CPU. Vision reaches the edge via the laptop+pool topology.
 
 The point is not a single triumphant number -- it is that the system MEASURES what survives compression
-and tells you the boundary, instead of asserting a capability it does not have.
+and tells you the boundary (and, for vision, what it takes to cross it), instead of asserting a
+capability it does not have.
 """
 
 from __future__ import annotations
@@ -102,9 +104,14 @@ def main() -> None:
         f"  torch-free pixel student: agreement w/ CLIP teacher {float((pred == teach_te).mean()):.3f} "
         f"(vs CLIP's {acc:.3f}) -- the signal is in CLIP's features, not the pixels."
     )
-    print("  -> for vision, the honest edge deployment keeps the encoder; only text distils to bare metal.")
+    print("  -> onto raw pixels, the capability does not transfer. BUT it is not lost: feature")
+    print("     distillation at scale closes it -- see vision_edge_distillation/ (a 5 MB student,")
+    print("     93% of CLIP's zero-shot, GPU-trained for $0.04, then verified on this laptop's CPU).")
 
-    print("\nfoundation-on-laptop: yes. edge distillation: yes for text, measured-no for vision-on-pixels.")
+    print(
+        "\nfoundation-on-laptop: yes. edge distillation: text on the laptop, vision via one GPU pass "
+        "(the laptop+pool topology), both then running on bare metal."
+    )
 
 
 if __name__ == "__main__":
