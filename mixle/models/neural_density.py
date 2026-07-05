@@ -139,14 +139,15 @@ class NeuralDensityAccumulator(SequenceEncodableStatisticAccumulator):
         self.x: list = []
         self.w: list = []
 
+    # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
     def update(self, x: Any, weight: float, estimate: Any) -> None:
-        self.x.append(np.atleast_1d(np.asarray(x, dtype=float)))
-        self.w.append(float(weight))
+        self.x.append(np.atleast_1d(np.asarray(x, dtype=float))[None, ...])
+        self.w.append(np.asarray([float(weight)], dtype=float))
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
-        for i in range(len(enc)):
-            self.x.append(np.atleast_1d(enc[i]))
-            self.w.append(float(weights[i]))
+        xb = np.asarray(enc, dtype=float)
+        self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
+        self.w.append(np.asarray(weights, dtype=float).ravel())
 
     def initialize(self, x: Any, weight: float, rng: Any) -> None:
         self.update(x, weight, None)
@@ -156,15 +157,20 @@ class NeuralDensityAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, other: Any) -> NeuralDensityAccumulator:
         xs, ws = other
-        self.x.extend(xs)
-        self.w.extend(ws)
+        if len(xs):
+            self.x.append(np.asarray(xs, dtype=float))
+            self.w.append(np.asarray(ws, dtype=float).ravel())
         return self
 
-    def value(self) -> tuple[list, list]:
-        return (self.x, self.w)
+    def value(self) -> tuple:
+        x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
+        w = np.concatenate(self.w) if self.w else np.zeros((0,))
+        return (x, w)
 
     def from_value(self, v: tuple) -> NeuralDensityAccumulator:
-        self.x, self.w = list(v[0]), list(v[1])
+        x, w = v
+        self.x = [np.asarray(x, dtype=float)] if len(x) else []
+        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
         return self
 
     def acc_to_encoder(self) -> NeuralDensityEncoder:
@@ -194,9 +200,9 @@ class NeuralDensityEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralDensity:
         torch = _torch()
         xs, ws = suff_stat
-        if not xs:
+        if len(xs) == 0:
             return NeuralDensity(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
-        x = torch.as_tensor(np.stack(xs), dtype=torch.float32, device=self.device)
+        x = torch.as_tensor(np.asarray(xs, dtype=float), dtype=torch.float32, device=self.device)
         w = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32, device=self.device)
         w = w / w.sum().clamp(min=1e-8)
         self.module.to(self.device).train()
