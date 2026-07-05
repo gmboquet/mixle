@@ -1,4 +1,4 @@
-"""Planned multi-hop retrieval -- chain typed hops across the substrate, keeping the evidence chain (S2).
+"""Planned multi-hop retrieval over substrate links and content.
 
 Single-shot :func:`~mixle.substrate.retrieve.retrieve` answers "what is most relevant to this query".
 But real questions chain: a symptom points to a document, the document names an entity, the entity
@@ -9,11 +9,9 @@ starting from the best matches, then expanding along two kinds of hop:
   * CONTENT hops: re-query the substrate with the frontier item's own text, surfacing neighbors it is
     about (the "this reminds me of" step),
 
-up to ``max_hops``, under a per-expansion budget. The result is a :class:`HopChain`: the items found
-AND the provenance PATH by which each was reached (which parent, which hop kind, at what depth). That
-path is the evidence chain -- the reasoner can cite not just WHAT it used but HOW it got there, and
-nothing enters the chain without a traceable route from the query. Diminishing-returns aware: a hop
-that surfaces nothing new stops that branch.
+up to ``max_hops``, under a per-expansion budget. The result is a
+:class:`HopChain`: the items found and the provenance path by which each was
+reached. Branches that surface no new items stop early.
 """
 
 from __future__ import annotations

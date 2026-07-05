@@ -38,7 +38,7 @@ if _HAS_TORCH:
         def forward(self, x: Any) -> Any:
             b, t, d = x.shape
             qkv = self.qkv(x).reshape(b, t, 3, self.h, d // self.h).permute(2, 0, 3, 1, 4)
-            o = F.scaled_dot_product_attention(qkv[0], qkv[1], qkv[2], is_causal=True)  # FlashAttention seam (CUDA)
+            o = F.scaled_dot_product_attention(qkv[0], qkv[1], qkv[2], is_causal=True)  # FlashAttention path (CUDA)
             return self.proj(o.transpose(1, 2).reshape(b, t, d))
 
     class Block(nn.Module):

@@ -1,22 +1,13 @@
-"""``investigate()`` -- the reasoner's WIDENED action space: retrieve / compute / simulate / create (S3).
+"""Action-based investigation over retrieve, compute, simulate, and create steps.
 
-:func:`~mixle.substrate.answer.answer_from_substrate` wired one action -- RETRIEVE. A real reasoner buys
-evidence with computation: it can also RUN a model (COMPUTE), run a what-if (SIMULATE), or build a model
-/ dataset on the fly (CREATE). :func:`investigate` is that loop. You hand it a question and a set of
-:class:`Action` s; it orders them by expected information gain per unit cost, fires them under a cost
-budget, accumulates the evidence fragments each returns, and then answers FROM that evidence or ABSTAINS
--- same no-answer-without-provenance rule as the RETRIEVE-only seed, now over a plural action space.
+:func:`investigate` accepts a question and a set of :class:`Action` objects. It
+scores actions by relevance per unit cost, executes them under an optional
+budget, accumulates evidence fragments, and returns an
+:class:`Investigation` containing either an answer or an abstention.
 
-Each action is a thin adapter: a ``run(question) -> list[str]`` plus a ``cost`` and a ``description``
-(what it can answer, used to score relevance). The creation verbs (:func:`mixle.inference.skill`,
-:func:`mixle.inference.simulate`, :func:`mixle.inference.create`) drop straight in via the
-:func:`compute_action` / :func:`simulate_action` / :func:`retrieve_action` builders, so the things the
-ecosystem can *make* become the things the reasoner can *do*.
-
-EIG-per-cost is a v1 proxy: an action's score is the lexical overlap of its description with the question
-(RETRIEVE gets a base floor because it is always at least weakly informative), divided by its cost. The
-seam to a learned acquisition model is :func:`score_action` -- swap it for a calibrated EIG estimate and
-the loop is unchanged. The discipline mirrors the rest of the stack: cheap, honest, never fabricates.
+Each action is a small adapter around ``run(question) -> list[str]`` plus cost
+and description metadata. Helper builders adapt substrate retrieval, registered
+skills, simulators, and creators into the same action protocol.
 """
 
 from __future__ import annotations
@@ -124,8 +115,11 @@ def relevance_of(action: Action, question: str) -> float:
 def score_action(action: Action, question: str) -> float:
     """EIG-per-cost proxy: lexical relevance of the action to the question, divided by its cost.
 
-    v1 heuristic -- the seam to a learned/calibrated expected-information-gain estimate. RETRIEVE-style
-    actions carry a ``base_score`` floor because retrieval is always at least weakly informative."""
+    This heuristic can be replaced with a learned or calibrated
+    expected-information-gain estimate. Retrieval-style actions carry a
+    ``base_score`` floor because retrieval is always at least weakly
+    informative.
+    """
     q = _tokens(question)
     overlap = len(q & _tokens(action.description)) / len(q) if q else 0.0
     return (action.base_score + overlap) / max(action.cost, 1e-9)
@@ -147,15 +141,14 @@ def investigate(
     """Answer ``question`` by firing evidence-acquiring ``actions`` under a cost budget, or abstain.
 
     Actions are ordered by ``scorer`` (default :func:`score_action`, EIG-per-cost) and fired
-    highest-first. The loop STOPS EARLY once it holds at least ``min_evidence`` fragments AND confidence
-    clears ``target_confidence`` (default: ``min_confidence``) -- so it spends the fewest, cheapest
-    actions that suffice and only reaches for the expensive ones when the cheap ones fell short. It also
-    stops at the cost budget or ``max_actions``. ``scorer`` is the seam to a LEARNED acquisition policy
-    (:func:`mixle.inference.learn_action_policy`): swap it and the loop is unchanged. The ``answerer``
-    (``(question, evidence_text) -> str``) is called ONLY when the evidence clears the bar -- otherwise
-    it abstains rather than guess. The returned :class:`Investigation` carries the ordered action trace
-    as provenance, and each fired action emits a ``route`` telemetry row so a policy can be learned from
-    what actually paid off.
+    highest-first. The loop stops early once it holds at least ``min_evidence``
+    fragments and confidence clears ``target_confidence`` (default:
+    ``min_confidence``). It also stops at the cost budget or ``max_actions``.
+    ``scorer`` can be replaced with a learned acquisition policy such as
+    :func:`mixle.inference.learn_action_policy`. The ``answerer`` is called only
+    when the evidence clears the bar. The returned :class:`Investigation`
+    carries the ordered action trace as provenance, and each fired action can
+    emit telemetry for later policy learning.
     """
     score = scorer or score_action
     stop_at = target_confidence if target_confidence is not None else min_confidence

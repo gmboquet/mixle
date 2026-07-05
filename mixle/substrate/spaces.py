@@ -1,4 +1,4 @@
-"""``Space`` -- a team-scoped view over the substrate, with explicit publish (multi-team sharing, P1).
+"""Team-scoped substrate views with explicit publishing.
 
 The substrate tags every item with an access ``scope`` ("local", a team id, or a shared scope like
 "public"), but the raw store filters on ONE scope at a time. A team's real visibility is a *union*: its
@@ -7,10 +7,9 @@ own items PLUS whatever has been shared into a common scope, and never another t
 the team's visible set, so two teams querying the same substrate see different, correctly-isolated
 knowledge.
 
-Sharing is EXPLICIT: nothing crosses a scope boundary until someone :func:`publish` es it. Publishing
-re-scopes an item into a shared scope and stamps its provenance with who published it and from where --
-an audit trail, so a shared item is always traceable to the act that shared it. This is the P1 seed
-(spaces + ACL scopes + explicit publish); versioned merge and org governance (P2/P3) build on it.
+Sharing is explicit: nothing crosses a scope boundary until someone calls
+:func:`publish`. Publishing re-scopes an item into a shared scope and records
+who published it and from where.
 """
 
 from __future__ import annotations
@@ -35,7 +34,7 @@ def publish(
     by: str | None = None,
     from_scope: str | None = None,
 ) -> list[str]:
-    """Share items into a common scope -- the only way knowledge crosses a team boundary (audited).
+    """Share items into a common scope.
 
     Re-scopes each item in ``ids`` to ``to`` and records ``published_by`` / ``published_from`` in its
     provenance. Returns the ids actually published (missing ids are skipped). ``from_scope``, if given,

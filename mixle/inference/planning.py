@@ -1,29 +1,21 @@
-"""Estimation planning + certificates -- the keystone that makes "right method, provably" auditable.
+"""Estimation planning and certificates.
 
-mixle already dispatches the right estimation method per block: exponential-family leaves get
-closed-form MLE, conditional-linear-Gaussian factors get least squares, GLM factors get IRLS,
-categorical tables get closed-form counts, and only genuinely non-convex pieces (mixtures, neural
-leaves) fall back to EM or gradient descent. What was MISSING is making that visible and CHECKABLE:
-a certificate saying, per block, which method ran and how strong its guarantee is, and an audit of
-exactly where -- if anywhere -- gradient descent was unavoidable.
+Mixle chooses estimation methods from model structure: exponential-family
+leaves use closed-form MLE when available, conditional-linear-Gaussian factors
+use least squares, GLM factors use IRLS, categorical tables use count updates,
+and non-convex pieces such as mixtures or neural leaves use EM or gradient
+optimization.
 
-This module walks a fitted model (or a distribution prototype) and returns an
-:class:`EstimationCertificate`: an ordered guarantee ladder per block plus the aggregate. The
-aggregate is the MINIMUM over blocks -- a fit is only as strong as its weakest link -- so a fully
-observed exponential-family graph certifies ``GLOBAL_UNIQUE`` while a mixture certifies
-``STATIONARY`` even though every one of its M-steps is closed form (the certificate reports that
-inner win explicitly: "why not ADAM" is answerable, block by block).
+This module makes those choices inspectable. It walks a fitted model or
+distribution prototype and returns an :class:`EstimationCertificate` containing
+per-block methods, guarantees, and placement hints. The aggregate guarantee is
+the minimum over all blocks, so a fully observed exponential-family graph can
+certify as ``GLOBAL_UNIQUE`` while a mixture certifies as ``STATIONARY`` even
+when each M-step is closed form.
 
-The guarantee ladder (ascending strength):
-
-  HEURISTIC                 gradient descent (SGD/Adam) -- a local optimum, no global claim
-  STATIONARY                EM / coordinate ascent -- a fixed point, possibly local
-  STATIONARY_ESCAPE_TESTED  EM with saddle-escape restarts (Model.fit(restarts=...))
-  GLOBAL                    convex objective (IRLS/least squares) -- the global optimum
-  GLOBAL_UNIQUE             closed form with a provably unique global optimum (exp-family MLE, CLG)
-
-Placement (``local`` / ``pool_eligible``) is advisory in v1: gradient blocks are marked
-pool-eligible so a later pool executor (workstream H) can offload them; everything else stays local.
+The guarantee ladder, in ascending strength, is ``HEURISTIC``,
+``STATIONARY``, ``STATIONARY_ESCAPE_TESTED``, ``GLOBAL``, and
+``GLOBAL_UNIQUE``.
 """
 
 from __future__ import annotations
@@ -79,9 +71,9 @@ class BlockPlan:
 class EstimationCertificate:
     """The auditable proof of how a model was (or would be) estimated: per-block plans + the aggregate.
 
-    ``guarantee`` is the minimum over blocks -- the fit's honest overall strength. ``why_not_adam``
-    answers the standing question: gradient descent was used for exactly these blocks, for these
-    reasons, and nowhere else.
+    ``guarantee`` is the minimum over blocks. ``why_not_adam`` summarizes where
+    gradient optimization was used and why those blocks could not use a stronger
+    closed-form or convex route.
     """
 
     guarantee: Guarantee

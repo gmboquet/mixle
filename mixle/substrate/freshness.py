@@ -1,4 +1,4 @@
-"""Knowledge freshness -- drift on knowledge items themselves (O4).
+"""Freshness checks for substrate knowledge items.
 
 Models drift; so does knowledge. An item can go stale three ways, each independently checkable:
 
@@ -9,10 +9,10 @@ Models drift; so does knowledge. An item can go stale three ways, each independe
 * **aged out** -- older than the caller's ``max_age_s`` policy for its kind (a soft signal: age alone is
   a review trigger, not proof of wrongness -- the finding says so).
 
-:func:`check_freshness` audits one item and names every signal; :func:`freshness_report` sweeps a store.
-This is the monitor agent's knowledge-side feed: the same drift discipline the model monitor applies to
-live batches, applied to the knowledge the reasoner cites -- a stale citation should surface as a
-finding before it becomes a wrong answer.
+:func:`check_freshness` audits one item and names every signal;
+:func:`freshness_report` sweeps a store. These checks help monitoring workflows
+surface stale citations and moved artifacts before they affect downstream
+answers.
 """
 
 from __future__ import annotations

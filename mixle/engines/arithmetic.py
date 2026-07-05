@@ -10,7 +10,7 @@ instead of collapsing to floats during exact arithmetic::
     with arith.using_engine("symbolic"):
         arith.pi      # SymbolicExpression "pi", not 3.141592...
 
-This is the seam for letting users control the arithmetic backend without switching mixle to a
+This is the extension point for letting users control the arithmetic backend without switching mixle to a
 full computer-algebra system.  ``maxint`` / ``maxrandint`` / ``eps`` are implementation limits and
 tolerances (not mathematical constants), so they stay engine-independent.
 """

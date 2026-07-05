@@ -1,18 +1,13 @@
-"""The ``Harness`` product -- the deployable shell a tiny agent plugs into (R1), with templates (R2)
-and a substrate registry (R3).
+"""Application harnesses around a configured reasoner.
 
-A :class:`~mixle.substrate.reasoner.Reasoner` answers questions; a :class:`Harness` makes that safe to
-hand to an application: an input SCHEMA (requests that don't validate are refused before any model
-runs), an action WHITELIST (the reasoner may only fire the action kinds/names the app allows),
-GUARDRAILS (secrets are redacted from the input before it reaches any action, and from the answer
-before it leaves), and an ESCALATION POLICY (an abstention or a guardrail trip routes to a human/queue
-callback instead of vanishing). Every request produces a :class:`HarnessResult` that says exactly which
-gate fired -- refused / answered / escalated -- so the app can act on the outcome, not guess at it.
+A :class:`Harness` wraps a :class:`~mixle.substrate.reasoner.Reasoner` with
+input validation, an action whitelist, secret-redaction guardrails, and an
+optional escalation callback. Each request returns a :class:`HarnessResult`
+whose status is ``refused``, ``answered``, or ``escalated``.
 
-:func:`support_triage_harness` and :func:`monitoring_harness` are the R2 domain templates: one call
-each, opinionated defaults, a working shell. :func:`register_harness` / :func:`find_harnesses` are the
-R3 registry -- harnesses are indexed on the substrate as scoped ``artifact`` items, so a team can
-discover and share them under the same P-workstream scopes and governance as any other knowledge.
+``support_triage_harness`` and ``monitoring_harness`` provide ready-made
+templates. ``register_harness`` and ``find_harnesses`` store harnesses as
+scoped substrate artifacts so teams can discover reusable shells.
 """
 
 from __future__ import annotations

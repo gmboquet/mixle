@@ -1,10 +1,9 @@
-"""The pool plane (workstream H) -- offload a unit of work to a small GPU pool, get an artifact home.
+"""Pool execution primitives for offloading selected units of work.
 
-99% local by default; a block or verb is offloaded only when the planner names the reason and the
-economics price it worth the round-trip. v1 ships the abstraction (:class:`PoolJob`, :class:`Backend`,
-:func:`submit`) and a :class:`LocalBackend` (the pool degraded to this machine) so it works end-to-end
-and degrades gracefully to all-local. Real GPU backends plug into the same protocol behind the
-budget + confirm rails.
+The pool API keeps local execution as the default. A job is sent to a backend
+only when a planner or caller provides a reason, an estimated cost, and a
+budget. The default :class:`LocalBackend` executes the same protocol in-process,
+so workflows can use the pool abstraction before a remote GPU backend exists.
 """
 
 from __future__ import annotations

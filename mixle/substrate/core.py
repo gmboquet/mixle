@@ -1,19 +1,14 @@
-"""The knowledge substrate: one typed, provenanced, scoped store over everything the ecosystem knows.
+"""Core substrate store and item model.
 
-The substrate is to data at rest what the module graph is to computation: a single queryable surface
-that carries TYPE (which modality), PROVENANCE (where it came from), SCOPE (which team may see it),
-and FRESHNESS -- so retrieval can be planned rather than guessed. Raw data, documents, model
-artifacts, harvested traces, simulation outputs, ontology triples, and context packets all live here
-as :class:`SubstrateItem` s, each retrievable through its own best index.
+The substrate is a filesystem-backed, queryable surface for typed items with
+provenance, scope, freshness metadata, tags, and links. Raw data, documents,
+model artifacts, traces, simulation outputs, ontology triples, and context
+packets can all be represented as :class:`SubstrateItem` records.
 
-This is the local shard (workstream O1): a filesystem-backed store a user owns and can run offline.
-Team sharing (workstream P) publishes items from a local shard into a team scope; all-data RAG
-(workstream S) plans retrieval over the item KINDS; context assembly (workstream O2) selects items
-into a budgeted :class:`~mixle.substrate.context.ContextPacket`.
-
-v1 retrieval: text/document items rank by cosine over a learned embedding (:mod:`mixle.represent`);
-structured/record and everything else fall back to lexical + tag + provenance matching. The point of
-v1 is the SUBSTRATE -- typed items with provenance and scope, one query surface -- not a final ranker.
+Text and document items rank by cosine similarity over a learned embedding when
+available. Structured records and other items fall back to lexical, tag, and
+provenance matching. Higher-level retrieval and context assembly build on this
+single local store.
 """
 
 from __future__ import annotations
@@ -43,7 +38,7 @@ MODALITIES = (
 
 @dataclass
 class SubstrateItem:
-    """One typed, provenanced, scoped thing the ecosystem knows -- the substrate's unit of knowledge."""
+    """One typed, provenanced, scoped item in the substrate."""
 
     kind: str  # one of MODALITIES
     text: str = ""  # a retrievable text surface (the document, a summary, a serialized record)

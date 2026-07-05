@@ -1,10 +1,9 @@
-"""The knowledge substrate -- one typed, provenanced, scoped store over everything the ecosystem knows.
+"""Typed, provenanced, scoped storage for local knowledge and artifacts.
 
-The local shard (workstream O1 of the frontier ecosystem plan): raw data, documents, model artifacts,
-harvested traces, and (later) ontology triples / simulation outputs / context packets all live here as
-typed :class:`SubstrateItem` s with provenance and access scope, retrievable through one ``search``.
-This is the foundation the all-data RAG (S), context assembly (O2), and team-sharing (P) workstreams
-build on.
+The substrate stores raw data, documents, model artifacts, harvested traces,
+ontology triples, simulation outputs, and context packets as
+:class:`SubstrateItem` objects. Each item carries a kind, provenance, access
+scope, tags, links, and a retrievable text surface.
 """
 
 from __future__ import annotations

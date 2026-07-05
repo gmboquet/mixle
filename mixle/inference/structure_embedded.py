@@ -1,17 +1,15 @@
-"""Structure learning over embedded heterogeneous fields -- text enters the graph as a VECTOR node.
+"""Structure learning over embedded heterogeneous fields.
 
-:func:`mixle.inference.learn_bayesian_network` handles flat records of categoricals, counts, reals,
-and (since workstream C1) fixed-length vectors -- but a free-text field (a description, a log line, a
-title) is none of those. This module couples the structure learner to :mod:`mixle.represent`: each
-text field is embedded (:func:`mixle.represent.fit_embedder`) and the field enters the record as its
-EMBEDDING VECTOR -- a first-class multivariate node the graph relates to every other field via
-multivariate conditional-linear-Gaussian factors (as a child) and by splicing its components into the
-design matrix (as a parent). This replaces the earlier cluster-code proxy, which threw away all
-within-cluster structure (its resolution was ``n_clusters``); the vector node keeps the full
-embedding, so a text field can drive a real number continuously and be driven by one.
+:func:`mixle.inference.learn_bayesian_network` can model flat records containing
+categorical, count, real, and fixed-length vector fields. This module adapts
+free-text fields into that workflow by embedding each text value with
+:func:`mixle.represent.fit_embedder` and representing the field as a
+multivariate vector node.
 
-For interpretability, ``describe()`` still surfaces representative examples per embedding cluster
-(nearest-centroid), but the MODEL uses the vector, not the code.
+The learned graph relates the embedding vector to other fields through
+multivariate conditional-linear-Gaussian factors or by using vector components
+as parent design features. Representative examples per embedding cluster remain
+available for interpretation, but the model itself uses the full vector.
 """
 
 from __future__ import annotations
