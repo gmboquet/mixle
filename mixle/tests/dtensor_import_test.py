@@ -36,5 +36,36 @@ class DTensorImportTest(unittest.TestCase):
             self.assertIn(eng.DTensor, eng._ARRAY_ENGINE_REGISTRY)
 
 
+@unittest.skipUnless(HAS_TORCH, "requires torch")
+class DTensorShardingGateTest(unittest.TestCase):
+    """The DTensor component-sharding path is gated to torch >= 2.5 (older torch lacks op strategies)."""
+
+    def test_ops_supported_matches_torch_version(self):
+        import torch
+
+        from mixle.engines.torch_engine import _dtensor_ops_supported
+
+        major, minor = (int(p) for p in torch.__version__.split(".")[:2])
+        self.assertEqual(_dtensor_ops_supported(), (major, minor) >= (2, 5))
+
+    def test_component_sharding_gated_on_old_torch(self):
+        # a *sentinel* mesh object is enough: the gate fires on version before touching the mesh
+        from mixle.engines.torch_engine import TorchEngine, _dtensor_ops_supported
+
+        if _dtensor_ops_supported():
+            # torch >= 2.5: construction is allowed (no process group needed just to store the mesh)
+            TorchEngine(device="cpu", mesh=object(), shard="components")
+        else:
+            with self.assertRaises(ValueError) as ctx:
+                TorchEngine(device="cpu", mesh=object(), shard="components")
+            self.assertIn("torch >= 2.5", str(ctx.exception))
+            self.assertIn("model_parallel", str(ctx.exception))  # points to the working alternative
+
+    def test_no_mesh_never_gated(self):
+        from mixle.engines.torch_engine import TorchEngine
+
+        TorchEngine(device="cpu")  # the ordinary single-device engine is unaffected on any torch
+
+
 if __name__ == "__main__":
     unittest.main()
