@@ -198,6 +198,46 @@ def study(
     return model
 
 
+# -- research proposals + conjectures (the don't-know-but-here's-how half) ---------------------------
+
+
+@dataclass
+class ResearchProposal:
+    """An honest gap, made actionable: what is missing and the ranked ways to acquire it."""
+
+    question: str
+    missing: str
+    nearest_knowledge: list[dict[str, Any]] = field(default_factory=list)
+    options: list[dict[str, Any]] = field(default_factory=list)
+    note: str = ""
+
+    def best(self) -> dict[str, Any] | None:
+        return self.options[0] if self.options else None
+
+    def render(self) -> str:
+        lines = [f"I don't know: {self.missing}."]
+        if self.nearest_knowledge:
+            lines.append("Closest things I do know:")
+            lines += [f"  - ({k['score']}) {k['text']}" for k in self.nearest_knowledge]
+        lines.append("Ways we could find out (best first):")
+        lines += [f"  {i + 1}. {o['how']}  [cost ~{o['cost']}]" for i, o in enumerate(self.options[:4])]
+        return "\n".join(lines)
+
+
+@dataclass
+class Conjecture:
+    """A curiosity-generated question: explicitly NOT knowledge -- a hypothesis with a proposed test."""
+
+    question: str
+    sources: list[str] = field(default_factory=list)  # the knowledge items that sparked it
+    status: str = "conjecture"  # never 'fact' until an investigation answers it with provenance
+    proposal: ResearchProposal | None = None
+
+    def render(self) -> str:
+        head = f"[CONJECTURE] {self.question}"
+        return head if self.proposal is None else f"{head}\n  test: {self.proposal.best()['how']}"
+
+
 # -- the assembled reasoner --------------------------------------------------------------------------
 
 
@@ -260,6 +300,121 @@ class Scientist:
             inv.abstained = True
             inv.note = "answer could not be grounded in the retrieved evidence"
         return inv
+
+    # -- "I don't know, but here is how we could find out" --------------------------------------------
+    def propose(self, question: str, investigation: Any = None) -> ResearchProposal:
+        """Turn an abstention into a research plan: what is missing, and ranked ways to acquire it.
+
+        This is the difference between a dead end and a scientist: an honest "I don't know" comes back
+        with the acquisition options -- add knowledge, run a mounted capability, fit a model to data,
+        simulate, or delegate outward -- each with what it would take and what it would settle. The
+        ranking is EIG-per-cost over the mounted actions plus the generic acquisition strategies."""
+        from mixle.substrate.act import relevance_of
+        from mixle.substrate.retrieve import retrieve
+
+        # what the substrate ALMOST knows: the nearest neighbors below the answer floor name the gap
+        near = retrieve(self.knowledge, question, k=3)
+        neighbors = [
+            {"text": it.text[:120], "score": round(float(s), 3)} for it, s in zip(near.items, near.scores) if s > 0.05
+        ]
+
+        options: list[dict[str, Any]] = []
+        # 1. mounted capabilities that are topically close but did not fire / did not suffice
+        for a in self._actions:
+            rel = relevance_of(a, question)
+            if rel > 0.0:
+                options.append(
+                    {
+                        "how": f"run the mounted {a.kind} capability {a.name!r}",
+                        "kind": a.kind,
+                        "relevance": round(rel, 3),
+                        "cost": a.cost,
+                        "score": round(rel / max(a.cost, 1e-9), 3),
+                    }
+                )
+        # 2. the generic acquisition strategies, priced by convention (cheap -> expensive)
+        generic = [
+            ("ingest the missing source into the knowledge base (learn())", "retrieve", 1.0),
+            ("fit a model to relevant data and query it (create()/study())", "create", 4.0),
+            ("design an experiment or simulation whose outcome decides it (simulate())", "simulate", 3.0),
+            ("delegate to an external model or expert, UQ-gated (external_action)", "delegate", 8.0),
+        ]
+        base_rel = 0.3  # a generic strategy is always weakly applicable; ranking is by cost
+        for how, kind, cost in generic:
+            options.append(
+                {"how": how, "kind": kind, "relevance": base_rel, "cost": cost, "score": round(base_rel / cost, 3)}
+            )
+        options.sort(key=lambda o: -o["score"])
+
+        missing = (
+            "no stored knowledge is close to this question"
+            if not neighbors
+            else "nearby knowledge exists but none of it answers the question"
+        )
+        return ResearchProposal(
+            question=question,
+            missing=missing,
+            nearest_knowledge=neighbors,
+            options=options,
+            note=getattr(investigation, "note", "") if investigation is not None else "",
+        )
+
+    def investigate(self, question: str, **kw: Any) -> Any:
+        """``ask``, but an abstention comes back WITH its research proposal attached -- never a bare no."""
+        inv = self.ask(question, **kw)
+        if inv.abstained:
+            inv.proposal = self.propose(question, inv)
+        return inv
+
+    # -- curiosity: conjectures with proposed tests, never asserted as fact ---------------------------
+    def wonder(self, topic: str | None = None, *, n: int = 3, seed: int = 0) -> list[Conjecture]:
+        """Generate testable conjectures from what it knows -- curiosity with receipts attached.
+
+        Pairs of knowledge items (optionally biased toward ``topic``) are handed to the local LLM with
+        the instruction to propose a QUESTION or HYPOTHESIS connecting them. Every output is labeled a
+        CONJECTURE and carries a proposed test (the research-proposal machinery), and is checked NOT to
+        already be answerable from the substrate -- curiosity about what it does not know, not
+        rediscovery of what it does."""
+        rng = np.random.RandomState(seed)
+        items = [i for i in self.knowledge.all() if i.text]
+        if topic:
+            from mixle.substrate.retrieve import retrieve
+
+            hits = retrieve(self.knowledge, topic, k=max(4, n * 2))
+            items = [i for i in hits.items if i.text] or items
+        if len(items) < 2:
+            return []
+
+        out: list[Conjecture] = []
+        seen: set[str] = set()
+        attempts = 0
+        while len(out) < n and attempts < n * 4:
+            attempts += 1
+            a, b = (items[i] for i in rng.choice(len(items), size=2, replace=False))
+            prompt = (
+                f"Fact A: {a.text}\nFact B: {b.text}\n\n"
+                "Propose ONE short, testable scientific question that connects these two facts. "
+                "Reply with just the question."
+            )
+            q = generate(prompt, max_new_tokens=48, temperature=0.7).strip().split("\n")[0]
+            for prefix in ("question:", "q:", "hypothesis:"):
+                if q.lower().startswith(prefix):
+                    q = q[len(prefix) :].strip()
+            if not q or q.lower() in seen or len(q) < 12:
+                continue
+            seen.add(q.lower())
+            probe = self.ask(q)
+            if not probe.abstained:
+                continue  # it already knows -- that is rediscovery, not curiosity
+            out.append(
+                Conjecture(
+                    question=q,
+                    sources=[a.id, b.id],
+                    status="conjecture",
+                    proposal=self.propose(q),
+                )
+            )
+        return out
 
     # -- certified perception ------------------------------------------------------------------------
     @staticmethod
