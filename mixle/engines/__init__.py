@@ -76,10 +76,13 @@ _ARRAY_ENGINE_REGISTRY: dict[type[Any], ComputeEngine] = {
 
 if torch is not None:
     _ARRAY_ENGINE_REGISTRY[torch.Tensor] = TorchEngine()
-    try:
+    try:  # public path (torch >= 2.5), then the private module torch 2.0-2.4 ship it under
         from torch.distributed.tensor import DTensor
-    except ImportError:  # pragma: no cover - depends on torch build
-        DTensor = None
+    except ImportError:
+        try:
+            from torch.distributed._tensor import DTensor
+        except ImportError:  # pragma: no cover - depends on torch build
+            DTensor = None
     if DTensor is not None:
         _ARRAY_ENGINE_REGISTRY[DTensor] = TorchEngine()
 else:
