@@ -1,6 +1,8 @@
 """Foundation capabilities on laptop resources -> compressed to edge devices, with honest receipts.
 
-Answers two questions the workplan raised, each measured on real data, no network:
+Answers two questions the workplan raised, each measured on real data. Needs network on the FIRST run: it
+downloads the CIFAR-10 / banking77 datasets and the CLIP / MiniLM open weights from Hugging Face (cached
+thereafter, so later runs are offline):
 
   1. Can a laptop RUN a foundation capability?  YES. A frozen open-weight encoder (605 MB CLIP, or 90 MB
      MiniLM) + a ~10 KB certified mixle head classifies at 90%+ on CPU in seconds. The heavy part is the

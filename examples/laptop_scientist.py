@@ -1,8 +1,9 @@
 """The laptop scientist: cross-modal perception + certified learning + verified reasoning, assembled.
 
-Run it: ``python examples/laptop_scientist.py``. No network (weights from the local HF cache), CPU only,
-a couple of minutes. Three acts, each a RECEIPT -- a measured claim, next to the named alternative it
-beats:
+Run it: ``python examples/laptop_scientist.py``. CPU only, a couple of minutes. Needs network on the FIRST
+run: it downloads the CIFAR-10 dataset and the CLIP / local-LLM open weights from Hugging Face (cached
+thereafter, so later runs are offline). Three acts, each a RECEIPT -- a measured claim, next to the named
+alternative it beats:
 
   ACT 1  PERCEIVE + LEARN   real CLIP image features -> a closed-form certified head on CIFAR-10, vs a
                             torch CNN given the SAME wall-clock budget. mixle wins on accuracy AND ships
