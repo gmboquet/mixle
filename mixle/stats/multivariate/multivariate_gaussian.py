@@ -648,7 +648,10 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         x_weight = np.multiply(x.T, weights)
         self.count += weights.sum()
         self.sum += x_weight.sum(axis=1)
-        self.sum2 += np.einsum("ji,ik->jk", x_weight, x)
+        # the weighted second moment sum_i w_i x_i x_i^T is (x.T * w) @ x -- a single BLAS gemm.
+        # np.einsum runs the naive C loop here (no BLAS), which dominated MVN EM at ~76% of fit time
+        # (20-36x slower than matmul on this contraction); the plain matmul is exact and multithreaded.
+        self.sum2 += x_weight @ x
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Vectorized initialization of the accumulator. Calls seq_update().
