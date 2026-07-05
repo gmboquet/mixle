@@ -36,7 +36,13 @@ torchrun --nproc_per_node=2 dtensor_torchrun.py
 - **BUG (fixed):** DTensor import was broken on torch 2.0–2.4 — the symbols live under
   `torch.distributed._tensor`, not the (empty) public `torch.distributed.tensor`. Fixed with a fallback;
   the sharded component-tensor round-trip then passes.
-- **Known torch limitation:** `logsumexp` has no DTensor sharding strategy on torch 2.4, so a fully
-  DTensor-sharded *mixture* EM fit is still gated there. The mixle-native `backend="model_parallel"` is
-  the working multi-worker model-parallel route (bit-identical, GPU included).
-- Reproducible for pennies: the whole campaign cost **$0.06** of rented GPU.
+- **Fully DTensor-sharded mixture EM: works on torch >= 2.5, gated below.** Investigating the
+  `logsumexp` crash showed torch 2.0-2.4 register **no** DTensor sharding strategies for the mixture
+  E-step's ops (`logsumexp`, `isinf`, ...) — not just one, so backporting each is whack-a-mole. torch
+  >= 2.5 runs the whole sharded fit **bit-identical to serial** (verified Δ=1e-15 on torch 2.12, CPU,
+  2 ranks). `TorchEngine` now **gates the component-sharding path to torch >= 2.5** with a clear error
+  pointing to `backend="model_parallel"` (the engine-agnostic component-parallel route, bit-identical
+  on any torch, GPU included). `dtensor_cpu.py` reproduces + verifies this on any torch, no GPU needed
+  (`torchrun --nproc_per_node=2 dtensor_cpu.py`): GATED on torch<2.5, PASS on >=2.5.
+- Reproducible for pennies: the campaign cost **$0.06** of rented GPU; the DTensor gap was then
+  root-caused and fixed entirely on CPU with a throwaway torch-2.4 venv — free.

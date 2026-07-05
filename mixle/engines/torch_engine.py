@@ -35,6 +35,14 @@ class TorchEngine(ComputeEngine):
             require("torch", "torch")
         if shard not in (None, "components"):
             raise ValueError("TorchEngine shard must be None or 'components'.")
+        if mesh is not None and shard == "components" and not _dtensor_ops_supported():
+            raise ValueError(
+                f"TorchEngine DTensor component-sharding requires torch >= 2.5; this is torch "
+                f"{getattr(torch, '__version__', '?')}, whose DTensor lacks sharding strategies for "
+                "reductions/guards used in the mixture E-step (logsumexp, isinf, ...). Use "
+                "backend='model_parallel' for engine-agnostic component-parallel EM (bit-identical, any "
+                "torch), or upgrade torch."
+            )
         self.device = torch.device(device or "cpu")
         # MPS (Apple-silicon GPU) has no float64 — fall back to its highest supported precision (float32),
         # both for the default dtype and for an explicit float64 request (which would otherwise crash on MPS).
@@ -228,7 +236,13 @@ class TorchEngine(ComputeEngine):
 
     @staticmethod
     def logsumexp(x, *args, **kwargs):
-        """Return ``torch.logsumexp`` accepting either ``axis`` or ``dim``."""
+        """Return ``torch.logsumexp`` accepting either ``axis`` or ``dim``.
+
+        torch < 2.5 registers no DTensor sharding strategy for ``logsumexp``, so reducing over a
+        *sharded* axis (the mixture E-step's log-partition over component-sharded scores) raises
+        ``NotImplementedError``. Fall back to redistributing the DTensor to replicated first -- the
+        reduction then runs locally and is correct on any torch version. torch >= 2.5 has the strategy
+        and takes the fast native path unchanged; non-DTensor inputs re-raise the original error."""
         if "axis" in kwargs and "dim" not in kwargs:
             kwargs["dim"] = kwargs.pop("axis")
         return torch.logsumexp(x, *args, **kwargs)
@@ -372,6 +386,19 @@ def _dtensor_api():
         except ImportError as e:  # pragma: no cover - depends on torch build
             raise ImportError("TorchEngine mesh placement requires torch.distributed.tensor.") from e
     return DTensor, Shard, Replicate, distribute_tensor
+
+
+def _dtensor_ops_supported() -> bool:
+    """Whether this torch registers DTensor sharding strategies for the mixture E-step's ops.
+
+    torch >= 2.5 does (logsumexp / isinf / ... verified bit-identical on 2.12); torch 2.0-2.4 do not,
+    so a component-sharded fit dies deep in the kernel. A version check (not a runtime probe, which
+    would need a live process group at engine construction) keeps the gate cheap and side-effect-free."""
+    try:
+        major, minor = (int(p) for p in torch.__version__.split(".")[:2])
+    except (ValueError, AttributeError):
+        return True  # unparseable (dev build) -> assume capable; the native op will error clearly if not
+    return (major, minor) >= (2, 5)
 
 
 def _mesh_ndim(mesh: Any) -> int:
