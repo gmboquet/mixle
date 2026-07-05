@@ -156,18 +156,22 @@ class DPOAccumulator(SequenceEncodableStatisticAccumulator):
         self.x: list = []
         self.ch: list = []
         self.rj: list = []
+        self.w: list = []  # per-pair weight (EM responsibility / streaming decay / sample weight)
 
     def update(self, xcr: Any, weight: float, estimate: Any) -> None:
         self.x.append(np.atleast_1d(np.asarray(xcr[0], dtype=float)))
         self.ch.append(int(xcr[1]))
         self.rj.append(int(xcr[2]))
+        self.w.append(float(weight))
 
     def seq_update(self, enc: Any, weights: Any, estimate: Any) -> None:
         x, ch, rj = enc
+        ws = np.asarray(weights, dtype=float).ravel() if weights is not None else np.ones(len(x))
         for i in range(len(x)):
             self.x.append(np.atleast_1d(x[i]))
             self.ch.append(int(ch[i]))
             self.rj.append(int(rj[i]))
+            self.w.append(float(ws[i]))
 
     def initialize(self, xcr: Any, weight: float, rng: Any) -> None:
         self.update(xcr, weight, None)
@@ -176,17 +180,18 @@ class DPOAccumulator(SequenceEncodableStatisticAccumulator):
         self.seq_update(enc, weights, None)
 
     def combine(self, other: Any) -> DPOAccumulator:
-        xo, co, ro = other
+        xo, co, ro, wo = other
         self.x.extend(xo)
         self.ch.extend(co)
         self.rj.extend(ro)
+        self.w.extend(wo)
         return self
 
     def value(self) -> tuple:
-        return (list(self.x), list(self.ch), list(self.rj))
+        return (list(self.x), list(self.ch), list(self.rj), list(self.w))
 
     def from_value(self, v: tuple) -> DPOAccumulator:
-        self.x, self.ch, self.rj = list(v[0]), list(v[1]), list(v[2])
+        self.x, self.ch, self.rj, self.w = list(v[0]), list(v[1]), list(v[2]), list(v[3])
         return self
 
     def acc_to_encoder(self) -> DPOEncoder:
@@ -214,9 +219,9 @@ class DPOModelEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> DPOModel:
         torch = _torch()
-        xs, chs, rjs = suff_stat
+        xs, chs, rjs, ws = suff_stat
         out = DPOModel(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
-        if not xs:
+        if len(xs) == 0:
             return out
         dev = self.device
         self.policy.to(dev)
@@ -226,6 +231,8 @@ class DPOModelEstimator(ParameterEstimator):
         xt = torch.as_tensor(np.array(xs), dtype=torch.float32).to(dev)
         ct = torch.as_tensor(np.array(chs), dtype=torch.long).to(dev)
         rt = torch.as_tensor(np.array(rjs), dtype=torch.long).to(dev)
+        wt = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32).to(dev)  # per-pair weight
+        wsum = wt.sum().clamp(min=1e-8)
         ar = torch.arange(len(ct), device=dev)
         opt = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
         with torch.no_grad():  # reference log-probs are constant -- compute once
@@ -235,7 +242,7 @@ class DPOModelEstimator(ParameterEstimator):
             opt.zero_grad()
             lp = torch.log_softmax(self.policy(xt), dim=1)
             margin = (lp[ar, ct] - lr_ch) - (lp[ar, rt] - lr_rj)
-            loss = -torch.nn.functional.logsigmoid(self.beta * margin).mean()
+            loss = -(wt * torch.nn.functional.logsigmoid(self.beta * margin)).sum() / wsum  # weighted DPO loss
             loss.backward()
             opt.step()
         return out
