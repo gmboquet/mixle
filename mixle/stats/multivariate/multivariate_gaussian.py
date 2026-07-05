@@ -40,6 +40,30 @@ from mixle.stats.compute.pdist import (
 from mixle.utils.aliasing import MISSING, coalesce_alias
 
 
+def _robust_cho_factor(covar: np.ndarray):
+    """Cholesky-factor a covariance, self-healing a covariance that lost positive-definiteness.
+
+    A sample covariance ``E[xx^T] - mu mu^T`` is PD in exact arithmetic, but float32 accumulation (GPU /
+    MPS engines) can lose PD-ness to catastrophic cancellation, and a near-empty EM component can go
+    singular. The fast path (a genuinely PD float64 covariance) is UNCHANGED. On failure, symmetrize
+    (fixes float32 asymmetry) and add a trace-scaled jitter, escalating until PD -- so the fit proceeds
+    instead of crashing at ``cho_factor``. The jitter is minimal (starts at 1e-10 * mean-diagonal)."""
+    try:
+        return scipy.linalg.cho_factor(covar)
+    except (scipy.linalg.LinAlgError, np.linalg.LinAlgError):
+        sym = 0.5 * (covar + covar.T)
+        scale = float(np.trace(sym)) / max(sym.shape[0], 1)
+        scale = scale if np.isfinite(scale) and scale > 0 else 1.0
+        eye = np.eye(sym.shape[0])
+        jitter = 1e-10 * scale
+        for _ in range(12):
+            try:
+                return scipy.linalg.cho_factor(sym + jitter * eye)
+            except (scipy.linalg.LinAlgError, np.linalg.LinAlgError):
+                jitter *= 10.0
+        raise
+
+
 class MultivariateGaussianFisherView(FixedFisherView):
     def __init__(self, dist: Any) -> None:
         self.dim = int(dist.dim if hasattr(dist, "dim") else len(dist.mu))
@@ -209,7 +233,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         self.mu = np.asarray(mu, dtype=float)
         self.covar = np.asarray(covar, dtype=float)
         self.covar = np.reshape(self.covar, (len(self.mu), len(self.mu)))
-        self.chol = scipy.linalg.cho_factor(self.covar)
+        self.chol = _robust_cho_factor(self.covar)
         self.name = name
         self.keys = keys
 
