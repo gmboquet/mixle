@@ -18,6 +18,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.models._neural_serial import decode_module, encode_module
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -41,6 +42,8 @@ def _log_softmax(logits: np.ndarray) -> np.ndarray:
 
 class StreamingTransformer(SequenceEncodableProbabilityDistribution):
     """Wraps a live, persistently-trained module. ``seq_log_density`` = next-token ``log p`` (eval/telemetry)."""
+
+    __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
 
     def __init__(self, module: Any, device: str = "cpu") -> None:
         self.module = module
@@ -101,6 +104,24 @@ class StreamingTransformer(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> StreamingTokenEncoder:
         return StreamingTokenEncoder()
+
+    # --- serialization: persist the module (as portable bytes); registered below so a mixture holding this
+    # leaf round-trips through to_dict/to_json/pickle as well. ---
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state["module"] = encode_module(self.module)
+        return state
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.module = decode_module(state["module"])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"module": encode_module(self.module), "device": self.device}
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> StreamingTransformer:
+        return cls(decode_module(payload["module"]), device=payload["device"])
 
 
 class StreamingTransformerSampler(DistributionSampler):
@@ -249,6 +270,18 @@ def stream_fit(
             log(step, window_sum / window_n)
             window_sum, window_n = 0.0, 0
     return est.estimate(None, acc.value()), acc.value()
+
+
+def _register_serializable() -> None:
+    # mixle.models classes aren't in the stats/analysis auto-walk, so opt in explicitly for to_json/from_json.
+    try:
+        from mixle.utils.serialization import register_serializable_class
+    except Exception:  # pragma: no cover
+        return
+    register_serializable_class(StreamingTransformer)
+
+
+_register_serializable()
 
 
 # --- back-compat aliases (the classes were renamed off the '...Leaf' suffix) ---
