@@ -113,30 +113,35 @@ class Registry:
 
         return _save
 
-    def get(self, name: str, version: str = "latest") -> tuple[Any, dict | None]:
-        """Load ``(model, header)`` for a version (``"latest"`` = highest-numbered)."""
+    def _resolve_version(self, name: str, version: str) -> str:
+        """Resolve ``"latest"`` to the highest version and raise a clear KeyError for an unknown name or
+        version -- rather than a bare IndexError on an unregistered name or a raw FileNotFoundError (which
+        leaks the store path) on a missing version. Mirrors the guard get() already had."""
         vs = self.versions(name)
         if not vs:
             raise KeyError(f"no versions registered for model {name!r}")
         if version == "latest":
-            version = vs[-1]
+            return vs[-1]
+        if version not in vs:
+            raise KeyError(f"{name!r} has no version {version!r}")
+        return version
+
+    def get(self, name: str, version: str = "latest") -> tuple[Any, dict | None]:
+        """Load ``(model, header)`` for a version (``"latest"`` = highest-numbered)."""
+        version = self._resolve_version(name, version)
         with open(os.path.join(self.root, name, version + ".json")) as f:
             payload = json.load(f)
         return from_serializable(payload["model"]), payload.get("header")
 
     def header(self, name: str, version: str = "latest") -> dict | None:
         """Just the provenance header of a version (no model deserialization)."""
-        vs = self.versions(name)
-        if version == "latest":
-            version = vs[-1]
+        version = self._resolve_version(name, version)
         with open(os.path.join(self.root, name, version + ".json")) as f:
             return json.load(f).get("header")
 
     def metadata(self, name: str, version: str = "latest") -> dict:
         """Just the ``metadata`` of a version (no model deserialization) -- e.g. a checkpoint's iteration."""
-        vs = self.versions(name)
-        if version == "latest":
-            version = vs[-1]
+        version = self._resolve_version(name, version)
         with open(os.path.join(self.root, name, version + ".json")) as f:
             return json.load(f).get("metadata") or {}
 
