@@ -34,15 +34,20 @@ Findings below are from a full `--gpu --heavy` run on a rented RTX A4000 + 16-co
 - **Self-healing MVN Cholesky** (`845cc1d`): float32 engines (MPS / CUDA) crashed at `cho_factor` on a
   non-PD covariance (precision loss) at higher dim; now symmetrize + minimal jitter only on failure, the
   float64 path byte-unchanged.
+- **`torch-cuda` MVN mixture OOM at dim=128** (`825165c`): the fused GPU E-step materialized a per-sample,
+  per-component `(N, K, dim, dim)` outer-product tensor (~21 GB) in three places — each really a gemm.
+  Fixed all three (per-component `(x*w[:,k]).T@x` second moment; flatten-feature matmul for the forward
+  log-density's `<T_n, eta_k>`; `w.T @ arr_flat` in the generic matrix-moment reducer). **Verified on a
+  rented RTX 3060 (12 GB):** the exact failing config now fits at **2.674 GB peak** (was a 19.53 GiB
+  single-alloc attempt), CUDA-vs-numpy parity Δll=5.8e-11.
+- **HMM numba silently off** (`f36a096`): the profiled HMM fit ran numpy Baum-Welch because the
+  distribution defaulted `use_numba=False` while the estimator defaulted numba-on, and
+  `optimize(prev_estimate=)` encodes via the distribution. Aligned the default → **5.7× faster**
+  (670→118 ms), bit-identical. HMM is still the slowest family; deeper wins need custom emission kernels.
 
 ## Open bottlenecks (flagged as tasks)
 
 - **`torch-cpu` engine is 11–31× *slower* than numpy** (MVN dim 16→128) — huge per-op dispatch overhead.
   The torch engine only pays off on GPU; on CPU, numpy wins decisively.
-- **`torch-cuda` MVN OOMs at dim=128** — it tries to allocate ~20 GB (an N·K·dim·dim intermediate); the
-  fused GPU covariance accumulation needs chunking / a gemm that doesn't materialize per-sample outer
-  products.
-- **HMM is ~90× slower per row than GMM** — the forward-backward `seq_update` plus heavy numpy reductions
-  (per-sequence work); the largest remaining single-family speedup opportunity.
 - **Single-node `model_parallel` is 0.89× (slower)** at N=200k — parallelism overhead exceeds the compute
   saved until problems are much larger; worth a crossover-size heuristic before auto-parallelizing.
