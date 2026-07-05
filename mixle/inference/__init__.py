@@ -38,6 +38,7 @@ from mixle.inference.bayesian_network import (
 # belief states: a distribution over a latent, updated by evidence (the assimilation step)
 from mixle.inference.belief import BeliefState, GaussianBelief, as_belief
 from mixle.inference.blackbox import LaplacePosterior, laplace_posterior
+from mixle.inference.calibrate_fit import CalibrationReport, calibration_report
 
 # calibration diagnostics — "is my probability / interval actually calibrated?"
 from mixle.inference.calibration import (
@@ -64,6 +65,7 @@ from mixle.inference.conformal import (
     split_conformal,
     weighted_conformal,
 )
+from mixle.inference.create import CreatedModel, create
 from mixle.inference.cross_validation import (
     NestedFold,
     blocked_kfold,
@@ -83,6 +85,15 @@ from mixle.inference.decision import RiskProfile, bayes_action
 from mixle.inference.em import EMStrategy, run_em
 from mixle.inference.errors_in_variables import DemingFit, deming_regression, propagate_uncertainty, simex
 from mixle.inference.estimation import BayesianStreamingEstimator, EMStep, best_of, fit, optimize
+
+# hierarchical within-subject event study / difference-in-differences (confirmed-exposure influence)
+from mixle.inference.event_study import (
+    EventStudyResult,
+    gaussian_effect,
+    hierarchical_event_study,
+    poisson_lograte_effect,
+    tipping_drift,
+)
 from mixle.inference.explain import Explanation, explain
 from mixle.inference.fisher import FisherView, FixedFisherView, to_fisher
 from mixle.inference.forecast import Forecast, forecast
@@ -144,6 +155,14 @@ from mixle.inference.nonparametric import (
     sign_test,
     wilcoxon_signed_rank,
 )
+from mixle.inference.orchestration import (
+    LearnedAcquisition,
+    LearnedPolicy,
+    learn_action_policy,
+    learn_placement_policy,
+    learn_schedule_policy,
+    meta_improve,
+)
 
 # ordinal (cumulative-link) regression + rank-concordance measures
 from mixle.inference.ordinal import (
@@ -154,10 +173,28 @@ from mixle.inference.ordinal import (
     ordinal_regression,
     somers_d,
 )
+from mixle.inference.placement import BlockPlacement, PlacementPlan, PoolSpec, plan_placement
+from mixle.inference.planning import (
+    BlockPlan,
+    EstimationCertificate,
+    EstimationSchedule,
+    Guarantee,
+    SchedulePass,
+    certify,
+    plan_estimation,
+    schedule,
+)
 from mixle.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
 
 # closed-form variational projections — compress a structured teacher onto a smaller student exactly
 from mixle.inference.project import collapse_mixture, fisher_merge, gaussian_kl, moment_project, reduce_mixture
+from mixle.inference.reproduce import (
+    ReproReceipt,
+    data_fingerprint,
+    param_fingerprint,
+    record_fit,
+    verify_reproducible,
+)
 
 # bootstrap / permutation inference for arbitrary statistics (distribution-free uncertainty)
 from mixle.inference.resampling import (
@@ -194,6 +231,8 @@ from mixle.inference.scoring import (
 
 # verifier-based selection — the generic best-of-N test-time-compute selector
 from mixle.inference.select import SelectionResult, select_best
+from mixle.inference.simulate import Scenario, Simulator, simulate
+from mixle.inference.skill import Skill, SkillRegistry, default_registry, skill
 
 # online / streaming estimators (single discoverable surface for the streaming drivers)
 from mixle.inference.streaming import IncrementalEstimator, StreamingEstimator
@@ -219,6 +258,7 @@ from mixle.inference.survival import (
     nelson_aalen,
     to_person_period,
 )
+from mixle.inference.synthesize import Dataset, synthesize
 
 # sampling-based inference — the engine-agnostic NUTS/ADVI facade (target must be sampleable/differentiable)
 from mixle.inference.target import (
@@ -255,6 +295,7 @@ from mixle.inference.uncertainty import (
     predictive_distribution,
     semantic_entropy,
 )
+from mixle.inference.uq import UQResult, uq
 from mixle.stats.bayes.conjugate import (
     ConjugatePosterior,
     MixtureConjugatePosterior,
@@ -308,10 +349,58 @@ __all__ = [
     # MLOps / production layer (provenance, drift, registry, serving, monitor) lives in the
     # mixle.inference.production subpackage -- imported as `from mixle.inference.production import ...`.
     "production",
+    # estimation planning + certificates (the right-method-provably keystone)
+    "certify",
+    "plan_estimation",
+    "schedule",
+    "EstimationSchedule",
+    "SchedulePass",
+    "EstimationCertificate",
+    "BlockPlan",
+    "Guarantee",
+    # uq() -- one verb, method auto-selected (Laplace / conformal / semantic entropy)
+    "uq",
+    "UQResult",
+    # calibration as a post-condition of fitting (is the model's uncertainty honest on holdout?)
+    "calibration_report",
+    "CalibrationReport",
+    # placement planning -- the local-vs-pool axis of the estimation plan
+    "plan_placement",
+    "PlacementPlan",
+    "BlockPlacement",
+    "PoolSpec",
+    # learned orchestration -- the platform's own decisions as models trained on telemetry (never-worse)
+    "learn_placement_policy",
+    "LearnedPolicy",
+    "learn_action_policy",
+    "LearnedAcquisition",
+    "learn_schedule_policy",
+    "meta_improve",
+    # simulate() -- a fitted model as a runtime data generator with causal intervention scenarios
+    "simulate",
+    "Simulator",
+    "Scenario",
+    # synthesize() -- a dataset factory: sample, label, keep only what verifies
+    "synthesize",
+    "Dataset",
+    # create() -- data (+ budget/device) to a certified model artifact
+    "create",
+    "CreatedModel",
+    # skill() -- package a fitted model / function as a named, reusable, indexed verb
+    "skill",
+    "Skill",
+    "SkillRegistry",
+    "default_registry",
     # the Posterior algebra (q(z|x) / q(theta|x) / posterior-predictive behind one interface)
     "posterior",
     "ParameterPosterior",
     "PredictivePosterior",
+    # reproducibility receipts -- record a fit, replay it, check it comes out bit-for-bit
+    "record_fit",
+    "verify_reproducible",
+    "ReproReceipt",
+    "data_fingerprint",
+    "param_fingerprint",
     # belief states (distribution over a latent, updated by evidence)
     "BeliefState",
     "GaussianBelief",
@@ -501,4 +590,10 @@ __all__ = [
     "available_backends",
     "InferenceBackend",
     "register_inference_backend",
+    # hierarchical within-subject event study / difference-in-differences
+    "EventStudyResult",
+    "gaussian_effect",
+    "poisson_lograte_effect",
+    "hierarchical_event_study",
+    "tipping_drift",
 ]

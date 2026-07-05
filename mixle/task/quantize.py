@@ -138,6 +138,8 @@ class QuantizedClassifierIO(_ClassifierIO):
     kind = "quantized_classifier"
 
     def logits_batch(self, model: Any, raw_inputs: list[Any]) -> np.ndarray:
+        if not raw_inputs:  # empty batch: (0, K), skip the forward (reshape can't infer -1 at size 0)
+            return np.empty((0, len(self.labels)), dtype=np.float32)
         return np.asarray(model.logits(self.features(raw_inputs))).reshape(len(raw_inputs), -1)
 
     def to_spec(self) -> dict[str, Any]:
@@ -166,7 +168,7 @@ def _torch_linears(module: Any) -> list[Any]:
     return [m for m in module.modules() if type(m).__name__ == "Linear"]
 
 
-def quantize_mlp(student: TaskModel, *, bits: int = 8) -> TaskModel:
+def quantize_mlp(student: TaskModel, *, bits: int = 8, clip_percentile: float | None = None) -> TaskModel:
     """Quantize a trained torch MLP student to an int8/int4, numpy-inference :class:`TaskModel`.
 
     Per-tensor symmetric weight quantization (``scale = max|W| / qmax`` with ``qmax`` 127 for int8, 7
@@ -175,6 +177,13 @@ def quantize_mlp(student: TaskModel, *, bits: int = 8) -> TaskModel:
     ``payload="arrays"`` (int4 weights nibble-packed on disk: two per byte), and -- having no torch
     dependence at inference -- qualifies for ``torch_free`` devices. LNS needs LUT matmul kernels
     (``mixle.engines.lns``) and is left explicitly unimplemented.
+
+    ``clip_percentile`` guards heavy-tailed weights. Plain max-scaling lets one outlier set the whole
+    layer's scale: at int4 (``qmax=7``) a single weight 30x the rest quantizes everything else to 0,
+    collapsing the layer. When set (e.g. ``99.9``), the scale is derived from that percentile of
+    ``|W|`` instead of the max, and weights above it saturate at ``+/-qmax`` -- the bulk of the
+    distribution keeps its resolution at the cost of clipping a few outliers. Default ``None`` keeps
+    the exact max-scale behavior (bit-identical on well-behaved weights).
     """
     if bits not in _QMAX:
         raise NotImplementedError(
@@ -182,6 +191,8 @@ def quantize_mlp(student: TaskModel, *, bits: int = 8) -> TaskModel:
         )
     if student.payload != "torch":
         raise ValueError("quantize_mlp expects a torch MLP student (payload='torch')")
+    if clip_percentile is not None and not (0.0 < clip_percentile <= 100.0):
+        raise ValueError("clip_percentile must be in (0, 100]")
     linears = _torch_linears(student.model)
     if not linears:
         raise ValueError("student module has no Linear layers to quantize")
@@ -195,7 +206,11 @@ def quantize_mlp(student: TaskModel, *, bits: int = 8) -> TaskModel:
             if lin.bias is not None
             else np.zeros(w.shape[0], dtype=np.float32)
         )
-        scale = float(np.max(np.abs(w)) / qmax) or 1.0
+        if clip_percentile is None:
+            wmax = float(np.max(np.abs(w)))
+        else:  # scale off a high percentile so outliers saturate instead of dictating the scale
+            wmax = float(np.percentile(np.abs(w), clip_percentile))
+        scale = (wmax / qmax) or 1.0
         wq = np.clip(np.round(w / scale), -qmax, qmax).astype(np.int8)
         layers.append((wq, scale, b))
 
@@ -205,6 +220,7 @@ def quantize_mlp(student: TaskModel, *, bits: int = 8) -> TaskModel:
     meta["quantized"] = {
         "bits": bits,
         "scheme": "per-tensor symmetric",
+        "clip_percentile": clip_percentile,
         "fp32_bytes": 4 * sum(w.size for w, _s, _b in layers),
     }
     return TaskModel(

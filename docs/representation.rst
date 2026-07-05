@@ -161,6 +161,37 @@ The clean separation is:
 * ``task`` and ``reason`` turn those models into calibrated decisions and LLM
   workflows.
 
+Modality Vectorization
+----------------------
+
+Version 0.6.2 adds deterministic modality helpers for cases where raw images
+or signals need to enter a cross-modal graph as fixed-length vector nodes.
+
+.. code-block:: python
+
+   from mixle.represent.modality import vectorize, vectorize_all
+
+   image_vector = vectorize(image_array, "image", dim=16)
+   signal_vectors = vectorize_all(signals, "signal", dim=24)
+
+The public helpers are:
+
+``image_features``
+    Mean intensity over a grid of image cells, padded or truncated to a fixed
+    dimension.
+
+``signal_features``
+    Mean, energy, and range over evenly spaced windows of a one-dimensional
+    signal.
+
+``vectorize`` / ``vectorize_all``
+    One front door for ``text``, ``record``, ``image``, and ``signal`` inputs.
+
+These are dependency-free baseline featurizers. They make an image or signal
+field usable in structure discovery and heterogeneous Bayesian-network factors.
+Use learned encoders when the task depends on semantics that coarse
+deterministic features cannot preserve.
+
 Posterior Retrieval
 -------------------
 
@@ -205,6 +236,12 @@ Representation API Inventory
      - One registered modality inside ``HeterogeneousEncoder``.
    * - ``PosteriorRetriever``
      - Import from ``mixle.represent.posterior`` for model-posterior retrieval.
+   * - ``vectorize`` / ``vectorize_all``
+     - Import from ``mixle.represent.modality`` for fixed-dimension modality
+       descriptors.
+   * - ``image_features`` / ``signal_features``
+     - Deterministic baseline features for image and one-dimensional signal
+       fields.
 
 Design Guidance
 ---------------

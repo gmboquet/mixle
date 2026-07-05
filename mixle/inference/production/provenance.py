@@ -51,7 +51,7 @@ def environment_info() -> dict:
         "platform": platform.platform(),
         "numpy": _version("numpy"),
         "scipy": _version("scipy"),
-        "pysp_version": _version("mixle"),
+        "mixle_version": _version("mixle"),
         "git_commit": _git_commit(),
         "cpu_count": os.cpu_count(),
     }
@@ -141,7 +141,8 @@ class Header:
             f"  timing: {self.timing}",
             f"  resources: {self.resources}",
             f"  env: python {self.environment.get('python')}, "
-            f"mixle {self.environment.get('pysp_version')}, git {self.environment.get('git_commit')}",
+            f"mixle {self.environment.get('mixle_version') or self.environment.get('pysp_version')}, "
+            f"git {self.environment.get('git_commit')}",
             f"  created_at: {self.created_at}",
         ]
         return "\n".join(lines)

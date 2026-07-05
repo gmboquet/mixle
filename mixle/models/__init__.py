@@ -72,10 +72,17 @@ from mixle.models.neural import (
 )
 from mixle.models.neural_density import (
     NeuralDensity,
+    NeuralDensityEstimator,
     build_autoregressive_categorical,
     build_coupling_flow,
     build_maf,
     build_vae,
+)
+from mixle.models.neural_families import (
+    MAF,
+    VAE,
+    DiscreteAR,
+    Flow,
 )
 from mixle.models.neural_leaf import NeuralGaussian, NeuralLeaf
 from mixle.models.partially_observable_markov_decision_process import (
@@ -125,7 +132,13 @@ __all__ = [
     "NeuralCategorical",
     "NeuralConditionalDensity",
     "NeuralDensity",
+    "NeuralDensityEstimator",
     "NeuralGaussian",
+    # constructible neural-density families (VAE(dim=8, latent=2), no build_* + adapter wrap)
+    "VAE",
+    "Flow",
+    "MAF",
+    "DiscreteAR",
     "DPOModel",
     "EnergyModel",
     "StreamingTransformer",

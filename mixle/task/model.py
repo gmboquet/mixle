@@ -163,6 +163,8 @@ class _ClassifierIO:
     def logits_batch(self, module: Any, raw_inputs: list[Any]) -> np.ndarray:
         import torch
 
+        if not raw_inputs:  # empty batch: (0, K) with no featurize/forward (reshape can't infer -1 at size 0)
+            return np.empty((0, len(self.labels)), dtype=np.float32)
         feats = self.features(raw_inputs)
         module.eval()
         with torch.no_grad():
@@ -253,6 +255,8 @@ class StructuredClassifierIO:
 
     def logits_batch(self, model: Any, raw_inputs: list[Any]) -> np.ndarray:
         """Per-label log-joint ``log P(features, label)`` as an ``(m, K)`` score matrix (the classifier logits)."""
+        if not raw_inputs:  # empty batch: (0, K), skip encoding (an empty seq_encode need not be supported)
+            return np.empty((0, len(self.labels)), dtype=np.float64)
         values = [self._values(r) for r in raw_inputs]
         out = np.full((len(values), len(self.labels)), -np.inf, dtype=np.float64)
         for k, label in enumerate(self.labels):

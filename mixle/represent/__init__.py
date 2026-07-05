@@ -23,6 +23,7 @@ from mixle.represent.generative import AutoencoderResult, fit_autoencoder
 from mixle.represent.graph import GraphEmbedding, GraphEncoder
 from mixle.represent.heterogeneous import HeterogeneousEncoder, ModalityEncoder
 from mixle.represent.learned_segment import LearnedSegmenter
+from mixle.represent.modality import image_features, signal_features, vectorize, vectorize_all
 from mixle.represent.posterior import PosteriorRetriever
 from mixle.represent.quantize import VectorQuantizer
 from mixle.represent.segment import (
@@ -56,4 +57,8 @@ __all__ = [
     "WindowSegmenter",
     "fit_autoencoder",
     "fit_embedder",
+    "vectorize",
+    "vectorize_all",
+    "image_features",
+    "signal_features",
 ]

@@ -23,7 +23,6 @@ Submodules
    :maxdepth: 4
 
    mixle.utils.aliasing
-   mixle.utils.builder
    mixle.utils.evaluation
    mixle.utils.metrics
    mixle.utils.optional_deps

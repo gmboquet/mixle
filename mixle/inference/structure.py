@@ -16,6 +16,7 @@ composes like any mixle distribution, but *models the dependence a composite dro
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Sequence
 from typing import Any
 
@@ -23,7 +24,6 @@ import numpy as np
 
 from mixle.inference.estimation import fit
 from mixle.stats.combinator.conditional import ConditionalDistributionEstimator
-from mixle.stats.combinator.null_dist import NullDistribution
 
 
 def _columns(data: Sequence[tuple]) -> list[list[Any]]:
@@ -706,19 +706,16 @@ def _quantile_binner(column: Sequence[Any], n_bins: int) -> _QuantileBinner:
 
 
 def _clone(estimator: Any) -> Any:
-    """A fresh copy of an estimator template (eval/str round-trip; falls back to the same object if unsupported)."""
+    """A fresh, independent copy of an estimator template so structure-search candidates never share state.
+
+    Was ``eval(str(estimator))``, but most estimators have the default ``<object at 0x...>`` repr, so that
+    silently raised and fell back to sharing the SAME object -- safe only because estimators are stateless
+    templates. ``deepcopy`` gives real isolation with no source-level eval; the fallback keeps the old
+    same-object behavior for any estimator that can't be copied (e.g. one holding an uncopyable handle)."""
     try:
-        return eval(str(estimator), _estimator_eval_scope())  # noqa: S307 - estimator repr is mixle-controlled
-    except Exception:  # noqa: BLE001 - some estimators are already stateless/reusable
+        return copy.deepcopy(estimator)
+    except Exception:  # noqa: BLE001 - some estimators hold uncopyable state; sharing was the prior behavior
         return estimator
-
-
-def _estimator_eval_scope() -> dict[str, Any]:
-    import mixle.stats as st
-
-    scope = {name: getattr(st, name) for name in dir(st) if not name.startswith("_")}
-    scope["NullDistribution"] = NullDistribution
-    return scope
 
 
 def _num_free_params(dist: Any) -> int:
