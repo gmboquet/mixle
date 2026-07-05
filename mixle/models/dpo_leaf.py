@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.models._neural_serial import decode_module, encode_module
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -44,6 +45,8 @@ def _logp_np(logits: np.ndarray, a: np.ndarray) -> np.ndarray:
 
 class DPOModel(SequenceEncodableProbabilityDistribution):
     """DPO over ``(x, chosen, rejected)`` preference triples. ``policy`` is trained, ``ref`` is frozen."""
+
+    __pysp_serializable__ = True  # modules persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
 
     def __init__(
         self, policy: Any, ref: Any, beta: float = 0.1, m_steps: int = 100, lr: float = 1e-3, device: str = "cpu"
@@ -89,6 +92,40 @@ class DPOModel(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> DPOEncoder:
         return DPOEncoder()
+
+    # --- serialization: persist hparams + both modules (as portable bytes); registered below so a mixture
+    # holding this leaf round-trips through to_dict/to_json/pickle as well. ---
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state["policy"] = encode_module(self.policy)
+        state["ref"] = encode_module(self.ref)
+        return state
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.policy = decode_module(state["policy"])
+        self.ref = decode_module(state["ref"])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "policy": encode_module(self.policy),
+            "ref": encode_module(self.ref),
+            "beta": self.beta,
+            "m_steps": self.m_steps,
+            "lr": self.lr,
+            "device": self.device,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> DPOModel:
+        return cls(
+            decode_module(payload["policy"]),
+            decode_module(payload["ref"]),
+            beta=payload["beta"],
+            m_steps=payload["m_steps"],
+            lr=payload["lr"],
+            device=payload["device"],
+        )
 
 
 class DPOModelSampler(DistributionSampler):
@@ -202,6 +239,18 @@ class DPOModelEstimator(ParameterEstimator):
             loss.backward()
             opt.step()
         return out
+
+
+def _register_serializable() -> None:
+    # mixle.models classes aren't in the stats/analysis auto-walk, so opt in explicitly for to_json/from_json.
+    try:
+        from mixle.utils.serialization import register_serializable_class
+    except Exception:  # pragma: no cover
+        return
+    register_serializable_class(DPOModel)
+
+
+_register_serializable()
 
 
 # --- back-compat aliases (the classes were renamed off the '...Leaf' suffix) ---
