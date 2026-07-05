@@ -10,7 +10,6 @@ import importlib
 
 _SUBMODULES = [
     "automatic",
-    "builder",
     "enumeration",
     "estimation",
     "em",

@@ -132,6 +132,14 @@ Multivariate And Matrix Families
      - correlation matrix
      - correlation priors or fitted correlation structure.
 
+For full-covariance multivariate Gaussian fits, 0.6.2 improves the default
+numeric path in two ways. Weighted second moments are accumulated through a
+BLAS-backed matrix multiply instead of a naive tensor contraction, which keeps
+large mixture fits from spending most of their time in covariance assembly. The
+Cholesky path also has a minimal jitter fallback for nearly positive-definite
+float32 covariance estimates, so GPU or reduced-precision EM runs can recover
+from roundoff without changing the ordinary float64 fast path.
+
 Directional Families
 --------------------
 

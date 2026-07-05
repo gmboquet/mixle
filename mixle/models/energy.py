@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.models._neural_serial import check_finite, decode_module, encode_module
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -44,6 +45,8 @@ class EnergyModel(SequenceEncodableProbabilityDistribution):
 
     Approximately normalized (trained by NCE); ``log_density`` returns ``-E(x) + c``. Composes like any leaf.
     """
+
+    __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
 
     def __init__(
         self,
@@ -74,8 +77,9 @@ class EnergyModel(SequenceEncodableProbabilityDistribution):
 
     def seq_log_density(self, x: Any) -> np.ndarray:
         torch = _torch()
+        xx = check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "EnergyModel.seq_log_density")
         self.module.to(self.device).eval()
-        xt = torch.as_tensor(np.atleast_2d(np.asarray(x, dtype=float)), dtype=torch.float32, device=self.device)
+        xt = torch.as_tensor(xx, dtype=torch.float32, device=self.device)
         with torch.no_grad():
             return (-self.module.energy(xt) + self.module.log_norm).cpu().numpy().reshape(-1)
 
@@ -96,6 +100,42 @@ class EnergyModel(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> EnergyModelEncoder:
         return EnergyModelEncoder()
+
+    # --- serialization: persist hparams + the module (as portable bytes); registered below so a mixture holding
+    # this leaf round-trips through to_dict/to_json/pickle as well. ---
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state["module"] = encode_module(self.module)
+        return state
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.module = decode_module(state["module"])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "m_steps": self.m_steps,
+            "lr": self.lr,
+            "noise_ratio": self.noise_ratio,
+            "langevin_steps": self.langevin_steps,
+            "langevin_step": self.langevin_step,
+            "device": self.device,
+            "name": self.name,
+            "module": encode_module(self.module),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> EnergyModel:
+        return cls(
+            decode_module(payload["module"]),
+            m_steps=payload["m_steps"],
+            lr=payload["lr"],
+            noise_ratio=payload["noise_ratio"],
+            langevin_steps=payload["langevin_steps"],
+            langevin_step=payload["langevin_step"],
+            device=payload["device"],
+            name=payload["name"],
+        )
 
 
 class EnergyModelSampler(DistributionSampler):
@@ -139,14 +179,15 @@ class EnergyModelAccumulator(SequenceEncodableStatisticAccumulator):
         self.x: list = []
         self.w: list = []
 
+    # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
     def update(self, x: Any, weight: float, estimate: Any) -> None:
-        self.x.append(np.atleast_1d(np.asarray(x, dtype=float)))
-        self.w.append(float(weight))
+        self.x.append(np.atleast_1d(np.asarray(x, dtype=float))[None, ...])
+        self.w.append(np.asarray([float(weight)], dtype=float))
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
-        for i in range(len(enc)):
-            self.x.append(np.atleast_1d(enc[i]))
-            self.w.append(float(weights[i]))
+        xb = np.asarray(enc, dtype=float)
+        self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
+        self.w.append(np.asarray(weights, dtype=float).ravel())
 
     def initialize(self, x: Any, weight: float, rng: Any) -> None:
         self.update(x, weight, None)
@@ -156,15 +197,20 @@ class EnergyModelAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, other: Any) -> EnergyModelAccumulator:
         xs, ws = other
-        self.x.extend(xs)
-        self.w.extend(ws)
+        if len(xs):
+            self.x.append(np.asarray(xs, dtype=float))
+            self.w.append(np.asarray(ws, dtype=float).ravel())
         return self
 
-    def value(self) -> tuple[list, list]:
-        return (self.x, self.w)
+    def value(self) -> tuple:
+        x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
+        w = np.concatenate(self.w) if self.w else np.zeros((0,))
+        return (x, w)
 
     def from_value(self, v: tuple) -> EnergyModelAccumulator:
-        self.x, self.w = list(v[0]), list(v[1])
+        x, w = v
+        self.x = [np.asarray(x, dtype=float)] if len(x) else []
+        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
         return self
 
     def acc_to_encoder(self) -> EnergyModelEncoder:
@@ -222,9 +268,9 @@ class EnergyModelEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple) -> EnergyModel:
         torch = _torch()
         xs, ws = suff_stat
-        if not xs:
+        if len(xs) == 0:
             return self._make()
-        x = torch.as_tensor(np.stack(xs), dtype=torch.float32, device=self.device)
+        x = torch.as_tensor(np.asarray(xs, dtype=float), dtype=torch.float32, device=self.device)
         w = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32, device=self.device)
         w = w / w.sum().clamp(min=1e-8)
 
@@ -261,6 +307,48 @@ class EnergyModelEstimator(ParameterEstimator):
 
 
 # --- a ready energy module to wrap: an MLP energy E(x) with a learned scalar log-normalizer -------------------
+#
+# EnergyNet is reachable at MODULE level (built on first use, resolved by name via __getattr__) so a wrapped leaf
+# -- and any mixture holding one -- pickles for distributed EM.
+
+_ENERGY_NET_CLASS: list[Any] = []
+
+
+def _energy_net_class() -> Any:
+    if _ENERGY_NET_CLASS:
+        return _ENERGY_NET_CLASS[0]
+    import torch
+    import torch.nn as nn
+
+    class EnergyNet(nn.Module):
+        def __init__(self, dim: int, hidden: int = 64, layers: int = 3) -> None:
+            super().__init__()
+            self.dim = int(dim)
+            self.hidden = int(hidden)
+            self.layers = int(layers)
+            body: list[nn.Module] = []
+            prev = self.dim
+            for _ in range(self.layers - 1):
+                body += [nn.Linear(prev, self.hidden), nn.Softplus()]  # smooth => Langevin gradients well-behaved
+                prev = self.hidden
+            body += [nn.Linear(prev, 1)]
+            self.net = nn.Sequential(*body)
+            self.log_norm = nn.Parameter(torch.zeros(()))  # the NCE-learned scalar log-normalizer
+
+        def energy(self, x: Any) -> Any:
+            return self.net(x).squeeze(-1)
+
+    EnergyNet.__module__ = __name__
+    EnergyNet.__qualname__ = "EnergyNet"
+    EnergyNet.__name__ = "EnergyNet"
+    _ENERGY_NET_CLASS.append(EnergyNet)
+    return EnergyNet
+
+
+def __getattr__(name: str) -> Any:  # PEP 562: lets ``pickle`` resolve the hoisted EnergyNet by name
+    if name == "EnergyNet":
+        return _energy_net_class()
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))
 
 
 def build_energy_net(dim: int, *, hidden: int = 64, layers: int = 3) -> Any:
@@ -270,23 +358,16 @@ def build_energy_net(dim: int, *, hidden: int = 64, layers: int = 3) -> Any:
     :class:`EnergyModel` scores ``-E(x) + log_norm``. Swap in any module exposing ``energy(x) -> (n,)``, a
     ``log_norm`` parameter and a ``dim`` attribute.
     """
-    import torch
-    import torch.nn as nn
+    return _energy_net_class()(dim, hidden, layers)
 
-    class EnergyNet(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.dim = int(dim)
-            body: list[nn.Module] = []
-            prev = self.dim
-            for _ in range(int(layers) - 1):
-                body += [nn.Linear(prev, hidden), nn.Softplus()]  # smooth => Langevin gradients are well-behaved
-                prev = hidden
-            body += [nn.Linear(prev, 1)]
-            self.net = nn.Sequential(*body)
-            self.log_norm = nn.Parameter(torch.zeros(()))  # the NCE-learned scalar log-normalizer
 
-        def energy(self, x: Any) -> Any:
-            return self.net(x).squeeze(-1)
+def _register_serializable() -> None:
+    # mixle.models classes aren't in the stats/analysis auto-walk, so opt in explicitly for to_json/from_json.
+    try:
+        from mixle.utils.serialization import register_serializable_class
+    except Exception:  # pragma: no cover
+        return
+    register_serializable_class(EnergyModel)
 
-    return EnergyNet()
+
+_register_serializable()

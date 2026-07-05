@@ -21,6 +21,26 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _safe_segment(seg: str, kind: str = "name") -> str:
+    """Reject a model name / version / alias that is not a single path component under the registry root.
+
+    The registry is a filesystem store that may be fed names/aliases from an API (e.g. via
+    ``Service.from_registry``); joining a raw ``../escape`` (or an absolute path, or one with separators)
+    onto the root would read or write outside it. Constrain each segment to a plain basename."""
+    if not isinstance(seg, str) or not seg:
+        raise ValueError(f"registry {kind} must be a non-empty string, got {seg!r}")
+    if (
+        seg in (os.curdir, os.pardir)
+        or os.sep in seg
+        or (os.altsep and os.altsep in seg)
+        or "\x00" in seg
+        or os.path.isabs(seg)
+        or os.path.basename(seg) != seg
+    ):
+        raise ValueError(f"unsafe registry {kind} {seg!r}: must be a single path component (no separators or '..')")
+    return seg
+
+
 class Registry:
     """A directory of named models, each with numbered versions and movable aliases."""
 
@@ -30,7 +50,7 @@ class Registry:
         os.makedirs(root, exist_ok=True)
 
     def _dir(self, name: str) -> str:
-        d = os.path.join(self.root, name)
+        d = os.path.join(self.root, _safe_segment(name))
         os.makedirs(d, exist_ok=True)
         return d
 
@@ -40,7 +60,7 @@ class Registry:
 
     def versions(self, name: str) -> list[str]:
         """Version ids for ``name`` in registration order (``v1``, ``v2``, ...)."""
-        d = os.path.join(self.root, name)
+        d = os.path.join(self.root, _safe_segment(name))
         if not os.path.isdir(d):
             return []
         vs = [f[:-5] for f in os.listdir(d) if f.endswith(".json")]
@@ -113,30 +133,36 @@ class Registry:
 
         return _save
 
-    def get(self, name: str, version: str = "latest") -> tuple[Any, dict | None]:
-        """Load ``(model, header)`` for a version (``"latest"`` = highest-numbered)."""
+    def _resolve_version(self, name: str, version: str) -> str:
+        """Resolve ``"latest"`` to the highest version and raise a clear KeyError for an unknown name or
+        version -- rather than a bare IndexError on an unregistered name or a raw FileNotFoundError (which
+        leaks the store path) on a missing version. Mirrors the guard get() already had."""
+        _safe_segment(name)
         vs = self.versions(name)
         if not vs:
             raise KeyError(f"no versions registered for model {name!r}")
         if version == "latest":
-            version = vs[-1]
+            return vs[-1]
+        if version not in vs:  # returned value is therefore always a known-safe version id
+            raise KeyError(f"{name!r} has no version {version!r}")
+        return version
+
+    def get(self, name: str, version: str = "latest") -> tuple[Any, dict | None]:
+        """Load ``(model, header)`` for a version (``"latest"`` = highest-numbered)."""
+        version = self._resolve_version(name, version)
         with open(os.path.join(self.root, name, version + ".json")) as f:
             payload = json.load(f)
         return from_serializable(payload["model"]), payload.get("header")
 
     def header(self, name: str, version: str = "latest") -> dict | None:
         """Just the provenance header of a version (no model deserialization)."""
-        vs = self.versions(name)
-        if version == "latest":
-            version = vs[-1]
+        version = self._resolve_version(name, version)
         with open(os.path.join(self.root, name, version + ".json")) as f:
             return json.load(f).get("header")
 
     def metadata(self, name: str, version: str = "latest") -> dict:
         """Just the ``metadata`` of a version (no model deserialization) -- e.g. a checkpoint's iteration."""
-        vs = self.versions(name)
-        if version == "latest":
-            version = vs[-1]
+        version = self._resolve_version(name, version)
         with open(os.path.join(self.root, name, version + ".json")) as f:
             return json.load(f).get("metadata") or {}
 
@@ -144,12 +170,14 @@ class Registry:
         """Point ``alias`` (e.g. ``"production"``) at ``version`` -- the atomic model swap."""
         if version not in self.versions(name):
             raise KeyError(f"{name!r} has no version {version!r}")
-        with open(os.path.join(self._dir(name), alias + ".alias"), "w") as f:
+        with open(os.path.join(self._dir(name), _safe_segment(alias, "alias") + ".alias"), "w") as f:
             f.write(version)
 
     def current(self, name: str, alias: str = "production") -> tuple[Any, dict | None]:
         """Load the model an ``alias`` points at (falls back to ``latest`` if the alias is unset)."""
-        p = os.path.join(self.root, name, alias + ".alias")
+        p = os.path.join(self.root, _safe_segment(name), _safe_segment(alias, "alias") + ".alias")
+        # the version READ FROM the alias file is still resolved against the known version list by get(),
+        # so a tampered alias file cannot traverse either.
         version = open(p).read().strip() if os.path.exists(p) else "latest"
         return self.get(name, version)
 

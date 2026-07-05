@@ -150,6 +150,11 @@ Use model parallelism when the model has large independent or nearly
 independent component work, such as mixture components, ensembles, or structured
 children that can be reduced safely.
 
+This is also the recommended fallback when Torch DTensor component sharding is
+not available. Torch versions before 2.5 expose incomplete DTensor strategies
+for the mixture operations Mixle needs, so ``TorchEngine`` rejects that path
+with guidance instead of letting a low-level distributed tensor error surface.
+
 Decomposition And Backend Modules
 ---------------------------------
 
@@ -208,4 +213,3 @@ API Reference
 * :doc:`api/mixle.utils.parallel`
 * :doc:`api/mixle.utils.parallel.planner`
 * :doc:`api/mixle.utils.parallel.model_parallel`
-

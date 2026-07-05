@@ -55,6 +55,17 @@ class EmbeddedStructureTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             learn_structure_embedded([("a", 1.0)] * 60)  # 'a' is a plain categorical, not free text
 
+    def test_text_field_enters_as_a_vector_node(self):
+        from mixle.inference import learn_structure_embedded
+
+        m = learn_structure_embedded(_rows(200, True), n_clusters=3, embed_dim=8, epochs=80, seed=0)
+        # the text field (0) is embedded to an 8-d vector in the record, driven as a multivariate node
+        enc = m.encode_record(_rows(1, True, seed=7)[0])
+        self.assertEqual(np.asarray(enc[0]).shape, (8,))  # a vector, not a cluster-code string
+        # and the network fitted a vector-valued factor for it (multivariate marginal or CLG)
+        vf = [f for f in m.net.factors if f.child == 0]
+        self.assertTrue(vf and type(vf[0]).__name__ in ("_VectorMarginalFactor", "_VectorCLGFactor"))
+
     def test_single_record_encode_matches_batch(self):
         from mixle.inference import learn_structure_embedded
 
@@ -62,7 +73,10 @@ class EmbeddedStructureTest(unittest.TestCase):
         rows = _rows(20, True, seed=3)
         batch = m.encode_records(rows)
         for r, enc in zip(rows, batch):
-            self.assertEqual(m.encode_record(r), enc)
+            single = m.encode_record(r)  # record is (text, price): field 0 -> vector, field 1 -> unchanged
+            # same embedding up to float32 batch-vs-single matmul noise
+            np.testing.assert_allclose(np.asarray(single[0]), np.asarray(enc[0]), atol=1e-5)
+            self.assertEqual(single[1], enc[1])  # the scalar price field is unchanged
 
 
 if __name__ == "__main__":

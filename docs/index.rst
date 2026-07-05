@@ -17,8 +17,8 @@ mixle
        The long-term direction is broader than a distribution catalog. Mixle is
        being developed as a unified modeling layer for heterogeneous records,
        mixtures, HMMs, Transformer leaves, task distillation, uncertainty-aware
-       LLM systems, design of experiments, structured decisions, and
-       production evidence.
+       LLM systems, local reasoning workflows, design of experiments,
+       structured decisions, and production evidence.
      </p>
      <p class="mixle-actions">
        <a class="mixle-button mixle-button-primary" href="quickstart.html">Start with the quickstart</a>
@@ -94,6 +94,10 @@ Scale, serve, or audit fitted models
     :doc:`utilities-and-parallelism`, :doc:`data`, :doc:`production`, and
     :doc:`lifecycle`.
 
+Build a local reasoning workflow
+    Read :doc:`reasoning-ecosystem` for substrate storage, skills, reasoner
+    actions, pool jobs, telemetry, and the optional ``Scientist`` workflow.
+
 Explore scientific design and structured decisions
     Read :doc:`doe`, :doc:`analysis`, :doc:`evolution`,
     :doc:`relations`, :doc:`operations`, and :doc:`enumeration`.
@@ -159,6 +163,7 @@ human map for finding the right import.
 
    installation
    maturity
+   whats-new-0-6-2
    quickstart
    concepts
    package-map
@@ -179,6 +184,7 @@ human map for finding the right import.
    agentic-task-distillation
    uncertainty
    reasoning-systems
+   reasoning-ecosystem
    hmms-latent
    processes
    automatic-modeling-internals

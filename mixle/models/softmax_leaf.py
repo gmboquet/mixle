@@ -21,6 +21,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.models._neural_serial import check_finite, decode_module, encode_module
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -48,6 +49,8 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
     ``batch_size`` (None = full batch) makes the M-step minibatch SGD over ``m_steps`` passes -- needed to train a
     real conv net on a large image set; ``device`` (e.g. ``"mps"``/``"cuda"``) runs it on the GPU.
     """
+
+    __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
 
     def __init__(
         self,
@@ -84,6 +87,7 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
         x, y = enc
+        check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "NeuralCategorical.seq_log_density")
         logp = _log_softmax(self._logits(x))
         y = np.asarray(y, dtype=int)
         return logp[np.arange(len(y)), y]
@@ -100,6 +104,38 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> NeuralCategoricalEncoder:
         return NeuralCategoricalEncoder()
+
+    # --- serialization: persist hparams + the module (as portable bytes); registered below so a mixture holding
+    # this leaf round-trips through to_dict/to_json/pickle as well. ---
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state["module"] = encode_module(self.module)
+        return state
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.module = decode_module(state["module"])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "m_steps": self.m_steps,
+            "lr": self.lr,
+            "name": self.name,
+            "batch_size": self.batch_size,
+            "device": self.device,
+            "module": encode_module(self.module),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> NeuralCategorical:
+        return cls(
+            decode_module(payload["module"]),
+            m_steps=payload["m_steps"],
+            lr=payload["lr"],
+            name=payload["name"],
+            batch_size=payload["batch_size"],
+            device=payload["device"],
+        )
 
 
 class NeuralCategoricalSampler(DistributionSampler):
@@ -134,17 +170,20 @@ class NeuralCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         self.y: list = []
         self.w: list = []
 
+    # x/y/w hold contiguous batch arrays, concatenated once at value() rather than one ndarray per row (the
+    # audit's per-row buffering blowup). x batching is shape-PRESERVING so conv/structured inputs survive;
+    # y stays an integer class index.
     def update(self, xy: Any, weight: float, estimate: Any) -> None:
-        self.x.append(np.atleast_1d(np.asarray(xy[0], dtype=float)))
-        self.y.append(int(xy[1]))
-        self.w.append(float(weight))
+        self.x.append(np.atleast_1d(np.asarray(xy[0], dtype=float))[None, ...])
+        self.y.append(np.asarray([int(xy[1])], dtype=int))
+        self.w.append(np.asarray([float(weight)], dtype=float))
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
         x, y = enc
-        for i in range(len(x)):
-            self.x.append(np.atleast_1d(x[i]))
-            self.y.append(int(y[i]))
-            self.w.append(float(weights[i]))
+        xb = np.asarray(x, dtype=float)
+        self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
+        self.y.append(np.asarray(y, dtype=int).ravel())
+        self.w.append(np.asarray(weights, dtype=float).ravel())
 
     def initialize(self, xy: Any, weight: float, rng: Any) -> None:
         self.update(xy, weight, None)
@@ -154,16 +193,23 @@ class NeuralCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, other: Any) -> NeuralCategoricalAccumulator:
         xo, yo, wo = other
-        self.x.extend(xo)
-        self.y.extend(yo)
-        self.w.extend(wo)
+        if len(xo):
+            self.x.append(np.asarray(xo, dtype=float))
+            self.y.append(np.asarray(yo, dtype=int).ravel())
+            self.w.append(np.asarray(wo, dtype=float).ravel())
         return self
 
     def value(self) -> tuple:
-        return (list(self.x), list(self.y), list(self.w))
+        x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
+        y = np.concatenate(self.y) if self.y else np.zeros((0,), dtype=int)
+        w = np.concatenate(self.w) if self.w else np.zeros((0,))
+        return (x, y, w)
 
     def from_value(self, value: tuple) -> NeuralCategoricalAccumulator:
-        self.x, self.y, self.w = list(value[0]), list(value[1]), list(value[2])
+        x, y, w = value
+        self.x = [np.asarray(x, dtype=float)] if len(x) else []
+        self.y = [np.asarray(y, dtype=int).ravel()] if len(y) else []
+        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
         return self
 
     def acc_to_encoder(self) -> NeuralCategoricalEncoder:
@@ -209,7 +255,7 @@ class NeuralCategoricalEstimator(ParameterEstimator):
         torch = _torch()
         xs, ys, ws = suff_stat
         out = NeuralCategorical(self.module, self.m_steps, self.lr, self.name, self.batch_size, self.device)
-        if not xs:
+        if len(xs) == 0:
             return out
         dev = self.device
         self.module.to(dev)
@@ -241,6 +287,18 @@ class NeuralCategoricalEstimator(ParameterEstimator):
                 loss.backward()
                 opt.step()
         return out
+
+
+def _register_serializable() -> None:
+    # mixle.models classes aren't in the stats/analysis auto-walk, so opt in explicitly for to_json/from_json.
+    try:
+        from mixle.utils.serialization import register_serializable_class
+    except Exception:  # pragma: no cover
+        return
+    register_serializable_class(NeuralCategorical)
+
+
+_register_serializable()
 
 
 # --- back-compat aliases (the classes were renamed off the '...Leaf' suffix) ---

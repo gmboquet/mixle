@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.models._neural_serial import decode_module, encode_module
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -44,6 +45,8 @@ def _logp_np(logits: np.ndarray, a: np.ndarray) -> np.ndarray:
 
 class DPOModel(SequenceEncodableProbabilityDistribution):
     """DPO over ``(x, chosen, rejected)`` preference triples. ``policy`` is trained, ``ref`` is frozen."""
+
+    __pysp_serializable__ = True  # modules persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
 
     def __init__(
         self, policy: Any, ref: Any, beta: float = 0.1, m_steps: int = 100, lr: float = 1e-3, device: str = "cpu"
@@ -90,6 +93,40 @@ class DPOModel(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> DPOEncoder:
         return DPOEncoder()
 
+    # --- serialization: persist hparams + both modules (as portable bytes); registered below so a mixture
+    # holding this leaf round-trips through to_dict/to_json/pickle as well. ---
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state["policy"] = encode_module(self.policy)
+        state["ref"] = encode_module(self.ref)
+        return state
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.policy = decode_module(state["policy"])
+        self.ref = decode_module(state["ref"])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "policy": encode_module(self.policy),
+            "ref": encode_module(self.ref),
+            "beta": self.beta,
+            "m_steps": self.m_steps,
+            "lr": self.lr,
+            "device": self.device,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> DPOModel:
+        return cls(
+            decode_module(payload["policy"]),
+            decode_module(payload["ref"]),
+            beta=payload["beta"],
+            m_steps=payload["m_steps"],
+            lr=payload["lr"],
+            device=payload["device"],
+        )
+
 
 class DPOModelSampler(DistributionSampler):
     def __init__(self, dist: DPOModel, seed: int | None = None) -> None:
@@ -119,18 +156,22 @@ class DPOAccumulator(SequenceEncodableStatisticAccumulator):
         self.x: list = []
         self.ch: list = []
         self.rj: list = []
+        self.w: list = []  # per-pair weight (EM responsibility / streaming decay / sample weight)
 
     def update(self, xcr: Any, weight: float, estimate: Any) -> None:
         self.x.append(np.atleast_1d(np.asarray(xcr[0], dtype=float)))
         self.ch.append(int(xcr[1]))
         self.rj.append(int(xcr[2]))
+        self.w.append(float(weight))
 
     def seq_update(self, enc: Any, weights: Any, estimate: Any) -> None:
         x, ch, rj = enc
+        ws = np.asarray(weights, dtype=float).ravel() if weights is not None else np.ones(len(x))
         for i in range(len(x)):
             self.x.append(np.atleast_1d(x[i]))
             self.ch.append(int(ch[i]))
             self.rj.append(int(rj[i]))
+            self.w.append(float(ws[i]))
 
     def initialize(self, xcr: Any, weight: float, rng: Any) -> None:
         self.update(xcr, weight, None)
@@ -139,17 +180,18 @@ class DPOAccumulator(SequenceEncodableStatisticAccumulator):
         self.seq_update(enc, weights, None)
 
     def combine(self, other: Any) -> DPOAccumulator:
-        xo, co, ro = other
+        xo, co, ro, wo = other
         self.x.extend(xo)
         self.ch.extend(co)
         self.rj.extend(ro)
+        self.w.extend(wo)
         return self
 
     def value(self) -> tuple:
-        return (list(self.x), list(self.ch), list(self.rj))
+        return (list(self.x), list(self.ch), list(self.rj), list(self.w))
 
     def from_value(self, v: tuple) -> DPOAccumulator:
-        self.x, self.ch, self.rj = list(v[0]), list(v[1]), list(v[2])
+        self.x, self.ch, self.rj, self.w = list(v[0]), list(v[1]), list(v[2]), list(v[3])
         return self
 
     def acc_to_encoder(self) -> DPOEncoder:
@@ -177,9 +219,9 @@ class DPOModelEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> DPOModel:
         torch = _torch()
-        xs, chs, rjs = suff_stat
+        xs, chs, rjs, ws = suff_stat
         out = DPOModel(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
-        if not xs:
+        if len(xs) == 0:
             return out
         dev = self.device
         self.policy.to(dev)
@@ -189,6 +231,8 @@ class DPOModelEstimator(ParameterEstimator):
         xt = torch.as_tensor(np.array(xs), dtype=torch.float32).to(dev)
         ct = torch.as_tensor(np.array(chs), dtype=torch.long).to(dev)
         rt = torch.as_tensor(np.array(rjs), dtype=torch.long).to(dev)
+        wt = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32).to(dev)  # per-pair weight
+        wsum = wt.sum().clamp(min=1e-8)
         ar = torch.arange(len(ct), device=dev)
         opt = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
         with torch.no_grad():  # reference log-probs are constant -- compute once
@@ -198,10 +242,22 @@ class DPOModelEstimator(ParameterEstimator):
             opt.zero_grad()
             lp = torch.log_softmax(self.policy(xt), dim=1)
             margin = (lp[ar, ct] - lr_ch) - (lp[ar, rt] - lr_rj)
-            loss = -torch.nn.functional.logsigmoid(self.beta * margin).mean()
+            loss = -(wt * torch.nn.functional.logsigmoid(self.beta * margin)).sum() / wsum  # weighted DPO loss
             loss.backward()
             opt.step()
         return out
+
+
+def _register_serializable() -> None:
+    # mixle.models classes aren't in the stats/analysis auto-walk, so opt in explicitly for to_json/from_json.
+    try:
+        from mixle.utils.serialization import register_serializable_class
+    except Exception:  # pragma: no cover
+        return
+    register_serializable_class(DPOModel)
+
+
+_register_serializable()
 
 
 # --- back-compat aliases (the classes were renamed off the '...Leaf' suffix) ---

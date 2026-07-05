@@ -37,6 +37,19 @@ class Link:
     mu_eta: Callable[[np.ndarray], np.ndarray]  # dmu/deta as a function of eta
 
 
+def _solve_psd(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Solve a (weighted) normal-equations system, robust to a singular/ill-conditioned design.
+
+    IRLS on collinear predictors (e.g. high-dim modality feature vectors as parents in a factor) yields
+    a singular ``X'WX``; a bare ``solve`` would raise. Fall back to the minimum-norm least-squares
+    solution (``lstsq``), which is well-defined and stable there and identical when the system is full
+    rank -- so a well-conditioned fit is unchanged and a rank-deficient one no longer crashes."""
+    try:
+        return np.linalg.solve(a, b)
+    except np.linalg.LinAlgError:
+        return np.linalg.lstsq(a, b, rcond=None)[0]
+
+
 def _clip01(p: np.ndarray) -> np.ndarray:
     eps = 1e-10
     return np.clip(p, eps, 1.0 - eps)
@@ -263,8 +276,11 @@ def glm(
         wls_w = w * dmu**2 / var
         z = (eta - off) + (y - mu) / dmu
         XtW = X.T * wls_w
-        beta = np.linalg.solve(XtW @ X, XtW @ z)
-        eta = X @ beta + off
+        new_beta = _solve_psd(XtW @ X, XtW @ z)
+        new_eta = X @ new_beta + off
+        if not (np.all(np.isfinite(new_beta)) and np.all(np.isfinite(new_eta))):
+            break  # divergence (e.g. complete separation): keep the last finite iterate
+        beta, eta = new_beta, new_eta
         mu = lk.inv(eta)
         dev = float(np.sum(w * fam.unit_deviance(y, mu)))
         if np.abs(dev - dev_old) <= tol * (np.abs(dev) + 0.1):
@@ -273,8 +289,8 @@ def glm(
 
     dmu = lk.mu_eta(eta)
     var = fam.variance(mu)
-    wls_w = w * dmu**2 / var
-    xtwx_inv = np.linalg.inv((X.T * wls_w) @ X)
+    wls_w = np.nan_to_num(w * dmu**2 / var, nan=0.0, posinf=0.0, neginf=0.0)
+    xtwx_inv = np.linalg.pinv((X.T * wls_w) @ X)  # pinv: robust to collinear high-dim parents
     dev = float(np.sum(w * fam.unit_deviance(y, mu)))
     if fam.estimate_dispersion:
         phi = float(np.sum(w * (y - mu) ** 2 / var) / max(n - p, 1))
@@ -441,7 +457,7 @@ def robust_regression(
         else:
             raise ValueError("method must be 'huber' or 'tukey'.")
         XtW = X.T * w
-        new = np.linalg.solve(XtW @ X, XtW @ y)
+        new = _solve_psd(XtW @ X, XtW @ y)
         if np.max(np.abs(new - beta)) < tol:
             beta = new
             break
@@ -468,7 +484,7 @@ def quantile_regression(
         r = y - X @ beta
         w = np.where(r >= 0, tau, 1.0 - tau) / np.maximum(np.abs(r), eps)
         XtW = X.T * w
-        new = np.linalg.solve(XtW @ X, XtW @ y)
+        new = _solve_psd(XtW @ X, XtW @ y)
         if np.max(np.abs(new - beta)) < tol:
             beta = new
             break

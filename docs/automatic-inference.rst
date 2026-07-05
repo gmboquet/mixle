@@ -7,7 +7,7 @@ to expose the chosen shape, confidence gaps, fallback path, and model
 capabilities so you can decide whether to trust the result or collect better
 data.
 
-There are four common entry points:
+There are five common entry points:
 
 .. list-table::
    :header-rows: 1
@@ -24,6 +24,10 @@ There are four common entry points:
    * - raw data only
      - ``optimize(data)`` or ``get_estimator(data)``
      - infer a first estimator from observed types and profiles
+   * - raw data plus an audit boundary
+     - ``create(data, ...)``
+     - fit a model and return an artifact with provenance, certificate,
+       optional calibration, uncertainty, and exchangeability diagnostics
    * - raw data plus an LLM designer
      - ``design_model(data, llm)``
      - ask for an allowlisted spec, build it, fit-validate it, fallback if bad
@@ -89,6 +93,28 @@ Or use the shorthand:
 
 Automatic typing is useful for exploration and baselines. For production, keep
 the returned estimator or use ``recommend_model`` so the decision is visible.
+
+Certified Artifact Creation
+---------------------------
+
+``create`` is the higher-level route when the fit itself should become an
+auditable artifact. It still uses the same estimator and inference machinery,
+but it packages the fitted model with provenance and optional validation
+receipts.
+
+.. code-block:: python
+
+   from mixle.inference import create
+
+   artifact = create(rows, calibrate=0.2, quantify_uq=True, seed=0)
+   model = artifact.model
+
+   print(artifact.certificate.level)
+   print(artifact.provenance.get("exchangeability"))
+
+Use ``optimize`` when you want the fitted model directly. Use ``create`` when a
+workflow needs to retain how the model was built, what checks were run, and
+which guarantees were available at creation time.
 
 Model Recommendation
 --------------------

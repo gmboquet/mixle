@@ -32,7 +32,8 @@ Maturity Summary
    * - Neural and language leaves
      - ``LM``, ``TransformerLMEstimator``, ``StreamingTransformer``,
        ``DPOModel``, ``CategoricalEmbedding``, ``NeuralDensity``,
-       ``NeuralConditionalDensity``
+       ``NeuralConditionalDensity``, ``VAE``, ``Flow``, ``MAF``,
+       ``DiscreteAR``
      - Incubating
      - A neural likelihood is one channel inside a larger model, or you are
        experimenting with compact local language-model helpers.
@@ -85,9 +86,10 @@ Choosing A Family
      - ``RandomForestEstimator``, ``RandomForestConditional``
      - Nonlinear conditional leaf ``p(y | x)``.
    * - Flexible neural density
-     - ``NeuralDensity``, ``NeuralConditionalDensity``, ``build_mdn``,
-       ``build_conditional_flow``
-     - Torch-backed density leaf for exact or mixture conditional likelihoods.
+     - ``NeuralDensity``, ``NeuralConditionalDensity``, ``VAE``, ``Flow``,
+       ``MAF``, ``DiscreteAR``, ``build_mdn``, ``build_conditional_flow``
+     - Torch-backed density leaf for exact, bounded, mixture, or conditional
+       neural likelihoods.
    * - Unknown clustering structure
      - ``fit_truncated_dpm``, ``TruncatedDirichletProcessMixtureModel``
      - Variational truncated Dirichlet-process mixture helper.
@@ -131,6 +133,9 @@ That guide covers:
 * ``CategoricalEmbedding`` for tying token embeddings across leaves.
 * ``NeuralDensity`` and ``NeuralConditionalDensity`` for Torch modules that
   expose explicit log-density methods.
+* ``VAE``, ``Flow``, ``MAF``, and ``DiscreteAR`` for constructible neural
+  density families that can be dropped into estimator trees without manually
+  building and wrapping a Torch module.
 * ``build_mdn`` for multimodal conditional density and
   ``build_conditional_flow`` for exact conditional normalizing flows.
 
@@ -152,6 +157,8 @@ Neural Builder Inventory
      - Count regression helper.
    * - ``NeuralGaussian`` / ``NeuralCategorical``
      - Torch-backed likelihood leaves for regression and classification.
+   * - ``VAE`` / ``Flow`` / ``MAF`` / ``DiscreteAR``
+     - Constructible neural-density distribution families.
    * - ``build_causal_lm``
      - Low-level causal language-model module builder used by ``LM``.
    * - ``stream_fit``
@@ -161,6 +168,11 @@ The model-family view is that these objects are likelihood components. They can
 be used alone, but their strategic value is larger: they can be children of
 mixtures, HMM emissions, record fields, density gates, or task-distillation
 cascades.
+
+Serialization support has been broadened for neural leaves, direct LMs,
+streaming Transformer leaves, DPO leaves, and neural-density leaves. Prefer the
+documented ``save``/``load`` or ``to_dict``/``to_json`` routes for artifacts,
+and still keep a held-out behavioral check around restored neural models.
 
 Gaussian Processes
 ------------------

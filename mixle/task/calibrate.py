@@ -30,6 +30,25 @@ from mixle.task.model import TaskModel
 ESCALATE = None  # the sentinel a decision returns when the conformal set is not a confident singleton
 
 
+def _qhat_to_json(qhat: float | None) -> Any:
+    """Serialize a threshold to a strict-JSON-safe value: ``+inf`` -> ``"inf"``, else the plain float/None."""
+    if qhat is None:
+        return None
+    if not np.isfinite(qhat):
+        return "inf"
+    return float(qhat)
+
+
+def _qhat_from_json(value: Any) -> float | None:
+    """Inverse of :func:`_qhat_to_json`: ``"inf"`` (or a non-finite float) -> ``float('inf')``; else float/None."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return float("inf") if value == "inf" else float(value)
+    q = float(value)
+    return float("inf") if not np.isfinite(q) else q
+
+
 class CalibratedTaskModel:
     """A :class:`TaskModel` plus a conformal threshold: predicts label *sets* and decides answer-vs-escalate."""
 
@@ -91,9 +110,14 @@ class CalibratedTaskModel:
         return float(np.mean(self._escalate_flags(texts, sets))) if len(sets) else 0.0
 
     def save(self, path: str) -> str:
-        """Persist the underlying model, the calibration (alpha, qhat), and any density gate in the artifact."""
-        q = self.qhat if (self.qhat is not None and np.isfinite(self.qhat)) else None
-        cal: dict[str, Any] = {"alpha": self.alpha, "qhat": q}
+        """Persist the underlying model, the calibration (alpha, qhat), and any density gate in the artifact.
+
+        ``qhat`` can legitimately be ``+inf`` (a small calibration set / tight ``alpha``: too little data to
+        admit any confident singleton, so every input escalates). That is a real, callable threshold, so it is
+        persisted as the JSON-safe sentinel ``"inf"`` and reloads back to ``float('inf')`` -- a loaded model
+        stays callable instead of raising "call calibrate".
+        """
+        cal: dict[str, Any] = {"alpha": self.alpha, "qhat": _qhat_to_json(self.qhat)}
         if self.density_gate is not None:
             cal["density_gate"] = self.density_gate.to_spec()
         self.task.meta = {**self.task.meta, "calibration": cal}
@@ -109,4 +133,4 @@ class CalibratedTaskModel:
             from mixle.task.density import DensityGate
 
             gate = DensityGate.from_spec(cal["density_gate"])
-        return cls(task, alpha=cal.get("alpha", 0.1), qhat=cal.get("qhat"), density_gate=gate)
+        return cls(task, alpha=cal.get("alpha", 0.1), qhat=_qhat_from_json(cal.get("qhat")), density_gate=gate)

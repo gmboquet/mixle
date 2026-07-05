@@ -20,4 +20,5 @@ Submodules
    mixle.reason.graph_llm
    mixle.reason.llm
    mixle.reason.model
+   mixle.reason.ontology
    mixle.reason.store

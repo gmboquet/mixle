@@ -293,6 +293,11 @@ def make_mlp(input_dim: int, hidden_dims: Sequence[int], output_dim: int = 1, ac
     }
     if activation not in activations:
         raise ValueError("Unknown activation %s. Expected one of %s." % (activation, ", ".join(sorted(activations))))
+    if int(input_dim) <= 0 or int(output_dim) <= 0 or any(int(h) <= 0 for h in hidden_dims):
+        raise ValueError(
+            "make_mlp dims must be positive; got input_dim=%r hidden_dims=%r output_dim=%r"
+            % (input_dim, list(hidden_dims), output_dim)
+        )
     dims = [int(input_dim)] + [int(h) for h in hidden_dims] + [int(output_dim)]
     layers = []
     for i in range(len(dims) - 1):
