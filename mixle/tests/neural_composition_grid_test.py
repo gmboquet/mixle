@@ -5,8 +5,10 @@ CompositeDistribution / HMM emission like any leaf." Mixture composition is alre
 neural_leaf_serialization_test.py and friends; this file closes the HMM-emission gap (untested for
 every leaf before this) and extends Composite-field coverage to a genuinely heterogeneous record mixing
 multiple neural leaf types with a classical family -- with a JSON round trip proven in every case, not
-assumed. See docs/neural-llm.rst's "Composition Grid" table for the full coverage matrix and the one
-real limitation this surfaced (a purely conditional leaf has no unconditional sampler).
+assumed. See docs/neural-llm.rst's "Composition Grid" table for the full coverage matrix.
+
+Workstream A2b closes the two cells the table originally left "not yet exercised": NeuralGaussian and
+NeuralConditionalDensity (both conditional, p(y|x)) in a Composite field and an HMM emission.
 """
 
 import numpy as np
@@ -16,6 +18,8 @@ torch = pytest.importorskip("torch")
 
 from mixle.inference import optimize
 from mixle.models import EnergyModel, Flow, build_energy_net, make_mlp
+from mixle.models.mixture_density import NeuralConditionalDensity, build_mdn
+from mixle.models.neural_leaf import NeuralGaussian
 from mixle.models.softmax_leaf import NeuralCategorical
 from mixle.stats import (
     CompositeDistribution,
@@ -156,3 +160,86 @@ class HeterogeneousNeuralCompositeTest:
         ll = fitted.log_density(rows[0])
         back = from_json(to_json(fitted))
         assert np.isclose(back.log_density(rows[0]), ll)
+
+
+def _mlp_gaussian(x_dim=3, m_steps=15):
+    return NeuralGaussian(make_mlp(x_dim, [8], 1), noise=1.0, m_steps=m_steps)
+
+
+def _mdn(x_dim=3, y_dim=1, m_steps=15):
+    return NeuralConditionalDensity(build_mdn(x_dim, y_dim, k=2, hidden=8), m_steps=m_steps)
+
+
+def _xy_rows(x_dim=3, n=40, seed=0):
+    rng = np.random.RandomState(seed)
+    return [(rng.randn(x_dim).astype("float32"), np.array([float(rng.randn())], dtype="float32")) for _ in range(n)]
+
+
+class NeuralGaussianCompositeAndHmmTest:
+    """A2b: closes the 'not yet exercised' NeuralGaussian x {Composite, HMM} cells."""
+
+    def test_composite_field_scores_fits_and_serializes(self):
+        ng, gauss = _mlp_gaussian(), GaussianDistribution(0.0, 1.0)
+        comp = CompositeDistribution((ng, gauss))
+        rows = [(xy, float(x)) for xy, x in zip(_xy_rows(), np.random.RandomState(1).randn(40))]
+        assert np.isfinite(comp.log_density(rows[0]))
+        est = CompositeEstimator((ng.estimator(), gauss.estimator()))
+        fitted = optimize(rows, est, max_its=2, out=None)
+        ll = fitted.log_density(rows[0])
+        assert np.isfinite(ll)
+        back = from_json(to_json(fitted))
+        assert np.isclose(back.log_density(rows[0]), ll)
+
+    def test_hmm_emission_fits_and_serializes(self):
+        rng = np.random.RandomState(0)
+
+        def rand_seq():
+            t = rng.randint(3, 7)
+            return [(rng.randn(3).astype("float32"), np.array([float(rng.randn())], dtype="float32")) for _ in range(t)]
+
+        data = [rand_seq() for _ in range(20)]
+        init = HiddenMarkovModelDistribution(
+            [_mlp_gaussian(), _mlp_gaussian()], [0.5, 0.5], [[0.9, 0.1], [0.1, 0.9]], len_dist=PoissonDistribution(5.0)
+        )
+        est = HiddenMarkovEstimator(
+            [_mlp_gaussian().estimator(), _mlp_gaussian().estimator()], len_estimator=PoissonEstimator()
+        )
+        fitted = optimize(data, est, prev_estimate=init, max_its=2, out=None)
+        ll = fitted.log_density(data[0])
+        assert np.isfinite(ll)
+        back = from_json(to_json(fitted))
+        assert np.isclose(back.log_density(data[0]), ll)
+
+
+class NeuralConditionalDensityCompositeAndHmmTest:
+    """A2b: closes the 'not yet exercised' NeuralConditionalDensity x {Composite, HMM} cells."""
+
+    def test_composite_field_scores_fits_and_serializes(self):
+        mdn, gauss = _mdn(), GaussianDistribution(0.0, 1.0)
+        comp = CompositeDistribution((mdn, gauss))
+        rows = [(xy, float(x)) for xy, x in zip(_xy_rows(), np.random.RandomState(1).randn(40))]
+        assert np.isfinite(comp.log_density(rows[0]))
+        est = CompositeEstimator((mdn.estimator(), gauss.estimator()))
+        fitted = optimize(rows, est, max_its=2, out=None)
+        ll = fitted.log_density(rows[0])
+        assert np.isfinite(ll)
+        back = from_json(to_json(fitted))
+        assert np.isclose(back.log_density(rows[0]), ll)
+
+    def test_hmm_emission_fits_and_serializes(self):
+        rng = np.random.RandomState(0)
+
+        def rand_seq():
+            t = rng.randint(3, 7)
+            return [(rng.randn(3).astype("float32"), np.array([float(rng.randn())], dtype="float32")) for _ in range(t)]
+
+        data = [rand_seq() for _ in range(20)]
+        init = HiddenMarkovModelDistribution(
+            [_mdn(), _mdn()], [0.5, 0.5], [[0.9, 0.1], [0.1, 0.9]], len_dist=PoissonDistribution(5.0)
+        )
+        est = HiddenMarkovEstimator([_mdn().estimator(), _mdn().estimator()], len_estimator=PoissonEstimator())
+        fitted = optimize(data, est, prev_estimate=init, max_its=2, out=None)
+        ll = fitted.log_density(data[0])
+        assert np.isfinite(ll)
+        back = from_json(to_json(fitted))
+        assert np.isclose(back.log_density(data[0]), ll)

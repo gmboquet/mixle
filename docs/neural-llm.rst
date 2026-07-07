@@ -363,9 +363,9 @@ test rather than assumed.
      - Serializes in each context
    * - ``NeuralGaussian`` (conditional, ``p(y|x)``)
      - tested
-     - untested (no architectural reason it would fail; not yet exercised)
-     - untested (as above)
-     - tested (Mixture only)
+     - tested
+     - tested
+     - tested in all three
    * - ``NeuralCategorical`` (conditional, ``p(y|x)``)
      - tested
      - tested
@@ -378,9 +378,9 @@ test rather than assumed.
      - tested in all three
    * - ``NeuralConditionalDensity`` (``mixture_density``, conditional)
      - tested
-     - untested (not yet exercised)
-     - untested (as above)
-     - tested (Mixture only)
+     - tested
+     - tested
+     - tested in all three
    * - ``EnergyModel`` (unconditional, approximately normalized)
      - tested
      - tested
@@ -394,10 +394,10 @@ model's own ``sampler()`` -- ``NeuralCategorical.sample()`` raises by design (se
 still works fine: ``optimize`` only needs ``log_density``/the accumulator contract, not sampling, so a
 conditionally-emitting HMM trains normally on externally supplied ``(x, y)`` sequences. See
 ``mixle/tests/neural_composition_grid_test.py`` for the HMM/Composite tests (the Mixture-column entries
-were already covered by ``neural_leaf_serialization_test.py`` and friends). The two remaining "untested"
-cells are not known to be broken -- there is no architectural reason a conditional field would fail
-inside Composite, or an unconditional density would fail as an HMM emission -- they are simply not yet
-exercised; closing them is a small, well-defined follow-up.
+were already covered by ``neural_leaf_serialization_test.py`` and friends). ``EnergyModel`` x HMM is the
+one remaining "untested" cell -- not known to be broken, there is no architectural reason an
+approximately-normalized unconditional density would fail as an HMM emission, simply not yet exercised;
+closing it is a small, well-defined follow-up.
 
 Examples And Tests
 ------------------
