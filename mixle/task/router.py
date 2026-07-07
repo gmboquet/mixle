@@ -22,6 +22,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.fault import DegradedResult
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 
 
@@ -37,6 +38,7 @@ class RouterStats:
     tiers: list[TierStats] = field(default_factory=list)
     harvested_inputs: list[Any] = field(default_factory=list)
     harvested_labels: list[Any] = field(default_factory=list)
+    degraded: list[DegradedResult] = field(default_factory=list)  # FAULT-a model_error events, in order
 
     @property
     def n_requests(self) -> int:
@@ -77,9 +79,19 @@ class Router:
         return cls(tiers)
 
     def __call__(self, x: Any) -> Any:
-        """Answer with the cheapest confident tier; the final tier's answers are harvested as labels."""
+        """Answer with the cheapest confident tier; the final tier's answers are harvested as labels.
+
+        FAULT-a ``model_error``: a tier whose ``decide(x)`` raises is routed PAST -- flagged in
+        ``stats.degraded`` -- rather than crashing the request; the next tier gets the chance to answer.
+        """
         for i, (name, model, _) in enumerate(self.tiers[:-1]):
-            label = model.decide(x)
+            try:
+                label = model.decide(x)
+            except Exception as exc:  # noqa: BLE001 -- route past this tier to the next, whatever it raised
+                self.stats.degraded.append(
+                    DegradedResult(value=None, degraded=True, mode="model_error", reason=f"{name}: {exc}")
+                )
+                continue
             if label is not ESCALATE:
                 self.stats.tiers[i].answered += 1
                 return label
