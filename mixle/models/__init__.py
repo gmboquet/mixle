@@ -57,6 +57,7 @@ from mixle.models.grammar import (
     pcfg_log_likelihood,
     viterbi_parse,
 )
+from mixle.models.hamiltonian import HamiltonianNet, leapfrog_rollout
 from mixle.models.knowledge_graph import KnowledgeGraphFitResult, TransEKnowledgeGraphModel
 from mixle.models.language_model import LM
 from mixle.models.mixture_density import (
@@ -166,6 +167,7 @@ __all__ = [
     "tune_training",
     "stream_fit",
     "GrammarLearningResult",
+    "HamiltonianNet",
     "HardEMResult",
     "KnowledgeGraphFitResult",
     "PartiallyObservableMarkovDecisionProcessFilterResult",
@@ -193,6 +195,7 @@ __all__ = [
     "gaussian_partial_correlation",
     "grammar_rule_table",
     "hard_em_stochastic_block_model",
+    "leapfrog_rollout",
     "learn_pc_skeleton",
     "build_autoregressive_categorical",
     "build_conditional_autoregressive_categorical",
