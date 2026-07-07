@@ -392,7 +392,12 @@ def _em_loop(
         nxt = step_fn(enc_data, estimator, model)
         _, ll = ll_fn(enc_data, nxt)
         vll = ll_fn(enc_vdata, nxt)[1] if has_v else ll
-        dll = ll - old_ll
+        # ll and old_ll can both be -inf (e.g. two successive collapsed/singular-covariance steps);
+        # -inf - -inf is nan by IEEE 754, which is the semantics every downstream nan-comparison below
+        # already relies on (nan >= 0 and nan < delta are both False, so a nan dll is inert) -- silence
+        # the resulting RuntimeWarning rather than changing behavior.
+        with np.errstate(invalid="ignore"):
+            dll = ll - old_ll
 
         # A non-finite step (e.g. a collapsed/singular covariance producing a NaN/-inf
         # log-likelihood) is never an improvement: never accept it, and do not let it
