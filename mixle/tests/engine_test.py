@@ -189,6 +189,45 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(TorchEngine(device="cpu").accumulator_dtype, torch.float64)
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_sum_promotes_float32_input_to_accumulator_dtype(self):
+        # Regression: TorchEngine.sum was a bare torch.sum passthrough with no accumulator_dtype
+        # promotion (unlike NumpyEngine.sum, which already promotes), so a float32-precision fit on
+        # this engine accumulated sufficient statistics in float32 and silently drifted on large N --
+        # exactly the risk accumulator_dtype exists to guard against. Must now match numpy exactly.
+        from mixle.engines.numpy_engine import NumpyEngine
+
+        raw = np.ones(5_000_000, dtype=np.float32) * 0.1
+        engine = TorchEngine(device="cpu", dtype="float32")
+        result = engine.sum(engine.asarray(raw))
+        self.assertEqual(result.dtype, torch.float64)
+        # compare against numpy's accumulator_dtype-promoted sum of the SAME float32-rounded values --
+        # the true reference (this many np.float32(0.1) values do not sum to exactly 500000.0 because
+        # 0.1 has no exact float32 representation; float32 *accumulation* of that error compounds far
+        # worse than float64 accumulation of the same per-element bias).
+        reference = float(NumpyEngine(dtype="float32").sum(raw))
+        self.assertAlmostEqual(float(result), reference, places=3)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_sum_respects_an_explicit_dtype_override(self):
+        engine = TorchEngine(device="cpu", dtype="float32")
+        x = engine.asarray(np.ones(10, dtype=np.float32))
+        result = engine.sum(x, dtype=torch.float32)
+        self.assertEqual(result.dtype, torch.float32)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_sum_matches_numpy_engine_accumulation_accuracy(self):
+        from mixle.engines.numpy_engine import NumpyEngine
+
+        ne = NumpyEngine(dtype="float32")
+        te = TorchEngine(device="cpu", dtype="float32")
+        raw = np.random.RandomState(0).randn(2_000_000).astype(np.float32) * 3.0 + 10.0
+        true_sum = float(np.sum(raw.astype(np.float64)))
+        np_sum = float(ne.sum(ne.asarray(raw)))
+        torch_sum = float(te.sum(te.asarray(raw)))
+        self.assertAlmostEqual(np_sum, true_sum, places=1)
+        self.assertAlmostEqual(torch_sum, true_sum, places=1)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_mixed_engine_payload_fails(self):
         payload = (np.asarray([1.0]), torch.tensor([1.0]))
         with self.assertRaises(TypeError):
@@ -211,6 +250,64 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(sharded.placements[0].dim, 0)
         np.testing.assert_allclose(engine.to_numpy(sharded), np.asarray([1.0, 2.0, 3.0]))
         self.assertIsInstance(engine_of(sharded), TorchEngine)
+
+
+class ActiveEngineConcurrencyTest(unittest.TestCase):
+    """Regression: using_active_engine used to back its state with threading.local, which isolates OS
+    threads (still verified below) but not concurrent asyncio tasks sharing one thread -- one task
+    could observe another's active engine mid-block. Fixed by switching to contextvars.ContextVar."""
+
+    def test_concurrent_asyncio_tasks_do_not_see_each_others_engine(self):
+        import asyncio
+
+        from mixle.engines.base import active_engine, using_active_engine
+
+        seen = {}
+
+        async def worker(name, delay1, delay2):
+            with using_active_engine(name):
+                await asyncio.sleep(delay1)
+                seen[name] = active_engine()
+                await asyncio.sleep(delay2)
+
+        async def main():
+            await asyncio.gather(worker("X", 0.03, 0.03), worker("Y", 0.0, 0.06))
+
+        asyncio.run(main())
+        self.assertEqual(seen, {"X": "X", "Y": "Y"})
+        self.assertIsNone(active_engine())  # cleared outside every block
+
+    def test_concurrent_threads_still_isolated(self):
+        import threading
+
+        from mixle.engines.base import active_engine, using_active_engine
+
+        seen = {}
+
+        def worker(name, delay):
+            with using_active_engine(name):
+                import time
+
+                time.sleep(delay)
+                seen[name] = active_engine()
+
+        t1 = threading.Thread(target=worker, args=("A", 0.03))
+        t2 = threading.Thread(target=worker, args=("B", 0.0))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        self.assertEqual(seen, {"A": "A", "B": "B"})
+
+    def test_exception_inside_the_block_still_restores_the_previous_engine(self):
+        from mixle.engines.base import active_engine, using_active_engine
+
+        with using_active_engine("outer"):
+            with self.assertRaises(ValueError):
+                with using_active_engine("inner"):
+                    raise ValueError("boom")
+            self.assertEqual(active_engine(), "outer")
+        self.assertIsNone(active_engine())
 
 
 if __name__ == "__main__":

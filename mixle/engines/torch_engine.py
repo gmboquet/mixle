@@ -192,11 +192,19 @@ class TorchEngine(ComputeEngine):
     isnan = staticmethod(lambda x: torch.isnan(x))
     isinf = staticmethod(lambda x: torch.isinf(x))
 
-    @staticmethod
-    def sum(x, *args, **kwargs):
-        """Return ``torch.sum`` accepting either ``axis`` or ``dim``."""
+    def sum(self, x, *args, **kwargs):
+        """Return ``torch.sum`` accepting either ``axis`` or ``dim``.
+
+        Promotes a floating input to :attr:`accumulator_dtype` when the caller doesn't pass an explicit
+        ``dtype=`` -- mirroring :meth:`NumpyEngine.sum`. Without this, ``torch.sum`` accumulates in the
+        input tensor's own dtype by default, so a float32-precision fit on this engine would silently
+        drift on large N (the exact catastrophic-cancellation risk ``accumulator_dtype`` exists to
+        guard against) while the numpy engine, which already promotes, stayed accurate.
+        """
         if "axis" in kwargs and "dim" not in kwargs:
             kwargs["dim"] = kwargs.pop("axis")
+        if kwargs.get("dtype") is None and torch.is_tensor(x) and x.dtype.is_floating_point:
+            kwargs["dtype"] = self.accumulator_dtype
         return torch.sum(x, *args, **kwargs)
 
     @staticmethod

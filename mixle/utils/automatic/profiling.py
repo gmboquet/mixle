@@ -401,6 +401,14 @@ def _lognormal_bits(values: Sequence[float]) -> float | None:
     arr = np.asarray(values, dtype=float)
     if arr.size == 0 or not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
         return None
+    if arr.var() <= 0.0:
+        # Raw-space variance is exactly zero (numerically constant data) -- unlike the Gaussian/
+        # Student-t/Gamma candidates, which all reject this directly, log-space variance of a
+        # constant array is NOT exactly zero: np.log(c) computed independently per repeated element
+        # rounds slightly differently each time, leaving a ~1e-32-scale floating-point artifact that
+        # _gaussian_bits would otherwise treat as a real (absurdly tight, winning) signal. Reject here
+        # too, on the same raw-space test the other candidates already use.
+        return None
     logs = np.log(arr)
     gauss = _gaussian_bits(float(logs.var()))
     if gauss is None:
@@ -1651,7 +1659,8 @@ class DatumNode:
         self.count = 0
         self.none_count = 0
         self.nan_count = 0
-        self.inf_count = 0
+        self.pos_inf_count = 0
+        self.neg_inf_count = 0
         self.str_count = 0
         self.float_count = 0
         self.int_count = 0
@@ -1712,7 +1721,8 @@ class DatumNode:
         "count",
         "none_count",
         "nan_count",
-        "inf_count",
+        "pos_inf_count",
+        "neg_inf_count",
         "str_count",
         "float_count",
         "int_count",
@@ -1772,7 +1782,10 @@ class DatumNode:
             if math.isnan(x):
                 self.nan_count += v
             elif math.isinf(x):
-                self.inf_count += v
+                if x > 0:
+                    self.pos_inf_count += v
+                else:
+                    self.neg_inf_count += v
             else:
                 # Python floats carry continuous-measurement semantics even
                 # when a realized value happens to be integral, e.g. a
@@ -1972,6 +1985,18 @@ class DatumNode:
         if self.nan_count > 0:
             rv = get_optional_estimator(rv, math.nan, use_bstats=use_bstats)
 
+        # +-inf is tracked (pos_inf_count/neg_inf_count) but, unlike None/NaN, was never wrapped here --
+        # the base estimator built above (e.g. GaussianEstimator, whose distribution requires finite
+        # support) never sees these values (add_datum excludes them from vdict), so get_estimator()
+        # returned successfully while optimize() on the SAME unfiltered data crashed. Wrap each sign
+        # present the same way None/NaN already are, so a field containing infinities gets a genuinely
+        # fittable estimator instead of one that silently can't handle the data it was inferred from.
+        if self.pos_inf_count > 0:
+            rv = get_optional_estimator(rv, math.inf, use_bstats=use_bstats)
+
+        if self.neg_inf_count > 0:
+            rv = get_optional_estimator(rv, -math.inf, use_bstats=use_bstats)
+
         return rv
 
     def _fixed_numeric_vector_dim(self):
@@ -1989,7 +2014,7 @@ class DatumNode:
         for child in self.children:
             if child.count != self.seq_count:
                 return None
-            if child.none_count > 0 or child.nan_count > 0 or child.inf_count > 0:
+            if child.none_count > 0 or child.nan_count > 0 or child.pos_inf_count > 0 or child.neg_inf_count > 0:
                 return None
             if child.str_count > 0 or child.bool_count > 0 or child.obj_count > 0:
                 return None

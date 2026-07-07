@@ -119,20 +119,32 @@ def _is_gpu_engine(engine: Any) -> bool:
 
 
 def _numeric_data_sample(data: Any, sample_size: int = 512) -> np.ndarray | None:
-    """Flatten the first ``sample_size`` observations to a float array, or None if not numeric.
+    """Flatten an evenly-spaced sample of ``sample_size`` observations to a float array, or None if
+    not numeric.
 
     Handles scalars, sequences/arrays of scalars, and (nested) tuples of those -- enough to read the
     magnitude/dynamic-range of continuous data. Structured/categorical/None observations yield None,
     in which case the caller stays at the safe default precision.
+
+    Strided across the full dataset rather than the leading ``sample_size`` rows: naturally-ordered
+    data (sorted, appended-to over time, grouped by source) can concentrate extreme-magnitude values
+    later in the sequence, which a plain prefix would never see -- silently recommending float32 for
+    data that is not actually well-conditioned for it. ``list(data)`` already materializes every row
+    to index into, so striding costs nothing extra over slicing a prefix.
     """
     if data is None:
         return None
     try:
-        head = list(data)[:sample_size]
+        rows = list(data)
     except TypeError:
         return None
-    if not head:
+    if not rows:
         return None
+    if len(rows) > sample_size:
+        step = len(rows) / sample_size
+        head = [rows[int(i * step)] for i in range(sample_size)]
+    else:
+        head = rows
     out: list[float] = []
 
     def _collect(obj: Any) -> bool:
