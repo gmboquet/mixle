@@ -26,6 +26,19 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # Heavy integration / PDE-inversion / stochastic-recovery / exhaustive-precision tests: each has a
     # call >~5 s and together they floor the fast gate at ~100 s. Tagged `slow` so they leave the fast
     # gate (`pytest -m fast` -> <30 s) while still running in the full CI gate (`-m "not optional ..."`).
+    # Torch-trained conditional-transport + belief-composition tests: each fits a neural conditional
+    # density and/or runs a Monte-Carlo calibration check (100s of samples per held-out point across
+    # multiple hop counts) -- legitimately needed for a real coverage/calibration claim, not padding.
+    # Unmarked, these alone floor the fast gate at 60+ s; tagged `slow` so they still run in full CI.
+    "belief_walk_test.py": ("torch", "stochastic", "slow"),
+    "cycle_consistency_test.py": ("torch", "stochastic", "slow"),
+    "cross_modal_model_test.py": ("torch", "stochastic", "slow"),
+    "transport_edge_test.py": ("torch", "stochastic", "slow"),
+    "transport_proof_test.py": ("torch", "stochastic", "slow"),
+    "task_extract_test.py": ("torch", "slow"),
+    "task_constrained_test.py": ("torch", "slow"),
+    "task_sft_plan_test.py": ("torch", "slow"),
+    "task_plan_refine_test.py": ("torch", "slow"),
     "bingham_test.py": ("distribution", "stochastic", "slow"),
     "conformal_test.py": ("ppl", "integration", "slow"),
     "fused_codegen_test.py": ("numba", "optional"),

@@ -103,11 +103,15 @@ class ScoreAndSamplePlansTest(unittest.TestCase):
     """workstream C1/C2: a decomposition model you can fit, score, and sample -- a low-probability plan
     is an escalation signal, not a silent guess."""
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
+        # trained ONCE (seed=0, deterministic) and reused read-only across every test below -- the
+        # 4 tests in this class never mutate the planner, so a per-test setUp was retraining the
+        # identical model 4 times over for no behavioral difference.
         from mixle.task import ToolSpec, sft_planner
 
-        self.tools = [ToolSpec("lookup_order", ["order_id"]), ToolSpec("notify", ["user"])]
-        self.planner = sft_planner(_teacher, _requests(180), self.tools, seed=0, epochs=40, d_model=64, n_layer=2)
+        cls.tools = [ToolSpec("lookup_order", ["order_id"]), ToolSpec("notify", ["user"])]
+        cls.planner = sft_planner(_teacher, _requests(180), cls.tools, seed=0, epochs=40, d_model=64, n_layer=2)
 
     def test_the_teacher_plan_scores_far_above_a_wrong_plan(self):
         from mixle.task import score_plan

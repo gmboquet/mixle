@@ -78,14 +78,18 @@ class _SyntheticOrderWorld:
 
 @unittest.skipUnless(_HAS_TORCH, "the plan-writing LM needs torch")
 class OutcomeRefinementTest(unittest.TestCase):
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
+        # trained ONCE (seed=0, deterministic) and reused read-only -- outcome_refine_planner()
+        # returns a NEW planner rather than mutating this one, so a per-test setUp was retraining
+        # the identical base model 3 times over for no behavioral difference.
         from mixle.task import sft_planner
 
-        self.world = _SyntheticOrderWorld()
+        cls.world = _SyntheticOrderWorld()
         tools = [ToolSpec("lookup_order", ["order_id"]), ToolSpec("notify", ["user"])]
-        train_reqs = self.world.requests(180, seed=0)
-        self.planner = sft_planner(self.world.teacher, train_reqs, tools, seed=0, epochs=40, d_model=64, n_layer=2)
-        self.held_out = self.world.requests(40, seed=7)
+        train_reqs = cls.world.requests(180, seed=0)
+        cls.planner = sft_planner(cls.world.teacher, train_reqs, tools, seed=0, epochs=40, d_model=64, n_layer=2)
+        cls.held_out = cls.world.requests(40, seed=7)
 
     def test_solve_rate_improves_over_the_imitation_baseline(self):
         """The C4 acceptance: outcome training beats imitation-only, measured on the same held-out set."""
