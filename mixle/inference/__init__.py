@@ -188,6 +188,9 @@ from mixle.inference.posterior import ParameterPosterior, PredictivePosterior, p
 
 # closed-form variational projections — compress a structured teacher onto a smaller student exactly
 from mixle.inference.project import collapse_mixture, fisher_merge, gaussian_kl, moment_project, reduce_mixture
+
+# receipts: bind ledger + trace + calibration + provenance into one offline-re-verifiable artifact (H3)
+from mixle.inference.receipt import Receipt, VerificationReport, verify_receipt
 from mixle.inference.reproduce import (
     ReproReceipt,
     data_fingerprint,
@@ -412,6 +415,10 @@ __all__ = [
     "posterior",
     "ParameterPosterior",
     "PredictivePosterior",
+    # answer receipts -- bind ledger + trace + calibration + provenance, re-verifiable offline (H3)
+    "Receipt",
+    "VerificationReport",
+    "verify_receipt",
     # reproducibility receipts -- record a fit, replay it, check it comes out bit-for-bit
     "record_fit",
     "verify_reproducible",
