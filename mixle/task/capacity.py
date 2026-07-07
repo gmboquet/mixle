@@ -256,7 +256,9 @@ def _fit_rung(
         label_index = {y: i for i, y in enumerate(label_list)}
         y = np.asarray([label_index[str(t)] for t in train_labels], dtype=np.int64)
         featurizer = WordEmbeddingFeaturizer(word_vectors, dim=vec_dim, seed=seed)
-        module, cfg = _fit_mlp(featurizer.transform(train_texts), y, len(label_list), hidden, epochs, lr, seed, device)
+        module, cfg, _steps_run = _fit_mlp(
+            featurizer.transform(train_texts), y, len(label_list), hidden, epochs, lr, seed, device
+        )
         student = TaskModel(
             module,
             EmbeddingHeadIO(featurizer, label_list),
