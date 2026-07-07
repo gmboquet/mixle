@@ -63,11 +63,19 @@ def whitespace_invariance(text: str) -> str:
 
 def _predict(model: Any, texts: list[str]) -> list[Any]:
     """Batch-predict labels from ``model``, which may be a ``CalibratedTaskModel``, a ``TaskModel``-like object
-    exposing ``batch``, or a bare ``teacher(texts) -> labels`` / ``teacher(text) -> label`` callable."""
-    if hasattr(model, "task"):
-        return list(model.task.batch(texts))
+    exposing ``batch``, or a bare ``teacher(texts) -> labels`` / ``teacher(text) -> label`` callable.
+
+    Checks ``batch`` before ``task``: a bare ``TaskModel``'s own ``task`` attribute is a plain
+    descriptive string, not a nested model, so checking ``task`` first misfires
+    (``AttributeError: 'str' object has no attribute 'batch'``) on any model not wrapped in
+    ``CalibratedTaskModel`` -- e.g. a :func:`~mixle.task.extract.distill_extractor` student, whose
+    adapter has no ``proba_batch`` and so can never be calibration-wrapped. ``CalibratedTaskModel``
+    itself exposes no ``batch``, so this order still falls through to ``model.task.batch`` for it.
+    """
     if hasattr(model, "batch"):
         return list(model.batch(texts))
+    if hasattr(model, "task"):
+        return list(model.task.batch(texts))
     out = model(texts)
     if isinstance(out, (list, tuple)) and len(out) == len(texts):
         return list(out)

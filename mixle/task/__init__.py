@@ -82,6 +82,7 @@ from mixle.task.extract import (
     extraction_f1,
     tokenize,
 )
+from mixle.task.generative_capability import extractive_capture_profile, validate_extraction_schema
 from mixle.task.generative_text import GenerativeTextIO, distill_text_generative, distill_text_generative_from_labels
 from mixle.task.harness import ExtractorHarness, MatcherHarness, replace_alerter, replace_extractor, replace_matcher
 from mixle.task.llm import (
@@ -149,6 +150,8 @@ __all__ = [
     "MatcherHarness",
     "FieldChoice",
     "GenerativeTextIO",
+    "extractive_capture_profile",
+    "validate_extraction_schema",
     "HashedNGram",
     "HashedRecord",
     "LNSStructuredClassifierIO",
