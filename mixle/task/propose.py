@@ -19,13 +19,20 @@ Same "no verifiable objective, no optimization" precondition as ``optimize_under
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from mixle.doe.oracle import OracleResult, VerifiableOracle
 from mixle.inference import optimize
 from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
+
+if TYPE_CHECKING:
+    # Deferred: mixle.doe pulls in mixle.models -> mixle.inference, and this module is reachable from
+    # mixle.inference.receipt (via mixle.task.replay) while mixle.inference is still initializing --
+    # an eager import here creates a circular import. OracleResult/VerifiableOracle are used only as
+    # (lazily-evaluated, `from __future__ import annotations`) type annotations, never constructed or
+    # isinstance-checked here, so the real import is never needed at runtime.
+    from mixle.doe.oracle import OracleResult, VerifiableOracle
 
 
 @dataclass
