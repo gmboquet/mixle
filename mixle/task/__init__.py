@@ -95,6 +95,15 @@ from mixle.task.edge import (
     measure_ops_per_second,
     task_fingerprint,
 )
+from mixle.task.explore_world import (
+    DRILL_COST,
+    SURVEY_COST,
+    EpisodeResult,
+    ExplorationWorld,
+    greedy_prospectivity_policy,
+    random_policy,
+    run_episode,
+)
 from mixle.task.extract import (
     ExtractionIO,
     distill_extractor,
@@ -131,6 +140,15 @@ from mixle.task.model import (
 )
 from mixle.task.multilabel import MultiLabelSolution, solve_multilabel
 from mixle.task.orchestrate import OrchestrationResult, World, orchestrate
+from mixle.task.outcome_decomposer import (
+    OutcomeTrainedDecomposer,
+    RoundStats,
+    evaluate_greedy_heuristic,
+    evaluate_plan_model,
+    execute_plan,
+    imitation_traces,
+    train_outcome_decomposer,
+)
 from mixle.task.plan import Planner, distill_planner
 from mixle.task.plan_model import PlanModel, fit_plan_model
 from mixle.task.plan_refine import RefinementReport, outcome_refine_planner
@@ -199,6 +217,13 @@ __all__ = [
     "ExecutionTrace",
     "EmbeddingHeadIO",
     "ExtractionIO",
+    "DRILL_COST",
+    "SURVEY_COST",
+    "EpisodeResult",
+    "ExplorationWorld",
+    "greedy_prospectivity_policy",
+    "random_policy",
+    "run_episode",
     "ExtractorHarness",
     "MatcherHarness",
     "CeilingReport",
@@ -239,6 +264,13 @@ __all__ = [
     "MultiLabelSolution",
     "OrchestrationResult",
     "World",
+    "OutcomeTrainedDecomposer",
+    "RoundStats",
+    "evaluate_greedy_heuristic",
+    "evaluate_plan_model",
+    "execute_plan",
+    "imitation_traces",
+    "train_outcome_decomposer",
     "StructuredSolution",
     "GenerativePlanner",
     "Planner",

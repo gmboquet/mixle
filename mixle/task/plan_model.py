@@ -70,13 +70,23 @@ class PlanModel:
         return self.log_prob(plan) >= floor
 
 
-def fit_plan_model(traces: AgentTraces | Sequence[AgentTrace], *, smoothing: float = 0.5) -> PlanModel:
+def fit_plan_model(
+    traces: AgentTraces | Sequence[AgentTrace], *, smoothing: float = 0.5, init_p: float = 1.0
+) -> PlanModel:
     """Fit a :class:`PlanModel` on harvested traces' tool-name sequences.
 
     ``smoothing`` is the Markov chain's Dirichlet pseudo-count (higher = smoother transition
     estimates, matters most with few traces). Fits via :func:`mixle.inference.optimize` on the
     existing :class:`~mixle.stats.sequences.markov_chain.MarkovChainEstimator` -- the same
     declare-an-estimator/call-optimize path every other mixle model uses, not hand-rolled counting.
+
+    ``init_p`` defaults to ``1.0`` (use every trace for the init pass), not ``optimize``'s own
+    ``init_p=0.1`` default: that Bernoulli-subsamples observations for a cheap init estimate, sized
+    for large corpora, but a trace corpus here is typically tens to a few hundred sequences -- with
+    that few, a 10% subsample has a real chance of drawing ZERO sequences, which crashes
+    ``MarkovChainEstimator.estimate1`` (``all_keys`` ends up empty, dividing by zero). Using the full
+    corpus for this small an init pass is cheap and simply correct; override down only for corpora
+    large enough that subsampling actually matters.
     """
     from mixle.inference import optimize
     from mixle.stats import IntegerCategoricalEstimator, MarkovChainEstimator
@@ -85,7 +95,7 @@ def fit_plan_model(traces: AgentTraces | Sequence[AgentTrace], *, smoothing: flo
     sequences = [_tool_names(t.plan) for t in trace_list]
 
     est = MarkovChainEstimator(pseudo_count=float(smoothing), len_estimator=IntegerCategoricalEstimator())
-    dist = optimize(sequences, est, out=None)
+    dist = optimize(sequences, est, out=None, init_p=float(init_p))
     log_probs = np.asarray([dist.log_density(seq) for seq in sequences], dtype=float)
     return PlanModel(dist=dist, training_log_probs=log_probs)
 
