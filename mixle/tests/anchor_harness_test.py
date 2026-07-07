@@ -1,0 +1,63 @@
+"""F7: the workstream-F anchor harness runs end to end and its report demonstrates every element the
+plan's acceptance list requires (structured-belief modalities, >=2 honestly-compounding hops, >=2
+receivers with genuinely different task-sufficient projections, cycle-consistency-gated abstention,
+and an honest frontier comparison)."""
+
+import unittest
+
+import pytest
+
+pytest.importorskip("torch")
+
+from mixle.reason.anchor_harness import AnchorHarnessReport, run_anchor_harness  # noqa: E402
+
+
+class AnchorHarnessTest(unittest.TestCase):
+    def test_runs_end_to_end_and_produces_a_full_report(self):
+        report = run_anchor_harness(n_train=1200, n_test=80, seed=0)
+        self.assertIsInstance(report, AnchorHarnessReport)
+
+    def test_at_least_two_structured_belief_modalities_no_shared_vector(self):
+        report = run_anchor_harness(n_train=1200, n_test=80, seed=0)
+        self.assertGreaterEqual(len(report.modalities), 2)
+        self.assertIn("geochem", report.modalities)
+        self.assertIn("gravity", report.modalities)
+
+    def test_at_least_two_hops_with_measured_compounding_calibration(self):
+        report = run_anchor_harness(n_train=1200, n_test=80, seed=0)
+        self.assertEqual(report.hop_names, ["gravity_to_density", "density_to_grade"])
+        self.assertEqual(set(report.coverage_by_hop), {1, 2})
+        for k, stats in report.coverage_by_hop.items():
+            self.assertIn("coverage", stats)
+            self.assertIn("consistent_with_nominal", stats)
+        # calibration is measured, not assumed -- report it whichever way it comes out
+        self.assertIsInstance(report.walk_is_calibrated, bool)
+
+    def test_two_receivers_get_genuinely_different_projections_of_the_same_belief(self):
+        report = run_anchor_harness(n_train=1200, n_test=80, seed=0)
+        self.assertNotEqual(report.driller_projection_components, report.scout_projection_components)
+        self.assertGreater(report.driller_projection_components, report.scout_projection_components)
+        self.assertNotEqual(report.driller_readout, report.scout_readout)
+
+    def test_cycle_consistency_gates_some_abstention(self):
+        report = run_anchor_harness(n_train=1200, n_test=80, seed=0)
+        self.assertGreater(len(report.abstained_site_ids), 0)
+        self.assertLess(report.abstain_rate, 0.5)  # abstention is a minority flag, not most of the traffic
+
+    def test_frontier_comparison_is_reported_honestly_both_ways(self):
+        report = run_anchor_harness(n_train=1200, n_test=80, seed=0)
+        self.assertIsInstance(report.frontier_mae, float)
+        self.assertIsInstance(report.walk_mae, float)
+        self.assertFalse(report.frontier_is_calibrated)  # the frontier baseline reports no interval at all
+        self.assertTrue(any("cheap" in note for note in report.notes))  # where the frontier wins: cost
+
+    def test_deterministic_given_seed(self):
+        r1 = run_anchor_harness(n_train=1200, n_test=80, seed=3)
+        r2 = run_anchor_harness(n_train=1200, n_test=80, seed=3)
+        self.assertEqual(r1.coverage_by_hop, r2.coverage_by_hop)
+        self.assertEqual(r1.abstained_site_ids, r2.abstained_site_ids)
+        self.assertEqual(r1.walk_mae, r2.walk_mae)
+
+
+if __name__ == "__main__":
+    unittest.main()
