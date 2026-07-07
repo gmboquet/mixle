@@ -35,9 +35,13 @@ from mixle.task.design import DesignedModel, design_model, spec_to_estimator
 from mixle.task.distill import (
     agreement,
     distill,
+    distill_for_routing,
     distill_from_labels,
+    distill_from_labels_for_routing,
     distill_records,
+    distill_records_for_routing,
     distill_records_from_labels,
+    distill_records_from_labels_for_routing,
     distill_structured,
     distill_structured_from_labels,
 )
@@ -112,7 +116,7 @@ from mixle.task.solve import Solution, load_harvested, solve
 from mixle.task.structured_out import StructuredSolution, solve_structured
 from mixle.task.toolcall import ToolCaller, ToolSpec, distill_tool_caller
 from mixle.task.traces import AgentTrace, AgentTraces, harvest_agent_traces, parse_conversation
-from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
+from mixle.task.tune import CalibratedTuneResult, RecipeSpace, TuneResult, tune_recipe, tune_recipe_for_routing
 
 __all__ = [
     "ESCALATE",
@@ -162,6 +166,7 @@ __all__ = [
     "ToolCaller",
     "ToolSpec",
     "TextClassifierIO",
+    "CalibratedTuneResult",
     "TuneResult",
     "acquisition_scores",
     "active_distill",
@@ -177,11 +182,15 @@ __all__ = [
     "distill_tool_caller",
     "distill_for_edge",
     "footprint",
+    "distill_for_routing",
     "distill_from_labels",
+    "distill_from_labels_for_routing",
     "distill_text_generative",
     "distill_text_generative_from_labels",
     "distill_records",
+    "distill_records_for_routing",
     "distill_records_from_labels",
+    "distill_records_from_labels_for_routing",
     "distill_structured",
     "distill_structured_from_labels",
     "extraction_f1",
@@ -228,4 +237,5 @@ __all__ = [
     "FINGERPRINT_KEYS",
     "tokenize",
     "tune_recipe",
+    "tune_recipe_for_routing",
 ]

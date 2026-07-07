@@ -8,6 +8,11 @@ prefers the *cheapest* recipe that still matches -- the "minimize train time" pi
 re-distilled winner as a callable :class:`~mixle.task.model.TaskModel` plus the full search history.
 
 The recipe space is a few interpretable axes with sensible defaults; override ``space`` to widen or pin them.
+
+``tune_recipe_for_routing`` is the routing-ready sibling: it runs the same search, then calibrates the winning
+recipe into a :class:`~mixle.task.calibrate.CalibratedTaskModel` on data the search never touched -- so a task
+gets an automatically right-sized model (search picks the complexity) that is *also* immediately ``decide()``-able
+for :class:`~mixle.task.cascade.Cascade` / :class:`~mixle.task.router.Router`, with no separate calibration step.
 """
 
 from __future__ import annotations
@@ -18,7 +23,8 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task.distill import agreement, distill
+from mixle.task.calibrate import CalibratedTaskModel
+from mixle.task.distill import _split_for_calibration, agreement, distill
 from mixle.task.model import TaskModel
 
 
@@ -119,3 +125,89 @@ def _teacher_labels(teacher: Callable[..., Any], texts: list[str]) -> list[Any]:
     if isinstance(out, (list, tuple)) and len(out) == len(texts):
         return list(out)
     return [teacher(t) for t in texts]
+
+
+def _teacher_from_cache(known: dict[str, Any], teacher: Callable[..., Any]) -> Callable[[list[str]], list[Any]]:
+    """A teacher wrapper answering from ``known`` (text -> label) first, so previously-labeled text is never
+    re-queried -- the teacher is assumed a deterministic function of the text, same as everywhere else in
+    distillation, so caching by text content changes no result, only how many real teacher calls it costs."""
+
+    def wrapped(texts: list[str]) -> list[Any]:
+        misses = [t for t in texts if t not in known]
+        if misses:
+            known.update(zip(misses, _teacher_labels(teacher, misses)))
+        return [known[t] for t in texts]
+
+    return wrapped
+
+
+@dataclass
+class CalibratedTuneResult:
+    """The outcome of a routing-ready recipe search: the calibrated winner, its recipe and scores, and history."""
+
+    model: CalibratedTaskModel
+    recipe: dict[str, Any]
+    agreement: float
+    score: float
+    cost: float
+    history: Any = field(default=None)
+
+
+def tune_recipe_for_routing(
+    teacher: Callable[..., Any],
+    train_texts: Sequence[str],
+    val_texts: Sequence[str],
+    *,
+    labels: Sequence[str] | None = None,
+    space: RecipeSpace | None = None,
+    n_init: int = 4,
+    n_iter: int = 8,
+    cost_weight: float = 0.0,
+    calibration_frac: float = 0.3,
+    alpha: float = 0.1,
+    seed: int = 0,
+    task: str = "",
+) -> CalibratedTuneResult:
+    """Bayesian-optimize the distillation recipe, then calibrate the winner for routing -- all in one call.
+
+    Runs :func:`tune_recipe`'s search over a ``calibration_frac`` slice of ``val_texts`` held back first: that
+    slice never scores a candidate or influences the search, and is used only afterward to calibrate the
+    winning model into a :class:`~mixle.task.calibrate.CalibratedTaskModel`. The result is a task-specific
+    recipe -- the search picked the complexity and epoch budget for this data, not a fixed default -- that is
+    also immediately ``decide()``-able: drop it into :class:`~mixle.task.cascade.Cascade` or
+    :class:`~mixle.task.router.Router` for tiered serving with no separate calibration step to manage.
+
+    ``teacher`` is also cheaper to call here than under :func:`tune_recipe` directly: every trial shares one
+    cache, so ``train_texts`` -- identical across every candidate recipe -- is queried only once for the whole
+    search rather than once per trial, and the calibration/search overlap in ``val_texts`` is never re-queried
+    either. Every distinct input is priced exactly once, however many candidates the search evaluates.
+    """
+    val_texts = [str(t) for t in val_texts]
+    val_truth = _teacher_labels(teacher, val_texts)
+    search_texts, _search_labels, cal_texts, cal_labels = _split_for_calibration(
+        val_texts, val_truth, calibration_frac, seed
+    )
+    # shared across every trial below: train_texts is identical candidate to candidate, so this cache also
+    # kills tune_recipe's normal per-trial re-query of train_texts, not just the val/search-slice overlap.
+    cached_teacher = _teacher_from_cache(dict(zip(val_texts, val_truth)), teacher)
+    result = tune_recipe(
+        cached_teacher,
+        train_texts,
+        search_texts,
+        labels=labels,
+        space=space,
+        n_init=n_init,
+        n_iter=n_iter,
+        cost_weight=cost_weight,
+        seed=seed,
+        task=task,
+    )
+    calibrated = CalibratedTaskModel(result.model, alpha=alpha).calibrate(cal_texts, cal_labels)
+    return CalibratedTuneResult(
+        model=calibrated,
+        recipe=result.recipe,
+        agreement=result.agreement,
+        score=result.score,
+        cost=result.cost,
+        history=result.history,
+    )
