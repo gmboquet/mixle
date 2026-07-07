@@ -79,14 +79,30 @@ class HarvestResolveTest(unittest.TestCase):
         self.assertEqual(result.n_harvested, 0)
 
     def test_determinism_given_seed(self):
-        router, _tier0 = _build_router(seed=0)
-        router.serve(_make(400, [FAMILY_A, FAMILY_B], random.Random(1)))
+        # two INDEPENDENT routers, identically harvested -- resolve_from_harvest clears the input
+        # router's harvest on success (so a repeat call on the SAME router legitimately sees less
+        # data), so determinism is checked across two routers with the same harvested state instead.
+        router1, _tier0a = _build_router(seed=0)
+        router1.serve(_make(400, [FAMILY_A, FAMILY_B], random.Random(1)))
+        router2, _tier0b = _build_router(seed=0)
+        router2.serve(_make(400, [FAMILY_A, FAMILY_B], random.Random(1)))
 
-        r1 = resolve_from_harvest(router, cost_per_request=0.001, seed=0)
-        r2 = resolve_from_harvest(router, cost_per_request=0.001, seed=0)
+        r1 = resolve_from_harvest(router1, cost_per_request=0.001, seed=0)
+        r2 = resolve_from_harvest(router2, cost_per_request=0.001, seed=0)
         self.assertEqual(r1.accepted, r2.accepted)
         self.assertEqual(r1.escalation_after, r2.escalation_after)
         self.assertEqual(r1.agreement, r2.agreement)
+
+    def test_successful_resolve_clears_the_input_routers_harvest(self):
+        router, _tier0 = _build_router(seed=0)
+        router.serve(_make(400, [FAMILY_A, FAMILY_B], random.Random(1)))
+        self.assertGreater(len(router.harvested()[0]), 0)
+
+        result = resolve_from_harvest(router, cost_per_request=0.001, seed=0)
+        self.assertTrue(result.accepted)
+        harvested_inputs, harvested_labels = router.harvested()
+        self.assertEqual(harvested_inputs, [])
+        self.assertEqual(harvested_labels, [])
 
     def test_inserted_tier_sits_just_before_the_frontier(self):
         router, _tier0 = _build_router(seed=0)

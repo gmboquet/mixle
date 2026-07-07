@@ -25,6 +25,14 @@ import numpy as np
 from mixle.inference import optimize
 
 
+def _as_paired_batch(a: np.ndarray) -> np.ndarray:
+    """``(n,)`` -> ``(n, 1)`` (n scalar observations, NOT one n-dimensional row -- unlike
+    ``np.atleast_2d``, which assumes the opposite and would silently misinterpret a batch of scalar
+    samples as a single high-dimensional one); ``(n, d)`` passes through unchanged."""
+    a = np.asarray(a, dtype=np.float64)
+    return a.reshape(-1, 1) if a.ndim == 1 else a
+
+
 def fit_cycle_transport(
     given: np.ndarray,
     target: np.ndarray,
@@ -50,8 +58,12 @@ def fit_cycle_transport(
 
     from mixle.models.mixture_density import NeuralConditionalDensity, build_mdn
 
-    given = np.atleast_2d(np.asarray(given, dtype=np.float64))
-    target = np.atleast_2d(np.asarray(target, dtype=np.float64))
+    given = _as_paired_batch(given)
+    target = _as_paired_batch(target)
+    if len(given) != len(target):
+        raise ValueError(
+            f"given and target must have the same number of paired observations, got {len(given)} vs {len(target)}"
+        )
     torch.manual_seed(seed)  # optimize()'s rng seeds data order only; module init needs its own seed
     module = build_mdn(x_dim=given.shape[1], y_dim=target.shape[1], k=k, hidden=hidden, layers=layers)
     leaf = NeuralConditionalDensity(module, m_steps=m_steps, lr=lr)
