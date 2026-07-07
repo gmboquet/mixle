@@ -1,4 +1,5 @@
-"""explain(): exact per-part attribution of log p(x)."""
+"""explain(): exact per-part attribution of log p(x). See explain_margin_test.py for the decision-margin
+ledger (workstream H1: answers with receipts)."""
 
 import numpy as np
 
@@ -28,8 +29,13 @@ def test_mixture_reports_responsibilities_and_winner_breakdown():
     ex = explain(mix, x)
     assert ex.component == 1 and ex.responsibilities[1] > 0.95
     np.testing.assert_allclose(ex.total, mix.log_density(x), atol=1e-12)
-    assert all(name.startswith("component[1].field") for name, _ in ex.parts)
+    assert all(name.startswith("component[1].field") or name == "component[1].prior" for name, _ in ex.parts)
     assert "component posterior" in ex.summary()
+    # the winner's own (prior + field) parts do NOT sum to the mixture's true total (that is a logsumexp
+    # over every component) -- the gap is the explicit, named correction term, not an omission.
+    assert ex.correction != 0.0
+    np.testing.assert_allclose(ex.ledger_sum(), ex.total, atol=1e-12)
+    assert ex.is_exact()
 
 
 def test_bayesian_network_parts_are_the_factor_scores():
