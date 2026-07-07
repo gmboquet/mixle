@@ -158,6 +158,13 @@ def route_stack(solutions: list, teacher: Any, *, costs: list[float]) -> Router:
     return Router.from_solutions(sols, teacher, costs=cs)
 
 
+# Below this many calibration points, escalation_rate can only land on a handful of coarse values
+# (e.g. 2 points -> only 0.0/0.5/1.0 are possible) -- not enough resolution to distinguish "genuinely
+# dropped escalation" from "which 2 of 8 points happened to land in calibration," which flips
+# accepted/rejected on nothing but the random train/cal split at the old n_harvested>=8 floor.
+_MIN_CAL_FOR_MEANINGFUL_MEASUREMENT = 10
+
+
 @dataclass
 class HarvestResolveResult:
     """What :func:`resolve_from_harvest` found and did -- a receipt, not a bare boolean.
@@ -209,7 +216,7 @@ def resolve_from_harvest(
 
     inputs, labels = router.harvested()
     n_harvested = len(inputs)
-    if n_harvested < 8:
+    if n_harvested < 4 + _MIN_CAL_FOR_MEANINGFUL_MEASUREMENT:
         return HarvestResolveResult(
             accepted=False,
             n_harvested=n_harvested,
@@ -224,11 +231,11 @@ def resolve_from_harvest(
 
     rng = np.random.RandomState(seed)
     order = rng.permutation(n_harvested)
-    n_cal = max(2, int(round(n_harvested * holdout)))
+    n_cal = max(_MIN_CAL_FOR_MEANINGFUL_MEASUREMENT, int(round(n_harvested * holdout)))
     cal_idx, train_idx = order[:n_cal], order[n_cal:]
     train_in, train_lab = [inputs[i] for i in train_idx], [str_labels[i] for i in train_idx]
     cal_in, cal_lab = [inputs[i] for i in cal_idx], [str_labels[i] for i in cal_idx]
-    if len(train_in) < 4 or len(cal_in) < 2:
+    if len(train_in) < 4 or len(cal_in) < _MIN_CAL_FOR_MEANINGFUL_MEASUREMENT:
         return HarvestResolveResult(
             accepted=False,
             n_harvested=n_harvested,

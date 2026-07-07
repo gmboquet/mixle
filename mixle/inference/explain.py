@@ -194,6 +194,14 @@ def explain_margin_mixture(model: Any, x: Any, answer: int, runner_up: int) -> E
 
 _FIX_VOCAB = frozenset({"add_edge", "upgrade_leaf", "split_region", "add_factor"})
 
+# Below these sizes there isn't enough data to estimate a scale (MAD) or a co-occurrence rate at all --
+# a background of 1-2 points can have a MAD of exactly 0, which the 1e-9 floor turns into a z-score in
+# the billions from pure numerical noise; a single case can only ever show 0% or 100% co-occurrence,
+# which is not evidence of anything "more than chance." Below either floor, diagnose() reports the
+# honest "not enough data" result rather than a spurious maximum-confidence finding.
+_MIN_BACKGROUND = 4
+_MIN_CASES_FOR_COOCCURRENCE = 3
+
 
 @dataclass
 class FaultReport:
@@ -235,7 +243,7 @@ def diagnose(
     see the module's diagnose_test.py and the KNOW-a/DIAGNOSE-a cards).
     """
     bg = list(background) if background is not None else list(cases)
-    if not bg or not cases:
+    if len(bg) < _MIN_BACKGROUND or not cases:
         return FaultReport(
             dominant="", evidence=[], suggested_fix="", receipt={"n_cases": len(cases), "n_background": len(bg)}
         )
@@ -259,7 +267,7 @@ def diagnose(
     ranked = sorted(mean_adverse.items(), key=lambda kv: -kv[1])
 
     dominant, fix, severity = "", "", 0.0
-    if len(ranked) > 1:
+    if len(ranked) > 1 and len(cases) >= _MIN_CASES_FOR_COOCCURRENCE:
         top_name, second_name = ranked[0][0], ranked[1][0]
         both = sum(1 for r in rows if r.get(top_name, 0.0) > min_z and r.get(second_name, 0.0) > min_z)
         either = sum(1 for r in rows if r.get(top_name, 0.0) > min_z or r.get(second_name, 0.0) > min_z)
