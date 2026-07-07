@@ -307,6 +307,68 @@ def make_mlp(input_dim: int, hidden_dims: Sequence[int], output_dim: int = 1, ac
     return torch.nn.Sequential(*layers)
 
 
+def make_monotonic_mlp(
+    input_dim: int, hidden_dims: Sequence[int], output_dim: int = 1, *, increasing: bool = True
+) -> Any:
+    """A fully connected Torch MLP that is monotonic in every input dimension jointly, BY CONSTRUCTION.
+
+    Each layer's weight matrix is reparameterized through ``softplus`` before use, so every weight is
+    strictly non-negative; composed with the (smooth, strictly increasing) ``Softplus`` activation, a
+    non-negative-weight affine map followed by an increasing activation is itself increasing, and that
+    property is closed under composition -- so the whole network is provably non-decreasing in every
+    input coordinate, with no penalty term and no post-hoc check needed. ``increasing=False`` negates the
+    output, giving a network non-increasing in every coordinate instead.
+
+    This is a hard architectural constraint (unlike :class:`~mixle.models.pinn.PINNRegression`'s soft
+    residual penalty): the guarantee holds at every point in input space, not just where training data
+    landed. Drops into the same wrappers as :func:`make_mlp` -- :class:`~mixle.models.neural_leaf.NeuralGaussian`
+    for regression, :class:`~mixle.models.softmax_leaf.NeuralCategorical` for classification -- no other
+    changes needed. Only jointly monotonic in ALL inputs; a network monotonic in some coordinates and free
+    in others needs a two-path (monotonic + unconstrained) variant, not built here.
+    """
+    try:
+        import torch
+    except ImportError as e:  # pragma: no cover
+        raise ImportError("make_monotonic_mlp requires torch.") from e
+    if int(input_dim) <= 0 or int(output_dim) <= 0 or any(int(h) <= 0 for h in hidden_dims):
+        raise ValueError(
+            "make_monotonic_mlp dims must be positive; got input_dim=%r hidden_dims=%r output_dim=%r"
+            % (input_dim, list(hidden_dims), output_dim)
+        )
+
+    class _NonNegativeLinear(torch.nn.Module):
+        def __init__(self, in_features: int, out_features: int) -> None:
+            super().__init__()
+            # softplus(0) = log(2) =~ 0.69, NOT ~0 -- a naive small-mean raw_weight init would put every
+            # effective weight near 0.69 rather than near 0, exploding the signal through depth. Instead
+            # init the EFFECTIVE weight at a normal fan-in scale, then invert softplus to get raw_weight.
+            fan_in = max(in_features, 1)
+            target = torch.empty(out_features, in_features).uniform_(1e-3, 1.0 / fan_in**0.5)
+            self.raw_weight = torch.nn.Parameter(target + torch.log(-torch.expm1(-target)))  # softplus^-1
+            self.bias = torch.nn.Parameter(torch.zeros(out_features))
+
+        def forward(self, x: Any) -> Any:
+            weight = torch.nn.functional.softplus(self.raw_weight)
+            return torch.nn.functional.linear(x, weight, self.bias)
+
+    class _NegateOutput(torch.nn.Module):
+        def __init__(self, module: Any) -> None:
+            super().__init__()
+            self.module = module
+
+        def forward(self, x: Any) -> Any:
+            return -self.module(x)
+
+    dims = [int(input_dim)] + [int(h) for h in hidden_dims] + [int(output_dim)]
+    layers: list[Any] = []
+    for i in range(len(dims) - 1):
+        layers.append(_NonNegativeLinear(dims[i], dims[i + 1]))
+        if i < len(dims) - 2:
+            layers.append(torch.nn.Softplus())
+    module = torch.nn.Sequential(*layers)
+    return module if increasing else _NegateOutput(module)
+
+
 def _torch_engine(
     engine: Any | None, precision: Any | None = None, owner: str = "GaussianRegressionNeuralNetwork"
 ) -> tuple[Any, Any]:

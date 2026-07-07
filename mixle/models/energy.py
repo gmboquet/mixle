@@ -345,9 +345,72 @@ def _energy_net_class() -> Any:
     return EnergyNet
 
 
-def __getattr__(name: str) -> Any:  # PEP 562: lets ``pickle`` resolve the hoisted EnergyNet by name
+_CONVEX_ENERGY_NET_CLASS: list[Any] = []
+
+
+def _convex_energy_net_class() -> Any:
+    """An input-convex energy net (ICNN, Amos et al. 2017): ``E(x)`` is convex in ``x`` BY CONSTRUCTION.
+
+    Each hidden layer takes the previous layer's activation ``z`` through a NON-NEGATIVE weight matrix
+    (``softplus``-reparameterized, same trick as :func:`~mixle.models.neural.make_monotonic_mlp`) plus an
+    unconstrained affine "skip" of the raw input ``x``, then a convex non-decreasing activation
+    (``Softplus``). A non-negative-weight combination of convex functions, composed with a convex
+    non-decreasing activation, is itself convex, and that property is closed under composition -- so the
+    whole energy is provably convex everywhere, not just where training data landed. The unconstrained
+    ``x``-skip at every layer is what makes this expressive (a purely non-negative-weight-in-``x`` network
+    would be far too restricted); only the ``z``-path weights carry the non-negativity constraint.
+    """
+    if _CONVEX_ENERGY_NET_CLASS:
+        return _CONVEX_ENERGY_NET_CLASS[0]
+    import torch
+    import torch.nn as nn
+
+    class _ICNNLayer(nn.Module):
+        def __init__(self, z_dim: int | None, x_dim: int, out_dim: int) -> None:
+            super().__init__()
+            self.x_path = nn.Linear(x_dim, out_dim)
+            self.raw_z_weight = nn.Parameter(torch.randn(out_dim, z_dim) * 0.1) if z_dim is not None else None
+
+        def forward(self, z: Any, x: Any) -> Any:
+            out = self.x_path(x)
+            if self.raw_z_weight is not None:
+                out = out + torch.nn.functional.linear(z, torch.nn.functional.softplus(self.raw_z_weight))
+            return out
+
+    class ConvexEnergyNet(nn.Module):
+        def __init__(self, dim: int, hidden: int = 64, layers: int = 3) -> None:
+            super().__init__()
+            self.dim = int(dim)
+            self.hidden = int(hidden)
+            self.layers = int(layers)
+            out_dims = [self.hidden] * (self.layers - 1) + [1]
+            self.icnn_layers = nn.ModuleList()
+            prev_dim: int | None = None
+            for out_dim in out_dims:
+                self.icnn_layers.append(_ICNNLayer(prev_dim, self.dim, out_dim))
+                prev_dim = out_dim
+            self.log_norm = nn.Parameter(torch.zeros(()))  # the NCE-learned scalar log-normalizer
+
+        def energy(self, x: Any) -> Any:
+            z = None
+            for i, layer in enumerate(self.icnn_layers):
+                z = layer(z, x)
+                if i < len(self.icnn_layers) - 1:
+                    z = torch.nn.functional.softplus(z)
+            return z.squeeze(-1)
+
+    ConvexEnergyNet.__module__ = __name__
+    ConvexEnergyNet.__qualname__ = "ConvexEnergyNet"
+    ConvexEnergyNet.__name__ = "ConvexEnergyNet"
+    _CONVEX_ENERGY_NET_CLASS.append(ConvexEnergyNet)
+    return ConvexEnergyNet
+
+
+def __getattr__(name: str) -> Any:  # PEP 562: lets ``pickle`` resolve the hoisted net classes by name
     if name == "EnergyNet":
         return _energy_net_class()
+    if name == "ConvexEnergyNet":
+        return _convex_energy_net_class()
     raise AttributeError("module %r has no attribute %r" % (__name__, name))
 
 
@@ -359,6 +422,17 @@ def build_energy_net(dim: int, *, hidden: int = 64, layers: int = 3) -> Any:
     ``log_norm`` parameter and a ``dim`` attribute.
     """
     return _energy_net_class()(dim, hidden, layers)
+
+
+def build_convex_energy_net(dim: int, *, hidden: int = 64, layers: int = 3) -> Any:
+    """An input-convex MLP energy ``E(x): R^dim -> R``, convex in ``x`` BY CONSTRUCTION -- ready to wrap
+    in an :class:`EnergyModel` exactly like :func:`build_energy_net`. A convex energy gives Langevin
+    sampling (:class:`EnergyModelSampler`) a unimodal target with no spurious local minima to get stuck
+    in, and gives any consumer of the fitted energy a certified-convex scalar-valued potential (e.g. a
+    verified optimum for a downstream ``mixle.doe`` search over ``-E(x)``). See :func:`_convex_energy_net_class`
+    for the construction.
+    """
+    return _convex_energy_net_class()(dim, hidden, layers)
 
 
 def _register_serializable() -> None:
