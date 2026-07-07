@@ -329,3 +329,65 @@ def sft_planner(
         agree += int(got is not None and _plans_match(got, list(teacher(r)), specs))
     planner.plan_agreement = agree / len(hold)
     return planner
+
+
+def score_plan(planner: GenerativePlanner, request: str, plan: Sequence[dict]) -> float:
+    """Mean per-character teacher-forced log-probability of a candidate ``plan`` under the trained LM.
+
+    This is not a decode: it scores a plan supplied by the CALLER (a candidate to rank against
+    alternatives, or an already-taken plan to flag as low-probability after the fact) -- the same
+    confidence metric :func:`~mixle.task.constrained.constrained_plan_decode` computes for its own
+    greedy path, generalized to any plan text. Higher (less negative) is more probable; a plan scoring
+    below the planner's calibrated ``conf_floor`` is exactly the "low-probability plan" escalation
+    signal the workstream-C decomposition-as-a-modeled-object plan calls for -- computed explicitly
+    here rather than left implicit in the decode loop.
+    """
+    import torch
+
+    text = _serialize_plan(list(plan))
+    lm = planner.lm
+    w = planner.codec.encode(str(request) + _PROMPT_SEP)
+    ids = planner.codec.encode(text)
+    logps: list[float] = []
+    lm.module.to(lm.device).eval()
+    try:
+        with torch.no_grad():
+            for ch_id in ids:
+                win = w[-lm.block :]
+                logits = lm.module(torch.as_tensor([win], dtype=torch.float32).to(lm.device))[0].cpu().numpy()
+                lse = float(np.logaddexp.reduce(logits - logits.max()) + logits.max())
+                logps.append(float(logits[ch_id]) - lse)
+                w.append(ch_id)
+    finally:
+        lm.module.train()
+    return float(np.mean(logps)) if logps else float("-inf")
+
+
+def sample_plans(
+    planner: GenerativePlanner, request: str, n: int = 5, *, temperature: float = 1.0, seed: int = 0
+) -> list[tuple[list[dict] | None, float]]:
+    """Draw ``n`` stochastic candidate plans from the trained LM, each scored by :func:`score_plan`.
+
+    Sorted highest-score first. A draw that fails to parse or validate (the grammar is not enforced
+    during stochastic sampling, unlike the constrained decode path) is returned as ``(None, -inf)`` --
+    an undefined score IS the escalation signal: a generative decomposition model that cannot produce a
+    coherent plan for a request should say so, never guess silently.
+    """
+    prompt = planner.codec.encode(str(request) + _PROMPT_SEP)
+    out: list[tuple[list[dict] | None, float]] = []
+    for i in range(int(n)):
+        gen = planner.lm.generate(
+            prompt,
+            n=planner.max_new,
+            temperature=temperature,
+            greedy=False,
+            seed=seed + i,
+            stop_id=planner.codec.eos_id,
+        )
+        text = planner.codec.decode(gen[len(prompt) :])
+        plan = _parse_plan(text if text.endswith(_EOS) else text + _EOS)
+        if plan is not None and planner._validate(plan, request):
+            out.append((plan, score_plan(planner, request, plan)))
+        else:
+            out.append((None, float("-inf")))
+    return sorted(out, key=lambda pair: pair[1], reverse=True)
