@@ -108,6 +108,14 @@ from mixle.task.quantize import (
     quantize_mlp,
 )
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
+from mixle.task.refine import (
+    EditTrial,
+    SearchOutcome,
+    apply_edge,
+    blind_structure_search,
+    diagnosis_directed_correction,
+    fit_independent_baseline,
+)
 from mixle.task.regress import RegressionSolution, solve_regression
 from mixle.task.router import Router, RouterStats, route_stack
 from mixle.task.scorecard import Scorecard, scorecard
@@ -148,6 +156,12 @@ __all__ = [
     "OpenAICompatLLM",
     "QuantizedClassifierIO",
     "QuantizedMLP",
+    "EditTrial",
+    "SearchOutcome",
+    "apply_edge",
+    "blind_structure_search",
+    "diagnosis_directed_correction",
+    "fit_independent_baseline",
     "RecipeSpace",
     "RecordClassifierIO",
     "RoutePlan",
