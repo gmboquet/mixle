@@ -39,6 +39,7 @@ from mixle.task.capability import (
 from mixle.task.cascade import Cascade, CascadeStats
 from mixle.task.density import DensityGate
 from mixle.task.design import DesignedModel, design_model, spec_to_estimator
+from mixle.task.disagreement import DisagreementGate, UnionGate, fit_disagreement_gate, measure_disagreement_mass
 from mixle.task.distill import (
     agreement,
     distill,
@@ -140,6 +141,8 @@ __all__ = [
     "DensityGate",
     "DesignModel",
     "DesignedModel",
+    "DisagreementGate",
+    "UnionGate",
     "DeviceSpec",
     "EdgeDistillResult",
     "EdgeFootprint",
@@ -184,6 +187,8 @@ __all__ = [
     "cascade_cost_per_request",
     "case_jitter_invariance",
     "design_model",
+    "fit_disagreement_gate",
+    "measure_disagreement_mass",
     "distill",
     "distill_designer",
     "distill_extractor",
