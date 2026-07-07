@@ -22,7 +22,15 @@ import numpy as np
 from scipy.stats import binomtest
 
 from mixle.inference import optimize
-from mixle.models.mixture_density import NeuralConditionalDensity, build_mdn
+
+try:
+    import torch  # noqa: F401
+
+    from mixle.models.mixture_density import NeuralConditionalDensity, build_mdn
+
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
 
 ALPHA = 0.10  # 90% nominal credible-interval coverage
 COVERAGE_P_FLOOR = 0.01  # binomial test p-value floor: below this, coverage is NOT consistent with nominal
@@ -120,27 +128,36 @@ def _nonlinear_reference_posterior(y, grid=np.linspace(-5, 5, 4001)):
 
 
 # --- fit both toy transports ONCE at import time; every test class (including the go/no-go report)
-# reads these same fits rather than repeating ~20s of training per case. ---
+# reads these same fits rather than repeating ~20s of training per case. Skipped entirely (rather than
+# raising on import) when torch is absent -- the classes below are marked skipUnless(_HAS_TORCH). ---
 
-_LIN_A, _LIN_SIGMA0, _LIN_R = _linear_gaussian_setup()
-_lin_x_train, _lin_y_train = _linear_gaussian_sample(_LIN_A, _LIN_SIGMA0, _LIN_R, 3000, np.random.RandomState(0))
-_LIN_FIT = _fit_mdn([(_lin_y_train[i], _lin_x_train[i]) for i in range(len(_lin_x_train))], x_dim=2, y_dim=2, seed=0)
-_LIN_SAMPLER = _LIN_FIT.sampler(seed=0)
-_LIN_X_TEST, _LIN_Y_TEST = _linear_gaussian_sample(_LIN_A, _LIN_SIGMA0, _LIN_R, 150, np.random.RandomState(1))
+_LIN_A = _LIN_SIGMA0 = _LIN_R = None
+_LIN_SAMPLER = _LIN_X_TEST = _LIN_Y_TEST = None
+_NL_SAMPLER = _NL_X_TEST = _NL_Y_TEST = None
 
-_nl_x_train, _nl_y_train = _nonlinear_sample(4000, np.random.RandomState(0))
-_NL_FIT = _fit_mdn(
-    [(_nl_y_train[i], _nl_x_train[i]) for i in range(len(_nl_x_train))],
-    x_dim=1,
-    y_dim=1,
-    seed=0,
-    delta=None,
-    reuse_estep_ll=False,
-)
-_NL_SAMPLER = _NL_FIT.sampler(seed=0)
-_NL_X_TEST, _NL_Y_TEST = _nonlinear_sample(150, np.random.RandomState(2))
+if _HAS_TORCH:
+    _LIN_A, _LIN_SIGMA0, _LIN_R = _linear_gaussian_setup()
+    _lin_x_train, _lin_y_train = _linear_gaussian_sample(_LIN_A, _LIN_SIGMA0, _LIN_R, 3000, np.random.RandomState(0))
+    _LIN_FIT = _fit_mdn(
+        [(_lin_y_train[i], _lin_x_train[i]) for i in range(len(_lin_x_train))], x_dim=2, y_dim=2, seed=0
+    )
+    _LIN_SAMPLER = _LIN_FIT.sampler(seed=0)
+    _LIN_X_TEST, _LIN_Y_TEST = _linear_gaussian_sample(_LIN_A, _LIN_SIGMA0, _LIN_R, 150, np.random.RandomState(1))
+
+    _nl_x_train, _nl_y_train = _nonlinear_sample(4000, np.random.RandomState(0))
+    _NL_FIT = _fit_mdn(
+        [(_nl_y_train[i], _nl_x_train[i]) for i in range(len(_nl_x_train))],
+        x_dim=1,
+        y_dim=1,
+        seed=0,
+        delta=None,
+        reuse_estep_ll=False,
+    )
+    _NL_SAMPLER = _NL_FIT.sampler(seed=0)
+    _NL_X_TEST, _NL_Y_TEST = _nonlinear_sample(150, np.random.RandomState(2))
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class LinearGaussianTransportTest(unittest.TestCase):
     """Metric (a) posterior fidelity and (b) calibration on the closed-form linear-Gaussian inverse."""
 
@@ -169,6 +186,7 @@ class LinearGaussianTransportTest(unittest.TestCase):
             self.assertGreater(p_value, COVERAGE_P_FLOOR, msg=f"observed coverage {rate} inconsistent with 90%")
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class NonlinearBimodalTransportTest(unittest.TestCase):
     """The small nonlinear case: y = x^2 + noise has a genuinely BIMODAL posterior (+/- x equally
     consistent), the case a single-Gaussian conditional head cannot represent but a mixture can."""
@@ -197,6 +215,7 @@ class NonlinearBimodalTransportTest(unittest.TestCase):
         self.assertGreater(p_value, COVERAGE_P_FLOOR, msg=f"observed coverage {rate} inconsistent with 90%")
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class TransportProofGoNoGoTest(unittest.TestCase):
     """The card's own required deliverable: the report states the go/no-go explicitly.
 
