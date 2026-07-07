@@ -44,8 +44,11 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
 
 def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
     from mixle.stats import NegativeBinomialDistribution
+    from mixle.utils.automatic.profiling import _value_array_from_vdict
 
-    return NegativeBinomialDistribution(1.0, 0.5).estimator()
+    fit = _params(_value_array_from_vdict(vdict))
+    r, p = fit if fit is not None else (1.0, 0.5)
+    return NegativeBinomialDistribution(r, p).estimator(pseudo_count=pseudo_count)
 
 
 def _cdf(arr: np.ndarray):
