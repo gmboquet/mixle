@@ -8,6 +8,11 @@ of the teacher's cost. ``agreement`` measures how faithfully the student mimics 
 the number :func:`~mixle.task.tune.tune_recipe` optimizes when it searches student recipes with ``mixle.doe``.
 
 Only the student fit needs torch; the teacher is opaque. ``distill`` is deterministic given ``seed``.
+
+``distill_for_routing``/``distill_records_for_routing`` are the routing-ready siblings: they hold out a
+calibration slice, fit the student on the rest, and return a :class:`~mixle.task.calibrate.CalibratedTaskModel`
+-- ``decide()``-able out of the box, so it drops straight into :class:`~mixle.task.cascade.Cascade` or
+:class:`~mixle.task.router.Router` with no separate calibration step to remember or get wrong.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.task.calibrate import CalibratedTaskModel
 from mixle.task.model import (
     HashedNGram,
     HashedRecord,
@@ -114,6 +120,94 @@ def distill_from_labels(
     return student
 
 
+def distill_for_routing(
+    teacher: Callable[..., Any],
+    texts: Sequence[str],
+    *,
+    labels: Sequence[str] | None = None,
+    calibration_frac: float = 0.2,
+    alpha: float = 0.1,
+    n: int = 3,
+    dim: int = 256,
+    hidden: Sequence[int] = (64,),
+    epochs: int = 200,
+    lr: float = 1e-2,
+    seed: int = 0,
+    task: str = "",
+    device: str = "cpu",
+) -> CalibratedTaskModel:
+    """Label ``texts`` with ``teacher``, fit a student, and calibrate it for routing -- all in one call.
+
+    A ``calibration_frac`` slice of the (teacher-)labeled data is held out from training and used to set a
+    conformal threshold, so the returned :class:`~mixle.task.calibrate.CalibratedTaskModel` is immediately
+    ``decide()``-able: confident, in-distribution inputs get the student's label; everything else is
+    ``ESCALATE``. Pass it straight to :class:`~mixle.task.cascade.Cascade` (with ``teacher``) or
+    :class:`~mixle.task.router.Router` for tiered serving -- no separate calibration split to manage by hand.
+    Deterministic given ``seed``; the calibration slice is disjoint from the student's training data.
+    """
+    texts = [str(t) for t in texts]
+    teacher_labels = _as_batched(teacher)(texts)
+    return distill_from_labels_for_routing(
+        texts,
+        teacher_labels,
+        labels=labels,
+        calibration_frac=calibration_frac,
+        alpha=alpha,
+        n=n,
+        dim=dim,
+        hidden=hidden,
+        epochs=epochs,
+        lr=lr,
+        seed=seed,
+        task=task,
+        device=device,
+    )
+
+
+def distill_from_labels_for_routing(
+    texts: Sequence[str],
+    teacher_labels: Sequence[Any],
+    *,
+    labels: Sequence[str] | None = None,
+    calibration_frac: float = 0.2,
+    alpha: float = 0.1,
+    n: int = 3,
+    dim: int = 256,
+    hidden: Sequence[int] = (64,),
+    epochs: int = 200,
+    lr: float = 1e-2,
+    seed: int = 0,
+    task: str = "",
+    device: str = "cpu",
+) -> CalibratedTaskModel:
+    """Teacher-free training core of :func:`distill_for_routing`: fit + calibrate from labels already in hand.
+
+    Splits ``(texts, teacher_labels)`` into a training slice and a held-out ``calibration_frac`` slice (fixed by
+    ``seed``), trains the student on the former via :func:`distill_from_labels`, then calibrates
+    (:meth:`~mixle.task.calibrate.CalibratedTaskModel.calibrate`) on the latter. ``labels`` (if given, else
+    inferred from all of ``teacher_labels`` before the split) is shared by both slices so a class that lands
+    entirely on one side of the split doesn't shrink the label set out from under the other.
+    """
+    label_list = list(labels) if labels is not None else sorted({str(y) for y in teacher_labels})
+    train_texts, train_labels, cal_texts, cal_labels = _split_for_calibration(
+        texts, teacher_labels, calibration_frac, seed
+    )
+    student = distill_from_labels(
+        train_texts,
+        train_labels,
+        labels=label_list,
+        n=n,
+        dim=dim,
+        hidden=hidden,
+        epochs=epochs,
+        lr=lr,
+        seed=seed,
+        task=task,
+        device=device,
+    )
+    return CalibratedTaskModel(student, alpha=alpha).calibrate(cal_texts, cal_labels)
+
+
 def distill_records(
     teacher: Callable[..., Any],
     records: Sequence[Any],
@@ -177,6 +271,77 @@ def distill_records_from_labels(
     )
     student.meta["train_agreement"] = agreement(student, teacher_labels, records)
     return student
+
+
+def distill_records_for_routing(
+    teacher: Callable[..., Any],
+    records: Sequence[Any],
+    *,
+    labels: Sequence[str] | None = None,
+    calibration_frac: float = 0.2,
+    alpha: float = 0.1,
+    dim: int = 256,
+    hidden: Sequence[int] = (64,),
+    epochs: int = 200,
+    lr: float = 1e-2,
+    seed: int = 0,
+    task: str = "",
+    device: str = "cpu",
+) -> CalibratedTaskModel:
+    """The structured-record sibling of :func:`distill_for_routing`: fit + calibrate a record classifier
+    in one call, returning a routing-ready :class:`~mixle.task.calibrate.CalibratedTaskModel`."""
+    records = list(records)
+    teacher_labels = _as_batched(teacher)(records)
+    return distill_records_from_labels_for_routing(
+        records,
+        teacher_labels,
+        labels=labels,
+        calibration_frac=calibration_frac,
+        alpha=alpha,
+        dim=dim,
+        hidden=hidden,
+        epochs=epochs,
+        lr=lr,
+        seed=seed,
+        task=task,
+        device=device,
+    )
+
+
+def distill_records_from_labels_for_routing(
+    records: Sequence[Any],
+    teacher_labels: Sequence[Any],
+    *,
+    labels: Sequence[str] | None = None,
+    calibration_frac: float = 0.2,
+    alpha: float = 0.1,
+    dim: int = 256,
+    hidden: Sequence[int] = (64,),
+    epochs: int = 200,
+    lr: float = 1e-2,
+    seed: int = 0,
+    task: str = "",
+    device: str = "cpu",
+) -> CalibratedTaskModel:
+    """Teacher-free training core of :func:`distill_records_for_routing` (mirrors
+    :func:`distill_from_labels_for_routing` for structured records)."""
+    label_list = list(labels) if labels is not None else sorted({str(y) for y in teacher_labels})
+    train_records, train_labels, cal_records, cal_labels = _split_for_calibration(
+        records, teacher_labels, calibration_frac, seed
+    )
+    student = distill_records_from_labels(
+        train_records,
+        train_labels,
+        labels=label_list,
+        dim=dim,
+        hidden=hidden,
+        epochs=epochs,
+        lr=lr,
+        seed=seed,
+        task=task,
+        device=device,
+    )
+    return CalibratedTaskModel(student, alpha=alpha).calibrate(cal_records, cal_labels)
 
 
 def distill_structured(
@@ -291,6 +456,34 @@ def _encode_labels(teacher_labels: Sequence[Any], labels: Sequence[str] | None) 
     label_list = list(labels) if labels is not None else sorted({str(y) for y in teacher_labels})
     index = {y: i for i, y in enumerate(label_list)}
     return label_list, np.asarray([index[str(t)] for t in teacher_labels], dtype=np.int64)
+
+
+def _split_for_calibration(
+    items: Sequence[Any], teacher_labels: Sequence[Any], calibration_frac: float, seed: int
+) -> tuple[list[Any], list[Any], list[Any], list[Any]]:
+    """Split ``(items, teacher_labels)`` into disjoint ``(train_items, train_labels, cal_items, cal_labels)``.
+
+    The calibration slice must be unseen by the student's training fit -- that disjointness is exactly what
+    makes the conformal coverage guarantee (:mod:`mixle.task.calibrate`) real rather than optimistic. The split
+    is a fixed permutation of ``seed``, so it is reproducible and shared across the text/record variants.
+    """
+    if not 0.0 < calibration_frac < 1.0:
+        raise ValueError(f"calibration_frac must be in (0, 1), got {calibration_frac}")
+    items, teacher_labels = list(items), list(teacher_labels)
+    n_total = len(items)
+    n_cal = max(1, int(round(n_total * calibration_frac)))
+    if n_cal >= n_total:
+        raise ValueError(
+            f"calibration_frac={calibration_frac} leaves no training examples for {n_total} total example(s)"
+        )
+    perm = np.random.RandomState(seed).permutation(n_total)
+    cal_idx, train_idx = perm[:n_cal], perm[n_cal:]
+    return (
+        [items[i] for i in train_idx],
+        [teacher_labels[i] for i in train_idx],
+        [items[i] for i in cal_idx],
+        [teacher_labels[i] for i in cal_idx],
+    )
 
 
 def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, seed, device):
