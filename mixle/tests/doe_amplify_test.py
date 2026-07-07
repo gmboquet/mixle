@@ -6,6 +6,13 @@ import unittest
 
 import numpy as np
 
+try:
+    import torch  # noqa: F401
+
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
+
 from mixle.doe.amplify import StudentTeacher, amplify_and_capture, fit_student
 from mixle.doe.oracle import OracleResult, VerifiableOracle, optimize_under_oracle
 
@@ -20,6 +27,7 @@ def _quadratic_bowl_oracle(target, seed=0):
     return VerifiableOracle(name="quadratic_bowl", tier="executable", score_fn=score_fn, fidelity="exact, noiseless")
 
 
+@unittest.skipUnless(_HAS_TORCH, "amplify_and_capture / fit_student fit a GaussianProcessRegressor (torch)")
 class AmplifyAndCaptureTest(unittest.TestCase):
     def test_round1_beats_a_single_ungrounded_guess(self):
         oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
