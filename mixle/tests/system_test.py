@@ -2,7 +2,7 @@
 
 import unittest
 
-from mixle.substrate.core import Substrate
+from mixle.substrate.core import Substrate, SubstrateItem
 from mixle.system import Query, System, SystemConfig
 
 
@@ -17,7 +17,9 @@ class SystemAnswerTest(unittest.TestCase):
 
         self.assertEqual(reply, "answer to: what is 2+2?")
         self.assertEqual(receipt["produced_by"], "teacher")
-        self.assertEqual(receipt["spend"], {"frontier_calls": 1})
+        # SPEND-a: spend is now the full Spend ledger shape (frontier_calls/oracle_calls/wall_ms/dollars),
+        # not the earlier ad hoc {"frontier_calls": 1} dict.
+        self.assertEqual(receipt["spend"], {"frontier_calls": 1, "oracle_calls": 0, "wall_ms": 0.0, "dollars": 0.0})
         self.assertEqual(receipt["task"], "qa")
         self.assertFalse(receipt["captured"])
 
@@ -34,6 +36,89 @@ class SystemAnswerTest(unittest.TestCase):
         system = System(SystemConfig(teacher=_fake_teacher, default_budget=1))
         _, receipt = system.answer(Query("x"), budget=5)
         self.assertEqual(receipt["budget"], 5)
+
+
+class SystemSpendLedgerTest(unittest.TestCase):
+    """CARD SPEND-a: budget is a hard ceiling; every call's cost accumulates into System.total_spend."""
+
+    def test_total_spend_accumulates_across_calls(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        for _ in range(3):
+            system.answer(Query("x"))
+        self.assertEqual(system.total_spend.to_dict()["frontier_calls"], 3)
+
+    def test_over_budget_request_is_refused_not_silently_served(self):
+        calls = {"n": 0}
+
+        def counting_teacher(prompt):
+            calls["n"] += 1
+            return f"answer to: {prompt}"
+
+        system = System(SystemConfig(teacher=counting_teacher))
+        reply, receipt = system.answer(Query("x"), budget=0)
+
+        self.assertIsNone(reply)
+        self.assertEqual(calls["n"], 0)  # the teacher was never called -- no silent overspend
+        self.assertEqual(receipt["status"], "refused")
+        self.assertEqual(receipt["shortfall"], 1.0)
+        self.assertEqual(receipt["spend"], {"frontier_calls": 0, "oracle_calls": 0, "wall_ms": 0.0, "dollars": 0.0})
+        self.assertEqual(system.total_spend.to_dict()["frontier_calls"], 0)
+
+    def test_a_refusal_does_not_perturb_a_later_successful_calls_running_total(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        system.answer(Query("a"))
+        system.answer(Query("b"), budget=0)  # refused; must not silently count against total_spend
+        system.answer(Query("c"))
+        self.assertEqual(system.total_spend.to_dict()["frontier_calls"], 2)
+
+    def test_receipt_carries_both_incremental_and_running_spend(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        system.answer(Query("a"))
+        _, receipt = system.answer(Query("b"))
+        self.assertEqual(receipt["spend"]["frontier_calls"], 1)
+        self.assertEqual(receipt["total_spend"]["frontier_calls"], 2)
+
+
+class SystemFaultModesTest(unittest.TestCase):
+    """CARD FAULT-a: teacher_down / store_down degrade to a named, flagged mode -- never silently."""
+
+    def _broken_teacher(self, prompt: str) -> str:
+        raise ConnectionError("teacher endpoint unreachable")
+
+    def test_teacher_down_falls_back_to_store_only_and_flags_it(self):
+        store = Substrate()
+        store.put(SubstrateItem(kind="text", text="the rollout finished on schedule"))
+        system = System(SystemConfig(teacher=self._broken_teacher, store=store))
+
+        reply, receipt = system.answer(Query("rollout status"))
+        self.assertIn("degraded: store-only", reply)
+        self.assertIn("rollout finished on schedule", reply)
+        self.assertEqual(receipt["status"], "answered")
+        self.assertEqual(receipt["degraded_mode"], "teacher_down")
+        self.assertIn("teacher endpoint unreachable", receipt["degraded_reason"])
+        self.assertEqual(receipt["produced_by"], "store")
+        # a degraded, store-only answer didn't actually spend a frontier call
+        self.assertEqual(receipt["spend"]["frontier_calls"], 0)
+
+    def test_teacher_down_with_no_usable_store_fails_honestly(self):
+        system = System(SystemConfig(teacher=self._broken_teacher))
+        reply, receipt = system.answer(Query("rollout status"))
+        self.assertIsNone(reply)
+        self.assertEqual(receipt["status"], "failed")
+        self.assertIn("teacher unavailable", receipt["reason"])
+
+    def test_store_down_falls_back_to_no_accumulation_and_flags_it(self):
+        class _BrokenStore:
+            def put(self, item):
+                raise OSError("store unreachable")
+
+        system = System(SystemConfig(teacher=_fake_teacher, store=_BrokenStore()))
+        report = system.ingest("the sky is blue", source={"model": "teacher-v1"})
+
+        self.assertEqual(report["status"], "degraded_no_accumulation")
+        self.assertFalse(report["assimilated"])
+        self.assertEqual(report["degraded_mode"], "store_down")
+        self.assertIn("store unreachable", report["degraded_reason"])
 
 
 class SystemIngestTest(unittest.TestCase):
