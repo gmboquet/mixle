@@ -640,6 +640,12 @@ __all__ = [
     "CensoredAccumulator",
     "CensoredAccumulatorFactory",
     "CensoredDataEncoder",
+    "CopulaDistribution",
+    "CopulaSampler",
+    "CopulaEstimator",
+    "CopulaAccumulator",
+    "CopulaAccumulatorFactory",
+    "CopulaDataEncoder",
     "ExponentiallyModifiedGaussianDistribution",
     "ExponentiallyModifiedGaussianSampler",
     "ExponentiallyModifiedGaussianEstimator",
@@ -865,6 +871,14 @@ from mixle.stats.combinator.conditional import (
     ConditionalDistributionSampler,
     ConditionalEnumerator,
     ConditionalEstimator,
+)
+from mixle.stats.combinator.copula import (
+    CopulaAccumulator,
+    CopulaAccumulatorFactory,
+    CopulaDataEncoder,
+    CopulaDistribution,
+    CopulaEstimator,
+    CopulaSampler,
 )
 from mixle.stats.combinator.exponential_tilt import (
     ExponentialTiltedDataEncoder,
