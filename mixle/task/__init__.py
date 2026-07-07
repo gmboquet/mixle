@@ -40,6 +40,12 @@ from mixle.task.capacity import (
     climb_to,
 )
 from mixle.task.cascade import Cascade, CascadeStats
+from mixle.task.collapse import (
+    CollapseVerdict,
+    collapse_monitor,
+    distinct_count_diversity,
+    entropy_diversity,
+)
 from mixle.task.density import DensityGate
 from mixle.task.design import DesignedModel, design_model, spec_to_estimator
 from mixle.task.distill import (
@@ -138,6 +144,10 @@ __all__ = [
     "CallableLLM",
     "Cascade",
     "CascadeStats",
+    "CollapseVerdict",
+    "collapse_monitor",
+    "distinct_count_diversity",
+    "entropy_diversity",
     "CostModel",
     "DEFAULT_RUNGS",
     "DensityGate",
