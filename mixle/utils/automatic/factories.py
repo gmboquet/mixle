@@ -401,6 +401,47 @@ def get_multivariate_gaussian_estimator(dim: int, use_bstats: bool = False) -> "
     return _estimator_provider(False).MultivariateGaussianEstimator(dim=dim)
 
 
+# --- modality-fingerprint routing (workstream A1) ---------------------------------------------------------
+#
+# A fixed-length numeric vector is not always "low-dimensional tabular numeric": at moderate-to-high
+# dimension it is much more often an embedding (a frozen encoder's output, a pooled feature vector) than
+# a handful of jointly-Gaussian measurements, and a bare multivariate Gaussian is the wrong default there
+# -- it can only capture a unimodal ellipsoid, not the manifold structure embeddings actually have. Above
+# EMBEDDING_MIN_DIM, route to a hybrid neural density (an exact normalizing flow) instead. A 2-D/3-D
+# numeric array (an image-shaped field) is routed through a frozen, deterministic feature extractor
+# (mixle.represent.modality.image_features) into the same hybrid density -- the "frozen encoder +
+# structured head" pattern. Below the threshold (plain low-dim tabular numeric) nothing changes: this is
+# additive, not a replacement of the existing per-coordinate/MVN path.
+EMBEDDING_MIN_DIM = 16
+IMAGE_FEATURE_DIM = 16
+
+
+def _has_torch() -> bool:
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def get_hybrid_embedding_estimator(dim: int) -> "ParameterEstimator":
+    """An exact neural density (a coupling flow) over an embedding-shaped ``dim``-vector field."""
+    from mixle.models.neural_families import Flow
+
+    return Flow(dim=dim).estimator()
+
+
+def get_hybrid_image_estimator(dim: int = IMAGE_FEATURE_DIM) -> "ParameterEstimator":
+    """A frozen ``image_features`` extractor composed with an exact neural density over the induced features."""
+    from mixle.models.feature_map import FeatureMapEstimator, register_feature_fn
+    from mixle.models.neural_families import Flow
+    from mixle.represent.modality import image_features
+
+    name = f"image_features_{dim}"
+    register_feature_fn(name, lambda img, _dim=dim: image_features(img, dim=_dim))
+    return FeatureMapEstimator(name, Flow(dim=dim).estimator())
+
+
 def get_dpm_mixture(
     data,
     rng=None,
