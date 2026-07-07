@@ -126,6 +126,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
     def expected_log_density(self, x: tuple[Any, ...]) -> float:
         """Prior-expected log-density: sum of the component ``expected_log_density`` values at ``x``."""
+        self._check_arity(x)
         rv = self.dists[0].expected_log_density(x[0])
         for i in range(1, self.count):
             rv += self.dists[i].expected_log_density(x[i])
@@ -178,6 +179,18 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         obs = set(observed)
         return CompositeDistribution([self.dists[i] for i in range(self.count) if i not in obs])
 
+    def _check_arity(self, x: tuple[Any, ...]) -> None:
+        """A too-short ``x`` would otherwise crash with a bare ``IndexError`` deep in the per-field
+        loop below, with no indication of which field or how many were expected; a too-long ``x``
+        would otherwise be silently accepted with the extra fields never read at all. Both are real
+        caller mistakes (e.g. an extra/missing column) that should surface immediately, at the call
+        site, not as a wrong log-likelihood with no signal anything was off."""
+        if len(x) != self.count:
+            raise ValueError(
+                "CompositeDistribution observation has %d fields but this composite has %d components."
+                % (len(x), self.count)
+            )
+
     def density(self, x: tuple[Any, ...]) -> float:
         """Evaluates density of CompositeDistribution for single observation tuple x.
 
@@ -192,6 +205,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             Density as float.
 
         """
+        self._check_arity(x)
         rv = self.dists[0].density(x[0])
 
         for i in range(1, self.count):
@@ -218,6 +232,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             Log-density as float.
 
         """
+        self._check_arity(x)
         rv = self.dists[0].log_density(x[0])
 
         for i in range(1, self.count):

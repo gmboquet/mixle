@@ -153,6 +153,16 @@ def _dirichlet_expectations(prior: Any, num_components: int) -> tuple[np.ndarray
     """
     if isinstance(prior, DirichletDistribution):
         alpha = np.asarray(prior.get_parameters(), dtype=float)
+        if alpha.shape[0] != num_components:
+            # unlike SymmetricDirichletDistribution (broadcasts a scalar to num_components by
+            # construction), a full DirichletDistribution's alpha is taken as-is -- a mismatched
+            # length would otherwise pass silently here and only fail later, deep inside a numpy
+            # broadcast in expected_log_density or mid-optimize() in the M-step, far from the
+            # actual mistake (the prior's own arity, not a mixture internals bug).
+            raise ValueError(
+                "mixture weight prior has %d components but the mixture has %d."
+                % (alpha.shape[0], num_components)
+            )
         return alpha, digamma(alpha) - digamma(np.sum(alpha))
     if isinstance(prior, SymmetricDirichletDistribution):
         alpha = np.ones(num_components) * prior.get_parameters()

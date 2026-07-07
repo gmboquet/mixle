@@ -59,7 +59,7 @@ def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
     return estimator
 
 
-def _maybe_structured_model(data: Any, max_its: int, out: Any) -> Any:
+def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState | None) -> Any:
     """The automatic-structure front door for ``optimize(data)`` / ``fit(data)`` with no estimator.
 
     For flat tuple records the independent :class:`CompositeDistribution` the automatic detector
@@ -90,7 +90,7 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any) -> Any:
         if not net.edges():
             return None  # independence is what the composite already models; keep the automatic families
 
-        composite = optimize(rows, get_estimator(rows), max_its=max_its, out=None)
+        composite = optimize(rows, get_estimator(rows), max_its=max_its, rng=rng, out=None)
         enc = composite.dist_to_encoder().seq_encode(rows)
         comp_ll = float(np.sum(composite.seq_log_density(enc)))
         comp_bic = -2.0 * comp_ll + _num_free_params(composite) * float(np.log(max(len(rows), 2)))
@@ -475,7 +475,13 @@ def _fused_em_loop(
         if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
             _write_em_iter(out, i + 1, ll_model, dll, score, has_v, obj_label)
         if on_step is not None:
-            on_step(EMStep(i + 1, nxt, float(ll_model), float(dll)))
+            # ll_model is the log-likelihood of `model` (the fused step's INPUT, computed for free
+            # as the E-step normalizer), not of `nxt` (this iteration's freshly-computed, not-yet-
+            # scored output) -- report them paired correctly, matching every other use of ll_model
+            # in this loop (`best_model = model` above, `score = ll_fn(enc_vdata, model)`), so an
+            # on_step consumer that checkpoints model alongside log_density (as the EMStep docstring
+            # explicitly recommends) doesn't persist a mismatched pair.
+            on_step(EMStep(i + 1, model, float(ll_model), float(dll)))
         if converged:
             break
 
@@ -707,7 +713,7 @@ def optimize(
         and init_estimator is None
         and strategy is None
     ):
-        structured = _maybe_structured_model(data, max_its, out)
+        structured = _maybe_structured_model(data, max_its, out, rng)
         if structured is not None:
             return structured
     estimator = _coerce_estimator(estimator, data)
@@ -899,7 +905,7 @@ def fit(
         and kwargs.get("prev_estimate") is None
         and kwargs.get("strategy") is None
     ):
-        structured = _maybe_structured_model(data, max_its, kwargs.get("out", sys.stdout))
+        structured = _maybe_structured_model(data, max_its, kwargs.get("out", sys.stdout), kwargs.get("rng"))
         if structured is not None:
             return structured
     estimator = _coerce_estimator(estimator, data)
