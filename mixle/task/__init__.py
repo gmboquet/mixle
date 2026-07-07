@@ -46,6 +46,7 @@ from mixle.task.collapse import (
     distinct_count_diversity,
     entropy_diversity,
 )
+from mixle.task.compose import ComposedAnswer, ComposedModel, compose
 from mixle.task.density import DensityGate
 from mixle.task.design import DesignedModel, design_model, spec_to_estimator
 from mixle.task.distill import (
@@ -146,6 +147,8 @@ __all__ = [
     "CallableLLM",
     "Cascade",
     "CascadeStats",
+    "ComposedAnswer",
+    "ComposedModel",
     "CollapseVerdict",
     "collapse_monitor",
     "distinct_count_diversity",
@@ -210,6 +213,7 @@ __all__ = [
     "capacity_ladder",
     "cascade_cost_per_request",
     "climb_to",
+    "compose",
     "design_model",
     "distill",
     "distill_designer",
