@@ -719,14 +719,41 @@ def _clone(estimator: Any) -> Any:
 
 
 def _num_free_params(dist: Any) -> int:
-    """A rough parameter count for the BIC penalty (used only to scale the complexity term)."""
-    for attr in ("mu", "p", "lam", "beta", "alpha"):
+    """A rough parameter count for the BIC penalty (used only to scale the complexity term).
+
+    Composes over :class:`~mixle.stats.combinator.composite.CompositeDistribution` (sums each field's
+    own count) rather than falling through to a flat constant -- a composite of any size used to score
+    the same as a single scalar leaf, which made the network-vs-composite BIC comparison in
+    :func:`mixle.inference.estimation._maybe_structured_model` nearly meaningless for multi-field data.
+
+    Counts a fitted categorical-family leaf (``pmap``/``p_vec``) as ``K - 1`` (the true simplex free
+    parameter count), not the flat constant every other attribute check fell through to -- undercounting
+    complexity there let :func:`mixle.inference.bayesian_network.learn_bayesian_network`'s greedy search
+    accept spurious edges between fields with no real dependence, since the BIC penalty for the extra
+    per-parent-config categorical table barely grew with the number of categories.
+
+    The single-scalar-parameter families below (Poisson rate, Bernoulli/Binomial/NegativeBinomial
+    success probability) count 1, not 2 -- the old code doubled every matched attribute uniformly,
+    correct only for a location+scale pair (Gaussian's mean+variance) and an overcount for these.
+    Any other leaf family (Weibull, Gumbel, Beta, ...) still falls through to the historical flat-2
+    fallback; genuinely counting every exotic detector family's parameters is future work, not
+    something this fix's audit confirmed as broken.
+    """
+    name = type(dist).__name__
+    if name == "CompositeDistribution":
+        return sum(_num_free_params(d) for d in dist.dists)
+    if hasattr(dist, "pmap"):  # CategoricalDistribution: a K-outcome simplex has K-1 free params
+        return max(1, len(dist.pmap) - 1)
+    if hasattr(dist, "p_vec"):  # IntegerCategoricalDistribution: same simplex parameterization
+        return max(1, int(np.asarray(dist.p_vec).size) - 1)
+    if hasattr(dist, "mu"):  # location+scale family (Gaussian, ...): mean + variance
+        try:
+            return max(1, int(np.asarray(dist.mu).size) * 2)
+        except (TypeError, ValueError):
+            return 2
+    for attr in ("lam", "p"):  # single free scalar: Poisson rate, Bernoulli/Binomial/NegBinom success prob
         if hasattr(dist, attr):
-            v = getattr(dist, attr)
-            try:
-                return max(1, int(np.asarray(v).size) * 2)
-            except (TypeError, ValueError):
-                return 2
+            return 1
     return 2
 
 
