@@ -46,7 +46,12 @@ from mixle.models.dirichlet_process_mixture import (
 )
 from mixle.models.dpo_leaf import DPOLeaf, DPOModel
 from mixle.models.embedding import CategoricalEmbedding
-from mixle.models.energy import EnergyModel, build_convex_energy_net, build_energy_net
+from mixle.models.energy import (
+    EnergyModel,
+    build_convex_energy_net,
+    build_energy_net,
+    build_product_energy_net,
+)
 from mixle.models.feature_map import FeatureMapDensity, FeatureMapEstimator, feature_fn, register_feature_fn
 from mixle.models.gaussian_process import GaussianProcessRegressor
 from mixle.models.grammar import (
@@ -206,6 +211,7 @@ __all__ = [
     "build_energy_net",
     "build_maf",
     "build_mdn",
+    "build_product_energy_net",
     "build_vae",
     "make_deep_set",
     "make_mlp",
