@@ -77,6 +77,14 @@ from mixle.task.extract import (
 )
 from mixle.task.generative_text import GenerativeTextIO, distill_text_generative, distill_text_generative_from_labels
 from mixle.task.harness import ExtractorHarness, MatcherHarness, replace_alerter, replace_extractor, replace_matcher
+from mixle.task.imagine import (
+    CeilingReport,
+    ImagineResult,
+    ProposalVerdict,
+    StructuralCandidate,
+    ceiling_report,
+    propose_structure,
+)
 from mixle.task.llm import (
     CallableLLM,
     OpenAICompatLLM,
@@ -147,6 +155,12 @@ __all__ = [
     "ExtractionIO",
     "ExtractorHarness",
     "MatcherHarness",
+    "CeilingReport",
+    "ImagineResult",
+    "ProposalVerdict",
+    "StructuralCandidate",
+    "ceiling_report",
+    "propose_structure",
     "FieldChoice",
     "GenerativeTextIO",
     "HashedNGram",
