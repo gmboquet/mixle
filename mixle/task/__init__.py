@@ -109,7 +109,7 @@ from mixle.task.quantize import (
 )
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
 from mixle.task.regress import RegressionSolution, solve_regression
-from mixle.task.router import Router, RouterStats, route_stack
+from mixle.task.router import HarvestResolveResult, Router, RouterStats, resolve_from_harvest, route_stack
 from mixle.task.scorecard import Scorecard, scorecard
 from mixle.task.sft_plan import GenerativePlanner, sample_plans, score_plan, sft_planner
 from mixle.task.solve import Solution, load_harvested, solve
@@ -154,6 +154,8 @@ __all__ = [
     "Router",
     "Scorecard",
     "RouterStats",
+    "HarvestResolveResult",
+    "resolve_from_harvest",
     "RegressionSolution",
     "MultiLabelSolution",
     "StructuredSolution",
