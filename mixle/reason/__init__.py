@@ -50,6 +50,7 @@ from mixle.reason.llm import (
     information_corroborator,
     sentence_claims,
 )
+from mixle.reason.modality import ModalityGraph, ModalityView
 from mixle.reason.ontology import (
     AXIOMS,
     ConstrainedDecode,
@@ -89,6 +90,8 @@ __all__ = [
     "FactualityModel",
     "sentence_claims",
     "content_overlap",
+    "ModalityView",
+    "ModalityGraph",
     "information_corroborator",
     "GraphLLM",
     "GraphDistribution",
