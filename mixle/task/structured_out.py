@@ -62,6 +62,12 @@ class StructuredSolution:
             out[key] = float(sub._predict([x])[0])
         return out
 
+    def decide(self, x: Any) -> dict[str, Any] | None:
+        """The ``CalibratedTaskModel.decide``-shaped contract (workstream B3): an alias of
+        :meth:`try_local`, so a :class:`~mixle.task.router.Router` tier can be a structured-output
+        solution, not just a classifier."""
+        return self.try_local(x)
+
     def __call__(self, x: Any) -> dict[str, Any]:
         self.n_requests += 1
         local = self.try_local(x)
