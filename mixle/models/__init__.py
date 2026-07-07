@@ -46,7 +46,7 @@ from mixle.models.dirichlet_process_mixture import (
 )
 from mixle.models.dpo_leaf import DPOLeaf, DPOModel
 from mixle.models.embedding import CategoricalEmbedding
-from mixle.models.energy import EnergyModel, build_energy_net
+from mixle.models.energy import EnergyModel, build_convex_energy_net, build_energy_net
 from mixle.models.feature_map import FeatureMapDensity, FeatureMapEstimator, feature_fn, register_feature_fn
 from mixle.models.gaussian_process import GaussianProcessRegressor
 from mixle.models.grammar import (
@@ -70,6 +70,7 @@ from mixle.models.neural import (
     GaussianRegressionNeuralNetwork,
     PoissonRegressionNeuralNetwork,
     make_mlp,
+    make_monotonic_mlp,
 )
 from mixle.models.neural_density import (
     NeuralDensity,
@@ -196,12 +197,14 @@ __all__ = [
     "build_autoregressive_categorical",
     "build_conditional_autoregressive_categorical",
     "build_conditional_flow",
+    "build_convex_energy_net",
     "build_coupling_flow",
     "build_energy_net",
     "build_maf",
     "build_mdn",
     "build_vae",
     "make_mlp",
+    "make_monotonic_mlp",
     "mean_stick_weights",
     "orient_v_structures",
     "pcfg_log_likelihood",
