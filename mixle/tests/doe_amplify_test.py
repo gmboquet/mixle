@@ -5,9 +5,12 @@ oracle doe_oracle_test.py uses, per the plan's own build order (no domain oracle
 import unittest
 
 import numpy as np
+import pytest
 
-from mixle.doe.amplify import StudentTeacher, amplify_and_capture, fit_student
-from mixle.doe.oracle import OracleResult, VerifiableOracle, optimize_under_oracle
+pytest.importorskip("torch")  # optimize_under_oracle's BayesianOptimizer surrogate needs GaussianProcessRegressor
+
+from mixle.doe.amplify import StudentTeacher, amplify_and_capture, fit_student  # noqa: E402
+from mixle.doe.oracle import OracleResult, VerifiableOracle, optimize_under_oracle  # noqa: E402
 
 _BOUNDS = [(-5.0, 5.0), (-5.0, 5.0)]
 
