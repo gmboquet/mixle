@@ -165,6 +165,24 @@ class NeuralConditionalDensitySampler(DistributionSampler):
         with torch.no_grad():
             return self.dist.module.sample_given(xt).cpu().numpy()[0]
 
+    def sample_given_batch(self, x_batch: Any) -> np.ndarray:
+        """One draw of ``y ~ p(y | x)`` for EVERY row of ``x_batch`` (shape ``(n, x_dim)``), in ONE
+        batched forward pass -- statistically identical to calling :meth:`sample_given` once per row
+        (same model, same per-draw sampling procedure), just without paying framework/dispatch
+        overhead per row. That per-call overhead dominates a Python loop of hundreds of individual
+        ``sample_given`` calls, which is exactly the shape both a particle-walk step (many different
+        x's, one draw each) and a per-point coverage check (repeat one x, many draws) reduce to --
+        both call sites use this to speed up the SAME check/walk rather than shrink it. Repeat a row
+        of ``x_batch`` to draw more than once from the same ``x``."""
+        torch = _torch()
+        self.dist.module.to(self.dist.device).eval()
+        torch.manual_seed(int(self.rng.randint(0, 2**31 - 1)))
+        xt = torch.as_tensor(
+            np.atleast_2d(np.asarray(x_batch, dtype=float)), dtype=torch.float32, device=self.dist.device
+        )
+        with torch.no_grad():
+            return self.dist.module.sample_given(xt).cpu().numpy()  # (n, y_dim)
+
 
 class NeuralConditionalDensityEncoder(DataSequenceEncoder):
     def __str__(self) -> str:

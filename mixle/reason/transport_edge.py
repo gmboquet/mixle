@@ -77,7 +77,9 @@ def marginal_coverage(sampler, x_test, y_test, *, n_draws: int = 200):
     d = x_test.shape[1]
     covered = [[] for _ in range(d)]
     for i in range(len(x_test)):
-        draws = np.asarray([sampler.sample_given(y_test[i]) for _ in range(n_draws)])
+        # one batched forward pass for all n_draws of THIS point, instead of n_draws individual calls
+        y_batch = np.repeat(np.atleast_2d(np.asarray(y_test[i], dtype=float)), n_draws, axis=0)
+        draws = np.asarray(sampler.sample_given_batch(y_batch))
         lo = np.quantile(draws, ALPHA / 2, axis=0)
         hi = np.quantile(draws, 1 - ALPHA / 2, axis=0)
         for dim in range(d):
