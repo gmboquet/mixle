@@ -99,6 +99,53 @@ class ContextPacket:
             "provenance": self.provenance(),
         }
 
+    def to_knowledge_dict(
+        self,
+        *,
+        id: str,  # noqa: A002 - matches the mixle-knowledge ContextPacket field name exactly
+        project_id: str,
+        target_kind: str,
+        target_id: str | None = None,
+        expected_output_schema: dict[str, Any] | None = None,
+        factuality: Any = None,
+    ) -> dict[str, Any]:
+        """A plain dict shaped like ``mixle_knowledge.contracts.ContextPacket`` (id/project_id/task/
+        target_kind/target_id/token_budget/byte_budget/evidence_item_ids/constraints/citations/
+        expected_output_schema/payload) -- the substrate -> packet -> different-receiver round trip
+        (workstream E1 of the 0.6.3 frontier-capability plan). Constructing the validated pydantic
+        object is the receiving side's job (``ContextPacket(**packet.to_knowledge_dict(...))`` in
+        mixle-knowledge); this stays a plain dict on purpose so mixle core carries no dependency on
+        mixle-knowledge -- platform contract packages depend on core, never the other way.
+
+        ``factuality``, when given a :class:`~mixle.substrate.factuality.FactualityReceipt` (workstream
+        E3), travels in ``payload["factuality"]`` so a receiver can verify grounding before trusting the
+        packet: ``check_factuality(...)`` -> this packet -> the receiver's own re-verification.
+        """
+        citations = [{"uri": p["source"] or f"substrate:{p['id']}", "media_type": p["kind"]} for p in self.provenance()]
+        payload: dict[str, Any] = {
+            "rendered": self.render(),
+            "shape": self.budget.shape,
+            "compressed": self.compressed,
+            "compression_ratio": self.compression_ratio,
+            "preservation": self.preservation(),
+        }
+        if factuality is not None:
+            payload["factuality"] = factuality.as_dict()
+        return {
+            "id": id,
+            "project_id": project_id,
+            "task": self.task,
+            "target_kind": target_kind,
+            "target_id": target_id,
+            "token_budget": None,
+            "byte_budget": self.budget.max_chars,
+            "evidence_item_ids": [i.id for i in self.items],
+            "constraints": [],
+            "citations": citations,
+            "expected_output_schema": expected_output_schema or {},
+            "payload": payload,
+        }
+
     def __len__(self) -> int:
         return len(self.items)
 
