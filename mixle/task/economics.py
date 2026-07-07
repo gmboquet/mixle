@@ -16,7 +16,9 @@ escalation rate) and reports the savings. This is the "is it worth it?" question
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -103,3 +105,40 @@ def recommend_route(
         break_even=break_even_volume(cost, n_label, p_escalate=p_escalate),
         options=options,
     )
+
+
+def select_alpha_for_cost(
+    model: Any,
+    cal_texts: Sequence[Any],
+    cal_labels: Sequence[Any],
+    probe_texts: Sequence[Any],
+    cost: CostModel,
+    *,
+    volume: int,
+    n_label: int,
+    alphas: Sequence[float] = (0.01, 0.05, 0.1, 0.15, 0.2, 0.3),
+) -> tuple[float, RoutePlan, dict[float, RoutePlan]]:
+    """Cost-aware threshold selection (workstream B2): pick ``alpha`` from a :class:`CostModel` target
+    instead of a fixed default, by actually connecting :func:`recommend_route` to the calibration step.
+
+    ``model`` is anything with the :class:`~mixle.task.calibrate.CalibratedTaskModel` shape: a mutable
+    ``alpha`` attribute, ``calibrate(texts, labels)`` (sets ``qhat`` from the SAME calibration scores at
+    the current ``alpha`` -- cheap, no refit), and ``escalation_rate(texts)``. For each candidate in
+    ``alphas``, this recalibrates ``model`` and measures its realized escalation rate on ``probe_texts``
+    (a held-out slice disjoint from ``cal_texts``), then scores that escalation rate with
+    :func:`recommend_route` over ``volume`` requests. The winner is the alpha whose recommended route is
+    cheapest overall -- ``model`` is left calibrated at that winning alpha. Returns
+    ``(best_alpha, best_plan, plan_by_alpha)``; the full sweep is kept so the choice is auditable, not
+    just asserted.
+    """
+    plans: dict[float, RoutePlan] = {}
+    for a in alphas:
+        model.alpha = float(a)
+        model.calibrate(cal_texts, cal_labels)
+        p_escalate = model.escalation_rate(probe_texts)
+        plans[a] = recommend_route(cost, volume=volume, n_label=n_label, p_escalate=p_escalate)
+
+    best_alpha = min(plans, key=lambda a: plans[a].total)
+    model.alpha = float(best_alpha)
+    model.calibrate(cal_texts, cal_labels)
+    return best_alpha, plans[best_alpha], plans
