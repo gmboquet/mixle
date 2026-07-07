@@ -46,12 +46,27 @@ class Count(FieldType):
         return int(value)
 
 
+_BOOLEAN_FALSE_STRINGS = frozenset({"false", "f", "no", "n", "0"})
+_BOOLEAN_TRUE_STRINGS = frozenset({"true", "t", "yes", "y", "1"})
+
+
 class Boolean(FieldType):
     """A boolean flag."""
 
     numpy_dtype = np.bool_
 
     def coerce(self, value: Any) -> bool:
+        # bool(value) alone is wrong for the primary use case this module exists for (CSV/SQL/Mongo
+        # sources hand back string-typed booleans): bool("False") is True, since any non-empty string
+        # is truthy. Parse the common string spellings explicitly; a string that isn't one of them is
+        # a real data problem, so it raises rather than guessing.
+        if isinstance(value, str):
+            s = value.strip().lower()
+            if s in _BOOLEAN_FALSE_STRINGS:
+                return False
+            if s in _BOOLEAN_TRUE_STRINGS:
+                return True
+            raise ValueError("cannot coerce string %r to Boolean" % value)
         return bool(value)
 
 
@@ -149,7 +164,15 @@ class Schema:
             return self.fields[0].type.coerce(record)
         if isinstance(record, dict):
             return {f.name: f.type.coerce(record[f.name]) for f in self.fields}
-        return tuple(f.type.coerce(v) for f, v in zip(self.fields, record))
+        # zip() silently stops at the shorter side, so an unchecked zip here would silently drop
+        # trailing values (or fields) instead of raising -- the exact "connectors silently get wrong"
+        # failure mode this module exists to prevent. Materialize once and check length explicitly.
+        values = record if isinstance(record, (tuple, list)) else list(record)
+        if len(values) != len(self.fields):
+            raise ValueError(
+                "record has %d value(s) but schema %r has %d field(s)" % (len(values), self.names, len(self.fields))
+            )
+        return tuple(f.type.coerce(v) for f, v in zip(self.fields, values))
 
     def conform(self, records: Any) -> list[Any]:
         """Coerce every record in ``records`` to this schema (raising clear errors on mismatch)."""
