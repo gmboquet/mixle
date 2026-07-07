@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 
 from mixle.task.calibrate import CalibratedTaskModel
+from mixle.task.density import DensityGate
 from mixle.task.model import (
     HashedNGram,
     HashedRecord,
@@ -135,6 +136,8 @@ def distill_for_routing(
     seed: int = 0,
     task: str = "",
     device: str = "cpu",
+    density_gate: bool = False,
+    density_gate_alpha: float = 0.05,
 ) -> CalibratedTaskModel:
     """Label ``texts`` with ``teacher``, fit a student, and calibrate it for routing -- all in one call.
 
@@ -144,6 +147,9 @@ def distill_for_routing(
     ``ESCALATE``. Pass it straight to :class:`~mixle.task.cascade.Cascade` (with ``teacher``) or
     :class:`~mixle.task.router.Router` for tiered serving -- no separate calibration split to manage by hand.
     Deterministic given ``seed``; the calibration slice is disjoint from the student's training data.
+
+    ``density_gate=True`` additionally escalates inputs a softmax cannot see are atypical: see
+    :func:`distill_from_labels_for_routing`.
     """
     texts = [str(t) for t in texts]
     teacher_labels = _as_batched(teacher)(texts)
@@ -161,6 +167,8 @@ def distill_for_routing(
         seed=seed,
         task=task,
         device=device,
+        density_gate=density_gate,
+        density_gate_alpha=density_gate_alpha,
     )
 
 
@@ -179,6 +187,8 @@ def distill_from_labels_for_routing(
     seed: int = 0,
     task: str = "",
     device: str = "cpu",
+    density_gate: bool = False,
+    density_gate_alpha: float = 0.05,
 ) -> CalibratedTaskModel:
     """Teacher-free training core of :func:`distill_for_routing`: fit + calibrate from labels already in hand.
 
@@ -187,6 +197,12 @@ def distill_from_labels_for_routing(
     (:meth:`~mixle.task.calibrate.CalibratedTaskModel.calibrate`) on the latter. ``labels`` (if given, else
     inferred from all of ``teacher_labels`` before the split) is shared by both slices so a class that lands
     entirely on one side of the split doesn't shrink the label set out from under the other.
+
+    ``density_gate=True`` fits a :class:`~mixle.task.density.DensityGate` on the *training* slice's features
+    (reusing the student's own featurizer, so there is no second feature space to keep in sync), calibrates its
+    OOD floor (``density_gate_alpha``) on the disjoint *calibration* slice, and wires it into the returned
+    model -- an input whose ``log p(x)`` falls below that floor escalates even if the conformal set is a
+    confident singleton.
     """
     label_list = list(labels) if labels is not None else sorted({str(y) for y in teacher_labels})
     train_texts, train_labels, cal_texts, cal_labels = _split_for_calibration(
@@ -205,7 +221,12 @@ def distill_from_labels_for_routing(
         task=task,
         device=device,
     )
-    return CalibratedTaskModel(student, alpha=alpha).calibrate(cal_texts, cal_labels)
+    gate = (
+        _fit_density_gate(student, train_texts, cal_texts, alpha=density_gate_alpha, seed=seed)
+        if density_gate
+        else None
+    )
+    return CalibratedTaskModel(student, alpha=alpha, density_gate=gate).calibrate(cal_texts, cal_labels)
 
 
 def distill_records(
@@ -287,6 +308,8 @@ def distill_records_for_routing(
     seed: int = 0,
     task: str = "",
     device: str = "cpu",
+    density_gate: bool = False,
+    density_gate_alpha: float = 0.05,
 ) -> CalibratedTaskModel:
     """The structured-record sibling of :func:`distill_for_routing`: fit + calibrate a record classifier
     in one call, returning a routing-ready :class:`~mixle.task.calibrate.CalibratedTaskModel`."""
@@ -305,6 +328,8 @@ def distill_records_for_routing(
         seed=seed,
         task=task,
         device=device,
+        density_gate=density_gate,
+        density_gate_alpha=density_gate_alpha,
     )
 
 
@@ -322,9 +347,12 @@ def distill_records_from_labels_for_routing(
     seed: int = 0,
     task: str = "",
     device: str = "cpu",
+    density_gate: bool = False,
+    density_gate_alpha: float = 0.05,
 ) -> CalibratedTaskModel:
     """Teacher-free training core of :func:`distill_records_for_routing` (mirrors
-    :func:`distill_from_labels_for_routing` for structured records)."""
+    :func:`distill_from_labels_for_routing` for structured records). ``density_gate=True`` fits the OOD gate
+    on the training slice's record features and calibrates it on the calibration slice, same as the text path."""
     label_list = list(labels) if labels is not None else sorted({str(y) for y in teacher_labels})
     train_records, train_labels, cal_records, cal_labels = _split_for_calibration(
         records, teacher_labels, calibration_frac, seed
@@ -341,7 +369,12 @@ def distill_records_from_labels_for_routing(
         task=task,
         device=device,
     )
-    return CalibratedTaskModel(student, alpha=alpha).calibrate(cal_records, cal_labels)
+    gate = (
+        _fit_density_gate(student, train_records, cal_records, alpha=density_gate_alpha, seed=seed)
+        if density_gate
+        else None
+    )
+    return CalibratedTaskModel(student, alpha=alpha, density_gate=gate).calibrate(cal_records, cal_labels)
 
 
 def distill_structured(
@@ -484,6 +517,24 @@ def _split_for_calibration(
         [items[i] for i in cal_idx],
         [teacher_labels[i] for i in cal_idx],
     )
+
+
+def _fit_density_gate(
+    student: TaskModel, train_items: Sequence[Any], cal_items: Sequence[Any], *, alpha: float, seed: int
+) -> DensityGate:
+    """Fit an OOD gate on the student's own featurizer: density from ``train_items``, floor from ``cal_items``.
+
+    Fitting the density and its floor on the *same* slice would let the gate calibrate against the exact data
+    it was fit on -- optimistic, the same mistake conformal calibration avoids. So the density is fit on
+    ``train_items`` (disjoint from the calibration slice used to set the conformal threshold), then the floor is
+    set from the ``alpha``-quantile of ``cal_items``' log-density under that fitted density: a genuinely
+    held-out threshold, consistent with how :meth:`~mixle.task.calibrate.CalibratedTaskModel.calibrate` treats
+    the same split.
+    """
+    gate = DensityGate(student.adapter.featurizer)
+    gate.fit(train_items, seed=seed)
+    gate.log_threshold = float(np.quantile(gate.log_density(cal_items), alpha))
+    return gate
 
 
 # Early-stopping schedule for _fit_mlp: check the training loss every _ES_CHECK_EVERY gradient steps, stop once

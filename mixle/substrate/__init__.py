@@ -23,6 +23,18 @@ from mixle.substrate.act import (
     simulate_action,
 )
 from mixle.substrate.answer import Answer, answer_from_substrate
+from mixle.substrate.belief import (
+    MODEL_ASSERTION,
+    MODEL_ASSERTION_CAP,
+    BeliefItem,
+    Claim,
+    EvidenceEntry,
+    assimilate,
+    credence_from_history,
+    harvest_knowledge,
+    retract,
+    retrieve_beliefs,
+)
 from mixle.substrate.context import (
     ContextBudget,
     ContextPacket,
@@ -32,6 +44,7 @@ from mixle.substrate.context import (
     compress_text,
 )
 from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
+from mixle.substrate.eig_retrieve import eig_retrieve
 from mixle.substrate.factuality import ClaimVerdict, FactualityReceipt, check_factuality
 from mixle.substrate.freshness import Freshness, check_freshness, content_hash, freshness_report
 from mixle.substrate.governance import Governance, approve, pending, propose, reject
@@ -84,6 +97,7 @@ __all__ = [
     "compress_text",
     "retrieve",
     "Retrieval",
+    "eig_retrieve",
     "multihop",
     "HopChain",
     "HopStep",
@@ -143,4 +157,14 @@ __all__ = [
     "monitoring_harness",
     "register_harness",
     "find_harnesses",
+    "harvest_knowledge",
+    "assimilate",
+    "retract",
+    "retrieve_beliefs",
+    "credence_from_history",
+    "BeliefItem",
+    "Claim",
+    "EvidenceEntry",
+    "MODEL_ASSERTION",
+    "MODEL_ASSERTION_CAP",
 ]
