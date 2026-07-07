@@ -9,6 +9,12 @@ hard import of a card that may not be built yet); ``improve`` honestly reports t
 improve until an orchestrator/router/registry registers into it. Later cards (REG-a the registry,
 SPEND-a the budget ledger, FAULT-a degraded modes, SCORE-a the scorecard) extend these same three verbs
 rather than adding new ones.
+
+SPEND-a wires a real :class:`~mixle.spend.Spend` ledger into ``answer``: ``budget`` is a hard ceiling
+measured in :meth:`~mixle.spend.Spend.total_units` -- a request that cannot afford even the cheapest
+answer path is refused (with the shortfall named on the receipt), never silently served over budget.
+Every successful call's incremental spend is added to :attr:`System.total_spend`, and both the
+incremental and running totals ride on the receipt.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from mixle.spend import Spend
 from mixle.task.llm import LLM, OpenAICompatLLM
 
 
@@ -77,15 +84,38 @@ class System:
 
     def __init__(self, config: SystemConfig) -> None:
         self.config = config
+        self.total_spend = Spend()
 
-    def answer(self, query: Query, *, budget: int | None = None) -> tuple[str, dict[str, Any]]:
-        """Thin shell: route straight to the teacher, wrap the reply in a minimal H-style receipt."""
-        spent_budget = self.config.default_budget if budget is None else int(budget)
+    def answer(self, query: Query, *, budget: int | None = None) -> tuple[str | None, dict[str, Any]]:
+        """Thin shell: route straight to the teacher, wrap the reply in a minimal H-style receipt.
+
+        ``budget`` is a hard ceiling (:class:`~mixle.spend.Spend.total_units`): if it cannot afford even
+        one frontier call, the request is refused -- ``reply`` is ``None`` and the receipt names the exact
+        ``shortfall`` -- rather than silently answering over budget. A served answer's cost is added to
+        :attr:`total_spend`, which every receipt also carries as ``total_spend``.
+        """
+        requested = self.config.default_budget if budget is None else int(budget)
+        cost = Spend(frontier_calls=1)
+        if requested < cost.total_units():
+            return None, {
+                "produced_by": None,
+                "status": "refused",
+                "reason": "budget insufficient for one frontier call",
+                "budget": requested,
+                "shortfall": cost.total_units() - requested,
+                "spend": Spend().to_dict(),
+                "total_spend": self.total_spend.to_dict(),
+                "captured": False,
+                "task": query.task,
+            }
         reply = _complete(self.config.teacher, query.text)
+        self.total_spend = self.total_spend + cost
         receipt = {
             "produced_by": "teacher",
-            "spend": {"frontier_calls": 1},
-            "budget": spent_budget,
+            "status": "answered",
+            "spend": cost.to_dict(),
+            "total_spend": self.total_spend.to_dict(),
+            "budget": requested,
             "captured": False,  # no local model has captured this capability yet (workstream D)
             "task": query.task,
         }
