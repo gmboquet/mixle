@@ -1,6 +1,8 @@
 """System facade -- the thin shell three verbs (answer/ingest/improve) sit behind (workstream J1/J8)."""
 
+import builtins
 import unittest
+from unittest.mock import patch
 
 from mixle.substrate.core import Substrate, SubstrateItem
 from mixle.system import Query, System, SystemConfig
@@ -109,7 +111,16 @@ class SystemFaultModesTest(unittest.TestCase):
 
     def test_store_down_falls_back_to_no_accumulation_and_flags_it(self):
         class _BrokenStore:
+            """Every method a store might be asked for raises the SAME unreachable error -- ingest's
+            KNOW-a path calls .all() (via assimilate's lookup) before it ever reaches .put()."""
+
             def put(self, item):
+                raise OSError("store unreachable")
+
+            def all(self, *args, **kwargs):
+                raise OSError("store unreachable")
+
+            def get(self, *args, **kwargs):
                 raise OSError("store unreachable")
 
         system = System(SystemConfig(teacher=_fake_teacher, store=_BrokenStore()))
@@ -128,10 +139,32 @@ class SystemIngestTest(unittest.TestCase):
         self.assertEqual(report["status"], "no_store")
         self.assertFalse(report["assimilated"])
 
-    def test_ingest_falls_back_to_a_retrievable_substrate_item_when_no_belief_store_exists(self):
+    def test_ingest_assimilates_via_the_belief_store_when_it_is_importable(self):
+        """The primary path now that KNOW-a is built: a real claim, assimilated with real credence."""
         store = Substrate()
         system = System(SystemConfig(teacher=_fake_teacher, store=store))
         report = system.ingest("the sky is blue", source={"model": "teacher-v1"})
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["n_claims"], 1)
+        self.assertEqual(len(report["items"]), 1)
+
+    def test_ingest_falls_back_to_a_retrievable_substrate_item_when_no_belief_store_exists(self):
+        """The defensive path SYS-a documents ('never a hard import of a card that may not be built
+        yet'): still real and worth covering even though mixle.substrate.belief is always importable
+        in THIS repo now -- simulate the import genuinely failing, the way it would for a caller
+        missing that optional piece."""
+        real_import = builtins.__import__
+
+        def _blocked_import(name, *args, **kwargs):
+            if name == "mixle.substrate.belief" or name.startswith("mixle.substrate.belief."):
+                raise ImportError(f"simulated: {name} not installed")
+            return real_import(name, *args, **kwargs)
+
+        store = Substrate()
+        system = System(SystemConfig(teacher=_fake_teacher, store=store))
+        with patch("builtins.__import__", side_effect=_blocked_import):
+            report = system.ingest("the sky is blue", source={"model": "teacher-v1"})
 
         self.assertEqual(report["status"], "ok_fallback")
         item = store.get(report["item_id"])
