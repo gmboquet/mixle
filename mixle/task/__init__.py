@@ -116,7 +116,7 @@ from mixle.task.solve import Solution, load_harvested, solve
 from mixle.task.structured_out import StructuredSolution, solve_structured
 from mixle.task.toolcall import ToolCaller, ToolSpec, distill_tool_caller
 from mixle.task.traces import AgentTrace, AgentTraces, harvest_agent_traces, parse_conversation
-from mixle.task.tune import RecipeSpace, TuneResult, tune_recipe
+from mixle.task.tune import CalibratedTuneResult, RecipeSpace, TuneResult, tune_recipe, tune_recipe_for_routing
 
 __all__ = [
     "ESCALATE",
@@ -166,6 +166,7 @@ __all__ = [
     "ToolCaller",
     "ToolSpec",
     "TextClassifierIO",
+    "CalibratedTuneResult",
     "TuneResult",
     "acquisition_scores",
     "active_distill",
@@ -236,4 +237,5 @@ __all__ = [
     "FINGERPRINT_KEYS",
     "tokenize",
     "tune_recipe",
+    "tune_recipe_for_routing",
 ]

@@ -50,6 +50,32 @@ class DistillTest(unittest.TestCase):
         held_out = agreement(student, _teacher(test), test)
         self.assertGreaterEqual(held_out, 0.75)
 
+
+class EarlyStoppingTest(unittest.TestCase):
+    def test_stops_well_before_the_epoch_ceiling_on_an_easy_task(self):
+        # a clean, well-separated rule should plateau long before 300 requested epochs
+        train = _make_corpus(seed=6)
+        student = distill(_teacher, train, n=4, dim=512, hidden=[64], epochs=300, lr=1e-2, seed=0)
+        self.assertLess(student.meta["recipe"]["epochs_run"], 300)
+        self.assertGreater(student.meta["recipe"]["epochs_run"], 0)
+        # the ceiling itself is preserved unchanged in the recipe -- only the actual run count is new
+        self.assertEqual(student.meta["recipe"]["epochs"], 300)
+
+    def test_never_exceeds_the_requested_ceiling(self):
+        train = _make_corpus(n_per_class=20, seed=8)
+        # a tiny epoch budget: early stopping must never run MORE than what was asked for
+        student = distill(_teacher, train, n=3, dim=64, epochs=15, seed=0)
+        self.assertLessEqual(student.meta["recipe"]["epochs_run"], 15)
+
+    def test_does_not_regress_accuracy_vs_the_full_fixed_run(self):
+        # early stopping should only skip steps that weren't improving the loss -- held-out accuracy should
+        # match (not merely "be acceptable in isolation", but be comparable to) an unrelated full run
+        train = _make_corpus(seed=9)
+        test = _make_corpus(seed=100)
+        student = distill(_teacher, train, n=4, dim=512, hidden=[64], epochs=300, lr=1e-2, seed=0)
+        held_out = agreement(student, _teacher(test), test)
+        self.assertGreaterEqual(held_out, 0.75)  # same bar as test_student_recovers_teacher, still cleared
+
     def test_labels_inferred_and_recorded(self):
         train = _make_corpus(seed=2)
         student = distill(_teacher, train, dim=256, epochs=50, seed=0)

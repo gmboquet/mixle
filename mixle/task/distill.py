@@ -106,7 +106,7 @@ def distill_from_labels(
     texts = [str(t) for t in texts]
     label_list, y = _encode_labels(teacher_labels, labels)
     feat = HashedNGram(n=n, dim=dim, seed=seed)
-    module, cfg = _fit_mlp(feat.transform(texts), y, len(label_list), hidden, epochs, lr, seed, device)
+    module, cfg, steps_run = _fit_mlp(feat.transform(texts), y, len(label_list), hidden, epochs, lr, seed, device)
     student = _student(
         module,
         cfg,
@@ -114,7 +114,7 @@ def distill_from_labels(
         task or "distilled text classifier",
         len(texts),
         label_list,
-        {"n": n, "dim": dim, "hidden": list(cfg["hidden_dims"]), "epochs": epochs, "lr": lr},
+        {"n": n, "dim": dim, "hidden": list(cfg["hidden_dims"]), "epochs": epochs, "epochs_run": steps_run, "lr": lr},
     )
     student.meta["train_agreement"] = agreement(student, teacher_labels, texts)
     return student
@@ -259,7 +259,7 @@ def distill_records_from_labels(
     records = list(records)
     label_list, y = _encode_labels(teacher_labels, labels)
     feat = HashedRecord(dim=dim, seed=seed)
-    module, cfg = _fit_mlp(feat.transform(records), y, len(label_list), hidden, epochs, lr, seed, device)
+    module, cfg, steps_run = _fit_mlp(feat.transform(records), y, len(label_list), hidden, epochs, lr, seed, device)
     student = _student(
         module,
         cfg,
@@ -267,7 +267,7 @@ def distill_records_from_labels(
         task or "distilled record classifier",
         len(records),
         label_list,
-        {"dim": dim, "hidden": list(cfg["hidden_dims"]), "epochs": epochs, "lr": lr},
+        {"dim": dim, "hidden": list(cfg["hidden_dims"]), "epochs": epochs, "epochs_run": steps_run, "lr": lr},
     )
     student.meta["train_agreement"] = agreement(student, teacher_labels, records)
     return student
@@ -486,14 +486,25 @@ def _split_for_calibration(
     )
 
 
+# Early-stopping schedule for _fit_mlp: check the training loss every _ES_CHECK_EVERY gradient steps, stop once
+# it hasn't improved by _ES_MIN_DELTA for _ES_PATIENCE consecutive checks. Internal constants, not exposed on the
+# public distill*() signatures -- epochs stays the one knob callers see; it now means "ceiling", not "exact count".
+_ES_CHECK_EVERY = 10
+_ES_PATIENCE = 3
+_ES_MIN_DELTA = 1e-3
+
+
 def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, seed, device):
-    """Train a small MLP classifier on features ``x`` and integer labels ``y``; return ``(module, config)``.
+    """Train a small MLP classifier on features ``x`` and integer labels ``y``; return ``(module, config, steps_run)``.
 
     Wraps the module in a :class:`~mixle.models.NeuralCategorical` leaf and fits it through the ordinary
     :func:`~mixle.inference.optimize` entry point -- the same declare-a-leaf/call-optimize path every other
-    mixle model goes through, rather than a bespoke torch loop. ``epochs`` is the leaf's ``m_steps`` (full-batch
-    gradient steps per call); a single ``optimize`` iteration (``max_its=1``) runs exactly one such M-step, so
-    training is unchanged in substance -- only the fitting path is now the shared one.
+    mixle model goes through, rather than a bespoke torch loop. Training runs in ``_ES_CHECK_EVERY``-step
+    chunks, each warm-started from the last (``optimize(..., prev_estimate=leaf, max_its=1)``), so ``epochs``
+    is a CEILING: once the mean training cross-entropy stops improving, further chunks are skipped rather than
+    always spending the full requested step count -- a task that converges early trains faster for it, and a
+    harder one still gets up to ``epochs`` steps. ``steps_run`` (the actual gradient-step count) is recorded
+    by the caller as ``recipe["epochs_run"]`` so the speedup is observable, not just internal.
     """
     import torch
 
@@ -509,9 +520,25 @@ def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, se
     }
     torch.manual_seed(seed)
     module = make_mlp(**cfg).to(device)
-    leaf = NeuralCategorical(module, m_steps=int(epochs), lr=float(lr), device=device)
-    fit = optimize(list(zip(x, y)), leaf.estimator(), prev_estimate=leaf, max_its=1, out=None)
-    return fit.module, cfg
+    data = list(zip(x, y))
+    enc = (np.asarray(x, dtype=float), np.asarray(y, dtype=int))
+
+    remaining, best_loss, stall, fit_module, steps_run = int(epochs), float("inf"), 0, module, 0
+    while remaining > 0:
+        chunk = min(_ES_CHECK_EVERY, remaining)
+        leaf = NeuralCategorical(fit_module, m_steps=chunk, lr=float(lr), device=device)
+        fit = optimize(data, leaf.estimator(), prev_estimate=leaf, max_its=1, out=None)
+        fit_module = fit.module
+        remaining -= chunk
+        steps_run += chunk
+        loss = -float(np.mean(fit.seq_log_density(enc)))
+        if best_loss - loss > _ES_MIN_DELTA:
+            best_loss, stall = loss, 0
+        else:
+            stall += 1
+            if stall >= _ES_PATIENCE:
+                break
+    return fit_module, cfg, steps_run
 
 
 def _student(module, cfg, adapter, task, n_examples, label_list, recipe) -> TaskModel:
