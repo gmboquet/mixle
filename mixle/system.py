@@ -99,14 +99,16 @@ class System:
     def __init__(self, config: SystemConfig) -> None:
         self.config = config
         self.total_spend = Spend()
-        self._harvest: dict[str, str] = {}
-        self._captured: dict[str, str] = {}
+        self._harvest: dict[tuple[str, str, str], str] = {}
+        self._captured: dict[tuple[str, str, str], str] = {}
 
     def answer(self, query: Query, *, budget: int | None = None) -> tuple[str | None, dict[str, Any]]:
         """Thin shell: route straight to the teacher, wrap the reply in a minimal H-style receipt.
 
-        Checks the captured cache first (see :meth:`improve`): an exact repeat of a query already
-        promoted by a prior ``improve()`` call is served free, no budget spent, ``captured=True``.
+        Checks the captured cache first (see :meth:`improve`): an exact repeat of a query (same text,
+        task, AND scope -- two queries that merely share text but differ in task/scope are different
+        questions and must not share a cache entry) already promoted by a prior ``improve()`` call is
+        served free, no budget spent, ``captured=True``.
 
         ``budget`` is a hard ceiling (:class:`~mixle.spend.Spend.total_units`): if it cannot afford even
         one frontier call, the request is refused -- ``reply`` is ``None`` and the receipt names the exact
@@ -119,8 +121,9 @@ class System:
         nothing relevant in it), the failure is reported honestly (``status="failed"``), never masked as a
         normal answer.
         """
-        if query.text in self._captured:
-            return self._captured[query.text], {
+        cache_key = (query.text, query.task, query.scope)
+        if cache_key in self._captured:
+            return self._captured[cache_key], {
                 "produced_by": "captured",
                 "status": "answered",
                 "spend": Spend().to_dict(),
@@ -176,7 +179,7 @@ class System:
         actual_cost = Spend() if result.degraded else cost
         self.total_spend = self.total_spend + actual_cost
         if not result.degraded:
-            self._harvest[query.text] = result.value
+            self._harvest[cache_key] = result.value
         receipt = {
             "produced_by": "store" if result.degraded else "teacher",
             "status": "answered",

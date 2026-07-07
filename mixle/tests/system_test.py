@@ -201,6 +201,24 @@ class SystemColdStartCaptureTest(unittest.TestCase):
         report = system.improve(10)
         self.assertEqual(report["status"], "nothing_to_improve")
 
+    def test_same_text_different_task_does_not_share_a_captured_cache_entry(self):
+        # regression: two queries with identical text but a different task (or scope) are different
+        # questions and must not silently answer one from the other's captured cache
+        teacher, calls = self._counting_teacher()
+        system = System(SystemConfig(teacher=teacher))
+        system.answer(Query("classify this", task="sentiment"))
+        system.improve(10)
+        system.answer(Query("classify this", task="topic"))
+        self.assertEqual(calls["n"], 2)
+
+    def test_same_text_different_scope_does_not_share_a_captured_cache_entry(self):
+        teacher, calls = self._counting_teacher()
+        system = System(SystemConfig(teacher=teacher))
+        system.answer(Query("classify this", scope="team-a"))
+        system.improve(10)
+        system.answer(Query("classify this", scope="team-b"))
+        self.assertEqual(calls["n"], 2)
+
 
 class SystemConfigFromEnvTest(unittest.TestCase):
     def test_from_env_requires_base_url_and_model(self):
