@@ -191,6 +191,13 @@ from mixle.inference.project import collapse_mixture, fisher_merge, gaussian_kl,
 
 # receipts: bind ledger + trace + calibration + provenance into one offline-re-verifiable artifact (H3)
 from mixle.inference.receipt import Receipt, VerificationReport, verify_receipt
+from mixle.inference.refine import (
+    TrialsToTarget,
+    apply_add_edge_fix,
+    blind_search_trials_to_target,
+    directed_correction,
+    held_out_log_likelihood,
+)
 from mixle.inference.reproduce import (
     ReproReceipt,
     data_fingerprint,
@@ -347,6 +354,11 @@ __all__ = [
     "reduce_mixture",
     "moment_project",
     "gaussian_kl",
+    "TrialsToTarget",
+    "apply_add_edge_fix",
+    "blind_search_trials_to_target",
+    "directed_correction",
+    "held_out_log_likelihood",
     "fisher_merge",
     "fit",
     "EMStep",
@@ -419,6 +431,12 @@ __all__ = [
     "Receipt",
     "VerificationReport",
     "verify_receipt",
+    # REFINE-a: diagnosis-directed correction vs blind structure search (workstream A5 research spike)
+    "TrialsToTarget",
+    "apply_add_edge_fix",
+    "blind_search_trials_to_target",
+    "directed_correction",
+    "held_out_log_likelihood",
     # reproducibility receipts -- record a fit, replay it, check it comes out bit-for-bit
     "record_fit",
     "verify_reproducible",
