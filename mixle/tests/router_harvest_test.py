@@ -8,6 +8,13 @@ import unittest
 from mixle.task.router import Router, resolve_from_harvest
 from mixle.task.solve import solve
 
+try:
+    import torch  # noqa: F401
+
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
+
 FAMILY_A = ["free money now", "cheap loans fast", "win cash today"]
 FAMILY_B = ["urgent wire transfer", "account suspended act now", "verify password immediately"]
 HAM = ["meeting at noon", "see you tomorrow", "project update attached", "lunch today", "thanks for the help"]
@@ -35,6 +42,7 @@ def _build_router(seed=0):
     return Router.from_solutions([tier0], teacher=_teacher, costs=[0.0001, 0.01]), tier0
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class HarvestResolveTest(unittest.TestCase):
     def test_new_tier_measurably_drops_escalation_on_held_out_traffic(self):
         router, tier0 = _build_router(seed=0)
