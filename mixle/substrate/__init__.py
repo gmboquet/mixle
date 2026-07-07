@@ -8,6 +8,7 @@ scope, tags, links, and a retrievable text surface.
 
 from __future__ import annotations
 
+from mixle.substrate.accum import FlywheelMeasurement, FlywheelReport, QAItem, measure_flywheel
 from mixle.substrate.act import (
     Action,
     Investigation,
@@ -103,6 +104,10 @@ __all__ = [
     "HopStep",
     "answer_from_substrate",
     "Answer",
+    "measure_flywheel",
+    "FlywheelReport",
+    "FlywheelMeasurement",
+    "QAItem",
     "investigate",
     "Investigation",
     "Action",
