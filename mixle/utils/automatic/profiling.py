@@ -20,6 +20,7 @@ from mixle.stats.compute.pdist import (
 
 from .factories import (
     AMBIGUOUS_SCORE_GAP_BITS,
+    EMBEDDING_MIN_DIM,
     ID_DISTINCT_FRACTION,
     ID_MIN_COUNT,
     INT_ID_RANGE_MULTIPLIER,
@@ -30,6 +31,7 @@ from .factories import (
     VALIDATION_ALPHA,
     VALIDATION_VARIANCE_FLOOR,
     _dense_integer_support,
+    _has_torch,
     _integer_range,
     get_categorical_estimator,
     get_composite_estimator,
@@ -37,6 +39,8 @@ from .factories import (
     get_gamma_estimator,
     get_gaussian_estimator,
     get_gaussian_mixture_estimator,
+    get_hybrid_embedding_estimator,
+    get_hybrid_image_estimator,
     get_ignored_estimator,
     get_integer_categorical_estimator,
     get_lognormal_estimator,
@@ -1429,7 +1433,8 @@ def analyze_structure(
     """
     rows = list(normalize_input(data))  # accept a DataFrame / RDD / DataSource, not only a bare list
     total_rows = len(rows)
-    estimator = get_estimator(rows, pseudo_count=pseudo_count, emp_suff_stat=emp_suff_stat, use_bstats=use_bstats)
+    root = DatumNode(data=rows)  # built directly (not via get_estimator) so its modality checks are inspectable
+    estimator = root.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats)
     field_series = _extract_field_series(rows)
     fields = [
         _profile_series(path, role, values)
@@ -1443,6 +1448,30 @@ def analyze_structure(
             )
 
     warnings = ["pairwise hints are unconditional; latent mixture/state/topic structure can explain or hide them"]
+    vec_dim = root._fixed_numeric_vector_dim()
+    mat_shape = root._fixed_numeric_matrix_shape()
+    if vec_dim is not None and vec_dim >= EMBEDDING_MIN_DIM:
+        if _has_torch():
+            warnings.append(
+                "modality fingerprint: embedding (dim=%d >= %d) -> routed to a hybrid neural density "
+                "(an exact coupling flow) instead of a bare multivariate Gaussian" % (vec_dim, EMBEDDING_MIN_DIM)
+            )
+        else:
+            warnings.append(
+                "modality fingerprint: embedding (dim=%d >= %d) would route to a hybrid neural density, "
+                "but torch is not installed -- fell back to a multivariate Gaussian" % (vec_dim, EMBEDDING_MIN_DIM)
+            )
+    elif mat_shape is not None:
+        if _has_torch():
+            warnings.append(
+                "modality fingerprint: image (shape=%s) -> routed through a frozen image_features extractor "
+                "into a hybrid neural density instead of a per-row sequence model" % (mat_shape,)
+            )
+        else:
+            warnings.append(
+                "modality fingerprint: image (shape=%s) would route to a hybrid neural density, but torch "
+                "is not installed -- fell back to the per-row sequence model" % (mat_shape,)
+            )
     observed_rows = [u for u in rows if u is not None]
     if use_bstats and observed_rows and all(isinstance(u, dict) for u in observed_rows):
         warnings.append(
@@ -1870,7 +1899,18 @@ class DatumNode:
                     use_bstats=use_bstats,
                 )
             elif self._fixed_numeric_vector_dim() is not None:
-                rv = get_multivariate_gaussian_estimator(self._fixed_numeric_vector_dim(), use_bstats=use_bstats)
+                vec_dim = self._fixed_numeric_vector_dim()
+                if vec_dim >= EMBEDDING_MIN_DIM and _has_torch():
+                    # modality fingerprint: "embedding" -- a high-dim numeric vector is far more often a
+                    # frozen encoder's output than a handful of jointly-Gaussian measurements, so a bare
+                    # multivariate Gaussian is the wrong default here (see EMBEDDING_MIN_DIM in factories.py).
+                    rv = get_hybrid_embedding_estimator(vec_dim)
+                else:
+                    rv = get_multivariate_gaussian_estimator(vec_dim, use_bstats=use_bstats)
+            elif self._fixed_numeric_matrix_shape() is not None and _has_torch():
+                # modality fingerprint: "image" -- a homogeneous 2-D numeric array field, routed through a
+                # frozen deterministic feature extractor into the same hybrid neural density.
+                rv = get_hybrid_image_estimator()
             elif fixed_arity and self.tuple_count == 0 and not self._children_homogeneous():
                 # fixed-length lists/vectors with positionally distinct types
                 rv = get_composite_estimator(
@@ -1917,6 +1957,29 @@ class DatumNode:
             if child.int_count + child.float_count == 0:
                 return None
         return dim
+
+    def _fixed_numeric_matrix_shape(self):
+        """Detect a homogeneous 2-D numeric array field (an "image"-shaped field): a fixed-length outer
+        sequence whose every row is itself a fixed-length numeric vector of the same width. A 2-D/3-D
+        numpy array iterates row-by-row into nested Iterables, so this is what an image datum looks like
+        by the time it reaches DatumNode."""
+        if self.tuple_count > 0 or self.seq_count == 0 or self.set_count > 0 or len(self.len_dict) != 1:
+            return None
+        rows = next(iter(self.len_dict))
+        if rows <= 1 or len(self.children) != rows:
+            return None
+        width = None
+        for child in self.children:
+            if child.count != self.seq_count:
+                return None
+            w = child._fixed_numeric_vector_dim()
+            if w is None:
+                return None
+            if width is None:
+                width = w
+            elif w != width:
+                return None
+        return (rows, width)
 
     def _children_homogeneous(self):
         """True when all positional children carry the same scalar type profile,
