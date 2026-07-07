@@ -75,9 +75,11 @@ class SystemConfig:
 class Query:
     """The typed problem contract for :meth:`System.answer`.
 
-    Field names align with the ``mixle-knowledge`` ``ContextPacket``/manifest contracts (``task``,
-    ``expected_output`` <-> ``expected_output_schema``, ``scope``) so a ``Query`` can be built directly
-    from one when a caller already holds a manifest.
+    ``task``/``expected_output`` align with the ``mixle-knowledge`` ``ContextPacket`` contract's
+    ``task``/``expected_output_schema`` fields (see :meth:`from_knowledge_dict`), so a caller who
+    already holds an assembled packet does not hand-build a ``Query`` field by field. ``scope`` has
+    no ``ContextPacket`` counterpart (that contract carries no such key) and stays a ``Query``-only
+    knob, not an invented alignment.
     """
 
     text: str
@@ -85,6 +87,25 @@ class Query:
     fingerprint: Any = None
     expected_output: dict[str, Any] | None = None
     scope: str = "local"
+
+    @classmethod
+    def from_knowledge_dict(cls, packet: dict[str, Any], *, scope: str = "local") -> Query:
+        """Build a ``Query`` directly from a mixle-knowledge-shaped ``ContextPacket`` dict -- the
+        exact dict :meth:`mixle.substrate.context.ContextPacket.to_knowledge_dict` emits, or the same
+        shape validated through ``mixle_knowledge.contracts.ContextPacket`` (workstream E1).
+
+        ``text`` comes from ``payload["rendered"]`` (the assembled context string a receiver actually
+        consumes); ``task``/``expected_output`` map directly from the packet's ``task``/
+        ``expected_output_schema``. ``scope`` is not a ``ContextPacket`` field, so it is passed
+        through as given rather than guessed from the packet.
+        """
+        payload = packet.get("payload") or {}
+        return cls(
+            text=str(payload.get("rendered", "")),
+            task=str(packet.get("task", "")),
+            expected_output=packet.get("expected_output_schema") or None,
+            scope=scope,
+        )
 
 
 def _complete(teacher: LLM | Callable[..., str], prompt: str) -> str:

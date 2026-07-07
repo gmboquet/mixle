@@ -54,6 +54,25 @@ class Receipt:
             "provenance": self.provenance,
         }
 
+    def to_knowledge_dict(self, *, id: str, project_id: str, task: str) -> dict[str, Any]:  # noqa: A002
+        """A plain dict shaped like ``mixle_knowledge.contracts.AnswerReceipt`` (id/project_id/task/
+        produced_by/answer/ledger/trace/calibration/provenance) -- workstream H3's receipt, aligned
+        with the mixle-knowledge receipt contracts per the plan. Distinct from
+        ``mixle_knowledge.contracts.ArtifactReceipt``, which certifies a trained model/artifact, not
+        one served answer -- this is the per-answer evidence trail an offline consumer re-verifies
+        (recompute the ledger, replay the trace, resolve the citations).
+
+        Stays a plain dict on purpose: mixle core carries no dependency on mixle-knowledge (platform
+        contract packages depend on core, never the other way); constructing the validated pydantic
+        object (``AnswerReceipt(**receipt.to_knowledge_dict(...))``) is the receiving side's job.
+        """
+        return {
+            "id": id,
+            "project_id": project_id,
+            "task": task,
+            **self.to_json(),
+        }
+
 
 @dataclass
 class VerificationReport:

@@ -98,5 +98,53 @@ class ReceiptVerifyTest(unittest.TestCase):
         self.assertIn("steps", blob["trace"])
 
 
+class KnowledgeReceiptTransferTest(unittest.TestCase):
+    """workstream H3: a Receipt -> a mixle-knowledge-shaped AnswerReceipt dict.
+
+    mixle core has no dependency on the mixle-knowledge package (platform contracts depend on core,
+    not the other way), so ``to_knowledge_dict`` produces a plain dict field-for-field matching
+    ``mixle_knowledge.contracts.AnswerReceipt`` rather than importing it; the exact field set is
+    pinned here as a regression guard against silent contract drift.
+    """
+
+    # mirrors mixle_knowledge.contracts.AnswerReceipt's fields exactly (created_at is defaulted
+    # there, so it is intentionally absent from this dict -- everything else must round-trip).
+    _KNOWLEDGE_ANSWER_RECEIPT_FIELDS = {
+        "id",
+        "project_id",
+        "task",
+        "answer",
+        "produced_by",
+        "ledger",
+        "trace",
+        "calibration",
+        "provenance",
+    }
+
+    def test_dict_shape_matches_the_knowledge_contract_field_for_field(self):
+        receipt = Receipt(
+            answer="a",
+            produced_by="student-v1",
+            ledger=_build_ledger(),
+            trace=_build_trace(),
+            calibration={"alpha": 0.1, "qhat": 0.83},
+            provenance={"source_id": "corpus-42"},
+        )
+        d = receipt.to_knowledge_dict(id="rcpt1", project_id="proj1", task="classify")
+        self.assertEqual(set(d.keys()), self._KNOWLEDGE_ANSWER_RECEIPT_FIELDS)
+        self.assertEqual(d["task"], "classify")
+        self.assertEqual(d["answer"], "a")
+        self.assertIn("parts", d["ledger"])
+        self.assertIn("steps", d["trace"])
+
+    def test_thin_shell_receipt_still_produces_a_valid_shape(self):
+        receipt = Receipt(answer="hi", produced_by="teacher")
+        d = receipt.to_knowledge_dict(id="rcpt2", project_id="proj1", task="chat")
+        self.assertEqual(set(d.keys()), self._KNOWLEDGE_ANSWER_RECEIPT_FIELDS)
+        self.assertIsNone(d["ledger"])
+        self.assertIsNone(d["trace"])
+        self.assertIsNone(d["calibration"])
+
+
 if __name__ == "__main__":
     unittest.main()
