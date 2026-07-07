@@ -294,9 +294,18 @@ def _encode_labels(teacher_labels: Sequence[Any], labels: Sequence[str] | None) 
 
 
 def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, seed, device):
-    """Train a small MLP classifier on features ``x`` and integer labels ``y``; return ``(module, config)``."""
+    """Train a small MLP classifier on features ``x`` and integer labels ``y``; return ``(module, config)``.
+
+    Wraps the module in a :class:`~mixle.models.NeuralCategorical` leaf and fits it through the ordinary
+    :func:`~mixle.inference.optimize` entry point -- the same declare-a-leaf/call-optimize path every other
+    mixle model goes through, rather than a bespoke torch loop. ``epochs`` is the leaf's ``m_steps`` (full-batch
+    gradient steps per call); a single ``optimize`` iteration (``max_its=1``) runs exactly one such M-step, so
+    training is unchanged in substance -- only the fitting path is now the shared one.
+    """
     import torch
 
+    from mixle.inference import optimize
+    from mixle.models import NeuralCategorical
     from mixle.models.neural import make_mlp
 
     cfg = {
@@ -307,17 +316,9 @@ def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, se
     }
     torch.manual_seed(seed)
     module = make_mlp(**cfg).to(device)
-    xt = torch.from_numpy(x).to(device)
-    yt = torch.from_numpy(y).to(device)
-    opt = torch.optim.Adam(module.parameters(), lr=lr)
-    loss_fn = torch.nn.CrossEntropyLoss()
-    module.train()
-    for _ in range(int(epochs)):
-        opt.zero_grad()
-        loss = loss_fn(module(xt), yt)
-        loss.backward()
-        opt.step()
-    return module, cfg
+    leaf = NeuralCategorical(module, m_steps=int(epochs), lr=float(lr), device=device)
+    fit = optimize(list(zip(x, y)), leaf.estimator(), prev_estimate=leaf, max_its=1, out=None)
+    return fit.module, cfg
 
 
 def _student(module, cfg, adapter, task, n_examples, label_list, recipe) -> TaskModel:
