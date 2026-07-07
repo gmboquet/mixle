@@ -140,7 +140,7 @@ route = ...     # the function doing the job today — a rule, an API, an LLM
 tickets = ...   # a list of representative inputs
 
 # label with route(), train a student, conformally calibrate
-sol = solve(route, tickets, propose="auto", synthesize=200)
+sol = solve(route, tickets, propose="auto")
 sol(tickets[0])   # drop-in: answers locally when SURE, else calls route()
 sol.improve()     # fold escalations back in; promote only if it verifies better
 sol.save("artifacts/router")
@@ -263,7 +263,7 @@ Normal(free * Field("x") + free * Field("z") + free, free).fit(
 - **Diagnostics:** multi-chain fits fold R̂ / ESS into `m.result.summary()`; `waic` / `loo` / `compare` rank
   fitted models.
 
-## Package Highlights
+## Package highlights
 
 - **~90 distributions** — scalar (Gaussian, Student-t, Gamma, Beta, Poisson, Categorical, von Mises,
   Dirichlet, …), multivariate, and combinators (Composite, Record, Sequence, Optional, Conditional) that
