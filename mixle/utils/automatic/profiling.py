@@ -1886,6 +1886,12 @@ class DatumNode:
         return POISSON_DISPERSION_MIN <= dispersion <= POISSON_DISPERSION_MAX
 
     def _merged_child(self):
+        if not self.children:
+            # every observed sequence was empty (e.g. data = [[], [], []]) -- no element was ever
+            # added, so there is no element type to merge. An empty DatumNode's own get_estimator()
+            # already resolves to "ignored" (typed == 0), the honest answer: the length model (built
+            # separately from self.len_dict, e.g. {0: n}) still captures "always empty" correctly.
+            return DatumNode()
         child = self.children[0].copy()
         for u in self.children[1:]:
             child = child.merge(u)
@@ -1969,7 +1975,13 @@ class DatumNode:
         return rv
 
     def _fixed_numeric_vector_dim(self):
-        if self.tuple_count > 0 or self.seq_count == 0 or self.set_count > 0 or len(self.len_dict) != 1:
+        if (
+            self.tuple_count > 0
+            or self.seq_count == 0
+            or self.set_count > 0
+            or self.dict_count > 0
+            or len(self.len_dict) != 1
+        ):
             return None
         dim = next(iter(self.len_dict))
         if dim <= 1 or len(self.children) != dim:
@@ -1992,7 +2004,13 @@ class DatumNode:
         sequence whose every row is itself a fixed-length numeric vector of the same width. A 2-D/3-D
         numpy array iterates row-by-row into nested Iterables, so this is what an image datum looks like
         by the time it reaches DatumNode."""
-        if self.tuple_count > 0 or self.seq_count == 0 or self.set_count > 0 or len(self.len_dict) != 1:
+        if (
+            self.tuple_count > 0
+            or self.seq_count == 0
+            or self.set_count > 0
+            or self.dict_count > 0
+            or len(self.len_dict) != 1
+        ):
             return None
         rows = next(iter(self.len_dict))
         if rows <= 1 or len(self.children) != rows:
