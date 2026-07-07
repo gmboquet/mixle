@@ -29,7 +29,23 @@ from mixle.task.artifact import (
     save_module,
 )
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
+from mixle.task.capacity import (
+    DEFAULT_RUNGS,
+    KNOWN_RUNGS,
+    EmbeddingHeadIO,
+    LadderResult,
+    RungResult,
+    WordEmbeddingFeaturizer,
+    capacity_ladder,
+    climb_to,
+)
 from mixle.task.cascade import Cascade, CascadeStats
+from mixle.task.collapse import (
+    CollapseVerdict,
+    collapse_monitor,
+    distinct_count_diversity,
+    entropy_diversity,
+)
 from mixle.task.density import DensityGate
 from mixle.task.design import DesignedModel, design_model, spec_to_estimator
 from mixle.task.distill import (
@@ -96,6 +112,7 @@ from mixle.task.model import (
 )
 from mixle.task.multilabel import MultiLabelSolution, solve_multilabel
 from mixle.task.plan import Planner, distill_planner
+from mixle.task.plan_model import PlanModel, fit_plan_model
 from mixle.task.plan_refine import RefinementReport, outcome_refine_planner
 
 # post-training quantization: int8/int4 MLP weights (numpy-only inference) + LNS integer log-space
@@ -110,7 +127,7 @@ from mixle.task.quantize import (
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
 from mixle.task.regress import RegressionSolution, solve_regression
 from mixle.task.replay import ExecutionTrace, TraceStep, is_bit_identical_replay, record_step, replay
-from mixle.task.router import Router, RouterStats, route_stack
+from mixle.task.router import HarvestResolveResult, Router, RouterStats, resolve_from_harvest, route_stack
 from mixle.task.scorecard import Scorecard, scorecard
 from mixle.task.sft_plan import GenerativePlanner, sample_plans, score_plan, sft_planner
 from mixle.task.solve import Solution, load_harvested, solve
@@ -129,7 +146,12 @@ __all__ = [
     "CallableLLM",
     "Cascade",
     "CascadeStats",
+    "CollapseVerdict",
+    "collapse_monitor",
+    "distinct_count_diversity",
+    "entropy_diversity",
     "CostModel",
+    "DEFAULT_RUNGS",
     "DensityGate",
     "DesignModel",
     "DesignedModel",
@@ -138,6 +160,7 @@ __all__ = [
     "EdgeFootprint",
     "EdgeSpace",
     "ExecutionTrace",
+    "EmbeddingHeadIO",
     "ExtractionIO",
     "ExtractorHarness",
     "MatcherHarness",
@@ -145,7 +168,9 @@ __all__ = [
     "GenerativeTextIO",
     "HashedNGram",
     "HashedRecord",
+    "KNOWN_RUNGS",
     "LNSStructuredClassifierIO",
+    "LadderResult",
     "ModelRecommendation",
     "OpenAICompatLLM",
     "QuantizedClassifierIO",
@@ -154,13 +179,18 @@ __all__ = [
     "RecordClassifierIO",
     "RoutePlan",
     "Router",
+    "RungResult",
     "Scorecard",
     "RouterStats",
+    "HarvestResolveResult",
+    "resolve_from_harvest",
     "RegressionSolution",
     "MultiLabelSolution",
     "StructuredSolution",
     "GenerativePlanner",
     "Planner",
+    "PlanModel",
+    "fit_plan_model",
     "Solution",
     "StructuredClassifierIO",
     "TaskManifest",
@@ -171,12 +201,15 @@ __all__ = [
     "TextClassifierIO",
     "CalibratedTuneResult",
     "TuneResult",
+    "WordEmbeddingFeaturizer",
     "acquisition_scores",
     "active_distill",
     "adapter_from_spec",
     "agreement",
     "break_even_volume",
+    "capacity_ladder",
     "cascade_cost_per_request",
+    "climb_to",
     "design_model",
     "distill",
     "distill_designer",

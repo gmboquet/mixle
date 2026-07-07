@@ -39,6 +39,7 @@ decision margin between two named hypotheses -- into the same kind of per-factor
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -187,3 +188,86 @@ def explain_margin_mixture(model: Any, x: Any, answer: int, runner_up: int) -> E
     total = (wa + float(ca.log_density(x))) - (wr + float(cr.log_density(x)))
     correction = total - float(sum(v for _, v in parts))
     return Explanation(total, sorted(parts, key=lambda p: p[1]), correction=correction)
+
+
+# --- diagnose: ledger -> FaultReport (workstream H5, the refinement loop's critic role) ------------
+
+_FIX_VOCAB = frozenset({"add_edge", "upgrade_leaf", "split_region", "add_factor"})
+
+
+@dataclass
+class FaultReport:
+    """A structural diagnosis built ONLY from :func:`explain` ledgers over failing cases -- no model
+    opinion. ``dominant`` names the structural element(s) most responsible (empty when nothing rises
+    above ordinary case-to-case variability); ``suggested_fix`` is one of :data:`_FIX_VOCAB` (empty
+    when nothing is dominant); ``evidence`` is every element ranked by its adverse contribution."""
+
+    dominant: str
+    evidence: list[tuple[str, float]] = field(default_factory=list)
+    suggested_fix: str = ""
+    receipt: dict[str, Any] = field(default_factory=dict)
+
+
+def diagnose(
+    model: Any,
+    cases: Sequence[Any],
+    *,
+    background: Sequence[Any] | None = None,
+    min_z: float = 1.0,
+    co_occurrence_threshold: float = 0.5,
+) -> FaultReport:
+    """Aggregate :func:`explain` ledgers over ``cases`` (failing / low-margin / miscalibrated examples)
+    into a :class:`FaultReport` naming the structural element most responsible.
+
+    Each case's per-part contributions are compared to ``background`` (a reference sample of typical
+    cases; defaults to ``cases`` themselves, though a real, separately-supplied background is needed to
+    detect a fault that is systematic across every case, since self-baselining against the failing set
+    cancels a shift common to all of it) via a robust z-score (median/MAD per part name), so "adverse"
+    is relative to that part's own normal variability, not a raw log-density magnitude.
+
+    A single part scoring far from baseline is NOT, by itself, evidence of a structural defect --
+    ordinary tail draws look surprising even under a well-specified model. The one closed-vocabulary
+    fault this function actively detects is a missing dependency: two parts that are BOTH adverse on
+    (almost) exactly the same cases far more than chance predicts -- the signature of an unmodeled edge
+    between them, ranked by exact ledger numbers, never guessed. When no such co-anomalous pair is
+    found, the honest report is empty/low-severity, not a forced guess at ``upgrade_leaf`` (that
+    single-part detector, and ``split_region``/``add_factor``, are real, separate follow-up work --
+    see the module's diagnose_test.py and the KNOW-a/DIAGNOSE-a cards).
+    """
+    bg = list(background) if background is not None else list(cases)
+    if not bg or not cases:
+        return FaultReport("", [], "", {"n_cases": len(cases), "n_background": len(bg)})
+
+    bg_explanations = [explain(model, x) for x in bg]
+    names = sorted({name for ex in bg_explanations for name, _ in ex.parts})
+    baseline: dict[str, float] = {}
+    scale: dict[str, float] = {}
+    for name in names:
+        vals = np.asarray([v for ex in bg_explanations for n, v in ex.parts if n == name], dtype=np.float64)
+        med = float(np.median(vals))
+        mad = float(np.median(np.abs(vals - med))) * 1.4826  # normal-consistent MAD -> std-equivalent
+        baseline[name], scale[name] = med, max(mad, 1e-9)
+
+    rows: list[dict[str, float]] = []
+    for x in cases:
+        ex = explain(model, x)
+        rows.append({name: max(0.0, (baseline[name] - v) / scale[name]) for name, v in ex.parts if name in baseline})
+
+    mean_adverse = {name: float(np.mean([r.get(name, 0.0) for r in rows])) for name in names}
+    ranked = sorted(mean_adverse.items(), key=lambda kv: -kv[1])
+
+    dominant, fix, severity = "", "", 0.0
+    if len(ranked) > 1:
+        top_name, second_name = ranked[0][0], ranked[1][0]
+        both = sum(1 for r in rows if r.get(top_name, 0.0) > min_z and r.get(second_name, 0.0) > min_z)
+        either = sum(1 for r in rows if r.get(top_name, 0.0) > min_z or r.get(second_name, 0.0) > min_z)
+        co_occurrence = (both / either) if either else 0.0
+        if either > 0 and co_occurrence >= co_occurrence_threshold:
+            dominant, fix, severity = f"{top_name}+{second_name}", "add_edge", co_occurrence
+
+    return FaultReport(
+        dominant=dominant,
+        evidence=ranked,
+        suggested_fix=fix,
+        receipt={"n_cases": len(cases), "n_background": len(bg), "severity": round(severity, 4)},
+    )

@@ -59,6 +59,7 @@ from mixle.reason.ontology import (
     constrained_decode,
 )
 from mixle.reason.store import CrossModalStore, RetrievalStep
+from mixle.reason.task_projection import TaskReadout, read_out, task_sufficient_projection
 
 __all__ = [
     "Ontology",
@@ -92,6 +93,9 @@ __all__ = [
     "content_overlap",
     "ModalityView",
     "ModalityGraph",
+    "TaskReadout",
+    "task_sufficient_projection",
+    "read_out",
     "information_corroborator",
     "GraphLLM",
     "GraphDistribution",
