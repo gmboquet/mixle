@@ -114,6 +114,22 @@ class HarvestResolveTest(unittest.TestCase):
         self.assertEqual(names[-2], "resolved")
         self.assertEqual(len(names), len(router.tiers) + 1)
 
+    def test_a_small_calibration_split_cannot_be_accepted_regardless_of_seed(self):
+        """At n_harvested=8 (the old accepted minimum), a 25% holdout gives only 2 calibration
+        points -- escalation_rate can only land on 0.0/0.5/1.0, so whether a run happened to be
+        "accepted" used to depend entirely on which 2 of 8 points landed in calibration, not on
+        anything real. Below the real minimum calibration size, every seed must reject."""
+        router, _tier0 = _build_router(seed=0)
+        for n_target in (8, 10, 13):
+            for seed in range(5):
+                router.stats.harvested_inputs.clear()
+                router.stats.harvested_labels.clear()
+                items = _make(n_target, [FAMILY_B], random.Random(seed + 200))
+                router.stats.harvested_inputs.extend(items)
+                router.stats.harvested_labels.extend(["spam"] * n_target)
+                result = resolve_from_harvest(router, cost_per_request=0.001, seed=seed)
+                self.assertFalse(result.accepted, f"n_harvested={n_target} seed={seed} was accepted")
+
 
 if __name__ == "__main__":
     unittest.main()
