@@ -178,6 +178,16 @@ class RegressionSolution:
         """Whether the calibrated precision meets the tolerance at all (else everything escalates)."""
         return bool(np.isfinite(self.qhat) and self.qhat <= self.tol)
 
+    def decide(self, x: Any) -> float | None:
+        """The ``CalibratedTaskModel.decide``-shaped contract (workstream B3): the calibrated point
+        estimate when ``answers_locally``, else ``ESCALATE`` (``None``) -- unlike ``__call__``, this
+        never falls through to the teacher itself, so a :class:`~mixle.task.router.Router` tier can
+        decide whether to escalate to the NEXT tier rather than always landing on this solution's own
+        teacher."""
+        if self.answers_locally:
+            return float(self._predict([x])[0])
+        return None
+
     def __call__(self, x: Any) -> float:
         self.n_requests += 1
         if self.answers_locally:
