@@ -94,7 +94,7 @@ from mixle.inference.event_study import (
     poisson_lograte_effect,
     tipping_drift,
 )
-from mixle.inference.explain import Explanation, FaultReport, diagnose, explain, explain_margin, explain_margin_mixture
+from mixle.inference.explain import Explanation, explain
 from mixle.inference.fisher import FisherView, FixedFisherView, to_fisher
 from mixle.inference.forecast import Forecast, forecast
 
@@ -188,9 +188,6 @@ from mixle.inference.posterior import ParameterPosterior, PredictivePosterior, p
 
 # closed-form variational projections — compress a structured teacher onto a smaller student exactly
 from mixle.inference.project import collapse_mixture, fisher_merge, gaussian_kl, moment_project, reduce_mixture
-
-# receipts: bind ledger + trace + calibration + provenance into one offline-re-verifiable artifact (H3)
-from mixle.inference.receipt import Receipt, VerificationReport, verify_receipt
 from mixle.inference.reproduce import (
     ReproReceipt,
     data_fingerprint,
@@ -284,13 +281,6 @@ from mixle.inference.target import (
     rhat_max,
     split_rhat,
 )
-from mixle.inference.torsion import (
-    CyclicGroup,
-    TwistedMixtureResult,
-    fit_independent_mixtures,
-    fit_twisted_mixture,
-    independent_log_density,
-)
 
 # epistemic / aleatoric uncertainty decomposition for any predictive (generalizes KG BALD)
 from mixle.inference.uncertainty import (
@@ -321,10 +311,6 @@ from mixle.stats.compute.sequence import estimate, initialize, seq_estimate, seq
 __all__ = [
     "Explanation",
     "explain",
-    "explain_margin",
-    "explain_margin_mixture",
-    "FaultReport",
-    "diagnose",
     "InterventionalNetwork",
     "average_causal_effect",
     "counterfactual",
@@ -397,12 +383,6 @@ __all__ = [
     # synthesize() -- a dataset factory: sample, label, keep only what verifies
     "synthesize",
     "Dataset",
-    # torsion (A4) -- twisted composition: mixture components sharing one base density modulo a group element
-    "CyclicGroup",
-    "TwistedMixtureResult",
-    "fit_twisted_mixture",
-    "fit_independent_mixtures",
-    "independent_log_density",
     # create() -- data (+ budget/device) to a certified model artifact
     "create",
     "CreatedModel",
@@ -415,10 +395,6 @@ __all__ = [
     "posterior",
     "ParameterPosterior",
     "PredictivePosterior",
-    # answer receipts -- bind ledger + trace + calibration + provenance, re-verifiable offline (H3)
-    "Receipt",
-    "VerificationReport",
-    "verify_receipt",
     # reproducibility receipts -- record a fit, replay it, check it comes out bit-for-bit
     "record_fit",
     "verify_reproducible",

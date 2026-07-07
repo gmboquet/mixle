@@ -22,7 +22,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
+from mixle.task.calibrate import ESCALATE
 
 
 @dataclass
@@ -144,88 +144,3 @@ def route_stack(solutions: list, teacher: Any, *, costs: list[float]) -> Router:
     sols = [solutions[i] for i in order]
     cs = [float(costs[i]) for i in order] + [float(costs[-1])]
     return Router.from_solutions(sols, teacher, costs=cs)
-
-
-@dataclass
-class HarvestResolveResult:
-    """What :func:`resolve_from_harvest` found and did -- a receipt, not a bare boolean.
-
-    ``escalation_before`` is exactly 1.0: every harvested input, by definition, escalated all the way
-    to the frontier under the current router. ``escalation_after`` is the NEW tier's own calibrated
-    escalation rate on a held-out split of that same harvested set; ``escalation_drop`` is the
-    difference. ``router`` is the new stack with the tier inserted (``None`` when nothing was
-    accepted -- either too little harvested data to fit and calibrate honestly, or the new tier does
-    not escalate measurably less often than always-escalate, in which case it buys nothing and is
-    correctly rejected rather than inserted for no gain).
-    """
-
-    accepted: bool
-    n_harvested: int
-    escalation_before: float
-    escalation_after: float
-    escalation_drop: float
-    agreement: float
-    router: Router | None = None
-    tier_name: str = ""
-
-
-def resolve_from_harvest(
-    router: Router,
-    *,
-    cost_per_request: float,
-    name: str = "resolved",
-    alpha: float = 0.1,
-    holdout: float = 0.25,
-    min_drop: float = 0.05,
-    distill_kw: dict[str, Any] | None = None,
-    seed: int = 0,
-) -> HarvestResolveResult:
-    """The multi-tier re-solve loop: train a NEW tier from ``router``'s harvested frontier labels and
-    insert it just before the frontier -- the :class:`~mixle.task.solve.Solution.improve` idea
-    generalized from one cascade to a whole router stack.
-
-    Every harvested input escalated all the way through the existing tiers (that is what "harvested"
-    means), so the honest baseline escalation rate on that set is 1.0. A new tier is fit and calibrated
-    on a held-out split of the SAME harvested set (never re-calling the frontier -- the labels are
-    already real teacher answers); it is inserted only if its OWN calibrated escalation rate on that
-    held-out split drops by at least ``min_drop`` below 1.0 -- i.e. it demonstrably intercepts a real
-    share of what used to always escalate. Too little harvested data, or a tier that still escalates
-    almost everything, is an honest no-op (``accepted=False``, ``router=None``), never a forced insert.
-    """
-    from mixle.task.distill import agreement
-    from mixle.task.solve import _fit_gate, _fit_student
-
-    inputs, labels = router.harvested()
-    n_harvested = len(inputs)
-    if n_harvested < 8:
-        return HarvestResolveResult(False, n_harvested, 1.0, 1.0, 0.0, 0.0)
-
-    kind = "text" if isinstance(inputs[0], str) else "record"
-    str_labels = [str(y) for y in labels]
-
-    rng = np.random.RandomState(seed)
-    order = rng.permutation(n_harvested)
-    n_cal = max(2, int(round(n_harvested * holdout)))
-    cal_idx, train_idx = order[:n_cal], order[n_cal:]
-    train_in, train_lab = [inputs[i] for i in train_idx], [str_labels[i] for i in train_idx]
-    cal_in, cal_lab = [inputs[i] for i in cal_idx], [str_labels[i] for i in cal_idx]
-    if len(train_in) < 4 or len(cal_in) < 2:
-        return HarvestResolveResult(False, n_harvested, 1.0, 1.0, 0.0, 0.0)
-
-    kw = dict(distill_kw or {})
-    kw.setdefault("seed", seed)
-    student = _fit_student(kind, train_in, train_lab, kw)
-    gate = _fit_gate(kind, train_in, 0.02, seed)
-    cal = CalibratedTaskModel(student, alpha=alpha, density_gate=gate).calibrate(cal_in, cal_lab)
-
-    agree = agreement(student, cal_lab, cal_in)
-    esc_after = cal.escalation_rate(cal_in)
-    drop = 1.0 - esc_after
-
-    if drop < min_drop:
-        return HarvestResolveResult(False, n_harvested, 1.0, float(esc_after), float(drop), float(agree))
-
-    new_tiers = list(router.tiers[:-1]) + [(name, cal, float(cost_per_request)), router.tiers[-1]]
-    return HarvestResolveResult(
-        True, n_harvested, 1.0, float(esc_after), float(drop), float(agree), Router(new_tiers), name
-    )

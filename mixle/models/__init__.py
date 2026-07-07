@@ -47,7 +47,6 @@ from mixle.models.dirichlet_process_mixture import (
 from mixle.models.dpo_leaf import DPOLeaf, DPOModel
 from mixle.models.embedding import CategoricalEmbedding
 from mixle.models.energy import EnergyModel, build_energy_net
-from mixle.models.feature_map import FeatureMapDensity, FeatureMapEstimator, feature_fn, register_feature_fn
 from mixle.models.gaussian_process import GaussianProcessRegressor
 from mixle.models.grammar import (
     GrammarLearningResult,
@@ -142,11 +141,6 @@ __all__ = [
     "DiscreteAR",
     "DPOModel",
     "EnergyModel",
-    # frozen-encoder + structured-head composition (workstream A1 modality routing)
-    "FeatureMapDensity",
-    "FeatureMapEstimator",
-    "feature_fn",
-    "register_feature_fn",
     "StreamingTransformer",
     # deprecated "...Leaf" aliases (kept for back-compat; prefer the names above)
     "NeuralLeaf",
