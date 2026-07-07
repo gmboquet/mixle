@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import contextvars
 import math
-import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -13,23 +13,28 @@ from typing import Any
 # each ``estimator.estimate(...)`` call so device-aware leaves (e.g. NeuralLeaf, whose M-step trains an
 # arbitrary torch module) can follow the engine's device without the ParameterEstimator.estimate
 # contract having to thread the engine through every subclass.
-_ACTIVE = threading.local()
+#
+# A ContextVar, not threading.local: threading.local isolates OS threads but not concurrent asyncio
+# tasks sharing one thread -- two using_active_engine(...) blocks entered as overlapping tasks on the
+# same event loop would otherwise see each other's engine mid-block (reproduced with asyncio.gather).
+# ContextVar is copied into each Task's context at creation, so it is isolated per-task as well as
+# per-thread, with no cost to the synchronous call path mixle's own EM loop uses today.
+_ACTIVE: contextvars.ContextVar[Any] = contextvars.ContextVar("mixle_active_engine", default=None)
 
 
 def active_engine() -> ComputeEngine | None:
     """Return the compute engine driving the current EM step, or ``None`` outside one."""
-    return getattr(_ACTIVE, "engine", None)
+    return _ACTIVE.get()
 
 
 @contextmanager
 def using_active_engine(engine: Any):
     """Mark ``engine`` active for the duration of the block (used by the estimation loop)."""
-    prev = getattr(_ACTIVE, "engine", None)
-    _ACTIVE.engine = engine
+    token = _ACTIVE.set(engine)
     try:
         yield
     finally:
-        _ACTIVE.engine = prev
+        _ACTIVE.reset(token)
 
 
 class ComputeEngine(ABC):
