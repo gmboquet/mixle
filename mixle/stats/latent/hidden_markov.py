@@ -715,29 +715,51 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             return retval
 
         else:
-            x_iter = iter(x)
+            # A topic-mixture (taus) HMM's state i emits from MixtureDistribution(topics, taus[i, :])
+            # (the exact semantics HiddenMarkovModelDistributionSampler already implements for sampling
+            # -- see its obs_samplers). This runs the SAME scaled forward recursion as the plain branch
+            # above, only swapping the per-state emission log-density for the topic-mixture log-density
+            # (weighted_log_sum(per-topic log-densities, log_taus[i, :]) = log of state i's mixture
+            # density). The prior version of this branch recomputed a from-scratch (non-recursive)
+            # per-timestep quantity that discarded every timestep but the last, and (for n_topics !=
+            # n_states) indexed log_taus with the wrong axis and crashed outright.
             log_w = self.log_w
             log_taus = self.log_taus
             n_states = self.n_states
-            x0 = next(x_iter)
+            topics = self.topics
 
-            obs_log_density_by_topic = np.asarray([u.log_density(x0) for u in self.topics])
-            log_likelihood_by_state = np.asarray(
-                [log_w[i] + vec.weighted_log_sum(obs_log_density_by_topic, log_taus[i, :]) for i in range(n_states)]
-            )
+            def _state_log_density(xt: T) -> np.ndarray:
+                obs_log_density_by_topic = np.asarray([u.log_density(xt) for u in topics])
+                return np.asarray(
+                    [vec.weighted_log_sum(obs_log_density_by_topic, log_taus[i, :]) for i in range(n_states)]
+                )
 
-            for x in x_iter:
-                obs_log_density_by_topic = np.asarray([u.log_density(x) for u in self.topics])
-                log_likelihood_by_state = [
-                    vec.weighted_log_sum(obs_log_density_by_topic, log_taus[:, i])
-                    + vec.weighted_log_sum(obs_log_density_by_topic, log_taus[i, :])
-                    for i in range(n_states)
-                ]
+            obs_log_likelihood = log_w + _state_log_density(x[0])
 
-            rv = vec.log_sum(log_likelihood_by_state)
-            rv += self.len_dist.log_density(len(x))
+            if np.max(obs_log_likelihood) == -np.inf:
+                return -np.inf
 
-            return rv
+            max_ll = obs_log_likelihood.max()
+            obs_log_likelihood = np.exp(obs_log_likelihood - max_ll)
+            sum_ll = np.sum(obs_log_likelihood)
+            retval = np.log(sum_ll) + max_ll
+
+            for k in range(1, len(x)):
+                obs_log_likelihood = self.transitions.T @ obs_log_likelihood
+                obs_log_likelihood = obs_log_likelihood / obs_log_likelihood.sum()
+                obs_log_likelihood = np.log(obs_log_likelihood) + _state_log_density(x[k])
+
+                max_ll = obs_log_likelihood.max()
+                if max_ll == -np.inf:
+                    return -np.inf
+                obs_log_likelihood = np.exp(obs_log_likelihood - max_ll)
+                sum_ll = np.sum(obs_log_likelihood)
+
+                retval += np.log(sum_ll) + max_ll
+
+            retval += self.len_dist.log_density(len(x))
+
+            return retval
 
     def _terminal_states_seq_log_density(self, x: E1 | E2) -> np.ndarray:
         """Vectorized terminal-state forward: per-sequence stopping-time likelihood from encoded emissions."""
@@ -758,7 +780,16 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         return out
 
     def seq_log_density(self, x: E1 | E2) -> np.ndarray:
-        """Return vectorized log-density values for sequence-encoded observations."""
+        """Return vectorized log-density values for sequence-encoded observations.
+
+        KNOWN GAP for ``has_topics`` (taus) models: unlike :meth:`log_density`, this always scores
+        ``self.topics[i]`` directly as state ``i``'s emission distribution, silently ignoring ``taus``
+        entirely (and assuming ``len(self.topics) == self.n_states``, which a topic-mixture model need
+        not satisfy). It therefore agrees with ``log_density`` only when ``taus`` is (effectively) an
+        identity matrix. Fitting/EM (which drives this path) has not been audited for topic-mixture
+        support; fixing this vectorized path -- and the accumulator that feeds it -- is unscoped future
+        work, not part of the log_density forward-recursion fix this docstring flags it alongside.
+        """
         if self.terminal_states is not None:
             return self._terminal_states_seq_log_density(x)
         x0, x1 = x
