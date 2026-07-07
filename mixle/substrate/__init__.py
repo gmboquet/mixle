@@ -23,6 +23,18 @@ from mixle.substrate.act import (
     simulate_action,
 )
 from mixle.substrate.answer import Answer, answer_from_substrate
+from mixle.substrate.belief import (
+    MODEL_ASSERTION,
+    MODEL_ASSERTION_CAP,
+    BeliefItem,
+    Claim,
+    EvidenceEntry,
+    assimilate,
+    credence_from_history,
+    harvest_knowledge,
+    retract,
+    retrieve_beliefs,
+)
 from mixle.substrate.context import (
     ContextBudget,
     ContextPacket,
@@ -143,4 +155,14 @@ __all__ = [
     "monitoring_harness",
     "register_harness",
     "find_harnesses",
+    "harvest_knowledge",
+    "assimilate",
+    "retract",
+    "retrieve_beliefs",
+    "credence_from_history",
+    "BeliefItem",
+    "Claim",
+    "EvidenceEntry",
+    "MODEL_ASSERTION",
+    "MODEL_ASSERTION_CAP",
 ]
