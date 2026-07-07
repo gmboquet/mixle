@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 
 from mixle.task.calibrate import CalibratedTaskModel
-from mixle.task.distill import _split_for_calibration, agreement, distill
+from mixle.task.distill import _fit_density_gate, _split_for_calibration, agreement, distill
 from mixle.task.model import TaskModel
 
 
@@ -167,6 +167,8 @@ def tune_recipe_for_routing(
     alpha: float = 0.1,
     seed: int = 0,
     task: str = "",
+    density_gate: bool = False,
+    density_gate_alpha: float = 0.05,
 ) -> CalibratedTuneResult:
     """Bayesian-optimize the distillation recipe, then calibrate the winner for routing -- all in one call.
 
@@ -181,6 +183,9 @@ def tune_recipe_for_routing(
     cache, so ``train_texts`` -- identical across every candidate recipe -- is queried only once for the whole
     search rather than once per trial, and the calibration/search overlap in ``val_texts`` is never re-queried
     either. Every distinct input is priced exactly once, however many candidates the search evaluates.
+
+    ``density_gate=True`` wires the same OOD escalation as :func:`~mixle.task.distill.distill_for_routing`: a
+    gate fit on ``train_texts``, its floor calibrated on the disjoint ``cal_texts`` slice.
     """
     val_texts = [str(t) for t in val_texts]
     val_truth = _teacher_labels(teacher, val_texts)
@@ -202,7 +207,12 @@ def tune_recipe_for_routing(
         seed=seed,
         task=task,
     )
-    calibrated = CalibratedTaskModel(result.model, alpha=alpha).calibrate(cal_texts, cal_labels)
+    gate = (
+        _fit_density_gate(result.model, train_texts, cal_texts, alpha=density_gate_alpha, seed=seed)
+        if density_gate
+        else None
+    )
+    calibrated = CalibratedTaskModel(result.model, alpha=alpha, density_gate=gate).calibrate(cal_texts, cal_labels)
     return CalibratedTuneResult(
         model=calibrated,
         recipe=result.recipe,
