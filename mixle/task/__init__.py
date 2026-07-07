@@ -113,6 +113,14 @@ from mixle.task.extract import (
 from mixle.task.generative_capability import extractive_capture_profile, validate_extraction_schema
 from mixle.task.generative_text import GenerativeTextIO, distill_text_generative, distill_text_generative_from_labels
 from mixle.task.harness import ExtractorHarness, MatcherHarness, replace_alerter, replace_extractor, replace_matcher
+from mixle.task.imagine import (
+    CeilingReport,
+    ImagineResult,
+    ProposalVerdict,
+    StructuralCandidate,
+    ceiling_report,
+    propose_structure,
+)
 from mixle.task.llm import (
     CallableLLM,
     OpenAICompatLLM,
@@ -156,6 +164,14 @@ from mixle.task.quantize import (
     quantize_mlp,
 )
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
+from mixle.task.refine import (
+    EditTrial,
+    SearchOutcome,
+    apply_edge,
+    blind_structure_search,
+    diagnosis_directed_correction,
+    fit_independent_baseline,
+)
 from mixle.task.regress import RegressionSolution, solve_regression
 from mixle.task.replay import ExecutionTrace, TraceStep, is_bit_identical_replay, record_step, replay
 from mixle.task.router import HarvestResolveResult, Router, RouterStats, resolve_from_harvest, route_stack
@@ -210,6 +226,12 @@ __all__ = [
     "run_episode",
     "ExtractorHarness",
     "MatcherHarness",
+    "CeilingReport",
+    "ImagineResult",
+    "ProposalVerdict",
+    "StructuralCandidate",
+    "ceiling_report",
+    "propose_structure",
     "FieldChoice",
     "GenerativeTextIO",
     "extractive_capture_profile",
@@ -223,6 +245,12 @@ __all__ = [
     "OpenAICompatLLM",
     "QuantizedClassifierIO",
     "QuantizedMLP",
+    "EditTrial",
+    "SearchOutcome",
+    "apply_edge",
+    "blind_structure_search",
+    "diagnosis_directed_correction",
+    "fit_independent_baseline",
     "RecipeSpace",
     "RecordClassifierIO",
     "RoutePlan",
@@ -317,6 +345,10 @@ __all__ = [
     "head_to_head_probe",
     "myopic_eig_policy",
     "outcome_refine_planner",
+    "ProposeVerifyResult",
+    "RoundLog",
+    "SequenceProposal",
+    "propose_verify_retrain",
     "sample_plans",
     "score_plan",
     "scorecard",

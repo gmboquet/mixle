@@ -23,10 +23,12 @@ pass for a claim the receipt does not make.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mixle.inference.explain import Explanation
-from mixle.task.replay import ExecutionTrace, is_bit_identical_replay
+
+if TYPE_CHECKING:
+    from mixle.task.replay import ExecutionTrace
 
 
 @dataclass
@@ -72,6 +74,8 @@ def verify_receipt(receipt: Receipt, *, tools: dict[str, Any] | None = None, tol
     """Re-check every claim the receipt actually makes, using only the receipt's own bound data (plus
     the ``tools`` registry needed to re-execute a trace -- the one piece that cannot be inlined into the
     receipt itself, since a tool is a function, not data)."""
+    from mixle.task.replay import is_bit_identical_replay
+
     checks: dict[str, str] = {}
 
     if receipt.ledger is not None:

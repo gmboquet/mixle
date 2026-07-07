@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 from mixle.inference.belief import BeliefState, GaussianBelief, as_belief
+from mixle.reason.belief_walk import HopTransport, WalkResult, belief_walk, coverage_by_hop_count
 from mixle.reason.core import (
     Evidence,
     Latent,
@@ -31,6 +32,12 @@ from mixle.reason.core import (
     ReasonedAnswer,
     block_selector,
     reason,
+)
+from mixle.reason.cycle_consistency import (
+    cycle_inconsistency,
+    fit_cycle_transport,
+    posterior_mean_estimate,
+    selective_error,
 )
 from mixle.reason.design import AcquisitionPlan, select_evidence_batch
 from mixle.reason.discrete import DiscreteAnswer, model_evidence, reason_discrete
@@ -60,6 +67,13 @@ from mixle.reason.ontology import (
 )
 from mixle.reason.store import CrossModalStore, RetrievalStep
 from mixle.reason.task_projection import TaskReadout, read_out, task_sufficient_projection
+from mixle.reason.transport_edge import (
+    EdgeTransportVerdict,
+    coverage_consistent_with_nominal,
+    fit_conditional_transport,
+    marginal_coverage,
+    verify_edge_transport,
+)
 
 __all__ = [
     "Ontology",
@@ -96,6 +110,14 @@ __all__ = [
     "TaskReadout",
     "task_sufficient_projection",
     "read_out",
+    "cycle_inconsistency",
+    "fit_cycle_transport",
+    "posterior_mean_estimate",
+    "selective_error",
+    "HopTransport",
+    "WalkResult",
+    "belief_walk",
+    "coverage_by_hop_count",
     "information_corroborator",
     "GraphLLM",
     "GraphDistribution",
@@ -109,6 +131,11 @@ __all__ = [
     "StructuredFusionClassifier",
     "HybridFusionClassifier",
     "fusion_flops",
+    "EdgeTransportVerdict",
+    "coverage_consistent_with_nominal",
+    "fit_conditional_transport",
+    "marginal_coverage",
+    "verify_edge_transport",
 ]
 
 _LAZY = {
