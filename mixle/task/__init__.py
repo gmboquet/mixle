@@ -95,6 +95,7 @@ from mixle.task.model import (
     register_adapter,
 )
 from mixle.task.multilabel import MultiLabelSolution, solve_multilabel
+from mixle.task.orchestrate import OrchestrationResult, World, orchestrate
 from mixle.task.plan import Planner, distill_planner
 from mixle.task.plan_refine import RefinementReport, outcome_refine_planner
 
@@ -158,6 +159,8 @@ __all__ = [
     "RouterStats",
     "RegressionSolution",
     "MultiLabelSolution",
+    "OrchestrationResult",
+    "World",
     "StructuredSolution",
     "GenerativePlanner",
     "Planner",
@@ -206,6 +209,7 @@ __all__ = [
     "llm_labeler",
     "load_harvested",
     "lns_classifier",
+    "orchestrate",
     "pick_label",
     "record_step",
     "recommend_model",
