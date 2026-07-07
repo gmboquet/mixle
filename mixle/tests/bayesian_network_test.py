@@ -56,10 +56,15 @@ class RegressionEdgeTest(unittest.TestCase):
 
 class MultiParentTest(unittest.TestCase):
     def test_discrete_child_recovers_both_parents(self):
-        # two independent categoricals drive a count via their INTERACTION -> the count needs BOTH as parents
+        # two independent categoricals drive a count via their INTERACTION -> the count needs BOTH as parents.
+        # n=2000 leaves this orientation (a,b->count) tied against an equally-fitting alternative DAG in the
+        # same equivalence class (a->count, a->b, count->b) for this seed -- a fixed parameter-count bug
+        # (_num_free_params misdetecting NegativeBinomialDistribution/CategoricalDistribution params) used to
+        # happen to break the tie the "expected" way here by coincidence. 6000 rows makes the true a,b->count
+        # dependence dominate reliably (confirmed stable at n>=6000; n=4000 still flips for this seed).
         r = np.random.RandomState(0)
         data = []
-        for _ in range(2000):
+        for _ in range(6000):
             a, b = int(r.rand() < 0.5), int(r.rand() < 0.5)
             rate = 2.0 + 3.0 * a + 5.0 * b + 4.0 * a * b
             data.append((str(a), str(b), int(r.poisson(rate))))
@@ -244,9 +249,14 @@ class GLMFactorTest(unittest.TestCase):
             self.assertTrue(np.isfinite(net.log_density((v, lab))))
 
     def test_mixed_parents_glm_uses_onehot_and_raw(self):
+        # n=800 leaves the x->y vs y->x BIC gain a near-exact tie for this seed (129.49 vs 129.68 nats --
+        # noise-level, not signal), which the greedy search can legitimately break either way; a fixed
+        # parameter-count bug (_num_free_params misdetecting CategoricalDistribution.pmap params) used to
+        # happen to break the tie the "expected" way here by pure coincidence. 1600 rows makes the true
+        # x->y dependence dominate the tie reliably (confirmed stable at n>=1600 across the same seed).
         rng = np.random.RandomState(3)
-        g = [["a", "b"][i] for i in rng.randint(0, 2, 800)]
-        x = rng.randn(800)
+        g = [["a", "b"][i] for i in rng.randint(0, 2, 1600)]
+        x = rng.randn(1600)
         logit = 2.5 * x + np.where(np.asarray(g) == "b", 2.0, -2.0)
         y = ["t" if rng.rand() < 1.0 / (1.0 + np.exp(-z)) else "f" for z in logit]
         data = list(zip(g, x.tolist(), y))
@@ -290,6 +300,55 @@ class VectorNodeTest(unittest.TestCase):
         net = learn_bayesian_network(data, max_parents=1)
         vfac = [f for f in net.factors if f.child == 1]
         self.assertEqual(type(vfac[0]).__name__, "_VectorMarginalFactor")  # no spurious edge -> a bare MVN marginal
+        self.assertEqual(net.edges(), [])
+
+
+class NumFreeParamsTest(unittest.TestCase):
+    """Regression: _num_free_params used to fall through to a flat constant 2 for any distribution whose
+    parameters aren't named mu/p/lam/beta/alpha -- silently true for CategoricalDistribution (params live
+    in .pmap) and CompositeDistribution (a structural wrapper with no scalar param attrs at all). This
+    undercounted the BIC complexity penalty for categorical fields, letting learn_bayesian_network accept
+    spurious edges between independent categorical fields once cardinality grew past a couple of levels."""
+
+    def test_categorical_counts_k_minus_1_not_a_flat_constant(self):
+        from mixle.inference.structure import _num_free_params
+
+        for k in (2, 5, 20):
+            col = [str(i % k) for i in range(400)]
+            dist = fit(col, st.CategoricalEstimator(), max_its=5, out=None)
+            with self.subTest(k=k):
+                self.assertEqual(_num_free_params(dist), k - 1)
+
+    def test_composite_sums_its_fields_not_a_flat_constant(self):
+        from mixle.inference.structure import _num_free_params
+
+        comp = st.CompositeDistribution((st.GaussianDistribution(0.0, 1.0), st.PoissonDistribution(2.0)))
+        self.assertEqual(_num_free_params(comp), 3)  # 2 (Gaussian: mean+var) + 1 (Poisson: rate)
+
+    def test_single_scalar_families_are_not_doubled(self):
+        from mixle.inference.structure import _num_free_params
+
+        self.assertEqual(_num_free_params(st.PoissonDistribution(3.0)), 1)
+        self.assertEqual(_num_free_params(st.BernoulliDistribution(0.3)), 1)
+        self.assertEqual(_num_free_params(st.GaussianDistribution(0.0, 1.0)), 2)
+
+    def test_negative_binomial_counts_both_r_and_p(self):
+        # NegativeBinomialEstimator fits both r and p by default (estimate_r=True) -- unlike Poisson/
+        # Bernoulli/Binomial's single free scalar, this family genuinely has 2, not 1.
+        from mixle.inference.structure import _num_free_params
+
+        self.assertEqual(_num_free_params(st.NegativeBinomialDistribution(3.0, 0.4)), 2)
+
+    def test_independent_categorical_fields_no_longer_produce_a_spurious_edge(self):
+        # Two independently-permuted categorical columns (20 and 4 levels) have no real dependence; the
+        # old flat-constant-2 penalty under-charged the extra per-parent-config categorical table enough
+        # for the greedy search to accept a spurious edge here (confirmed against the pre-fix code).
+        rng = np.random.RandomState(0)
+        n = 400
+        c1 = [f"L{i % 20}" for i in rng.permutation(n) % 20]
+        c2 = [f"K{i % 4}" for i in rng.permutation(n) % 4]
+        data = list(zip(c1, c2))
+        net = learn_bayesian_network(data, max_parents=2, min_gain=0.0)
         self.assertEqual(net.edges(), [])
 
 

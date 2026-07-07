@@ -95,11 +95,24 @@ def recommend_compute_precision(
         if s2 is not None and float(s2) < min_variance:
             return PrecisionPlan(np.float64, "near-degenerate component (var %.1e) -> float64 for accuracy" % float(s2))
 
-    # look at the DATA: magnitude + dynamic range
+    # look at the DATA: magnitude + dynamic range. Stride across the full dataset rather than taking
+    # a leading prefix -- naturally-ordered data (sorted, appended-to over time, grouped by source)
+    # can concentrate extreme-magnitude values later in the sequence, which a prefix would never see,
+    # silently allocating float32 to data that is not actually well-conditioned for it. When ``data``
+    # supports random access, stride-index it directly to avoid materializing the whole sequence;
+    # otherwise defer to _numeric_data_sample's own internal stride (it must materialize anyway).
     from mixle.engines.precision import _numeric_data_sample
 
-    sample = data[:sample_size] if hasattr(data, "__getitem__") else data
-    s = _numeric_data_sample(sample)
+    if hasattr(data, "__getitem__") and hasattr(data, "__len__"):
+        n = len(data)
+        if n > sample_size:
+            step = n / sample_size
+            sample = [data[int(i * step)] for i in range(sample_size)]
+        else:
+            sample = data
+    else:
+        sample = data
+    s = _numeric_data_sample(sample, sample_size)
     if s is None or s.size == 0:
         return PrecisionPlan(np.float64, "non-numeric / empty data -> float64")
     amax = float(np.max(np.abs(s)))

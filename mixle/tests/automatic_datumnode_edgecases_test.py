@@ -12,6 +12,8 @@ crash-on-empty-vdict and detectors' dropped-fit/pseudo_count, fixed separately):
 
 import unittest
 
+import numpy as np
+
 from mixle.inference.estimation import fit
 from mixle.utils.automatic import analyze_structure, get_estimator
 
@@ -63,6 +65,54 @@ class ModalityFingerprintDictGuardTest(unittest.TestCase):
         data = [[float(i)] * 16 for i in range(20)]
         profile = analyze_structure(data, pairwise=False)
         self.assertTrue(any("modality fingerprint" in w for w in profile.warnings))
+
+
+class InfiniteFloatValueTest(unittest.TestCase):
+    """Regression: DatumNode tracked infinite float values (inf_count) but, unlike None/NaN
+    (none_count/nan_count), never wrapped the resulting estimator to account for them -- add_datum
+    excludes non-finite floats from vdict, so get_estimator() returned a plain estimator (e.g.
+    GaussianEstimator) that had never seen the infinities, and fitting that estimator on the SAME
+    unfiltered raw data then crashed (GaussianDistribution requires finite support)."""
+
+    def test_mixed_finite_and_positive_infinity_does_not_crash_optimize(self):
+        from mixle.inference.estimation import optimize
+
+        data = [1.0, 2.0, float("inf"), 3.0]
+        est = get_estimator(data)
+        self.assertEqual(type(est).__name__, "OptionalEstimator")  # not a bare GaussianEstimator
+        model = optimize(data, out=None)
+        self.assertTrue(np.isfinite(model.log_density(2.0)))
+        self.assertEqual(model.log_density(float("inf")), 0.0)
+
+    def test_mixed_finite_and_negative_infinity_does_not_crash_optimize(self):
+        from mixle.inference.estimation import optimize
+
+        data = [1.0, 2.0, -float("inf"), 3.0]
+        model = optimize(data, out=None)
+        self.assertTrue(np.isfinite(model.log_density(2.0)))
+        self.assertEqual(model.log_density(-float("inf")), 0.0)
+
+    def test_both_signs_of_infinity_present_are_both_handled(self):
+        from mixle.inference.estimation import optimize
+
+        data = [1.0, -float("inf"), 2.0, float("inf"), 3.0]
+        model = optimize(data, out=None)
+        self.assertTrue(np.isfinite(model.log_density(2.0)))
+        self.assertEqual(model.log_density(float("inf")), 0.0)
+        self.assertEqual(model.log_density(-float("inf")), 0.0)
+
+    def test_all_infinite_field_does_not_silently_disappear(self):
+        from mixle.inference.estimation import optimize
+
+        data = [float("inf")] * 5
+        est = get_estimator(data)
+        self.assertEqual(type(est).__name__, "OptionalEstimator")  # not a bare IgnoredEstimator
+        model = optimize(data, out=None)
+        self.assertEqual(model.log_density(float("inf")), 0.0)
+
+    def test_finite_only_data_is_unaffected(self):
+        est = get_estimator([1.0, 2.0, 3.0, 4.0])
+        self.assertEqual(type(est).__name__, "GaussianEstimator")
 
 
 if __name__ == "__main__":

@@ -47,6 +47,18 @@ class RecommendPrecisionTest(unittest.TestCase):
         data = [float(x) * 1e8 for x in m.sampler(3).sample(2000)]
         self.assertEqual(np.dtype(recommend_compute_precision(m, data).compute_dtype), np.float64)
 
+    def test_tail_concentrated_large_magnitude_stays_float64(self):
+        # Regression: the data sample used to be a plain leading prefix (data[:sample_size]) -- a
+        # naturally-ordered dataset that stashes extreme-magnitude rows later in the sequence (past
+        # the default sample_size=4096) was invisible to the magnitude guard, silently allocating
+        # float32 to data that is not actually well-conditioned for it.
+        m = st.MixtureDistribution([st.GaussianDistribution(0.0, 1.0), st.GaussianDistribution(5.0, 1.0)], [0.5, 0.5])
+        well_conditioned = list(m.sampler(3).sample(5000))
+        extreme_tail = [1.0e9] * 200  # appears only after the default 4096-row prefix
+        data = well_conditioned + extreme_tail
+        plan = recommend_compute_precision(m, data)
+        self.assertEqual(np.dtype(plan.compute_dtype), np.float64)
+
     def test_non_fusible_model_stays_float64(self):
         m = st.MixtureDistribution([st.LaplaceDistribution(0.0, 1.0), st.LaplaceDistribution(3.0, 1.0)], [0.5, 0.5])
         plan = recommend_compute_precision(m, m.sampler(4).sample(2000))

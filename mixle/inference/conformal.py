@@ -27,12 +27,25 @@ import numpy as np
 
 
 def _conformal_quantile(scores: np.ndarray, alpha: float) -> float:
-    """The ``ceil((n+1)(1-alpha))``-th smallest score (finite-sample conformal quantile)."""
+    """The ``ceil((n+1)(1-alpha))``-th smallest score (finite-sample conformal quantile).
+
+    ``k`` reaches 0 exactly at ``alpha == 1.0`` (a valid boundary: 0% coverage requested, the most
+    permissive threshold is never needed and the tightest one always is). ``s[k - 1]`` with ``k == 0``
+    used to silently wrap around via Python's negative indexing to ``s[-1]`` -- the MAXIMUM score, the
+    loosest threshold instead of the tightest -- breaking monotonicity in ``alpha`` right at the
+    boundary and, for ``alpha > 1`` (invalid), either returning an arbitrary interior score or raising
+    an uncaught ``IndexError``. Mirrors :func:`weighted_conformal`'s already-correct ``min(k, n-1)``
+    convention, which returns the minimum score at this same boundary.
+    """
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"alpha must be in [0.0, 1.0], got {alpha!r}.")
     s = np.sort(np.asarray(scores, dtype=float))
     n = s.shape[0]
     k = int(np.ceil((n + 1) * (1.0 - alpha)))
     if k > n:
         return float("inf")
+    if k < 1:
+        return float(s[0])
     return float(s[k - 1])
 
 
