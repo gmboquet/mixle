@@ -34,7 +34,7 @@ from mixle.reason.core import (
 )
 from mixle.reason.cycle_consistency import (
     cycle_inconsistency,
-    fit_conditional_transport,
+    fit_cycle_transport,
     posterior_mean_estimate,
     selective_error,
 )
@@ -103,7 +103,7 @@ __all__ = [
     "task_sufficient_projection",
     "read_out",
     "cycle_inconsistency",
-    "fit_conditional_transport",
+    "fit_cycle_transport",
     "posterior_mean_estimate",
     "selective_error",
     "information_corroborator",

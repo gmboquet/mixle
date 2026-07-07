@@ -25,7 +25,7 @@ import numpy as np
 from mixle.inference import optimize
 
 
-def fit_conditional_transport(
+def fit_cycle_transport(
     given: np.ndarray,
     target: np.ndarray,
     *,
@@ -46,10 +46,13 @@ def fit_conditional_transport(
     default to :func:`~mixle.inference.optimize`'s own early-stopping; pass ``delta=None,
     reuse_estep_ll=False`` for a harder, more multimodal target (mirrors TRANSPORT-a's nonlinear case).
     """
+    import torch
+
     from mixle.models.mixture_density import NeuralConditionalDensity, build_mdn
 
     given = np.atleast_2d(np.asarray(given, dtype=np.float64))
     target = np.atleast_2d(np.asarray(target, dtype=np.float64))
+    torch.manual_seed(seed)  # optimize()'s rng seeds data order only; module init needs its own seed
     module = build_mdn(x_dim=given.shape[1], y_dim=target.shape[1], k=k, hidden=hidden, layers=layers)
     leaf = NeuralConditionalDensity(module, m_steps=m_steps, lr=lr)
     data = [(given[i], target[i]) for i in range(len(given))]
