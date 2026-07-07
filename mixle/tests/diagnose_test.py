@@ -101,5 +101,23 @@ class EmptyInputTest(unittest.TestCase):
         self.assertEqual(report.evidence, [])
 
 
+class DegenerateSampleSizeTest(unittest.TestCase):
+    """A background too small to estimate a scale (MAD collapses to ~0, exploding z-scores) or a
+    case count too small for co-occurrence to mean anything must not manufacture a confident,
+    maximum-severity finding out of pure numerical noise."""
+
+    def test_degenerate_background_reports_not_enough_data_not_a_confident_finding(self):
+        report = diagnose(_buggy_net(), [(5.0, 5.0)] * 3, background=[(0.0, 0.0)])
+        self.assertEqual(report.dominant, "")
+        self.assertEqual(report.evidence, [])
+
+    def test_single_case_does_not_manufacture_add_edge_from_zero_co_occurrence_evidence(self):
+        background = [(0.1, 0.05), (-0.2, -0.15), (0.05, 0.1), (-0.1, -0.05)]
+        report = diagnose(_buggy_net(), [(5.0, 5.0)], background=background)
+        self.assertEqual(report.dominant, "")
+        self.assertEqual(report.suggested_fix, "")
+        self.assertEqual(report.receipt["severity"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

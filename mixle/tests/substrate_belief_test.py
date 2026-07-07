@@ -99,6 +99,38 @@ class AntiLaunderingTest(unittest.TestCase):
         )
         self.assertGreater(downstream.credence, 0.5)
 
+    def test_multi_hop_laundering_ring_is_rejected(self):
+        """A -> B -> C -> back to A: each individual hop looks like a legitimate citation of a
+        grounded belief, but the whole ring's only real support traces back to A's own claim. A
+        citing C (closing the ring) must be rejected exactly like a direct self-citation would be --
+        the one-hop check `_launders` used to do is not enough to catch this."""
+        sub = Substrate()
+        a = assimilate(
+            sub,
+            Claim(text="claim A", produced_by={"model": "m"}),
+            {"source_id": "ext-doc-1", "tier": "real_measurement", "direction": "+", "weight": 1.0},
+        )
+        before = a.credence
+        b = assimilate(
+            sub,
+            Claim(text="claim B", produced_by={"model": "m"}),
+            {"source_id": a.id, "tier": "real_measurement", "direction": "+", "weight": 1.0},
+        )
+        self.assertGreater(b.credence, 0.5)  # legitimate: A is genuinely grounded
+        c = assimilate(
+            sub,
+            Claim(text="claim C", produced_by={"model": "m"}),
+            {"source_id": b.id, "tier": "real_measurement", "direction": "+", "weight": 1.0},
+        )
+        self.assertGreater(c.credence, 0.5)  # legitimate: B is genuinely grounded (via A)
+
+        a_revised = assimilate(
+            sub,
+            Claim(text="claim A", produced_by={"model": "m"}),
+            {"source_id": c.id, "tier": "real_measurement", "direction": "+", "weight": 1.0},
+        )
+        self.assertEqual(a_revised.credence, before)  # the ring closes -- rejected, credence unchanged
+
 
 class RevisionAndRetractTest(unittest.TestCase):
     def test_contradicting_evidence_lowers_credence(self):
