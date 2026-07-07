@@ -56,10 +56,15 @@ class RegressionEdgeTest(unittest.TestCase):
 
 class MultiParentTest(unittest.TestCase):
     def test_discrete_child_recovers_both_parents(self):
-        # two independent categoricals drive a count via their INTERACTION -> the count needs BOTH as parents
+        # two independent categoricals drive a count via their INTERACTION -> the count needs BOTH as parents.
+        # n=2000 leaves this orientation (a,b->count) tied against an equally-fitting alternative DAG in the
+        # same equivalence class (a->count, a->b, count->b) for this seed -- a fixed parameter-count bug
+        # (_num_free_params misdetecting NegativeBinomialDistribution/CategoricalDistribution params) used to
+        # happen to break the tie the "expected" way here by coincidence. 6000 rows makes the true a,b->count
+        # dependence dominate reliably (confirmed stable at n>=6000; n=4000 still flips for this seed).
         r = np.random.RandomState(0)
         data = []
-        for _ in range(2000):
+        for _ in range(6000):
             a, b = int(r.rand() < 0.5), int(r.rand() < 0.5)
             rate = 2.0 + 3.0 * a + 5.0 * b + 4.0 * a * b
             data.append((str(a), str(b), int(r.poisson(rate))))
@@ -326,6 +331,13 @@ class NumFreeParamsTest(unittest.TestCase):
         self.assertEqual(_num_free_params(st.PoissonDistribution(3.0)), 1)
         self.assertEqual(_num_free_params(st.BernoulliDistribution(0.3)), 1)
         self.assertEqual(_num_free_params(st.GaussianDistribution(0.0, 1.0)), 2)
+
+    def test_negative_binomial_counts_both_r_and_p(self):
+        # NegativeBinomialEstimator fits both r and p by default (estimate_r=True) -- unlike Poisson/
+        # Bernoulli/Binomial's single free scalar, this family genuinely has 2, not 1.
+        from mixle.inference.structure import _num_free_params
+
+        self.assertEqual(_num_free_params(st.NegativeBinomialDistribution(3.0, 0.4)), 2)
 
     def test_independent_categorical_fields_no_longer_produce_a_spurious_edge(self):
         # Two independently-permuted categorical columns (20 and 4 levels) have no real dependence; the

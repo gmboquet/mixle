@@ -732,12 +732,14 @@ def _num_free_params(dist: Any) -> int:
     accept spurious edges between fields with no real dependence, since the BIC penalty for the extra
     per-parent-config categorical table barely grew with the number of categories.
 
-    The single-scalar-parameter families below (Poisson rate, Bernoulli/Binomial/NegativeBinomial
-    success probability) count 1, not 2 -- the old code doubled every matched attribute uniformly,
-    correct only for a location+scale pair (Gaussian's mean+variance) and an overcount for these.
-    Any other leaf family (Weibull, Gumbel, Beta, ...) still falls through to the historical flat-2
-    fallback; genuinely counting every exotic detector family's parameters is future work, not
-    something this fix's audit confirmed as broken.
+    The single-scalar-parameter families below (Poisson rate, Bernoulli/Binomial success probability)
+    count 1, not 2 -- the old code doubled every matched attribute uniformly, correct only for a
+    location+scale pair (Gaussian's mean+variance) and an overcount for these. NegativeBinomialDistribution
+    is a deliberate exception: it has both ``r`` and ``p`` attributes, and ``NegativeBinomialEstimator``
+    fits both by default (``estimate_r=True``), so it counts 2 even though ``p`` alone would otherwise
+    match the single-scalar bucket below. Any other leaf family (Weibull, Gumbel, Beta, ...) still falls
+    through to the historical flat-2 fallback; genuinely counting every exotic detector family's
+    parameters is future work, not something this fix's audit confirmed as broken.
     """
     name = type(dist).__name__
     if name == "CompositeDistribution":
@@ -746,6 +748,8 @@ def _num_free_params(dist: Any) -> int:
         return max(1, len(dist.pmap) - 1)
     if hasattr(dist, "p_vec"):  # IntegerCategoricalDistribution: same simplex parameterization
         return max(1, int(np.asarray(dist.p_vec).size) - 1)
+    if hasattr(dist, "r") and hasattr(dist, "p"):  # NegativeBinomialDistribution: r and p both estimated
+        return 2
     if hasattr(dist, "mu"):  # location+scale family (Gaussian, ...): mean + variance
         try:
             return max(1, int(np.asarray(dist.mu).size) * 2)
