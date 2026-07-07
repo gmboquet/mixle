@@ -2,7 +2,15 @@
 
 import unittest
 
-from mixle.substrate import ContextBudget, Substrate, assemble_context, compress_text, ingest_documents
+from mixle.substrate import (
+    ContextBudget,
+    ReceiverProfile,
+    Substrate,
+    assemble_context,
+    assemble_for_receivers,
+    compress_text,
+    ingest_documents,
+)
 from mixle.telemetry import Telemetry
 
 try:
@@ -215,6 +223,71 @@ class KnowledgePacketTransferTest(unittest.TestCase):
         self.assertGreater(len(d_llm["payload"]["rendered"]), len(d_student["payload"]["rendered"]))
         self.assertLessEqual(d_student["byte_budget"], 80)
         self.assertLessEqual(d_llm["byte_budget"], 500)
+
+
+class ReceiverConditionedCompressionTest(unittest.TestCase):
+    """workstream E2: assemble_for_receivers budgets and shapes per named receiver in one call."""
+
+    def _corpus_substrate(self):
+        s = Substrate()
+        ingest_documents(
+            s,
+            ["cats are mammals that purr", "dogs are mammals that bark", "the moon orbits the earth"],
+            source="animal facts",
+        )
+        return s
+
+    def _shop_substrate(self):
+        s = Substrate()
+        s.add(
+            "text",
+            "The company was founded in 1998. Our headquarters are in Denver. "
+            "The refund policy allows returns within 30 days of purchase. We have 200 employees.",
+        )
+        s.add(
+            "text",
+            "Shipping is handled by a third party. Orders ship in 2 business days. "
+            "Refunds for defective items are processed immediately without a restocking fee.",
+        )
+        return s
+
+    def test_each_receiver_gets_its_own_budget_and_shape(self):
+        s = self._shop_substrate()
+        packets = assemble_for_receivers(
+            s,
+            "refund policy",
+            [
+                ReceiverProfile("frontier_llm", max_chars=500, shape="passages"),
+                ReceiverProfile("local_student", max_chars=60, shape="features", compress=True),
+            ],
+        )
+        self.assertEqual(set(packets), {"frontier_llm", "local_student"})
+        llm, student = packets["frontier_llm"], packets["local_student"]
+        self.assertLessEqual(llm.used_chars, 500)
+        self.assertLess(student.used_chars, llm.used_chars)  # the tight-budget receiver gets far less text
+        self.assertGreater(len(llm.render()), len(student.render()))
+        self.assertFalse(llm.compressed)
+        self.assertTrue(student.compressed)  # only the tight-budget receiver's profile asked for compression
+
+    def test_matches_the_e1_to_knowledge_dict_round_trip_per_receiver(self):
+        """Each receiver's packet feeds the E1 transfer contract independently, carrying its own target_kind."""
+        s = self._corpus_substrate()
+        packets = assemble_for_receivers(
+            s,
+            "mammals",
+            [ReceiverProfile("frontier_llm", max_chars=500), ReceiverProfile("local_student", max_chars=60)],
+        )
+        d_llm = packets["frontier_llm"].to_knowledge_dict(id="p1", project_id="proj", target_kind="frontier_llm")
+        d_student = packets["local_student"].to_knowledge_dict(id="p2", project_id="proj", target_kind="local_student")
+        self.assertEqual(d_llm["task"], d_student["task"])
+        self.assertNotEqual(d_llm["byte_budget"], d_student["byte_budget"])
+
+    def test_receiver_profile_to_budget_matches_its_fields(self):
+        profile = ReceiverProfile("x", max_chars=123, max_items=7, shape="brief")
+        budget = profile.to_budget()
+        self.assertEqual(budget.max_chars, 123)
+        self.assertEqual(budget.max_items, 7)
+        self.assertEqual(budget.shape, "brief")
 
 
 if __name__ == "__main__":
