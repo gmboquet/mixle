@@ -289,6 +289,13 @@ __all__ = [
     "WeibullSampler",
     "WeibullEstimator",
     "WeibullDataEncoder",
+    "GatedMixtureDistribution",
+    "GatedMixtureSampler",
+    "GatedMixtureEstimator",
+    "GatedMixtureAccumulator",
+    "GatedMixtureAccumulatorFactory",
+    "GatedMixtureDataEncoder",
+    "SoftmaxGate",
     "HeterogeneousMixtureDistribution",
     "HeterogeneousMixtureSampler",
     "HeterogeneousMixtureEstimator",
@@ -1189,6 +1196,15 @@ from mixle.stats.latent.dirac_length import (
     DiracLengthMixtureEnumerator,
     DiracLengthMixtureEstimator,
     DiracLengthMixtureSampler,
+)
+from mixle.stats.latent.gated_mixture import (
+    GatedMixtureAccumulator,
+    GatedMixtureAccumulatorFactory,
+    GatedMixtureDataEncoder,
+    GatedMixtureDistribution,
+    GatedMixtureEstimator,
+    GatedMixtureSampler,
+    SoftmaxGate,
 )
 from mixle.stats.latent.heterogeneous_mixture import (
     HeterogeneousMixtureDataEncoder,
