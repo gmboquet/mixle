@@ -81,6 +81,7 @@ class VerifiableOracle:
         result) rather than block the caller or guess a score, if a single scoring call runs over budget.
         Uses a worker thread so a ``score_fn`` that never returns cannot hang the caller either."""
         from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
 
         def _run() -> OracleResult:
             pool = ThreadPoolExecutor(max_workers=1)
@@ -92,7 +93,10 @@ class VerifiableOracle:
                 # worker thread finish (or leak, for a truly hung score_fn) on its own time, not ours.
                 pool.shutdown(wait=False)
 
-        outcome = abstain_on_timeout(_run)
+        # future.result() raises concurrent.futures.TimeoutError, which is a DISTINCT class from the
+        # builtin TimeoutError on Python 3.10 (only aliased to it in 3.11+) -- catch that exact type so
+        # oracle_timeout abstention works on every supported interpreter, not just 3.11+.
+        outcome = abstain_on_timeout(_run, timeout_error=FuturesTimeoutError)
         if outcome.degraded:
             return OracleResult(
                 score=float("-inf"),
