@@ -148,6 +148,78 @@ class SystemImproveTest(unittest.TestCase):
         self.assertEqual(report["budget"], 10)
 
 
+class SystemColdStartCaptureTest(unittest.TestCase):
+    """CARD SEED-a: from an empty system, answer then improve, and the second identical answer is free."""
+
+    def _counting_teacher(self):
+        calls = {"n": 0}
+
+        def teacher(prompt):
+            calls["n"] += 1
+            return f"answer to: {prompt}"
+
+        return teacher, calls
+
+    def test_second_identical_query_after_improve_costs_no_frontier_calls(self):
+        teacher, calls = self._counting_teacher()
+        system = System(SystemConfig(teacher=teacher))
+        query = Query("what is the capital of Freedonia?")
+
+        reply1, receipt1 = system.answer(query)
+        self.assertEqual(calls["n"], 1)
+        self.assertFalse(receipt1["captured"])
+
+        report = system.improve(10)
+        self.assertEqual(report["status"], "captured")
+        self.assertEqual(report["n_captured"], 1)
+
+        reply2, receipt2 = system.answer(query)
+        self.assertEqual(calls["n"], 1)  # no new frontier call -- served from the captured cache
+        self.assertEqual(reply2, reply1)
+        self.assertTrue(receipt2["captured"])
+        self.assertEqual(receipt2["produced_by"], "captured")
+        self.assertEqual(receipt2["spend"], {"frontier_calls": 0, "oracle_calls": 0, "wall_ms": 0.0, "dollars": 0.0})
+
+    def test_repeat_query_before_improve_still_pays_for_a_fresh_teacher_call(self):
+        teacher, calls = self._counting_teacher()
+        system = System(SystemConfig(teacher=teacher))
+        query = Query("what is the capital of Freedonia?")
+        system.answer(query)
+        system.answer(query)
+        self.assertEqual(calls["n"], 2)
+
+    def test_capture_is_specific_to_the_captured_query_text(self):
+        teacher, calls = self._counting_teacher()
+        system = System(SystemConfig(teacher=teacher))
+        system.answer(Query("query one"))
+        system.improve(10)
+        system.answer(Query("query two"))  # a different query -- still a real teacher call
+        self.assertEqual(calls["n"], 2)
+
+    def test_improve_with_nothing_harvested_yet_is_still_honest(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        report = system.improve(10)
+        self.assertEqual(report["status"], "nothing_to_improve")
+
+    def test_same_text_different_task_does_not_share_a_captured_cache_entry(self):
+        # regression: two queries with identical text but a different task (or scope) are different
+        # questions and must not silently answer one from the other's captured cache
+        teacher, calls = self._counting_teacher()
+        system = System(SystemConfig(teacher=teacher))
+        system.answer(Query("classify this", task="sentiment"))
+        system.improve(10)
+        system.answer(Query("classify this", task="topic"))
+        self.assertEqual(calls["n"], 2)
+
+    def test_same_text_different_scope_does_not_share_a_captured_cache_entry(self):
+        teacher, calls = self._counting_teacher()
+        system = System(SystemConfig(teacher=teacher))
+        system.answer(Query("classify this", scope="team-a"))
+        system.improve(10)
+        system.answer(Query("classify this", scope="team-b"))
+        self.assertEqual(calls["n"], 2)
+
+
 class SystemConfigFromEnvTest(unittest.TestCase):
     def test_from_env_requires_base_url_and_model(self):
         with self.assertRaises(ValueError) as ctx:
