@@ -41,6 +41,7 @@ from mixle.reason.belief_walk import HopTransport, belief_walk, coverage_by_hop_
 from mixle.reason.cycle_consistency import cycle_inconsistency, fit_cycle_transport
 from mixle.reason.modality import ModalityGraph, ModalityView
 from mixle.reason.task_projection import TaskReadout, read_out, task_sufficient_projection
+from mixle.reason.transport_edge import verify_edge_transport
 from mixle.stats.latent.gaussian_mixture import GaussianMixtureDistribution
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
@@ -119,18 +120,27 @@ def run_anchor_harness(*, n_train: int = 2000, n_test: int = 200, seed: int = 0)
 
     hop1_fit = fit_cycle_transport(gravity_train, density_train, k=1, seed=seed, max_its=25)
     hop2_fit = fit_cycle_transport(density_train, grade_train, k=1, seed=seed + 1, max_its=25)
-    hops = [
-        HopTransport("gravity_to_density", hop1_fit, premise_passed=True),
-        HopTransport("density_to_grade", hop2_fit, premise_passed=True),
-    ]
 
-    # --- F3: belief walk composing the 2 verified hops, honest compounding ---
+    # held-out pairs for the F2-a premise check -- generated BEFORE the hops are composed, since
+    # `premise_passed` must reflect a computed verdict, never an assumed one (F2-a's own contract).
     rng_test = np.random.RandomState(seed + 100)
     gravity_test = rng_test.normal(0, 1.0, size=(n_test, 1))
     density_true = _step(gravity_test, _GRAVITY_TO_DENSITY, rng_test)
     grade_true = _step(density_true, _DENSITY_TO_GRADE, rng_test)
     true_by_hop = {1: density_true, 2: grade_true}
 
+    # verify_edge_transport(sampler, x_test, y_test) checks coverage of the MODELED variable (x_test)
+    # from draws conditioned on the OBSERVED one (y_test, fed to sample_given) -- each hop here models
+    # its `target` conditioned on `given` (see fit_cycle_transport(given, target) above), so x_test is
+    # each hop's target and y_test is what it conditions on, not the other way around.
+    hop1_verdict = verify_edge_transport("gravity_to_density", hop1_fit.sampler(seed=seed), density_true, gravity_test)
+    hop2_verdict = verify_edge_transport("density_to_grade", hop2_fit.sampler(seed=seed + 1), grade_true, density_true)
+    hops = [
+        HopTransport("gravity_to_density", hop1_fit, premise_passed=hop1_verdict.usable),
+        HopTransport("density_to_grade", hop2_fit, premise_passed=hop2_verdict.usable),
+    ]
+
+    # --- F3: belief walk composing the 2 verified hops, honest compounding ---
     coverage_by_hop = coverage_by_hop_count(hops, gravity_test, true_by_hop, alpha=0.1, n_draws=150, seed=seed)
 
     walk_means = np.zeros(n_test)
@@ -158,7 +168,7 @@ def run_anchor_harness(*, n_train: int = 2000, n_test: int = 200, seed: int = 0)
     grade_tier_means = np.array([[-2.0], [-0.6], [0.6], [2.0]])  # low / lowmid / midhigh / high grade tiers
     grade_tier_cov = np.stack([np.array([[0.35]]) for _ in range(4)])
     grade_tier_w = np.full(4, 0.25)
-    grade_belief = GaussianMixtureDistribution(grade_tier_means, grade_tier_cov, grade_tier_w)
+    grade_belief = GaussianMixtureDistribution(mu=grade_tier_means, sig2=grade_tier_cov, w=grade_tier_w)
 
     driller_task = TaskReadout("exact_tier", lambda mean: round(float(mean[0]), 1))
     scout_task = TaskReadout("worth_drilling", lambda mean: bool(mean[0] > 0.0))

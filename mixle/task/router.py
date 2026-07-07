@@ -210,7 +210,14 @@ def resolve_from_harvest(
     inputs, labels = router.harvested()
     n_harvested = len(inputs)
     if n_harvested < 8:
-        return HarvestResolveResult(False, n_harvested, 1.0, 1.0, 0.0, 0.0)
+        return HarvestResolveResult(
+            accepted=False,
+            n_harvested=n_harvested,
+            escalation_before=1.0,
+            escalation_after=1.0,
+            escalation_drop=0.0,
+            agreement=0.0,
+        )
 
     kind = "text" if isinstance(inputs[0], str) else "record"
     str_labels = [str(y) for y in labels]
@@ -222,7 +229,14 @@ def resolve_from_harvest(
     train_in, train_lab = [inputs[i] for i in train_idx], [str_labels[i] for i in train_idx]
     cal_in, cal_lab = [inputs[i] for i in cal_idx], [str_labels[i] for i in cal_idx]
     if len(train_in) < 4 or len(cal_in) < 2:
-        return HarvestResolveResult(False, n_harvested, 1.0, 1.0, 0.0, 0.0)
+        return HarvestResolveResult(
+            accepted=False,
+            n_harvested=n_harvested,
+            escalation_before=1.0,
+            escalation_after=1.0,
+            escalation_drop=0.0,
+            agreement=0.0,
+        )
 
     kw = dict(distill_kw or {})
     kw.setdefault("seed", seed)
@@ -235,9 +249,29 @@ def resolve_from_harvest(
     drop = 1.0 - esc_after
 
     if drop < min_drop:
-        return HarvestResolveResult(False, n_harvested, 1.0, float(esc_after), float(drop), float(agree))
+        return HarvestResolveResult(
+            accepted=False,
+            n_harvested=n_harvested,
+            escalation_before=1.0,
+            escalation_after=float(esc_after),
+            escalation_drop=float(drop),
+            agreement=float(agree),
+        )
 
     new_tiers = list(router.tiers[:-1]) + [(name, cal, float(cost_per_request)), router.tiers[-1]]
+    # the input router's harvest is now consumed into the new tier -- clear it (mirrors
+    # Solution.improve()'s escalated_texts/labels.clear() after promoting) so a caller that keeps
+    # using `router` for observability, or calls resolve_from_harvest again after more traffic, does
+    # not double-count these same escalations as still-unresolved.
+    router.stats.harvested_inputs.clear()
+    router.stats.harvested_labels.clear()
     return HarvestResolveResult(
-        True, n_harvested, 1.0, float(esc_after), float(drop), float(agree), Router(new_tiers), name
+        accepted=True,
+        n_harvested=n_harvested,
+        escalation_before=1.0,
+        escalation_after=float(esc_after),
+        escalation_drop=float(drop),
+        agreement=float(agree),
+        router=Router(new_tiers),
+        tier_name=name,
     )
