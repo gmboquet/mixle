@@ -96,7 +96,7 @@ python_functions = ["test_*"]
 # line overrides this default, so the CI gates keep working:
 #   full correctness run : pytest -m "not optional and not benchmark"   (everything incl. slow)
 #   single file, serial  : pytest path/to/file_test.py -n0 -m ""        (-m "" clears the fast filter)
-addopts = "-ra --strict-markers -n auto -m fast"
+addopts = "-ra --strict-markers -n 4 -m fast"
 markers = [
     "fast: quick correctness tests suitable for every commit.",
     "slow: heavier stochastic, integration, or exhaustive tests for full CI.",
