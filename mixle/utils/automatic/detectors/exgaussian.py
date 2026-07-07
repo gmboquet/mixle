@@ -84,8 +84,11 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
 
 def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
     from mixle.stats import ExponentiallyModifiedGaussianDistribution
+    from mixle.utils.automatic.profiling import _value_array_from_vdict
 
-    return ExponentiallyModifiedGaussianDistribution(0.0, 1.0, 1.0).estimator()
+    fit = _fit(_value_array_from_vdict(vdict))
+    mu, sigma2, lam = fit if fit is not None else (0.0, 1.0, 1.0)
+    return ExponentiallyModifiedGaussianDistribution(mu, sigma2, lam).estimator(pseudo_count=pseudo_count)
 
 
 def _cdf(arr: np.ndarray):
