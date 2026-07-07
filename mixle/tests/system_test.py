@@ -4,12 +4,41 @@ import builtins
 import unittest
 from unittest.mock import patch
 
+from mixle.substrate.context import ContextBudget, assemble_context
 from mixle.substrate.core import Substrate, SubstrateItem
+from mixle.substrate.ingest import ingest_documents
 from mixle.system import Query, System, SystemConfig
 
 
 def _fake_teacher(prompt: str) -> str:
     return f"answer to: {prompt}"
+
+
+class QueryKnowledgeAlignmentTest(unittest.TestCase):
+    """Query.from_knowledge_dict is the OTHER half of the mixle-knowledge alignment claim in Query's
+    own docstring: build a Query directly from a real assembled ContextPacket (workstream E1's own
+    to_knowledge_dict output), not just a claim that the field names happen to match."""
+
+    def test_query_built_from_a_real_assembled_context_packet(self):
+        substrate = Substrate()
+        ingest_documents(substrate, ["cats are mammals that purr"], source="animal facts")
+        pkt = assemble_context(substrate, "mammals", budget=ContextBudget(max_chars=200))
+        d = pkt.to_knowledge_dict(id="pkt1", project_id="proj1", target_kind="frontier_llm")
+
+        query = Query.from_knowledge_dict(d, scope="project")
+        self.assertEqual(query.task, "mammals")
+        self.assertEqual(query.text, pkt.render())
+        self.assertEqual(query.scope, "project")
+
+    def test_expected_output_schema_maps_to_expected_output(self):
+        d = {"task": "extract", "payload": {"rendered": "hi"}, "expected_output_schema": {"type": "object"}}
+        query = Query.from_knowledge_dict(d)
+        self.assertEqual(query.expected_output, {"type": "object"})
+
+    def test_missing_expected_output_schema_stays_none(self):
+        d = {"task": "chat", "payload": {"rendered": "hi"}}
+        query = Query.from_knowledge_dict(d)
+        self.assertIsNone(query.expected_output)
 
 
 class SystemAnswerTest(unittest.TestCase):
