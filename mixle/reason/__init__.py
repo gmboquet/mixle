@@ -60,6 +60,13 @@ from mixle.reason.ontology import (
 )
 from mixle.reason.store import CrossModalStore, RetrievalStep
 from mixle.reason.task_projection import TaskReadout, read_out, task_sufficient_projection
+from mixle.reason.transport_edge import (
+    EdgeTransportVerdict,
+    coverage_consistent_with_nominal,
+    fit_conditional_transport,
+    marginal_coverage,
+    verify_edge_transport,
+)
 
 __all__ = [
     "Ontology",
@@ -109,6 +116,11 @@ __all__ = [
     "StructuredFusionClassifier",
     "HybridFusionClassifier",
     "fusion_flops",
+    "EdgeTransportVerdict",
+    "coverage_consistent_with_nominal",
+    "fit_conditional_transport",
+    "marginal_coverage",
+    "verify_edge_transport",
 ]
 
 _LAZY = {
