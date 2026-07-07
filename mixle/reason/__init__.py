@@ -32,6 +32,12 @@ from mixle.reason.core import (
     block_selector,
     reason,
 )
+from mixle.reason.cycle_consistency import (
+    cycle_inconsistency,
+    fit_cycle_transport,
+    posterior_mean_estimate,
+    selective_error,
+)
 from mixle.reason.design import AcquisitionPlan, select_evidence_batch
 from mixle.reason.discrete import DiscreteAnswer, model_evidence, reason_discrete
 from mixle.reason.graph_llm import (
@@ -103,6 +109,10 @@ __all__ = [
     "TaskReadout",
     "task_sufficient_projection",
     "read_out",
+    "cycle_inconsistency",
+    "fit_cycle_transport",
+    "posterior_mean_estimate",
+    "selective_error",
     "information_corroborator",
     "GraphLLM",
     "GraphDistribution",
