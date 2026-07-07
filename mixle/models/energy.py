@@ -406,11 +406,64 @@ def _convex_energy_net_class() -> Any:
     return ConvexEnergyNet
 
 
+_PRODUCT_ENERGY_NET_CLASS: list[Any] = []
+
+
+def _product_energy_net_class() -> Any:
+    """A product-of-experts energy: ``E(x) = sum_k E_k(x)``, so ``p(x) ∝ prod_k exp(-E_k(x)) = prod_k p_k(x)``.
+
+    A mixture (:class:`~mixle.stats.latent.mixture.MixtureDistribution`) *adds* densities -- a disjunction,
+    "x looks like expert A OR expert B". A product of experts *multiplies* them -- a conjunction, "x is
+    plausible under expert A AND expert B AND ..." -- so each expert acts as a soft constraint and the
+    product is their intersection (Hinton, "Training Products of Experts by Minimizing Contrastive
+    Divergence", Neural Computation 2002). The normalizer of a product is intractable in general, which is
+    exactly the problem the energy stack already solves: sum the expert energies into one energy module and
+    fit the shared ``log_norm`` by NCE, sample by Langevin -- all inherited from :class:`EnergyModel` with
+    no new machinery. Each expert stays a separately-specified, interpretable factor (``.experts``).
+    """
+    if _PRODUCT_ENERGY_NET_CLASS:
+        return _PRODUCT_ENERGY_NET_CLASS[0]
+    import torch
+    import torch.nn as nn
+
+    class ProductEnergyNet(nn.Module):
+        def __init__(self, experts: Any) -> None:
+            super().__init__()
+            experts = list(experts)
+            if len(experts) < 2:
+                raise ValueError("ProductEnergyNet needs at least 2 experts; got %d" % len(experts))
+            dims = {int(e.dim) for e in experts}
+            if len(dims) != 1:
+                raise ValueError("all experts must share one input dim; got %s" % sorted(dims))
+            self.experts = nn.ModuleList(experts)
+            self.dim = int(next(iter(dims)))
+            self.log_norm = nn.Parameter(torch.zeros(()))  # the product's own NCE-learned normalizer
+
+        def expert_energies(self, x: Any) -> Any:
+            """``(n, K)`` per-expert energies -- the interpretable decomposition of the total energy."""
+            import torch as _t
+
+            return _t.stack([e.energy(x) for e in self.experts], dim=-1)
+
+        def energy(self, x: Any) -> Any:
+            # sum the experts' energies; their OWN log_norms are constants that only shift the (separate)
+            # product log_norm, so they are harmless here and the product's log_norm absorbs the offset.
+            return sum(e.energy(x) for e in self.experts)
+
+    ProductEnergyNet.__module__ = __name__
+    ProductEnergyNet.__qualname__ = "ProductEnergyNet"
+    ProductEnergyNet.__name__ = "ProductEnergyNet"
+    _PRODUCT_ENERGY_NET_CLASS.append(ProductEnergyNet)
+    return ProductEnergyNet
+
+
 def __getattr__(name: str) -> Any:  # PEP 562: lets ``pickle`` resolve the hoisted net classes by name
     if name == "EnergyNet":
         return _energy_net_class()
     if name == "ConvexEnergyNet":
         return _convex_energy_net_class()
+    if name == "ProductEnergyNet":
+        return _product_energy_net_class()
     raise AttributeError("module %r has no attribute %r" % (__name__, name))
 
 
@@ -433,6 +486,26 @@ def build_convex_energy_net(dim: int, *, hidden: int = 64, layers: int = 3) -> A
     for the construction.
     """
     return _convex_energy_net_class()(dim, hidden, layers)
+
+
+def build_product_energy_net(experts: Any) -> Any:
+    """Combine expert energy modules multiplicatively: one module with ``energy(x) = sum_k experts[k].energy(x)``.
+
+    A product of experts, ``p(x) ∝ prod_k p_k(x)`` -- a *conjunction* (each expert a soft constraint, the
+    product their intersection), as opposed to a mixture's disjunction. This is the ENERGY-BASED,
+    arbitrary-density complement to :func:`mixle.ops.product_of_experts`, which pools *tractable* families
+    (Categorical, Gaussian) in closed form but deliberately raises on the general continuous case because
+    the product normalizer is then intractable. That intractable normalizer is exactly what the energy
+    stack already handles: wrap the result here in an :class:`EnergyModel` to fit the shared ``log_norm``
+    by NCE and sample by Langevin, no new machinery.
+
+    Each expert must expose ``energy(x) -> (n,)`` and a ``dim`` attribute (e.g. any :func:`build_energy_net` /
+    :func:`build_convex_energy_net` module, all sharing one input dim), and stays individually inspectable via
+    the built module's ``.experts`` / ``.expert_energies(x)``. Fit it in one line::
+
+        model = EnergyModel(build_product_energy_net([expert_a, expert_b]), m_steps=250)
+    """
+    return _product_energy_net_class()(experts)
 
 
 def _register_serializable() -> None:
