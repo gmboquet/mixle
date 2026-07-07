@@ -1,7 +1,7 @@
-"""``PINNRegression`` -- a physics-informed neural network as a mixle conditional-density leaf.
+"""``PINNRegression`` -- a physics-informed neural network as a mixle conditional-density model.
 
 A :class:`~mixle.models.neural_leaf.NeuralGaussian` fits ``p(y | x) = N(y; module(x), noise^2 I)`` from labeled
-``(x, y)`` pairs alone. ``PINNRegression`` is the same leaf plus a **residual penalty**: at every M-step it also
+``(x, y)`` pairs alone. ``PINNRegression`` is the same model plus a **residual penalty**: at every M-step it also
 draws unlabeled collocation points from a box domain, evaluates a caller-supplied PDE/ODE residual on the
 module's output via autograd, and adds ``residual_weight * mean(residual**2)`` to the training loss -- the
 standard physics-informed-neural-network (PINN) loss, ``L = L_data + w * L_physics``.
@@ -9,13 +9,13 @@ standard physics-informed-neural-network (PINN) loss, ``L = L_data + w * L_physi
 This makes the labeled-data term double as boundary/initial conditions (or scattered measurements) and the
 residual term enforce the governing equation *between* them, so the fitted module honors the physics even where
 it never saw labeled data -- the whole point of a PINN over plain regression. With zero labeled data
-(``suff_stat`` empty) the leaf still trains: pure PDE-residual fitting, a boundary-value/collocation solver.
+(``suff_stat`` empty) the model still trains: pure PDE-residual fitting, a boundary-value/collocation solver.
 
 The reported density (:meth:`log_density`/:meth:`seq_log_density`, inherited unchanged from ``NeuralGaussian``)
-is the data-fit Gaussian NLL only -- the leaf never claims the residual penalty as part of its probability
-model. :func:`mixle.inference.planning.certify` already caps a bare gradient-fit leaf like this at
+is the data-fit Gaussian NLL only -- the model never claims the residual penalty as part of its probability
+model. :func:`mixle.inference.planning.certify` already caps a bare gradient-fit model like this at
 ``STATIONARY`` (no global-optimum claim), so ``penalized=`` adds nothing for a standalone fit; pass
-``certify(structure, penalized="PINN residual")`` when this leaf is composed as one block of a larger
+``certify(structure, penalized="PINN residual")`` when this model is composed as one block of a larger
 structure that otherwise contains closed-form EM blocks, so those blocks are honestly downgraded too
 (mirroring how :func:`mixle.ppl.core.ode_residual`'s soft-constraint fits are certified).
 
@@ -31,7 +31,7 @@ Requires torch. ``residual_fn(module, collocation_points) -> tensor`` computes t
         u_xx = torch.autograd.grad(u_x, coll, grad_outputs=torch.ones_like(u_x), create_graph=True)[0][:, 1:2]
         return u_t - ALPHA * u_xx
 
-    leaf = PINNRegression(make_mlp(2, [32, 32], 1), heat_residual, domain=([0.0, -1.0], [1.0, 1.0]))
+    model = PINNRegression(make_mlp(2, [32, 32], 1), heat_residual, domain=([0.0, -1.0], [1.0, 1.0]))
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def _encode_residual_fn(fn: Any) -> str:
     except Exception as e:
         raise ValueError(
             "PINNRegression.to_dict() needs residual_fn to be pickle-able (a module-level function, not a "
-            "lambda or closure); construct the leaf from a named function if you need serialization."
+            "lambda or closure); construct the model from a named function if you need serialization."
         ) from e
 
 
