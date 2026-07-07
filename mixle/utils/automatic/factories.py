@@ -249,7 +249,10 @@ def get_poisson_estimator(
                 ss_0 += v
                 ss_1 += k * v
 
-        ss_1 = ss_1 / ss_0
+        # ss_0 is 0 when vdict is empty or every key was filtered out (non-finite) -- no data to
+        # estimate a mean from, so fall back the same way the emp_suff_stat=False branch does below,
+        # rather than dividing by zero.
+        ss_1 = ss_1 / ss_0 if ss_0 > 0.0 else (1.0 if pseudo_count is not None else None)
 
     elif pseudo_count is not None:
         ss_1 = 1.0
@@ -276,8 +279,15 @@ def get_gaussian_estimator(
                 ss_0 += v
                 ss_1 += k * v
                 ss_2 += k * k * v
-        ss_1 = ss_1 / ss_0
-        ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
+        # ss_0 is 0 when vdict is empty or every key was non-finite -- no data to estimate mean/variance
+        # from, so fall back the same way the emp_suff_stat=False branch does below.
+        if ss_0 > 0.0:
+            ss_1 = ss_1 / ss_0
+            ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
+        elif pseudo_count is not None:
+            ss_1, ss_2 = 1.0e-6, 1.0e-6
+        else:
+            ss_1, ss_2 = None, None
 
     elif pseudo_count is not None:
         ss_1 = 1.0e-6
@@ -311,8 +321,16 @@ def get_lognormal_estimator(
                 ss_0 += v
                 ss_1 += lk * v
                 ss_2 += lk * lk * v
-        ss_1 = ss_1 / ss_0
-        ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
+        # ss_0 is 0 when vdict is empty or every key was non-positive/non-finite (log-normal needs
+        # strictly positive values) -- no data to estimate mean/variance from, fall back like the
+        # emp_suff_stat=False branch does below rather than dividing by zero.
+        if ss_0 > 0.0:
+            ss_1 = ss_1 / ss_0
+            ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
+        elif pseudo_count is not None:
+            ss_1, ss_2 = 1.0e-6, 1.0e-6
+        else:
+            ss_1, ss_2 = None, None
     elif pseudo_count is not None:
         ss_1 = 1.0e-6
         ss_2 = 1.0e-6
