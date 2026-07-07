@@ -144,6 +144,7 @@ from mixle.task.outcome_decomposer import (
 from mixle.task.plan import Planner, distill_planner
 from mixle.task.plan_model import PlanModel, fit_plan_model
 from mixle.task.plan_refine import RefinementReport, outcome_refine_planner
+from mixle.task.probe_policy import ProbeHeadToHead, head_to_head_probe, myopic_eig_policy
 
 # post-training quantization: int8/int4 MLP weights (numpy-only inference) + LNS integer log-space
 # execution for structured students (transcendental-free above the leaf boundary)
@@ -312,6 +313,9 @@ __all__ = [
     "replace_matcher",
     "route_stack",
     "RefinementReport",
+    "ProbeHeadToHead",
+    "head_to_head_probe",
+    "myopic_eig_policy",
     "outcome_refine_planner",
     "sample_plans",
     "score_plan",
