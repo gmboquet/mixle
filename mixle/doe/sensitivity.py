@@ -164,6 +164,15 @@ def fast_indices(
     if var <= 0:
         return {"S1": s1, "names": out_names, "var": 0.0}
     m = int(harmonics)
+    if 2.0 * m >= int(n) - 1:
+        # the Tarantola correction's denominator (1 - 2m/(n-1)) must stay strictly positive; once
+        # 2m/(n-1) reaches or exceeds 1, the correction denominator hits zero or goes negative,
+        # flipping the sign of a subsequent nonsensical S1 rather than raising. clip(0, 1) at the
+        # end would otherwise silently mask this as an ordinary "no sensitivity" result.
+        raise ValueError(
+            f"fast_indices requires 2*harmonics < n-1 for a well-posed Tarantola correction "
+            f"(harmonics={m}, n={n}); increase n or lower harmonics."
+        )
     for i in range(d):
         yi = y[np.argsort(perms[i])]  # reorder output along input i's search-curve coordinate
         spectrum = np.abs(np.fft.rfft(yi - yi.mean())) ** 2

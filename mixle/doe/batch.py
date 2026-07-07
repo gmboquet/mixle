@@ -131,6 +131,11 @@ def propose_local_penalization(
 
     if int(q) <= 0:
         raise ValueError("q must be positive.")
+    if int(q) > int(n_candidates):
+        # once every candidate's merit is set to -inf (line 174), np.argmax deterministically returns
+        # index 0 again (ties broken by first occurrence) -- the batch would silently contain
+        # duplicate points instead of raising. Name the actual constraint instead.
+        raise ValueError(f"propose_local_penalization requires q <= n_candidates (q={q}, n_candidates={n_candidates}).")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     xs, ys = _validate_xy(x, y)

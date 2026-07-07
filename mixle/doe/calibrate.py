@@ -89,7 +89,11 @@ def calibrate(
         r = y - np.asarray(simulator(x, theta), dtype=float).ravel()
         if not discrepancy:
             noise = np.exp(p[nth])
-            return 0.5 * np.sum(r**2) / noise**2 + n * np.log(noise)  # Gaussian iid residual
+            # + 1e-8 floor mirrors the discrepancy branch's kernel-diagonal jitter below -- noise=exp(...)
+            # can't hit exactly 0, but Nelder-Mead can still drive p[nth] negative enough that noise**2
+            # underflows toward 0, blowing up this division; the two sibling branches should defend
+            # against degenerate noise the same way.
+            return 0.5 * np.sum(r**2) / (noise**2 + 1e-8) + n * np.log(noise)  # Gaussian iid residual
         amp, noise = np.exp(p[nth : nth + 2])
         k = _rbf(x, x, ls, amp) + (noise**2 + 1e-8) * np.eye(n)
         try:
