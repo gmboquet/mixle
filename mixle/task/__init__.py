@@ -32,6 +32,7 @@ from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 from mixle.task.cascade import Cascade, CascadeStats
 from mixle.task.density import DensityGate
 from mixle.task.design import DesignedModel, design_model, spec_to_estimator
+from mixle.task.design_prior import best_family, rank_design_families, record_accepted_recipe
 from mixle.task.distill import (
     agreement,
     distill,
@@ -132,6 +133,9 @@ __all__ = [
     "DensityGate",
     "DesignModel",
     "DesignedModel",
+    "best_family",
+    "rank_design_families",
+    "record_accepted_recipe",
     "DeviceSpec",
     "EdgeDistillResult",
     "EdgeFootprint",
