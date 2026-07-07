@@ -97,6 +97,7 @@ from mixle.task.model import (
 from mixle.task.multilabel import MultiLabelSolution, solve_multilabel
 from mixle.task.plan import Planner, distill_planner
 from mixle.task.plan_refine import RefinementReport, outcome_refine_planner
+from mixle.task.propose import ProposeVerifyResult, RoundLog, SequenceProposal, propose_verify_retrain
 
 # post-training quantization: int8/int4 MLP weights (numpy-only inference) + LNS integer log-space
 # execution for structured students (transcendental-free above the leaf boundary)
@@ -211,6 +212,10 @@ __all__ = [
     "route_stack",
     "RefinementReport",
     "outcome_refine_planner",
+    "ProposeVerifyResult",
+    "RoundLog",
+    "SequenceProposal",
+    "propose_verify_retrain",
     "sample_plans",
     "score_plan",
     "scorecard",
