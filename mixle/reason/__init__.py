@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 from mixle.inference.belief import BeliefState, GaussianBelief, as_belief
+from mixle.reason.anchor_harness import AnchorHarnessReport, run_anchor_harness
 from mixle.reason.belief_walk import HopTransport, WalkResult, belief_walk, coverage_by_hop_count
 from mixle.reason.core import (
     Evidence,
@@ -76,6 +77,8 @@ from mixle.reason.transport_edge import (
 )
 
 __all__ = [
+    "AnchorHarnessReport",
+    "run_anchor_harness",
     "Ontology",
     "OntologyConstrainedKG",
     "constrained_decode",
