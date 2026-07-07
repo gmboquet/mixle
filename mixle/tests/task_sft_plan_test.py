@@ -99,6 +99,60 @@ class SftPlannerTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class ScoreAndSamplePlansTest(unittest.TestCase):
+    """workstream C1/C2: a decomposition model you can fit, score, and sample -- a low-probability plan
+    is an escalation signal, not a silent guess."""
+
+    def setUp(self):
+        from mixle.task import ToolSpec, sft_planner
+
+        self.tools = [ToolSpec("lookup_order", ["order_id"]), ToolSpec("notify", ["user"])]
+        self.planner = sft_planner(_teacher, _requests(180), self.tools, seed=0, epochs=40, d_model=64, n_layer=2)
+
+    def test_the_teacher_plan_scores_far_above_a_wrong_plan(self):
+        from mixle.task import score_plan
+
+        req = "please refund order 5555 for bob as discussed"
+        correct = score_plan(self.planner, req, _teacher(req))
+        wrong = score_plan(self.planner, req, [{"tool": "notify", "args": {"user": "bob"}}])
+        self.assertGreater(correct, wrong)
+        self.assertGreater(correct, self.planner.conf_floor)  # the teacher plan clears the escalation floor
+
+    def test_a_low_probability_plan_falls_below_the_calibrated_floor(self):
+        from mixle.task import score_plan
+
+        req = "please refund order 5555 for bob as discussed"
+        # a plausible-looking but wrong-order plan: notify before the lookup it depends on
+        implausible = [
+            {"tool": "notify", "args": {"user": "bob"}},
+            {"tool": "lookup_order", "args": {"order_id": "5555"}},
+        ]
+        self.assertLess(score_plan(self.planner, req, implausible), self.planner.conf_floor)
+
+    def test_sample_plans_returns_n_candidates_sorted_by_score(self):
+        from mixle.task import sample_plans
+
+        req = "can you check status of order 4242 right away"
+        samples = sample_plans(self.planner, req, n=5, temperature=0.7, seed=3)
+        self.assertEqual(len(samples), 5)
+        scores = [s for _, s in samples]
+        self.assertEqual(scores, sorted(scores, reverse=True))  # highest-probability candidate first
+
+    def test_an_unparseable_sample_is_reported_not_guessed(self):
+        from mixle.task import sample_plans
+
+        req = "can you check status of order 4242 right away"
+        # a very high temperature makes malformed/invalid draws likely -- they must surface as (None, -inf),
+        # never as a silently-returned plan that failed to parse or validate
+        samples = sample_plans(self.planner, req, n=8, temperature=5.0, seed=9)
+        for plan, score in samples:
+            if plan is None:
+                self.assertEqual(score, float("-inf"))
+            else:
+                self.assertGreater(score, float("-inf"))
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class GenerativePlannerPersistenceTest(unittest.TestCase):
     def test_save_load_plans_identically(self):
         import tempfile
