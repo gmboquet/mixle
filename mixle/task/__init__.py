@@ -29,6 +29,13 @@ from mixle.task.artifact import (
     save_module,
 )
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
+from mixle.task.capability import (
+    CapabilitySuite,
+    capture_profile,
+    case_jitter_invariance,
+    keyboard_typo_corruption,
+    whitespace_invariance,
+)
 from mixle.task.cascade import Cascade, CascadeStats
 from mixle.task.density import DensityGate
 from mixle.task.design import DesignedModel, design_model, spec_to_estimator
@@ -126,6 +133,7 @@ __all__ = [
     "AgentTraces",
     "CalibratedTaskModel",
     "CallableLLM",
+    "CapabilitySuite",
     "Cascade",
     "CascadeStats",
     "CostModel",
@@ -172,7 +180,9 @@ __all__ = [
     "adapter_from_spec",
     "agreement",
     "break_even_volume",
+    "capture_profile",
     "cascade_cost_per_request",
+    "case_jitter_invariance",
     "design_model",
     "distill",
     "distill_designer",
@@ -194,6 +204,7 @@ __all__ = [
     "distill_structured_from_labels",
     "extraction_f1",
     "harvest_agent_traces",
+    "keyboard_typo_corruption",
     "parse_conversation",
     "get_arrays_builder",
     "get_builder",
@@ -215,6 +226,7 @@ __all__ = [
     "scorecard",
     "sft_planner",
     "spec_to_estimator",
+    "whitespace_invariance",
     "load_arrays",
     "load_json",
     "load_module",
