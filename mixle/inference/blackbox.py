@@ -11,9 +11,11 @@ Gaussian posterior in that space from a finite-difference Hessian of the model's
     post.sample(...)        # parameter draws (a fitted model per draw)
     post.cov                # unconstrained-space posterior covariance
 
-Coverage is the parameter round-trip in ``_FLATTENERS`` -- the scalar exponential-family leaves plus
-``Composite`` and ``Mixture`` (recursively), so heterogeneous records and mixtures-of-anything are
-covered out of the box. It is extensible exactly like ``register_family``: add a leaf's
+Coverage is the parameter round-trip in :func:`_flatten` -- the scalar exponential-family leaves, the
+``Categorical`` simplex, plus ``Composite``, ``Mixture`` and ``HeterogeneousBayesianNetwork``
+(recursively), so heterogeneous records, mixtures-of-anything, and learned Bayesian networks (categorical
+CPTs + conditional-linear-Gaussian coefficients) are covered out of the box. It is extensible exactly
+like ``register_family``: add a leaf's
 (extract, rebuild) and every composite over it works. A model whose structure is not yet flattenable
 raises a clear error rather than returning a wrong answer.
 """
@@ -109,6 +111,17 @@ def _flatten(model) -> tuple[np.ndarray, Callable[[np.ndarray], Any]]:
         to_u, from_u = leaves[name]
         return np.asarray(to_u(model), dtype=float), (lambda u, _f=from_u: _f(u))
 
+    if isinstance(model, S.CategoricalDistribution):
+        # the category-probability simplex over the (fixed) support -> K-1 softmax logits
+        keys = sorted(model.pmap.keys(), key=repr)
+        u0 = np.asarray(_simplex_to_u([model.pmap[k] for k in keys]), dtype=float)
+
+        def rebuild(u, _keys=keys, _k=len(keys), _dv=model.default_value, _nm=model.name):
+            p, rest = _simplex_from_u(u, _k)
+            return S.CategoricalDistribution(dict(zip(_keys, p)), default_value=_dv, name=_nm), rest
+
+        return u0, rebuild
+
     if isinstance(model, S.CompositeDistribution):
         parts = [_flatten(d) for d in model.dists]
         u0 = np.concatenate([p[0] for p in parts]) if parts else np.zeros(0)
@@ -138,9 +151,81 @@ def _flatten(model) -> tuple[np.ndarray, Callable[[np.ndarray], Any]]:
 
         return u0, rebuild
 
+    from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork
+
+    if isinstance(model, HeterogeneousBayesianNetwork):
+        parts = [_flatten_factor(f) for f in model.factors]
+        u0 = np.concatenate([p[0] for p in parts]) if parts else np.zeros(0)
+
+        def rebuild(u, _parts=parts):
+            facs, rest = [], u
+            for _, rb in _parts:
+                f, rest = rb(rest)
+                facs.append(f)
+            return HeterogeneousBayesianNetwork(facs), rest
+
+        return u0, rebuild
+
     raise NotImplementedError(
         f"laplace_posterior cannot flatten a {name}; add it to _leaf_flatteners (the same per-family "
         "extend point as register_family), or use the model's bespoke inference."
+    )
+
+
+def _flatten_factor(f) -> tuple[np.ndarray, Callable[[np.ndarray], Any]]:
+    """Flatten one Bayesian-network factor's numeric parameters to unconstrained coords (keeping its fixed
+    structure -- child, parent set, discrete levels, GLM kind -- outside the vector) and return
+    ``(u0, rebuild)`` where ``rebuild`` reconstructs the factor from such a vector plus the remaining tail."""
+    from mixle.inference.bayesian_network import (
+        _DiscreteConditionalFactor,
+        _GLMFactor,
+        _LinearGaussianFactor,
+        _MarginalFactor,
+    )
+
+    if isinstance(f, _MarginalFactor):  # a root field: flatten its fitted marginal (categorical / Gaussian / count)
+        u0, rb = _flatten(f.dist)
+        return u0, (lambda u, _rb=rb, _c=f.child: (lambda d, r: (_MarginalFactor(_c, d), r))(*_rb(u)))
+
+    if isinstance(f, _LinearGaussianFactor):  # CLG node: regression coefficients (real) + a log scale
+        u0 = np.concatenate([np.asarray(f.coef, dtype=float), np.asarray(_pos_to_u(f.sigma), dtype=float)])
+        nc = int(np.asarray(f.coef).shape[0])
+
+        def rb(u, _c=f.child, _p=f.parents, _d=f.discrete, _nc=nc):
+            coef = np.asarray(u[:_nc], dtype=float)
+            sigma, rest = _pos_from_u(u[_nc:])
+            return _LinearGaussianFactor(_c, _p, _d, coef, sigma), rest
+
+        return u0, rb
+
+    if isinstance(f, _GLMFactor):  # GLM node: the logistic / Poisson / softmax weights are already unconstrained
+        w = np.asarray(f.weights, dtype=float)
+        u0 = w.ravel()
+
+        def rb(u, _c=f.child, _p=f.parents, _d=f.discrete, _k=f.kind, _lv=f.levels, _sh=w.shape):
+            n = int(np.prod(_sh)) if _sh else 0
+            weights = np.asarray(u[:n], dtype=float).reshape(_sh)
+            return _GLMFactor(_c, _p, _d, _k, _lv, weights), u[n:]
+
+        return u0, rb
+
+    if isinstance(f, _DiscreteConditionalFactor):  # per-config CPTs: flatten the backoff + each config's child dist
+        cfgs = sorted(f.table.keys(), key=repr)
+        subs = [_flatten(f.backoff)] + [_flatten(f.table[c]) for c in cfgs]
+        u0 = np.concatenate([s[0] for s in subs]) if subs else np.zeros(0)
+
+        def rb(u, _c=f.child, _p=f.parents, _cfgs=cfgs, _subs=subs):
+            dists, rest = [], u
+            for _, rbf in _subs:
+                d, rest = rbf(rest)
+                dists.append(d)
+            table = {cfg: dists[i + 1] for i, cfg in enumerate(_cfgs)}
+            return _DiscreteConditionalFactor(_c, _p, table, dists[0]), rest
+
+        return u0, rb
+
+    raise NotImplementedError(
+        f"laplace_posterior cannot flatten a {type(f).__name__} Bayesian-network factor; add it to _flatten_factor."
     )
 
 
