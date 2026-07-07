@@ -243,8 +243,11 @@ def _find(sub: Substrate, key: str, scope: str) -> SubstrateItem | None:
 def _launders(sub: Substrate, source_id: str, belief_id: str, scope: str, _seen: set[str] | None = None) -> bool:
     """True iff citing ``source_id`` as evidence for ``belief_id`` would launder unearned credence:
     a direct or indirect cycle back to ``belief_id``, or a reference to another belief item that has
-    no independent support of its own. A ``source_id`` that is not itself a belief item in the
-    substrate (a document, an oracle receipt, any genuine external reference) is never laundering."""
+    no independent support of its own -- walked ALL THE WAY DOWN, not just one hop: ``source_id`` is
+    laundering unless it resolves to something with at least one non-model-assertion entry that is
+    ITSELF not laundering (recursively). A ``source_id`` that is not itself a belief item in the
+    substrate (a document, an oracle receipt, any genuine external reference) is never laundering --
+    that is the recursion's base case."""
     if source_id == belief_id:
         return True
     seen = _seen or set()
@@ -254,9 +257,11 @@ def _launders(sub: Substrate, source_id: str, belief_id: str, scope: str, _seen:
     if ref_item is None or _BELIEF_TAG not in ref_item.tags:
         return False
     ref = _from_item(ref_item)
-    if not _has_real_support(ref):
-        return True
-    return False
+    next_seen = seen | {source_id}
+    for e in ref.evidence_history:
+        if e.tier != MODEL_ASSERTION and e.weight > 0 and not _launders(sub, e.source_id, belief_id, scope, next_seen):
+            return False  # ref has at least one genuinely independent, non-circular real support
+    return True  # every one of ref's entries is model-assertion-only or itself laundering
 
 
 def _to_item(belief: BeliefItem) -> SubstrateItem:
