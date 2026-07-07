@@ -92,6 +92,7 @@ from mixle.task.model import (
 )
 from mixle.task.multilabel import MultiLabelSolution, solve_multilabel
 from mixle.task.plan import Planner, distill_planner
+from mixle.task.plan_refine import RefinementReport, outcome_refine_planner
 
 # post-training quantization: int8/int4 MLP weights (numpy-only inference) + LNS integer log-space
 # execution for structured students (transcendental-free above the leaf boundary)
@@ -106,7 +107,7 @@ from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_mod
 from mixle.task.regress import RegressionSolution, solve_regression
 from mixle.task.router import Router, RouterStats, route_stack
 from mixle.task.scorecard import Scorecard, scorecard
-from mixle.task.sft_plan import GenerativePlanner, sft_planner
+from mixle.task.sft_plan import GenerativePlanner, sample_plans, score_plan, sft_planner
 from mixle.task.solve import Solution, load_harvested, solve
 from mixle.task.structured_out import StructuredSolution, solve_structured
 from mixle.task.toolcall import ToolCaller, ToolSpec, distill_tool_caller
@@ -199,6 +200,10 @@ __all__ = [
     "replace_extractor",
     "replace_matcher",
     "route_stack",
+    "RefinementReport",
+    "outcome_refine_planner",
+    "sample_plans",
+    "score_plan",
     "scorecard",
     "sft_planner",
     "spec_to_estimator",
