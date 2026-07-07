@@ -123,6 +123,7 @@ from mixle.doe.oracle import (
     optimize_under_oracle,
 )
 from mixle.doe.propagate import propagate, register_propagator, unscented_transform
+from mixle.doe.robust import IncumbentResult, noisy_minimize, posterior_incumbent
 from mixle.doe.sensitivity import dgsm, fast_indices, morris_screening, sobol_indices
 from mixle.doe.trust_region import TrustRegion, turbo_minimize
 
@@ -213,6 +214,9 @@ __all__ = [
     "propagate",
     "register_propagator",
     "unscented_transform",
+    "noisy_minimize",
+    "posterior_incumbent",
+    "IncumbentResult",
     "calibrate",
     "KOCalibration",
 ]
