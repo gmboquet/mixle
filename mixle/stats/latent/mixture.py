@@ -160,8 +160,7 @@ def _dirichlet_expectations(prior: Any, num_components: int) -> tuple[np.ndarray
             # broadcast in expected_log_density or mid-optimize() in the M-step, far from the
             # actual mistake (the prior's own arity, not a mixture internals bug).
             raise ValueError(
-                "mixture weight prior has %d components but the mixture has %d."
-                % (alpha.shape[0], num_components)
+                "mixture weight prior has %d components but the mixture has %d." % (alpha.shape[0], num_components)
             )
         return alpha, digamma(alpha) - digamma(np.sum(alpha))
     if isinstance(prior, SymmetricDirichletDistribution):
