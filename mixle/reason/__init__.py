@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 from mixle.inference.belief import BeliefState, GaussianBelief, as_belief
+from mixle.reason.belief_walk import HopTransport, WalkResult, belief_walk, coverage_by_hop_count
 from mixle.reason.core import (
     Evidence,
     Latent,
@@ -113,6 +114,10 @@ __all__ = [
     "fit_cycle_transport",
     "posterior_mean_estimate",
     "selective_error",
+    "HopTransport",
+    "WalkResult",
+    "belief_walk",
+    "coverage_by_hop_count",
     "information_corroborator",
     "GraphLLM",
     "GraphDistribution",
