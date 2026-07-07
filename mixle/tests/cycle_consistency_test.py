@@ -101,6 +101,31 @@ class CycleAbstentionBeatsMarginalConfidenceTest(unittest.TestCase):
         self.assertLess(se_cycle, float(_ERRORS.mean()) * 0.5)
 
 
+@pytest.mark.skipif(not _HAS_TORCH, reason="torch not installed")
+class FitCycleTransportShapeTest(unittest.TestCase):
+    """fit_cycle_transport must treat a 1D array as N scalar observations (n, 1), never as one
+    n-dimensional row -- np.atleast_2d does the opposite, which silently misinterprets the data
+    (this is the natural call shape for a scalar-valued modality reading, e.g. `given = rng.normal(size=n)`)."""
+
+    def test_1d_given_and_target_fit_without_crashing_and_sample_correctly(self):
+        rng = np.random.RandomState(0)
+        n = 200
+        given = rng.normal(size=n)
+        target = 2 * given + 0.1 * rng.normal(size=n)
+
+        fit = fit_cycle_transport(given, target, max_its=5, m_steps=5)
+        sampler = fit.sampler(seed=0)
+        draws = np.asarray(sampler.sample_given_batch(np.array([[0.5]])))
+        self.assertEqual(draws.shape, (1, 1))
+
+    def test_mismatched_1d_lengths_raise_a_clear_error_not_an_index_error(self):
+        rng = np.random.RandomState(0)
+        given = rng.normal(size=200)
+        target = rng.normal(size=150)  # deliberately mismatched
+        with self.assertRaisesRegex(ValueError, "same number of paired observations"):
+            fit_cycle_transport(given, target, max_its=2, m_steps=2)
+
+
 @pytest.mark.skipif(_ERRORS is None, reason="torch not installed")
 class CycleConsistencyGoNoGoTest(unittest.TestCase):
     def test_go_no_go_report(self):
