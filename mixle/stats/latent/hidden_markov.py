@@ -1034,7 +1034,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         num_states = self.n_states
 
         v = np.zeros((nn, num_states), dtype=np.float64)
-        ptr = np.zeros(nn, dtype=np.int32)
+        bp = np.zeros((nn, num_states), dtype=np.int32)
         pr_obs = np.zeros((nn, num_states), dtype=np.float64)
         enc_x = self.topics[0].dist_to_encoder().seq_encode(x)
 
@@ -1044,14 +1044,21 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         v[0, :] += pr_obs[0, :] + self.log_w
 
         for t in range(1, nn):
+            # temp[i, j] = v[t-1, i] + log P(Z(t)=j | Z(t-1)=i): the score of extending each previous
+            # state i's best path through the transition to candidate state j (before adding j's own
+            # emission). bp[t, j] records which previous state i achieves that max for j -- the
+            # backpointer this loop used to never store, so decode fell back to an independent
+            # per-timestep argmax(v[t, :]) below instead of a real joint-MAP backtrack.
             temp = np.zeros((num_states, num_states), dtype=np.float64)
             temp += np.reshape(v[t - 1, :], (num_states, 1))
             temp += self.log_transitions
-            temp += np.reshape(pr_obs[t, :], (1, num_states))
-            v[t, :] += temp.max(axis=0, keepdims=False)
+            bp[t, :] = np.argmax(temp, axis=0)
+            v[t, :] += temp.max(axis=0, keepdims=False) + pr_obs[t, :]
 
-        for t in range(nn - 1, -1, -1):
-            ptr[t] = np.argmax(v[t, :])
+        ptr = np.zeros(nn, dtype=np.int32)
+        ptr[nn - 1] = np.argmax(v[nn - 1, :])
+        for t in range(nn - 2, -1, -1):
+            ptr[t] = bp[t + 1, ptr[t + 1]]
 
         return ptr
 
@@ -1092,17 +1099,16 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             max_len = len(idx_bands)
             num_seq = idx_mat.shape[0]
 
-            good = idx_mat >= 0
-
             pr_obs = np.zeros((tot_cnt, num_states))
             v = np.zeros((tot_cnt, num_states), dtype=np.float64)
+            bp = np.zeros((tot_cnt, num_states), dtype=np.int32)
             ptr = np.zeros(tot_cnt, dtype=np.int32)
 
             # Compute state likelihood vectors and scale the max to one
             for i in range(num_states):
                 pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
 
-            # Vectorized alpha pass
+            # Vectorized alpha pass, recording each band's backpointer alongside its score.
             prev_band_idx = np.arange(idx_bands[0][0], idx_bands[0][1])
             v[prev_band_idx, :] += pr_obs[prev_band_idx, :] + log_w
 
@@ -1114,13 +1120,66 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 temp += np.reshape(v[prev_band_idx[has_next_loc], :], (-1, num_states, 1)) + log_a_mat
                 temp += np.reshape(pr_obs[nxt_band_idx, :], (-1, 1, num_states))
 
+                bp[nxt_band_idx, :] = np.argmax(temp, axis=1)
                 v[nxt_band_idx, :] += np.max(temp, axis=1)
 
                 prev_band_idx = nxt_band_idx.copy()
 
-            for i in range(max_len - 1, -1, -1):
-                prev_band_idx = np.arange(idx_bands[i][0], idx_bands[i][1])
-                ptr[prev_band_idx] += np.argmax(v[prev_band_idx, :], axis=1)
+            # Backward pass: a real per-sequence backtrack through bp, not an independent per-timestep
+            # argmax(v) at every band (which used to pick the marginal-best state at each position
+            # separately -- provably not the joint-MAP path). idx_mat[s, :len_vec[s]] is sequence s's
+            # own flat indices in time order (the same mapping _terminal_states_seq_log_density already
+            # relies on), so each sequence backtracks independently through its own chain.
+            for s in range(num_seq):
+                length = int(len_vec[s])
+                if length == 0:
+                    continue
+                row = idx_mat[s, :length]
+                last = row[-1]
+                ptr[last] = np.argmax(v[last, :])
+                for t in range(length - 2, -1, -1):
+                    cur, nxt = row[t], row[t + 1]
+                    ptr[cur] = bp[nxt, ptr[nxt]]
+
+            return ptr
+
+        else:
+            # Numba-encoded batch: contiguous per-sequence flat layout (tz[n]..tz[n+1) is sequence n's
+            # own timesteps in order), unlike the banded x0 layout above. This used to have no branch
+            # at all here and silently fell off the end returning None -- a hard failure under the
+            # class's own default (use_numba=HAS_NUMBA), since seq_encode produces this encoding
+            # whenever numba is installed. A plain per-sequence Python forward+backtrack (not a new
+            # numba kernel) trades away the numba speedup for this specific decode call in exchange for
+            # a correct, low-risk fix; seq_viterbi is an inference-time decode, not a hot EM loop.
+            num_states = self.n_states
+            (idx, sz, enc_data), len_enc = x1
+            tot_cnt = len(idx)
+            num_seq = len(sz)
+            tz = np.concatenate([[0], sz]).cumsum().astype(dtype=np.int32)
+
+            pr_obs = np.zeros((tot_cnt, num_states), dtype=np.float64)
+            for i in range(num_states):
+                pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
+
+            log_w = self.log_w
+            log_a_mat = self.log_transitions
+
+            v = np.zeros((tot_cnt, num_states), dtype=np.float64)
+            bp = np.zeros((tot_cnt, num_states), dtype=np.int32)
+            ptr = np.zeros(tot_cnt, dtype=np.int32)
+
+            for n in range(num_seq):
+                s0, s1 = int(tz[n]), int(tz[n + 1])
+                if s0 == s1:
+                    continue
+                v[s0, :] = pr_obs[s0, :] + log_w
+                for t in range(s0 + 1, s1):
+                    temp = np.reshape(v[t - 1, :], (num_states, 1)) + log_a_mat
+                    bp[t, :] = np.argmax(temp, axis=0)
+                    v[t, :] = temp.max(axis=0) + pr_obs[t, :]
+                ptr[s1 - 1] = np.argmax(v[s1 - 1, :])
+                for t in range(s1 - 2, s0 - 1, -1):
+                    ptr[t] = bp[t + 1, ptr[t + 1]]
 
             return ptr
 
