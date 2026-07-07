@@ -20,6 +20,14 @@ FAULT-a wires two named degraded modes (:mod:`mixle.fault`) into the same two ve
 back to captured+store-only reasoning when the teacher raises (``teacher_down``); ``ingest`` falls back
 to acknowledging-without-accumulating when the store write itself raises (``store_down``). Both flag
 ``degraded_mode``/``degraded_reason`` on the returned receipt/report rather than silently serving worse.
+
+SEED-a closes the cold-start loop: every teacher-produced answer is harvested (query text -> reply);
+``improve`` promotes whatever has been harvested into a captured cache (nothing fancier -- this thin
+shell's "capture" is a verbatim lookup, not a trained model); ``answer`` checks the captured cache
+FIRST, before spending anything, so a repeat of the exact same query after an ``improve`` call is
+served free (``captured=True``, zero frontier calls) instead of re-querying the teacher. Capture only
+promotes after an explicit ``improve()`` -- a repeat query *before* ``improve`` still pays for a fresh
+teacher call, so the measured saving is attributable to ``improve``, not an implicit cache.
 """
 
 from __future__ import annotations
@@ -91,9 +99,16 @@ class System:
     def __init__(self, config: SystemConfig) -> None:
         self.config = config
         self.total_spend = Spend()
+        self._harvest: dict[tuple[str, str, str], str] = {}
+        self._captured: dict[tuple[str, str, str], str] = {}
 
     def answer(self, query: Query, *, budget: int | None = None) -> tuple[str | None, dict[str, Any]]:
         """Thin shell: route straight to the teacher, wrap the reply in a minimal H-style receipt.
+
+        Checks the captured cache first (see :meth:`improve`): an exact repeat of a query (same text,
+        task, AND scope -- two queries that merely share text but differ in task/scope are different
+        questions and must not share a cache entry) already promoted by a prior ``improve()`` call is
+        served free, no budget spent, ``captured=True``.
 
         ``budget`` is a hard ceiling (:class:`~mixle.spend.Spend.total_units`): if it cannot afford even
         one frontier call, the request is refused -- ``reply`` is ``None`` and the receipt names the exact
@@ -106,6 +121,20 @@ class System:
         nothing relevant in it), the failure is reported honestly (``status="failed"``), never masked as a
         normal answer.
         """
+        cache_key = (query.text, query.task, query.scope)
+        if cache_key in self._captured:
+            return self._captured[cache_key], {
+                "produced_by": "captured",
+                "status": "answered",
+                "spend": Spend().to_dict(),
+                "total_spend": self.total_spend.to_dict(),
+                "budget": self.config.default_budget if budget is None else int(budget),
+                "captured": True,
+                "task": query.task,
+                "degraded_mode": None,
+                "degraded_reason": None,
+            }
+
         requested = self.config.default_budget if budget is None else int(budget)
         cost = Spend(frontier_calls=1)
         if requested < cost.total_units():
@@ -149,6 +178,8 @@ class System:
             }
         actual_cost = Spend() if result.degraded else cost
         self.total_spend = self.total_spend + actual_cost
+        if not result.degraded:
+            self._harvest[cache_key] = result.value
         receipt = {
             "produced_by": "store" if result.degraded else "teacher",
             "status": "answered",
@@ -203,9 +234,25 @@ class System:
         return {"status": "ok_fallback", "assimilated": False, "item_id": item.id}
 
     def improve(self, budget: int) -> dict[str, Any]:
-        """Stub until an orchestrator/router/registry registers into the system: nothing to improve yet."""
+        """Promote every harvested (query, reply) pair from :meth:`answer` into the captured cache.
+
+        Honestly reports there is nothing to improve when nothing has been harvested yet (an orchestrator/
+        router/registry with a real training step is future work); otherwise this is the cold-start
+        capture step SEED-a measures: after this call, a repeat of any just-captured query is answered
+        for free (see :meth:`answer`).
+        """
+        if not self._harvest:
+            return {
+                "status": "nothing_to_improve",
+                "reason": "no improvement subsystem registered yet",
+                "budget": int(budget),
+            }
+        n_captured = len(self._harvest)
+        self._captured.update(self._harvest)
+        self._harvest.clear()
         return {
-            "status": "nothing_to_improve",
-            "reason": "no improvement subsystem registered yet",
+            "status": "captured",
+            "reason": f"promoted {n_captured} harvested (query, reply) pair(s) into the captured cache",
             "budget": int(budget),
+            "n_captured": n_captured,
         }
