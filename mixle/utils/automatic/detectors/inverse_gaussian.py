@@ -52,8 +52,11 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
 
 def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
     from mixle.stats import InverseGaussianDistribution
+    from mixle.utils.automatic.profiling import _value_array_from_vdict
 
-    return InverseGaussianDistribution(1.0, 1.0).estimator()
+    fit = _mle(_value_array_from_vdict(vdict))
+    mu, lam = fit if fit is not None else (1.0, 1.0)
+    return InverseGaussianDistribution(mu, lam).estimator(pseudo_count=pseudo_count)
 
 
 def _cdf(arr: np.ndarray):

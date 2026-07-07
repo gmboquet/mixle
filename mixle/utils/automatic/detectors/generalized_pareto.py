@@ -76,10 +76,15 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
 
 def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
     from mixle.stats import GeneralizedParetoDistribution
+    from mixle.utils.automatic.profiling import _value_array_from_vdict
 
-    keys = [float(k) for k in vdict.keys() if isinstance(k, (int, float, np.integer, np.floating))]
-    loc = min(keys) if keys else 0.0
-    return GeneralizedParetoDistribution(scale=1.0, shape=0.1, loc=loc).estimator()
+    fit = _fit(_value_array_from_vdict(vdict))
+    if fit is not None:
+        loc, scale, xi = fit
+    else:
+        keys = [float(k) for k in vdict.keys() if isinstance(k, (int, float, np.integer, np.floating))]
+        loc, scale, xi = (min(keys) if keys else 0.0), 1.0, 0.1
+    return GeneralizedParetoDistribution(scale=scale, shape=xi, loc=loc).estimator(pseudo_count=pseudo_count)
 
 
 def _cdf(arr: np.ndarray):
