@@ -12,6 +12,7 @@ event records the budget, usage, and number of selected items.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -295,6 +296,53 @@ def compress_text(text: str, task: str, max_chars: int) -> str:
     """Extractive, torch-free summary of ``text`` keeping the sentences most relevant to ``task``,
     within ``max_chars`` (the standalone compressor used by :func:`assemble_context` with ``compress=True``)."""
     return _compress(text, task, int(max_chars))
+
+
+@dataclass
+class ReceiverProfile:
+    """A named receiver's capacity -- what :func:`assemble_for_receivers` budgets and shapes for it.
+
+    A frontier LM and a local student are not the same target: the LM affords a large, prose-shaped
+    context; the student needs a small, feature-shaped one. ``ReceiverProfile`` names that difference
+    so it is set once per receiver, not re-derived ad hoc at every call site (workstream E2:
+    receiver-conditioned compression)."""
+
+    name: str
+    max_chars: int = 2000
+    max_items: int = 20
+    shape: str = "passages"  # 'passages' (LLM) | 'brief' (human) | 'features' (student)
+    compress: bool = False
+
+    def to_budget(self) -> ContextBudget:
+        return ContextBudget(max_chars=self.max_chars, max_items=self.max_items, shape=self.shape)
+
+
+def assemble_for_receivers(
+    substrate: Substrate,
+    task: str,
+    receivers: Sequence[ReceiverProfile],
+    *,
+    kind: str | None = None,
+    scope: str | None = None,
+    telemetry: Any = None,
+) -> dict[str, ContextPacket]:
+    """Assemble ONE task-conditioned :class:`ContextPacket` per named receiver -- the concrete
+    receiver-conditioned compression from workstream E2: two receivers reading the SAME substrate for
+    the SAME task get genuinely different renderings (budget, shape, and -- via ``compress`` -- which
+    sentences survive), never the same blob truncated to fit.
+
+        packets = assemble_for_receivers(substrate, task, [
+            ReceiverProfile("frontier_llm", max_chars=2000, shape="passages"),
+            ReceiverProfile("local_student", max_chars=200, shape="features", compress=True),
+        ])
+        packets["frontier_llm"].render(), packets["local_student"].render()
+    """
+    return {
+        r.name: assemble_context(
+            substrate, task, budget=r.to_budget(), kind=kind, scope=scope, compress=r.compress, telemetry=telemetry
+        )
+        for r in receivers
+    }
 
 
 def _emit(telemetry: Any, packet: ContextPacket) -> None:
