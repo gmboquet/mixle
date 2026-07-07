@@ -23,7 +23,14 @@ from mixle.substrate.act import (
     simulate_action,
 )
 from mixle.substrate.answer import Answer, answer_from_substrate
-from mixle.substrate.context import ContextBudget, ContextPacket, assemble_context, compress_text
+from mixle.substrate.context import (
+    ContextBudget,
+    ContextPacket,
+    ReceiverProfile,
+    assemble_context,
+    assemble_for_receivers,
+    compress_text,
+)
 from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
 from mixle.substrate.factuality import ClaimVerdict, FactualityReceipt, check_factuality
 from mixle.substrate.freshness import Freshness, check_freshness, content_hash, freshness_report
@@ -71,7 +78,9 @@ __all__ = [
     "ingest_records",
     "ContextPacket",
     "ContextBudget",
+    "ReceiverProfile",
     "assemble_context",
+    "assemble_for_receivers",
     "compress_text",
     "retrieve",
     "Retrieval",
