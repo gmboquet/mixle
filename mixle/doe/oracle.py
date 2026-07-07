@@ -30,6 +30,7 @@ from typing import Any
 import numpy as np
 
 from mixle.doe.designs import Bounds
+from mixle.fault import abstain_on_timeout
 
 # The declared verifiability tiers, weakest to strongest. "self_graded" is deliberately NOT here: a
 # model grading its own candidates is the banned reward, rejected at VerifiableOracle construction.
@@ -60,6 +61,7 @@ class VerifiableOracle:
     tier: str
     score_fn: Callable[[Any], OracleResult]
     fidelity: str | None = None
+    timeout: float | None = None  # seconds; FAULT-a oracle_timeout: abstain rather than block or guess
 
     def __post_init__(self) -> None:
         if self.tier not in VERIFIABILITY_TIERS:
@@ -70,7 +72,34 @@ class VerifiableOracle:
             )
 
     def __call__(self, candidate: Any) -> OracleResult:
-        return self.score_fn(candidate)
+        if self.timeout is None:
+            return self.score_fn(candidate)
+        return self._call_with_timeout(candidate)
+
+    def _call_with_timeout(self, candidate: Any) -> OracleResult:
+        """FAULT-a ``oracle_timeout``: abstain (a maximally-uninformative, zero-cost, explicitly flagged
+        result) rather than block the caller or guess a score, if a single scoring call runs over budget.
+        Uses a worker thread so a ``score_fn`` that never returns cannot hang the caller either."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _run() -> OracleResult:
+            pool = ThreadPoolExecutor(max_workers=1)
+            future = pool.submit(self.score_fn, candidate)
+            try:
+                return future.result(timeout=self.timeout)
+            finally:
+                # don't block __call__ waiting for a score_fn that already blew its budget -- let the
+                # worker thread finish (or leak, for a truly hung score_fn) on its own time, not ours.
+                pool.shutdown(wait=False)
+
+        outcome = abstain_on_timeout(_run)
+        if outcome.degraded:
+            return OracleResult(
+                score=float("-inf"),
+                receipt={"oracle_id": self.name, "tier": self.tier, **outcome.to_receipt_fields()},
+                cost=0.0,
+            )
+        return outcome.value
 
 
 @dataclass
