@@ -106,7 +106,7 @@ from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_mod
 from mixle.task.regress import RegressionSolution, solve_regression
 from mixle.task.router import Router, RouterStats, route_stack
 from mixle.task.scorecard import Scorecard, scorecard
-from mixle.task.sft_plan import GenerativePlanner, sft_planner
+from mixle.task.sft_plan import GenerativePlanner, sample_plans, score_plan, sft_planner
 from mixle.task.solve import Solution, load_harvested, solve
 from mixle.task.structured_out import StructuredSolution, solve_structured
 from mixle.task.toolcall import ToolCaller, ToolSpec, distill_tool_caller
@@ -199,6 +199,8 @@ __all__ = [
     "replace_extractor",
     "replace_matcher",
     "route_stack",
+    "sample_plans",
+    "score_plan",
     "scorecard",
     "sft_planner",
     "spec_to_estimator",
