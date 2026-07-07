@@ -35,6 +35,7 @@ from mixle.doe.active import (
     expected_information_gain_nmc,
     propose_active_learning,
 )
+from mixle.doe.amplify import AmplificationRound, AmplifyReport, StudentTeacher, amplify_and_capture, fit_student
 from mixle.doe.analysis import (
     FactorialEffects,
     ResponseSurface,
@@ -166,6 +167,11 @@ __all__ = [
     "DesignRun",
     "optimize_under_oracle",
     "VERIFIABILITY_TIERS",
+    "amplify_and_capture",
+    "AmplifyReport",
+    "AmplificationRound",
+    "StudentTeacher",
+    "fit_student",
     "optimal_design",
     "polynomial_features",
     "d_criterion",
