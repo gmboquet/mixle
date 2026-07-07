@@ -23,6 +23,7 @@ from typing import Any, Protocol, runtime_checkable
 from mixle.task.replay import ExecutionTrace, TraceStep
 
 _STOP_TOOLS = (None, "__stop__", "STOP")
+_NO_TOOL_KEY = object()  # distinguishes an EXPLICIT tool=None from a schema with no "tool" key at all
 
 
 @runtime_checkable
@@ -44,7 +45,24 @@ class OrchestrationResult:
 
 
 def _is_stop(step: dict[str, Any] | None) -> bool:
-    return step is None or step.get("tool") in _STOP_TOOLS
+    """A step is STOP only when it is ``None`` or has an EXPLICIT ``tool`` key set to a stop value.
+    A step whose schema has no ``"tool"`` key at all (e.g. EXPLORE-a's ``{"type": ..., "cell": ...}``)
+    is a real action, not a stop -- ``dict.get("tool")`` alone can't tell those apart, since a missing
+    key and an explicit ``tool=None`` both return ``None``."""
+    return step is None or step.get("tool", _NO_TOOL_KEY) in _STOP_TOOLS
+
+
+def _tool_name(step: dict[str, Any]) -> str:
+    """The identifier :class:`~mixle.task.replay.TraceStep` records for this step: ``"tool"`` when the
+    schema has one (the common case), else ``"type"`` (EXPLORE-a's action-kind field) -- rather than a
+    bare ``step["tool"]`` KeyError far from the real cause when a world uses neither."""
+    if "tool" in step:
+        return step["tool"]
+    if "type" in step:
+        return step["type"]
+    raise KeyError(
+        f"orchestrate() cannot name this step for the trace: it has neither a 'tool' nor a 'type' key ({step!r})"
+    )
 
 
 def orchestrate(
@@ -79,7 +97,7 @@ def orchestrate(
         except Exception as exc:
             # atypical/failed step: record the failure, then give the plan model one chance to re-plan
             # around it before giving up -- the trace shows what actually happened, not just the outcome
-            trace.steps.append(TraceStep(tool=step["tool"], args=step.get("args", {}), result={"error": str(exc)}))
+            trace.steps.append(TraceStep(tool=_tool_name(step), args=step.get("args", {}), result={"error": str(exc)}))
             retry_history = [*history, {**step, "error": str(exc)}]
             retry_step = plan_model(question, retry_history)
             if _is_stop(retry_step):
@@ -90,14 +108,14 @@ def orchestrate(
             except Exception as retry_exc:
                 trace.steps.append(
                     TraceStep(
-                        tool=retry_step["tool"], args=retry_step.get("args", {}), result={"error": str(retry_exc)}
+                        tool=_tool_name(retry_step), args=retry_step.get("args", {}), result={"error": str(retry_exc)}
                     )
                 )
                 stopped_reason = "replan_failed"
                 break
             step = retry_step
 
-        trace.steps.append(TraceStep(tool=step["tool"], args=step.get("args", {}), result=observation))
+        trace.steps.append(TraceStep(tool=_tool_name(step), args=step.get("args", {}), result=observation))
         history.append({**step, "result": observation})
     else:
         stopped_reason = "budget_exhausted"

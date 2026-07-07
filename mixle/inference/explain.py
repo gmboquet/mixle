@@ -236,7 +236,9 @@ def diagnose(
     """
     bg = list(background) if background is not None else list(cases)
     if not bg or not cases:
-        return FaultReport("", [], "", {"n_cases": len(cases), "n_background": len(bg)})
+        return FaultReport(
+            dominant="", evidence=[], suggested_fix="", receipt={"n_cases": len(cases), "n_background": len(bg)}
+        )
 
     bg_explanations = [explain(model, x) for x in bg]
     names = sorted({name for ex in bg_explanations for name, _ in ex.parts})
