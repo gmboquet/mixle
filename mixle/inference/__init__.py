@@ -94,7 +94,7 @@ from mixle.inference.event_study import (
     poisson_lograte_effect,
     tipping_drift,
 )
-from mixle.inference.explain import Explanation, explain, explain_margin, explain_margin_mixture
+from mixle.inference.explain import Explanation, FaultReport, diagnose, explain, explain_margin, explain_margin_mixture
 from mixle.inference.fisher import FisherView, FixedFisherView, to_fisher
 from mixle.inference.forecast import Forecast, forecast
 
@@ -284,6 +284,13 @@ from mixle.inference.target import (
     rhat_max,
     split_rhat,
 )
+from mixle.inference.torsion import (
+    CyclicGroup,
+    TwistedMixtureResult,
+    fit_independent_mixtures,
+    fit_twisted_mixture,
+    independent_log_density,
+)
 
 # epistemic / aleatoric uncertainty decomposition for any predictive (generalizes KG BALD)
 from mixle.inference.uncertainty import (
@@ -316,6 +323,8 @@ __all__ = [
     "explain",
     "explain_margin",
     "explain_margin_mixture",
+    "FaultReport",
+    "diagnose",
     "InterventionalNetwork",
     "average_causal_effect",
     "counterfactual",
@@ -388,6 +397,12 @@ __all__ = [
     # synthesize() -- a dataset factory: sample, label, keep only what verifies
     "synthesize",
     "Dataset",
+    # torsion (A4) -- twisted composition: mixture components sharing one base density modulo a group element
+    "CyclicGroup",
+    "TwistedMixtureResult",
+    "fit_twisted_mixture",
+    "fit_independent_mixtures",
+    "independent_log_density",
     # create() -- data (+ budget/device) to a certified model artifact
     "create",
     "CreatedModel",
