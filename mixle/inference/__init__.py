@@ -94,7 +94,7 @@ from mixle.inference.event_study import (
     poisson_lograte_effect,
     tipping_drift,
 )
-from mixle.inference.explain import Explanation, explain, explain_margin, explain_margin_mixture
+from mixle.inference.explain import Explanation, FaultReport, diagnose, explain, explain_margin, explain_margin_mixture
 from mixle.inference.fisher import FisherView, FixedFisherView, to_fisher
 from mixle.inference.forecast import Forecast, forecast
 
@@ -313,6 +313,8 @@ __all__ = [
     "explain",
     "explain_margin",
     "explain_margin_mixture",
+    "FaultReport",
+    "diagnose",
     "InterventionalNetwork",
     "average_causal_effect",
     "counterfactual",
