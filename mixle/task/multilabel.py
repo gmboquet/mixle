@@ -102,6 +102,12 @@ class MultiLabelSolution:
             return [lab for lab, p in zip(self.labels, present) if p]
         return None
 
+    def decide(self, x: Any) -> list[str] | None:
+        """The ``CalibratedTaskModel.decide``-shaped contract (workstream B3): an alias of
+        :meth:`try_local`, so a :class:`~mixle.task.router.Router` tier can be a multilabel solution,
+        not just a classifier."""
+        return self.try_local(x)
+
     def __call__(self, x: Any) -> list[str]:
         self.n_requests += 1
         local = self.try_local(x)
