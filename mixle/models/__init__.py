@@ -69,6 +69,7 @@ from mixle.models.neural import (
     CategoricalClassificationNeuralNetwork,
     GaussianRegressionNeuralNetwork,
     PoissonRegressionNeuralNetwork,
+    make_deep_set,
     make_mlp,
     make_monotonic_mlp,
 )
@@ -203,6 +204,7 @@ __all__ = [
     "build_maf",
     "build_mdn",
     "build_vae",
+    "make_deep_set",
     "make_mlp",
     "make_monotonic_mlp",
     "mean_stick_weights",
