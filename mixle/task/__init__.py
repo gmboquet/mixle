@@ -77,6 +77,7 @@ from mixle.task.economics import (
     break_even_volume,
     cascade_cost_per_request,
     recommend_route,
+    select_alpha_for_cost,
 )
 
 # edge distillation: structure x training-process search under a hard device budget, steered by a
@@ -337,6 +338,7 @@ __all__ = [
     "recommend_model",
     "replay",
     "recommend_route",
+    "select_alpha_for_cost",
     "replace_alerter",
     "replace_extractor",
     "replace_matcher",
