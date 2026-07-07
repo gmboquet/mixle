@@ -88,6 +88,25 @@ class MarginalFieldProfile:
     gof_pvalue: float | None = None
     notes: list[str] = field(default_factory=list)
 
+    def robust_recommendation(self) -> str:
+        """The model choice to actually trust, combining the in-sample (BIC) pick with the held-out
+        validation check rather than leaving their disagreement as a note for a human to notice.
+
+        Held-out generalization is stronger evidence than an in-sample penalized-likelihood score:
+        a flexible family (a 3-parameter shape family, a 2-component mixture) can win BIC by fitting
+        noise/outliers in the training data that do not repeat in held-out data, which is exactly the
+        failure mode BIC's asymptotic parameter-count penalty does not always catch at small-to-moderate
+        n. So: agree with ``recommendation`` whenever there is no held-out evidence, or the two already
+        agree; defer to ``validation_recommendation`` only when it disagrees by a DECISIVE margin (the
+        same ``AMBIGUOUS_SCORE_GAP_BITS`` threshold already used to flag a close call elsewhere in this
+        module) -- a marginal, ambiguous validation preference is not enough evidence to overturn BIC.
+        """
+        if self.validation_recommendation is None or self.validation_recommendation == self.recommendation:
+            return self.recommendation
+        if self.validation_score_gap_bits is None or self.validation_score_gap_bits < AMBIGUOUS_SCORE_GAP_BITS:
+            return self.recommendation
+        return self.validation_recommendation
+
     def model_weights(self) -> dict[str, float]:
         """Return Schwarz (BIC) model weights over the scored candidates, summing to 1.
 
@@ -108,6 +127,7 @@ class MarginalFieldProfile:
             "observed_count": self.observed_count,
             "kind": self.kind,
             "recommendation": self.recommendation,
+            "robust_recommendation": self.robust_recommendation(),
             "bits_per_obs": self.bits_per_obs,
             "entropy_bits": self.entropy_bits,
             "cardinality": self.cardinality,
@@ -212,9 +232,14 @@ class StructureProfile:
         lines = []
         for field_profile in self.fields:
             bits = "" if field_profile.bits_per_obs is None else " (~%.3f bits/obs)" % field_profile.bits_per_obs
+            robust = field_profile.robust_recommendation()
+            overridden = (
+                " (validation-overridden from %s)" % field_profile.recommendation
+                if robust != field_profile.recommendation
+                else ""
+            )
             lines.append(
-                "%s: %s -> %s%s"
-                % (format_path(field_profile.path), field_profile.kind, field_profile.recommendation, bits)
+                "%s: %s -> %s%s%s" % (format_path(field_profile.path), field_profile.kind, robust, overridden, bits)
             )
             for note in field_profile.notes:
                 lines.append("  - %s" % note)
@@ -981,6 +1006,10 @@ def _validate_marginal_profile(
         profile.validation_notes.append(
             "validation prefers %s over marginal recommendation %s" % (recommendation, profile.recommendation)
         )
+        if profile.robust_recommendation() == recommendation:
+            profile.validation_notes.append(
+                "gap is decisive -- robust_recommendation() overrides to %s" % recommendation
+            )
     return profile
 
 
