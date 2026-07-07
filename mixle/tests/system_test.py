@@ -2,7 +2,7 @@
 
 import unittest
 
-from mixle.substrate.core import Substrate
+from mixle.substrate.core import Substrate, SubstrateItem
 from mixle.system import Query, System, SystemConfig
 
 
@@ -77,6 +77,48 @@ class SystemSpendLedgerTest(unittest.TestCase):
         _, receipt = system.answer(Query("b"))
         self.assertEqual(receipt["spend"]["frontier_calls"], 1)
         self.assertEqual(receipt["total_spend"]["frontier_calls"], 2)
+
+
+class SystemFaultModesTest(unittest.TestCase):
+    """CARD FAULT-a: teacher_down / store_down degrade to a named, flagged mode -- never silently."""
+
+    def _broken_teacher(self, prompt: str) -> str:
+        raise ConnectionError("teacher endpoint unreachable")
+
+    def test_teacher_down_falls_back_to_store_only_and_flags_it(self):
+        store = Substrate()
+        store.put(SubstrateItem(kind="text", text="the rollout finished on schedule"))
+        system = System(SystemConfig(teacher=self._broken_teacher, store=store))
+
+        reply, receipt = system.answer(Query("rollout status"))
+        self.assertIn("degraded: store-only", reply)
+        self.assertIn("rollout finished on schedule", reply)
+        self.assertEqual(receipt["status"], "answered")
+        self.assertEqual(receipt["degraded_mode"], "teacher_down")
+        self.assertIn("teacher endpoint unreachable", receipt["degraded_reason"])
+        self.assertEqual(receipt["produced_by"], "store")
+        # a degraded, store-only answer didn't actually spend a frontier call
+        self.assertEqual(receipt["spend"]["frontier_calls"], 0)
+
+    def test_teacher_down_with_no_usable_store_fails_honestly(self):
+        system = System(SystemConfig(teacher=self._broken_teacher))
+        reply, receipt = system.answer(Query("rollout status"))
+        self.assertIsNone(reply)
+        self.assertEqual(receipt["status"], "failed")
+        self.assertIn("teacher unavailable", receipt["reason"])
+
+    def test_store_down_falls_back_to_no_accumulation_and_flags_it(self):
+        class _BrokenStore:
+            def put(self, item):
+                raise OSError("store unreachable")
+
+        system = System(SystemConfig(teacher=_fake_teacher, store=_BrokenStore()))
+        report = system.ingest("the sky is blue", source={"model": "teacher-v1"})
+
+        self.assertEqual(report["status"], "degraded_no_accumulation")
+        self.assertFalse(report["assimilated"])
+        self.assertEqual(report["degraded_mode"], "store_down")
+        self.assertIn("store unreachable", report["degraded_reason"])
 
 
 class SystemIngestTest(unittest.TestCase):
