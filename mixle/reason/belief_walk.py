@@ -81,7 +81,7 @@ def belief_walk(hops: Sequence[HopTransport], x0: Any, *, n_draws: int = 200, se
     current = np.tile(x0_arr, (n_draws, 1))
     for hop in hops:
         sampler = hop.sampler(seed=int(rng.randint(0, 2**31 - 1)))
-        current = np.asarray([sampler.sample_given(current[i]) for i in range(n_draws)], dtype=np.float64)
+        current = np.asarray(sampler.sample_given_batch(current), dtype=np.float64)
     return WalkResult([h.name for h in hops], current)
 
 

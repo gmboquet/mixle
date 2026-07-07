@@ -81,6 +81,10 @@ class _ConstantSampler:
     def sample_given(self, y):
         return np.zeros(1) + np.random.RandomState(0).normal(scale=0.01, size=1)
 
+    def sample_given_batch(self, x_batch):
+        n = np.atleast_2d(x_batch).shape[0]
+        return np.zeros((n, 1)) + np.random.RandomState(0).normal(scale=0.01, size=(n, 1))
+
 
 class KillCriterionUnusableEdgeTest(unittest.TestCase):
     def test_an_uninformative_transport_is_reported_unusable_with_a_named_reason(self):

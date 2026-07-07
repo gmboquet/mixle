@@ -83,7 +83,8 @@ def cycle_inconsistency(
     (the known A->B observation function) is supplied, agreement is checked in OBSERVATION space
     (the literal round trip target -> forward(target)) instead of raw target space.
     """
-    draws = np.asarray([sampler.sample_given(given_value) for _ in range(n_draws)], dtype=np.float64)
+    x_batch = np.repeat(np.atleast_2d(np.asarray(given_value, dtype=np.float64)), n_draws, axis=0)
+    draws = np.asarray(sampler.sample_given_batch(x_batch), dtype=np.float64)
     if forward is not None:
         draws = np.asarray([forward(d) for d in draws], dtype=np.float64)
     return float(np.mean(np.var(draws, axis=0)))
@@ -92,7 +93,8 @@ def cycle_inconsistency(
 def posterior_mean_estimate(sampler: Any, given_value: np.ndarray, *, n_draws: int = 20) -> np.ndarray:
     """The point estimate a downstream consumer would actually use: the mean of ``n_draws`` posterior
     samples of the target given ``given_value``."""
-    draws = np.asarray([sampler.sample_given(given_value) for _ in range(n_draws)], dtype=np.float64)
+    x_batch = np.repeat(np.atleast_2d(np.asarray(given_value, dtype=np.float64)), n_draws, axis=0)
+    draws = np.asarray(sampler.sample_given_batch(x_batch), dtype=np.float64)
     return draws.mean(axis=0)
 
 

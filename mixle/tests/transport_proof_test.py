@@ -63,7 +63,9 @@ def _marginal_coverage(sampler, x_test, y_test, *, n_draws=200):
     d = x_test.shape[1]
     covered = [[] for _ in range(d)]
     for i in range(len(x_test)):
-        draws = np.asarray([sampler.sample_given(y_test[i]) for _ in range(n_draws)])
+        # one batched forward pass for all n_draws of THIS point, instead of n_draws individual calls
+        y_batch = np.repeat(np.atleast_2d(np.asarray(y_test[i], dtype=float)), n_draws, axis=0)
+        draws = np.asarray(sampler.sample_given_batch(y_batch))
         lo = np.quantile(draws, ALPHA / 2, axis=0)
         hi = np.quantile(draws, 1 - ALPHA / 2, axis=0)
         for k in range(d):
@@ -172,7 +174,8 @@ class LinearGaussianTransportTest(unittest.TestCase):
         for i in range(10):
             y = self.y_test[i]
             mu_true, sigma_true = _true_posterior(self.A, self.sigma0, self.r, y)
-            draws = np.asarray([self.sampler.sample_given(y) for _ in range(400)])
+            y_batch = np.repeat(np.atleast_2d(np.asarray(y, dtype=float)), 400, axis=0)
+            draws = np.asarray(self.sampler.sample_given_batch(y_batch))
             mu_hat, sigma_hat = draws.mean(axis=0), np.cov(draws.T)
             errs_mean.append(np.linalg.norm(mu_hat - mu_true))
             errs_cov.append(np.linalg.norm(sigma_hat - sigma_true))
@@ -199,7 +202,8 @@ class NonlinearBimodalTransportTest(unittest.TestCase):
     def test_posterior_matches_dense_grid_reference_and_is_bimodal(self):
         y_probe = np.array([1.0])  # a moderate y: the true posterior has real mass at BOTH x ~= +1 and x ~= -1
         ref_mean, ref_std = _nonlinear_reference_posterior(y_probe[0])
-        draws = np.asarray([self.sampler.sample_given(y_probe)[0] for _ in range(2000)])
+        y_batch = np.repeat(np.atleast_2d(np.asarray(y_probe, dtype=float)), 2000, axis=0)
+        draws = np.asarray(self.sampler.sample_given_batch(y_batch))[:, 0]
 
         self.assertLess(abs(float(draws.mean()) - ref_mean), 0.15)
         self.assertLess(abs(float(draws.std()) - ref_std), 0.15)
