@@ -188,6 +188,13 @@ from mixle.inference.posterior import ParameterPosterior, PredictivePosterior, p
 
 # closed-form variational projections — compress a structured teacher onto a smaller student exactly
 from mixle.inference.project import collapse_mixture, fisher_merge, gaussian_kl, moment_project, reduce_mixture
+from mixle.inference.refine import (
+    TrialsToTarget,
+    apply_add_edge_fix,
+    blind_search_trials_to_target,
+    directed_correction,
+    held_out_log_likelihood,
+)
 from mixle.inference.reproduce import (
     ReproReceipt,
     data_fingerprint,
@@ -344,6 +351,11 @@ __all__ = [
     "reduce_mixture",
     "moment_project",
     "gaussian_kl",
+    "TrialsToTarget",
+    "apply_add_edge_fix",
+    "blind_search_trials_to_target",
+    "directed_correction",
+    "held_out_log_likelihood",
     "fisher_merge",
     "fit",
     "EMStep",
