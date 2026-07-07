@@ -122,6 +122,18 @@ class TuneRecipeForRoutingTest(unittest.TestCase):
         tune_recipe_for_routing(counting_teacher, train, val, n_init=3, n_iter=4, calibration_frac=0.3, seed=0)
         self.assertEqual(calls["n"], len(val) + len(train))
 
+    def test_density_gate_wires_an_ood_escalation(self):
+        # CARD B1-a: density_gate=True on tune_recipe_for_routing mirrors distill_for_routing's OOD gate.
+        train = _make_corpus(seed=16)
+        val = _make_corpus(n_per_class=60, seed=17)
+        res = tune_recipe_for_routing(
+            _teacher, train, val, n_init=3, n_iter=4, calibration_frac=0.3, seed=0, density_gate=True
+        )
+        self.assertIsNotNone(res.model.density_gate)
+        rng = np.random.RandomState(0)
+        ood = " ".join("".join(chr(rng.randint(0x3B1, 0x3C9)) for _ in range(8)) for _ in range(12))
+        self.assertIs(res.model.decide(ood), ESCALATE)
+
 
 if __name__ == "__main__":
     unittest.main()

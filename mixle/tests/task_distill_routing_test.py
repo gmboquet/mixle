@@ -138,5 +138,89 @@ class DistillRecordsForRoutingTest(unittest.TestCase):
             self.assertTrue(d is ESCALATE or d in calibrated.labels)
 
 
+class DensityGateRoutingTest(unittest.TestCase):
+    """CARD B1-a: density_gate=True on the *_for_routing family escalates inputs a softmax can't see are OOD."""
+
+    def _ood_text(self, seed: int) -> str:
+        # long random-unicode-ish text sharing no vocabulary with the spam/ham corpus
+        rng = np.random.RandomState(seed)
+        return " ".join("".join(chr(rng.randint(0x3B1, 0x3C9)) for _ in range(8)) for _ in range(12))
+
+    def test_gate_on_escalates_ood_input(self):
+        train = _make_corpus(seed=10)
+        gated = distill_for_routing(
+            _teacher,
+            train,
+            n=4,
+            dim=512,
+            hidden=[64],
+            epochs=300,
+            lr=1e-2,
+            seed=0,
+            calibration_frac=0.2,
+            density_gate=True,
+        )
+        self.assertIsNotNone(gated.density_gate)
+        ood = self._ood_text(0)
+        self.assertIs(gated.decide(ood), ESCALATE)
+
+    def test_escalation_rate_gate_on_gte_off(self):
+        train = _make_corpus(seed=11)
+        ungated = distill_for_routing(
+            _teacher,
+            train,
+            n=4,
+            dim=512,
+            hidden=[64],
+            epochs=300,
+            lr=1e-2,
+            seed=0,
+            calibration_frac=0.2,
+            density_gate=False,
+        )
+        gated = distill_for_routing(
+            _teacher,
+            train,
+            n=4,
+            dim=512,
+            hidden=[64],
+            epochs=300,
+            lr=1e-2,
+            seed=0,
+            calibration_frac=0.2,
+            density_gate=True,
+        )
+        mixed = _make_corpus(seed=88) + [self._ood_text(i) for i in range(20)]
+        self.assertGreaterEqual(gated.escalation_rate(mixed), ungated.escalation_rate(mixed))
+
+    def test_deterministic_given_seed(self):
+        train = _make_corpus(seed=12)
+        a = distill_for_routing(
+            _teacher,
+            train,
+            n=4,
+            dim=128,
+            hidden=[32],
+            epochs=60,
+            seed=7,
+            calibration_frac=0.25,
+            density_gate=True,
+        )
+        b = distill_for_routing(
+            _teacher,
+            train,
+            n=4,
+            dim=128,
+            hidden=[32],
+            epochs=60,
+            seed=7,
+            calibration_frac=0.25,
+            density_gate=True,
+        )
+        self.assertAlmostEqual(a.density_gate.log_threshold, b.density_gate.log_threshold, places=9)
+        test = _make_corpus(seed=44) + [self._ood_text(1)]
+        self.assertEqual([a.decide(t) for t in test], [b.decide(t) for t in test])
+
+
 if __name__ == "__main__":
     unittest.main()
