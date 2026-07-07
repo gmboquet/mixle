@@ -29,6 +29,16 @@ from mixle.task.artifact import (
     save_module,
 )
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
+from mixle.task.capacity import (
+    DEFAULT_RUNGS,
+    KNOWN_RUNGS,
+    EmbeddingHeadIO,
+    LadderResult,
+    RungResult,
+    WordEmbeddingFeaturizer,
+    capacity_ladder,
+    climb_to,
+)
 from mixle.task.cascade import Cascade, CascadeStats
 from mixle.task.density import DensityGate
 from mixle.task.design import DesignedModel, design_model, spec_to_estimator
@@ -129,6 +139,7 @@ __all__ = [
     "Cascade",
     "CascadeStats",
     "CostModel",
+    "DEFAULT_RUNGS",
     "DensityGate",
     "DesignModel",
     "DesignedModel",
@@ -136,6 +147,7 @@ __all__ = [
     "EdgeDistillResult",
     "EdgeFootprint",
     "EdgeSpace",
+    "EmbeddingHeadIO",
     "ExtractionIO",
     "ExtractorHarness",
     "MatcherHarness",
@@ -143,7 +155,9 @@ __all__ = [
     "GenerativeTextIO",
     "HashedNGram",
     "HashedRecord",
+    "KNOWN_RUNGS",
     "LNSStructuredClassifierIO",
+    "LadderResult",
     "ModelRecommendation",
     "OpenAICompatLLM",
     "QuantizedClassifierIO",
@@ -152,6 +166,7 @@ __all__ = [
     "RecordClassifierIO",
     "RoutePlan",
     "Router",
+    "RungResult",
     "Scorecard",
     "RouterStats",
     "RegressionSolution",
@@ -168,12 +183,15 @@ __all__ = [
     "TextClassifierIO",
     "CalibratedTuneResult",
     "TuneResult",
+    "WordEmbeddingFeaturizer",
     "acquisition_scores",
     "active_distill",
     "adapter_from_spec",
     "agreement",
     "break_even_volume",
+    "capacity_ladder",
     "cascade_cost_per_request",
+    "climb_to",
     "design_model",
     "distill",
     "distill_designer",
