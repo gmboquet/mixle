@@ -113,14 +113,6 @@ from mixle.doe.optimal import (
     register_criterion,
 )
 from mixle.doe.optimizer import BayesianOptimizer
-from mixle.doe.oracle import (
-    VERIFIABILITY_TIERS,
-    DesignCandidate,
-    DesignRun,
-    OracleResult,
-    VerifiableOracle,
-    optimize_under_oracle,
-)
 from mixle.doe.propagate import propagate, register_propagator, unscented_transform
 from mixle.doe.sensitivity import dgsm, fast_indices, morris_screening, sobol_indices
 from mixle.doe.trust_region import TrustRegion, turbo_minimize
@@ -160,12 +152,6 @@ __all__ = [
     "minimize",
     "propose_next",
     "propose_batch",
-    "VerifiableOracle",
-    "OracleResult",
-    "DesignCandidate",
-    "DesignRun",
-    "optimize_under_oracle",
-    "VERIFIABILITY_TIERS",
     "optimal_design",
     "polynomial_features",
     "d_criterion",
