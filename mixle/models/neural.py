@@ -369,6 +369,67 @@ def make_monotonic_mlp(
     return module if increasing else _NegateOutput(module)
 
 
+def make_deep_set(
+    element_dim: int,
+    phi_hidden: Sequence[int],
+    latent_dim: int,
+    rho_hidden: Sequence[int],
+    output_dim: int = 1,
+    *,
+    pooling: str = "mean",
+) -> Any:
+    """A Deep Sets network (Zaheer et al. 2017): invariant to any permutation of the SET axis, by construction.
+
+    Input shape ``(..., set_size, element_dim)``: a per-element MLP ``phi`` (shared weights, applied
+    identically to every element -- ``torch.nn.Linear`` already broadcasts over all leading dims, so
+    reusing :func:`make_mlp` for ``phi`` gives exactly that) maps each element to a ``latent_dim`` code;
+    a permutation-invariant pool (``pooling="mean"``/``"sum"``/``"max"``, taken over the set axis)
+    aggregates the codes into one order-independent summary; a second MLP ``rho`` maps the summary to the
+    output. Because ``phi`` is applied identically per element and the pool is a symmetric function, the
+    output is EXACTLY unchanged by any permutation of the set axis -- true for any weights, trained or not,
+    unlike e.g. training on many random orderings and hoping the network learns invariance.
+
+    The returned module is a plain ``torch.nn.Module``, trainable with any ordinary Torch optimizer loop
+    over ``(set_size, element_dim)``-shaped inputs. NOTE: :class:`~mixle.models.neural_leaf.NeuralGaussian`'s
+    accumulator flattens each observation to a 1-D feature vector (``reshape(n, -1)``) before the M-step,
+    which destroys the set axis this module needs -- so it is NOT a drop-in wrapper for set-shaped data as
+    :func:`make_mlp`/:func:`make_monotonic_mlp` are for flat feature vectors. Use this module directly with
+    a custom training loop (or through a wrapper that preserves the set axis) for a fixed set size.
+    """
+    try:
+        import torch
+    except ImportError as e:  # pragma: no cover
+        raise ImportError("make_deep_set requires torch.") from e
+    if pooling not in ("mean", "sum", "max"):
+        raise ValueError('pooling must be one of "mean", "sum", "max"; got %r' % (pooling,))
+    if int(element_dim) <= 0 or int(latent_dim) <= 0 or int(output_dim) <= 0:
+        raise ValueError(
+            "make_deep_set dims must be positive; got element_dim=%r latent_dim=%r output_dim=%r"
+            % (element_dim, latent_dim, output_dim)
+        )
+    phi = make_mlp(element_dim, phi_hidden, latent_dim, activation="relu")
+    rho = make_mlp(latent_dim, rho_hidden, output_dim, activation="relu")
+
+    class _DeepSet(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.phi = phi
+            self.rho = rho
+            self.pooling = pooling
+
+        def forward(self, x: Any) -> Any:
+            codes = self.phi(x)  # (..., set_size, latent_dim); phi is shared/identical across the set axis
+            if self.pooling == "mean":
+                pooled = codes.mean(dim=-2)
+            elif self.pooling == "sum":
+                pooled = codes.sum(dim=-2)
+            else:
+                pooled = codes.max(dim=-2).values
+            return self.rho(pooled)
+
+    return _DeepSet()
+
+
 def _torch_engine(
     engine: Any | None, precision: Any | None = None, owner: str = "GaussianRegressionNeuralNetwork"
 ) -> tuple[Any, Any]:
