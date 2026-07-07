@@ -109,6 +109,7 @@ from mixle.task.quantize import (
 )
 from mixle.task.recommend import FieldChoice, ModelRecommendation, recommend_model
 from mixle.task.regress import RegressionSolution, solve_regression
+from mixle.task.replay import ExecutionTrace, TraceStep, is_bit_identical_replay, record_step, replay
 from mixle.task.router import Router, RouterStats, route_stack
 from mixle.task.scorecard import Scorecard, scorecard
 from mixle.task.sft_plan import GenerativePlanner, sample_plans, score_plan, sft_planner
@@ -136,6 +137,7 @@ __all__ = [
     "EdgeDistillResult",
     "EdgeFootprint",
     "EdgeSpace",
+    "ExecutionTrace",
     "ExtractionIO",
     "ExtractorHarness",
     "MatcherHarness",
@@ -163,6 +165,7 @@ __all__ = [
     "StructuredClassifierIO",
     "TaskManifest",
     "TaskModel",
+    "TraceStep",
     "ToolCaller",
     "ToolSpec",
     "TextClassifierIO",
@@ -198,12 +201,15 @@ __all__ = [
     "parse_conversation",
     "get_arrays_builder",
     "get_builder",
+    "is_bit_identical_replay",
     "llm_extractor",
     "llm_labeler",
     "load_harvested",
     "lns_classifier",
     "pick_label",
+    "record_step",
     "recommend_model",
+    "replay",
     "recommend_route",
     "replace_alerter",
     "replace_extractor",
