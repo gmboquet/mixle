@@ -92,6 +92,7 @@ from mixle.models.partially_observable_markov_decision_process import (
     PartiallyObservableMarkovDecisionProcessModel,
     baum_welch_pomdp,
 )
+from mixle.models.pinn_leaf import PINNRegression, PINNRegressionEstimator
 from mixle.models.random_forest import (
     RandomForestConditional,
     RandomForestEstimator,
@@ -171,6 +172,8 @@ __all__ = [
     "PartiallyObservableMarkovDecisionProcessModel",
     "PartiallyDirectedGraph",
     "PCFGParseNode",
+    "PINNRegression",
+    "PINNRegressionEstimator",
     "PoissonRegressionNeuralNetwork",
     "RandomForestConditional",
     "RandomForestEstimator",
