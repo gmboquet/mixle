@@ -71,6 +71,7 @@ from mixle.task.distill import (
     distill_structured,
     distill_structured_from_labels,
 )
+from mixle.task.distill_soft import distill_from_soft_labels, distill_soft, soft_agreement
 from mixle.task.economics import (
     CostModel,
     RoutePlan,
@@ -321,6 +322,9 @@ __all__ = [
     "distill_records_from_labels_for_routing",
     "distill_structured",
     "distill_structured_from_labels",
+    "distill_from_soft_labels",
+    "distill_soft",
+    "soft_agreement",
     "extraction_f1",
     "harvest_agent_traces",
     "keyboard_typo_corruption",
