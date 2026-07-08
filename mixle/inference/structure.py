@@ -473,6 +473,17 @@ class MixtureOfDependencyTrees:
         self.weights = np.asarray(weights, dtype=np.float64)
         self.log_weights = np.log(np.clip(self.weights, 1e-300, None))
 
+    @property
+    def w(self) -> np.ndarray:
+        """Mixture-convention alias for ``weights`` -- lets mixture-generic tooling (e.g.
+        ``mixle.utils.hvis.model_fit_health`` / ``hvis_map``) accept this model unchanged."""
+        return self.weights
+
+    @property
+    def log_w(self) -> np.ndarray:
+        """Mixture-convention alias for ``log_weights`` (see :attr:`w`)."""
+        return self.log_weights
+
     def __str__(self) -> str:
         return f"MixtureOfDependencyTrees(k={len(self.components)}, weights={np.round(self.weights, 3).tolist()})"
 
@@ -590,6 +601,119 @@ def learn_mixture_structure(
             best_ll, best = ll, model
     assert best is not None
     return best
+
+
+def _split_separation(values: np.ndarray) -> tuple[float, float]:
+    """Deterministic 1-D 2-means ``(separation, minority share)`` -- the same construction (sign
+    split + Lloyd, gap over pooled within-std) and calibration as the merged-regime detector in
+    ``mixle.utils.hvis.topology.model_fit_health``, so the ``2.65 + 6/sqrt(n)`` threshold carries
+    over. Returns ``(0, 0)`` when 2-means degenerates to one cluster."""
+    proj = np.asarray(values, dtype=np.float64)
+    proj = proj - proj.mean()
+    assign = proj > 0.0
+    for _ in range(15):
+        if assign.all() or (~assign).all():
+            return 0.0, 0.0
+        c1, c0 = float(proj[assign].mean()), float(proj[~assign].mean())
+        new_assign = np.abs(proj - c1) < np.abs(proj - c0)
+        if bool(np.all(new_assign == assign)):
+            break
+        assign = new_assign
+    if not 0 < int(assign.sum()) < len(proj):
+        return 0.0, 0.0
+    minority = min(float(assign.mean()), float(1.0 - assign.mean()))
+    within_var = float(
+        np.average([proj[assign].var(), proj[~assign].var()], weights=[assign.mean(), 1 - assign.mean()])
+    )
+    sep = abs(float(proj[assign].mean() - proj[~assign].mean())) / max(np.sqrt(within_var), 1.0e-12)
+    return sep, minority
+
+
+def mixture_structure_health(
+    mot: MixtureOfDependencyTrees, data: Sequence[tuple], *, merged_sep_threshold: float | None = None
+) -> dict:
+    """The identifiability receipt for a fitted :class:`MixtureOfDependencyTrees`.
+
+    The trap it names: a flexible per-field family (a Gaussian-mixture conditional, a heavy-tailed
+    catch-all marginal) lets ONE component absorb what the caller intended as SEVERAL regimes --
+    and because the absorbed fit scores well, likelihood-level receipts look healthy. Measured
+    concretely: on two planted regimes, a one-component fit matches the two-component fit's
+    likelihood, so nothing downstream of the density can see the difference.
+
+    The check that can: STRUCTURE-CONDITIONAL multimodality. For every continuous field of every
+    component, group that component's dominated points by the field's own learned conditioning
+    (parent level for a binned conditional, regression residuals for a linear edge, the whole
+    fiber for a root marginal) -- after the tree has explained what it can, each group must be
+    unimodal. A group that still splits (deterministic 2-means separation over the same
+    ``2.65 + 6/sqrt(n)`` finite-sample threshold the hvis merged-regime detector is calibrated
+    to, minority share >= 20%) is a regime split the component is hiding, whichever family
+    absorbed it.
+
+    Returns ``{"components": [...], "diagnosis": [str, ...]}`` -- empty ``diagnosis`` means no
+    component hides multimodal structure. Per component, ``multimodal_fields`` lists
+    ``(field, where, separation)`` and ``mixture_factors`` lists factors the detector fitted as
+    mixture families (supporting detail: where the absorbed structure went). The fix when it
+    fires is more components or pinned unimodal ``field_estimators`` (see
+    :func:`learn_mixture_structure`). Complementary to ``mixle.utils.hvis.model_fit_health``,
+    which audits density calibration and accepts this model directly.
+    """
+    from mixle.stats import MixtureDistribution
+    from mixle.stats.combinator.conditional import ConditionalDistribution
+
+    data = list(data)
+    cols = _columns(data)
+    dominant = mot.responsibilities(data).argmax(axis=1)
+    components, diagnosis = [], []
+    for k, tree in enumerate(mot.components):
+        rows_k = np.flatnonzero(dominant == k)
+        mixture_factors: list[tuple[int, str]] = []
+        multimodal: list[tuple[int, str, float]] = []
+        for j, factor in enumerate(tree.factors):
+            if isinstance(factor, MixtureDistribution):
+                mixture_factors.append((j, "marginal"))
+            elif isinstance(factor, ConditionalDistribution):
+                mixture_factors.extend(
+                    (j, f"conditional level {lv!r}")
+                    for lv, child in factor.dmap.items()
+                    if isinstance(child, MixtureDistribution)
+                )
+
+            if not _is_numeric(cols[j]):
+                continue
+            vals = np.asarray([cols[j][i] for i in rows_k], dtype=np.float64)
+            parent = tree.parents[j]
+            if parent is None:
+                groups = [("marginal", vals)]
+            elif isinstance(factor, LinearGaussianEdge):
+                pv = np.asarray([cols[parent][i] for i in rows_k], dtype=np.float64)
+                groups = [("regression residuals", vals - (factor.a + factor.b * pv))]
+            elif isinstance(factor, ConditionalDistribution):
+                binner = tree.binners[j]
+                keys = [cols[parent][i] if binner is None else binner(cols[parent][i]) for i in rows_k]
+                by_key: dict = {}
+                for key, v in zip(keys, vals):
+                    by_key.setdefault(key, []).append(float(v))
+                groups = [
+                    (f"level {key!r}", np.asarray(g)) for key, g in sorted(by_key.items(), key=lambda t: repr(t[0]))
+                ]
+            else:  # GLM edges have discrete children; nothing continuous to test
+                continue
+            for where, g in groups:
+                if len(g) < 20:
+                    continue
+                sep, minority = _split_separation(g)
+                threshold = (
+                    merged_sep_threshold if merged_sep_threshold is not None else 2.65 + 6.0 / np.sqrt(float(len(g)))
+                )
+                if sep > threshold and minority >= 0.2:
+                    multimodal.append((j, where, sep))
+                    diagnosis.append(
+                        f"component {k} field {j} ({where}): still splits after conditioning (2-means "
+                        f"separation {sep:.1f}, minority {minority:.0%}) -- this component is absorbing "
+                        "multiple regimes; consider more components or pinned field_estimators."
+                    )
+        components.append({"mixture_factors": mixture_factors, "multimodal_fields": multimodal})
+    return {"components": components, "diagnosis": diagnosis}
 
 
 # --- structure search + fitting ------------------------------------------------------------------------------

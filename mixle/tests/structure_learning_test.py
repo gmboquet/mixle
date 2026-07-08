@@ -228,6 +228,38 @@ class MixtureOfTreesTest(unittest.TestCase):
         for i, row in enumerate(rows):
             self.assertAlmostEqual(mot.log_density(row), float(seq[i]), places=6)
 
+    def test_health_flags_a_component_absorbing_two_regimes(self):
+        # the identifiability receipt: force ONE component over two-regime data. The absorption is
+        # invisible to density-level receipts (the flexible per-field families fit both regimes
+        # well) -- but after conditioning on the component's own learned structure, the value
+        # field still splits, whichever family hid it. Both honest two-component fits (pinned
+        # families AND auto-detected) come back clean: within-level groups are unimodal there.
+        from mixle.inference.structure import mixture_structure_health
+
+        train = _two_regime(8)
+        absorbed = learn_mixture_structure(train, 1, restarts=1, seed=0)
+        report = mixture_structure_health(absorbed, train)
+        self.assertTrue(any("component 0" in d and "absorbing" in d for d in report["diagnosis"]))
+        self.assertTrue(report["components"][0]["multimodal_fields"])
+
+        fams = (st.CategoricalEstimator(), st.GaussianEstimator())
+        clean = learn_mixture_structure(train, 2, restarts=4, seed=0, field_estimators=fams)
+        self.assertEqual(mixture_structure_health(clean, train)["diagnosis"], [])
+        auto = learn_mixture_structure(train, 2, restarts=4, seed=0)
+        self.assertEqual(mixture_structure_health(auto, train)["diagnosis"], [])
+
+    def test_hvis_fit_health_accepts_a_mixture_of_trees(self):
+        # the w/log_w aliases make the model quack like a mixture, so the DENSITY-level receipt
+        # (merged/shattered regimes, calibration) composes with the factor-family receipt above
+        from mixle.utils.hvis import model_fit_health
+
+        train = _two_regime(9, n=400)
+        mot = learn_mixture_structure(train, 2, restarts=3, seed=0)
+        report = model_fit_health(mot, train)
+        self.assertIn("components", report)
+        self.assertIn("diagnosis", report)
+        self.assertEqual(len(report["components"]), 2)
+
 
 def _linear(seed, n=400):
     """A linear continuous dependence y ~ 2x + noise, plus an independent categorical field."""
