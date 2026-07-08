@@ -257,6 +257,10 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # loops plus a repeated-timing receipt -- ~4s total, tagged slow so it leaves the fast gate while
     # still running in full CI under the `experimental` marker's own tests.
     "context_spine_test.py": ("torch", "experimental", "slow"),
+    # E8 context parallelism (mixle/utils/parallel/context_parallel_spine.py): parametrized exact-match
+    # correctness sweeps plus a real torch.multiprocessing.spawn/gloo 4-process test -- tagged slow so it
+    # leaves the fast gate while still running in full CI under the `parallel` marker's own tests.
+    "context_parallel_spine_test.py": ("torch", "experimental", "parallel", "slow"),
 }
 
 
