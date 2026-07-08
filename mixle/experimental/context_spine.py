@@ -83,10 +83,25 @@ if _HAS_TORCH:
         compute ordinary full causal self-attention with no truncation -- the "full-attention-equivalent"
         configuration ``notes/designs/E1.md`` uses as the acceptance baseline, computed by the exact same code
         path multi-chunk streaming uses (not a second, independently-written transformer).
+
+        ``cp_size`` (E8, ``notes/designs/E8.md``): context-parallel window sharding. ``cp_size=1`` (the
+        default) is the original single-device path above, completely unchanged -- byte-identical, not just
+        numerically close, so E1's existing behavior and tests are untouched. ``cp_size > 1`` shards the
+        current step's KV axis (``cache ++ chunk``) across ``cp_size`` simulated ranks via
+        ``mixle.utils.parallel.context_parallel_spine`` for the attention sub-step of every layer; nothing
+        else (embeddings, LayerNorm, MLP, head, cache bookkeeping) changes, since those are all per-position
+        and need no communication.
         """
 
         def __init__(
-            self, vocab: int, *, d_model: int = 32, n_layer: int = 2, n_head: int = 2, window: int | None = 64
+            self,
+            vocab: int,
+            *,
+            d_model: int = 32,
+            n_layer: int = 2,
+            n_head: int = 2,
+            window: int | None = 64,
+            cp_size: int = 1,
         ) -> None:
             super().__init__()
             assert d_model % n_head == 0
@@ -96,6 +111,14 @@ if _HAS_TORCH:
             self.n_head = int(n_head)
             self.head_dim = d_model // n_head
             self.window = None if window is None else int(window)
+
+            self.cp_size = int(cp_size)
+            if self.cp_size < 1:
+                raise ValueError("cp_size must be >= 1, got %r" % (cp_size,))
+            if self.cp_size > 1:
+                from mixle.utils.parallel.context_parallel_spine import validate_cp_window_plan
+
+                validate_cp_window_plan(self.cp_size, self.window)
 
             self.tok = nn.Embedding(vocab, d_model)
             self.qkv = nn.ModuleList([nn.Linear(d_model, 3 * d_model) for _ in range(n_layer)])
@@ -148,23 +171,44 @@ if _HAS_TORCH:
                     key_positions = query_positions
                     k_full, v_full = k, v
 
-                sin_q, cos_q = _rope_angles(query_positions, self.head_dim)
-                sin_k, cos_k = _rope_angles(key_positions, self.head_dim)
-                q = _apply_rope(q, sin_q, cos_q)
-                k_full = _apply_rope(k_full, sin_k, cos_k)
+                if self.cp_size == 1:
+                    # Original single-device path -- unchanged, byte-identical to E1.
+                    sin_q, cos_q = _rope_angles(query_positions, self.head_dim)
+                    sin_k, cos_k = _rope_angles(key_positions, self.head_dim)
+                    q = _apply_rope(q, sin_q, cos_q)
+                    k_full = _apply_rope(k_full, sin_k, cos_k)
 
-                delta = query_positions[:, None] - key_positions[None, :]  # (t, len(keys))
-                allowed = (delta >= 0) & (delta < self.window) if self.window is not None else (delta >= 0)
-                mask = torch.zeros(t, key_positions.shape[0], device=device)
-                mask = mask.masked_fill(~allowed, float("-inf"))
+                    delta = query_positions[:, None] - key_positions[None, :]  # (t, len(keys))
+                    allowed = (delta >= 0) & (delta < self.window) if self.window is not None else (delta >= 0)
+                    mask = torch.zeros(t, key_positions.shape[0], device=device)
+                    mask = mask.masked_fill(~allowed, float("-inf"))
 
-                qh = q.transpose(1, 2)  # (b, n_head, t, head_dim)
-                kh = k_full.transpose(1, 2)  # (b, n_head, len(keys), head_dim)
-                vh = v_full.transpose(1, 2)
-                attn = (qh @ kh.transpose(-2, -1)) / (self.head_dim**0.5)  # (b, n_head, t, len(keys))
-                attn = attn + mask[None, None]
-                attn = attn.softmax(dim=-1)
-                out = (attn @ vh).transpose(1, 2).reshape(b, t, self.d_model)  # (b, t, d_model)
+                    qh = q.transpose(1, 2)  # (b, n_head, t, head_dim)
+                    kh = k_full.transpose(1, 2)  # (b, n_head, len(keys), head_dim)
+                    vh = v_full.transpose(1, 2)
+                    attn = (qh @ kh.transpose(-2, -1)) / (self.head_dim**0.5)  # (b, n_head, t, len(keys))
+                    attn = attn + mask[None, None]
+                    attn = attn.softmax(dim=-1)
+                    out = (attn @ vh).transpose(1, 2).reshape(b, t, self.d_model)  # (b, t, d_model)
+                else:
+                    # E8: shard the KV axis (cache ++ chunk) across cp_size simulated ranks and reconstruct
+                    # the dense attention output. k_full/v_full here are still raw (pre-RoPE) -- RoPE is
+                    # applied per-shard inside cp_window_attention_forward, see notes/designs/E8.md.
+                    from mixle.utils.parallel.context_parallel_spine import cp_shard_kv, cp_window_attention_forward
+
+                    shards = cp_shard_kv(k_full, v_full, key_positions, self.cp_size)
+                    out = cp_window_attention_forward(
+                        q, query_positions, shards, window=self.window, head_dim=self.head_dim
+                    )
+                    # The cp_size==1 path above reassigns k_full to its RoPE'd form before caching (so
+                    # cache_k is RoPE'd, not raw) -- reproduce that exact convention here, per-shard, so
+                    # cp_size>1's cache matches the dense path's cache bit-for-bit (mod the same
+                    # float-non-associativity already flagged for the attention output itself).
+                    k_full = torch.cat(
+                        [_apply_rope(s.k_shard, *_rope_angles(s.key_positions_shard, self.head_dim)) for s in shards],
+                        dim=1,
+                    )
+
                 h = h + self.proj[layer](out)
                 h = h + self.mlp[layer](self.ln2[layer](h))
 
