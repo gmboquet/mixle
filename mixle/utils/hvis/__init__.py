@@ -188,6 +188,12 @@ from mixle.utils.hvis.affinity import (
 from mixle.utils.hvis.affinity import (
     model_log_affinity as model_log_affinity,
 )
+from mixle.utils.hvis.direct import (
+    ModelMap as ModelMap,
+)
+from mixle.utils.hvis.direct import (
+    model_map as model_map,
+)
 from mixle.utils.hvis.embed import (
     dpmsne as dpmsne,
 )
@@ -330,6 +336,8 @@ __all__ = [
     "mixture_coordinates",
     "component_map",
     "barycentric_init",
+    "model_map",
+    "ModelMap",
     "sparse_model_distances",
     "approx_sparse_model_distances",
     "model_knn",
