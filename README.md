@@ -10,18 +10,21 @@
 ![tests](https://img.shields.io/badge/tests-2700%2B-brightgreen)
 [![docs](https://img.shields.io/badge/docs-gmboquet.github.io%2Fmixle-blue)](https://gmboquet.github.io/mixle/)
 
-**Automatic inference for composable models of heterogeneous data.** Every model in mixle is a
-*distribution* with the same five-piece contract, so a neural language model, a classical density, and a
-latent structure (a mixture, an HMM) snap into one object you fit with a single call — and the inference
-*follows from the structure you built*: conjugate, EM, MAP, variational, or MCMC, chosen for you. The same
-fit runs locally on NumPy / Numba / GPU or scales out across Spark, Dask, Ray, or MPI by a `backend=` argument.
+**From data to a deployable model with very little code.** Hand mixle raw records and it works out a model
+and fits it for you. Hand it a plain PyTorch module and it fits in one call — no training loop, no
+batching / eval / convergence boilerplate. Hand it the slow, expensive thing doing a job today — a frontier
+LLM, an API, a rule — and it **distills a small local model that answers the easy cases itself and escalates
+only the hard ones**, with a confidence gate deciding when the local answer is safe and a cost model
+reporting exactly what you saved. Pieces compose without adapter classes or glue code, and the same program
+runs on a laptop or scales across Spark, Dask, Ray, or MPI with one `backend=` argument.
 
-The unit of composition is the distribution: leaves (a Transformer LM, a Gaussian, a Poisson, …) combine
-into tuples, tuples become mixture components, mixtures become HMM emissions, to any depth. A model and the
-estimator that fits it have the same shape — so **what you can express, you can fit**.
+The idea is that you describe *what* you're modeling and mixle handles *how* to fit it. Nest a few pieces —
+a neural language model, a curve, a mixture, an HMM — and a single `optimize(...)` call fits the whole
+thing; the fitting method is chosen from the structure rather than configured by hand. The deeper machinery
+is there when you want it, but you rarely need it to get started.
 
-📖 **Full documentation:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) — guides, the
-distribution catalog, and the API reference.
+📖 **Full documentation:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) — guides, the model
+catalog, and the API reference.
 
 ## Contents
 
@@ -85,10 +88,10 @@ The tiny model handles the easy majority and defers the hard cases, so the blend
 running the large model on a fraction of requests. The same pattern distills tool-callers, extractors, and
 structured classifiers (`mixle.task`).
 
-**A torch module is a distribution — the training code you didn't write.** Any module exposing
-`log_density(batch)` fits with one call: no training loop, no batching/eval/convergence boilerplate, no
-adapter classes. And because the fitted leaf *is* a distribution, it composes with classical families and
-fits jointly by EM.
+**Your torch module just fits — the training code you didn't write.** Any module exposing
+`log_density(batch)` fits with one call: no training loop, no batching / eval / convergence boilerplate, no
+adapter classes. And the fitted module drops straight into a bigger model — mix it with classical pieces
+and one call fits them jointly.
 
 ```python
 import torch
@@ -296,29 +299,32 @@ Normal(free * Field("x") + free * Field("z") + free, free).fit(
 
 ## Package highlights
 
-- **~90 distributions** — scalar (Gaussian, Student-t, Gamma, Beta, Poisson, Categorical, von Mises,
-  Dirichlet, …), multivariate, and combinators (Composite, Record, Sequence, Optional, Conditional) that
-  model a whole heterogeneous record as one distribution.
-- **Latent structure** — mixtures, HMMs (segmental / lookback / tree / quantized), LDA / PLSI, PCFGs,
-  Markov chains, IBP, Pitman-Yor; permutations and graphs (Mallows, matchings, spanning trees, random
-  graphs, graph grammars).
-- **The family contract** — every family is five pieces (`Distribution` / `Sampler` / `Estimator` /
-  `Accumulator` / `DataEncoder`); `optimize(data, est)` fits by EM/MLE, and also takes a distribution
-  prototype or bare data (it infers the estimator).
-- **Frequentist or Bayesian** — the prior is the only switch: no prior is MLE, a conjugate `prior=` returns
-  a closed-form posterior from the same call.
-- **Inference** (`mixle.inference`) — MCMC (MH / HMC / NUTS / VMP), EM variants, Fisher views, and a
-  `Posterior` algebra over latents / params / predictive.
-- **Task distillation** (`mixle.task`) — distill teachers into small local models with conformal
-  calibration, cascades, and routers.
-- **Neural leaves** (`mixle.models`) — a Transformer LM, neural experts, and DPO-tuned leaves, each a
-  distribution that composes and trains by EM; plus GPs, forests, and graphs.
-- **Representations** (`mixle.represent`) — one shared vector space across text / image / signal / structure
-  with learned cross-modal tokenization.
-- **Design of experiments** (`mixle.doe`) — space-filling designs, GP Bayesian optimization, Sobol/Morris
-  sensitivity, and calibration.
-- **MLOps** (`mixle.inference.production`) — reproducible artifacts, drift detection, and a versioned
-  registry + scoring service; full serving via [mixle-mlops](https://github.com/gmboquet/mixle-mlops).
+- **Just pass data** — `optimize(data)` and `mixle.propose(data)` work out a model for you: they pick a
+  family per field, notice when fields depend on each other, and (new in 0.6.3) fit a copula or vine when
+  continuous columns are correlated — heavy joint tails included.
+- **A torch module, fit for you** (`mixle.models`) — any module with a forward pass and an objective fits
+  in one call (`optimize(x, module)`); freeze submodules, swap the optimizer, and get the raw module back —
+  nothing is trapped. Parity with a hand-written loop is pinned by a test.
+- **Distill big models into small ones, and route by cost** (`mixle.task`) — turn a slow, expensive teacher
+  (an LLM, a rule, a human) into a tiny local model; a **conformal gate** decides when the local answer is
+  safe, a **cascade / router** escalates only the hard cases to the teacher, and a **cost model** reports
+  the dollars saved and the break-even volume so the trade-off is a number, not a guess. Soft-label
+  distillation, density-gated and cost-aware routing thresholds, harvest-and-re-distill loops, and multi-tier
+  routing with bandits / RL for the decision policy are all included.
+- **Build by nesting** — mixtures, sequences, records, HMMs (segmental / lookback / tree / quantized), LDA,
+  PCFGs, and more compose to any depth, with parameters tied across the structure by `keys=`; one call fits
+  the whole tree.
+- **A large catalog of building blocks** — around 90 families (continuous, discrete, directional,
+  multivariate), copulas and vines for dependence, permutations and graphs (Mallows, matchings, spanning
+  trees, grammars), and neural leaves: a Transformer LM, energy models, and constrained networks
+  (physics-informed, monotonic, input-convex, conservation-preserving, permutation-invariant).
+- **Scale with a flag** — the same fit runs local (NumPy / Numba / GPU) or distributed
+  (Spark / Dask / Ray / MPI) via `backend=`; the Transformer LM trains sharded (FSDP2) under torchrun.
+- **When you want the full picture** — exact enumeration and rank / quantile queries over discrete and
+  structured models, MCMC and variational inference for posteriors (a `prior=` is the only switch from
+  point estimate to posterior), design of experiments with Bayesian optimization, cross-modal
+  representations, and reproducible artifacts with a serving gateway
+  ([mixle-mlops](https://github.com/gmboquet/mixle-mlops)).
 
 ## Companion projects
 
@@ -374,6 +380,4 @@ Contributions, issues, and discussion are welcome — open a PR or an issue.
 ## License
 
 MIT — see [LICENSE](https://github.com/gmboquet/mixle/blob/main/LICENSE).
-
-mixle began life as **pysparkplug**, developed at Lawrence Livermore National Laboratory 2014–2025 (LLNL-CODE-844837).
 
