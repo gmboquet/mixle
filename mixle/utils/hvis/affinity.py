@@ -699,6 +699,94 @@ def model_log_affinity(
     return log_s
 
 
+def mixture_coordinates(mix_model, data, field_weights=None) -> dict:
+    """The observation decomposition made first-class: ``x -> (posterior, remainder per field)``.
+
+    The mixture describes every observation at two levels, and this returns both explicitly:
+    ``"posterior"`` -- the (n, K) component posterior, literally barycentric coordinates on the
+    simplex whose vertices are the components (the between-cluster geometry); ``"fields"`` -- one
+    entry per flattened leaf field with its per-component log-densities, its within-component
+    coordinates (``"coords"``: native value coordinates where the leaf has them, universal
+    typicality coordinates otherwise), and ``"native"`` recording which. This is exactly the
+    decomposition the 'local' affinity is built from; exposing it lets a caller inspect or plot the
+    two levels directly (e.g. a ternary plot of the posterior for K=3) instead of trusting the
+    embedding blindly.
+    """
+    data = list(data)
+    z, _ = _posteriors_and_loglikes(mix_model, data=data)
+    fields = []
+    for l_f, x_f, native_f in _field_log_density_features(list(mix_model.components), data):
+        fields.append({"log_density": np.asarray(l_f, dtype=np.float64), "coords": x_f, "native": bool(native_f)})
+    if field_weights is not None and len(field_weights) != len(fields):
+        raise ValueError(f"field_weights has {len(field_weights)} entries but the model flattens to {len(fields)}.")
+    return {"posterior": z, "fields": fields}
+
+
+def component_map(z: np.ndarray, emb_dim: int = 2) -> np.ndarray:
+    """Lay out the K components as simplex vertices by their overlap geometry on the data.
+
+    Component confusability is measured from the posteriors alone: the Bhattacharyya coefficient
+    between the components' responsibility profiles, ``BC(k, l) = sum_i sqrt(z_ik z_il) /
+    sqrt(sum_i z_ik * sum_i z_il)`` -- 1 when two components claim exactly the same observations,
+    0 when they never co-claim. Classical MDS on ``-log BC`` gives vertex coordinates in which
+    confusable components sit close. These vertices anchor :func:`barycentric_init`.
+    """
+    z = np.asarray(z, dtype=np.float64)
+    k = z.shape[1]
+    if k == 1:
+        return np.zeros((1, emb_dim))
+    sq = np.sqrt(z)
+    overlap = sq.T @ sq
+    mass = np.sqrt(np.maximum(z.sum(axis=0), 1.0e-12))
+    bc = overlap / np.outer(mass, mass)
+    np.clip(bc, 1.0e-12, 1.0, out=bc)
+    d2 = np.square(-np.log(bc))
+    np.fill_diagonal(d2, 0.0)
+
+    j = np.eye(k) - np.ones((k, k)) / k  # classical MDS: double-center the squared distances
+    b = -0.5 * j @ d2 @ j
+    vals, vecs = np.linalg.eigh(b)
+    order = np.argsort(vals)[::-1][:emb_dim]
+    coords = vecs[:, order] * np.sqrt(np.maximum(vals[order], 0.0))
+    if coords.shape[1] < emb_dim:  # rank-deficient overlap geometry: pad axes with zeros
+        coords = np.column_stack([coords, np.zeros((k, emb_dim - coords.shape[1]))])
+    return coords
+
+
+def barycentric_init(z: np.ndarray, emb_dim: int = 2, *, jitter: float = 0.15, seed: int | None = None) -> np.ndarray:
+    """Initial embedding coordinates from the barycentric reading of the posterior.
+
+    Each observation starts at ``z @ vertices`` -- its posterior-weighted combination of the
+    component vertices from :func:`component_map` -- so the layout's GLOBAL arrangement (which
+    clusters sit near which, where mixed-membership points fall) is decided by the model's own
+    geometry rather than by the random seed, and t-SNE's optimization refines locally from there.
+
+    ``jitter`` is a fraction of the smallest nonzero inter-vertex distance and matters more than it
+    looks: sharp posteriors put every same-regime point EXACTLY on its vertex, and t-SNE from
+    near-coincident starts is chaotic (microscopic noise decides the layout) and slow to develop
+    local structure. The decomposition needs both levels even at init time -- the barycentric base
+    supplies the between geometry, the jitter stands in for the within spread the optimization then
+    makes real. Rescaled to the conventional 1e-4 standard deviation so optimizer dynamics (early
+    exaggeration, learning rates) match the random-init path.
+    """
+    z = np.asarray(z, dtype=np.float64)
+    vertices = component_map(z, emb_dim=emb_dim)
+    y = z @ vertices
+    gaps = [
+        float(np.linalg.norm(vertices[a] - vertices[b]))
+        for a in range(len(vertices))
+        for b in range(a + 1, len(vertices))
+    ]
+    nonzero = [g for g in gaps if g > 0]
+    scale = min(nonzero) if nonzero else 1.0
+    rng = np.random.RandomState(seed)
+    y = y + rng.randn(*y.shape) * (float(jitter) * scale)
+    spread = float(y.std())
+    if spread > 0:
+        y = y * (1.0e-4 / spread)
+    return y
+
+
 def log_affinity_block(
     factors, row_idx: np.ndarray, col_idx: np.ndarray, evidence_cap: float | None = None
 ) -> np.ndarray:

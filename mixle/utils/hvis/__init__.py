@@ -162,6 +162,12 @@ from mixle.utils.hvis.affinity import (
     balanced_factors as balanced_factors,
 )
 from mixle.utils.hvis.affinity import (
+    barycentric_init as barycentric_init,
+)
+from mixle.utils.hvis.affinity import (
+    component_map as component_map,
+)
+from mixle.utils.hvis.affinity import (
     conditional_pmat as conditional_pmat,
 )
 from mixle.utils.hvis.affinity import (
@@ -175,6 +181,9 @@ from mixle.utils.hvis.affinity import (
 )
 from mixle.utils.hvis.affinity import (
     log_affinity_block as log_affinity_block,
+)
+from mixle.utils.hvis.affinity import (
+    mixture_coordinates as mixture_coordinates,
 )
 from mixle.utils.hvis.affinity import (
     model_log_affinity as model_log_affinity,
@@ -318,6 +327,9 @@ __all__ = [
     "model_log_affinity",
     "affinity_health",
     "log_affinity_block",
+    "mixture_coordinates",
+    "component_map",
+    "barycentric_init",
     "sparse_model_distances",
     "approx_sparse_model_distances",
     "model_knn",
