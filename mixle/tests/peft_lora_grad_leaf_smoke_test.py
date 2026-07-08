@@ -37,9 +37,7 @@ class PeftLoraGradLeafSmokeTest(unittest.TestCase):
         rng = np.random.RandomState(0)
         module = build_peft_wrapped_module(seed=0)
 
-        base_before = {
-            k: v.clone() for k, v in module.lm.base_model.model.state_dict().items() if "lora_" not in k
-        }
+        base_before = {k: v.clone() for k, v in module.lm.base_model.model.state_dict().items() if "lora_" not in k}
 
         data = toy_token_sequences(vocab=module.lm.config.vocab_size, block=8, n=32, rng=rng)
         leaf = GradLeaf(module, m_steps=40, lr=0.1)

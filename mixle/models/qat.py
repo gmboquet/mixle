@@ -122,6 +122,17 @@ if _HAS_TORCH:
         def extra_repr(self) -> str:
             return f"bits={self.bits}, in={self.base.in_features}, out={self.base.out_features}"
 
+else:  # pragma: no cover - torch is optional
+
+    class QATWrapper:  # type: ignore[no-redef]
+        """Torch-absent stand-in: keeps ``QATWrapper`` always importable (``mixle.models`` imports it
+        unconditionally, matching every other torch-optional model in this package -- see
+        :class:`~mixle.models.gaussian_process.GaussianProcessRegressor`), raising only when actually
+        constructed, since it must subclass ``nn.Module`` to be real and ``nn`` does not exist here."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise ImportError("QATWrapper requires torch.")
+
 
 def fake_quantize(x: Any, *, bits: int = 4, clip_percentile: float | None = None) -> Any:
     """Straight-through fake-quantize ``x`` to ``bits`` (int4 or int8, per
