@@ -187,6 +187,12 @@ from mixle.task.structured_out import StructuredSolution, solve_structured
 from mixle.task.toolcall import ToolCaller, ToolSpec, distill_tool_caller
 from mixle.task.traces import AgentTrace, AgentTraces, harvest_agent_traces, parse_conversation
 from mixle.task.tune import CalibratedTuneResult, RecipeSpace, TuneResult, tune_recipe, tune_recipe_for_routing
+from mixle.task.vlm import (
+    CallableVLM,
+    OpenAICompatVLM,
+    score_candidate,
+    score_fn_for,
+)
 
 __all__ = [
     "ESCALATE",
@@ -248,6 +254,10 @@ __all__ = [
     "LadderResult",
     "ModelRecommendation",
     "OpenAICompatLLM",
+    "OpenAICompatVLM",
+    "CallableVLM",
+    "score_candidate",
+    "score_fn_for",
     "QuantizedClassifierIO",
     "QuantizedMLP",
     "EditTrial",
