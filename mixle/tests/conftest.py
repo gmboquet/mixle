@@ -261,6 +261,10 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # small stand-in ranges x a length-curriculum bandit round -- several TBPTT training loops, tagged
     # slow for the same reason as context_spine_test.py.
     "long_context_eval_test.py": ("torch", "experimental", "slow"),
+    # E6 retrieval memory over frozen past (mixle/experimental/retrieval_memory_spine.py): several TBPTT
+    # training loops (including a needle-suite baseline comparison), tagged slow for the same reason as
+    # context_spine_test.py / long_context_eval_test.py.
+    "retrieval_memory_spine_test.py": ("torch", "experimental", "slow"),
 }
 
 
