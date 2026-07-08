@@ -11,8 +11,9 @@ import unittest
 
 import numpy as np
 
-from mixle.stats import GaussianDistribution, MixtureDistribution
+from mixle.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator
 from mixle.utils.hvis import StreamingHvis, place_in_atlas
+from mixle.utils.hvis.stream import _mean_log_density
 
 _MODEL = MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(8.0, 1.0)], [0.5, 0.5])
 
@@ -120,6 +121,69 @@ class RefreshAndGrowthTest(unittest.TestCase):
         landmarks, _ = _draw(10, rng)
         with self.assertRaises(ValueError):
             StreamingHvis(_MODEL, landmarks, atlas=np.zeros((3, 2)))
+
+
+class StreamingEstimatorTest(unittest.TestCase):
+    """The model streams too (incremental EM): a NEW cluster arrives, drift trips, and refresh()
+    re-estimates the model from the arrivals' accumulated sufficient statistics -- the third,
+    broad "background" component migrates to explain the new cluster. The estimator must be
+    consistent with the model (same mixture shape), so the capacity for a new cluster is a broad
+    component, not a component count change."""
+
+    def _stream_with_estimator(self, seed=0):
+        # two sharp known clusters + one broad background component that a new cluster can claim
+        model = MixtureDistribution(
+            [GaussianDistribution(0.0, 1.0), GaussianDistribution(8.0, 1.0), GaussianDistribution(4.0, 100.0)],
+            [0.45, 0.45, 0.10],
+        )
+        estimator = MixtureEstimator([GaussianEstimator(), GaussianEstimator(), GaussianEstimator()])
+        rng = np.random.RandomState(seed)
+        landmarks, _ = _draw(30, rng)
+        stream = StreamingHvis(model, landmarks, perplexity=10.0, seed=seed, estimator=estimator, max_its=300)
+        return stream, rng
+
+    def test_refresh_absorbs_a_new_cluster_via_stream_em(self):
+        stream, rng = self._stream_with_estimator(seed=10)
+        new_cluster = [float(v) for v in rng.normal(20.0, 1.0, 40)]
+        stream.add(new_cluster)
+        self.assertTrue(stream.drifted)  # the frozen model cannot explain the arrivals
+        ll_before = _mean_log_density(stream.mix_model, new_cluster)
+
+        report = stream.refresh()
+        self.assertEqual(report["model_updated"], "stream_em")
+        self.assertEqual(report["n_stream_obs_consumed"], 40.0)
+
+        # the M-step moved the broad component onto the new cluster: same data, much higher density
+        ll_after = _mean_log_density(stream.mix_model, new_cluster)
+        self.assertGreater(ll_after, ll_before + 2.0)
+
+        # and the stream no longer reads as drifted under the updated model
+        fresh = [float(v) for v in rng.normal(20.0, 1.0, 25)]
+        stream.add(fresh)
+        self.assertFalse(stream.drifted)
+
+    def test_explicit_model_wins_and_discards_pending_stream_stats(self):
+        stream, rng = self._stream_with_estimator(seed=11)
+        stream.add([float(v) for v in rng.normal(20.0, 1.0, 20)])
+        replacement = MixtureDistribution(
+            [GaussianDistribution(0.0, 1.0), GaussianDistribution(8.0, 1.0), GaussianDistribution(20.0, 1.0)],
+            [0.4, 0.4, 0.2],
+        )
+        report = stream.refresh(mix_model=replacement)
+        self.assertEqual(report["model_updated"], "explicit")
+        self.assertEqual(report["n_stream_obs_consumed"], 0.0)
+        self.assertIs(stream.mix_model, replacement)
+        # the pending statistics were discarded: a follow-up refresh has nothing to consume
+        follow_up = stream.refresh()
+        self.assertIsNone(follow_up["model_updated"])
+
+    def test_no_estimator_means_the_model_never_changes(self):
+        stream, _, rng = _make_stream(seed=12)
+        model_before = stream.mix_model
+        stream.add([float(v) for v in rng.normal(30.0, 1.0, 15)])
+        report = stream.refresh()
+        self.assertIs(stream.mix_model, model_before)
+        self.assertIsNone(report["model_updated"])
 
 
 if __name__ == "__main__":

@@ -23,6 +23,12 @@ required. That turns streaming into three separable, individually-checkable piec
    and Procrustes-aligns the result back onto the old atlas -- and REPORTS the alignment residual,
    so a genuine geometry change is surfaced instead of being animated away.
 
+With an ``estimator``, the MODEL streams too, closing the loop with mixle's native
+sufficient-statistic machinery: each arriving batch is E-stepped once at arrival time under the
+then-current model (``accumulator.seq_update``), and :meth:`StreamingHvis.refresh` performs the
+M-step over reservoir + accumulated stream statistics before re-embedding -- incremental EM
+(Neal & Hinton 1998), one honest sweep per refresh, never a silent full re-fit.
+
 The one thing this deliberately does not promise: a placement is a projection into the atlas's
 geometry. A point unlike anything in the reservoir gets a low-affinity row (and drags the drift
 score down) rather than a secretly-wrong confident position -- check :meth:`drift_score` before
@@ -174,6 +180,15 @@ class StreamingHvis:
             data the factors are built over, which during streaming is ``landmarks + batch`` -- with
             a reasonably sized reservoir the landmarks dominate, but ``'balanced'`` (the default) is
             a pure per-point function of the model and has no such coupling.
+        estimator: optional ``ParameterEstimator`` consistent with ``mix_model``. When given, the
+            MODEL streams too, by incremental EM (Neal & Hinton 1998): every :meth:`add` batch is
+            E-stepped once, at arrival time, under the model current at that moment, and its
+            sufficient statistics accumulate; :meth:`refresh` then performs one M-step over the
+            reservoir's statistics (E-stepped under the current model) combined with the accumulated
+            stream statistics, adopting the re-estimated model before re-embedding. One honest EM
+            sweep per refresh -- NOT full-batch EM to convergence; pass ``refresh(mix_model=...)``
+            with your own fully re-fit model when that is what you want (an explicit model always
+            wins, and discards the pending stream statistics).
         drift_threshold_nats: how far (in nats) the arrivals' mean log-density may fall below the
             landmark reference before :attr:`drifted` trips.
         htsne_kwargs: forwarded to :func:`htsne` for atlas builds and :meth:`refresh`.
@@ -191,6 +206,7 @@ class StreamingHvis:
         affinity: str = "balanced",
         evidence_cap: float | None = 1.0,
         field_weights=None,
+        estimator: Any = None,
         drift_threshold_nats: float = 2.0,
         seed: int | None = None,
         **htsne_kwargs: Any,
@@ -206,6 +222,9 @@ class StreamingHvis:
         self.drift_threshold_nats = float(drift_threshold_nats)
         self.seed = seed
         self._htsne_kwargs = dict(htsne_kwargs)
+        self.estimator = estimator
+        self._stream_acc = estimator.accumulator_factory().make() if estimator is not None else None
+        self._stream_nobs = 0.0
 
         if atlas is not None:
             atlas = np.asarray(atlas, dtype=np.float64)
@@ -278,6 +297,10 @@ class StreamingHvis:
             self._recent_log_density = batch_ll
         else:  # EWMA so one odd batch informs but does not own the verdict
             self._recent_log_density = 0.7 * self._recent_log_density + 0.3 * batch_ll
+        if self._stream_acc is not None:  # incremental EM: E-step now, under the model of this moment
+            enc = self.mix_model.dist_to_encoder().seq_encode(batch)
+            self._stream_acc.seq_update(enc, np.ones(len(batch)), self.mix_model)
+            self._stream_nobs += len(batch)
         return coords
 
     def extend_landmarks(self, data: list, coords: np.ndarray | None = None) -> None:
@@ -312,13 +335,40 @@ class StreamingHvis:
         """Re-embed the landmark reservoir (optionally under an updated model), warm-started from
         the current coordinates and rigidly aligned back onto them.
 
-        Returns ``{"alignment_residual_rms", "atlas_spread", "n_landmarks"}``. A residual small
-        relative to the spread means visual continuity is real; a large one means the embedding
-        geometry genuinely changed and the report says so rather than hiding it in the alignment.
-        Resets the drift accumulator (a refresh is the response to drift, so scoring restarts).
+        With an ``estimator`` configured and stream statistics pending, the model is re-estimated
+        first (one incremental-EM M-step over reservoir + stream statistics) and the re-embed runs
+        under the NEW model. An explicit ``mix_model`` argument always wins and discards the pending
+        stream statistics -- passing both a stream-updated posture and an external model would make
+        the vintage of the statistics unaccountable.
+
+        Returns ``{"alignment_residual_rms", "alignment_scale", "atlas_spread", "n_landmarks",
+        "model_updated", "n_stream_obs_consumed"}``. A residual small relative to the spread means
+        visual continuity is real; a large one means the embedding geometry genuinely changed and
+        the report says so rather than hiding it in the alignment. Resets the drift accumulator
+        (a refresh is the response to drift, so scoring restarts).
         """
+        model_updated = None
+        n_consumed = 0.0
         if mix_model is not None:
             self.mix_model = mix_model
+            model_updated = "explicit"
+            if self._stream_acc is not None:  # stale-vintage stats must not survive an external model
+                n_consumed = 0.0
+                self._stream_acc = self.estimator.accumulator_factory().make()
+                self._stream_nobs = 0.0
+        elif self._stream_acc is not None and self._stream_nobs > 0:
+            acc = self.estimator.accumulator_factory().make()
+            enc = self.mix_model.dist_to_encoder().seq_encode(self.landmark_data)
+            acc.seq_update(enc, np.ones(len(self.landmark_data)), self.mix_model)
+            acc.combine(self._stream_acc.value())
+            stats_dict: dict[Any, Any] = {}
+            acc.key_merge(stats_dict)
+            acc.key_replace(stats_dict)
+            self.mix_model = self.estimator.estimate(None, acc.value())
+            model_updated = "stream_em"
+            n_consumed = self._stream_nobs
+            self._stream_acc = self.estimator.accumulator_factory().make()
+            self._stream_nobs = 0.0
         old = self.atlas
         new = self._embed_landmarks(Y=old.copy())
         aligned, residual, scale = _procrustes_align(new, old)
@@ -330,4 +380,6 @@ class StreamingHvis:
             "alignment_scale": scale,
             "atlas_spread": float(old.std()),
             "n_landmarks": len(self.landmark_data),
+            "model_updated": model_updated,
+            "n_stream_obs_consumed": float(n_consumed),
         }
