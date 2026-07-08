@@ -252,6 +252,7 @@ from mixle.inference.structure import (
     dependency_gain,
     learn_mixture_structure,
     learn_structure,
+    mixture_structure_health,
 )
 from mixle.inference.structure_embedded import EmbeddedStructureModel, learn_structure_embedded
 
@@ -565,6 +566,7 @@ __all__ = [
     # automatic dependency-structure learning for heterogeneous records
     "learn_structure",
     "learn_mixture_structure",
+    "mixture_structure_health",
     "learn_bayesian_network",
     "learn_mixture_bayesian_network",
     "select_mixture_components",
