@@ -18,6 +18,7 @@
    ZeroDivisionError from a plain int division) on n_inner=0 or n_outer=0.
 """
 
+import importlib.util
 import unittest
 
 import numpy as np
@@ -32,6 +33,12 @@ from mixle.doe import (
     propose_next,
     unscented_transform,
 )
+
+# propose_next's default GP surrogate (mixle.models.gaussian_process.GaussianProcessRegressor) is
+# torch-only; the n_candidates<=0 validation tests never reach the GP fit (they raise first), but the
+# two tests that actually run a fit need to be skipped in a torch-free environment like everything
+# else in the suite does.
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 class UnscentedTransformSingularCovarianceTest(unittest.TestCase):
@@ -70,6 +77,7 @@ class ProposeNCandidatesValidationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             propose_next(self.x, self.y, self.bounds, n_candidates=0)
 
+    @unittest.skipUnless(HAS_TORCH, "torch not installed")
     def test_propose_next_still_works_with_a_normal_n_candidates(self):
         point = propose_next(self.x, self.y, self.bounds, n_candidates=16, seed=0)
         self.assertEqual(point.shape, (2,))
@@ -135,6 +143,7 @@ class ExpectedInformationGainZeroBudgetTest(unittest.TestCase):
 
 
 class AskBeforeTellDoesNotProduceNanSurrogateTest(unittest.TestCase):
+    @unittest.skipUnless(HAS_TORCH, "torch not installed")
     def test_a_batch_ask_larger_than_n_init_before_any_tell_does_not_nan_out(self):
         # the exact real path that hit the `nan or 1.0` bug: propose a batch of candidates with an
         # empty y (before any objective evaluation is told back), via active_learning_design's
