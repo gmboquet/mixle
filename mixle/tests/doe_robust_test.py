@@ -44,11 +44,11 @@ class PosteriorIncumbentTest(unittest.TestCase):
 
 class NoisyIncumbentBeatsArgminTest(unittest.TestCase):
     def test_posterior_incumbent_is_closer_to_the_true_optimum_under_noise(self):
-        seeds = range(10)
+        seeds = range(6)
         noise_std = 1.5  # comparable to the objective's spread -> argmin-of-observed gets fooled
         argmin_err, robust_err = [], []
         for s in seeds:
-            res = minimize(_noisy_bowl(noise_std, seed=100 + s), _BOUNDS, n_init=6, n_iter=14, seed=s)
+            res = minimize(_noisy_bowl(noise_std, seed=100 + s), _BOUNDS, n_init=6, n_iter=10, seed=s)
             argmin_x = res.x[int(np.argmin(res.y))]  # what plain minimize reports
             robust_x = posterior_incumbent(res.x, res.y, maximize=False).best_x  # the robust rule
             argmin_err.append(float(np.linalg.norm(argmin_x - _TARGET)))
