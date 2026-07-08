@@ -20,8 +20,9 @@ runs on a laptop or scales across Spark, Dask, Ray, or MPI with one `backend=` a
 
 The idea is that you describe *what* you're modeling and mixle handles *how* to fit it. Nest a few pieces —
 a neural language model, a curve, a mixture, an HMM — and a single `optimize(...)` call fits the whole
-thing; the fitting method is chosen from the structure rather than configured by hand. The deeper machinery
-is there when you want it, but you rarely need it to get started.
+thing. The *how* follows from the structure, not a flag: closed-form where a part has one, gradient descent
+where it's a neural net, EM where there are latent variables, all inside one loop. The deeper machinery is
+there when you want it, but you rarely need it to get started.
 
 📖 **Full documentation:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) — guides, the model
 catalog, and the API reference.
@@ -38,7 +39,7 @@ catalog, and the API reference.
 Python 3.10+ (developed on 3.12). On PyPI as `mixle`; the import name is `mixle`.
 
 ```sh
-pip install mixle          # base (numpy, scipy, mpmath): every distribution + local EM
+pip install mixle          # base (numpy, scipy, mpmath): every family, fit locally
 pip install "mixle[all]"   # acceleration, scale-out, and connectors
 ```
 
@@ -104,7 +105,8 @@ class Flow(torch.nn.Module):        # your module: forward and objective, nothin
 fitted = optimize(x, Flow())        # the loop, batching, eval, convergence — manufactured
 fitted.module                       # the raw torch module back — nothing is trapped
 
-# ...and it composes: a flow and a Gamma in ONE mixture, fit jointly by EM
+# ...and it composes: a flow and a Gamma in ONE mixture, fit jointly in one
+# call (EM over the mixture; gradient for the flow, closed-form for the Gamma)
 mix = MixtureDistribution([fitted, GammaDistribution(2.0, 1.0)], [0.5, 0.5])
 ```
 
@@ -112,7 +114,7 @@ Control never leaves you: freeze submodules with `requires_grad_(False)` (the op
 trainable parameters — train a projection head against a frozen encoder, or a LoRA-style adapter over a
 frozen base), override the objective or optimizer as hooks (`GradLeaf(module, loss=..., optimizer=...)`),
 and parity with a hand-written torch loop is pinned by a test (`mixle/tests/torch_parity_test.py`), not
-claimed in prose. Scaling stays a flag: `optimize(..., backend=...)` distributes EM across
+claimed in prose. Scaling stays a flag: `optimize(..., backend=...)` distributes the fit across
 Spark/Dask/Ray/MPI; the transformer LM's `fit(token_ids, distributed=True, precision="bf16")` runs FSDP2
 (ZeRO-3) with DCP checkpoints under torchrun, and `build_causal_lm(..., gradient_checkpointing=True)`
 trades recompute for activation memory with gradients pinned identical by test. The receipts cover the
@@ -196,7 +198,7 @@ optimize(..., precision="auto")   # mixed precision; stats accumulate in float64
 optimize(..., backend="spark")    # distributed: mp · dask · mpi · ray · lightning
 ```
 
-- The same EM contract runs unchanged on NumPy, Numba, Torch, or a symbolic backend.
+- The same fit runs unchanged on NumPy, Numba, Torch, or a symbolic backend.
 - New frameworks register a factory (`register_encoded_data_backend`) — no dispatch to edit.
 - The planner (`mixle.utils.parallel.planner`) turns a hardware budget into a memory-aware placement
   (chunking, device assignment, Torch sharding) you compute once and reuse.
