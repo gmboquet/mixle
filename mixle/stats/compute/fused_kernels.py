@@ -1399,7 +1399,7 @@ class CompiledMixture:
         if max_iter is not None:
             max_its = max_iter
         if model is None:
-            model = self.initialize(enc, estimator, rng or np.random.RandomState(), p=init_p)
+            model = self.initialize(enc, estimator, rng or np.random.RandomState(0), p=init_p)
 
         old_ll = self.seq_log_density(enc, model).sum()
         for it in range(max_its):

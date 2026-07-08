@@ -2016,7 +2016,7 @@ class RandomVariable:
         ):
             import numpy as _np
 
-            rng = kw.get("rng") or _np.random.RandomState()
+            rng = kw.get("rng") or _np.random.RandomState(0)  # fixed default: an un-seeded fit is deterministic
             seed = self._family.seed_fn(self._args, data, rng, seed_child)
             if seed is not None:
                 kw["prev_estimate"] = seed

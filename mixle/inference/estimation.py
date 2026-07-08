@@ -628,7 +628,9 @@ def optimize(
         init_estimator (Optional[ParameterEstimator]): ParameterEstimator to used to initialize EM algorithm parameters.
             If None, estimator is used. Must be consistent with estimator.
         init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
-        rng (RandomState): RandomState used to set seed for initializing EM algorithm.
+        rng (RandomState): RandomState used to set seed for initializing EM algorithm. ``None`` resolves to
+            a FIXED seed, so an un-seeded ``optimize``/``fit`` is deterministic by default; pass your own
+            RandomState when you WANT different initializations across calls (e.g. hand-rolled restarts).
         vdata (Optional[Sequence[T]]): Optional validation set.
         prev_estimate (Optional[SeqeuenceEncodableProbabilityDistribution]): Optional model estimate used from prior
             fitting. Must be consistent with estimator.
@@ -719,7 +721,7 @@ def optimize(
     estimator = _coerce_estimator(estimator, data)
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
-    rng = RandomState() if rng is None else rng
+    rng = RandomState(0) if rng is None else rng  # fixed default: an un-seeded fit is deterministic
     if precision == "minimal":
         # Data-aware allocation: inspect the data + model and run the reduced-precision fused kernel only
         # where it is verified safe; else stay float64. The accumulation is float64 either way.
@@ -1135,7 +1137,7 @@ class BayesianStreamingEstimator:
             raise ValueError("mode must be 'posterior_carry' or 'forgetting'.")
         self.model = model
         self.init_p = init_p
-        self.rng = RandomState() if rng is None else rng
+        self.rng = RandomState(0) if rng is None else rng  # fixed default: an un-seeded fit is deterministic
         self.num_chunks = num_chunks
         self.step = 0
         self.nobs = 0.0
