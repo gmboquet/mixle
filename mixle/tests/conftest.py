@@ -36,6 +36,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "transport_edge_test.py": ("torch", "stochastic", "slow"),
     "transport_proof_test.py": ("torch", "stochastic", "slow"),
     "task_extract_test.py": ("torch", "slow"),
+    "data_mixture_test.py": ("torch", "slow"),
     "task_constrained_test.py": ("torch", "slow"),
     "task_sft_plan_test.py": ("torch", "slow"),
     "task_plan_refine_test.py": ("torch", "slow"),
