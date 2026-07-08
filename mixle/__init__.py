@@ -18,7 +18,15 @@ The structure (see ``docs/ARCHITECTURE.md`` and ``docs/CAPABILITIES.md``):
 Start with ``mixle.describe(x)`` to see what any object can do.
 """
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
 from mixle.capability import capabilities, catalog, describe, require, summarize, supports, what_supports
+
+try:
+    __version__ = _pkg_version("mixle")
+except PackageNotFoundError:  # running from a source tree with no installed distribution metadata
+    __version__ = "0+unknown"
 
 # Top-level namespaces resolved lazily so ``import mixle`` stays cheap and ``mixle.dist`` / ``mixle.ops``
 # / ``mixle.enumeration`` work without importing the whole tree up front.
@@ -53,6 +61,7 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "__version__",
     "Model",
     "propose",
     "supports",
