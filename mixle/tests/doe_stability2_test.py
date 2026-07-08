@@ -21,6 +21,7 @@ bugs found and fixed here.
    called with zero observations (ask(q > n_init) before any tell()), now a clear, named error.
 """
 
+import importlib.util
 import unittest
 
 import numpy as np
@@ -29,6 +30,11 @@ from mixle.doe import design_diagnostics, fast_indices, polynomial_features
 from mixle.doe.batch import propose_local_penalization
 from mixle.doe.optimizer import BayesianOptimizer
 from mixle.doe.trust_region import _thompson_batch, turbo_minimize
+
+# The default GP surrogate (mixle.models.gaussian_process.GaussianProcessRegressor) is torch-only;
+# tests that actually run a fit need to be skipped in a torch-free environment like everything else
+# in the suite does.
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 class TurboBudgetOvershootTest(unittest.TestCase):
@@ -50,6 +56,7 @@ class TurboBudgetOvershootTest(unittest.TestCase):
 
 
 class ThompsonBatchCandidateValidationTest(unittest.TestCase):
+    @unittest.skipUnless(HAS_TORCH, "torch not installed")
     def test_q_greater_than_candidates_raises_instead_of_silently_truncating(self):
         from mixle.doe.bayesopt import _fit_surrogate
 
@@ -70,6 +77,7 @@ class LocalPenalizationDuplicateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             propose_local_penalization(x, y, [(0.0, 1.0), (0.0, 1.0)], q=10, n_candidates=5, seed=0)
 
+    @unittest.skipUnless(HAS_TORCH, "torch not installed")
     def test_q_within_n_candidates_still_works(self):
         rng = np.random.RandomState(0)
         x = rng.uniform(0, 1, size=(5, 2))
@@ -124,6 +132,7 @@ class AskBeforeTellDuplicateInitPointsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             opt.ask(1)
 
+    @unittest.skipUnless(HAS_TORCH, "torch not installed")
     def test_the_normal_ask_tell_ask_workflow_still_works(self):
         opt = BayesianOptimizer([(0.0, 1.0), (0.0, 1.0)], n_init=3, seed=0)
         for _ in range(3):
