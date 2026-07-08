@@ -793,6 +793,8 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         prior: SequenceEncodableProbabilityDistribution | None = None,
         min_covar: float | None = None,
         ridge: float | None = None,
+        track_conditioning: bool = False,
+        degenerate_ratio: float = 1.0e-6,
     ) -> None:
         """MultivariateGaussianEstimator object for estimating multivariate normal distribution from sufficient stats.
 
@@ -814,6 +816,16 @@ class MultivariateGaussianEstimator(ParameterEstimator):
                 ``eps = max(min_covar, ridge * trace(cov) / d)`` so a singular / non-finite
                 covariance (a component holding < d points) cannot break the Cholesky factor.
                 Bias is negligible at the defaults.
+            track_conditioning (bool): Opt-in numerics-conditioning receipt. When ``True``,
+                ``estimate`` computes the eigenspectrum of the RAW (pre-ridge) empirical covariance
+                and attaches it to the returned distribution as ``.conditioning_receipt`` -- a
+                :class:`~mixle.stats.compute.error_receipts.ConditioningReceipt` with the eigenvalues,
+                condition number, and a near-degenerate-variance flag. Computed on the raw scatter
+                (not the ridge-regularized one) so the receipt reports the DATA's true conditioning
+                rather than the numerical safety net masking it. ``False`` by default (no overhead).
+            degenerate_ratio (float): Smallest/largest covariance-eigenvalue ratio below which
+                ``track_conditioning`` flags the fit as near-degenerate. Only used when
+                ``track_conditioning=True``.
 
         Attributes:
             dim (int): Dimension of multivariate normal.
@@ -844,6 +856,8 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         self.has_conj_prior = isinstance(prior, NormalWishartDistribution)
         self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
         self.ridge = 1.0e-6 if ridge is None else float(ridge)
+        self.track_conditioning = track_conditioning
+        self.degenerate_ratio = float(degenerate_ratio)
 
     def accumulator_factory(self) -> "MultivariateGaussianAccumulatorFactory":
         """Returns a MultivariateGaussianAccumulatorFactory built from the estimator's attributes."""
@@ -922,9 +936,11 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             # rather than dividing by zero and emitting a NaN mean.
             d = self.dim if self.dim is not None else len(suff_stat[0])
             mu = np.asarray(self.prior_mu, dtype=float) if self.prior_mu is not None else vec.zeros(d)
-            covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.eye(d)
-            covar = self._regularize_covar(covar)
-            return MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.keys)
+            raw_covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.eye(d)
+            covar = self._regularize_covar(raw_covar)
+            dist = MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.keys)
+            self._attach_conditioning_receipt(dist, raw_covar)
+            return dist
 
         if pc1 is not None and self.prior_mu is not None:
             mu = (suff_stat[0] + pc1 * self.prior_mu) / (nobs + pc1)
@@ -932,13 +948,23 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             mu = suff_stat[0] / nobs
 
         if pc2 is not None and self.prior_covar is not None:
-            covar = (suff_stat[1] + (pc2 * self.prior_covar) - vec.outer(mu, mu * nobs)) / (nobs + pc2)
+            raw_covar = (suff_stat[1] + (pc2 * self.prior_covar) - vec.outer(mu, mu * nobs)) / (nobs + pc2)
         else:
-            covar = (suff_stat[1] / nobs) - vec.outer(mu, mu)
+            raw_covar = (suff_stat[1] / nobs) - vec.outer(mu, mu)
 
-        covar = self._regularize_covar(covar)
+        covar = self._regularize_covar(raw_covar)
 
-        return MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.keys)
+        dist = MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.keys)
+        self._attach_conditioning_receipt(dist, raw_covar)
+        return dist
+
+    def _attach_conditioning_receipt(self, dist: "MultivariateGaussianDistribution", raw_covar: np.ndarray) -> None:
+        """Opt-in: compute and attach a numerics-conditioning receipt to ``dist`` (see ``__init__``)."""
+        if not self.track_conditioning:
+            return
+        from mixle.stats.compute.error_receipts import conditioning_receipt
+
+        dist.conditioning_receipt = conditioning_receipt(raw_covar, degenerate_ratio=self.degenerate_ratio)
 
     def _regularize_covar(self, covar: np.ndarray) -> np.ndarray:
         """P1 covariance ridge: cov <- cov + eps*I with eps = max(min_covar, ridge*trace/d).
