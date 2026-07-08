@@ -38,6 +38,9 @@ def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
     *shape* need not be written twice:
 
       * a :class:`ParameterEstimator` -- used as-is (the historical contract);
+      * a bare **torch module** with ``log_density(batch)`` -- wrapped as a
+        :class:`~mixle.models.grad_leaf.GradLeaf`, so ``optimize(x, module)`` needs no contract
+        code at all;
       * a distribution **prototype** (any :class:`ProbabilityDistribution`) -- its matching
         estimator tree is taken from ``proto.estimator()``, so you build the structure once and fit
         it directly;
@@ -46,6 +49,13 @@ def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
     """
     if isinstance(estimator, ProbabilityDistribution):
         return estimator.estimator()
+    if hasattr(estimator, "log_density") and callable(getattr(estimator, "state_dict", None)):
+        # a bare torch density module (scores batches, carries parameters): fit it as a gradient
+        # leaf -- the module owns forward and objective, the manufactured contract owns the loop.
+        from mixle.models.grad_leaf import GradLeaf, looks_like_torch_module
+
+        if looks_like_torch_module(estimator):
+            return GradLeaf(estimator).estimator()
     if estimator is None:
         if data is None:
             raise ValueError(

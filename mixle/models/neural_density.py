@@ -21,15 +21,8 @@ from typing import Any
 
 import numpy as np
 
-from mixle.models._neural_serial import check_finite, decode_module, encode_module
-from mixle.stats.compute.pdist import (
-    DataSequenceEncoder,
-    DistributionSampler,
-    ParameterEstimator,
-    SequenceEncodableProbabilityDistribution,
-    SequenceEncodableStatisticAccumulator,
-    StatisticAccumulatorFactory,
-)
+from mixle.models._neural_serial import decode_module, encode_module
+from mixle.models.grad_leaf import GradEstimator, GradLeaf
 
 
 def _torch() -> Any:
@@ -38,53 +31,25 @@ def _torch() -> Any:
     return torch
 
 
-class NeuralDensity(SequenceEncodableProbabilityDistribution):
-    """Wrap a torch density ``module`` (``module.log_density(x) -> (n,)``) as a composable mixle distribution."""
+class NeuralDensity(GradLeaf):
+    """Wrap a torch density ``module`` (``module.log_density(x) -> (n,)``) as a composable mixle distribution.
 
-    __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
-
-    def __init__(
-        self, module: Any, *, m_steps: int = 60, lr: float = 5e-3, device: str = "cpu", name: str | None = None
-    ) -> None:
-        self.module = module
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
-        self.device = device
-        self.name = name
-
-    def __str__(self) -> str:
-        return f"NeuralDensity({type(self.module).__name__})"
-
-    def log_density(self, x: Any) -> float:
-        return float(self.seq_log_density(np.atleast_2d(np.asarray(x, dtype=float)))[0])
-
-    def seq_log_density(self, x: Any) -> np.ndarray:
-        torch = _torch()
-        xx = check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "NeuralDensity.seq_log_density")
-        self.module.to(self.device).eval()
-        xt = torch.as_tensor(xx, dtype=torch.float32, device=self.device)
-        with torch.no_grad():
-            return self.module.log_density(xt).cpu().numpy().reshape(-1)
-
-    def sampler(self, seed: int | None = None) -> NeuralDensitySampler:
-        return NeuralDensitySampler(self, seed)
+    A thin named subclass of :class:`~mixle.models.grad_leaf.GradLeaf` -- the generic bridge owns the
+    manufactured contract (buffer accumulator, array encoder, gradient M-step, sampler); this class owns
+    only its name, its JSON payload, and its ready-module builders below. ``loss``/``optimizer`` hooks
+    pass through (see the grad_leaf module docstring for the control story).
+    """
 
     def estimator(self, pseudo_count: float | None = None) -> NeuralDensityEstimator:
-        return NeuralDensityEstimator(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
-
-    def dist_to_encoder(self) -> NeuralDensityEncoder:
-        return NeuralDensityEncoder()
-
-    # --- serialization: persist hparams + the module (as portable bytes); registered below so a mixture holding
-    # this leaf round-trips through to_dict/to_json/pickle as well. ---
-    def __pysp_getstate__(self) -> dict[str, Any]:
-        state = dict(self.__dict__)
-        state["module"] = encode_module(self.module)
-        return state
-
-    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
-        self.__dict__.update(state)
-        self.module = decode_module(state["module"])
+        return NeuralDensityEstimator(
+            self.module,
+            m_steps=self.m_steps,
+            lr=self.lr,
+            device=self.device,
+            name=self.name,
+            loss=self.loss,
+            optimizer=self.optimizer,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -106,113 +71,19 @@ class NeuralDensity(SequenceEncodableProbabilityDistribution):
         )
 
 
-class NeuralDensitySampler(DistributionSampler):
-    def __init__(self, dist: NeuralDensity, seed: int | None = None) -> None:
-        self.dist = dist
-        self.rng = np.random.RandomState(seed)
-
-    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
-        torch = _torch()
-        n = int(size or 1)
-        self.dist.module.to(self.dist.device).eval()
-        torch.manual_seed(int(self.rng.randint(0, 2**31 - 1)))
-        with torch.no_grad():
-            out = self.dist.module.sample(n).cpu().numpy()
-        return out if (size is not None) else out[0]
-
-
-class NeuralDensityEncoder(DataSequenceEncoder):
-    def __str__(self) -> str:
-        return "NeuralDensityEncoder"
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, NeuralDensityEncoder)
-
-    def seq_encode(self, data: list) -> np.ndarray:
-        return np.array([np.atleast_1d(np.asarray(x, dtype=float)) for x in data])
-
-
-class NeuralDensityAccumulator(SequenceEncodableStatisticAccumulator):
-    """Buffers the (responsibility-weighted) data for the M-step -- the weights are the E-step's soft counts."""
-
-    def __init__(self) -> None:
-        self.x: list = []
-        self.w: list = []
-
-    # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
-    def update(self, x: Any, weight: float, estimate: Any) -> None:
-        self.x.append(np.atleast_1d(np.asarray(x, dtype=float))[None, ...])
-        self.w.append(np.asarray([float(weight)], dtype=float))
-
-    def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
-        xb = np.asarray(enc, dtype=float)
-        self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
-        self.w.append(np.asarray(weights, dtype=float).ravel())
-
-    def initialize(self, x: Any, weight: float, rng: Any) -> None:
-        self.update(x, weight, None)
-
-    def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
-        self.seq_update(enc, weights, None)
-
-    def combine(self, other: Any) -> NeuralDensityAccumulator:
-        xs, ws = other
-        if len(xs):
-            self.x.append(np.asarray(xs, dtype=float))
-            self.w.append(np.asarray(ws, dtype=float).ravel())
-        return self
-
-    def value(self) -> tuple:
-        x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
-        w = np.concatenate(self.w) if self.w else np.zeros((0,))
-        return (x, w)
-
-    def from_value(self, v: tuple) -> NeuralDensityAccumulator:
-        x, w = v
-        self.x = [np.asarray(x, dtype=float)] if len(x) else []
-        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
-        return self
-
-    def acc_to_encoder(self) -> NeuralDensityEncoder:
-        return NeuralDensityEncoder()
-
-
-class NeuralDensityAccumulatorFactory(StatisticAccumulatorFactory):
-    def make(self) -> NeuralDensityAccumulator:
-        return NeuralDensityAccumulator()
-
-
-class NeuralDensityEstimator(ParameterEstimator):
+class NeuralDensityEstimator(GradEstimator):
     """M-step: responsibility-weighted MLE -- ``max sum_i w_i log p(x_i)`` by gradient ascent on the module (warm)."""
 
-    def __init__(
-        self, module: Any, *, m_steps: int = 60, lr: float = 5e-3, device: str = "cpu", name: str | None = None
-    ) -> None:
-        self.module = module
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
-        self.device = device
-        self.name = name
-
-    def accumulator_factory(self) -> NeuralDensityAccumulatorFactory:
-        return NeuralDensityAccumulatorFactory()
-
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralDensity:
-        torch = _torch()
-        xs, ws = suff_stat
-        if len(xs) == 0:
-            return NeuralDensity(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
-        x = torch.as_tensor(np.asarray(xs, dtype=float), dtype=torch.float32, device=self.device)
-        w = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32, device=self.device)
-        w = w / w.sum().clamp(min=1e-8)
-        self.module.to(self.device).train()
-        opt = torch.optim.Adam(self.module.parameters(), lr=self.lr)
-        for _ in range(self.m_steps):
-            opt.zero_grad()
-            loss = -(w * self.module.log_density(x)).sum()  # weighted negative log-likelihood
-            loss.backward()
-            opt.step()
-        return NeuralDensity(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
+    def _leaf(self) -> NeuralDensity:
+        return NeuralDensity(
+            self.module,
+            m_steps=self.m_steps,
+            lr=self.lr,
+            device=self.device,
+            name=self.name,
+            loss=self.loss,
+            optimizer=self.optimizer,
+        )
 
 
 # --- ready density modules to wrap ---------------------------------------------------------------------------
