@@ -1154,7 +1154,7 @@ class CompositeDataEncoder(DataSequenceEncoder):
 
         """
         count = len(self.encoders)
-        if not isinstance(x, (list, tuple)):
+        if not isinstance(x, (list, tuple, np.ndarray)):
             raise ContractError(
                 "CompositeDistribution.seq_encode",
                 "a sequence of %d-tuples" % count,
@@ -1162,7 +1162,7 @@ class CompositeDataEncoder(DataSequenceEncoder):
                 "pass a list/tuple of observations, e.g. [(x0, x1, ...), ...].",
             )
         for row_idx, u in enumerate(x):
-            if not isinstance(u, (tuple, list)):
+            if not isinstance(u, (tuple, list, np.ndarray)):
                 raise ContractError(
                     "CompositeDistribution.dists (row %d)" % row_idx,
                     "a tuple of %d fields (one per component distribution)" % count,

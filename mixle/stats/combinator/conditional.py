@@ -1489,7 +1489,7 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
             Returns rv (see description for details)
 
         """
-        if not isinstance(x, (list, tuple)):
+        if not isinstance(x, (list, tuple, np.ndarray)):
             raise ContractError(
                 "ConditionalDistribution.seq_encode",
                 "a sequence of (given, value) pairs",
@@ -1503,14 +1503,14 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
 
         for i in range(len(x)):
             xx = x[i]
-            if not isinstance(xx, (tuple, list)) or len(xx) != 2:
+            if not isinstance(xx, (tuple, list, np.ndarray)) or len(xx) != 2:
                 raise ContractError(
                     "ConditionalDistribution.seq_encode (row %d)" % i,
                     "a 2-tuple (given_value, observed_value)",
                     "%s%s"
                     % (
                         type(xx).__name__,
-                        " of length %d" % len(xx) if isinstance(xx, (tuple, list)) else "",
+                        " of length %d" % len(xx) if isinstance(xx, (tuple, list, np.ndarray)) else "",
                     ),
                     "each row must be a (given, value) pair -- check row %d for a missing/extra field." % i,
                 )

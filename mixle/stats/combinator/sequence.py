@@ -1216,7 +1216,7 @@ class SequenceDataEncoder(DataSequenceEncoder):
         Returns:
 
         """
-        if not isinstance(x, (list, tuple)):
+        if not isinstance(x, (list, tuple, np.ndarray)):
             raise ContractError(
                 "SequenceDistribution.seq_encode",
                 "a sequence of sequences (one inner sequence per observation)",

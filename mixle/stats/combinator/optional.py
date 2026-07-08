@@ -699,14 +699,14 @@ class OptionalEstimator(ParameterEstimator):
                 "pass the 2-tuple produced by OptionalEstimatorAccumulator.value(), not a bare base "
                 "sufficient statistic.",
             )
-        if not isinstance(suff_stat[0], (tuple, list)) or len(suff_stat[0]) != 2:
+        if not isinstance(suff_stat[0], (tuple, list, np.ndarray)) or len(suff_stat[0]) != 2:
             raise ContractError(
                 "OptionalEstimator.estimate(suff_stat[0])",
                 "a 2-element [missing_weight, present_weight] pair",
                 "%s%s"
                 % (
                     type(suff_stat[0]).__name__,
-                    " of length %d" % len(suff_stat[0]) if isinstance(suff_stat[0], (tuple, list)) else "",
+                    " of length %d" % len(suff_stat[0]) if isinstance(suff_stat[0], (tuple, list, np.ndarray)) else "",
                 ),
                 "suff_stat[0] must be the [missing_weight, present_weight] pair produced by "
                 "OptionalEstimatorAccumulator.value().",
@@ -786,7 +786,7 @@ class OptionalDataEncoder(DataSequenceEncoder):
             return False
 
     def seq_encode(self, x: Sequence[T]) -> tuple[int, np.ndarray, np.ndarray, Any]:
-        if not isinstance(x, (list, tuple)):
+        if not isinstance(x, (list, tuple, np.ndarray)):
             raise ContractError(
                 "OptionalDistribution.seq_encode",
                 "a sequence of observations (or the missing-value sentinel)",

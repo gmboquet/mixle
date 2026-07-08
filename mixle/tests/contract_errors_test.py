@@ -17,6 +17,8 @@ import unittest
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
+
 import mixle.stats as stats
 from mixle.stats.compute.pdist import ContractError
 
@@ -225,6 +227,39 @@ class ContractErrorsTestCase(unittest.TestCase):
                 )
                 self.assertIn("expected", message)
                 self.assertIn("got", message)
+
+
+class ContractErrorDoesNotNarrowValidInputTestCase(unittest.TestCase):
+    """Regression guard: the card's "Do NOT change what counts as VALID input" constraint.
+
+    A first version of these contract-boundary checks used ``isinstance(x, (list, tuple))``,
+    which silently rejected ``numpy.ndarray`` -- previously valid, in-production-use input (caught
+    by a full-suite run surfacing real failures in mixle/tests/wave_mvn_test.py and
+    mixle/tests/backend_scoring_test.py that this narrower catalog test above did not exercise).
+    These cases pin that ndarray input keeps working at every touched seq_encode/estimate boundary.
+    """
+
+    def test_mixture_seq_encode_accepts_ndarray(self):
+        _mixture_encoder().seq_encode(np.array([0.1, 0.2, 0.3]))
+
+    def test_sequence_seq_encode_accepts_ndarray_of_sequences(self):
+        _sequence_encoder().seq_encode(np.array([[0.1, 0.2], [0.3, 0.4]]))
+
+    def test_optional_seq_encode_accepts_ndarray(self):
+        _optional_encoder().seq_encode(np.array([0.1, 0.2, 0.3]))
+
+    def test_composite_seq_encode_accepts_ndarray_of_tuples(self):
+        _composite_encoder().seq_encode(np.array([("a", "x"), ("b", "y")], dtype=object))
+
+    def test_conditional_seq_encode_accepts_ndarray_of_tuples(self):
+        _conditional_encoder().seq_encode(np.array([("a", 1.0), ("a", 2.0)], dtype=object))
+
+    def test_optional_estimator_accepts_ndarray_weight_pair(self):
+        est = _optional_estimator()
+        base_estimator = _GAUSS.estimator()
+        acc = base_estimator.accumulator_factory().make()
+        acc.seq_update(_GAUSS.dist_to_encoder().seq_encode([1.0, 2.0]), np.ones(2), None)
+        est.estimate(3.0, (np.array([1.0, 2.0]), acc.value()))
 
 
 if __name__ == "__main__":

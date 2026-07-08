@@ -1804,7 +1804,7 @@ class MixtureDataEncoder(DataSequenceEncoder):
             Encoded sequence (single shared encoding, or a per-component wrapper).
 
         """
-        if not isinstance(x, (list, tuple)):
+        if not isinstance(x, (list, tuple, np.ndarray)):
             raise ContractError(
                 "MixtureDistribution.seq_encode",
                 "a sequence of observations (all components share the same observation type)",
