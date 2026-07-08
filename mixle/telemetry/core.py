@@ -26,6 +26,7 @@ EVENT_KINDS = (
     "reason",  # a reasoning action (retrieve/compute/simulate/create/delegate/escalate) + its gain
     "pool_job",  # a PoolJob lifecycle event: submit/start/finish, cost, duration
     "drift",  # a drift alarm on a served artifact
+    "em_round",  # one worker-rank's E/M-step timing+bytes+accumulator size for one distributed EM round
 )
 
 _TIME_KEY = "_wall_time"  # tests inject a deterministic clock via record(when=...)
