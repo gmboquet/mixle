@@ -22,6 +22,7 @@ from numpy.random import RandomState
 from mixle.enumeration.algorithms import freeze, merge_enumerators
 from mixle.stats.combinator.composite import _distribute_child_prior
 from mixle.stats.compute.pdist import (
+    ContractError,
     DataSequenceEncoder,
     DistributionEnumerator,
     DistributionSampler,
@@ -31,6 +32,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
     child_enumerator,
+    prefix_contract_error,
 )
 from mixle.utils.special import digamma
 
@@ -684,6 +686,32 @@ class OptionalEstimator(ParameterEstimator):
             rv += float(self.prior.log_density(model.p))
         return rv
 
+    def _validate_suff_stat(self, suff_stat: tuple[list[float], SS] | None) -> None:
+        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 2:
+            raise ContractError(
+                "OptionalEstimator.estimate(suff_stat)",
+                "a 2-tuple ([missing_weight, present_weight], base_suff_stat)",
+                "%s%s"
+                % (
+                    type(suff_stat).__name__,
+                    " of length %d" % len(suff_stat) if isinstance(suff_stat, (tuple, list)) else "",
+                ),
+                "pass the 2-tuple produced by OptionalEstimatorAccumulator.value(), not a bare base "
+                "sufficient statistic.",
+            )
+        if not isinstance(suff_stat[0], (tuple, list)) or len(suff_stat[0]) != 2:
+            raise ContractError(
+                "OptionalEstimator.estimate(suff_stat[0])",
+                "a 2-element [missing_weight, present_weight] pair",
+                "%s%s"
+                % (
+                    type(suff_stat[0]).__name__,
+                    " of length %d" % len(suff_stat[0]) if isinstance(suff_stat[0], (tuple, list)) else "",
+                ),
+                "suff_stat[0] must be the [missing_weight, present_weight] pair produced by "
+                "OptionalEstimatorAccumulator.value().",
+            )
+
     def _estimate_conjugate(self, suff_stat: tuple[list[float], SS]) -> OptionalDistribution:
         """Closed-form Beta conjugate posterior update on ``p`` (carried forward as the fitted prior).
 
@@ -692,9 +720,13 @@ class OptionalEstimator(ParameterEstimator):
         """
         from mixle.stats.univariate.continuous.beta import BetaDistribution
 
+        self._validate_suff_stat(suff_stat)
         psum = suff_stat[0][0]
         nsum = suff_stat[0][1]
-        dist = self.estimator.estimate(nsum, suff_stat[1])
+        try:
+            dist = self.estimator.estimate(nsum, suff_stat[1])
+        except ContractError as e:
+            raise prefix_contract_error("OptionalDistribution.dist", e) from None
 
         a, b = self.prior.get_parameters()
         new_a = a + psum
@@ -713,7 +745,11 @@ class OptionalEstimator(ParameterEstimator):
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
 
-        dist = self.estimator.estimate(suff_stat[0][1], suff_stat[1])
+        self._validate_suff_stat(suff_stat)
+        try:
+            dist = self.estimator.estimate(suff_stat[0][1], suff_stat[1])
+        except ContractError as e:
+            raise prefix_contract_error("OptionalDistribution.dist", e) from None
 
         if self.pseudo_count is not None and self.est_prob:
             return OptionalDistribution(
@@ -750,6 +786,14 @@ class OptionalDataEncoder(DataSequenceEncoder):
             return False
 
     def seq_encode(self, x: Sequence[T]) -> tuple[int, np.ndarray, np.ndarray, Any]:
+        if not isinstance(x, (list, tuple)):
+            raise ContractError(
+                "OptionalDistribution.seq_encode",
+                "a sequence of observations (or the missing-value sentinel)",
+                "%s" % type(x).__name__,
+                "pass a list/tuple of observations, e.g. [x0, missing_value, x2, ...].",
+            )
+
         nz_idx = []
         nz_val = []
         z_idx = []
@@ -769,7 +813,19 @@ class OptionalDataEncoder(DataSequenceEncoder):
                     nz_idx.append(i)
                     nz_val.append(v)
 
-        enc_data = self.encoder.seq_encode(nz_val)
+        try:
+            enc_data = self.encoder.seq_encode(nz_val)
+        except ContractError as e:
+            raise prefix_contract_error("OptionalDistribution.dist", e) from None
+        except (TypeError, ValueError, IndexError, KeyError) as e:
+            raise ContractError(
+                "OptionalDistribution.dist",
+                "every present (non-missing) value compatible with the base distribution's data type",
+                "a value that raised %s: %s" % (type(e).__name__, e),
+                "check that every present value matches the data type expected by the base "
+                "distribution (%s); missing entries should equal missing_value=%r."
+                % (self.encoder, self.missing_value),
+            ) from e
 
         nz_idx = np.asarray(nz_idx, dtype=int)
         z_idx = np.asarray(z_idx, dtype=int)

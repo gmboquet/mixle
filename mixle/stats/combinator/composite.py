@@ -28,6 +28,7 @@ from mixle.enumeration.algorithms import (
 )
 from mixle.inference.fisher import Path
 from mixle.stats.compute.pdist import (
+    ContractError,
     DataSequenceEncoder,
     DistributionEnumerator,
     DistributionSampler,
@@ -37,6 +38,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
     child_enumerator,
+    prefix_contract_error,
 )
 
 T = tuple[Any, ...]
@@ -1056,7 +1058,30 @@ class CompositeEstimator(ParameterEstimator):
                 number of observation (nobs).
 
         """
-        return CompositeDistribution(tuple([est.estimate(nobs, ss) for est, ss in zip(self.estimators, suff_stat)]))
+        if not isinstance(suff_stat, (tuple, list)):
+            raise ContractError(
+                "CompositeEstimator.estimate(suff_stat)",
+                "a tuple of %d component sufficient statistics" % self.count,
+                "%s" % type(suff_stat).__name__,
+                "pass the tuple produced by CompositeAccumulator.value(), not a single component's "
+                "sufficient statistic.",
+            )
+        if len(suff_stat) != self.count:
+            raise ContractError(
+                "CompositeEstimator.estimate(suff_stat)",
+                "a tuple of length %d (one sufficient statistic per component)" % self.count,
+                "a tuple of length %d" % len(suff_stat),
+                "the suff_stat tuple must have exactly %d entries, matching CompositeEstimator's "
+                "%d component estimators -- a mismatched CompositeAccumulator/CompositeEstimator "
+                "pairing is the usual cause." % (self.count, self.count),
+            )
+        components = []
+        for i, (est, ss) in enumerate(zip(self.estimators, suff_stat)):
+            try:
+                components.append(est.estimate(nobs, ss))
+            except ContractError as e:
+                raise prefix_contract_error("CompositeEstimator.estimators[%d]" % i, e) from None
+        return CompositeDistribution(tuple(components))
 
 
 class CompositeDataEncoder(DataSequenceEncoder):
@@ -1128,10 +1153,47 @@ class CompositeDataEncoder(DataSequenceEncoder):
             for all observations of component i from x.
 
         """
+        count = len(self.encoders)
+        if not isinstance(x, (list, tuple)):
+            raise ContractError(
+                "CompositeDistribution.seq_encode",
+                "a sequence of %d-tuples" % count,
+                "%s" % type(x).__name__,
+                "pass a list/tuple of observations, e.g. [(x0, x1, ...), ...].",
+            )
+        for row_idx, u in enumerate(x):
+            if not isinstance(u, (tuple, list)):
+                raise ContractError(
+                    "CompositeDistribution.dists (row %d)" % row_idx,
+                    "a tuple of %d fields (one per component distribution)" % count,
+                    "%s" % type(u).__name__,
+                    "wrap the observation in a %d-tuple matching the component distributions." % count,
+                )
+            if len(u) != count:
+                raise ContractError(
+                    "CompositeDistribution.dists (row %d)" % row_idx,
+                    "a tuple of length %d" % count,
+                    "a tuple of length %d" % len(u),
+                    "check row %d for a missing or extra field -- every row must have exactly %d "
+                    "entries, one per component distribution." % (row_idx, count),
+                )
+
         enc_data = []
 
         for i, encoder in enumerate(self.encoders):
-            enc_data.append(encoder.seq_encode([u[i] for u in x]))
+            field_path = "CompositeDistribution.dists[%d]" % i
+            try:
+                enc_data.append(encoder.seq_encode([u[i] for u in x]))
+            except ContractError as e:
+                raise prefix_contract_error(field_path, e) from None
+            except (TypeError, ValueError, IndexError, KeyError) as e:
+                raise ContractError(
+                    field_path,
+                    "data compatible with component %d's data type" % i,
+                    "data that raised %s: %s" % (type(e).__name__, e),
+                    "check that field %d of every row matches the data type expected by component %d "
+                    "(%s)." % (i, i, encoder),
+                ) from e
 
         return tuple(enc_data)
 

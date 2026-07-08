@@ -35,6 +35,7 @@ from mixle.stats.combinator.null_dist import (
     NullEstimator,
 )
 from mixle.stats.compute.pdist import (
+    ContractError,
     DataSequenceEncoder,
     DistributionEnumerator,
     DistributionSampler,
@@ -44,6 +45,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
     child_enumerator,
+    prefix_contract_error,
 )
 
 T = TypeVar("T")  # Data type of Sequence distribution dist.
@@ -1096,18 +1098,39 @@ class SequenceEstimator(ParameterEstimator):
         return SequenceAccumulatorFactory(dist_factory, len_factory, self.len_normalized, self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[Any, Any | None]) -> SequenceDistribution:
+        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 2:
+            raise ContractError(
+                "SequenceEstimator.estimate(suff_stat)",
+                "a 2-tuple (entry_suff_stat, length_suff_stat)",
+                "%s%s"
+                % (
+                    type(suff_stat).__name__,
+                    " of length %d" % len(suff_stat) if isinstance(suff_stat, (tuple, list)) else "",
+                ),
+                "pass the 2-tuple produced by SequenceAccumulator.value(), not a bare entry sufficient statistic.",
+            )
+
+        try:
+            entry_dist = self.estimator.estimate(nobs, suff_stat[0])
+        except ContractError as e:
+            raise prefix_contract_error("SequenceEstimator.estimator", e) from None
+
         if isinstance(self.len_estimator, NullEstimator):
             return SequenceDistribution(
-                self.estimator.estimate(nobs, suff_stat[0]),
+                entry_dist,
                 len_dist=self.len_dist,
                 len_normalized=self.len_normalized,
                 name=self.name,
             )
 
         else:
+            try:
+                len_dist = self.len_estimator.estimate(nobs, suff_stat[1])
+            except ContractError as e:
+                raise prefix_contract_error("SequenceEstimator.len_estimator", e) from None
             return SequenceDistribution(
-                self.estimator.estimate(nobs, suff_stat[0]),
-                len_dist=self.len_estimator.estimate(nobs, suff_stat[1]),
+                entry_dist,
+                len_dist=len_dist,
                 len_normalized=self.len_normalized,
                 name=self.name,
             )
@@ -1193,16 +1216,36 @@ class SequenceDataEncoder(DataSequenceEncoder):
         Returns:
 
         """
+        if not isinstance(x, (list, tuple)):
+            raise ContractError(
+                "SequenceDistribution.seq_encode",
+                "a sequence of sequences (one inner sequence per observation)",
+                "%s" % type(x).__name__,
+                "pass a list of sequences, e.g. [[0, 1, 2], [], [3, 4]].",
+            )
+
         tx = []
         nx = []
         tidx = []
 
         for i in range(len(x)):
-            nx.append(len(x[i]))
+            row = x[i]
+            try:
+                row_len = len(row)
+            except TypeError:
+                raise ContractError(
+                    "SequenceDistribution.entries (row %d)" % i,
+                    "a sequence (list/tuple/etc.) of entries",
+                    "%s" % type(row).__name__,
+                    "each observation must itself be a sequence of entries -- row %d is a scalar, "
+                    "not a sequence. Wrap it in a list, e.g. [%r]." % (i, row),
+                ) from None
 
-            for j in range(len(x[i])):
+            nx.append(row_len)
+
+            for j in range(row_len):
                 tidx.append(i)
-                tx.append(x[i][j])
+                tx.append(row[j])
 
         rv1 = np.asarray(tidx, dtype=int)
         rv2 = np.asarray(nx, dtype=float)
@@ -1210,7 +1253,18 @@ class SequenceDataEncoder(DataSequenceEncoder):
 
         rv2[rv3] = 1.0 / rv2[rv3]
 
-        rv4 = self.encoder.seq_encode(tx)
+        try:
+            rv4 = self.encoder.seq_encode(tx)
+        except ContractError as e:
+            raise prefix_contract_error("SequenceDistribution.entries", e) from None
+        except (TypeError, ValueError, IndexError, KeyError) as e:
+            raise ContractError(
+                "SequenceDistribution.entries",
+                "every flattened entry compatible with the base distribution's data type",
+                "an entry that raised %s: %s" % (type(e).__name__, e),
+                "check that every element of every inner sequence matches the data type expected by "
+                "the base distribution (%s)." % self.encoder,
+            ) from e
 
         ### None if NullDataEncoder() for length
         rv5 = self.len_encoder.seq_encode(nx)

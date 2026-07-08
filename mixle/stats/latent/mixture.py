@@ -35,6 +35,7 @@ from mixle.inference.fisher import Path
 from mixle.stats.bayes.dirichlet import DirichletDistribution
 from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 from mixle.stats.compute.pdist import (
+    ContractError,
     DataSequenceEncoder,
     DistributionEnumerator,
     DistributionSampler,
@@ -44,6 +45,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
     child_enumerator,
+    prefix_contract_error,
 )
 from mixle.stats.compute.posterior import CategoricalLatentPosterior
 from mixle.utils.aliasing import MISSING, coalesce_alias
@@ -1624,9 +1626,35 @@ class MixtureEstimator(ParameterEstimator):
 
         """
         num_components = self.num_components
+        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 2:
+            raise ContractError(
+                "MixtureEstimator.estimate(suff_stat)",
+                "a 2-tuple (component_weight_counts, component_suff_stats)",
+                "%s%s"
+                % (
+                    type(suff_stat).__name__,
+                    " of length %d" % len(suff_stat) if isinstance(suff_stat, (tuple, list)) else "",
+                ),
+                "pass the 2-tuple produced by MixtureAccumulator.value(), not a bare component sufficient statistic.",
+            )
         counts, comp_suff_stats = suff_stat
+        if len(counts) != num_components or len(comp_suff_stats) != num_components:
+            raise ContractError(
+                "MixtureEstimator.estimate(suff_stat)",
+                "%d component weight counts and %d component sufficient statistics" % (num_components, num_components),
+                "%d component weight counts and %d component sufficient statistics"
+                % (len(counts), len(comp_suff_stats)),
+                "suff_stat must carry exactly %d entries per side, matching MixtureEstimator's %d "
+                "component estimators -- a mismatched MixtureAccumulator/MixtureEstimator component "
+                "count is the usual cause." % (num_components, num_components),
+            )
 
-        components = [self.estimators[i].estimate(counts[i], comp_suff_stats[i]) for i in range(num_components)]
+        components = []
+        for i in range(num_components):
+            try:
+                components.append(self.estimators[i].estimate(counts[i], comp_suff_stats[i]))
+            except ContractError as e:
+                raise prefix_contract_error("MixtureDistribution.components[%d]" % i, e) from None
 
         if self.has_conj_prior and self.fixed_weights is None:
             # Conjugate Dirichlet weight update: MAP weights w_k proportional to
@@ -1776,8 +1804,26 @@ class MixtureDataEncoder(DataSequenceEncoder):
             Encoded sequence (single shared encoding, or a per-component wrapper).
 
         """
+        if not isinstance(x, (list, tuple)):
+            raise ContractError(
+                "MixtureDistribution.seq_encode",
+                "a sequence of observations (all components share the same observation type)",
+                "%s" % type(x).__name__,
+                "pass a list/tuple of observations, e.g. [x0, x1, ...].",
+            )
         if self.homogeneous:
-            return self.encoder.seq_encode(x)
+            try:
+                return self.encoder.seq_encode(x)
+            except ContractError as e:
+                raise prefix_contract_error("MixtureDistribution.components", e) from None
+            except (TypeError, ValueError, IndexError, KeyError) as e:
+                raise ContractError(
+                    "MixtureDistribution.components",
+                    "every observation compatible with the shared component data type",
+                    "data that raised %s: %s" % (type(e).__name__, e),
+                    "check that every observation matches the data type expected by the mixture's "
+                    "components (%s)." % self.encoder,
+                ) from e
         try:
             return _HeteroMixtureEncoded(tuple(e.seq_encode(x) for e in self.encoders))
         except (TypeError, ValueError) as e:

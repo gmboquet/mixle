@@ -82,6 +82,40 @@ class KeyValidationError(ValueError):
     pass
 
 
+class ContractError(ValueError):
+    """Raised when malformed data trips a combinator's ``seq_encode``/``estimate`` contract boundary.
+
+    Mirrors :class:`EnumerationError`'s path-composition convention: ``path`` names the full field
+    path through nested combinators (composed with ``" -> "``, outermost first), e.g.
+    ``"CompositeDistribution.dists[2] -> SequenceDistribution.entries"``. Every ``ContractError``
+    also carries what was expected, what actually arrived, and (when there is one) a concrete,
+    non-generic suggestion for the likely fix -- so a caller reading only the message, not the
+    traceback, knows what to change.
+    """
+
+    def __init__(self, path: str, expected: str, actual: str, fix: str = "") -> None:
+        self.path = path
+        self.expected = expected
+        self.actual = actual
+        self.fix = fix
+        msg = "%s: expected %s, got %s." % (path, expected, actual)
+        if fix:
+            msg += " Fix: %s" % fix
+        super().__init__(msg)
+
+
+def prefix_contract_error(prefix: str, err: "ContractError") -> "ContractError":
+    """Return a new ContractError with ``prefix`` prepended to ``err``'s field path.
+
+    Used by a combinator to annotate a ``ContractError`` raised deep inside a child's
+    ``seq_encode``/``estimate`` with the outer field position, so the final message names the
+    FULL path down to where the failure actually occurred (e.g. a mixture-of-composites-of-
+    sequences error names every level, not just the outermost combinator).
+    """
+    new_path = "%s -> %s" % (prefix, err.path) if err.path else prefix
+    return ContractError(new_path, err.expected, err.actual, err.fix)
+
+
 def child_enumerator(child: "ProbabilityDistribution", path: str) -> "DistributionEnumerator":
     """Construct child.enumerator(), annotating EnumerationError with the child's path.
 
