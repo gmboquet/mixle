@@ -22,13 +22,12 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
+from mixle.models.grad_leaf import DataBufferAccumulatorFactory
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
-    SequenceEncodableStatisticAccumulator,
-    StatisticAccumulatorFactory,
 )
 
 
@@ -164,63 +163,6 @@ class NeuralCategoricalEncoder(DataSequenceEncoder):
         return (x, y)
 
 
-class NeuralCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
-    def __init__(self) -> None:
-        self.x: list = []
-        self.y: list = []
-        self.w: list = []
-
-    # x/y/w hold contiguous batch arrays, concatenated once at value() rather than one ndarray per row (the
-    # audit's per-row buffering blowup). x batching is shape-PRESERVING so conv/structured inputs survive;
-    # y stays an integer class index.
-    def update(self, xy: Any, weight: float, estimate: Any) -> None:
-        self.x.append(np.atleast_1d(np.asarray(xy[0], dtype=float))[None, ...])
-        self.y.append(np.asarray([int(xy[1])], dtype=int))
-        self.w.append(np.asarray([float(weight)], dtype=float))
-
-    def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
-        x, y = enc
-        xb = np.asarray(x, dtype=float)
-        self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
-        self.y.append(np.asarray(y, dtype=int).ravel())
-        self.w.append(np.asarray(weights, dtype=float).ravel())
-
-    def initialize(self, xy: Any, weight: float, rng: Any) -> None:
-        self.update(xy, weight, None)
-
-    def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
-        self.seq_update(enc, weights, None)
-
-    def combine(self, other: Any) -> NeuralCategoricalAccumulator:
-        xo, yo, wo = other
-        if len(xo):
-            self.x.append(np.asarray(xo, dtype=float))
-            self.y.append(np.asarray(yo, dtype=int).ravel())
-            self.w.append(np.asarray(wo, dtype=float).ravel())
-        return self
-
-    def value(self) -> tuple:
-        x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
-        y = np.concatenate(self.y) if self.y else np.zeros((0,), dtype=int)
-        w = np.concatenate(self.w) if self.w else np.zeros((0,))
-        return (x, y, w)
-
-    def from_value(self, value: tuple) -> NeuralCategoricalAccumulator:
-        x, y, w = value
-        self.x = [np.asarray(x, dtype=float)] if len(x) else []
-        self.y = [np.asarray(y, dtype=int).ravel()] if len(y) else []
-        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
-        return self
-
-    def acc_to_encoder(self) -> NeuralCategoricalEncoder:
-        return NeuralCategoricalEncoder()
-
-
-class NeuralCategoricalAccumulatorFactory(StatisticAccumulatorFactory):
-    def make(self) -> NeuralCategoricalAccumulator:
-        return NeuralCategoricalAccumulator()
-
-
 class NeuralCategoricalEstimator(ParameterEstimator):
     """EM estimator for a :class:`NeuralCategorical`: the M-step is ``m_steps`` of responsibility-weighted
     cross-entropy gradient on the module (the module is warm-started across EM iterations => generalized EM).
@@ -248,8 +190,8 @@ class NeuralCategoricalEstimator(ParameterEstimator):
         # ewc = (anchor_params, fisher_diag, lambda): the EWC anti-forgetting penalty for continued pretraining
         self.ewc = ewc
 
-    def accumulator_factory(self) -> NeuralCategoricalAccumulatorFactory:
-        return NeuralCategoricalAccumulatorFactory()
+    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
+        return DataBufferAccumulatorFactory(NeuralCategoricalEncoder(), n_fields=2)
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralCategorical:
         torch = _torch()
@@ -259,9 +201,11 @@ class NeuralCategoricalEstimator(ParameterEstimator):
             return out
         dev = self.device
         self.module.to(dev)
-        # data stays on CPU (a large image set won't fit on the GPU); each minibatch is moved to the device
+        # data stays on CPU (a large image set won't fit on the GPU); each minibatch is moved to the device.
+        # x arrives shape-preserving from the buffer so conv/structured inputs survive; the generic buffer
+        # stores labels as a (n, 1) float64 column -- integral class indices cast to long exactly.
         xt = torch.as_tensor(np.array(xs), dtype=torch.float32)
-        yt = torch.as_tensor(np.array(ys), dtype=torch.long)
+        yt = torch.as_tensor(np.asarray(ys).reshape(-1), dtype=torch.long)
         wt = torch.as_tensor(np.array(ws), dtype=torch.float32)
         n = xt.shape[0]
         bs = self.batch_size or n

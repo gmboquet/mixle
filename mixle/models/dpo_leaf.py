@@ -21,13 +21,12 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import decode_module, encode_module
+from mixle.models.grad_leaf import DataBufferAccumulatorFactory
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
-    SequenceEncodableStatisticAccumulator,
-    StatisticAccumulatorFactory,
 )
 
 
@@ -151,58 +150,6 @@ class DPOEncoder(DataSequenceEncoder):
         return (x, ch, rj)
 
 
-class DPOAccumulator(SequenceEncodableStatisticAccumulator):
-    def __init__(self) -> None:
-        self.x: list = []
-        self.ch: list = []
-        self.rj: list = []
-        self.w: list = []  # per-pair weight (EM responsibility / streaming decay / sample weight)
-
-    def update(self, xcr: Any, weight: float, estimate: Any) -> None:
-        self.x.append(np.atleast_1d(np.asarray(xcr[0], dtype=float)))
-        self.ch.append(int(xcr[1]))
-        self.rj.append(int(xcr[2]))
-        self.w.append(float(weight))
-
-    def seq_update(self, enc: Any, weights: Any, estimate: Any) -> None:
-        x, ch, rj = enc
-        ws = np.asarray(weights, dtype=float).ravel() if weights is not None else np.ones(len(x))
-        for i in range(len(x)):
-            self.x.append(np.atleast_1d(x[i]))
-            self.ch.append(int(ch[i]))
-            self.rj.append(int(rj[i]))
-            self.w.append(float(ws[i]))
-
-    def initialize(self, xcr: Any, weight: float, rng: Any) -> None:
-        self.update(xcr, weight, None)
-
-    def seq_initialize(self, enc: Any, weights: Any, rng: Any) -> None:
-        self.seq_update(enc, weights, None)
-
-    def combine(self, other: Any) -> DPOAccumulator:
-        xo, co, ro, wo = other
-        self.x.extend(xo)
-        self.ch.extend(co)
-        self.rj.extend(ro)
-        self.w.extend(wo)
-        return self
-
-    def value(self) -> tuple:
-        return (list(self.x), list(self.ch), list(self.rj), list(self.w))
-
-    def from_value(self, v: tuple) -> DPOAccumulator:
-        self.x, self.ch, self.rj, self.w = list(v[0]), list(v[1]), list(v[2]), list(v[3])
-        return self
-
-    def acc_to_encoder(self) -> DPOEncoder:
-        return DPOEncoder()
-
-
-class DPOAccumulatorFactory(StatisticAccumulatorFactory):
-    def make(self) -> DPOAccumulator:
-        return DPOAccumulator()
-
-
 class DPOModelEstimator(ParameterEstimator):
     """DPO M-step: ``m_steps`` of gradient on the POLICY minimizing ``-log sigmoid(beta * margin)``; ref frozen."""
 
@@ -214,8 +161,8 @@ class DPOModelEstimator(ParameterEstimator):
         self.lr = float(lr)
         self.device = device
 
-    def accumulator_factory(self) -> DPOAccumulatorFactory:
-        return DPOAccumulatorFactory()
+    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
+        return DataBufferAccumulatorFactory(DPOEncoder(), n_fields=3)
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> DPOModel:
         torch = _torch()
@@ -228,9 +175,10 @@ class DPOModelEstimator(ParameterEstimator):
         self.ref.to(dev)
         for p in self.ref.parameters():
             p.requires_grad_(False)  # frozen reference
-        xt = torch.as_tensor(np.array(xs), dtype=torch.float32).to(dev)
-        ct = torch.as_tensor(np.array(chs), dtype=torch.long).to(dev)
-        rt = torch.as_tensor(np.array(rjs), dtype=torch.long).to(dev)
+        # the generic buffer stores every field as float batch arrays; restore shapes/dtypes at tensor prep
+        xt = torch.as_tensor(np.asarray(xs, dtype=float).reshape(len(xs), -1), dtype=torch.float32).to(dev)
+        ct = torch.as_tensor(np.asarray(chs).ravel().astype(int), dtype=torch.long).to(dev)
+        rt = torch.as_tensor(np.asarray(rjs).ravel().astype(int), dtype=torch.long).to(dev)
         wt = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32).to(dev)  # per-pair weight
         wsum = wt.sum().clamp(min=1e-8)
         ar = torch.arange(len(ct), device=dev)

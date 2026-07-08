@@ -24,13 +24,12 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
+from mixle.models.grad_leaf import DataBufferAccumulatorFactory
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
-    SequenceEncodableStatisticAccumulator,
-    StatisticAccumulatorFactory,
 )
 
 
@@ -172,56 +171,6 @@ class EnergyModelEncoder(DataSequenceEncoder):
         return np.array([np.atleast_1d(np.asarray(x, dtype=float)) for x in data])
 
 
-class EnergyModelAccumulator(SequenceEncodableStatisticAccumulator):
-    """Buffers responsibility-weighted data for the NCE M-step (weights = the E-step soft counts)."""
-
-    def __init__(self) -> None:
-        self.x: list = []
-        self.w: list = []
-
-    # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
-    def update(self, x: Any, weight: float, estimate: Any) -> None:
-        self.x.append(np.atleast_1d(np.asarray(x, dtype=float))[None, ...])
-        self.w.append(np.asarray([float(weight)], dtype=float))
-
-    def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
-        xb = np.asarray(enc, dtype=float)
-        self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
-        self.w.append(np.asarray(weights, dtype=float).ravel())
-
-    def initialize(self, x: Any, weight: float, rng: Any) -> None:
-        self.update(x, weight, None)
-
-    def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
-        self.seq_update(enc, weights, None)
-
-    def combine(self, other: Any) -> EnergyModelAccumulator:
-        xs, ws = other
-        if len(xs):
-            self.x.append(np.asarray(xs, dtype=float))
-            self.w.append(np.asarray(ws, dtype=float).ravel())
-        return self
-
-    def value(self) -> tuple:
-        x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
-        w = np.concatenate(self.w) if self.w else np.zeros((0,))
-        return (x, w)
-
-    def from_value(self, v: tuple) -> EnergyModelAccumulator:
-        x, w = v
-        self.x = [np.asarray(x, dtype=float)] if len(x) else []
-        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
-        return self
-
-    def acc_to_encoder(self) -> EnergyModelEncoder:
-        return EnergyModelEncoder()
-
-
-class EnergyModelAccumulatorFactory(StatisticAccumulatorFactory):
-    def make(self) -> EnergyModelAccumulator:
-        return EnergyModelAccumulator()
-
-
 class EnergyModelEstimator(ParameterEstimator):
     """M-step: Noise-Contrastive Estimation against a Gaussian noise fit to the (weighted) data.
 
@@ -250,8 +199,8 @@ class EnergyModelEstimator(ParameterEstimator):
         self.device = device
         self.name = name
 
-    def accumulator_factory(self) -> EnergyModelAccumulatorFactory:
-        return EnergyModelAccumulatorFactory()
+    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
+        return DataBufferAccumulatorFactory(EnergyModelEncoder(), n_fields=1)
 
     def _make(self) -> EnergyModel:
         return EnergyModel(
