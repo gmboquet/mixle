@@ -1,7 +1,8 @@
 """Regression tests for two fixed defects.
 
-1. DPOAccumulator dropped the per-pair weight, so weighted EM / mixture responsibilities / streaming decay
-   silently trained an unweighted DPO loss. It now carries and applies the weight.
+1. The DPO accumulator dropped the per-pair weight, so weighted EM / mixture responsibilities / streaming decay
+   silently trained an unweighted DPO loss. It now carries and applies the weight (buffering lives in the shared
+   ``DataBufferAccumulator``, which DPO wires with three encoded fields plus weights).
 2. Registry joined a raw name/alias onto the store root, so ``../escape`` traversed outside it. Segments are
    now constrained to a single path component.
 """
@@ -18,27 +19,31 @@ pytestmark = pytest.mark.fast
 # --------------------------------------------------------------------------- DPO weights
 
 
-def test_dpo_accumulator_carries_the_weight():
-    from mixle.models.dpo_leaf import DPOAccumulator
+def _dpo_accumulator():
+    """The accumulator exactly as DPO estimation wires it (generic data buffer over the DPO encoding)."""
+    from mixle.models.dpo_leaf import DPOModelEstimator
 
-    lo, hi = DPOAccumulator(), DPOAccumulator()
+    est = DPOModelEstimator(policy=None, ref=None, beta=0.1, m_steps=1, lr=1e-3, device="cpu")
+    return est.accumulator_factory().make()
+
+
+def test_dpo_accumulator_carries_the_weight():
+    lo, hi = _dpo_accumulator(), _dpo_accumulator()
     lo.update((np.zeros(3), 0, 1), 0.01, None)
     hi.update((np.zeros(3), 0, 1), 100.0, None)
     # same triple, very different weight -> the sufficient statistics must differ now
-    assert lo.value()[3] != hi.value()[3]
+    assert lo.value()[3].tolist() != hi.value()[3].tolist()
 
 
 def test_dpo_seq_update_and_combine_preserve_weights():
-    from mixle.models.dpo_leaf import DPOAccumulator
-
     enc = (np.zeros((2, 3)), np.array([0, 0]), np.array([1, 1]))
-    a = DPOAccumulator()
+    a = _dpo_accumulator()
     a.seq_update(enc, np.array([2.0, 5.0]), None)
-    assert a.value()[3] == [2.0, 5.0]
+    assert a.value()[3].tolist() == [2.0, 5.0]
 
-    b = DPOAccumulator().from_value(a.value())  # round-trip the 4-tuple
-    b.combine(a.value())  # distributed merge extends every parallel list, weights included
-    assert len(b.value()[0]) == 4 and b.value()[3] == [2.0, 5.0, 2.0, 5.0]
+    b = _dpo_accumulator().from_value(a.value())  # round-trip the 4-tuple (x, chosen, rejected, w)
+    b.combine(a.value())  # distributed merge extends every parallel buffer, weights included
+    assert len(b.value()[0]) == 4 and b.value()[3].tolist() == [2.0, 5.0, 2.0, 5.0]
 
 
 def test_dpo_weighting_changes_the_fitted_policy():
