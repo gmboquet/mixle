@@ -726,6 +726,12 @@ __all__ = [
     "GumbelCopulaDistribution",
     "GumbelCopulaSampler",
     "GumbelCopulaEstimator",
+    "CVineCopulaDistribution",
+    "CVineCopulaSampler",
+    "CVineCopulaEstimator",
+    "GaussianPairCopula",
+    "ClaytonPairCopula",
+    "IndependencePairCopula",
     "MatrixNormalDistribution",
     "MatrixNormalSampler",
     "MatrixNormalEstimator",
@@ -1432,6 +1438,14 @@ from mixle.stats.multivariate.student_t_copula import (
     StudentTCopulaDistribution,
     StudentTCopulaEstimator,
     StudentTCopulaSampler,
+)
+from mixle.stats.multivariate.vine_copula import (
+    ClaytonPairCopula,
+    CVineCopulaDistribution,
+    CVineCopulaEstimator,
+    CVineCopulaSampler,
+    GaussianPairCopula,
+    IndependencePairCopula,
 )
 from mixle.stats.processes.birth_death import (
     BirthDeathSamplingDataEncoder,
