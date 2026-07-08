@@ -76,8 +76,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
-      - name: Run full non-optional suite
-        run: python -m pytest -m "not optional and not benchmark" -n auto
+      - name: Run full non-optional suite with coverage
+        # Reporting only for now, no --cov-fail-under gate: this base install skips every optional
+        # backend (torch/numba/spark/dask/jax/...), so line coverage here is a floor, not the real
+        # number -- a hard threshold set against this subset would misrepresent actual coverage and
+        # either block unrelated PRs or get raised past what full-extras coverage really supports.
+        # Revisit once the optional-extras job also reports and the two are combined.
+        run: python -m pytest -m "not optional and not benchmark" -n auto --cov --cov-report=xml --cov-report=term
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 30
 
   optional:
     name: optional extras / py3.12
