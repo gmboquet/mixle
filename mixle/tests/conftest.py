@@ -234,7 +234,6 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "quotient_leaf_test.py": ("torch", "integration", "slow"),  # conv+pool leaf, fits/compares real nets
     "ppl_guide_test.py": ("ppl", "stochastic", "slow"),  # structured VI, admixture/LDA recovery
     "structure_learning_test.py": ("integration", "slow"),  # multi-restart EM structure search
-    "spark_executor_test.py": ("spark", "optional", "parallel", "slow"),  # matches spark_encoded_data_test.py
     "task_traces_test.py": ("integration", "slow"),
     "temporal_graph_grammar_test.py": ("graph", "stochastic", "slow"),
     "anchor_harness_test.py": ("torch", "stochastic", "slow"),  # neural conditional-transport + calibration

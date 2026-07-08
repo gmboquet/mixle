@@ -262,7 +262,8 @@ class ScalableSamplerTest(unittest.TestCase):
             edge_remove_rate=2.0,
         )
         seqs = [
-            gt.sampler(seed=s).sample_one_scalable(num_steps=6, seed_edges=self._seed_edges(rng, n=40)) for s in range(60)
+            gt.sampler(seed=s).sample_one_scalable(num_steps=6, seed_edges=self._seed_edges(rng, n=40))
+            for s in range(60)
         ]
         self.assertTrue(all(sp.issparse(a) for seq in seqs for a in seq))  # never densified
         self.assertTrue(np.all(np.isfinite(gt.seq_log_density(seqs))))
@@ -335,9 +336,7 @@ class LatentRegimeTemporalGraphGrammarTest(unittest.TestCase):
         )
         A = [[0.85, 0.15], [0.15, 0.85]]
         gt = stats.LatentTemporalGraphGrammarDistribution([growth, decay], [0.5, 0.5], A)
-        data = [
-            gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(40)
-        ]
+        data = [gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(40)]
         self.assertTrue(np.all(np.isfinite(gt.seq_log_density(data))))
         # single-grammar baseline
         se = stats.TemporalGraphGrammarEstimator(pseudo_count=0.5)
@@ -381,9 +380,7 @@ class RegimeSwitchingAttributesTest(unittest.TestCase):
             [0.5, 0.5],
             [[0.85, 0.15], [0.15, 0.85]],
         )
-        data = [
-            gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(35)
-        ]
+        data = [gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(35)]
         self.assertTrue(np.all(np.isfinite(gt.seq_log_density(data))))
         est = gt.estimator(pseudo_count=0.3)
         acc = est.accumulator_factory().make()
@@ -478,9 +475,7 @@ class LatentChurningTemporalGraphGrammarTest(unittest.TestCase):
             initial_probs=[0.5, 0.5],
             transition_matrix=[[0.85, 0.15], [0.15, 0.85]],
         )
-        data = [
-            gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(35)
-        ]
+        data = [gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(35)]
         # nodes genuinely leave (counts swing) and ids disappear
         self.assertTrue(any(set(o[t - 1][1]) - set(o[t][1]) for o in data for t in range(1, len(o))))
         self.assertTrue(np.all(np.isfinite(gt.seq_log_density(data))))
