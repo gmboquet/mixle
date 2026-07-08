@@ -14,6 +14,11 @@ are neither: an inverse problem has *several* valid ``y`` for one ``x``; measure
 sigma_k(x)^2)`` -- whose entire mixture (weights, means, variances) is a function of ``x``, so it is multimodal
 and heteroscedastic. Any other conditional density (a conditional flow, an autoregressive head) plugs in the same
 way: give it ``log_density(x, y)`` and ``sample_given(x)``.
+
+:func:`build_projection_leaf` is a different kind of ready instance -- a **contrastive** ``p(y | x)`` (an InfoNCE
+projection between two, typically frozen, embedding spaces) whose ``log_density`` is not a calibrated density at
+all but still trains and composes through the exact same adapter: the stage-1 "frozen encoder -> projection ->
+frozen encoder" pattern, generalized to a family with no domain nouns.
 """
 
 from __future__ import annotations
@@ -367,6 +372,131 @@ def _build_conditional_flow_class(torch: Any, nn: Any) -> Any:
 
 
 _register_module_class("ConditionalFlow", _build_conditional_flow_class)
+
+
+# --- the contrastive instance: a projection between two (typically frozen) embedding spaces --------------------
+
+
+def build_projection_leaf(
+    d_x: int,
+    d_y: int,
+    *,
+    encoder_x: Any = None,
+    encoder_y: Any = None,
+    proj_dim: int | None = None,
+    hidden: int = 64,
+    freeze_encoders: bool = True,
+    temperature: float = 0.07,
+) -> Any:
+    """A contrastive (InfoNCE / CLIP-style) conditional ``p(y | x)`` between two embedding spaces -- ready to wrap.
+
+    This is the stage-1 multimodal pattern -- frozen encoder -> trainable projection -> frozen encoder -- stated
+    with no domain nouns. ``encoder_x``/``encoder_y`` are any torch module mapping a raw item to a ``d_x``/``d_y``
+    embedding; both default to ``nn.Identity()``, so ``x``/``y`` may already BE the embeddings (pass precomputed
+    vectors straight in, no backbone required). Encoders are frozen by default (``freeze_encoders=True``): their
+    parameters get ``requires_grad_(False)`` and the module is pinned in ``eval()`` regardless of the outer
+    ``train()``/``eval()`` calls the M-step makes, so no dropout/batchnorm noise leaks into a "frozen" backbone
+    and no gradient ever reaches it. The only trainable piece is a small projection head per side (``d_x`` /
+    ``d_y`` -> ``hidden`` -> ``proj_dim``, default ``proj_dim = min(d_x, d_y)``) mapping BOTH embeddings into one
+    shared, L2-normalized space -- the CLIP design (two projections into a shared space), not a single asymmetric
+    ``x -> y`` regression -- so the same leaf answers "which y matches this x" and "which x matches this y".
+
+    ``log_density(x, y)`` returns, per row, the (negative) SYMMETRIC INFONCE loss for a batch of ``n`` paired
+    embeddings: every row's projected pair is scored against every OTHER row in the batch as a negative, in both
+    directions (``x -> y`` and ``y -> x``), log-softmax-normalized over the batch dimension, then averaged. That
+    is exactly what the shared :class:`NeuralConditionalDensity` M-step already does with ``log_density`` --
+    weight it and sum it -- so no separate loss path is needed: the M-step's responsibility-weighted-NLL gradient
+    ascent on ``log_density`` **is** InfoNCE training, "for free" from the adapter's existing contract. As with
+    :func:`~mixle.models.neural_density.build_vae`'s ELBO, this is an honest score against itself (or another
+    leaf scored the same batch-relative way) rather than a calibrated ``log p(y | x)`` -- there is no way to
+    integrate a softmax-over-the-current-batch score to 1 over all ``y``. A batch of a single row has no
+    negatives to contrast against, so ``log_density`` returns ``0`` for it rather than raising.
+
+    ``sample_given`` is not defined -- a contrastive leaf is discriminative (it scores/ranks pairs); it has no
+    generative ``p(y | x)`` to draw from. Retrieve a matching ``y`` by comparing ``module.embed_x(x)`` against
+    ``module.embed_y(candidates)`` (cosine similarity in the shared space) instead.
+    """
+    return _module_class("ProjectionLeaf")(
+        d_x, d_y, encoder_x, encoder_y, proj_dim, hidden, freeze_encoders, temperature
+    )
+
+
+def _build_projection_leaf_class(torch: Any, nn: Any) -> Any:
+    class ProjectionLeaf(nn.Module):
+        def __init__(
+            self,
+            d_x: int,
+            d_y: int,
+            encoder_x: Any = None,
+            encoder_y: Any = None,
+            proj_dim: int | None = None,
+            hidden: int = 64,
+            freeze_encoders: bool = True,
+            temperature: float = 0.07,
+        ) -> None:
+            super().__init__()
+            self.d_x = int(d_x)
+            self.d_y = int(d_y)
+            self.proj_dim = int(proj_dim) if proj_dim is not None else max(1, min(self.d_x, self.d_y))
+            self.hidden = int(hidden)
+            self._freeze_encoders = bool(freeze_encoders)
+            self.encoder_x = encoder_x if encoder_x is not None else nn.Identity()
+            self.encoder_y = encoder_y if encoder_y is not None else nn.Identity()
+            if self._freeze_encoders:
+                for p in self.encoder_x.parameters():
+                    p.requires_grad_(False)
+                for p in self.encoder_y.parameters():
+                    p.requires_grad_(False)
+                self.encoder_x.eval()
+                self.encoder_y.eval()
+            # the ONLY trainable pieces: two small projection heads into a shared space, plus a learned
+            # (CLIP-style) log-temperature -- clamped at use so training cannot blow the softmax up/flat.
+            self.proj_x = nn.Sequential(
+                nn.Linear(self.d_x, self.hidden), nn.Tanh(), nn.Linear(self.hidden, self.proj_dim)
+            )
+            self.proj_y = nn.Sequential(
+                nn.Linear(self.d_y, self.hidden), nn.Tanh(), nn.Linear(self.hidden, self.proj_dim)
+            )
+            self.log_tau = nn.Parameter(torch.log(torch.tensor(float(temperature))))
+
+        def train(self, mode: bool = True) -> ProjectionLeaf:
+            super().train(mode)
+            if self._freeze_encoders:  # a frozen backbone stays in eval() no matter what the M-step requests
+                self.encoder_x.eval()
+                self.encoder_y.eval()
+            return self
+
+        def embed_x(self, x: Any) -> Any:
+            """``x`` (raw item or precomputed embedding) through the frozen encoder then the trainable
+            projection, L2-normalized -- the vector to compare against ``embed_y`` in the shared space."""
+            return nn.functional.normalize(self.proj_x(self.encoder_x(x)), dim=-1)
+
+        def embed_y(self, y: Any) -> Any:
+            return nn.functional.normalize(self.proj_y(self.encoder_y(y)), dim=-1)
+
+        def log_density(self, x: Any, y: Any) -> Any:
+            px, py = self.embed_x(x), self.embed_y(y)
+            n = px.shape[0]
+            if n <= 1:  # no negatives in the batch to contrast against
+                return torch.zeros(n, device=px.device, dtype=px.dtype)
+            tau = self.log_tau.exp().clamp(min=1e-2, max=100.0)
+            logits = (px @ py.t()) / tau  # (n, n): logits[i, j] = similarity(x_i, y_j)
+            idx = torch.arange(n, device=px.device)
+            log_x2y = torch.log_softmax(logits, dim=1)[idx, idx]  # x_i's correct y among the batch's y's
+            log_y2x = torch.log_softmax(logits, dim=0)[idx, idx]  # y_i's correct x among the batch's x's
+            return 0.5 * (log_x2y + log_y2x)  # symmetric InfoNCE, per row
+
+        def sample_given(self, x: Any) -> Any:
+            raise NotImplementedError(
+                "ProjectionLeaf is a discriminative/contrastive leaf (it scores how well x and y "
+                "embeddings match); it has no generative p(y | x) to sample from. Retrieve a y by "
+                "comparing embed_x(x) against embed_y(candidates) in the shared space instead."
+            )
+
+    return ProjectionLeaf
+
+
+_register_module_class("ProjectionLeaf", _build_projection_leaf_class)
 
 
 # --- the discrete conditional: an autoregressive categorical conditioned on x -- exact p(y|x) over discrete y ----
