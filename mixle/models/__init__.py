@@ -70,6 +70,7 @@ from mixle.models.mixture_density import (
     build_conditional_autoregressive_categorical,
     build_conditional_flow,
     build_mdn,
+    build_projection_leaf,
 )
 from mixle.models.neural import (
     CategoricalClassificationNeuralNetwork,
@@ -212,6 +213,7 @@ __all__ = [
     "build_maf",
     "build_mdn",
     "build_product_energy_net",
+    "build_projection_leaf",
     "build_vae",
     "make_deep_set",
     "make_mlp",
