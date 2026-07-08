@@ -52,6 +52,9 @@ arrow = ["pyarrow>=14"]
 sql = ["sqlalchemy>=2.0"]
 mongo = ["pymongo>=4.3"]
 hadoop = ["pyarrow>=14", "fsspec>=2023.1.0"]
+# lazy N-D array-store connectors (mixle.data.sources.array_source): zarr + HDF5 volumes for
+# PatchSampler-style streaming reads. numpy-memmap needs no extra dependency, so it is not listed here.
+arrays = ["zarr>=2.16", "h5py>=3.10"]
 data = ["pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "pymongo>=4.3", "fsspec>=2023.1.0"]
 # graph-grammar models (mixle.stats.sequences.grammar) are the only networkx user; lazy + optional.
 grammar = ["networkx>=3.0"]

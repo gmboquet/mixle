@@ -258,6 +258,9 @@ NODEID_MARKERS: tuple[tuple[str, MarkerTuple], ...] = (
     ("MPS", ("torch", "optional")),
     ("numba", ("numba",)),
     ("umap", ("optional", "hvis")),
+    # PeakRssPatchStreamingTest writes+reads a ~476 MiB synthetic zarr volume to exercise the A3
+    # patch-streaming peak-RSS receipt; the rest of array_data_sources_test.py stays in the fast gate.
+    ("PeakRssPatchStreamingTest", ("optional", "slow")),
 )
 
 
