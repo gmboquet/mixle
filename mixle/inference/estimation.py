@@ -96,25 +96,66 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState 
         from mixle.inference.structure import _num_free_params
         from mixle.utils.automatic import get_estimator
 
+        # all-continuous records get a second dependence candidate below (a copula), which models
+        # heterogeneous marginals + dependence a linear-Gaussian network cannot; other records only try the BN.
+        all_continuous = all(isinstance(v, (float, np.floating)) for v in first)
         net = learn_bayesian_network(rows)
-        if not net.edges():
+        if not net.edges() and not all_continuous:
             return None  # independence is what the composite already models; keep the automatic families
 
         composite = optimize(rows, get_estimator(rows), max_its=max_its, rng=rng, out=None)
         enc = composite.dist_to_encoder().seq_encode(rows)
         comp_ll = float(np.sum(composite.seq_log_density(enc)))
-        comp_bic = -2.0 * comp_ll + _num_free_params(composite) * float(np.log(max(len(rows), 2)))
-        net_bic = bayesian_network_bic(net, rows)
-        if net_bic >= comp_bic:
+        n_log = float(np.log(max(len(rows), 2)))
+        comp_params = _num_free_params(composite)
+        comp_bic = -2.0 * comp_ll + comp_params * n_log
+
+        # candidate dependence models, each scored by BIC on the same data; the independent composite is the
+        # baseline and wins ties, so this never returns a worse model than the historical default.
+        candidates: list[tuple[float, Any, str]] = []
+        if net.edges():
+            candidates.append((bayesian_network_bic(net, rows), net, "bayesian-network"))
+        if all_continuous:
+            cop = _maybe_copula_model(rows, composite, comp_params, n_log, max_its, rng)
+            if cop is not None:
+                candidates.append(cop)
+        if not candidates:
+            return None
+        best_bic, best_model, desc = min(candidates, key=lambda u: u[0])
+        if best_bic >= comp_bic:
             return None
         if out is not None:
-            edges = ", ".join(f"{p}->{c}" for p, c in net.edges())
             out.write(
-                f"structure: discovered cross-field dependencies [{edges}] (BIC {net_bic:.1f} < {comp_bic:.1f})\n"
+                "structure: %s dependence beats independent fields (BIC %.1f < %.1f)\n" % (desc, best_bic, comp_bic)
             )
-        return net
+        return best_model
     except Exception:  # noqa: BLE001 - the structure default must never break the historical path
         return None
+
+
+def _maybe_copula_model(
+    rows: Any, composite: Any, comp_params: int, n_log: float, max_its: int, rng: RandomState | None
+) -> tuple[float, Any, str] | None:
+    """A copula over the composite's per-field marginals: heterogeneous margins + a Gaussian dependence core.
+
+    Reuses the independently-detected marginals (which the composite already fitted) and adds ONE dependence
+    object -- a Gaussian copula's correlation matrix, ``d(d-1)/2`` parameters on top of the marginals -- so the
+    BIC comparison against the composite is exactly "does the dependence pay for those correlation params". The
+    copula reaches joints a linear-Gaussian Bayesian network cannot: e.g. a Gamma margin and a Student-t margin
+    coupled by rank correlation. Returns ``(bic, model, "copula")`` or ``None`` if inapplicable.
+    """
+    marginals = list(getattr(composite, "dists", []) or [])
+    if len(marginals) < 2 or any(not callable(getattr(m, "cdf", None)) for m in marginals):
+        return None  # a copula needs each marginal's CDF for the probability-integral transform
+    from mixle.stats.combinator.copula import CopulaDistribution
+    from mixle.stats.multivariate.gaussian_copula import GaussianCopulaDistribution
+
+    d = len(marginals)
+    proto = CopulaDistribution(marginals, GaussianCopulaDistribution(np.eye(d)))
+    copula = optimize(rows, proto.estimator(), prev_estimate=proto, max_its=max_its, rng=rng, out=None)
+    ll = float(np.sum(copula.seq_log_density(copula.dist_to_encoder().seq_encode(rows))))
+    params = comp_params + d * (d - 1) // 2  # marginals (as in the composite) + the correlation off-diagonals
+    return (-2.0 * ll + params * n_log, copula, "copula")
 
 
 # --- data-encoding helpers --------------------------------------------------
