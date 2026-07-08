@@ -732,6 +732,9 @@ __all__ = [
     "DVineCopulaDistribution",
     "DVineCopulaSampler",
     "DVineCopulaEstimator",
+    "RVineCopulaDistribution",
+    "RVineCopulaSampler",
+    "RVineCopulaEstimator",
     "GaussianPairCopula",
     "ClaytonPairCopula",
     "FrankPairCopula",
@@ -1439,6 +1442,11 @@ from mixle.stats.multivariate.multivariate_student_t import (
     MultivariateStudentTDistribution,
     MultivariateStudentTEstimator,
     MultivariateStudentTSampler,
+)
+from mixle.stats.multivariate.rvine_copula import (
+    RVineCopulaDistribution,
+    RVineCopulaEstimator,
+    RVineCopulaSampler,
 )
 from mixle.stats.multivariate.student_t_copula import (
     StudentTCopulaDistribution,
