@@ -199,6 +199,11 @@ Mixle also includes scientific modeling support:
    * - ``mixle.evolve``
      - Objective-led model improvement, structure search, verification, and
        anti-regression ledgers.
+   * - ``mixle.epistemic``
+     - Hypothesis portfolios with open-world mass, distribution discrepancy
+       (KL/JS/Wasserstein/MMD), EIG-driven action selection, and a
+       replayable decision journal -- the epistemic-loop control flow, built
+       on ``mixle.inference``, ``mixle.doe``, and ``mixle.evolve``.
 
 Use :doc:`processes`, :doc:`relations`, :doc:`analysis`, :doc:`doe`, and
 :doc:`evolution` when the modeling task is closer to scientific design,

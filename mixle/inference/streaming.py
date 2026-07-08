@@ -80,7 +80,7 @@ class _StreamingBase:
         self.init_estimator = estimator if init_estimator is None else init_estimator
         self.model = model
         self.init_p = init_p
-        self.rng = RandomState() if rng is None else rng
+        self.rng = RandomState(0) if rng is None else rng  # fixed default: an un-seeded fit is deterministic
         self.encoder = encoder if encoder is not None else (model.dist_to_encoder() if model is not None else None)
         self.num_chunks = num_chunks
         self.running_accumulator = None

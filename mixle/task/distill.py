@@ -47,6 +47,28 @@ def _as_batched(teacher: Callable[..., Any]) -> Callable[[list[str]], list[Any]]
     return batched
 
 
+def _teacher_labels(teacher: Callable[..., Any], items: list, n_jobs: int = 1) -> list[Any]:
+    """Label ``items`` with ``teacher``, fanning contiguous blocks across ``n_jobs`` THREADS.
+
+    Threads, not processes: teachers are typically network-bound LM calls (:mod:`mixle.task.llm`),
+    where parallel in-flight requests are the whole win and the GIL never bites; a CPU-bound Python
+    teacher gains nothing here and should batch internally instead. Labels come back in input
+    order, and ``n_jobs=1`` is byte-for-byte the sequential batched call. Blocks are ~4 per worker
+    so one slow straggler cannot idle the pool.
+    """
+    if n_jobs <= 1 or len(items) <= 1:
+        return _as_batched(teacher)(items)
+    from concurrent.futures import ThreadPoolExecutor
+
+    n_blocks = min(len(items), 4 * n_jobs)
+    edges = [round(i * len(items) / n_blocks) for i in range(n_blocks + 1)]
+    blocks = [items[a:b] for a, b in zip(edges[:-1], edges[1:]) if b > a]
+    batched = _as_batched(teacher)
+    with ThreadPoolExecutor(max_workers=n_jobs) as pool:
+        parts = list(pool.map(batched, blocks))
+    return [label for part in parts for label in part]
+
+
 def distill(
     teacher: Callable[..., Any],
     texts: Sequence[str],
@@ -60,15 +82,18 @@ def distill(
     seed: int = 0,
     task: str = "",
     device: str = "cpu",
+    n_jobs: int = 1,
 ) -> TaskModel:
     """Label ``texts`` with ``teacher``, fit a small student to match, and return a callable :class:`TaskModel`.
 
     ``n``/``dim`` size the hashed n-gram featurizer; ``hidden`` the student MLP. ``labels`` fixes the label set
     (else inferred from the teacher's outputs). The student's train-set agreement with the teacher is recorded
-    in ``meta``.
+    in ``meta``. ``n_jobs > 1`` fans teacher labeling across that many threads (order-preserving; the win is
+    parallel in-flight requests against a network-bound teacher) -- every ``distill_*`` teacher entry point
+    takes the same knob.
     """
     texts = [str(t) for t in texts]
-    teacher_labels = _as_batched(teacher)(texts)
+    teacher_labels = _teacher_labels(teacher, texts, n_jobs=n_jobs)
     return distill_from_labels(
         texts,
         teacher_labels,
@@ -138,6 +163,7 @@ def distill_for_routing(
     device: str = "cpu",
     density_gate: bool = False,
     density_gate_alpha: float = 0.05,
+    n_jobs: int = 1,
 ) -> CalibratedTaskModel:
     """Label ``texts`` with ``teacher``, fit a student, and calibrate it for routing -- all in one call.
 
@@ -152,7 +178,7 @@ def distill_for_routing(
     :func:`distill_from_labels_for_routing`.
     """
     texts = [str(t) for t in texts]
-    teacher_labels = _as_batched(teacher)(texts)
+    teacher_labels = _teacher_labels(teacher, texts, n_jobs=n_jobs)
     return distill_from_labels_for_routing(
         texts,
         teacher_labels,
@@ -241,6 +267,7 @@ def distill_records(
     seed: int = 0,
     task: str = "",
     device: str = "cpu",
+    n_jobs: int = 1,
 ) -> TaskModel:
     """Distill a teacher into a record classifier (``record -> label`` over tuples/dicts of mixed fields).
 
@@ -248,7 +275,7 @@ def distill_records(
     Uses the hashing-trick :class:`~mixle.task.model.HashedRecord` featurizer, so it needs no fitted encoder.
     """
     records = list(records)
-    teacher_labels = _as_batched(teacher)(records)
+    teacher_labels = _teacher_labels(teacher, records, n_jobs=n_jobs)
     return distill_records_from_labels(
         records,
         teacher_labels,
@@ -310,11 +337,12 @@ def distill_records_for_routing(
     device: str = "cpu",
     density_gate: bool = False,
     density_gate_alpha: float = 0.05,
+    n_jobs: int = 1,
 ) -> CalibratedTaskModel:
     """The structured-record sibling of :func:`distill_for_routing`: fit + calibrate a record classifier
     in one call, returning a routing-ready :class:`~mixle.task.calibrate.CalibratedTaskModel`."""
     records = list(records)
-    teacher_labels = _as_batched(teacher)(records)
+    teacher_labels = _teacher_labels(teacher, records, n_jobs=n_jobs)
     return distill_records_from_labels_for_routing(
         records,
         teacher_labels,
@@ -388,6 +416,7 @@ def distill_structured(
     max_its: int = 30,
     seed: int = 0,
     task: str = "",
+    n_jobs: int = 1,
 ) -> TaskModel:
     """Distill a teacher into a tiny **structured probabilistic** classifier -- a learned Bayesian network, not an MLP.
 
@@ -402,7 +431,7 @@ def distill_structured(
     student whose sub-structures differ by regime. Assumes a fixed record schema (see :class:`StructuredClassifierIO`).
     """
     records = list(records)
-    teacher_labels = [str(t) for t in _as_batched(teacher)(records)]
+    teacher_labels = [str(t) for t in _teacher_labels(teacher, records, n_jobs=n_jobs)]
     return distill_structured_from_labels(
         records,
         teacher_labels,
@@ -444,7 +473,9 @@ def distill_structured_from_labels(
         )
         edges = model.components[0].edges()
     else:
-        model = learn_structure(augmented, min_gain=min_gain, n_bins=n_bins, max_its=max_its)
+        model = learn_structure(
+            augmented, min_gain=min_gain, n_bins=n_bins, max_its=max_its, rng=np.random.RandomState(seed)
+        )
         edges = model.edges()
 
     adapter = StructuredClassifierIO(field_keys, label_index, label_list)
