@@ -12,9 +12,29 @@ pyspark: `pyspark` is None when missing and RDD_TYPES is an empty tuple, so
 through to their local implementations. Install with:
 
     pip install mixle[spark]
+
+zarr / h5py: the array-store data sources (``mixle.data.sources.array_source``) read lazily from
+on-disk zarr and HDF5 volumes without materializing them. Both are ``None`` when missing and
+``HAS_ZARR`` / ``HAS_H5PY`` are ``False``, so the connectors raise the standard ``require(...)`` message
+instead of an ``ImportError`` on import. numpy-memmap volumes need no extra dependency. Install with:
+
+    pip install mixle[arrays]
 """
 
-__all__ = ["numba", "HAS_NUMBA", "pyspark", "HAS_PYSPARK", "RDD_TYPES", "gmpy2", "HAS_GMPY2", "require"]
+__all__ = [
+    "numba",
+    "HAS_NUMBA",
+    "pyspark",
+    "HAS_PYSPARK",
+    "RDD_TYPES",
+    "gmpy2",
+    "HAS_GMPY2",
+    "zarr",
+    "HAS_ZARR",
+    "h5py",
+    "HAS_H5PY",
+    "require",
+]
 
 
 def require(name: str, extra: str):
@@ -71,3 +91,21 @@ except ImportError:
     pyspark = None
     HAS_PYSPARK = False
     RDD_TYPES = ()
+
+
+try:
+    import zarr
+
+    HAS_ZARR = True
+except ImportError:
+    zarr = None
+    HAS_ZARR = False
+
+
+try:
+    import h5py
+
+    HAS_H5PY = True
+except ImportError:
+    h5py = None
+    HAS_H5PY = False
