@@ -43,7 +43,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 
-__all__ = ["GradEstimator", "GradLeaf"]
+__all__ = ["DataBufferAccumulator", "DataBufferAccumulatorFactory", "GradEstimator", "GradLeaf"]
 
 
 def _torch() -> Any:
@@ -161,23 +161,33 @@ class GradLeafEncoder(DataSequenceEncoder):
         return np.array([np.atleast_1d(np.asarray(x, dtype=float)) for x in data])
 
 
-class GradAccumulator(SequenceEncodableStatisticAccumulator):
-    """A gradient leaf's only possible "sufficient statistic": the (responsibility-weighted) data
-    itself, buffered for the M-step. The weights are the E-step's soft counts."""
+class DataBufferAccumulator(SequenceEncodableStatisticAccumulator):
+    """THE gradient-leaf "sufficient statistic": the encoded, responsibility-weighted data itself,
+    buffered for the M-step (the weights are the E-step's soft counts). Generic over the encoding
+    arity -- a single array for unconditional leaves, a tuple like ``(x, y)`` for conditional ones
+    -- so every gradient family shares this one class instead of hand-writing its own buffer.
+    Single observations route through the family's own encoder, so per-row quirks live in exactly
+    one place."""
 
-    def __init__(self) -> None:
-        self.x: list = []
+    def __init__(self, encoder: Any, n_fields: int = 1) -> None:
+        self.encoder = encoder
+        self.n_fields = int(n_fields)
+        self.parts: list[list] = [[] for _ in range(self.n_fields)]
         self.w: list = []
 
     # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
+    def _append(self, enc: Any, weights: np.ndarray) -> None:
+        fields = enc if isinstance(enc, tuple) else (enc,)
+        for buf, f in zip(self.parts, fields):
+            fb = np.asarray(f, dtype=float)
+            buf.append(fb.reshape(fb.shape[0], 1) if fb.ndim == 1 else fb)
+        self.w.append(np.asarray(weights, dtype=float).ravel())
+
     def update(self, x: Any, weight: float, estimate: Any) -> None:
-        self.x.append(np.atleast_1d(np.asarray(x, dtype=float))[None, ...])
-        self.w.append(np.asarray([float(weight)], dtype=float))
+        self._append(self.encoder.seq_encode([x]), np.asarray([float(weight)]))
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
-        xb = np.asarray(enc, dtype=float)
-        self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
-        self.w.append(np.asarray(weights, dtype=float).ravel())
+        self._append(enc, weights)
 
     def initialize(self, x: Any, weight: float, rng: Any) -> None:
         self.update(x, weight, None)
@@ -185,31 +195,36 @@ class GradAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
         self.seq_update(enc, weights, None)
 
-    def combine(self, other: Any) -> GradAccumulator:
-        xs, ws = other
-        if len(xs):
-            self.x.append(np.asarray(xs, dtype=float))
+    def combine(self, other: Any) -> DataBufferAccumulator:
+        *fields, ws = other
+        if len(ws):
+            for buf, f in zip(self.parts, fields):
+                buf.append(np.asarray(f, dtype=float))
             self.w.append(np.asarray(ws, dtype=float).ravel())
         return self
 
     def value(self) -> tuple:
-        x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
+        fields = tuple(np.concatenate(buf, axis=0) if buf else np.zeros((0, 0)) for buf in self.parts)
         w = np.concatenate(self.w) if self.w else np.zeros((0,))
-        return (x, w)
+        return (*fields, w)
 
-    def from_value(self, v: tuple) -> GradAccumulator:
-        x, w = v
-        self.x = [np.asarray(x, dtype=float)] if len(x) else []
+    def from_value(self, v: tuple) -> DataBufferAccumulator:
+        *fields, w = v
+        self.parts = [[np.asarray(f, dtype=float)] if len(f) else [] for f in fields]
         self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
         return self
 
-    def acc_to_encoder(self) -> GradLeafEncoder:
-        return GradLeafEncoder()
+    def acc_to_encoder(self) -> Any:
+        return self.encoder
 
 
-class GradAccumulatorFactory(StatisticAccumulatorFactory):
-    def make(self) -> GradAccumulator:
-        return GradAccumulator()
+class DataBufferAccumulatorFactory(StatisticAccumulatorFactory):
+    def __init__(self, encoder: Any, n_fields: int = 1) -> None:
+        self.encoder = encoder
+        self.n_fields = int(n_fields)
+
+    def make(self) -> DataBufferAccumulator:
+        return DataBufferAccumulator(self.encoder, self.n_fields)
 
 
 class GradEstimator(ParameterEstimator):
@@ -248,12 +263,13 @@ class GradEstimator(ParameterEstimator):
             optimizer=self.optimizer,
         )
 
-    def accumulator_factory(self) -> GradAccumulatorFactory:
-        return GradAccumulatorFactory()
+    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
+        return DataBufferAccumulatorFactory(GradLeafEncoder(), n_fields=1)
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> GradLeaf:
         torch = _torch()
-        xs, ws = suff_stat
+        *fields, ws = suff_stat
+        xs = fields[0]
         params = [p for p in self.module.parameters() if p.requires_grad]
         if len(xs) == 0 or not params:  # nothing to fit, or a fully frozen (fixed) module
             return self._leaf()

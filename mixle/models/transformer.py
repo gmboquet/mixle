@@ -70,6 +70,10 @@ if _HAS_TORCH:
             self.ln = nn.LayerNorm(d_model)
             self.head = nn.Linear(d_model, vocab, bias=False)
             self.head.weight = self.tok.weight  # weight tying
+            # activation (gradient) checkpointing: recompute block activations in backward instead of
+            # storing them -- the standard memory/compute trade for long blocks or deep stacks. A plain
+            # attribute (not a ctor arg) so modules saved before the flag existed rebuild unchanged.
+            self.gradient_checkpointing = False
 
         def forward(self, x: Any) -> Any:
             x = x.long()
@@ -77,20 +81,35 @@ if _HAS_TORCH:
             pos = torch.arange(t, device=x.device)
             h = self.tok(x) + self.pos(pos)[None, :, :]
             for blk in self.blocks:
-                h = blk(h)
+                if getattr(self, "gradient_checkpointing", False) and self.training and torch.is_grad_enabled():
+                    h = torch.utils.checkpoint.checkpoint(blk, h, use_reentrant=False)
+                else:
+                    h = blk(h)
             return self.head(self.ln(h))[:, -1]  # next-token logits from the last position -> (batch, vocab)
 
 
 def build_causal_lm(
-    vocab: int, d_model: int = 128, n_layer: int = 3, n_head: int = 4, block: int = 64, embedding: Any = None
+    vocab: int,
+    d_model: int = 128,
+    n_layer: int = 3,
+    n_head: int = 4,
+    block: int = 64,
+    embedding: Any = None,
+    gradient_checkpointing: bool = False,
 ) -> Any:
     """Build a causal decoder-only Transformer LM (token+pos embeddings, pre-norm blocks, weight-tied head).
 
     ``embedding`` optionally injects a *shared* token ``nn.Embedding`` (``vocab x d_model``) to use in place of a
     fresh one -- so several language models can tie the same word embedding and train it jointly (the weight-tied
     head follows it). Its shape must match ``(vocab, d_model)``.
+
+    ``gradient_checkpointing=True`` recomputes block activations during backward instead of storing them --
+    identical gradients (pinned by test) for a large activation-memory cut on deep stacks or long blocks.
+    The flag is a plain module attribute, so it can also be toggled on an existing model.
     """
     from mixle.models.embedding import resolve_embedding
 
     embedding = resolve_embedding(embedding, vocab, d_model)  # CategoricalEmbedding | nn.Embedding | None -> module
-    return CausalLM(vocab, d_model, n_layer, n_head, block, embedding=embedding)
+    lm = CausalLM(vocab, d_model, n_layer, n_head, block, embedding=embedding)
+    lm.gradient_checkpointing = bool(gradient_checkpointing)
+    return lm
