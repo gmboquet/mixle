@@ -161,7 +161,7 @@ class TorchMixture:
         out: Any | None = None,
     ) -> tuple[Any, float]:
         """Run local EM to convergence and return ``(model, log_likelihood)``."""
-        model = self.initialize(enc, estimator, rng or np.random.RandomState(), p=init_p) if model is None else model
+        model = self.initialize(enc, estimator, rng or np.random.RandomState(0), p=init_p) if model is None else model
         old_ll = float(self.seq_log_density(enc, model=model).sum())
         for i in range(max(1, int(max_its))):
             model = self.em_step(enc, estimator, model=model)

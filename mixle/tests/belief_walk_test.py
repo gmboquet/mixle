@@ -107,7 +107,12 @@ class ComposedWalkBeatsDirectEndToEndTest(unittest.TestCase):
         n_test = len(_X0_TEST)
         covered_direct = covered_walk = 0
         for i in range(n_test):
-            direct_draws = np.asarray([_DIRECT_SAMPLER.sample_given(_X0_TEST[i]) for _ in range(150)])
+            # batched, not 150 individual sample_given calls -- statistically identical (each row of
+            # the batch draws its own independent mixture component + Gaussian noise, see
+            # NeuralConditionalDensitySampler.sample_given_batch's docstring) but avoids paying
+            # per-call torch dispatch overhead 150*n_test times over.
+            x_batch = np.repeat(np.atleast_2d(_X0_TEST[i]), 150, axis=0)
+            direct_draws = np.asarray(_DIRECT_SAMPLER.sample_given_batch(x_batch))
             lo, hi = np.quantile(direct_draws, 0.05), np.quantile(direct_draws, 0.95)
             covered_direct += lo <= _TRUE_BY_HOP[3][i, 0] <= hi
 
