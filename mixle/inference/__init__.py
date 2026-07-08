@@ -247,6 +247,11 @@ from mixle.inference.robust import (
     robust_standard_errors,
     sandwich_covariance,
 )
+from mixle.inference.scenario import FieldPosterior as ScenarioFieldPosterior
+from mixle.inference.scenario import Scenario as ScenarioSpec
+from mixle.inference.scenario import SimulationReceipt as ScenarioSimulationReceipt
+from mixle.inference.scenario import Simulator as ScenarioSimulator
+from mixle.inference.scenario import simulate as simulate_scenario
 
 # M2's scenario simulators (mixle.inference.scenario) eagerly import
 # mixle.stats.latent.hidden_markov -- importing that at THIS module's own top level creates a real
