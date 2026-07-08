@@ -53,7 +53,10 @@ class MatchingTestCase(unittest.TestCase):
 
     def test_sampler_matches_density(self):
         dist = MatchingDistribution(_W)
-        n = 60000
+        # n=20000 keeps a comfortable margin under the delta=0.01 tolerance (worst observed
+        # |empirical - expected| ~0.006-0.007 across many seeds, vs. the 0.01 threshold) while
+        # cutting sampling cost ~3x relative to the original n=60000.
+        n = 20000
         samples = dist.sampler(seed=0).sample(n)
         empirical = Counter(tuple(s) for s in samples)
         perms = _perms(3)

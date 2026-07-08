@@ -40,6 +40,11 @@ class TurboOptimizeTest(unittest.TestCase):
         opt = np.array([0.3, -0.7, 1.2, -1.5, 0.0, 0.9])
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            # The GP-hyperparameter refit (Adam, default max_its=500) dominates runtime: profiling
+            # showed ~54 refits x 500 Adam steps for ~25s of a ~26s run. Capping max_its=50 here
+            # only shortens that inner fit -- the TuRBO loop, n_init/max_evals/batch_size budget, and
+            # candidate set are unchanged. Verified across 30 seeds: recovered error stays <=0.165
+            # (well under the 0.5 threshold) with no failures.
             res = turbo_minimize(
                 lambda x: float(np.sum((x - opt) ** 2)),
                 [(-2.0, 2.0)] * 6,
@@ -47,6 +52,7 @@ class TurboOptimizeTest(unittest.TestCase):
                 max_evals=120,
                 batch_size=2,
                 seed=0,
+                fit_kwargs={"max_its": 50},
             )
         self.assertLess(np.linalg.norm(res["x"] - opt), 0.5)
         self.assertEqual(res["X"].shape[1], 6)
@@ -59,7 +65,19 @@ class TurboOptimizeTest(unittest.TestCase):
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            res = turbo_minimize(sphere, [(-3.0, 3.0)] * 10, n_init=20, max_evals=200, batch_size=4, seed=1)
+            # Same rationale as test_finds_quadratic_optimum: cap the GP refit's max_its instead of
+            # touching the search budget. Verified across 25 seeds (0-14, 20-29): turbo's best value
+            # stayed in [0.37, 2.70], comfortably beating the fixed rand_best=5.64 baseline every
+            # time (>2x margin even in the worst observed case).
+            res = turbo_minimize(
+                sphere,
+                [(-3.0, 3.0)] * 10,
+                n_init=20,
+                max_evals=200,
+                batch_size=4,
+                seed=1,
+                fit_kwargs={"max_its": 50},
+            )
         rand_best = min(sphere(np.random.RandomState(s).uniform(-3, 3, 10)) for s in range(200))
         self.assertLess(res["y"], rand_best)
 
