@@ -498,7 +498,7 @@ def get_dpm_mixture(
     from .profiling import get_estimator
 
     if rng is None:
-        rng = np.random.RandomState()
+        rng = np.random.RandomState(0)  # fixed default: an un-seeded fit is deterministic
     if out is None:
         out = sys.stdout
 

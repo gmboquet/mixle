@@ -28,6 +28,7 @@ from mixle.task.artifact import (
     save_json,
     save_module,
 )
+from mixle.task.bandit import UCB1, EstimatorBandit, ThompsonBernoulli, ThompsonGaussian
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 from mixle.task.capability import (
     CapabilitySuite,
@@ -187,6 +188,12 @@ from mixle.task.structured_out import StructuredSolution, solve_structured
 from mixle.task.toolcall import ToolCaller, ToolSpec, distill_tool_caller
 from mixle.task.traces import AgentTrace, AgentTraces, harvest_agent_traces, parse_conversation
 from mixle.task.tune import CalibratedTuneResult, RecipeSpace, TuneResult, tune_recipe, tune_recipe_for_routing
+from mixle.task.vlm import (
+    CallableVLM,
+    OpenAICompatVLM,
+    score_candidate,
+    score_fn_for,
+)
 
 __all__ = [
     "ESCALATE",
@@ -201,6 +208,10 @@ __all__ = [
     "CascadeStats",
     "ComposedAnswer",
     "ComposedModel",
+    "EstimatorBandit",
+    "ThompsonBernoulli",
+    "ThompsonGaussian",
+    "UCB1",
     "CollapseVerdict",
     "collapse_monitor",
     "distinct_count_diversity",
@@ -248,6 +259,10 @@ __all__ = [
     "LadderResult",
     "ModelRecommendation",
     "OpenAICompatLLM",
+    "OpenAICompatVLM",
+    "CallableVLM",
+    "score_candidate",
+    "score_fn_for",
     "QuantizedClassifierIO",
     "QuantizedMLP",
     "EditTrial",

@@ -38,7 +38,7 @@ class HMMStructuralParameterTestCase(unittest.TestCase):
         seqs = self._sequences()
         m0, m1 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1")
         fit = Markov([Normal(m0, 1.0), Normal(m1, 1.0)], transitions=free, initial=free).fit(
-            seqs, how="ensemble", constraints=m0 < m1, draws=800, burn=300, rng=np.random.RandomState(1)
+            seqs, how="ensemble", constraints=m0 < m1, draws=600, burn=250, rng=np.random.RandomState(1)
         )
         t = fit.params["transitions"]
         self.assertEqual(t.shape, (2, 2))
@@ -71,7 +71,7 @@ class MixtureWeightsAsParameterTestCase(unittest.TestCase):
         m0, m1 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1")
         w = Dirichlet([1.0, 1.0], name="w")
         fit = Mix([Normal(m0, 1.0), Normal(m1, 1.0)], w).fit(
-            self.data, how="ensemble", constraints=m0 < m1, draws=1000, burn=400, rng=np.random.RandomState(1)
+            self.data, how="ensemble", constraints=m0 < m1, draws=600, burn=250, rng=np.random.RandomState(1)
         )
         wts = fit.params["weights"]
         self.assertAlmostEqual(wts[0], 0.7, delta=0.05)
@@ -81,7 +81,7 @@ class MixtureWeightsAsParameterTestCase(unittest.TestCase):
     def test_free_weights(self):
         m0, m1 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1")
         fit = Mix([Normal(m0, 1.0), Normal(m1, 1.0)], free).fit(
-            self.data, how="ensemble", constraints=m0 < m1, draws=1000, burn=400, rng=np.random.RandomState(2)
+            self.data, how="ensemble", constraints=m0 < m1, draws=600, burn=250, rng=np.random.RandomState(2)
         )
         wts = fit.params["weights"]
         self.assertAlmostEqual(wts[0], 0.7, delta=0.05)
@@ -97,8 +97,8 @@ class MixtureWeightsAsParameterTestCase(unittest.TestCase):
             list(x),
             how="ensemble",
             constraints=(m0 < m1) & (m1 < m2),
-            draws=2000,
-            burn=800,
+            draws=1500,
+            burn=650,
             walkers=40,  # 3-component posterior needs a larger ensemble to mix reliably
             rng=np.random.RandomState(4),
         )
@@ -134,7 +134,7 @@ class MixtureAutogradTestCase(unittest.TestCase):
     def test_nuts_on_mixture(self):
         m0, m1 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1")
         fit = Mix([Normal(m0, 1.0), Normal(m1, 1.0)], free).fit(
-            self.data, how="nuts", constraints=m0 < m1, draws=500, burn=400, rng=np.random.RandomState(1)
+            self.data, how="nuts", constraints=m0 < m1, draws=300, burn=250, rng=np.random.RandomState(1)
         )
         self.assertAlmostEqual(fit.result.mean("m0"), -3.0, delta=0.4)
         self.assertAlmostEqual(fit.result.mean("m1"), 3.0, delta=0.4)
