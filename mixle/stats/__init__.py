@@ -723,6 +723,9 @@ __all__ = [
     "StudentTCopulaDistribution",
     "StudentTCopulaSampler",
     "StudentTCopulaEstimator",
+    "GumbelCopulaDistribution",
+    "GumbelCopulaSampler",
+    "GumbelCopulaEstimator",
     "CVineCopulaDistribution",
     "CVineCopulaSampler",
     "CVineCopulaEstimator",
@@ -1406,6 +1409,11 @@ from mixle.stats.multivariate.gaussian_copula import (
     GaussianCopulaDistribution,
     GaussianCopulaEstimator,
     GaussianCopulaSampler,
+)
+from mixle.stats.multivariate.gumbel_copula import (
+    GumbelCopulaDistribution,
+    GumbelCopulaEstimator,
+    GumbelCopulaSampler,
 )
 from mixle.stats.multivariate.integer_multinomial import (
     IntegerMultinomialDataEncoder,
