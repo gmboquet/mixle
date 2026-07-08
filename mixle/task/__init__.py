@@ -28,6 +28,7 @@ from mixle.task.artifact import (
     save_json,
     save_module,
 )
+from mixle.task.bandit import UCB1, EstimatorBandit, ThompsonBernoulli, ThompsonGaussian
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 from mixle.task.capability import (
     CapabilitySuite,
@@ -207,6 +208,10 @@ __all__ = [
     "CascadeStats",
     "ComposedAnswer",
     "ComposedModel",
+    "EstimatorBandit",
+    "ThompsonBernoulli",
+    "ThompsonGaussian",
+    "UCB1",
     "CollapseVerdict",
     "collapse_monitor",
     "distinct_count_diversity",
