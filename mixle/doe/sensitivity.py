@@ -102,6 +102,8 @@ def morris_screening(
     effect ``mu_star[i]`` ranks influence and the spread ``sigma[i]`` flags nonlinearity/interactions.
     Cost: ``trajectories * (d + 1)`` evaluations -- far fewer than Sobol, for an initial screen.
     """
+    if levels < 2:
+        raise ValueError(f"morris_screening requires levels >= 2 (a single-level grid has no step), got {levels}")
     bounds = np.asarray(bounds, dtype=float)
     d = len(bounds)
     rng = np.random.RandomState(seed)

@@ -100,6 +100,8 @@ def propose_mes(
     a ``(d,)`` array. ``maximize`` selects the optimization sense (default minimize, matching the rest
     of the BO layer).
     """
+    if int(n_candidates) <= 0:
+        raise ValueError("n_candidates must be positive.")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     xs, ys = _validate_xy(x, y)
