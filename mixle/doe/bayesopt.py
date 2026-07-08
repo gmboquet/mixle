@@ -226,6 +226,12 @@ def _propose_one(
     """Fit the surrogate, score Latin-hypercube candidates, return (best point, its merit, fitted gp)."""
     if int(n_candidates) <= 0:
         raise ValueError("n_candidates must be positive.")
+    if y.size == 0:
+        # np.min/np.max on an empty y crashes with an opaque "zero-size array" ValueError. This is a
+        # real, reachable path: BayesianOptimizer.ask(q) with q > n_init before any tell() calls
+        # propose_next/propose_batch with zero observations -- there is no incumbent to score
+        # acquisition against yet, so name that clearly instead of a generic numpy crash.
+        raise ValueError("cannot propose an acquisition-based point with zero observations; call tell() first.")
     gp = _fit_surrogate(x, y, gp, fit_kwargs)
     candidates = latin_hypercube(b, n_candidates, rng)
     mean, cov = gp.predict(x, y, candidates, return_cov=True)
