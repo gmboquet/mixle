@@ -12,10 +12,11 @@
 
 **From data to a deployable model with very little code.** Hand mixle raw records and it works out a model
 and fits it for you. Hand it a plain PyTorch module and it fits in one call — no training loop, no
-batching / eval / convergence boilerplate. Hand it the slow function doing a job today and it distills a
-small, fast local model that handles the easy cases and defers the hard ones. Pieces compose without
-adapter classes or glue code, and the same program runs on a laptop or scales across Spark, Dask, Ray, or
-MPI with one `backend=` argument.
+batching / eval / convergence boilerplate. Hand it the slow, expensive thing doing a job today — a frontier
+LLM, an API, a rule — and it **distills a small local model that answers the easy cases itself and escalates
+only the hard ones**, with a confidence gate deciding when the local answer is safe and a cost model
+reporting exactly what you saved. Pieces compose without adapter classes or glue code, and the same program
+runs on a laptop or scales across Spark, Dask, Ray, or MPI with one `backend=` argument.
 
 The idea is that you describe *what* you're modeling and mixle handles *how* to fit it. Nest a few pieces —
 a neural language model, a curve, a mixture, an HMM — and a single `optimize(...)` call fits the whole
@@ -304,10 +305,12 @@ Normal(free * Field("x") + free * Field("z") + free, free).fit(
 - **A torch module, fit for you** (`mixle.models`) — any module with a forward pass and an objective fits
   in one call (`optimize(x, module)`); freeze submodules, swap the optimizer, and get the raw module back —
   nothing is trapped. Parity with a hand-written loop is pinned by a test.
-- **Replace a function with a model** (`mixle.task`) — distill a slow, expensive teacher (an LLM, a rule, a
-  human) into a small local model, with conformal calibration and cascades / routers so it answers when
-  sure and defers when not. Soft-label distillation, cost-aware routing, and bandits / RL for the decision
-  loop are included.
+- **Distill big models into small ones, and route by cost** (`mixle.task`) — turn a slow, expensive teacher
+  (an LLM, a rule, a human) into a tiny local model; a **conformal gate** decides when the local answer is
+  safe, a **cascade / router** escalates only the hard cases to the teacher, and a **cost model** reports
+  the dollars saved and the break-even volume so the trade-off is a number, not a guess. Soft-label
+  distillation, density-gated and cost-aware routing thresholds, harvest-and-re-distill loops, and multi-tier
+  routing with bandits / RL for the decision policy are all included.
 - **Build by nesting** — mixtures, sequences, records, HMMs (segmental / lookback / tree / quantized), LDA,
   PCFGs, and more compose to any depth, with parameters tied across the structure by `keys=`; one call fits
   the whole tree.
