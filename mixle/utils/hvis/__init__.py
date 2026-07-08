@@ -194,6 +194,18 @@ from mixle.utils.hvis.direct import (
 from mixle.utils.hvis.direct import (
     model_map as model_map,
 )
+from mixle.utils.hvis.distributed import (
+    FiberStats as FiberStats,
+)
+from mixle.utils.hvis.distributed import (
+    distributed_model_map as distributed_model_map,
+)
+from mixle.utils.hvis.distributed import (
+    fiber_stats as fiber_stats,
+)
+from mixle.utils.hvis.distributed import (
+    fuzzy_nerve_from_stats as fuzzy_nerve_from_stats,
+)
 from mixle.utils.hvis.embed import (
     dpmsne as dpmsne,
 )
