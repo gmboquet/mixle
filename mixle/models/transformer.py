@@ -73,15 +73,25 @@ if _HAS_TORCH:
             # activation (gradient) checkpointing: recompute block activations in backward instead of
             # storing them -- the standard memory/compute trade for long blocks or deep stacks. A plain
             # attribute (not a ctor arg) so modules saved before the flag existed rebuild unchanged.
+            # Either a single bool (all-or-nothing, the original behavior) or a per-block list/tuple of
+            # bools of length n_layer (F6's selective per-block policy -- see
+            # mixle.models.memory_efficient_training.SelectiveRecomputePolicy.apply_to_model, which sets
+            # exactly this attribute from a real memory-vs-recompute-FLOPs cost model).
             self.gradient_checkpointing = False
+
+        def _checkpoint_block(self, i: int) -> bool:
+            gc = getattr(self, "gradient_checkpointing", False)
+            if isinstance(gc, bool):
+                return gc
+            return bool(gc[i])  # per-block list/tuple, one entry per self.blocks
 
         def forward(self, x: Any) -> Any:
             x = x.long()
             t = x.shape[1]
             pos = torch.arange(t, device=x.device)
             h = self.tok(x) + self.pos(pos)[None, :, :]
-            for blk in self.blocks:
-                if getattr(self, "gradient_checkpointing", False) and self.training and torch.is_grad_enabled():
+            for i, blk in enumerate(self.blocks):
+                if self._checkpoint_block(i) and self.training and torch.is_grad_enabled():
                     h = torch.utils.checkpoint.checkpoint(blk, h, use_reentrant=False)
                 else:
                     h = blk(h)
@@ -105,7 +115,9 @@ def build_causal_lm(
 
     ``gradient_checkpointing=True`` recomputes block activations during backward instead of storing them --
     identical gradients (pinned by test) for a large activation-memory cut on deep stacks or long blocks.
-    The flag is a plain module attribute, so it can also be toggled on an existing model.
+    The flag is a plain module attribute, so it can also be toggled on an existing model -- including to a
+    per-block list/tuple of bools (one per ``n_layer``) rather than a single all-or-nothing bool, for F6's
+    cost-model-driven selective policy (``mixle.models.memory_efficient_training.SelectiveRecomputePolicy``).
     """
     from mixle.models.embedding import resolve_embedding
 
