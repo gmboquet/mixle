@@ -116,9 +116,7 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState 
         if net.edges():
             candidates.append((bayesian_network_bic(net, rows), net, "bayesian-network"))
         if all_continuous:
-            cop = _maybe_copula_model(rows, composite, comp_params, n_log, max_its, rng)
-            if cop is not None:
-                candidates.append(cop)
+            candidates.extend(_copula_candidates(rows, composite, comp_params, comp_bic, n_log, max_its, rng))
         if not candidates:
             return None
         best_bic, best_model, desc = min(candidates, key=lambda u: u[0])
@@ -133,29 +131,61 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState 
         return None
 
 
-def _maybe_copula_model(
-    rows: Any, composite: Any, comp_params: int, n_log: float, max_its: int, rng: RandomState | None
-) -> tuple[float, Any, str] | None:
-    """A copula over the composite's per-field marginals: heterogeneous margins + a Gaussian dependence core.
+# pair-copula free-parameter counts, for BIC when a vine is a candidate (independence adds nothing).
+_PAIR_COPULA_PARAMS = {"independence": 0, "gaussian": 1, "clayton": 1, "frank": 1, "gumbel": 1, "student_t": 2}
 
-    Reuses the independently-detected marginals (which the composite already fitted) and adds ONE dependence
-    object -- a Gaussian copula's correlation matrix, ``d(d-1)/2`` parameters on top of the marginals -- so the
-    BIC comparison against the composite is exactly "does the dependence pay for those correlation params". The
-    copula reaches joints a linear-Gaussian Bayesian network cannot: e.g. a Gamma margin and a Student-t margin
-    coupled by rank correlation. Returns ``(bic, model, "copula")`` or ``None`` if inapplicable.
+
+def _vine_param_count(vine: Any) -> int:
+    """Total free parameters of a fitted R-vine: sum of its per-edge pair-copula parameters."""
+    return sum(_PAIR_COPULA_PARAMS.get(e.copula.family, 1) for tree in getattr(vine, "trees", []) for e in tree)
+
+
+def _copula_candidates(
+    rows: Any, composite: Any, comp_params: int, comp_bic: float, n_log: float, max_its: int, rng: RandomState | None
+) -> list[tuple[float, Any, str]]:
+    """Copula dependence candidates over the composite's per-field marginals, each scored by BIC.
+
+    Reuses the independently-detected marginals (which the composite already fitted, and which expose the CDF a
+    copula needs for the probability-integral transform) and tries dependence cores that a linear-Gaussian
+    Bayesian network cannot represent:
+
+    * a **Gaussian copula** -- one correlation matrix, ``d(d-1)/2`` params on top of the marginals; the
+      elliptical, tail-independent default.
+    * a **regular vine** with Dißmann structure + per-edge family selection -- tried only when the Gaussian
+      copula already shows dependence pays (so a vine is never fit on independent data), and kept only if its
+      per-edge tail-dependence structure beats the Gaussian core by BIC. This is what lets automatic inference
+      recognize joint tail dependence (a Clayton-style joint-crash coupling) instead of forcing it elliptical.
+
+    Returns a list of ``(bic, model, description)`` candidates (possibly empty).
     """
     marginals = list(getattr(composite, "dists", []) or [])
     if len(marginals) < 2 or any(not callable(getattr(m, "cdf", None)) for m in marginals):
-        return None  # a copula needs each marginal's CDF for the probability-integral transform
+        return []  # a copula needs each marginal's CDF for the probability-integral transform
     from mixle.stats.combinator.copula import CopulaDistribution
     from mixle.stats.multivariate.gaussian_copula import GaussianCopulaDistribution
+    from mixle.stats.multivariate.rvine_copula import RVineCopulaDistribution
 
     d = len(marginals)
-    proto = CopulaDistribution(marginals, GaussianCopulaDistribution(np.eye(d)))
-    copula = optimize(rows, proto.estimator(), prev_estimate=proto, max_its=max_its, rng=rng, out=None)
-    ll = float(np.sum(copula.seq_log_density(copula.dist_to_encoder().seq_encode(rows))))
-    params = comp_params + d * (d - 1) // 2  # marginals (as in the composite) + the correlation off-diagonals
-    return (-2.0 * ll + params * n_log, copula, "copula")
+
+    def _fit_bic(core: Any, extra_params: int) -> tuple[float, Any]:
+        proto = CopulaDistribution(marginals, core)
+        fitted = optimize(rows, proto.estimator(), prev_estimate=proto, max_its=max_its, rng=rng, out=None)
+        ll = float(np.sum(fitted.seq_log_density(fitted.dist_to_encoder().seq_encode(rows))))
+        return -2.0 * ll + (comp_params + extra_params) * n_log, fitted
+
+    g_bic, gauss = _fit_bic(GaussianCopulaDistribution(np.eye(d)), d * (d - 1) // 2)
+    out: list[tuple[float, Any, str]] = [(g_bic, gauss, "copula")]
+
+    # only fit a vine when the (cheaper) Gaussian copula already beat independence -- if there is no dependence
+    # to model, the more-flexible vine cannot help and would just cost time. Its per-edge tail-dependence
+    # structure then earns its keep only if BIC prefers it over the elliptical Gaussian core.
+    if g_bic < comp_bic:
+        vproto = CopulaDistribution(marginals, RVineCopulaDistribution(d, []))
+        vine = optimize(rows, vproto.estimator(), prev_estimate=vproto, max_its=max_its, rng=rng, out=None)
+        v_ll = float(np.sum(vine.seq_log_density(vine.dist_to_encoder().seq_encode(rows))))
+        v_bic = -2.0 * v_ll + (comp_params + _vine_param_count(vine.copula)) * n_log
+        out.append((v_bic, vine, "vine-copula"))
+    return out
 
 
 # --- data-encoding helpers --------------------------------------------------
