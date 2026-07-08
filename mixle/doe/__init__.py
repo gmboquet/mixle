@@ -83,6 +83,12 @@ from mixle.doe.designs import (
     random_design,
     sobol_design,
 )
+from mixle.doe.distillation import (
+    DistillationDesign,
+    cross_modal_distillation_design,
+    distillation_design,
+    multitask_distillation_design,
+)
 from mixle.doe.entropy import (
     max_value_entropy_search,
     propose_mes,
@@ -136,6 +142,10 @@ __all__ = [
     "maxpro_design",
     "random_design",
     "sobol_design",
+    "DistillationDesign",
+    "distillation_design",
+    "multitask_distillation_design",
+    "cross_modal_distillation_design",
     "fractional_factorial",
     "plackett_burman",
     "central_composite",
