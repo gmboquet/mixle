@@ -126,7 +126,9 @@ class AxisAlignTest(unittest.TestCase):
         goal = AxisAlign(data, axis=0, weight=0.5)  # the raw 1-D value should order embedding axis 0
         coords = htsne(data, mix_model=_MODEL, method="exact", seed=5, max_its=400, goals=[goal], out=None)
         r = float(np.corrcoef(coords[:, 0], np.asarray(data))[0, 1])
-        self.assertGreater(r, 0.8)
+        # without the goal this seed lands at r=-0.79 (sign is arbitrary); the goal forces positive
+        # alignment at 0.75-0.98 depending on the BLAS/numpy build, so pin the sign with margin
+        self.assertGreater(r, 0.6)
 
     def test_constant_values_raise(self):
         with self.assertRaises(ValueError):
