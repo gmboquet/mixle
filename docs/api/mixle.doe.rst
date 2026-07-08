@@ -19,6 +19,7 @@ Submodules
    mixle.doe.calibrate
    mixle.doe.constrained
    mixle.doe.designs
+   mixle.doe.distillation
    mixle.doe.entropy
    mixle.doe.factorial
    mixle.doe.mixture

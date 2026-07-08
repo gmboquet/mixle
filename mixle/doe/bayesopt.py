@@ -198,7 +198,12 @@ def _fit_surrogate(x: np.ndarray, y: np.ndarray, gp: Surrogate | None, fit_kwarg
     if gp is None:
         from mixle.models.gaussian_process import GaussianProcessRegressor
 
-        scale = float(np.std(y)) or 1.0
+        # np.std([]) is nan (with a RuntimeWarning), and `nan or 1.0` evaluates to nan -- nan is
+        # truthy, so the `or` fallback only ever caught the exact-zero-variance case, not the
+        # empty-y case. An empty y is a real, documented path: BayesianOptimizer.ask(q) with
+        # q > n_init before any tell() calls propose_batch with zero observations.
+        std = float(np.std(y)) if y.size > 0 else 0.0
+        scale = std if std > 0.0 else 1.0
         gp = GaussianProcessRegressor(lengthscale=1.0, amplitude=scale, noise=0.1 * scale + 1.0e-6)
     kwargs = {"out": None, **(fit_kwargs or {})}
     gp.fit(x, y, **kwargs)
@@ -219,6 +224,8 @@ def _propose_one(
     fit_kwargs: dict[str, Any] | None,
 ) -> tuple[np.ndarray, float, Surrogate]:
     """Fit the surrogate, score Latin-hypercube candidates, return (best point, its merit, fitted gp)."""
+    if int(n_candidates) <= 0:
+        raise ValueError("n_candidates must be positive.")
     if y.size == 0:
         # np.min/np.max on an empty y crashes with an opaque "zero-size array" ValueError. This is a
         # real, reachable path: BayesianOptimizer.ask(q) with q > n_init before any tell() calls
@@ -305,6 +312,8 @@ def propose_knowledge_gradient(
     look-ahead Bayesian-optimization proposal. ``maximize`` selects the objective sense (the mean is
     negated for minimization).
     """
+    if int(n_candidates) <= 0:
+        raise ValueError("n_candidates must be positive.")
     x, y = _validate_xy(x, y)
     b = _as_bounds(bounds)
     rng = _as_rng(seed)

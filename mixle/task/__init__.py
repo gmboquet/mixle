@@ -123,6 +123,7 @@ from mixle.task.imagine import (
     ceiling_report,
     propose_structure,
 )
+from mixle.task.irl import MaxEntIRLResult, max_ent_irl, rollout_states, state_features
 from mixle.task.llm import (
     CallableLLM,
     OpenAICompatLLM,
@@ -177,6 +178,7 @@ from mixle.task.refine import (
 )
 from mixle.task.regress import RegressionSolution, solve_regression
 from mixle.task.replay import ExecutionTrace, TraceStep, is_bit_identical_replay, record_step, replay
+from mixle.task.rl import GridWorld, QLearningResult, rollout, tabular_q_learning
 from mixle.task.router import HarvestResolveResult, Router, RouterStats, resolve_from_harvest, route_stack
 from mixle.task.scorecard import Scorecard, scorecard
 from mixle.task.sft_plan import GenerativePlanner, sample_plans, score_plan, sft_planner
@@ -356,6 +358,14 @@ __all__ = [
     "RoundLog",
     "SequenceProposal",
     "propose_verify_retrain",
+    "GridWorld",
+    "QLearningResult",
+    "tabular_q_learning",
+    "rollout",
+    "MaxEntIRLResult",
+    "max_ent_irl",
+    "rollout_states",
+    "state_features",
     "sample_plans",
     "score_plan",
     "scorecard",
