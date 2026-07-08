@@ -621,6 +621,7 @@ def optimize(
     objective: str = "auto",
     on_step: Any | None = None,
     structure: str = "auto",
+    schedule: str = "full",
 ) -> SequenceEncodableProbabilityDistribution:
     """Estimation of 'estimator' via EM algorithm for max_its iterations or until
         new_loglikelihood - old_loglikelihood < delta.
@@ -710,6 +711,19 @@ def optimize(
             the historical automatic-composite path proceeds untouched. ``'off'`` restores the
             unconditional historical behavior. Only consulted when ``estimator`` is ``None`` and no
             ``prev_estimate``/``init_estimator``/``strategy``/``enc_data`` is supplied.
+        schedule (str): ``'full'`` (default) -- unchanged vanilla full-tree EM, every round scores
+            and re-estimates every component. ``'auto'`` engages the D3 block-coordinate-ascent
+            scheduler (:mod:`mixle.inference.block_em`): each round, D1 node reports rank the
+            components NOT already D2-frozen by gain-per-cost, and only the highest-value ones
+            (within a per-round cost budget) are actually re-estimated -- composing with D2's
+            freeze/roll-up cache rather than duplicating it. This is a SPEED-only scheduling
+            choice: F (the Neal-Hinton free energy) is still gated non-decreasing every round, and
+            when there is no useful ranking to do (e.g. every component looks equally worth
+            updating) the scheduler degenerates to doing exactly what ``'full'`` does. Only
+            engaged when the model is a plain local-backend ``MixtureDistribution``/
+            ``MixtureEstimator`` MLE fit with no explicit ``strategy``/``engine``/``resources``/
+            ``placement`` -- anything else silently falls back to ``'full'`` (never an error, never
+            a behavior change beyond scheduling).
 
     Returns:
         SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm
@@ -819,6 +833,39 @@ def optimize(
         # the plain log-likelihood otherwise. So a Bayesian estimator converges/selects on the right
         # objective whether the caller reaches for optimize() or fit().
         resolved_objective = _resolve_objective(objective, estimator, mm)
+
+        # D3 block-EM scheduler: 'auto' dispatches to mixle.inference.block_em's greedy
+        # gain-per-cost scheduler when the fit is a plain local MLE MixtureDistribution/
+        # MixtureEstimator fit with none of the other execution knobs engaged (those all need
+        # the standard _em_loop path); everything else silently keeps the 'full' behavior below
+        # -- schedule='auto' never errors or changes what is computed, only how it is scheduled.
+        if schedule == "auto":
+            from mixle.stats.latent.mixture import MixtureDistribution, MixtureEstimator
+
+            if (
+                isinstance(mm, MixtureDistribution)
+                and isinstance(estimator, MixtureEstimator)
+                and strategy is None
+                and resolved_objective == "mle"
+                and engine is None
+                and resources is None
+                and placement is None
+                and backend_name == "local"
+            ):
+                from mixle.inference.block_em import run_block_em
+
+                best_model, block_history = run_block_em(enc_data, estimator, mm, max_its=max_its, delta=delta)
+                if out is not None and block_history:
+                    last = block_history[-1]
+                    out.write(
+                        "block-em: %d rounds, final F=%.6f, mean active fraction=%.3f\n"
+                        % (
+                            len(block_history),
+                            last.objective,
+                            float(np.mean([h.active_fraction for h in block_history])),
+                        )
+                    )
+                return best_model
 
         # Cost-model auto-fusion: with no explicit engine, switch a large-enough local MLE fit of a
         # fusible model onto the single-pass fused numba kernel (parity-identical, ~1.7x once warm).
