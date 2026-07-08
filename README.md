@@ -106,12 +106,15 @@ mix = MixtureDistribution([fitted, GammaDistribution(2.0, 1.0)], [0.5, 0.5])
 ```
 
 Control never leaves you: freeze submodules with `requires_grad_(False)` (the optimizer only sees
-trainable parameters — train a projection head against a frozen encoder), override the objective or
-optimizer as hooks (`GradLeaf(module, loss=..., optimizer=...)`), and parity with a hand-written torch
-loop is pinned by a test (`mixle/tests/torch_parity_test.py`), not claimed in prose. Scaling stays a
-flag: `optimize(..., backend=...)` distributes EM across Spark/Dask/Ray/MPI, and the transformer LM's
-`fit(token_ids, distributed=True, precision="bf16")` runs FSDP2 (ZeRO-3) with DCP checkpoints under
-torchrun.
+trainable parameters — train a projection head against a frozen encoder, or a LoRA-style adapter over a
+frozen base), override the objective or optimizer as hooks (`GradLeaf(module, loss=..., optimizer=...)`),
+and parity with a hand-written torch loop is pinned by a test (`mixle/tests/torch_parity_test.py`), not
+claimed in prose. Scaling stays a flag: `optimize(..., backend=...)` distributes EM across
+Spark/Dask/Ray/MPI; the transformer LM's `fit(token_ids, distributed=True, precision="bf16")` runs FSDP2
+(ZeRO-3) with DCP checkpoints under torchrun, and `build_causal_lm(..., gradient_checkpointing=True)`
+trades recompute for activation memory with gradients pinned identical by test. The receipts cover the
+manufactured loop and mixle's own leaves; frontier-scale multimodal stacks remain torch/DeepSpeed
+territory — bring the trained module back as a leaf.
 
 **Compose arbitrarily deep — and tie parameters across the structure.** A segmental HMM whose every state
 emits a *composite* segment (a two-mode mixture plus a phrase scored by a PCFG), with the mixture's first
