@@ -42,6 +42,18 @@ class MaterializedSource:
     def __init__(
         self, data: Sequence[Any], structure: SampleStructure = EXCHANGEABLE, schema: Schema | None = None
     ) -> None:
+        # materialize()/records() re-derive from self._data on every call (cheap and correct for a
+        # real Sequence, which supports repeated iteration by definition) rather than caching like
+        # LazySource does -- but that's only safe if data really IS re-iterable. A one-shot iterator
+        # or generator passed here despite the type hint would silently materialize empty/partial on
+        # the SECOND call, far from this constructor. Checking __len__ (not isinstance(..., Sequence))
+        # is deliberate: numpy.ndarray is a perfectly safe, re-iterable container here but does NOT
+        # register as collections.abc.Sequence, while every one-shot iterator/generator lacks __len__.
+        if not hasattr(data, "__len__"):
+            raise TypeError(
+                f"MaterializedSource requires a re-iterable container (with __len__), got "
+                f"{type(data).__name__}; wrap a one-shot iterable with list(...) first."
+            )
         self._data = data
         self.structure = structure
         self.schema = schema

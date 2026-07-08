@@ -66,6 +66,8 @@ def propose_active_learning(
     fit_kwargs: dict[str, Any] | None = None,
 ) -> np.ndarray:
     """Propose the next active-learning point (``method='alc'`` IMSE, or ``'alm'`` max variance)."""
+    if int(n_candidates) <= 0:
+        raise ValueError("n_candidates must be positive.")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     xs, ys = _validate_xy(x, y)
@@ -144,6 +146,8 @@ def expected_information_gain_nmc(
     returns ``(n, k)`` parameter draws; ``log_likelihood(thetas, y)`` returns a log-density per row of
     ``thetas`` at the single observation ``y``; ``simulate(theta, rng)`` draws one ``y`` given ``theta``.
     """
+    if int(n_outer) <= 0 or int(n_inner) <= 0:
+        raise ValueError("expected_information_gain_nmc requires n_outer > 0 and n_inner > 0.")
     rng = seed if isinstance(seed, RandomState) else RandomState(seed)
     thetas_outer = np.asarray(prior_sampler(rng, int(n_outer)), dtype=np.float64)
     total = 0.0
