@@ -154,6 +154,15 @@ from mixle.task.outcome_decomposer import (
     imitation_traces,
     train_outcome_decomposer,
 )
+from mixle.task.pilot_ladder import (
+    PILOT_LADDER_ASSUMED_HEALTHY_PIECES,
+    PILOT_LADDER_UNAVAILABLE_PIECES,
+    PilotLadderResult,
+    Rung,
+    RungArtifacts,
+    RungOutcome,
+    run_pilot_ladder,
+)
 from mixle.task.plan import Planner, distill_planner
 from mixle.task.plan_model import PlanModel, fit_plan_model
 from mixle.task.plan_refine import RefinementReport, outcome_refine_planner
@@ -321,6 +330,13 @@ __all__ = [
     "mdl_score",
     "monolithic_predict",
     "record_decomposition_outcome",
+    "PILOT_LADDER_ASSUMED_HEALTHY_PIECES",
+    "PILOT_LADDER_UNAVAILABLE_PIECES",
+    "PilotLadderResult",
+    "Rung",
+    "RungArtifacts",
+    "RungOutcome",
+    "run_pilot_ladder",
     "GenerativePlanner",
     "Planner",
     "PlanModel",
