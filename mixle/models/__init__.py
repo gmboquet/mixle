@@ -73,6 +73,16 @@ from mixle.models.mixture_density import (
     build_mdn,
     build_projection_leaf,
 )
+from mixle.models.mup import (
+    apply_mup_init,
+    classify_causal_lm_params,
+    init_std_multiplier,
+    lr_multiplier,
+    mup_param_groups,
+    output_forward_multiplier,
+    transfer_init_std,
+    transfer_lr,
+)
 from mixle.models.neural import (
     CategoricalClassificationNeuralNetwork,
     GaussianRegressionNeuralNetwork,
@@ -175,6 +185,14 @@ __all__ = [
     "lm_train_fn",
     "snapshot",
     "tune_training",
+    "apply_mup_init",
+    "classify_causal_lm_params",
+    "init_std_multiplier",
+    "lr_multiplier",
+    "mup_param_groups",
+    "output_forward_multiplier",
+    "transfer_init_std",
+    "transfer_lr",
     "stream_fit",
     "GrammarLearningResult",
     "HamiltonianNet",
