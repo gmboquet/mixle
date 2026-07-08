@@ -185,6 +185,19 @@ from mixle.task.scorecard import Scorecard, scorecard
 from mixle.task.sft_plan import GenerativePlanner, sample_plans, score_plan, sft_planner
 from mixle.task.solve import Solution, load_harvested, solve
 from mixle.task.structured_out import StructuredSolution, solve_structured
+from mixle.task.task_decomposition import (
+    DecompositionProposer,
+    DependencyForest,
+    TaskExample,
+    decomposed_predict,
+    discover_decomposition,
+    fit_decomposition,
+    init_decomposition_proposer,
+    log_decomposition_recipe,
+    mdl_score,
+    monolithic_predict,
+    record_decomposition_outcome,
+)
 from mixle.task.toolcall import ToolCaller, ToolSpec, distill_tool_caller
 from mixle.task.traces import AgentTrace, AgentTraces, harvest_agent_traces, parse_conversation
 from mixle.task.tune import CalibratedTuneResult, RecipeSpace, TuneResult, tune_recipe, tune_recipe_for_routing
@@ -292,6 +305,17 @@ __all__ = [
     "imitation_traces",
     "train_outcome_decomposer",
     "StructuredSolution",
+    "DecompositionProposer",
+    "DependencyForest",
+    "TaskExample",
+    "decomposed_predict",
+    "discover_decomposition",
+    "fit_decomposition",
+    "init_decomposition_proposer",
+    "log_decomposition_recipe",
+    "mdl_score",
+    "monolithic_predict",
+    "record_decomposition_outcome",
     "GenerativePlanner",
     "Planner",
     "PlanModel",
