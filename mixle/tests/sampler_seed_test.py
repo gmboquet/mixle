@@ -207,6 +207,15 @@ def _stats_public_distribution_catalog():
         _att_rng.randn(3, 2), np.full((3, 2), np.log(0.3)), _att_emission(3, 3), sigma2=0.3
     )
 
+    copula = stats.CopulaDistribution(
+        [stats.GammaDistribution(1.0, 1.0), stats.GaussianDistribution(0.0, 1.0)],
+        stats.GaussianCopulaDistribution(np.eye(2)),
+    )
+    gated_mixture = stats.GatedMixtureDistribution(
+        [stats.GaussianDistribution(-1.0, 1.0), stats.GaussianDistribution(1.0, 1.0)],
+        stats.SoftmaxGate.zeros(2, 1),
+    )
+
     return {
         "ResponsibilityAttentionDistribution": responsibility_attention,
         "VariationalEmbeddingAttentionDistribution": variational_embedding_attention,
@@ -227,6 +236,8 @@ def _stats_public_distribution_catalog():
                 stats.GaussianDistribution(0.0, 1.0),
             )
         ),
+        "CopulaDistribution": copula,
+        "GatedMixtureDistribution": gated_mixture,
         "RecordDistribution": stats.RecordDistribution(
             {
                 "x": stats.GaussianDistribution(0.0, 1.0),
@@ -572,8 +583,21 @@ class SamplerSeedTestCase(unittest.TestCase):
         catalog = {**_stats_public_distribution_catalog(), **_bayes_only_distribution_catalog()}
         self.assert_catalog_matches_exports(stats, catalog)
         for name, dist in sorted(catalog.items()):
+            if name == "GatedMixtureDistribution":
+                # Conditional p(y|z): .sampler().sample() raises NotImplementedError by design
+                # (there's no marginal over z to sample from) -- exercise sample_given(z) instead.
+                self.assert_repeatable_conditional_sampler(name, dist, z=np.array([1.5]))
+                continue
             self.assert_repeatable_sampler(name, dist)
             self.assert_sized_sample_contract(name, dist, null_is_sentinel=True)
+
+    def assert_repeatable_conditional_sampler(self, name, dist, z):
+        with self.subTest(name=name, mode="conditional_stream"):
+            first_sampler = dist.sampler(seed=271828)
+            second_sampler = dist.sampler(seed=271828)
+            first = [_canonical(first_sampler.sample_given(z)) for _ in range(6)]
+            second = [_canonical(second_sampler.sample_given(z)) for _ in range(6)]
+            self.assertEqual(first, second)
 
     def test_bayes_only_samplers_are_seed_repeatable(self):
         catalog = _bayes_only_distribution_catalog()
