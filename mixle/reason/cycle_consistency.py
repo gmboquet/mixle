@@ -23,6 +23,8 @@ from typing import Any
 import numpy as np
 
 from mixle.inference import optimize
+from mixle.reason.cross_modal import CrossModalJoint
+from mixle.stats.latent.mixture import MixtureDistribution
 
 
 def _as_paired_batch(a: np.ndarray) -> np.ndarray:
@@ -108,6 +110,63 @@ def posterior_mean_estimate(sampler: Any, given_value: np.ndarray, *, n_draws: i
     x_batch = np.repeat(np.atleast_2d(np.asarray(given_value, dtype=np.float64)), n_draws, axis=0)
     draws = np.asarray(sampler.sample_given_batch(x_batch), dtype=np.float64)
     return draws.mean(axis=0)
+
+
+def joint_cycle_consistency_receipt(
+    joint: CrossModalJoint,
+    source: str,
+    target: str,
+    *,
+    backward_joint: CrossModalJoint | None = None,
+    n_round_trip: int = 300,
+    n_kl_samples: int = 500,
+    seed: int = 0,
+) -> float:
+    """Cross-modal generalization (workstream L2) of this module's round-trip closure signal.
+
+    ``cycle_inconsistency`` above measures round-trip closure (A -> B -> A) for a NEURAL transport,
+    where the true target is unknown at serving time and self-AGREEMENT among repeated draws is the
+    only available proxy. A :class:`~mixle.reason.cross_modal.CrossModalJoint` is a typed grammar
+    object, not an opaque transport: its true marginal ``p(source)`` is available in closed form
+    (:meth:`CrossModalJoint.infer` with no observations), so the round-trip receipt here compares the
+    round-trip estimate DIRECTLY against that true marginal, rather than against itself.
+
+    Two ways to arrive at a belief about ``source`` through the joint: (1) directly, its own marginal
+    ``p(source)``; (2) via a round trip, ``p(source) -> infer p(target | source) -> infer p(source |
+    target) back``, averaged over many draws into one aggregate "round-trip" belief. This receipt is a
+    Monte-Carlo KL-divergence estimate between (2) and (1); a well-specified joint recovers its own
+    marginal on a round trip (the receipt is ~0 up to Monte-Carlo noise), while a deliberately
+    mis-specified backward projection (``backward_joint`` -- e.g. a joint whose ``target``-given-regime
+    distributions have been shuffled relative to ``joint``'s, standing in for a broken/incompatible
+    A<-B projection) breaks that identity and the receipt becomes clearly, measurably elevated.
+    """
+    backward = joint if backward_joint is None else backward_joint
+    rng = np.random.RandomState(seed)
+
+    true_marginal = joint.infer({}, [source])
+    forward_sampler = true_marginal.sampler(seed=int(rng.randint(0, 2**31 - 1)))
+
+    round_trip_components = []
+    round_trip_weights = []
+    for _ in range(n_round_trip):
+        a_value = forward_sampler.sample()[0]
+        post_target = joint.infer({source: a_value}, [target])
+        b_sampler = post_target.sampler(seed=int(rng.randint(0, 2**31 - 1)))
+        b_value = b_sampler.sample()[0]
+        post_source = backward.infer({target: b_value}, [source])
+        for component, weight in zip(post_source.components, post_source.w):
+            round_trip_components.append(component)
+            round_trip_weights.append(weight / n_round_trip)
+
+    round_trip = MixtureDistribution(round_trip_components, w=np.asarray(round_trip_weights, dtype=np.float64))
+
+    kl_sampler = round_trip.sampler(seed=int(rng.randint(0, 2**31 - 1)))
+    kl_terms = [
+        round_trip.log_density(x) - true_marginal.log_density(x)
+        for x in (kl_sampler.sample() for _ in range(n_kl_samples))
+    ]
+    # KL divergence is non-negative in theory; clamp away small Monte-Carlo undershoot at (near-)zero.
+    return float(max(float(np.mean(kl_terms)), 0.0))
 
 
 def selective_error(errors: Sequence[float], abstain_scores: Sequence[float], keep_frac: float) -> float:
