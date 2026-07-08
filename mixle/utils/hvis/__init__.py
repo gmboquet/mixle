@@ -245,6 +245,15 @@ from mixle.utils.hvis.stream import (
 from mixle.utils.hvis.stream import (
     place_in_atlas as place_in_atlas,
 )
+from mixle.utils.hvis.topology import (
+    embedding_health as embedding_health,
+)
+from mixle.utils.hvis.topology import (
+    fuzzy_nerve as fuzzy_nerve,
+)
+from mixle.utils.hvis.topology import (
+    nerve_report as nerve_report,
+)
 from mixle.utils.hvis.tsne import (
     _barnes_hut_negative_forces as _barnes_hut_negative_forces,
 )
@@ -338,6 +347,9 @@ __all__ = [
     "barycentric_init",
     "model_map",
     "ModelMap",
+    "fuzzy_nerve",
+    "nerve_report",
+    "embedding_health",
     "sparse_model_distances",
     "approx_sparse_model_distances",
     "model_knn",
