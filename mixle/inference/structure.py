@@ -58,6 +58,7 @@ def dependency_gain(
     *,
     max_its: int = 30,
     penalty: str = "bic",
+    rng: np.random.RandomState | None = None,
 ) -> float:
     """Description-length gain (nats) of modeling ``child`` conditioned on a discrete ``parent`` vs. independently.
 
@@ -65,18 +66,21 @@ def dependency_gain(
     the same data and returns ``LL_cond - LL_marginal`` minus a complexity penalty for the extra parameters
     (BIC: ``0.5 * (levels - 1) * k * ln n``). Positive means the dependence is worth modeling. This is a
     model-based dependency test -- it works across *any* pair of families, unlike a same-type MI estimate.
+    ``rng`` seeds the fits' EM initializations (``None`` = a fixed seed: deterministic by default; matters when
+    the child family needs a randomized init, e.g. a mixture).
     """
+    rng = np.random.RandomState(0) if rng is None else rng
     child = list(child)
     n = len(child)
     levels = sorted(set(parent))
-    marginal = fit(child, _clone(child_estimator), max_its=max_its, out=None)
+    marginal = fit(child, _clone(child_estimator), max_its=max_its, out=None, rng=rng)
     ll_marginal = float(np.sum(marginal.seq_log_density(marginal.dist_to_encoder().seq_encode(child))))
 
     pairs = list(zip(parent, child))
     cond_est = ConditionalDistributionEstimator(
         estimator_map={lv: _clone(child_estimator) for lv in levels}, given_estimator=None
     )
-    cond = fit(pairs, cond_est, max_its=max_its, out=None)
+    cond = fit(pairs, cond_est, max_its=max_its, out=None, rng=rng)
     enc = cond.dist_to_encoder().seq_encode(pairs)
     ll_cond = float(np.sum(cond.seq_log_density(enc)))
 
@@ -155,11 +159,19 @@ def fit_linear_gaussian_edge(pairs: Sequence[tuple]) -> LinearGaussianEdge:
 
 
 def regression_gain(
-    parent: Sequence[Any], child: Sequence[Any], child_estimator: Any, *, max_its: int = 30, penalty: str = "bic"
+    parent: Sequence[Any],
+    child: Sequence[Any],
+    child_estimator: Any,
+    *,
+    max_its: int = 30,
+    penalty: str = "bic",
+    rng: np.random.RandomState | None = None,
 ) -> float:
     """Description-length gain (nats) of a linear-Gaussian *regression* edge ``child ~ a + b*parent`` over the
     child marginal. One extra parameter (the slope) vs. the ``bins * k`` a binned conditional spends — so for a
-    real linear dependence this beats binning decisively. Returns ``-inf`` when a regression is undefined."""
+    real linear dependence this beats binning decisively. Returns ``-inf`` when a regression is undefined.
+    ``rng`` seeds the marginal fit's EM initialization (``None`` = a fixed seed: deterministic by default)."""
+    rng = np.random.RandomState(0) if rng is None else rng
     p = np.asarray(parent, dtype=float)
     c = np.asarray(child, dtype=float)
     n = len(c)
@@ -167,7 +179,7 @@ def regression_gain(
         return float("-inf")
     edge = fit_linear_gaussian_edge(list(zip(p.tolist(), c.tolist())))
     ll_reg = float(np.sum(edge.seq_log_density((p, c))))
-    marginal = fit(list(child), _clone(child_estimator), max_its=max_its, out=None)
+    marginal = fit(list(child), _clone(child_estimator), max_its=max_its, out=None, rng=rng)
     ll_marginal = float(np.sum(marginal.seq_log_density(marginal.dist_to_encoder().seq_encode(list(child)))))
     pen = 0.5 * 1.0 * np.log(max(n, 2)) if penalty == "bic" else 0.0  # a single extra parameter: the slope
     return ll_reg - ll_marginal - pen
@@ -280,9 +292,12 @@ def glm_gain(
     *,
     max_its: int = 30,
     penalty: str = "bic",
+    rng: np.random.RandomState | None = None,
 ) -> float:
     """Description-length gain (nats) of a GLM ``family`` regression edge over the child marginal (one extra slope
-    parameter). Returns ``-inf`` when the fit is undefined or non-finite."""
+    parameter). Returns ``-inf`` when the fit is undefined or non-finite. ``rng`` seeds the marginal fit's EM
+    initialization (``None`` = a fixed seed: deterministic by default)."""
+    rng = np.random.RandomState(0) if rng is None else rng
     p = np.asarray(parent, dtype=float)
     c = np.asarray(child, dtype=float)
     n = len(c)
@@ -295,14 +310,19 @@ def glm_gain(
         return float("-inf")
     if not np.isfinite(ll_glm):
         return float("-inf")
-    marginal = fit(list(child), _clone(child_estimator), max_its=max_its, out=None)
+    marginal = fit(list(child), _clone(child_estimator), max_its=max_its, out=None, rng=rng)
     ll_marginal = float(np.sum(marginal.seq_log_density(marginal.dist_to_encoder().seq_encode(list(child)))))
     pen = 0.5 * 1.0 * np.log(max(n, 2)) if penalty == "bic" else 0.0
     return ll_glm - ll_marginal - pen
 
 
 def _numeric_edge_candidate(
-    parent_col: Sequence[Any], child_col: Sequence[Any], template: Any, *, max_its: int = 30
+    parent_col: Sequence[Any],
+    child_col: Sequence[Any],
+    template: Any,
+    *,
+    max_its: int = 30,
+    rng: np.random.RandomState | None = None,
 ) -> tuple[float | None, str | None]:
     """The best regression/GLM edge of ``child`` on a numeric ``parent``: ``(gain, kind)`` or ``(None, None)``.
     Dispatches on the child's type — binary -> logistic, count -> Poisson, real -> linear-Gaussian."""
@@ -311,11 +331,11 @@ def _numeric_edge_candidate(
     if not _is_numeric(child_col):  # a categorical child stays a binned conditional
         return None, None
     if _is_binary(child_col):
-        return glm_gain(parent_col, child_col, template, "binomial", max_its=max_its), "glm:binomial"
+        return glm_gain(parent_col, child_col, template, "binomial", max_its=max_its, rng=rng), "glm:binomial"
     if _is_count(child_col):
-        return glm_gain(parent_col, child_col, template, "poisson", max_its=max_its), "glm:poisson"
+        return glm_gain(parent_col, child_col, template, "poisson", max_its=max_its, rng=rng), "glm:poisson"
     if _is_numeric(child_col):
-        return regression_gain(parent_col, child_col, template, max_its=max_its), "regression"
+        return regression_gain(parent_col, child_col, template, max_its=max_its, rng=rng), "regression"
     return None, None
 
 
@@ -512,13 +532,21 @@ def learn_mixture_structure(
     min_gain: float = 0.0,
     n_bins: int = 4,
     max_its: int = 30,
+    field_estimators: Sequence[Any] | None = None,
 ) -> MixtureOfDependencyTrees:
     """Fit a :class:`MixtureOfDependencyTrees` by hard EM -- discover clusters AND each cluster's dependency graph.
 
     Each iteration re-learns a dependency forest per cluster on its currently-assigned points (M-step), then
     reassigns every record to its most-probable cluster (E-step), until assignments stabilize. Runs ``restarts``
     random initializations and returns the highest-likelihood fit. Empty/tiny clusters are re-seeded so a
-    component never collapses.
+    component never collapses. Deterministic given ``seed``: the one ``RandomState`` drives the k-means/random
+    initializations AND every per-cluster fit's EM init (via :func:`learn_structure`'s ``rng``).
+
+    ``field_estimators`` pins each field's family (forwarded to :func:`learn_structure`) instead of re-running
+    the automatic detector per cluster per iteration. Beyond the speedup, pinning matters for identifiability:
+    the detector models a multimodal column with a Gaussian MIXTURE, which lets ONE cluster absorb what the
+    caller intended as two -- with per-field families pinned to unimodal models, regimes that differ in level
+    must separate into different components to score well.
     """
     data = list(data)
     n = len(data)
@@ -528,7 +556,9 @@ def learn_mixture_structure(
     best_ll = -np.inf
 
     def learn(subset: list[tuple]) -> DependencyTreeDistribution:
-        return learn_structure(subset, min_gain=min_gain, n_bins=n_bins, max_its=max_its)
+        return learn_structure(
+            subset, field_estimators=field_estimators, min_gain=min_gain, n_bins=n_bins, max_its=max_its, rng=rng
+        )
 
     # seed the first restarts with k-means (numeric-level split, then full-feature split), rest random
     inits = [
@@ -573,6 +603,7 @@ def learn_structure(
     max_levels: int = 64,
     n_bins: int = 4,
     max_its: int = 30,
+    rng: np.random.RandomState | None = None,
 ) -> DependencyTreeDistribution:
     """Discover the dependency forest for heterogeneous ``data`` and return the fitted joint model.
 
@@ -582,7 +613,13 @@ def learn_structure(
     field at most one parent), and fits each factor. Falls back to independent marginals where no dependence
     clears ``min_gain`` -- never worse than a composite, much better when structure exists. This is "automatic
     inference for composable models of heterogeneous data" made real.
+
+    ``rng`` seeds every internal fit's EM initialization; ``None`` resolves to a FIXED seed, so two calls on
+    the same data return the same model. (Before this knob, fits whose detected family needs a randomized
+    init -- a Gaussian-mixture conditional, say -- drew fresh OS entropy per call, so the learned model
+    itself was nondeterministic.)
     """
+    rng = np.random.RandomState(0) if rng is None else rng
     data = list(data)
     cols = _columns(data)
     n_fields = len(cols)
@@ -600,9 +637,9 @@ def learn_structure(
         for c in range(n_fields):
             if c == p:
                 continue
-            gain = dependency_gain(keyed[p], cols[c], templates[c], max_its=max_its)
+            gain = dependency_gain(keyed[p], cols[c], templates[c], max_its=max_its, rng=rng)
             kind = "binned"
-            ngain, nkind = _numeric_edge_candidate(cols[p], cols[c], templates[c], max_its=max_its)
+            ngain, nkind = _numeric_edge_candidate(cols[p], cols[c], templates[c], max_its=max_its, rng=rng)
             if ngain is not None and ngain > gain:
                 gain, kind = ngain, nkind
             if gain > min_gain:
@@ -625,7 +662,7 @@ def learn_structure(
     edge_binners: list[Any] = [None] * n_fields
     for i in range(n_fields):
         if parents[i] is None:
-            factors[i] = fit(cols[i], _clone(templates[i]), max_its=max_its, out=None)
+            factors[i] = fit(cols[i], _clone(templates[i]), max_its=max_its, out=None, rng=rng)
         elif edge_kind[i] == "regression":
             factors[i] = fit_linear_gaussian_edge(list(zip(cols[parents[i]], cols[i])))
             edge_binners[i] = None  # the raw parent value drives the regression
@@ -638,7 +675,7 @@ def learn_structure(
             est = ConditionalDistributionEstimator(
                 estimator_map={lv: _clone(templates[i]) for lv in sorted(set(keys))}, given_estimator=None
             )
-            factors[i] = fit(list(zip(keys, cols[i])), est, max_its=max_its, out=None)
+            factors[i] = fit(list(zip(keys, cols[i])), est, max_its=max_its, out=None, rng=rng)
             edge_binners[i] = binners[p]
     return DependencyTreeDistribution(parents, factors, edge_binners)
 

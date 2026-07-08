@@ -182,7 +182,13 @@ class MixtureOfTreesTest(unittest.TestCase):
         self.assertTrue(any((0, 1) in c.edges() for c in mot.components))
 
     def test_responsibilities_recover_clusters(self):
-        # label each row by its regime and check the mixture's hard assignment separates them
+        # label each row by its regime and check the mixture's hard assignment separates them.
+        # Families are PINNED to unimodal models: with the automatic detector free to pick Gaussian
+        # MIXTURES for conditionals, one component can absorb both regimes, and such impure splits
+        # genuinely OUT-SCORE the planted one (measured: -3410 nats impure vs -3415 pure) -- which
+        # basin best-of-N returned then rode on EM trajectory noise, the CI flake. Pinned to single
+        # Gaussians, every restart converges to the planted split (measured: purity 1.000 at one
+        # identical likelihood across 12 seeds).
         r = np.random.RandomState(7)
         rows, z = [], []
         for _ in range(1200):
@@ -190,11 +196,23 @@ class MixtureOfTreesTest(unittest.TestCase):
             c = "hi" if r.rand() < 0.5 else "lo"
             rows.append((c, float((5.0 if zi == 0 else -5.0) + (3.0 if c == "hi" else -3.0) + r.randn())))
             z.append(zi)
-        mot = learn_mixture_structure(rows, 2, restarts=4, seed=0)
+        fams = (st.CategoricalEstimator(), st.GaussianEstimator())
+        mot = learn_mixture_structure(rows, 2, restarts=4, seed=0, field_estimators=fams)
         assign = mot.responsibilities(rows).argmax(axis=1)
         z = np.array(z)
         purity = max((assign == z).mean(), (assign != z).mean())
         self.assertGreater(purity, 0.9)
+
+    def test_learning_is_deterministic_given_seed(self):
+        # the regression test for the flake's ROOT CAUSE: per-cluster fits used to draw fresh OS
+        # entropy for their EM inits (fit() with no rng), so the same call returned a different
+        # model run to run whenever a detected family (e.g. a mixture conditional) needed a
+        # randomized init. seed must pin the WHOLE pipeline: same call, bitwise-identical model.
+        train = _two_regime(11)
+        a = learn_mixture_structure(train, 2, restarts=3, seed=5)
+        b = learn_mixture_structure(train, 2, restarts=3, seed=5)
+        np.testing.assert_array_equal(a.responsibilities(train), b.responsibilities(train))
+        self.assertEqual([c.edges() for c in a.components], [c.edges() for c in b.components])
 
     def test_samples_and_scores(self):
         mot = learn_mixture_structure(_two_regime(3), 2, restarts=3, seed=0)
