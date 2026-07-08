@@ -56,6 +56,13 @@ from typing import Any
 
 import numpy as np
 
+from mixle.inference.conditional_jit_controller import (
+    BanditController,
+    ControllerAction,
+    ControllerState,
+    DesignModelController,
+    LearnedController,
+)
 from mixle.inference.freeze_rollup import (
     FreezeRollupCache,
     _combine,
@@ -71,6 +78,7 @@ _DEFAULT_ACCEPT_TOLERANCE = 1.0e-9
 _DEFAULT_BUDGET_FRACTION = 0.5
 _DEFAULT_TIE_TOL = 1.0e-9
 _SCORE_SEED = 0  # fixed, shared across every component -- see module docstring on the tie test.
+_KNOWN_POLICIES = ("greedy", "learned_bandit", "learned_design_model")
 
 
 @dataclass
@@ -103,8 +111,8 @@ def _block_scores(
     model: MixtureDistribution,
     eligible: list[int],
     prev_residual: dict[int, float],
-) -> tuple[dict[int, float], dict[int, float]]:
-    """Return ``(gain_per_cost, cost)`` for each ``eligible`` component index.
+) -> tuple[dict[int, float], dict[int, float], dict[int, float], dict[int, float]]:
+    """Return ``(gain_per_cost, cost, residual, q_gain)`` for each ``eligible`` component index.
 
     ``gain`` is the D1 Q-gain (residual improvement since the last round this component was
     scored) when available, else the raw residual itself (a component never scored before has an
@@ -112,10 +120,15 @@ def _block_scores(
     here" proxy for round 1). ``cost`` is D1's E-step-cost + M-step-cost proxy. Every component
     is scored with the SAME fixed seed (see module docstring) so structurally-identical
     components are directly comparable -- required for the degenerate-to-vanilla-EM test to be
-    deterministic rather than RNG-dependent.
+    deterministic rather than RNG-dependent. ``residual``/``q_gain`` (the raw, un-normalized D1
+    fields) are returned alongside the derived ``gain_per_cost``/``cost`` purely so a D5 learned
+    policy can build a :class:`~mixle.inference.conditional_jit_controller.ControllerState`
+    without a second pass over the tree.
     """
     gain_per_cost: dict[int, float] = {}
     cost: dict[int, float] = {}
+    residual: dict[int, float] = {}
+    q_gain: dict[int, float] = {}
     for idx in eligible:
         report = node_report(
             model.components[idx],
@@ -131,7 +144,9 @@ def _block_scores(
         block_cost = max(report.e_step_cost + report.m_step_cost, 1.0e-12)
         cost[idx] = block_cost
         gain_per_cost[idx] = gain / block_cost
-    return gain_per_cost, cost
+        residual[idx] = report.residual if np.isfinite(report.residual) else 0.0
+        q_gain[idx] = gain
+    return gain_per_cost, cost, residual, q_gain
 
 
 def _select_active(
@@ -192,8 +207,10 @@ def run_block_em(
     freeze_patience: int = 3,
     stall_patience: int = 5,
     max_skip_rounds: int = 2,
+    policy: str | LearnedController = "greedy",
+    controller: LearnedController | None = None,
 ) -> tuple[MixtureDistribution, list[BlockEMStats]]:
-    """Run block-coordinate-ascent EM over a :class:`MixtureDistribution` (workstream D3).
+    """Run block-coordinate-ascent EM over a :class:`MixtureDistribution` (workstream D3, D5).
 
     Each round: rank every component D2 does not already report frozen by D1 gain-per-cost,
     select the highest-value ones within ``budget_fraction`` of the round's total eligible cost
@@ -227,11 +244,44 @@ def run_block_em(
     every ``max_skip_rounds + 1`` rounds, which is what makes "same target F, fewer evals" (as
     opposed to just "monotone but permanently stuck") an honest comparison against vanilla EM.
 
+    ``policy`` (workstream D5, :mod:`mixle.inference.conditional_jit_controller`) selects WHO picks
+    the per-round ``budget_fraction`` that feeds the exact same :func:`_select_active` ranking
+    above: ``"greedy"`` (the default) uses the fixed ``budget_fraction`` argument every round,
+    unchanged D3 behavior. ``"learned_bandit"``/``"learned_design_model"`` instead ask a
+    :class:`~mixle.inference.conditional_jit_controller.LearnedController` for this round's budget
+    (constructing a default :class:`~mixle.inference.conditional_jit_controller.BanditController`/
+    :class:`~mixle.inference.conditional_jit_controller.DesignModelController` if ``controller`` is
+    not supplied) and feed it back the round's REALIZED gain (this round's own F improvement,
+    ``round_value - current_value``, i.e. exactly what this round's active blocks achieved) and
+    REALIZED cost (``evals_e + evals_c``, the same wall-clock proxy :class:`BlockEMStats` already
+    reports) after every round -- so the controller learns from the SAME accept/reject-gated,
+    provably-monotone rounds D3 already runs, never from an invented parallel objective. Passing an
+    already-constructed :class:`~mixle.inference.conditional_jit_controller.LearnedController`
+    directly as ``policy`` is also accepted (equivalent to passing it as ``controller`` with
+    ``policy="learned_bandit"``/``"learned_design_model"``) and is how a caller warm-starts a
+    controller across several calls/fits -- the SAME controller object keeps learning, since it is
+    only ever mutated in place, never copied.
+
     Returns ``(final_model, history)`` where ``history[i]`` is round ``i``'s
     :class:`BlockEMStats`.
     """
     if not isinstance(initial_model, MixtureDistribution):
         raise TypeError("run_block_em requires a MixtureDistribution model.")
+    if isinstance(policy, LearnedController):
+        controller = policy
+        policy = "learned"
+    elif policy == "learned_bandit":
+        controller = controller if controller is not None else BanditController()
+        policy = "learned"
+    elif policy == "learned_design_model":
+        controller = controller if controller is not None else DesignModelController()
+        policy = "learned"
+    elif policy == "greedy":
+        controller = None
+    else:
+        raise ValueError(
+            "policy must be one of %r, or a LearnedController instance; got %r." % (_KNOWN_POLICIES, policy)
+        )
     cache = (
         FreezeRollupCache(
             q_gain_tol=q_gain_tol,
@@ -254,12 +304,21 @@ def run_block_em(
     for round_index in range(max(1, int(max_its))):
         frozen_idx = detect_frozen(cache, model)
         eligible = [idx for idx in range(model.num_components) if idx not in frozen_idx and not model.zw[idx]]
-        scores, cost = _block_scores(model, eligible, prev_residual)
+        scores, cost, residual, q_gain = _block_scores(model, eligible, prev_residual)
+
+        controller_state: ControllerState | None = None
+        controller_action: ControllerAction | None = None
+        round_budget_fraction = budget_fraction
+        if controller is not None:
+            controller_state = ControllerState.from_scores(round_index, eligible, scores, cost, residual, q_gain)
+            controller_action = controller.select_action(controller_state)
+            round_budget_fraction = controller_action.budget_fraction
+
         active, degenerate = _select_active(
             eligible,
             scores,
             cost,
-            budget_fraction=budget_fraction,
+            budget_fraction=round_budget_fraction,
             full_tree_every_round=full_tree_every_round,
             tie_tol=tie_tol,
         )
@@ -292,6 +351,11 @@ def run_block_em(
             round_value = candidate_value
         else:
             round_value = current_value
+
+        if controller is not None and controller_state is not None and controller_action is not None:
+            realized_gain = max(0.0, round_value - current_value)
+            realized_cost = float(evals_e + evals_c)
+            controller.update(controller_state, controller_action, realized_gain, realized_cost)
 
         n_zero = int(np.count_nonzero(model.zw)) if not accepted else int(np.count_nonzero(candidate.zw))
         history.append(
