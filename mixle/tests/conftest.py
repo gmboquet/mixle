@@ -56,6 +56,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "scheduled_hmm_test.py": ("hmm", "integration", "slow"),
     "program_test.py": ("torch", "integration", "slow"),
     "neural_leaf_test.py": ("torch", "integration", "slow"),
+    "multimodal_stage1_demo_smoke_test.py": ("torch", "integration", "slow"),
     "neural_ppl_test.py": ("torch", "integration", "slow"),
     "language_model_sft_test.py": ("torch", "integration", "slow"),
     "project_neural_test.py": ("torch", "integration", "slow"),
