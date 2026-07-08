@@ -713,6 +713,13 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "Acquisition protocol + register_acquisition",
         "mixle.doe._contracts",
     ),
+    CapabilitySpec(
+        "BeliefTrackable",
+        "a weighted hypothesis portfolio with open-world mass, reweighted by evidence",
+        "subsystem role",
+        "HypothesisPortfolio.reweight()",
+        "mixle.epistemic",
+    ),
 )
 
 _CATALOG_BY_NAME = {spec.name: spec for spec in CAPABILITY_CATALOG}
