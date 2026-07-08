@@ -7,12 +7,18 @@ are supported (the `affinity` argument):
 
 - 'local' (the 'auto' default whenever raw data is available): the model is
   flattened into leaf fields and each field contributes a local statistical
-  affinity. Discrete fields use the per-field posterior Bhattacharyya
-  geometry; continuous/count fields additionally use a component-local
-  Mahalanobis metric in sufficient-statistic-like coordinates learned from
-  the realized data. Thus the same component is no longer a zero-distance
-  quotient: within-component neighborhoods are resolved when the field has
-  actual local structure.
+  affinity combining the per-field posterior (between-cluster structure)
+  with a component-local Mahalanobis metric (within-cluster structure).
+  Continuous/count fields use their native coordinates; every other leaf --
+  HMMs, Markov chains, categoricals, sequence-of-discrete element fields --
+  uses typicality coordinates (per-component log-density; per-token rate
+  plus a log-length axis for sequence-valued leaves), so no field type
+  degrades to posterior-only geometry. Thus the same component is never a
+  zero-distance quotient: sharp posteriors stop collapsing clusters into
+  tiny structureless points, variable-length fields keep length as one
+  honest axis instead of the dominant one, and mixed continuous/discrete
+  fields are made commensurate by the per-component whitening. See
+  affinity_health() for measurable receipts of these degeneracies.
 
 - 'balanced': the model
   is flattened into its leaf fields (nested composites, sequence
@@ -150,6 +156,9 @@ from mixle.utils.hvis.affinity import (
     _resolve_affinity as _resolve_affinity,
 )
 from mixle.utils.hvis.affinity import (
+    affinity_health as affinity_health,
+)
+from mixle.utils.hvis.affinity import (
     balanced_factors as balanced_factors,
 )
 from mixle.utils.hvis.affinity import (
@@ -163,6 +172,9 @@ from mixle.utils.hvis.affinity import (
 )
 from mixle.utils.hvis.affinity import (
     local_factors as local_factors,
+)
+from mixle.utils.hvis.affinity import (
+    log_affinity_block as log_affinity_block,
 )
 from mixle.utils.hvis.affinity import (
     model_log_affinity as model_log_affinity,
@@ -304,6 +316,8 @@ __all__ = [
     "humap",
     "dpmsne",
     "model_log_affinity",
+    "affinity_health",
+    "log_affinity_block",
     "sparse_model_distances",
     "approx_sparse_model_distances",
     "model_knn",

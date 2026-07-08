@@ -44,33 +44,18 @@ import numpy as np
 from mixle.utils.hvis.affinity import (
     _affinity_factors,
     _calibrate_row,
-    _factor_similarity_block,
-    _factor_weight,
     _posteriors_and_loglikes,
     _resolve_affinity,
+    log_affinity_block,
 )
 
 __all__ = ["StreamingHvis", "place_in_atlas"]
 
 
 def _cross_log_affinity(factors, row_idx: np.ndarray, col_idx: np.ndarray, evidence_cap: float | None) -> np.ndarray:
-    """Rectangular (rows x cols) log-affinity block -- :func:`model_log_affinity` for a sub-block.
-
-    Mirrors the square path exactly: per-factor similarity blocks, log, per-factor evidence cap
-    (multi-factor affinities only), weighted sum.
-    """
-    cap = evidence_cap if (evidence_cap is not None and len(factors) > 1) else None
-    log_s = np.zeros((len(row_idx), len(col_idx)))
-    with np.errstate(divide="ignore"):
-        for factor in factors:
-            weight = _factor_weight(factor)
-            if weight == 0.0:
-                continue
-            term = np.log(np.maximum(_factor_similarity_block(factor, row_idx, col_idx), 1.0e-300))
-            if cap is not None:
-                np.maximum(term, -cap, out=term)
-            log_s += weight * term
-    return log_s
+    """Rectangular log-affinity block; the shared implementation lives in
+    :func:`mixle.utils.hvis.affinity.log_affinity_block` (also used by ``affinity_health``)."""
+    return log_affinity_block(factors, row_idx, col_idx, evidence_cap)
 
 
 def _row_probabilities(log_aff: np.ndarray, perplexity: float | None) -> np.ndarray:
