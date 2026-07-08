@@ -109,6 +109,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "automatic_scientific_test.py": ("automatic", "integration", "slow"),
     "automatic_test.py": ("automatic", "distribution"),
     "base_dist_test.py": ("distribution", "integration", "slow"),
+    # Volume-scale performance receipts (roadmap A7): GradLeaf/mixture-E-step/A3-patch-streamed
+    # timing receipts, each printing a measured wall-clock number against a generous pinned floor.
+    "bench_receipts_test.py": ("benchmark", "slow"),
     "bayes_test.py": ("bayes", "distribution", "integration"),
     "bayes_streaming_test.py": ("bayes",),
     "wave_bayes1_test.py": ("bayes",),
