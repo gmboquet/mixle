@@ -257,6 +257,10 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # loops plus a repeated-timing receipt -- ~4s total, tagged slow so it leaves the fast gate while
     # still running in full CI under the `experimental` marker's own tests.
     "context_spine_test.py": ("torch", "experimental", "slow"),
+    # E7 long-context referee (mixle/experimental/long_context_eval.py): needle/copy/multi-hop suites x
+    # small stand-in ranges x a length-curriculum bandit round -- several TBPTT training loops, tagged
+    # slow for the same reason as context_spine_test.py.
+    "long_context_eval_test.py": ("torch", "experimental", "slow"),
 }
 
 
