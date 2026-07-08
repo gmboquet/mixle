@@ -38,11 +38,37 @@ __all__ = [
     "QuantizedMLP",
     "QuantizedClassifierIO",
     "quantize_mlp",
+    "quantize_dequantize_array",
     "LNSStructuredClassifierIO",
     "lns_classifier",
 ]
 
 _QMAX = {8: 127, 4: 7}  # symmetric integer range per weight precision
+
+
+def quantize_dequantize_array(
+    w: np.ndarray, *, bits: int = 8, clip_percentile: float | None = None
+) -> tuple[np.ndarray, float]:
+    """The per-tensor symmetric quantize step shared by PTQ (:func:`quantize_mlp`) and QAT's
+    straight-through fake-quant (:mod:`mixle.models.qat`): ``scale = max|W| / qmax`` (or a
+    percentile of ``|W|`` when ``clip_percentile`` is set), ``Wq = clip(round(W / scale), -qmax,
+    qmax)``. Returns ``(Wq int8, scale)``; the dequantized value is ``Wq.astype(float) * scale`` --
+    callers that only need the round-tripped float (QAT's fake-quant) do that multiply themselves,
+    callers that need the deployable integer payload (PTQ) keep ``Wq`` and ``scale`` separate.
+    """
+    if bits not in _QMAX:
+        raise ValueError(f"bits must be one of {sorted(_QMAX)}, got {bits}")
+    if clip_percentile is not None and not (0.0 < clip_percentile <= 100.0):
+        raise ValueError("clip_percentile must be in (0, 100]")
+    qmax = _QMAX[bits]
+    w = np.asarray(w, dtype=np.float64)
+    if clip_percentile is None:
+        wmax = float(np.max(np.abs(w))) if w.size else 0.0
+    else:  # scale off a high percentile so outliers saturate instead of dictating the scale
+        wmax = float(np.percentile(np.abs(w), clip_percentile)) if w.size else 0.0
+    scale = (wmax / qmax) or 1.0
+    wq = np.clip(np.round(w / scale), -qmax, qmax).astype(np.int8)
+    return wq, scale
 
 
 def _pack_nibbles(w: np.ndarray) -> np.ndarray:
@@ -197,7 +223,6 @@ def quantize_mlp(student: TaskModel, *, bits: int = 8, clip_percentile: float | 
     if not linears:
         raise ValueError("student module has no Linear layers to quantize")
 
-    qmax = _QMAX[bits]
     layers: list[tuple[np.ndarray, float, np.ndarray]] = []
     for lin in linears:
         w = lin.weight.detach().cpu().numpy().astype(np.float64)
@@ -206,12 +231,7 @@ def quantize_mlp(student: TaskModel, *, bits: int = 8, clip_percentile: float | 
             if lin.bias is not None
             else np.zeros(w.shape[0], dtype=np.float32)
         )
-        if clip_percentile is None:
-            wmax = float(np.max(np.abs(w)))
-        else:  # scale off a high percentile so outliers saturate instead of dictating the scale
-            wmax = float(np.percentile(np.abs(w), clip_percentile))
-        scale = (wmax / qmax) or 1.0
-        wq = np.clip(np.round(w / scale), -qmax, qmax).astype(np.int8)
+        wq, scale = quantize_dequantize_array(w, bits=bits, clip_percentile=clip_percentile)
         layers.append((wq, scale, b))
 
     qmodel = QuantizedMLP(layers, bits=bits)
