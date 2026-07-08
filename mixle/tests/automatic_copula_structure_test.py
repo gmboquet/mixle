@@ -12,8 +12,8 @@ from scipy.stats import gamma as spgamma
 from scipy.stats import norm
 
 from mixle.inference import optimize
-from mixle.stats.combinator.copula import CopulaDistribution
 from mixle.stats.combinator.composite import CompositeDistribution
+from mixle.stats.combinator.copula import CopulaDistribution
 
 
 def _dependent_heterogeneous(seed, n=1500, r=0.75):
