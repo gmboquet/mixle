@@ -714,6 +714,15 @@ __all__ = [
     "GaussianCopulaSampler",
     "GaussianCopulaEstimator",
     "GaussianCopulaDataEncoder",
+    "ClaytonCopulaDistribution",
+    "ClaytonCopulaSampler",
+    "ClaytonCopulaEstimator",
+    "FrankCopulaDistribution",
+    "FrankCopulaSampler",
+    "FrankCopulaEstimator",
+    "StudentTCopulaDistribution",
+    "StudentTCopulaSampler",
+    "StudentTCopulaEstimator",
     "MatrixNormalDistribution",
     "MatrixNormalSampler",
     "MatrixNormalEstimator",
@@ -1364,6 +1373,11 @@ from mixle.stats.multivariate.categorical_multinomial import (
     MultinomialEstimator,
     MultinomialSampler,
 )
+from mixle.stats.multivariate.clayton_copula import (
+    ClaytonCopulaDistribution,
+    ClaytonCopulaEstimator,
+    ClaytonCopulaSampler,
+)
 from mixle.stats.multivariate.diagonal_gaussian import (
     DiagonalGaussianDataEncoder,
     DiagonalGaussianDistribution,
@@ -1375,6 +1389,11 @@ from mixle.stats.multivariate.dirichlet_multinomial import (
     DirichletMultinomialDistribution,
     DirichletMultinomialEstimator,
     DirichletMultinomialSampler,
+)
+from mixle.stats.multivariate.frank_copula import (
+    FrankCopulaDistribution,
+    FrankCopulaEstimator,
+    FrankCopulaSampler,
 )
 from mixle.stats.multivariate.gaussian_copula import (
     GaussianCopulaDataEncoder,
@@ -1400,6 +1419,11 @@ from mixle.stats.multivariate.multivariate_student_t import (
     MultivariateStudentTDistribution,
     MultivariateStudentTEstimator,
     MultivariateStudentTSampler,
+)
+from mixle.stats.multivariate.student_t_copula import (
+    StudentTCopulaDistribution,
+    StudentTCopulaEstimator,
+    StudentTCopulaSampler,
 )
 from mixle.stats.processes.birth_death import (
     BirthDeathSamplingDataEncoder,
