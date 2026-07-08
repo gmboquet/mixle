@@ -34,9 +34,11 @@ from mixle.reason.core import (
     block_selector,
     reason,
 )
+from mixle.reason.cross_modal import CrossModalJoint
 from mixle.reason.cycle_consistency import (
     cycle_inconsistency,
     fit_cycle_transport,
+    joint_cycle_consistency_receipt,
     posterior_mean_estimate,
     selective_error,
 )
@@ -117,6 +119,8 @@ __all__ = [
     "fit_cycle_transport",
     "posterior_mean_estimate",
     "selective_error",
+    "CrossModalJoint",
+    "joint_cycle_consistency_receipt",
     "HopTransport",
     "WalkResult",
     "belief_walk",
