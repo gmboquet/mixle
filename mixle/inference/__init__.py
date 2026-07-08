@@ -224,6 +224,11 @@ from mixle.inference.robust import (
     robust_standard_errors,
     sandwich_covariance,
 )
+from mixle.inference.scenario import FieldPosterior as ScenarioFieldPosterior
+from mixle.inference.scenario import Scenario as ScenarioSpec
+from mixle.inference.scenario import SimulationReceipt as ScenarioSimulationReceipt
+from mixle.inference.scenario import Simulator as ScenarioSimulator
+from mixle.inference.scenario import simulate as simulate_scenario
 
 # proper scoring rules — fair currency for comparing probabilistic forecasts / interval methods
 from mixle.inference.scoring import (
@@ -407,6 +412,14 @@ __all__ = [
     "simulate",
     "Simulator",
     "Scenario",
+    # simulate_scenario() (M2) -- on-the-fly conditional simulators: evidence + interventions + horizon,
+    # via M0's condition()/do(), with a plausibility receipt. Aliased (not `simulate`/`Scenario`/
+    # `Simulator`) to avoid colliding with the names above -- see notes/designs/M2.md.
+    "simulate_scenario",
+    "ScenarioSpec",
+    "ScenarioSimulator",
+    "ScenarioSimulationReceipt",
+    "ScenarioFieldPosterior",
     # synthesize() -- a dataset factory: sample, label, keep only what verifies
     "synthesize",
     "Dataset",
