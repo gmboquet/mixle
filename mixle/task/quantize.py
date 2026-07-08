@@ -40,9 +40,45 @@ __all__ = [
     "quantize_mlp",
     "LNSStructuredClassifierIO",
     "lns_classifier",
+    "symmetric_quantize",
+    "dequantize_symmetric",
 ]
 
 _QMAX = {8: 127, 4: 7}  # symmetric integer range per weight precision
+
+
+def symmetric_quantize(w: np.ndarray, bits: int, clip_percentile: float | None = None) -> tuple[np.ndarray, float]:
+    """Per-tensor symmetric integer quantization: the exact core of :func:`quantize_mlp`'s per-layer
+    loop, factored out so any caller (this module's MLP path, or
+    :mod:`mixle.models.unified_quantizer`'s generic per-tensor interface) shares ONE implementation
+    of int8/int4 weight quantization rather than reimplementing the arithmetic.
+
+    ``scale = max|w| / qmax`` (or the ``clip_percentile`` of ``|w|`` when given, so outliers saturate
+    instead of setting the whole scale); ``wq = clip(round(w / scale), -qmax, qmax)`` as ``int8``
+    (int4 values still live in an ``int8`` array, in the symmetric ``[-7, 7]`` sub-range -- nibble
+    packing for on-disk storage is a separate concern, see :func:`_pack_nibbles`).
+
+    Returns:
+        tuple[np.ndarray, float]: ``(wq, scale)`` with ``wq`` int8-dtyped and ``w ~ wq * scale``.
+    """
+    if bits not in _QMAX:
+        raise ValueError(f"bits must be one of {sorted(_QMAX)}, got {bits}")
+    if clip_percentile is not None and not (0.0 < clip_percentile <= 100.0):
+        raise ValueError("clip_percentile must be in (0, 100]")
+    w = np.asarray(w, dtype=np.float64)
+    qmax = _QMAX[bits]
+    if clip_percentile is None:
+        wmax = float(np.max(np.abs(w))) if w.size else 0.0
+    else:
+        wmax = float(np.percentile(np.abs(w), clip_percentile)) if w.size else 0.0
+    scale = (wmax / qmax) or 1.0
+    wq = np.clip(np.round(w / scale), -qmax, qmax).astype(np.int8)
+    return wq, scale
+
+
+def dequantize_symmetric(wq: np.ndarray, scale: float) -> np.ndarray:
+    """Inverse of :func:`symmetric_quantize`: ``wq * scale`` as float64."""
+    return np.asarray(wq, dtype=np.float64) * float(scale)
 
 
 def _pack_nibbles(w: np.ndarray) -> np.ndarray:
@@ -197,7 +233,6 @@ def quantize_mlp(student: TaskModel, *, bits: int = 8, clip_percentile: float | 
     if not linears:
         raise ValueError("student module has no Linear layers to quantize")
 
-    qmax = _QMAX[bits]
     layers: list[tuple[np.ndarray, float, np.ndarray]] = []
     for lin in linears:
         w = lin.weight.detach().cpu().numpy().astype(np.float64)
@@ -206,12 +241,7 @@ def quantize_mlp(student: TaskModel, *, bits: int = 8, clip_percentile: float | 
             if lin.bias is not None
             else np.zeros(w.shape[0], dtype=np.float32)
         )
-        if clip_percentile is None:
-            wmax = float(np.max(np.abs(w)))
-        else:  # scale off a high percentile so outliers saturate instead of dictating the scale
-            wmax = float(np.percentile(np.abs(w), clip_percentile))
-        scale = (wmax / qmax) or 1.0
-        wq = np.clip(np.round(w / scale), -qmax, qmax).astype(np.int8)
+        wq, scale = symmetric_quantize(w, bits, clip_percentile=clip_percentile)
         layers.append((wq, scale, b))
 
     qmodel = QuantizedMLP(layers, bits=bits)
