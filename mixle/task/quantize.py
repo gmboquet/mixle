@@ -41,6 +41,7 @@ __all__ = [
     "quantize_dequantize_array",
     "LNSStructuredClassifierIO",
     "lns_classifier",
+    "dequantize_symmetric",
 ]
 
 _QMAX = {8: 127, 4: 7}  # symmetric integer range per weight precision
@@ -69,6 +70,11 @@ def quantize_dequantize_array(
     scale = (wmax / qmax) or 1.0
     wq = np.clip(np.round(w / scale), -qmax, qmax).astype(np.int8)
     return wq, scale
+
+
+def dequantize_symmetric(wq: np.ndarray, scale: float) -> np.ndarray:
+    """Inverse of :func:`quantize_dequantize_array`: ``wq * scale`` as float64."""
+    return np.asarray(wq, dtype=np.float64) * float(scale)
 
 
 def _pack_nibbles(w: np.ndarray) -> np.ndarray:
