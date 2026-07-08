@@ -312,6 +312,10 @@ def _stats_public_distribution_catalog():
         "FrankCopulaDistribution": stats.FrankCopulaDistribution(dim=2, theta=4.0),
         "ClaytonCopulaDistribution": stats.ClaytonCopulaDistribution(dim=2, theta=1.5),
         "StudentTCopulaDistribution": stats.StudentTCopulaDistribution([[1.0, 0.4], [0.4, 1.0]], df=6.0),
+        "GumbelCopulaDistribution": stats.GumbelCopulaDistribution(dim=2, theta=2.5),
+        "CVineCopulaDistribution": stats.CVineCopulaDistribution(dim=3, pairs={}),
+        "DVineCopulaDistribution": stats.DVineCopulaDistribution(dim=3, pairs={}),
+        "RVineCopulaDistribution": stats.RVineCopulaDistribution(dim=3, trees=[]),
         "MatrixNormalDistribution": stats.MatrixNormalDistribution(
             [[0.0, 0.0], [1.0, -1.0], [2.0, 0.5]],
             [[2.0, 0.3, 0.1], [0.3, 1.0, 0.2], [0.1, 0.2, 1.5]],
