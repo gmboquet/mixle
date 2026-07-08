@@ -20,6 +20,7 @@ from numpy.random import RandomState
 from mixle.engines.arithmetic import *
 from mixle.inference.fisher import FixedFisherView
 from mixle.stats.bayes.normal_gamma import NormalGammaDistribution
+from mixle.stats.compute.error_receipts import CompensatedAccumulator
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -426,13 +427,34 @@ class GaussianSampler(DistributionSampler):
         return self.rng.normal(loc=self.dist.mu, scale=sqrt(self.dist.sigma2), size=size)
 
 
+class GaussianSuffStat(tuple):
+    """A ``(sum, sum2, count, count2)`` sufficient statistic that also carries a numerics receipt.
+
+    Behaves exactly like the plain 4-tuple everywhere it is indexed, unpacked, or iterated (it *is*
+    one); ``receipt`` is extra payload that :meth:`GaussianAccumulator.combine` reads to fold the
+    Kahan error-bound bookkeeping (``abs_total``, ``n`` for ``sum`` and ``sum2``) into the receiving
+    accumulator when both sides are ``compensated``. Code that doesn't know about ``compensated``
+    accumulation (serialization, generic ``scale_suff_stat``, ...) sees an ordinary tuple.
+    """
+
+    def __new__(cls, sum_: float, sum2_: float, count_: float, count2_: float, receipt: dict | None = None):
+        obj = super().__new__(cls, (sum_, sum2_, count_, count2_))
+        obj.receipt = receipt
+        return obj
+
+
 class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
-    def __init__(self, keys: str | None = None, name: str | None = None) -> None:
+    def __init__(self, keys: str | None = None, name: str | None = None, compensated: bool = False) -> None:
         """GaussianAccumulator object used to accumulate sufficient statistics from observed data.
 
         Args:
             keys (Optional[str]): Set key for GaussianAccumulator object.
             name (Optional[str]): Set name for GaussianAccumulator object.
+            compensated (bool): Opt-in Kahan-compensated accumulation of ``sum``/``sum2`` with a
+                running numerics-error bound (see :mod:`mixle.stats.compute.error_receipts`), read
+                back via :meth:`error_bound`. ``False`` (the default) is the plain float64
+                accumulation this class always used -- that code path is untouched, so it carries no
+                measurable overhead over the pre-existing behavior.
 
         Attributes:
             sum (float): Sum of weighted observations (sum_i w_i*X_i).
@@ -450,6 +472,9 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.count2 = 0.0
         self.keys = keys
         self.name = name
+        self.compensated = compensated
+        self._sum_acc = CompensatedAccumulator(compensated=True) if compensated else None
+        self._sum2_acc = CompensatedAccumulator(compensated=True) if compensated else None
 
     def update(self, x: float, weight: float, estimate: Optional["GaussianDistribution"]) -> None:
         """Update sufficient statistics for GaussianAccumulator with one weighted observation.
@@ -465,8 +490,14 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         x_weight = x * weight
-        self.sum += x_weight
-        self.sum2 += x * x_weight
+        if self.compensated:
+            self._sum_acc.add(x_weight)
+            self._sum2_acc.add(x * x_weight)
+            self.sum = self._sum_acc.total
+            self.sum2 = self._sum2_acc.total
+        else:
+            self.sum += x_weight
+            self.sum2 += x * x_weight
         self.count += weight
         self.count2 += weight
 
@@ -515,9 +546,18 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        self.sum += np.dot(x, weights)
-        self.sum2 += np.dot(x * x, weights)
-        w_sum = weights.sum()
+        if self.compensated:
+            for xi, wi in zip(x, weights):
+                xw = float(xi) * float(wi)
+                self._sum_acc.add(xw)
+                self._sum2_acc.add(float(xi) * xw)
+            self.sum = self._sum_acc.total
+            self.sum2 = self._sum2_acc.total
+            w_sum = float(np.sum(weights))
+        else:
+            self.sum += np.dot(x, weights)
+            self.sum2 += np.dot(x * x, weights)
+            w_sum = weights.sum()
         self.count += w_sum
         self.count2 += w_sum
 
@@ -529,6 +569,11 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             suff_stat[1] (float): Sum of weighted observations (sum_i w_i*X_i^2),
             suff_stat[2] (float): Sum of weighted observations (sum_i w_i),
             suff_stat[3] (float): Sum of weighted observations (sum_i w_i).
+
+        When this accumulator is ``compensated`` and ``suff_stat`` carries a numerics-error
+        receipt (see :meth:`value` / :class:`GaussianSuffStat`), the receipt is folded in too --
+        its ``(abs_total, n)`` fields add exactly, just like ``sum``/``count`` above, so
+        :meth:`error_bound` composes correctly across combined partitions.
 
         Args:
             suff_stat (Tuple[float, float, float, float]): See above for details.
@@ -542,10 +587,44 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += suff_stat[2]
         self.count2 += suff_stat[3]
 
+        if self.compensated:
+            receipt = getattr(suff_stat, "receipt", None)
+            if receipt is not None:
+                abs_s, n_s = receipt["sum"]
+                abs_s2, n_s2 = receipt["sum2"]
+                self._sum_acc.abs_total += abs_s
+                self._sum_acc.n += n_s
+                self._sum2_acc.abs_total += abs_s2
+                self._sum2_acc.n += n_s2
+            # keep the running Kahan total (and its compensation) in sync with the merged sum
+            self._sum_acc.total = self.sum
+            self._sum2_acc.total = self.sum2
+
         return self
 
+    def error_bound(self) -> dict[str, float] | None:
+        """Return the running numerics-error bound receipt for ``sum``/``sum2``.
+
+        ``None`` when this accumulator was not constructed with ``compensated=True`` -- the
+        disabled default carries no receipt to report.
+        """
+        if not self.compensated:
+            return None
+        return {"sum": self._sum_acc.bound(), "sum2": self._sum2_acc.bound()}
+
     def value(self) -> tuple[float, float, float, float]:
-        """Returns sufficient statistics of GaussianAccumulator object (Tuple[float, float, float, float])."""
+        """Returns sufficient statistics of GaussianAccumulator object (Tuple[float, float, float, float]).
+
+        When ``compensated``, the returned value is a :class:`GaussianSuffStat` -- a drop-in 4-tuple
+        (indexing/unpacking/iteration all behave identically) that additionally carries the
+        numerics-error receipt in its ``.receipt`` attribute, so :meth:`combine` can fold it in.
+        """
+        if self.compensated:
+            receipt = {
+                "sum": (self._sum_acc.abs_total, self._sum_acc.n),
+                "sum2": (self._sum2_acc.abs_total, self._sum2_acc.n),
+            }
+            return GaussianSuffStat(self.sum, self.sum2, self.count, self.count2, receipt=receipt)
         return self.sum, self.sum2, self.count, self.count2
 
     def from_value(self, x: tuple[float, float, float, float]) -> "GaussianAccumulator":
@@ -568,6 +647,17 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 = x[1]
         self.count = x[2]
         self.count2 = x[3]
+
+        if self.compensated:
+            receipt = getattr(x, "receipt", None)
+            if receipt is not None:
+                abs_s, n_s = receipt["sum"]
+                abs_s2, n_s2 = receipt["sum2"]
+                self._sum_acc = CompensatedAccumulator(total=self.sum, abs_total=abs_s, n=n_s, compensated=True)
+                self._sum2_acc = CompensatedAccumulator(total=self.sum2, abs_total=abs_s2, n=n_s2, compensated=True)
+            else:
+                self._sum_acc = CompensatedAccumulator(total=self.sum, compensated=True)
+                self._sum2_acc = CompensatedAccumulator(total=self.sum2, compensated=True)
 
         return self
 
@@ -612,12 +702,13 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class GaussianAccumulatorFactory(StatisticAccumulatorFactory):
-    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(self, name: str | None = None, keys: str | None = None, compensated: bool = False) -> None:
         """GaussianAccumulatorFactory object for creating GaussianAccumulator.
 
         Args:
             name (Optional[str]): Assign a name to GaussianAccumulatorFactory object.
             keys (Optional[str]): Assign keys member for GaussianAccumulators.
+            compensated (bool): Passed through to each made :class:`GaussianAccumulator`; see there.
 
         Attributes:
             name (Optional[str]): Name of the GaussianAccumulatorFactory obejct.
@@ -626,10 +717,11 @@ class GaussianAccumulatorFactory(StatisticAccumulatorFactory):
         """
         self.keys = keys
         self.name = name
+        self.compensated = compensated
 
     def make(self) -> "GaussianAccumulator":
         """Return a GaussianAccumulator object with name and keys passed."""
-        return GaussianAccumulator(name=self.name, keys=self.keys)
+        return GaussianAccumulator(name=self.name, keys=self.keys, compensated=self.compensated)
 
 
 class GaussianEstimator(ParameterEstimator):
@@ -641,6 +733,7 @@ class GaussianEstimator(ParameterEstimator):
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
         min_covar: float | None = None,
+        compensated: bool = False,
     ):
         """GaussianEstimator object used to estimate GaussianDistribution from aggregated sufficient statistics.
 
@@ -657,6 +750,9 @@ class GaussianEstimator(ParameterEstimator):
                 (default) uses a tiny ``1e-8`` floor; the estimated variance is also floored at a
                 relative ``1e-6 * sigma2`` to keep the safeguard data-scaled. Set explicitly to widen
                 the floor for hard / high-dimensional cases. Bias is negligible at the default.
+            compensated (bool): Opt-in Kahan-compensated accumulation with a running numerics-error
+                bound for the accumulators this estimator makes; see
+                :class:`GaussianAccumulator`. ``False`` by default (no overhead).
 
         Attributes:
             pseudo_count (Tuple[Optional[float], Optional[float]]): Weights for suff_stat.
@@ -672,10 +768,11 @@ class GaussianEstimator(ParameterEstimator):
         self.prior = prior
         self.has_conj_prior = isinstance(prior, NormalGammaDistribution)
         self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
+        self.compensated = compensated
 
     def accumulator_factory(self) -> "GaussianAccumulatorFactory":
         """Return GaussianAccumulatorFactory with name and keys passed."""
-        return GaussianAccumulatorFactory(self.name, self.keys)
+        return GaussianAccumulatorFactory(self.name, self.keys, compensated=self.compensated)
 
     def model_log_density(self, model: "GaussianDistribution") -> float:
         """Log-density of the model parameters under the NormalGamma prior (ELBO global term).
