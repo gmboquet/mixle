@@ -787,22 +787,32 @@ def component_map(
     if k == 1:
         return np.zeros((1, emb_dim))
     sq = np.sqrt(z)
-    overlap = sq.T @ sq
-    mass = np.sqrt(np.maximum(z.sum(axis=0), 1.0e-12))
-    bc = overlap / np.outer(mass, mass)
+    if method not in ("nerve", "mds"):
+        raise ValueError("method must be 'nerve' or 'mds'.")
+    strong = None
+    if method == "nerve":
+        from mixle.utils.hvis.topology import fuzzy_nerve
+
+        nerve = fuzzy_nerve(z, edge_threshold=edge_threshold)
+        strong = {e for e, w in nerve["edges"].items() if w >= edge_threshold}
+    return _component_map_core(sq.T @ sq, z.sum(axis=0), strong, emb_dim, method)
+
+
+def _component_map_core(
+    sqrt_overlap: np.ndarray, masses: np.ndarray, strong: set | None, emb_dim: int, method: str
+) -> np.ndarray:
+    """:func:`component_map` finalization from additive statistics (``sqrt(z)^T sqrt(z)``, ``sum z``,
+    and the strong-edge set). Shared with :mod:`mixle.utils.hvis.distributed`, whose shards compute
+    the same statistics chunk-wise."""
+    k = sqrt_overlap.shape[0]
+    mass = np.sqrt(np.maximum(masses, 1.0e-12))
+    bc = sqrt_overlap / np.outer(mass, mass)
     np.clip(bc, 1.0e-12, 1.0, out=bc)
     neg_log_bc = -np.log(bc)
     np.fill_diagonal(neg_log_bc, 0.0)
 
     if method == "mds":
         return _classical_mds(np.square(neg_log_bc), emb_dim)
-    if method != "nerve":
-        raise ValueError("method must be 'nerve' or 'mds'.")
-
-    from mixle.utils.hvis.topology import fuzzy_nerve
-
-    nerve = fuzzy_nerve(z, edge_threshold=edge_threshold)
-    strong = {e for e, w in nerve["edges"].items() if w >= edge_threshold}
     if not strong:  # no measured overlaps at all: fall back to the dense view
         return _classical_mds(np.square(neg_log_bc), emb_dim)
 
