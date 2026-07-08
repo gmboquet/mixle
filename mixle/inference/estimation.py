@@ -121,7 +121,14 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState 
             candidates.extend(copula_candidates(rows, composite, comp_params, comp_bic, n_log, max_its, rng))
         if not candidates:
             return None
-        best_bic, best_model, desc = min(candidates, key=lambda u: u[0])
+        # a later, more complex candidate (e.g. a vine) only displaces an earlier, simpler one (e.g. the
+        # plain Gaussian copula core it can degenerate to exactly on low-dimensional data) when it wins by
+        # more than floating-point noise -- otherwise a sub-ulp BIC difference from platform/BLAS variance
+        # would nondeterministically pick the more complex, mathematically-equivalent model.
+        best_bic, best_model, desc = candidates[0]
+        for bic, model, name in candidates[1:]:
+            if bic < best_bic - 1e-6 * max(1.0, abs(best_bic)):
+                best_bic, best_model, desc = bic, model, name
         if best_bic >= comp_bic:
             return None
         if out is not None:
