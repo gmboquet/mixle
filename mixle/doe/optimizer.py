@@ -108,7 +108,12 @@ class BayesianOptimizer:
             raise ValueError("q must be positive.")
         points: list[np.ndarray] = []
         # Exhaust the space-filling initial design first (the GP needs data before it is useful).
-        while len(points) < q and (self.n_observations + len(points)) < self.n_init:
+        # Gated on self._init_used (points already DISPENSED), not self.n_observations (points
+        # already TOLD): those two diverge in the parallel/async campaign this class explicitly
+        # supports (ask() called several times before any tell()) -- gating on n_observations let a
+        # later ask() re-enter this branch and re-dispense (via _init_used % n_init) an already-issued
+        # init point as a duplicate, silently corrupting the space-filling design.
+        while len(points) < q and (self._init_used + len(points)) < self.n_init:
             points.append(self._next_init_point())
         remaining = q - len(points)
         if remaining == 1:
