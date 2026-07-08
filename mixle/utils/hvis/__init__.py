@@ -203,6 +203,12 @@ from mixle.utils.hvis.embed import (
 from mixle.utils.hvis.embed import (
     humap as humap,
 )
+from mixle.utils.hvis.front import (
+    Map as Map,
+)
+from mixle.utils.hvis.front import (
+    hvis_map as hvis_map,
+)
 from mixle.utils.hvis.goals import (
     Anchor as Anchor,
 )
@@ -246,10 +252,16 @@ from mixle.utils.hvis.stream import (
     place_in_atlas as place_in_atlas,
 )
 from mixle.utils.hvis.topology import (
+    component_tree as component_tree,
+)
+from mixle.utils.hvis.topology import (
     embedding_health as embedding_health,
 )
 from mixle.utils.hvis.topology import (
     fuzzy_nerve as fuzzy_nerve,
+)
+from mixle.utils.hvis.topology import (
+    model_fit_health as model_fit_health,
 )
 from mixle.utils.hvis.topology import (
     nerve_report as nerve_report,
@@ -350,6 +362,11 @@ __all__ = [
     "fuzzy_nerve",
     "nerve_report",
     "embedding_health",
+    "model_fit_health",
+    "component_tree",
+    "hvis_map",
+    "Map",
+    "map",
     "sparse_model_distances",
     "approx_sparse_model_distances",
     "model_knn",
@@ -359,3 +376,6 @@ __all__ = [
     "fisher_factors",
     "tsne_barnes_hut",
 ]
+
+# the design review promised hvis.map(); hvis_map is the shadow-safe import name.
+map = hvis_map  # noqa: A001

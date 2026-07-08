@@ -106,8 +106,9 @@ class GeometryAndInterpretabilityTest(unittest.TestCase):
         fitted = model_map(data, mix_model=model)
         self.assertEqual(len(fitted.coord_labels), fitted.loadings[0].shape[0])
         values = np.array([x[0] for x in data[:30]])
-        axis_scores = fitted.coords[:30] - fitted.vertices[0][None, :]  # regime-0 chart offsets
-        r = float(np.corrcoef(axis_scores[:, 0], values)[0, 1])
+        offsets = fitted.coords[:30] - fitted.vertices[0][None, :]  # regime-0 chart offsets
+        major = offsets @ fitted.frames[0][0]  # read them in the chart's own frame (row 0 = major axis)
+        r = float(np.corrcoef(major, values)[0, 1])
         self.assertGreater(abs(r), 0.9)
 
 
@@ -150,13 +151,17 @@ class RefineTest(unittest.TestCase):
         skeleton = model_map(data, mix_model=_MODEL3)
         refined = model_map(data, mix_model=_MODEL3, refine=True, seed=0)
 
-        def gap_ratio(coords):
+        def pair_dists(coords):
             cents = np.stack([coords[labels == c].mean(axis=0) for c in (0, 1, 2)])
-            return float(np.linalg.norm(cents[0] - cents[1]) / np.linalg.norm(cents[0] - cents[2]))
+            return {p: float(np.linalg.norm(cents[p[0]] - cents[p[1]])) for p in ((0, 1), (0, 2), (1, 2))}
 
         self.assertGreaterEqual(_purity(refined.coords, labels), _purity(skeleton.coords, labels) - 0.05)
-        self.assertLess(gap_ratio(refined.coords), 0.9)  # confusable pair still adjacent
-        self.assertLess(abs(gap_ratio(refined.coords) - gap_ratio(skeleton.coords)), 0.25)
+        # the invariant refine must keep is the ORDERING: the confusable pair stays the closest.
+        # A tight ratio pin would be wrong -- the skeleton's disconnected-piece gap is an explicit
+        # rendering choice that the affinity-driven polish legitimately renegotiates.
+        for dists in (pair_dists(skeleton.coords), pair_dists(refined.coords)):
+            self.assertLess(dists[(0, 1)], dists[(0, 2)])
+            self.assertLess(dists[(0, 1)], dists[(1, 2)])
 
 
 if __name__ == "__main__":

@@ -7,14 +7,22 @@ posterior simplex and component overlap geometry), and WHERE each observation si
 regime (the whitened local/typicality coordinates). This module composes those two levels directly
 -- the (posterior, remainder) decomposition as a layout:
 
-    y_i = sum_k z_ik * (vertex_k + fiber_scores_ik)
+    y_i = sum_k z_ik * (vertex_k + frame_k(fiber_scores_ik))
 
-* vertices: :func:`~mixle.utils.hvis.affinity.component_map` -- classical MDS on the components'
-  overlap geometry (confusable regimes adjacent). Deterministic.
+* vertices: :func:`~mixle.utils.hvis.affinity.component_map` -- geodesic layout of the cover's
+  nerve (confusable regimes adjacent; rings render as rings). Deterministic.
 * fibers: per component, a responsibility-weighted PCA of the per-field WHITENED local coordinates
   (native value coordinates or universal typicality coordinates -- the same geometry the 'local'
   affinity scores). Deterministic up to sign, and signs are canonicalized. The loadings are
   returned, so a fiber axis is NAMEABLE: "within regime k, axis 1 is field 2's coordinate 0".
+  ``chart='quadratic'`` lifts the fiber features with degree-2 terms (explicit polynomial kernel,
+  still closed-form and placeable) for regimes whose within-structure is curved; the per-component
+  ``chart_residuals`` report says how much variance the linear chart leaves behind either way.
+* frames: each chart gets its own on-screen frame, major axis oriented tangentially (orthogonal to
+  the nearest other vertex) so neighboring charts' fringes cannot collide head-on.
+* occlusion: components with NO measured overlap in the model must not overlap on screen -- a
+  deterministic push-apart pass enforces it, while genuinely-overlapping components are allowed to
+  overlap visually (screen overlap then MEANS model overlap).
 * composition: barycentric in the posterior, so sharp points sit in their regime's local chart and
   mixed-membership points interpolate between charts.
 
@@ -25,9 +33,9 @@ responsibility -- rebuilt here on HViS's field decomposition so it covers hetero
 variable-length, and sequence data.
 
 When to still reach for the neighbor optimizers: no trustworthy model, strongly nonlinear
-within-regime manifolds a linear fiber chart flattens, or pure exploration. ``refine=True`` runs
-t-SNE FROM this layout (informative init, exaggeration off) so the optimizer only polishes local
-neighborhoods it is actually good at -- the composition stays in charge of the global picture.
+within-regime manifolds a chart flattens, or pure exploration. ``refine=True`` runs t-SNE FROM this
+layout (informative init, exaggeration off) so the optimizer only polishes local neighborhoods it
+is actually good at -- the composition stays in charge of the global picture.
 """
 
 from __future__ import annotations
@@ -44,6 +52,8 @@ from mixle.utils.hvis.affinity import (
     local_factors,
 )
 
+_MAX_QUAD_BASE = 8  # quadratic lift caps its base at this many pre-PCA directions
+
 
 def _sqrt_psd(mat: np.ndarray) -> np.ndarray:
     vals, vecs = np.linalg.eigh(np.asarray(mat, dtype=np.float64))
@@ -58,13 +68,110 @@ def _canonical_signs(components: np.ndarray) -> np.ndarray:
     return components * flips
 
 
+def _lift_quadratic(v: np.ndarray) -> np.ndarray:
+    """Explicit degree-2 polynomial features: ``[v, v_i v_j for i <= j]`` -- a closed-form,
+    deterministic, placement-compatible nonlinear chart."""
+    n, m = v.shape
+    prods = [v[:, i] * v[:, j] for i in range(m) for j in range(i, m)]
+    return np.column_stack([v] + prods)
+
+
+def _quad_labels(base: list[str]) -> list[str]:
+    m = len(base)
+    return list(base) + [f"{base[i]}*{base[j]}" for i in range(m) for j in range(i, m)]
+
+
+def component_fiber_coords(mix_model, data, field_weights=None) -> tuple[np.ndarray, list[np.ndarray], list[str], dict]:
+    """The shared fiber machinery: posteriors, per-component whitened field coordinates, labels.
+
+    Returns ``(z, [u_k for each component], coord_labels, transforms)`` where ``u_k`` is the
+    (n, D) concatenation of every coordinate-bearing field's values, whitened by component ``k``'s
+    local inverse covariance and weighted per field. ``transforms`` carries everything needed to
+    reproduce the coordinates for NEW data (used by :meth:`ModelMap.place` and by
+    :func:`mixle.utils.hvis.topology.model_fit_health`).
+    """
+    data = list(data)
+    z, _ = _posteriors_and_loglikes(mix_model, data=data)
+    k_count = z.shape[1]
+    factors = local_factors(mix_model, data, field_weights=field_weights)
+    terms = list(_field_log_density_features(list(mix_model.components), data))
+
+    field_specs, xs, labels, keep = [], [], [], []
+    for f_pos, (factor, (_l, x_f, native_f)) in enumerate(zip(factors, terms)):
+        if x_f is None:
+            continue
+        x_f = np.asarray(x_f, dtype=np.float64)
+        if not _is_local_factor(factor):  # coordinate-bearing fields are always local factors
+            raise ValueError("internal: coordinate-bearing fields must be local factors.")
+        weight = float(factor["weight"])
+        dof = float(factor.get("delta_scale", 1.0))
+        field_specs.append({"dim": x_f.shape[1], "weight_sqrt": float(np.sqrt(weight / dof))})
+        xs.append(x_f)
+        keep.append(f_pos)
+        kind = "native" if native_f else "typicality"
+        labels.extend([f"field{f_pos}[{kind}]:{c}" for c in range(x_f.shape[1])])
+
+    inv_covs = [np.asarray(factors[i]["inv_cov"], dtype=np.float64) for i in keep]
+    whiteners = [[_sqrt_psd(inv_covs[f_pos][k]) for f_pos in range(len(keep))] for k in range(k_count)]
+    us = [
+        np.column_stack([(x @ w) * spec["weight_sqrt"] for x, w, spec in zip(xs, whiteners[k], field_specs)])
+        for k in range(k_count)
+    ]
+    transforms = {"keep": keep, "field_specs": field_specs, "whiteners": whiteners}
+    return z, us, labels, transforms
+
+
+def _resolve_overlap(
+    vertices: np.ndarray,
+    radii: np.ndarray,
+    allowed: set[tuple[int, int]],
+    *,
+    margin: float = 1.05,
+    max_sweeps: int = 200,
+) -> np.ndarray:
+    """Deterministic push-apart: components with NO measured overlap in the model must not overlap
+    on screen. Pairs in ``allowed`` (model overlap present) may overlap visually -- screen overlap
+    then MEANS model overlap. Pushes only ever grow separations, so adjacency orderings among the
+    allowed pairs are preserved."""
+    v = vertices.copy()
+    k = v.shape[0]
+    for _ in range(int(max_sweeps)):
+        moved = False
+        for a in range(k):
+            for b in range(a + 1, k):
+                if (a, b) in allowed:
+                    continue
+                need = margin * (radii[a] + radii[b])
+                diff = v[b] - v[a]
+                dist = float(np.linalg.norm(diff))
+                if dist >= need:
+                    continue
+                if dist <= 1.0e-12:  # coincident: split along a deterministic, pair-specific angle
+                    angle = 2.0 * np.pi * (a * k + b) / float(k * k)
+                    direction = np.zeros(v.shape[1])
+                    direction[0], direction[min(1, v.shape[1] - 1)] = np.cos(angle), np.sin(angle)
+                else:
+                    direction = diff / dist
+                push = (need - dist) / 2.0
+                v[a] -= push * direction
+                v[b] += push * direction
+                moved = True
+        if not moved:
+            break
+    return v
+
+
 @dataclass
 class ModelMap:
     """A fitted direct layout: coordinates plus everything needed to read and extend the map.
 
-    ``vertices`` are the component anchors; ``loadings[k]`` names what regime ``k``'s fiber axes
-    measure (rows = concatenated whitened field coordinates, see ``coord_labels``); ``place(data)``
-    maps NEW observations with the fit-time transforms -- closed form, so streaming is one call.
+    ``vertices`` are the component anchors (post occlusion resolution); ``loadings[k]`` names what
+    regime ``k``'s chart axes measure (rows = chart features, see ``coord_labels``); ``frames[k]``
+    is the chart's on-screen frame (row 0 = the major axis's direction); ``chart_residuals[k]`` is
+    the fraction of fiber variance the LINEAR chart leaves beyond ``emb_dim`` (high = this regime's
+    within-structure is not 2-D-linear -- consider ``chart='quadratic'`` or ``refine=True``);
+    ``place(data)`` maps NEW observations with the fit-time transforms -- closed form, so streaming
+    is one call.
     """
 
     coords: np.ndarray
@@ -72,43 +179,51 @@ class ModelMap:
     responsibilities: np.ndarray
     loadings: list[np.ndarray]
     coord_labels: list[str]
+    frames: list[np.ndarray] = field(default_factory=list)
+    chart: str = "linear"
+    chart_residuals: np.ndarray = field(default_factory=lambda: np.zeros(0))
     _model: object = field(repr=False, default=None)
-    _keep_fields: list[int] = field(repr=False, default_factory=list)
-    _field_specs: list[dict] = field(repr=False, default_factory=list)
+    _transforms: dict = field(repr=False, default_factory=dict)
+    _pre: list = field(repr=False, default_factory=list)  # per-k (pre_mu, pre_dirs) or None
     _fiber_means: list[np.ndarray] = field(repr=False, default_factory=list)
-    _fiber_whiteners: list[list[np.ndarray]] = field(repr=False, default_factory=list)
     _fiber_scale: float = field(repr=False, default=1.0)
     _emb_dim: int = field(repr=False, default=2)
 
+    def _chart_features(self, u: np.ndarray, k: int) -> np.ndarray:
+        if self.chart == "linear":
+            return u
+        pre = self._pre[k]
+        v = u if pre is None else (u - pre[0]) @ pre[1]
+        return _lift_quadratic(v)
+
     def place(self, data) -> np.ndarray:
         """Closed-form out-of-sample placement with the FIT-TIME transforms (means, whiteners,
-        fiber directions, scale). Placing the training data reproduces ``coords`` exactly."""
+        chart directions, frames, scale). Placing the training data reproduces ``coords`` exactly."""
         data = list(data)
         z, _ = _posteriors_and_loglikes(self._model, data=data)
         terms = list(_field_log_density_features(list(self._model.components), data))
-        if max(self._keep_fields, default=-1) >= len(terms):
+        keep = self._transforms["keep"]
+        if max(keep, default=-1) >= len(terms):
             raise ValueError("data decomposes into a different field set than the fitted map.")
         xs = []
-        for f_pos in self._keep_fields:
+        for f_pos, spec in zip(keep, self._transforms["field_specs"]):
             x_f = terms[f_pos][1]
-            if x_f is None:
+            if x_f is None or np.asarray(x_f).shape[1] != spec["dim"]:
                 raise ValueError("data decomposes into a different field set than the fitted map.")
             xs.append(np.asarray(x_f, dtype=np.float64))
         k_count = self.vertices.shape[0]
         y = np.zeros((len(data), self._emb_dim))
         for k in range(k_count):
-            u = self._whitened_block(xs, k)
-            scores = (u - self._fiber_means[k]) @ self.loadings[k] * self._fiber_scale
-            y += z[:, k : k + 1] * (self.vertices[k][None, :] + scores)
+            u = np.column_stack(
+                [
+                    (x @ w) * spec["weight_sqrt"]
+                    for x, w, spec in zip(xs, self._transforms["whiteners"][k], self._transforms["field_specs"])
+                ]
+            )
+            feats = self._chart_features(u, k)
+            scores = (feats - self._fiber_means[k]) @ self.loadings[k] * self._fiber_scale
+            y += z[:, k : k + 1] * (self.vertices[k][None, :] + scores @ self.frames[k])
         return y
-
-    def _whitened_block(self, xs: list[np.ndarray], k: int) -> np.ndarray:
-        parts = []
-        for x_f, spec, whitener in zip(xs, self._field_specs, self._fiber_whiteners[k]):
-            if x_f is None or x_f.shape[1] != spec["dim"]:
-                raise ValueError("field coordinates do not match the fitted map's field shapes.")
-            parts.append((x_f @ whitener) * spec["weight_sqrt"])
-        return np.column_stack(parts)
 
 
 def model_map(
@@ -117,6 +232,10 @@ def model_map(
     emb_dim: int = 2,
     *,
     spread: float = 0.35,
+    chart: str = "linear",
+    occlusion: bool = True,
+    occlusion_margin: float = 1.05,
+    edge_threshold: float = 0.02,
     field_weights=None,
     max_components: int = 50,
     dpm_max_its: int = 200,
@@ -128,12 +247,16 @@ def model_map(
 
     ``spread`` sets how large regime fibers render relative to the smallest inter-vertex gap --
     a LEGIBILITY choice made explicit, unlike t-SNE where cluster sizes are a meaningless artifact.
-    ``seed``/``max_components``/``dpm_max_its`` only matter when ``mix_model`` is None and a DPM
-    must be fit first; the layout itself uses no randomness. ``refine=True`` polishes local
-    neighborhoods with t-SNE initialized FROM this layout (exaggeration off), leaving the global
-    arrangement model-decided; the refined coordinates replace ``coords`` (the skeleton stays
-    available as ``vertices``).
+    ``chart`` is ``'linear'`` (default) or ``'quadratic'`` (explicit degree-2 features -- a curved
+    within-regime chart that stays closed-form and placeable); either way ``chart_residuals``
+    reports the linear chart's leftover variance per regime. ``occlusion=True`` enforces that
+    components with no measured overlap never overlap on screen. ``seed``/``max_components``/
+    ``dpm_max_its`` only matter when ``mix_model`` is None and a DPM must be fit first; the layout
+    itself uses no randomness. ``refine=True`` polishes local neighborhoods with t-SNE initialized
+    FROM this layout (exaggeration off), leaving the global arrangement model-decided.
     """
+    if chart not in ("linear", "quadratic"):
+        raise ValueError("chart must be 'linear' or 'quadratic'.")
     data = list(data)
     if mix_model is None:
         from mixle.utils.automatic import get_dpm_mixture
@@ -142,50 +265,55 @@ def model_map(
             data, rng=np.random.RandomState(seed), max_components=max_components, max_its=dpm_max_its, out=None
         )
 
-    z, _ = _posteriors_and_loglikes(mix_model, data=data)
+    z, us, base_labels, transforms = component_fiber_coords(mix_model, data, field_weights=field_weights)
     n, k_count = z.shape
-    vertices = component_map(z, emb_dim=emb_dim)
+    vertices = component_map(z, emb_dim=emb_dim, edge_threshold=edge_threshold)
 
-    factors = local_factors(mix_model, data, field_weights=field_weights)
-    terms = list(_field_log_density_features(list(mix_model.components), data))
-    field_specs, xs, labels = [], [], []
-    for f_pos, (factor, (_l, x_f, native_f)) in enumerate(zip(factors, terms)):
-        if x_f is None:
-            field_specs.append(None)
-            xs.append(None)
-            continue
-        x_f = np.asarray(x_f, dtype=np.float64)
-        weight = float(factor["weight"]) if _is_local_factor(factor) else 1.0
-        dof = float(factor.get("delta_scale", 1.0)) if _is_local_factor(factor) else 1.0
-        field_specs.append({"dim": x_f.shape[1], "weight_sqrt": np.sqrt(weight / dof)})
-        xs.append(x_f)
-        kind = "native" if native_f else "typicality"
-        labels.extend([f"field{f_pos}[{kind}]:{c}" for c in range(x_f.shape[1])])
-    keep = [i for i, spec in enumerate(field_specs) if spec is not None]
-    field_specs = [field_specs[i] for i in keep]
-    xs = [xs[i] for i in keep]
-    inv_covs = [np.asarray(factors[i]["inv_cov"], dtype=np.float64) for i in keep if _is_local_factor(factors[i])]
-    if len(inv_covs) != len(keep):  # a posterior-only tuple factor slipped through with coords: not expected
-        raise ValueError("internal: coordinate-bearing fields must be local factors.")
-
-    fiber_means, fiber_whiteners, loadings, raw_scores = [], [], [], []
+    fiber_means, loadings, raw_scores, pre_list, residuals = [], [], [], [], []
+    labels = list(base_labels)
     for k in range(k_count):
-        whiteners = [_sqrt_psd(inv_covs[f_pos][k]) for f_pos in range(len(keep))]
-        u = np.column_stack([(x @ w) * spec["weight_sqrt"] for x, w, spec in zip(xs, whiteners, field_specs)])
+        u = us[k]
         wk = z[:, k]
-        sw = float(wk.sum())
-        mu = (wk @ u) / sw if sw > 0 else u.mean(axis=0)
-        centered = u - mu
-        cov = (centered * wk[:, None]).T @ centered / max(sw, 1.0e-12)
+        sw = max(float(wk.sum()), 1.0e-12)
+
+        # linear-chart residual report: how much fiber variance emb_dim linear axes leave behind
+        mu_u = (wk @ u) / sw
+        cov_u = ((u - mu_u) * wk[:, None]).T @ (u - mu_u) / sw
+        vals_u = np.sort(np.linalg.eigvalsh(cov_u))[::-1]
+        total = float(vals_u.sum())
+        residuals.append(0.0 if total <= 0 else float(max(0.0, 1.0 - vals_u[:emb_dim].sum() / total)))
+
+        if chart == "quadratic":
+            if u.shape[1] > _MAX_QUAD_BASE:
+                vals, vecs = np.linalg.eigh(cov_u)
+                order = np.argsort(vals)[::-1][:_MAX_QUAD_BASE]
+                pre = (mu_u, _canonical_signs(vecs[:, order]))
+                feats = _lift_quadratic((u - pre[0]) @ pre[1])
+            else:
+                pre = None
+                feats = _lift_quadratic(u)
+        else:
+            pre = None
+            feats = u
+        pre_list.append(pre)
+
+        mu = (wk @ feats) / sw
+        centered = feats - mu
+        cov = (centered * wk[:, None]).T @ centered / sw
         vals, vecs = np.linalg.eigh(cov)
         order = np.argsort(vals)[::-1][:emb_dim]
         p = _canonical_signs(vecs[:, order])
         if p.shape[1] < emb_dim:
             p = np.column_stack([p, np.zeros((p.shape[0], emb_dim - p.shape[1]))])
         fiber_means.append(mu)
-        fiber_whiteners.append(whiteners)
         loadings.append(p)
         raw_scores.append(centered @ p)
+
+    if chart == "quadratic":
+        if pre_list[0] is None:
+            labels = _quad_labels(base_labels)
+        else:
+            labels = _quad_labels([f"pre_pc{i}" for i in range(_MAX_QUAD_BASE)])
 
     stds = [
         float(np.sqrt(np.average(np.sum(s**2, axis=1), weights=np.maximum(z[:, k], 1e-12))))
@@ -197,9 +325,44 @@ def model_map(
     med_std = float(np.median([s for s in stds if s > 0]) or 1.0)
     scale = (spread * ref / med_std) if med_std > 0 else 1.0
 
+    if occlusion and k_count > 1:
+        dominant = z.argmax(axis=1)
+        radii = np.zeros(k_count)
+        for k in range(k_count):
+            mine = raw_scores[k][dominant == k] * scale
+            radii[k] = float(np.percentile(np.linalg.norm(mine, axis=1), 90)) if len(mine) else 0.0
+        masses = np.maximum(z.sum(axis=0), 1.0e-12)
+        co = z.T @ z
+        allowed = {
+            (a, b)
+            for a in range(k_count)
+            for b in range(a + 1, k_count)
+            if co[a, b] / min(masses[a], masses[b]) >= edge_threshold
+        }
+        vertices = _resolve_overlap(vertices, radii, allowed, margin=occlusion_margin)
+
+    # per-chart frames: orient each chart's MAJOR axis tangentially (orthogonal to the nearest
+    # other vertex) so neighboring charts' fringes cannot collide head-on. Computed from the FINAL
+    # vertices, after occlusion.
+    frames = []
+    for k in range(k_count):
+        if emb_dim != 2 or k_count < 2:
+            frames.append(np.eye(emb_dim))
+            continue
+        others = [j for j in range(k_count) if j != k]
+        nearest = min(others, key=lambda j: float(np.linalg.norm(vertices[j] - vertices[k])))
+        radial = vertices[nearest] - vertices[k]
+        norm = float(np.linalg.norm(radial))
+        if norm <= 1.0e-12:
+            frames.append(np.eye(2))
+            continue
+        radial = radial / norm
+        tangent = np.array([-radial[1], radial[0]])
+        frames.append(np.stack([tangent, radial]))  # rows: major axis -> tangent, minor -> radial
+
     coords = np.zeros((n, emb_dim))
     for k in range(k_count):
-        coords += z[:, k : k + 1] * (vertices[k][None, :] + raw_scores[k] * scale)
+        coords += z[:, k : k + 1] * (vertices[k][None, :] + (raw_scores[k] * scale) @ frames[k])
 
     result = ModelMap(
         coords=coords,
@@ -207,11 +370,13 @@ def model_map(
         responsibilities=z,
         loadings=loadings,
         coord_labels=labels,
+        frames=frames,
+        chart=chart,
+        chart_residuals=np.asarray(residuals),
         _model=mix_model,
-        _keep_fields=keep,
-        _field_specs=field_specs,
+        _transforms=transforms,
+        _pre=pre_list,
         _fiber_means=fiber_means,
-        _fiber_whiteners=fiber_whiteners,
         _fiber_scale=scale,
         _emb_dim=emb_dim,
     )

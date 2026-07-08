@@ -1131,11 +1131,13 @@ class HTSNETestCase(unittest.TestCase):
         data, labels, model = self._complex_heterogeneous_data_and_model()
         factors = local_factors(model, data)
         self.assertEqual(len(factors), 7)
-        # every non-Optional field now carries local geometry: native coordinates where the leaf
-        # has them, universal typicality coordinates otherwise (the old pin of 3 documented the
-        # posterior-only fallback gap that collapsed discrete/sequence fields into ties). The two
-        # Optional-derived fields (missingness gate + gated inner scores) remain posterior-only.
-        self.assertEqual(sum(isinstance(f, dict) and f.get("kind") == "local" for f in factors), 5)
+        # every field except gated-inner scores now carries local geometry: native coordinates
+        # where the leaf has them, universal typicality coordinates otherwise, and the Optional
+        # missingness gate carries its presence indicator (the missing/present pattern is real
+        # within-cluster structure). Only the Optional INNER field (scores gated to present rows)
+        # remains posterior-only. Earlier pins (3, then 5) documented the fallback gaps as they
+        # were successively closed.
+        self.assertEqual(sum(isinstance(f, dict) and f.get("kind") == "local" for f in factors), 6)
 
         log_s = model_log_affinity(None, None, affinity=factors, evidence_cap=1.0)
         self.assertGreater(affinity_neighbor_purity(log_s, labels, k=12), 0.95)

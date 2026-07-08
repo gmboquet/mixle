@@ -83,6 +83,21 @@ class FuzzyNerveTest(unittest.TestCase):
         self.assertEqual(report["n_components"], 2)
         self.assertTrue(any("disconnected" in d for d in report["diagnosis"]))
 
+    def test_ring_cover_renders_as_a_ring_not_a_line(self):
+        # the R3 acceptance: the geodesic nerve layout must realize the loop geometrically --
+        # vertices near-equidistant from their centroid, every vertex's nearest a true ring
+        # neighbor. Bare MDS on the clipped dense distance matrix cannot promise this.
+        from mixle.utils.hvis import component_map
+
+        z = _ring_fixture()
+        v = component_map(z)
+        radial = np.linalg.norm(v - v.mean(axis=0, keepdims=True), axis=1)
+        self.assertLess(float(radial.std() / radial.mean()), 0.2)  # a ring, not a smear
+        for k in range(8):
+            d = np.linalg.norm(v - v[k], axis=1)
+            d[k] = np.inf
+            self.assertIn(int(np.argmin(d)), ((k - 1) % 8, (k + 1) % 8))  # adjacency survives
+
     def test_nerve_is_deterministic(self):
         z = _ring_fixture()
         a, b = fuzzy_nerve(z), fuzzy_nerve(z)

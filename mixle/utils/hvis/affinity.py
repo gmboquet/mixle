@@ -210,7 +210,9 @@ def _field_log_density_features(dists, items):
                 ],
                 dtype=np.float64,
             )  # log P(present)
-            yield np.where(miss[:, None], lp0[None, :], lp1[None, :]), None, True
+            # the presence pattern is real within-cluster structure: a 0/1 coordinate lets the
+            # local machinery separate present-vs-missing neighbors instead of posterior-only ties.
+            yield np.where(miss[:, None], lp0[None, :], lp1[None, :]), (~miss).astype(np.float64)[:, None], False
         if (~miss).any():
             fill = items[int(np.argmax(~miss))]
             sub = [fill if m else x for x, m in zip(items, miss)]
@@ -722,14 +724,63 @@ def mixture_coordinates(mix_model, data, field_weights=None) -> dict:
     return {"posterior": z, "fields": fields}
 
 
-def component_map(z: np.ndarray, emb_dim: int = 2) -> np.ndarray:
-    """Lay out the K components as simplex vertices by their overlap geometry on the data.
+def _classical_mds(d2: np.ndarray, emb_dim: int) -> np.ndarray:
+    k = d2.shape[0]
+    j = np.eye(k) - np.ones((k, k)) / k
+    b = -0.5 * j @ d2 @ j
+    vals, vecs = np.linalg.eigh(b)
+    order = np.argsort(vals)[::-1][:emb_dim]
+    coords = vecs[:, order] * np.sqrt(np.maximum(vals[order], 0.0))
+    flips = np.sign(coords[np.abs(coords).argmax(axis=0), np.arange(coords.shape[1])])
+    flips[flips == 0] = 1.0
+    coords = coords * flips  # canonical eigenvector signs: determinism must not depend on LAPACK
+    if coords.shape[1] < emb_dim:
+        coords = np.column_stack([coords, np.zeros((k, emb_dim - coords.shape[1]))])
+    return coords
 
-    Component confusability is measured from the posteriors alone: the Bhattacharyya coefficient
-    between the components' responsibility profiles, ``BC(k, l) = sum_i sqrt(z_ik z_il) /
-    sqrt(sum_i z_ik * sum_i z_il)`` -- 1 when two components claim exactly the same observations,
-    0 when they never co-claim. Classical MDS on ``-log BC`` gives vertex coordinates in which
-    confusable components sit close. These vertices anchor :func:`barycentric_init`.
+
+def _smacof(d: np.ndarray, emb_dim: int, n_iter: int = 300) -> np.ndarray:
+    """Deterministic stress majorization (uniform weights, classical-MDS init) toward target
+    distances ``d`` -- the Guttman transform, no randomness anywhere."""
+    k = d.shape[0]
+    if k == 1:
+        return np.zeros((1, emb_dim))
+    x = _classical_mds(np.square(d), emb_dim)
+    for _ in range(int(n_iter)):
+        cur = np.sqrt(np.maximum(np.square(x[:, None, :] - x[None, :, :]).sum(axis=2), 1.0e-12))
+        np.fill_diagonal(cur, 1.0)
+        ratio = d / cur
+        np.fill_diagonal(ratio, 0.0)
+        b = -ratio
+        b[np.arange(k), np.arange(k)] = ratio.sum(axis=1)
+        x_new = (b @ x) / k
+        if float(np.abs(x_new - x).max()) < 1.0e-10:
+            x = x_new
+            break
+        x = x_new
+    return x - x.mean(axis=0, keepdims=True)
+
+
+def component_map(
+    z: np.ndarray, emb_dim: int = 2, *, method: str = "nerve", edge_threshold: float = 0.02
+) -> np.ndarray:
+    """Lay out the K components as vertices by their overlap geometry on the data.
+
+    ``method='nerve'`` (default): geodesic layout of the cover's nerve -- edge lengths are
+    ``-log BC`` on STRONG edges only (see :func:`mixle.utils.hvis.topology.fuzzy_nerve`), all-pairs
+    shortest paths give the target metric, and deterministic stress majorization embeds it. This is
+    Isomap on the nerve: a ring of components renders as a ring and a chain as a line, where bare
+    MDS on the clipped dense ``-log BC`` matrix (every non-overlapping pair saturating at the same
+    huge distance) distorts both -- the classic horseshoe failure. Disconnected pieces of the nerve
+    are laid out separately and placed side by side with an explicit gap; their on-screen separation
+    is a RENDERING choice, which :func:`mixle.utils.hvis.topology.nerve_report` also says outright.
+
+    ``method='mds'``: the previous behavior -- classical MDS on the dense clipped ``-log BC``
+    matrix. Kept as the fallback and for comparison.
+
+    Component confusability itself is unchanged: the Bhattacharyya coefficient between the
+    components' responsibility profiles. These vertices anchor :func:`barycentric_init` and
+    :func:`mixle.utils.hvis.direct.model_map`.
     """
     z = np.asarray(z, dtype=np.float64)
     k = z.shape[1]
@@ -740,17 +791,43 @@ def component_map(z: np.ndarray, emb_dim: int = 2) -> np.ndarray:
     mass = np.sqrt(np.maximum(z.sum(axis=0), 1.0e-12))
     bc = overlap / np.outer(mass, mass)
     np.clip(bc, 1.0e-12, 1.0, out=bc)
-    d2 = np.square(-np.log(bc))
-    np.fill_diagonal(d2, 0.0)
+    neg_log_bc = -np.log(bc)
+    np.fill_diagonal(neg_log_bc, 0.0)
 
-    j = np.eye(k) - np.ones((k, k)) / k  # classical MDS: double-center the squared distances
-    b = -0.5 * j @ d2 @ j
-    vals, vecs = np.linalg.eigh(b)
-    order = np.argsort(vals)[::-1][:emb_dim]
-    coords = vecs[:, order] * np.sqrt(np.maximum(vals[order], 0.0))
-    if coords.shape[1] < emb_dim:  # rank-deficient overlap geometry: pad axes with zeros
-        coords = np.column_stack([coords, np.zeros((k, emb_dim - coords.shape[1]))])
-    return coords
+    if method == "mds":
+        return _classical_mds(np.square(neg_log_bc), emb_dim)
+    if method != "nerve":
+        raise ValueError("method must be 'nerve' or 'mds'.")
+
+    from mixle.utils.hvis.topology import fuzzy_nerve
+
+    nerve = fuzzy_nerve(z, edge_threshold=edge_threshold)
+    strong = {e for e, w in nerve["edges"].items() if w >= edge_threshold}
+    if not strong:  # no measured overlaps at all: fall back to the dense view
+        return _classical_mds(np.square(neg_log_bc), emb_dim)
+
+    import scipy.sparse
+    import scipy.sparse.csgraph
+
+    rows = [a for a, _b in strong] + [b for _a, b in strong]
+    cols = [b for _a, b in strong] + [a for a, _b in strong]
+    lengths = [max(float(neg_log_bc[a, b]), 1.0e-6) for a, b in strong] * 2
+    graph = scipy.sparse.csr_matrix((lengths, (rows, cols)), shape=(k, k))
+    geo = scipy.sparse.csgraph.shortest_path(graph, directed=False)
+
+    n_pieces, piece_of = scipy.sparse.csgraph.connected_components(graph, directed=False)
+    coords = np.zeros((k, emb_dim))
+    offset = 0.0
+    typical = float(np.median([length for length in lengths])) if lengths else 1.0
+    for piece in range(n_pieces):
+        members = np.flatnonzero(piece_of == piece)
+        sub = _smacof(geo[np.ix_(members, members)], emb_dim)
+        half_width = float(sub[:, 0].max() - sub[:, 0].min()) / 2.0 if len(members) > 1 else 0.0
+        offset += half_width
+        sub = sub + np.array([offset] + [0.0] * (emb_dim - 1))
+        coords[members] = sub
+        offset += half_width + 1.5 * max(typical, 1.0)  # explicit rendering gap between pieces
+    return coords - coords.mean(axis=0, keepdims=True)
 
 
 def barycentric_init(z: np.ndarray, emb_dim: int = 2, *, jitter: float = 0.15, seed: int | None = None) -> np.ndarray:
