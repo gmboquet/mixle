@@ -30,6 +30,13 @@ Phase 2-3 surface:
 
 from __future__ import annotations
 
+from mixle.evolve.concept_discovery import (
+    AdmissionEvent,
+    ConceptLibrary,
+    TaskResult,
+    run_concept_discovery_loop,
+    task_signature,
+)
 from mixle.evolve.improve import ImprovementResult, improve
 from mixle.evolve.ledger import EvolutionLedger
 from mixle.evolve.objective import (
@@ -105,4 +112,10 @@ __all__ = [
     "Categorical",
     "Population",
     "OperatorBandit",
+    # CARD L6: concept discovery -- the library of families itself under selection
+    "ConceptLibrary",
+    "AdmissionEvent",
+    "TaskResult",
+    "run_concept_discovery_loop",
+    "task_signature",
 ]
