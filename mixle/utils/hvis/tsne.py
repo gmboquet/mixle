@@ -60,12 +60,15 @@ def update_embed(
     alpha: float,
     min_gain: float,
     min_value: float = 1.0e-128,
+    center: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """One delta-bar-delta gradient step of KL(P || Q) on the embedding Y.
 
     Gradient of the heavy-tailed kernel:
         dC/dy_i = (2(alpha+1)/alpha) * sum_j (p_ij - q_ij) num_ij (y_i - y_j),
-    computed in matrix form (no per-row Python loop).
+    computed in matrix form (no per-row Python loop). ``center=False`` skips the mean-centering
+    for gauge-fixing goals (anchors, see :mod:`mixle.utils.hvis.goals`), which centering would
+    otherwise undo each step.
     """
     dC, Q = _exact_tsne_gradient(P, Y, alpha, min_value=min_value)
 
@@ -75,7 +78,8 @@ def update_embed(
 
     iY = momentum * iY - eta * (gains * dC)
     Y = Y + iY
-    Y -= np.mean(Y, axis=0, keepdims=True)
+    if center:
+        Y -= np.mean(Y, axis=0, keepdims=True)
 
     return Y, iY, gains, Q
 
@@ -153,8 +157,17 @@ def tsne_exact(
     print_iter: int = 100,
     seed: int | None = None,
     out=None,
+    goals=None,
 ) -> np.ndarray:
-    """Full-matrix t-SNE on symmetrized probabilities P with convergence stopping."""
+    """Full-matrix t-SNE on symmetrized probabilities P with convergence stopping.
+
+    ``goals`` is an optional sequence of embedding goals (:mod:`mixle.utils.hvis.goals`): their
+    gradients join the data gradient every iteration and hard constraints are re-projected after
+    every step.
+    """
+    from mixle.utils.hvis.goals import apply_projections, goals_fix_gauge, total_goal_gradient
+
+    center = not goals_fix_gauge(goals)
     if out is None:
         out = sys.stdout
 
@@ -185,7 +198,11 @@ def tsne_exact(
             np.maximum(P, min_value, out=P)
 
         mom = 0.5 if i <= early_its else momentum
-        Y, iY, gains, Q = update_embed(P, Y, iY, gains, mom, eta, alpha, min_gain, min_value)
+        Y, iY, gains, Q = update_embed(P, Y, iY, gains, mom, eta, alpha, min_gain, min_value, center=center)
+        step = total_goal_gradient(goals, Y)
+        if step is not None:  # goals apply as their own bounded step: rate semantics, no eta/gains coupling
+            Y = Y - step
+        Y = apply_projections(goals, Y, iY)
 
         if optimize_alpha and i > early_its:
             alpha = update_alpha(P, Y, alpha, min_alpha, min_value, max_alpha_its)
@@ -630,8 +647,14 @@ def _tsne_barnes_hut_from_p(
     seed: int | None = None,
     Y: np.ndarray | None = None,
     out=None,
+    goals=None,
 ) -> np.ndarray:
-    """Barnes-Hut t-SNE on a sparse symmetric probability matrix."""
+    """Barnes-Hut t-SNE on a sparse symmetric probability matrix. ``goals`` as in
+    :func:`tsne_exact`: goal gradients join the data gradient each iteration, hard constraints are
+    re-projected each step, and mean-centering is skipped when a goal fixes the gauge."""
+    from mixle.utils.hvis.goals import apply_projections, goals_fix_gauge, total_goal_gradient
+
+    center = not goals_fix_gauge(goals)
     if out is None:
         out = sys.stdout
 
@@ -653,7 +676,8 @@ def _tsne_barnes_hut_from_p(
         if Y.shape[0] != n:
             raise ValueError("initial embedding Y has the wrong number of rows.")
         emb_dim = Y.shape[1]
-    Y -= np.mean(Y, axis=0, keepdims=True)
+    if center:
+        Y -= np.mean(Y, axis=0, keepdims=True)
 
     iY = np.zeros_like(Y)
     gains = np.ones_like(Y)
@@ -684,7 +708,12 @@ def _tsne_barnes_hut_from_p(
         mom = 0.5 if it <= early_its else momentum
         iY = mom * iY - eta * gains * dC
         Y = Y + iY
-        Y -= np.mean(Y, axis=0, keepdims=True)
+        if center:
+            Y -= np.mean(Y, axis=0, keepdims=True)
+        step = total_goal_gradient(goals, Y)
+        if step is not None:  # bounded rate semantics, decoupled from eta/gains (see goals module)
+            Y = Y - step
+        Y = apply_projections(goals, Y, iY)
 
         if (it % print_iter) == 0:
             _, kl_z_sum = _dispatch_negative_forces(
@@ -731,6 +760,7 @@ def _tsne_barnes_hut(
     leaf_size: int = 16,
     repulsion_method: str = "auto",
     exact_repulsion_threshold: int = 5000,
+    goals=None,
 ) -> np.ndarray:
     P = _sparse_joint_pmat(dist_csr, perplexity)
     return _tsne_barnes_hut_from_p(
@@ -750,6 +780,7 @@ def _tsne_barnes_hut(
         seed=seed,
         Y=Y,
         out=out,
+        goals=goals,
     )
 
 
