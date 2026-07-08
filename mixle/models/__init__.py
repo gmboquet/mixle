@@ -54,6 +54,7 @@ from mixle.models.energy import (
 )
 from mixle.models.feature_map import FeatureMapDensity, FeatureMapEstimator, feature_fn, register_feature_fn
 from mixle.models.gaussian_process import GaussianProcessRegressor
+from mixle.models.grad_leaf import GradEstimator, GradLeaf
 from mixle.models.grammar import (
     GrammarLearningResult,
     PCFGParseNode,
@@ -141,6 +142,8 @@ __all__ = [
     "GaussianRegressionNeuralNetwork",
     "NeuralCategorical",
     "NeuralConditionalDensity",
+    "GradEstimator",
+    "GradLeaf",
     "NeuralDensity",
     "NeuralDensityEstimator",
     "NeuralGaussian",
