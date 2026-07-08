@@ -99,6 +99,7 @@ from mixle.task.edge import (
     measure_ops_per_second,
     task_fingerprint,
 )
+from mixle.task.emulate import Emulator, EmulatorReceipt, emulate
 from mixle.task.environment import (
     Environment,
     ExplorationEnvironment,
@@ -265,6 +266,9 @@ __all__ = [
     "EdgeDistillResult",
     "EdgeFootprint",
     "EdgeSpace",
+    "Emulator",
+    "EmulatorReceipt",
+    "emulate",
     "ExecutionTrace",
     "EmbeddingHeadIO",
     "ExtractionIO",
