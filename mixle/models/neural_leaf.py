@@ -24,13 +24,12 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
+from mixle.models.grad_leaf import DataBufferAccumulatorFactory
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
-    SequenceEncodableStatisticAccumulator,
-    StatisticAccumulatorFactory,
 )
 
 
@@ -195,63 +194,6 @@ class NeuralGaussianEncoder(DataSequenceEncoder):
         return (x, y)
 
 
-class NeuralGaussianAccumulator(SequenceEncodableStatisticAccumulator):
-    def __init__(self) -> None:
-        self.x: list = []
-        self.y: list = []
-        self.w: list = []
-
-    # x/y/w hold a list of contiguous (n_i, dim) batch arrays; they are concatenated once at value(), so a
-    # streamed shard is a few batch arrays rather than one tiny ndarray per row (the audit's 50k-ndarray blowup).
-    def update(self, xy: Any, weight: float, estimate: Any) -> None:
-        self.x.append(np.asarray(xy[0], dtype=float).reshape(1, -1))
-        self.y.append(np.asarray(xy[1], dtype=float).reshape(1, -1))
-        self.w.append(np.asarray([float(weight)], dtype=float))
-
-    def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
-        x, y = enc
-        xb = np.asarray(x, dtype=float)
-        yb = np.asarray(y, dtype=float)
-        self.x.append(xb.reshape(len(xb), -1))
-        self.y.append(yb.reshape(len(yb), -1))
-        self.w.append(np.asarray(weights, dtype=float).ravel())
-
-    def initialize(self, xy: Any, weight: float, rng: Any) -> None:
-        self.update(xy, weight, None)
-
-    def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
-        self.seq_update(enc, weights, None)
-
-    def combine(self, other: Any) -> NeuralGaussianAccumulator:
-        xo, yo, wo = other  # another accumulator's value(): contiguous (n, dim) arrays
-        if len(xo):
-            self.x.append(np.asarray(xo, dtype=float))
-            self.y.append(np.asarray(yo, dtype=float))
-            self.w.append(np.asarray(wo, dtype=float).ravel())
-        return self
-
-    def value(self) -> tuple:
-        x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
-        y = np.concatenate(self.y, axis=0) if self.y else np.zeros((0, 0))
-        w = np.concatenate(self.w) if self.w else np.zeros((0,))
-        return (x, y, w)
-
-    def from_value(self, value: tuple) -> NeuralGaussianAccumulator:
-        x, y, w = value
-        self.x = [np.asarray(x, dtype=float)] if len(x) else []
-        self.y = [np.asarray(y, dtype=float)] if len(y) else []
-        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
-        return self
-
-    def acc_to_encoder(self) -> NeuralGaussianEncoder:
-        return NeuralGaussianEncoder()
-
-
-class NeuralGaussianAccumulatorFactory(StatisticAccumulatorFactory):
-    def make(self) -> NeuralGaussianAccumulator:
-        return NeuralGaussianAccumulator()
-
-
 class NeuralGaussianEstimator(ParameterEstimator):
     """EM estimator for a :class:`NeuralGaussian`: the M-step is ``m_steps`` of weighted-NLL gradient on the module.
 
@@ -275,8 +217,8 @@ class NeuralGaussianEstimator(ParameterEstimator):
         self.name = name
         self.device = device
 
-    def accumulator_factory(self) -> NeuralGaussianAccumulatorFactory:
-        return NeuralGaussianAccumulatorFactory()
+    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
+        return DataBufferAccumulatorFactory(NeuralGaussianEncoder(), n_fields=2)
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralGaussian:
         torch = _torch()
@@ -285,8 +227,10 @@ class NeuralGaussianEstimator(ParameterEstimator):
             return NeuralGaussian(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
         dev = _resolve_device(self.device, torch)
         self.module.to(dev)
-        xt = torch.as_tensor(np.array(xs), dtype=torch.float32, device=dev)
-        yt = torch.as_tensor(np.array(ys), dtype=torch.float32, device=dev)
+        xs = np.asarray(xs, dtype=float).reshape(len(xs), -1)
+        ys = np.asarray(ys, dtype=float).reshape(len(ys), -1)
+        xt = torch.as_tensor(xs, dtype=torch.float32, device=dev)
+        yt = torch.as_tensor(ys, dtype=torch.float32, device=dev)
         wt = torch.as_tensor(np.array(ws), dtype=torch.float32, device=dev)
         wsum = float(wt.sum()) + 1e-8
         log_noise = torch.log(torch.tensor(float(self.noise), device=dev)).clone().detach().requires_grad_(True)

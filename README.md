@@ -85,6 +85,34 @@ The tiny model handles the easy majority and defers the hard cases, so the blend
 running the large model on a fraction of requests. The same pattern distills tool-callers, extractors, and
 structured classifiers (`mixle.task`).
 
+**A torch module is a distribution — the training code you didn't write.** Any module exposing
+`log_density(batch)` fits with one call: no training loop, no batching/eval/convergence boilerplate, no
+adapter classes. And because the fitted leaf *is* a distribution, it composes with classical families and
+fits jointly by EM.
+
+```python
+import torch
+from mixle.inference import optimize
+from mixle.stats import GammaDistribution, MixtureDistribution
+
+class Flow(torch.nn.Module):        # your module: forward and objective, nothing else
+    def log_density(self, x): ...   # (n, d) -> (n,)
+
+fitted = optimize(x, Flow())        # the loop, batching, eval, convergence — manufactured
+fitted.module                       # the raw torch module back — nothing is trapped
+
+# ...and it composes: a flow and a Gamma in ONE mixture, fit jointly by EM
+mix = MixtureDistribution([fitted, GammaDistribution(2.0, 1.0)], [0.5, 0.5])
+```
+
+Control never leaves you: freeze submodules with `requires_grad_(False)` (the optimizer only sees
+trainable parameters — train a projection head against a frozen encoder), override the objective or
+optimizer as hooks (`GradLeaf(module, loss=..., optimizer=...)`), and parity with a hand-written torch
+loop is pinned by a test (`mixle/tests/torch_parity_test.py`), not claimed in prose. Scaling stays a
+flag: `optimize(..., backend=...)` distributes EM across Spark/Dask/Ray/MPI, and the transformer LM's
+`fit(token_ids, distributed=True, precision="bf16")` runs FSDP2 (ZeRO-3) with DCP checkpoints under
+torchrun.
+
 **Compose arbitrarily deep — and tie parameters across the structure.** A segmental HMM whose every state
 emits a *composite* segment (a two-mode mixture plus a phrase scored by a PCFG), with the mixture's first
 mode **coupled across states by `keys=`**. One `optimize` call fits the whole tree by EM:

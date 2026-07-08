@@ -23,13 +23,12 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
+from mixle.models.grad_leaf import DataBufferAccumulatorFactory
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
-    SequenceEncodableStatisticAccumulator,
-    StatisticAccumulatorFactory,
 )
 
 
@@ -197,64 +196,6 @@ class NeuralConditionalDensityEncoder(DataSequenceEncoder):
         return (x, y)
 
 
-class NeuralConditionalDensityAccumulator(SequenceEncodableStatisticAccumulator):
-    """Buffers responsibility-weighted ``(x, y)`` pairs for the M-step (the weights are the E-step soft counts)."""
-
-    def __init__(self) -> None:
-        self.x: list = []
-        self.y: list = []
-        self.w: list = []
-
-    # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
-    def update(self, xy: Any, weight: float, estimate: Any) -> None:
-        self.x.append(np.atleast_1d(np.asarray(xy[0], dtype=float))[None, ...])
-        self.y.append(np.atleast_1d(np.asarray(xy[1], dtype=float))[None, ...])
-        self.w.append(np.asarray([float(weight)], dtype=float))
-
-    def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
-        x, y = enc
-        xb = np.asarray(x, dtype=float)
-        yb = np.asarray(y, dtype=float)
-        self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
-        self.y.append(yb.reshape(yb.shape[0], 1) if yb.ndim == 1 else yb)
-        self.w.append(np.asarray(weights, dtype=float).ravel())
-
-    def initialize(self, xy: Any, weight: float, rng: Any) -> None:
-        self.update(xy, weight, None)
-
-    def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
-        self.seq_update(enc, weights, None)
-
-    def combine(self, other: Any) -> NeuralConditionalDensityAccumulator:
-        xo, yo, wo = other
-        if len(xo):
-            self.x.append(np.asarray(xo, dtype=float))
-            self.y.append(np.asarray(yo, dtype=float))
-            self.w.append(np.asarray(wo, dtype=float).ravel())
-        return self
-
-    def value(self) -> tuple:
-        x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
-        y = np.concatenate(self.y, axis=0) if self.y else np.zeros((0, 0))
-        w = np.concatenate(self.w) if self.w else np.zeros((0,))
-        return (x, y, w)
-
-    def from_value(self, value: tuple) -> NeuralConditionalDensityAccumulator:
-        x, y, w = value
-        self.x = [np.asarray(x, dtype=float)] if len(x) else []
-        self.y = [np.asarray(y, dtype=float)] if len(y) else []
-        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
-        return self
-
-    def acc_to_encoder(self) -> NeuralConditionalDensityEncoder:
-        return NeuralConditionalDensityEncoder()
-
-
-class NeuralConditionalDensityAccumulatorFactory(StatisticAccumulatorFactory):
-    def make(self) -> NeuralConditionalDensityAccumulator:
-        return NeuralConditionalDensityAccumulator()
-
-
 class NeuralConditionalDensityEstimator(ParameterEstimator):
     """M-step: responsibility-weighted MLE ``max sum_i w_i log p(y_i | x_i)`` by gradient ascent (warm-started)."""
 
@@ -267,8 +208,8 @@ class NeuralConditionalDensityEstimator(ParameterEstimator):
         self.device = device
         self.name = name
 
-    def accumulator_factory(self) -> NeuralConditionalDensityAccumulatorFactory:
-        return NeuralConditionalDensityAccumulatorFactory()
+    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
+        return DataBufferAccumulatorFactory(NeuralConditionalDensityEncoder(), n_fields=2)
 
     def _make(self) -> NeuralConditionalDensity:
         return NeuralConditionalDensity(
