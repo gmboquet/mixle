@@ -15,6 +15,7 @@ Acceptance criteria under test (see the ConditionalJIT track's D5 item):
    evaluated with no further learning on a third, held-out one).
 """
 
+import importlib.util
 import unittest
 
 import numpy as np
@@ -27,6 +28,8 @@ from mixle.inference.conditional_jit_controller import (
     DesignModelController,
 )
 from mixle.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator, seq_encode
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 def _make_problem(seed=42, nobs=400, decoy_spread=1.0):
@@ -219,6 +222,7 @@ class LearnedVsGreedyAcceptanceTestCase(unittest.TestCase):
             l, g, "warm-started learned controller needed MORE evals than greedy on the held-out problem"
         )
 
+    @unittest.skipUnless(HAS_TORCH, "DesignModel.propose fits a GaussianProcessRegressor (torch)")
     def test_offline_design_model_beats_greedy_on_a_genuinely_held_out_problem(self):
         """The offline DesignModel mode, evaluated the way the roadmap frames it: fit on LOGGED
         (state, action, gain, cost) rows from two problems, then propose budgets on a THIRD
