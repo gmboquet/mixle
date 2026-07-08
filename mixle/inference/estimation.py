@@ -693,8 +693,15 @@ def optimize(
     on_step: Any | None = None,
     structure: str = "auto",
 ) -> SequenceEncodableProbabilityDistribution:
-    """Estimation of 'estimator' via EM algorithm for max_its iterations or until
-        new_loglikelihood - old_loglikelihood < delta.
+    """Fit ``estimator`` to ``data`` by a generalized-EM loop, for ``max_its`` iterations or until the
+        objective improves by less than ``delta``.
+
+    Each iteration re-estimates every part of the model by whatever its structure calls for -- closed-form
+    for conjugate / exponential-family leaves, gradient descent for neural leaves, coordinate descent for
+    GLMs, responsibility-weighted EM for latent structure (mixtures, HMMs) -- so a single call fits a
+    heterogeneous tree without the caller choosing an algorithm. (The convergence objective is MLE by
+    default; a parameter prior switches it to penalized-LL / MAP, and a variational model to the ELBO -- see
+    ``objective``.)
 
     Args:
         data (Optional[List[T]]): List of data type T containing observed data. Must be compatible with data type of
