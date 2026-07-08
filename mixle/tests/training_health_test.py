@@ -10,10 +10,12 @@ from __future__ import annotations
 import time
 import unittest
 
-import torch
+import pytest
 
-from mixle.models.transformer import build_causal_lm
-from mixle.utils.parallel.training_health import (
+torch = pytest.importorskip("torch")
+
+from mixle.models.transformer import build_causal_lm  # noqa: E402
+from mixle.utils.parallel.training_health import (  # noqa: E402
     RollingBaseline,
     TrainingHealthMonitor,
     flop_config_from_causal_lm,
