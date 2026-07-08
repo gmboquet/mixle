@@ -53,11 +53,14 @@ class AnchorTest(unittest.TestCase):
     def test_soft_anchor_equilibrium_gap_shrinks_with_the_rate(self):
         # a soft anchor reaches equilibrium where the data force balances the relaxation pull, so
         # (a) the point sits near the pin but NOT exactly on it, and (b) a faster rate sits closer.
-        # (Comparing against a free run would be unsound: unaligned layouts have rotation freedom.)
+        # Gaps are scale-normalized by each layout's own spread: separate t-SNE runs settle at
+        # different spreads, so RAW cross-run distances are trajectory noise (comparing them flaked
+        # across BLAS builds). The rate contrast is wide (0.05 vs 0.8; a ~50x normalized-gap
+        # separation locally) so no build inverts it.
         data, _ = _data(seed=2)
         pin = np.array([[4.0, 4.0]])
 
-        def dist_at(weight):
+        def gap_at(weight):
             coords = htsne(
                 data,
                 mix_model=_MODEL,
@@ -67,13 +70,13 @@ class AnchorTest(unittest.TestCase):
                 goals=[Anchor([0], pin, weight=weight)],
                 out=None,
             )
-            return float(np.linalg.norm(coords[0] - pin[0])), float(coords.std())
+            return float(np.linalg.norm(coords[0] - pin[0]) / coords.std())
 
-        dist_slow, _ = dist_at(0.1)
-        dist_fast, spread = dist_at(0.5)
-        self.assertGreater(dist_fast, 0.0)  # soft: never an exact projection
-        self.assertLess(dist_fast, 0.25 * spread)  # but the pull is real: well inside the layout scale
-        self.assertLess(dist_fast, dist_slow)  # and monotone in the rate, as the equilibrium predicts
+        gap_slow = gap_at(0.05)
+        gap_fast = gap_at(0.8)
+        self.assertGreater(gap_fast, 0.0)  # soft: never an exact projection
+        self.assertLess(gap_fast, 0.25)  # but the pull is real: well inside the layout scale
+        self.assertLess(gap_fast, 0.25 * gap_slow)  # and monotone in the rate, with cross-build margin
 
     def test_anchor_shape_mismatch_raises(self):
         with self.assertRaises(ValueError):
