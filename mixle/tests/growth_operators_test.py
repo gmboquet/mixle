@@ -19,11 +19,11 @@ import unittest
 
 import numpy as np
 import pytest
-import torch.nn.functional as F
 
 torch = pytest.importorskip("torch")
+import torch.nn.functional as F  # noqa: E402
 
-from mixle.experimental.growth_operators import (
+from mixle.experimental.growth_operators import (  # noqa: E402
     insert_block,
     net2net_widen,
     verify_output_parity,
