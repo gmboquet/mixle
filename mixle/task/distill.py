@@ -473,7 +473,9 @@ def distill_structured_from_labels(
         )
         edges = model.components[0].edges()
     else:
-        model = learn_structure(augmented, min_gain=min_gain, n_bins=n_bins, max_its=max_its)
+        model = learn_structure(
+            augmented, min_gain=min_gain, n_bins=n_bins, max_its=max_its, rng=np.random.RandomState(seed)
+        )
         edges = model.edges()
 
     adapter = StructuredClassifierIO(field_keys, label_index, label_list)
