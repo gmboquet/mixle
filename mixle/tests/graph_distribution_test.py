@@ -117,12 +117,19 @@ class GraphDistributionTestCase(unittest.TestCase):
                     if not directed:
                         adj[j, i] = v
                 brute.append((adj, dist.log_density(adj)))
+            # Every adjacency the enumerator can emit is already present (with its log_density) in
+            # `brute`, since both walk the same `_edge_indices` edge set over the full 2**|edges|
+            # space. Reuse those already-computed values instead of calling dist.log_density(v) again
+            # per item -- log_density is the dominant cost here, and recomputing it for every one of
+            # the (up to tens of thousands of) enumerated graphs was pure redundant work.
+            brute_by_bytes = {a.tobytes(): lp for a, lp in brute}
             brute.sort(key=lambda t: -t[1])
             items = list(dist.enumerator())
             self.assertEqual(len(items), len(brute))
             np.testing.assert_allclose([lp for _, lp in items], [lp for _, lp in brute], atol=1e-9)
             for v, lp in items:
-                self.assertAlmostEqual(lp, dist.log_density(v), places=9)
+                self.assertIn(v.tobytes(), brute_by_bytes)
+                self.assertAlmostEqual(lp, brute_by_bytes[v.tobytes()], places=9)
 
         with self.assertRaises(EnumerationError):
             stats.StochasticBlockGraphDistribution(bp).enumerator()  # no fixed assignments

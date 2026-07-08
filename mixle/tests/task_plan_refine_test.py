@@ -85,6 +85,19 @@ class OutcomeRefinementTest(unittest.TestCase):
         # the identical base model 3 times over for no behavioral difference.
         from mixle.task import sft_planner
 
+        # epochs=40/n_layer=2 is required here, not a stylistic choice: a 6-seed sweep using
+        # deepcopy'd (order-independent) planners showed every reduced config -- epochs 15/20/25 at
+        # n_layer=1, and epochs 15/25 at n_layer=2 -- fails test_solve_rate_improves_over_the_imitation_
+        # baseline's solve_rate_after>=solve_rate_before assertion 6/6 times in true isolation; only
+        # epochs=40/n_layer=2 passed 6/6. (A smaller config had appeared safe in an earlier pass, but
+        # that was a false negative from cross-test mutation: outcome_refine_planner() mutates
+        # cls.planner.lm in place, so running the class as a whole benefits from test_report_names'
+        # alphabetically-earlier refinement pass -- a single isolated run of test_solve_rate reveals the
+        # base model genuinely needs the deeper config to reliably demonstrate the effect.) n_train=180
+        # and held_out=40 are left unchanged: they set the statistical power behind
+        # verified_gain_pairs>0 and the solve-rate comparison, and shrinking either was observed
+        # (separately, at smaller scale) to risk zero verified samples across the k draws -- a hard
+        # failure of that assertion.
         cls.world = _SyntheticOrderWorld()
         tools = [ToolSpec("lookup_order", ["order_id"]), ToolSpec("notify", ["user"])]
         train_reqs = cls.world.requests(180, seed=0)

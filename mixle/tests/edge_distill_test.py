@@ -53,6 +53,22 @@ def _tiny_space():
     )
 
 
+def _fast_edge_space():
+    """Same cube as :func:`_tiny_space`, minus the mixture-of-dependency-trees arm.
+
+    ``components_range=(1, 2)`` lets ``distill_for_edge`` propose a 2-component structured student,
+    whose fit (hard EM: multiple restarts x iterations, each relearning a dependency forest per
+    cluster) costs an order of magnitude more than every other candidate in this space combined --
+    profiling a single search call showed >75% of wall time inside that one fit. None of the
+    `DistillForEdgeTest` searches below assert anything about mixture components specifically (they
+    check feasibility, agreement, Pareto validity, warm-start parity, and cross-task transfer), so
+    pinning ``components_range=(1, 1)`` removes the expensive arm without touching what's verified.
+    """
+    sp = _tiny_space()
+    sp.components_range = (1, 1)
+    return sp
+
+
 class FootprintTest(unittest.TestCase):
     def test_mlp_footprint_matches_closed_form(self):
         from mixle.task import distill_records_from_labels
@@ -297,7 +313,7 @@ class DistillForEdgeTest(unittest.TestCase):
     def test_search_returns_feasible_student_and_valid_pareto(self):
         dev = DeviceSpec(max_bytes=200_000)  # generous: both families fit; search optimizes quality
         res = distill_for_edge(
-            self.teacher, self.train, self.val, dev, space=_tiny_space(), n_init=3, n_iter=2, promote=2, seed=0
+            self.teacher, self.train, self.val, dev, space=_fast_edge_space(), n_init=3, n_iter=2, promote=2, seed=0
         )
         self.assertTrue(res.feasible)
         self.assertTrue(dev.feasible(res.footprint))
@@ -319,7 +335,7 @@ class DistillForEdgeTest(unittest.TestCase):
         # whichever wins, the deployed artifact must carry no torch dependence.
         dev = DeviceSpec(torch_free=True)
         res = distill_for_edge(
-            self.teacher, self.train, self.val, dev, space=_tiny_space(), n_init=3, n_iter=2, promote=2, seed=0
+            self.teacher, self.train, self.val, dev, space=_fast_edge_space(), n_init=3, n_iter=2, promote=2, seed=0
         )
         self.assertTrue(res.footprint.torch_free)
         if res.family == "mlp":
@@ -364,7 +380,7 @@ class DistillForEdgeTest(unittest.TestCase):
     def test_design_model_warm_start_accumulates_and_matches_cold(self):
         dev = DeviceSpec(max_bytes=200_000)
         cold = distill_for_edge(
-            self.teacher, self.train, self.val, dev, space=_tiny_space(), n_init=3, n_iter=2, promote=1, seed=0
+            self.teacher, self.train, self.val, dev, space=_fast_edge_space(), n_init=3, n_iter=2, promote=1, seed=0
         )
         n_ledger = len(cold.design)
         warm = distill_for_edge(
@@ -372,10 +388,11 @@ class DistillForEdgeTest(unittest.TestCase):
             self.train,
             self.val,
             dev,
-            space=_tiny_space(),
+            space=_fast_edge_space(),
             design=cold.design,
             n_init=2,  # halved seeding: the warm surrogate already covers the space
-            n_iter=2,
+            n_iter=3,  # one extra BO iteration: without the mixture arm's extra candidate diversity,
+            # this keeps the warm search's promoted finalists as reliably good as the cold baseline
             promote=2,
             seed=1,
         )
@@ -425,7 +442,7 @@ class DistillForEdgeTest(unittest.TestCase):
         # serves both: no compatibility error, rows accumulate, and B's search still succeeds.
         dev = DeviceSpec(max_bytes=200_000)
         a = distill_for_edge(
-            self.teacher, self.train, self.val, dev, space=_tiny_space(), n_init=2, n_iter=1, promote=1, seed=0
+            self.teacher, self.train, self.val, dev, space=_fast_edge_space(), n_init=2, n_iter=1, promote=1, seed=0
         )
         rng = np.random.RandomState(5)
         recs3 = [(float(rng.normal()), float(rng.normal()), "p" if rng.random() < 0.5 else "q") for _ in range(200)]
@@ -443,11 +460,14 @@ class DistillForEdgeTest(unittest.TestCase):
             recs3[:140],
             recs3[140:],
             dev,
-            space=_tiny_space(),
+            space=_fast_edge_space(),
             design=a.design,
-            n_init=2,
+            n_init=16,  # more LHS seeds (cheap: no surrogate fit) so a good candidate for this
+            # harder 3-field task is reliably among the screens, without paying for extra BO
+            # iterations (each of which fits a Gaussian-process surrogate -- the expensive step)
             n_iter=1,
-            promote=1,
+            promote=6,  # promote more of those screens to full fidelity so the winner is picked
+            # from a wide field rather than gambling on the single top screen
             seed=1,
         )
         self.assertGreater(len(b.design), n_after_a)  # shared ledger keeps growing across tasks

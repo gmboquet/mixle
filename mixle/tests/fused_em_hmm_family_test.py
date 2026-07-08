@@ -85,7 +85,12 @@ class FusedEMHmmFamilyTestCase(unittest.TestCase):
     def test_segmental(self):
         dist, est, data = self._segmental()
         self._parity(dist, est, data)
-        self._fused(est, data)
+        # max_its=200 never actually reaches the delta=1e-8 stopping criterion on this fixture (still
+        # improving by ~2e-4/iteration at 200), so the standard/fused comparison is really "same fixed
+        # iteration count", not "same converged optimum" -- verified the fused/standard log-likelihoods
+        # stay bit-identical (not just within tolerance) all the way down to max_its=15; 50 keeps a large
+        # margin above that floor while cutting this EM loop's cost ~4x.
+        self._fused(est, data, max_its=50)
         self._default_off(est)
 
     # (the semi-supervised HMM is numpy-only and has no fused-EM fast path; see semi_supervised_hmm_test.py)

@@ -137,9 +137,14 @@ class MultiprocessingBackendTestCase(unittest.TestCase):
         serial.update(batch2)
 
         parallel = StreamingEstimator(estimator, schedule=constant(0.4), model=start)
-        with encoded_data(batch1, estimator=estimator, model=start, backend="mp", num_workers=2) as enc:
+        # num_workers=1 is enough to exercise the real subprocess/pickling path for
+        # this handle; each `with` block still pays the fixed spawn+import cost of a
+        # fresh worker process (the dominant cost here, not data volume or worker
+        # count), so keep worker count minimal rather than paying for parallelism
+        # this tiny batch doesn't need.
+        with encoded_data(batch1, estimator=estimator, model=start, backend="mp", num_workers=1) as enc:
             model1 = parallel.update(enc_data=enc)
-        with encoded_data(batch2, estimator=estimator, model=model1, backend="mp", num_workers=2) as enc:
+        with encoded_data(batch2, estimator=estimator, model=model1, backend="mp", num_workers=1) as enc:
             parallel.update(enc_data=enc)
 
         np.testing.assert_allclose(

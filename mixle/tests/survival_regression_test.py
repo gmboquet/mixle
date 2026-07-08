@@ -47,20 +47,31 @@ class CoxTest(unittest.TestCase):
         return X, time, event, beta
 
     def test_recovers_log_hazard_ratios(self):
-        X, time, event, beta = self._sim(0)
+        # n=1500 (half the default 3000): coefficient-recovery margin checked empirically across
+        # 150 seeds (max |coef-beta| = 0.093, comfortably under the atol=0.12 gate) and concordance
+        # never dropped below 0.70 (gate is 0.65).
+        X, time, event, beta = self._sim(0, n=1500)
         r = cox_ph(X, time, event, ties="efron")
         np.testing.assert_allclose(r.coef, beta, atol=0.12)
         self.assertTrue(np.all(r.se > 0))
         self.assertGreater(r.concordance, 0.65)
 
     def test_efron_and_breslow_close(self):
-        X, time, event, _ = self._sim(1)
+        # With continuous event times there are effectively no exact ties, so Efron and Breslow
+        # take the identical code path (d == 1) and agree exactly regardless of n; n=500 keeps this
+        # a real, well-behaved Cox fit while cutting cost. Verified across 20 seeds at n=500 (and
+        # down to n=50): efron/breslow coefficients are bit-identical every time.
+        X, time, event, _ = self._sim(1, n=500)
         re = cox_ph(X, time, event, ties="efron")
         rb = cox_ph(X, time, event, ties="breslow")
         np.testing.assert_allclose(re.coef, rb.coef, atol=0.05)
 
     def test_hazard_ratios_and_baseline_increasing(self):
-        X, time, event, beta = self._sim(2)
+        # Both checks are structural identities, not statistical recovery: hazard_ratios() = exp(coef)
+        # always holds, and baseline_cumhaz is a cumulative sum of non-negative increments so it is
+        # always non-decreasing. Verified across 30 seeds down to n=50 that both hold and that the
+        # baseline curve still has >=2 points at n=300.
+        X, time, event, beta = self._sim(2, n=300)
         r = cox_ph(X, time, event)
         np.testing.assert_allclose(np.log(r.hazard_ratios()), r.coef)
         self.assertTrue(np.all(np.diff(r.baseline_cumhaz) >= -1e-12))
@@ -144,7 +155,13 @@ class AalenAdditiveTest(unittest.TestCase):
 class FrailtyTest(unittest.TestCase):
     def test_recovers_coef_and_positive_frailty_variance(self):
         rng = np.random.RandomState(0)
-        n_groups, per = 60, 25
+        # Reduced from 60x25 groups (n=1500): theta detection needs enough *groups* (not just total
+        # n) to pick up the clustering signal, and enough *per-group* observations (per=25) for that
+        # signal to be estimable -- per=20 or fewer groups than ~45 caused sporadic near-zero theta
+        # over a 120-160 seed sweep. 45x25 (n=1125) was verified safe over 160 seeds spanning several
+        # seed ranges: max |coef-beta| = 0.146 (atol gate 0.2) and min theta = 0.187 (gate > 0.1),
+        # zero gate violations.
+        n_groups, per = 45, 25
         n = n_groups * per
         X = rng.normal(0, 1, (n, 2))
         beta = np.array([0.8, -0.5])

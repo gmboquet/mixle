@@ -85,14 +85,20 @@ class ExtractionTest(unittest.TestCase):
         self.assertGreater(conf_in, conf_out)  # confidence drops on an unfamiliar line
 
     def test_returns_field_dict(self):
-        model, _ = self._train(epochs=120)
+        # epochs=30 already reaches train_f1==1.0 on this fixture (verified empirically down to epochs=15
+        # before the vendor/amount fields start dropping, epochs=10 misses vendor); 30 keeps a solid margin
+        # while cutting training cost ~4x vs. the 120 used by the accuracy-threshold tests in this file.
+        model, _ = self._train(epochs=30)
         out = model("Receipt 7777: Acme $12.34 (2026-05-05)")
         self.assertEqual(set(out).issubset(set(FIELDS)), True)
         self.assertEqual(out.get("vendor"), "Acme")
         self.assertEqual(out.get("amount"), "12.34")
 
     def test_fresh_process_reload(self):
-        model, _ = self._train(epochs=100)
+        # this test only checks save/load round-trip equality (before == after), never model accuracy,
+        # so epochs is not load-bearing for the claim -- verified the round-trip still holds bit-for-bit
+        # down to epochs=3; kept at 10 (still a real trained model) for a >>10x margin over that floor.
+        model, _ = self._train(epochs=10)
         text = "Payment to Globex of $88.10 ref 4321 dated 2026-03-03"
         before = model(text)
         with tempfile.TemporaryDirectory() as d:

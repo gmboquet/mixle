@@ -171,7 +171,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "ewens_test.py": ("distribution", "numba", "stochastic"),
     "generalized_mallows_test.py": ("distribution", "numba", "stochastic"),
     "generalized_mallows_model_test.py": ("distribution", "numba", "stochastic"),
-    "survival_regression_test.py": ("distribution", "stochastic"),
+    "survival_regression_test.py": ("distribution", "stochastic", "slow"),
     "scoring_rules_test.py": ("distribution",),
     "calibration_diagnostics_test.py": ("distribution",),
     "multiple_testing_test.py": ("distribution",),
@@ -190,9 +190,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "ppl_separation_test.py": ("ppl",),
     "random_graph_models_test.py": ("graph",),
     "quantized_hmm_test.py": ("hmm", "integration", "slow"),
-    "quantized_triangular_hmm_test.py": ("hmm", "enumeration", "integration"),
+    "quantized_triangular_hmm_test.py": ("hmm", "enumeration", "integration", "slow"),
     "hmm_determinize_test.py": ("hmm", "enumeration", "integration"),
-    "missing_data_test.py": ("distribution", "hmm", "ppl", "integration"),
+    "missing_data_test.py": ("distribution", "hmm", "ppl", "integration", "slow"),
     "provenance_test.py": ("distribution", "serialization"),
     "drift_test.py": ("distribution", "doe", "stochastic"),
     "serving_test.py": ("distribution", "serialization"),
@@ -207,6 +207,8 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "sparse_markov_transform_test.py": ("latent",),
     "spearman_rho_test.py": ("distribution",),
     "spark_encoded_data_test.py": ("spark", "optional", "parallel", "slow"),
+    "spark_executor_test.py": ("spark", "optional", "parallel", "slow"),
+    "ray_encoded_data_test.py": ("ray", "optional", "parallel", "slow"),
     "torchrun_encoded_data_test.py": ("torchrun", "torch", "optional", "parallel", "slow"),
     "torch_neural_test.py": ("torchrun", "torch", "optional", "parallel", "slow"),
     "torch_engine_ext_test.py": ("torch", "optional", "integration", "slow"),
@@ -224,6 +226,25 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "wave_select_test.py": ("distribution", "enumeration", "latent"),
     "wave_setdist_test.py": ("distribution", "enumeration"),
     "zero_count_estimate_test.py": ("distribution",),
+    # Newer files never triaged into this registry: each floors well above the ~1s/test the fast gate
+    # is built around (profiled via `pytest -m fast --durations=40`, individual calls 8-105s), so the
+    # fast gate silently regressed by ~9 minutes of wall time across all three of them as these landed.
+    # Tagged the same way their nearest existing sibling already is.
+    "doe_robust_test.py": ("doe", "stochastic", "slow"),  # 10-seed BO loop averaged for a noise claim
+    "quotient_leaf_test.py": ("torch", "integration", "slow"),  # conv+pool leaf, fits/compares real nets
+    "ppl_guide_test.py": ("ppl", "stochastic", "slow"),  # structured VI, admixture/LDA recovery
+    "structure_learning_test.py": ("integration", "slow"),  # multi-restart EM structure search
+    "task_traces_test.py": ("integration", "slow"),
+    "temporal_graph_grammar_test.py": ("graph", "stochastic", "slow"),
+    "anchor_harness_test.py": ("torch", "stochastic", "slow"),  # neural conditional-transport + calibration
+    "edge_distill_test.py": ("torch", "integration", "slow"),
+    "structured_hmm_test.py": ("hmm", "integration", "slow"),
+    "task_realteacher_smoke_test.py": ("integration", "slow"),
+    "task_model_test.py": ("integration", "slow"),  # fresh-process save/load round trip
+    "symbolic_export_test.py": ("integration", "slow"),
+    "task_tune_test.py": ("doe", "stochastic", "slow"),  # BO over student recipes via mixle.doe
+    "task_plan_test.py": ("integration", "slow"),
+    "task_distill_structured_test.py": ("integration", "slow"),
 }
 
 

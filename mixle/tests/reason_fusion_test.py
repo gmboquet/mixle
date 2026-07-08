@@ -113,9 +113,9 @@ class ProductOfExpertsFusionTest(unittest.TestCase):
                 return (model(xte).argmax(1) == yte).float().mean().item()
 
         torch.manual_seed(0)
-        hybrid = fit_acc(HybridFusionClassifier(dtok, 16, 2, n_tok, attn_layers=2), 80)
+        hybrid = fit_acc(HybridFusionClassifier(dtok, 16, 2, n_tok, attn_layers=2), 20)
         torch.manual_seed(0)
-        poe = fit_acc(StructuredFusionClassifier(dtok, 16, 2), 80)
+        poe = fit_acc(StructuredFusionClassifier(dtok, 16, 2), 20)
         self.assertGreater(hybrid, 0.8)  # the attention layer supplies the relational structure...
         self.assertLess(poe, 0.6)  # ...that permutation-invariant PoE structurally cannot
         self.assertGreater(hybrid, poe + 0.2)

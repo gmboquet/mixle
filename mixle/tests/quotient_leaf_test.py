@@ -60,18 +60,32 @@ def _gather(split, n_per_class, classes=(0, 1, 2, 3)):
 
 @unittest.skipUnless(_HAS_CIFAR, "CIFAR-10 not available in the local HuggingFace datasets cache")
 class TranslationQuotientLeafTest(unittest.TestCase):
+    # Conv width/depth and training length below are deliberately small. The invariance property under test
+    # is architectural (global average pooling erases spatial position by construction, independent of how
+    # well-converged the fit is), and the quotient-vs-baseline shift-sensitivity comparison has a large margin
+    # (baseline shift-divergence is consistently one-to-two orders of magnitude larger than the quotient leaf's
+    # across many seeds -- checked with seeds 0-9 during a speed pass), so a much smaller/cheaper fit still
+    # supports both claims reliably; see the module docstring for the full comparison writeup.
+    _HIDDEN_CHANNELS = 8
+    _OUT_CHANNELS = 16
+    _M_STEPS = 10
+
     @classmethod
     def setUpClass(cls) -> None:
         torch.manual_seed(0)
         cls.n_classes = 4
-        cls.x_train, cls.y_train = _gather("train", 60)
-        cls.x_test, cls.y_test = _gather("test", 40)
+        cls.x_train, cls.y_train = _gather("train", 24)
+        cls.x_test, cls.y_test = _gather("test", 24)
 
-        cls.quotient_module = build_translation_quotient_module(cls.n_classes)
-        cls.baseline_module = build_unpooled_conv_module(cls.n_classes, spatial_size=32)
+        cls.quotient_module = build_translation_quotient_module(
+            cls.n_classes, hidden_channels=cls._HIDDEN_CHANNELS, out_channels=cls._OUT_CHANNELS
+        )
+        cls.baseline_module = build_unpooled_conv_module(
+            cls.n_classes, spatial_size=32, hidden_channels=cls._HIDDEN_CHANNELS, out_channels=cls._OUT_CHANNELS
+        )
 
-        cls.quotient_leaf = TranslationQuotientLeaf(cls.quotient_module, m_steps=30, lr=1e-3)
-        cls.baseline_leaf = UnpooledConvLeaf(cls.baseline_module, m_steps=30, lr=1e-3)
+        cls.quotient_leaf = TranslationQuotientLeaf(cls.quotient_module, m_steps=cls._M_STEPS, lr=1e-3)
+        cls.baseline_leaf = UnpooledConvLeaf(cls.baseline_module, m_steps=cls._M_STEPS, lr=1e-3)
 
         data = list(zip(cls.x_train, cls.y_train))
         cls.fitted_quotient = optimize(data, cls.quotient_leaf.estimator(), max_its=1, out=None)
@@ -123,13 +137,17 @@ class TranslationQuotientLeafTest(unittest.TestCase):
         data_quarter = list(zip(self.x_train[:quarter], self.y_train[:quarter]))
 
         torch.manual_seed(1)
-        q_module = build_translation_quotient_module(self.n_classes)
-        q_leaf = TranslationQuotientLeaf(q_module, m_steps=30, lr=1e-3)
+        q_module = build_translation_quotient_module(
+            self.n_classes, hidden_channels=self._HIDDEN_CHANNELS, out_channels=self._OUT_CHANNELS
+        )
+        q_leaf = TranslationQuotientLeaf(q_module, m_steps=self._M_STEPS, lr=1e-3)
         q_fit = optimize(data_quarter, q_leaf.estimator(), max_its=1, out=None)
 
         torch.manual_seed(1)
-        b_module = build_unpooled_conv_module(self.n_classes, spatial_size=32)
-        b_leaf = UnpooledConvLeaf(b_module, m_steps=30, lr=1e-3)
+        b_module = build_unpooled_conv_module(
+            self.n_classes, spatial_size=32, hidden_channels=self._HIDDEN_CHANNELS, out_channels=self._OUT_CHANNELS
+        )
+        b_leaf = UnpooledConvLeaf(b_module, m_steps=self._M_STEPS, lr=1e-3)
         b_fit = optimize(data_quarter, b_leaf.estimator(), max_its=1, out=None)
 
         q_pred = q_fit.predict(self.x_test)

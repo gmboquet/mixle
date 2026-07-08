@@ -126,6 +126,7 @@ markers = [
     "numba: numba-accelerated path tests.",
     "mpi: MPI backend tests.",
     "dask: dask.distributed backend tests.",
+    "ray: Ray backend tests.",
     "spark: Spark backend tests.",
     "torchrun: torch.distributed/torchrun backend tests.",
     "parallel: multiprocessing or distributed backend tests.",

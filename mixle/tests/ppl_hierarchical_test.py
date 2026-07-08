@@ -43,7 +43,7 @@ class HierarchicalPriorTest(unittest.TestCase):
         data = rng.normal(2.0, 1.0, 200)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            fit = self._funnel().fit(data, how="nuts", draws=400, burn=400, chains=2, rng=np.random.RandomState(1))
+            fit = self._funnel().fit(data, how="nuts", draws=150, burn=150, chains=2, rng=np.random.RandomState(1))
         s = fit.summary()
         self.assertAlmostEqual(s["mu"]["mean"], 2.0, delta=0.3)  # mu tracks the data mean
         self.assertGreater(s["tau"]["mean"], 0.0)  # tau is a positive scale
@@ -66,7 +66,7 @@ class HierarchicalPriorTest(unittest.TestCase):
         model = Normal(Normal(0.0, tau, name="mu"), 1.0)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            fit = model.fit(data, how="nuts", draws=300, burn=400, chains=2, rng=np.random.RandomState(3))
+            fit = model.fit(data, how="nuts", draws=100, burn=100, chains=2, rng=np.random.RandomState(3))
         s = fit.summary()
         for k in ("mu", "tau", "a"):
             self.assertTrue(np.isfinite(s[k]["mean"]))
@@ -99,8 +99,8 @@ class NonCenteredReparamTest(unittest.TestCase):
         data = np.random.RandomState(0).normal(2.0, 1.0, 60)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            c = self._funnel(False).fit(data, how="nuts", draws=600, burn=600, chains=2, rng=np.random.RandomState(1))
-            nc = self._funnel(True).fit(data, how="nuts", draws=600, burn=600, chains=2, rng=np.random.RandomState(1))
+            c = self._funnel(False).fit(data, how="nuts", draws=200, burn=200, chains=2, rng=np.random.RandomState(1))
+            nc = self._funnel(True).fit(data, how="nuts", draws=200, burn=200, chains=2, rng=np.random.RandomState(1))
         # same model, different geometry -> same posterior
         self.assertAlmostEqual(c.summary()["mu"]["mean"], nc.summary()["mu"]["mean"], delta=0.15)
         self.assertAlmostEqual(c.summary()["tau"]["mean"], nc.summary()["tau"]["mean"], delta=0.5)
@@ -114,7 +114,7 @@ class NonCenteredReparamTest(unittest.TestCase):
                 warnings.simplefilter("ignore")
                 for seed in range(3):
                     fit = self._funnel(noncentered).fit(
-                        data, how="nuts", draws=600, burn=600, chains=2, rng=np.random.RandomState(seed)
+                        data, how="nuts", draws=600, burn=300, chains=2, rng=np.random.RandomState(seed)
                     )
                     d += fit.summary().get("_num_divergences", 0)
             return d

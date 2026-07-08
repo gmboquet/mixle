@@ -30,17 +30,21 @@ class ParallelChainsTest(unittest.TestCase):
 
     def test_process_parallel_runs_with_picklable_target(self):
         # `_std_normal_value_and_grad` is module-level (picklable), so the process pool works.
+        # Wall time here is dominated by the per-subprocess import of mixle.inference (~15-20s,
+        # unavoidable without touching library code), not by num_samples/warmup -- the actual
+        # sampling is <1s either way. draws are trimmed anyway (verified the mean stays well
+        # under the 0.3 tolerance across 10 seeds) since it does shrink the sampling work itself.
         res = nuts(
             _std_normal_value_and_grad,
             dim=2,
-            num_samples=300,
-            warmup=300,
+            num_samples=150,
+            warmup=150,
             chains=2,
             backend="numpy",
             parallel=True,
             rng=1,
         )
-        self.assertEqual(res.chains.shape, (2, 300, 2))
+        self.assertEqual(res.chains.shape, (2, 150, 2))
         self.assertTrue(np.all(np.abs(res.samples.mean(axis=0)) < 0.3))
 
     def test_invalid_parallel_mode_raises(self):

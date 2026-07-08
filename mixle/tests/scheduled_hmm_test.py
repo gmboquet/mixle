@@ -90,10 +90,12 @@ class ScheduledHMMTest(unittest.TestCase):
             ByRelativePosition(2),
             len_dist=DCat({6: 0.5, 8: 0.5}),
         )
-        data = truth.sampler(0).sample(400)
+        # n=200/iters=8 (down from 400/12): verified the monotone-EM and rel-beats-homogeneous margin
+        # (~200-390 nats, well clear of 0) holds across 20 independent data/init seeds at this size.
+        data = truth.sampler(0).sample(200)
         held = truth.sampler(99).sample(200)
 
-        def fit(schedule, iters=12):
+        def fit(schedule, iters=8):
             est = ScheduledHMMEstimator(
                 k, schedule, Cat(0, [0.25] * v).estimator(), DCat({6: 0.5, 8: 0.5}).estimator(), pseudo_count=0.2
             )
@@ -129,12 +131,14 @@ class ScheduledHMMTest(unittest.TestCase):
             Homogeneous(),
             len_dist=DCat({9: 1.0}),
         )
+        # 100/class (down from 200) and iters=6 (down from 10): verified the by-length-beats-homogeneous
+        # margin (~300-390 nats) holds across 20 independent data/init seeds at this size.
         rng = np.random.RandomState(3)
-        data = short.sampler(0).sample(200) + long.sampler(1).sample(200)
+        data = short.sampler(0).sample(100) + long.sampler(1).sample(100)
         rng.shuffle(data)
         held = short.sampler(5).sample(100) + long.sampler(6).sample(100)
 
-        def fit(schedule, iters=10):
+        def fit(schedule, iters=6):
             est = ScheduledHMMEstimator(
                 k, schedule, Cat(0, [0.25] * v).estimator(), DCat({3: 0.5, 9: 0.5}).estimator(), pseudo_count=0.2
             )
