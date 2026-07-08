@@ -65,8 +65,14 @@ def htsne(
     candidate_multiplier: int = 8,
     repulsion_method: str = "auto",
     exact_repulsion_threshold: int = 5000,
+    goals=None,
 ):
     """Embed heterogeneous data with model-based t-SNE.
+
+    goals: optional sequence of embedding goals (mixle.utils.hvis.goals) -- Anchor pins for
+    anchoring, LabelCohesion for partial labeling, AxisAlign for layout objectives. Goal gradients
+    join the data gradient every iteration on BOTH engines; hard anchors are re-projected exactly
+    after every step.
 
     A mixture model is fit to the data (a Dirichlet process mixture with
     automatically typed components by default, or pass mix_model), pairwise
@@ -213,6 +219,7 @@ def htsne(
             leaf_size=barnes_hut_leaf_size,
             repulsion_method=repulsion_method,
             exact_repulsion_threshold=exact_repulsion_threshold,
+            goals=goals,
         )
 
     P = get_pmat(z_ij, l_ij, targ_perplexity=perplexity, affinity=affinity, evidence_cap=evidence_cap)
@@ -234,6 +241,7 @@ def htsne(
         print_iter=print_iter,
         seed=seed,
         out=out,
+        goals=goals,
     )
 
 
@@ -256,6 +264,8 @@ def humap(
     fisher_information: str = "observed",
     n_epochs: int | None = None,
     out=None,
+    engine: str = "auto",
+    goals=None,
     **umap_kwargs,
 ):
     """Embed heterogeneous data with model-based UMAP.
@@ -263,24 +273,54 @@ def humap(
     The same mixture-model affinities as htsne (see the affinity and
     evidence_cap arguments there), but the k-nearest-neighbor graph of model
     distances -log s_ij is handed to UMAP's fuzzy simplicial set construction
-    and layout (umap-learn) instead of t-SNE. Scales like UMAP: the dense
-    affinity matrix is never built.
+    and layout instead of t-SNE. Scales like UMAP: the dense affinity matrix
+    is never built.
 
-    Extra keyword arguments are passed to umap.UMAP. Returns the n x emb_dim
-    embedding.
+    engine selects the layout backend:
+        'umap-learn' - the optional umap-learn package (extra keyword
+            arguments are passed to umap.UMAP). Cannot honor goals: its numba
+            SGD loop takes no external gradients, so goals raise rather than
+            being silently dropped.
+        'internal'   - mixle.utils.hvis.umap_np, a dependency-free UMAP core
+            (same construction: smoothed-kNN fuzzy graph, fitted a/b curve,
+            epochs-per-sample SGD with negative sampling). Slower than the
+            numba path but always available, and the only engine that can
+            steer the layout with goals.
+        'auto'       - umap-learn when it is installed AND no goals were
+            given; the internal engine otherwise.
+
+    goals: optional sequence of embedding goals (mixle.utils.hvis.goals) --
+    Anchor / LabelCohesion / AxisAlign, as in htsne. Requires the internal
+    engine (auto selects it when goals are present).
     """
-    try:
-        import warnings
+    if engine not in ("auto", "umap-learn", "internal"):
+        raise ValueError("engine must be 'auto', 'umap-learn', or 'internal'.")
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore", message="Tensorflow not installed; ParametricUMAP will be unavailable", category=ImportWarning
-            )
-            import umap
-    except ImportError:
-        from mixle.utils.optional_deps import require
+    umap = None
+    if engine in ("auto", "umap-learn"):
+        try:
+            import warnings
 
-        require("umap-learn", "umap")
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Tensorflow not installed; ParametricUMAP will be unavailable",
+                    category=ImportWarning,
+                )
+                import umap
+        except ImportError:
+            if engine == "umap-learn":
+                from mixle.utils.optional_deps import require
+
+                require("umap-learn", "umap")
+
+    if engine == "umap-learn" and goals:
+        raise ValueError(
+            "goals require engine='internal' (or 'auto'): umap-learn's layout loop cannot honor them, "
+            "and silently dropping a stated goal would be worse than refusing."
+        )
+    if engine == "auto":
+        engine = "umap-learn" if (umap is not None and not goals) else "internal"
 
     if out is None:
         out = sys.stdout
@@ -320,6 +360,20 @@ def humap(
     k = min(n_neighbors, n - 1)
 
     knn_idx, knn_dist = model_knn(z_ij, l_ij, k=k, affinity=affinity, evidence_cap=evidence_cap)
+
+    if engine == "internal":
+        from mixle.utils.hvis.umap_np import internal_umap
+
+        return internal_umap(
+            knn_idx,
+            knn_dist,
+            emb_dim=emb_dim,
+            min_dist=min_dist,
+            n_epochs=n_epochs,
+            seed=seed,
+            goals=goals,
+            **umap_kwargs,
+        )
 
     reducer = umap.UMAP(
         n_components=emb_dim,

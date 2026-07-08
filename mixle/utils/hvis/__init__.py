@@ -176,6 +176,15 @@ from mixle.utils.hvis.embed import (
 from mixle.utils.hvis.embed import (
     humap as humap,
 )
+from mixle.utils.hvis.goals import (
+    Anchor as Anchor,
+)
+from mixle.utils.hvis.goals import (
+    AxisAlign as AxisAlign,
+)
+from mixle.utils.hvis.goals import (
+    LabelCohesion as LabelCohesion,
+)
 from mixle.utils.hvis.neighbors import (
     _augment_candidates as _augment_candidates,
 )
@@ -289,6 +298,9 @@ __all__ = [
     "htsne",
     "StreamingHvis",
     "place_in_atlas",
+    "Anchor",
+    "LabelCohesion",
+    "AxisAlign",
     "humap",
     "dpmsne",
     "model_log_affinity",
