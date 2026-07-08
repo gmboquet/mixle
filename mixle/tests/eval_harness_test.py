@@ -15,16 +15,18 @@ from __future__ import annotations
 import unittest
 
 import numpy as np
-import torch
+import pytest
 
-from mixle.models.eval_harness import (
+torch = pytest.importorskip("torch")
+
+from mixle.models.eval_harness import (  # noqa: E402
     EvalReport,
     TaskResult,
     evaluate_checkpoint,
     markov_transition_matrix,
     track_regression,
 )
-from mixle.models.transformer import build_causal_lm
+from mixle.models.transformer import build_causal_lm  # noqa: E402
 
 VOCAB = 16
 BLOCK = 8
