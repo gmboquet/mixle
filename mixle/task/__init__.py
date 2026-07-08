@@ -99,6 +99,13 @@ from mixle.task.edge import (
     measure_ops_per_second,
     task_fingerprint,
 )
+from mixle.task.environment import (
+    Environment,
+    ExplorationEnvironment,
+    GaussianStreamingBelief,
+    InteractionLog,
+    interact,
+)
 from mixle.task.explore_world import (
     DRILL_COST,
     SURVEY_COST,
@@ -251,6 +258,11 @@ __all__ = [
     "ExecutionTrace",
     "EmbeddingHeadIO",
     "ExtractionIO",
+    "Environment",
+    "ExplorationEnvironment",
+    "GaussianStreamingBelief",
+    "InteractionLog",
+    "interact",
     "DRILL_COST",
     "SURVEY_COST",
     "EpisodeResult",
