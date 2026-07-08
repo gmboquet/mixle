@@ -181,6 +181,7 @@ human map for finding the right import.
    representation
    task-distillation
    task-serving
+   bring_your_own_model
    agentic-task-distillation
    uncertainty
    reasoning-systems
