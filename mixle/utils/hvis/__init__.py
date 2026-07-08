@@ -203,6 +203,12 @@ from mixle.utils.hvis.neighbors import (
 from mixle.utils.hvis.neighbors import (
     sparse_model_distances as sparse_model_distances,
 )
+from mixle.utils.hvis.stream import (
+    StreamingHvis as StreamingHvis,
+)
+from mixle.utils.hvis.stream import (
+    place_in_atlas as place_in_atlas,
+)
 from mixle.utils.hvis.tsne import (
     _barnes_hut_negative_forces as _barnes_hut_negative_forces,
 )
@@ -281,6 +287,8 @@ from mixle.utils.hvis.tsne import (
 
 __all__ = [
     "htsne",
+    "StreamingHvis",
+    "place_in_atlas",
     "humap",
     "dpmsne",
     "model_log_affinity",
