@@ -55,7 +55,30 @@ from mixle.inference.calibration import (
     reliability_curve,
     top_label_confidence,
 )
-from mixle.inference.causal import InterventionalNetwork, average_causal_effect, counterfactual, do
+from mixle.inference.causal import InterventionalNetwork, average_causal_effect, counterfactual
+from mixle.inference.causal import do as bn_do
+
+# M0's generic do() -- works over any fitted composed model (composite / mixture / HMM /
+# dependency-tree / Bayesian network / conditional / sequence / optional), unlike causal.do (aliased
+# above as bn_do), which only ever handled HeterogeneousBayesianNetwork. This is the package-level
+# `do` name; reach for `bn_do` explicitly when you specifically want the older BN-only path.
+#
+# Imported lazily (see __getattr__ at the bottom of this module, same pattern mixle.stats uses), for
+# two independent reasons:
+#   1. mixle.inference.condition eagerly imports mixle.stats.latent.mixture, and importing it at
+#      THIS module's own top level created a circular import through mixle.stats.bayes.dirichlet,
+#      which is sometimes still mid-init when mixle.inference is first reached from within
+#      mixle.stats' own chain.
+#   2. `condition` (the FUNCTION in mixle.inference.condition) is deliberately NOT re-exported at
+#      this package level at all, lazily or otherwise -- Python's import machinery always binds a
+#      submodule onto its parent package's namespace on first import, and `mixle.inference.condition`
+#      is ALSO this submodule's own dotted name; any attempt to shadow that with the function loses
+#      to the module every time a second name from the same submodule is imported in the same
+#      `from mixle.inference import ...` statement (confirmed: causes __getattr__ to be skipped for
+#      "condition" entirely once the submodule is bound). Every existing caller already reaches the
+#      function the unambiguous way -- `from mixle.inference.condition import condition` or
+#      `mixle.inference.condition.condition(...)` -- so nothing regresses by leaving it that way.
+_CONDITION_LAZY_NAMES = frozenset({"do", "Posterior", "ConditionReceipt", "FieldPath"})
 from mixle.inference.conformal import (
     conformal_label_sets,
     conformal_label_threshold,
@@ -337,6 +360,12 @@ __all__ = [
     "average_causal_effect",
     "counterfactual",
     "do",
+    "bn_do",
+    # NOT "condition" -- reach the M0 condition() function via mixle.inference.condition.condition
+    # or `from mixle.inference.condition import condition`; see the module-level comment above.
+    "Posterior",
+    "ConditionReceipt",
+    "FieldPath",
     "Forecast",
     "forecast",
     # the estimator contract + MLE/EM/MAP drivers
@@ -641,3 +670,18 @@ __all__ = [
     "hierarchical_event_study",
     "tipping_drift",
 ]
+
+
+def __getattr__(name: str):
+    if name in _CONDITION_LAZY_NAMES:
+        import importlib
+
+        # importlib.import_module (not `from mixle.inference import condition`) -- the latter
+        # resolves the submodule name via THIS package's own attribute lookup, which re-enters
+        # __getattr__("condition") (the lazy-exported FUNCTION shares its name with the submodule)
+        # and recurses forever.
+        _condition_module = importlib.import_module("mixle.inference.condition")
+        value = getattr(_condition_module, name)
+        globals()[name] = value  # subsequent accesses skip __getattr__ entirely
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
