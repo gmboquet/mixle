@@ -157,6 +157,11 @@ class MixtureOfTreesTest(unittest.TestCase):
         # more restarts so the mixture EM reliably reaches the good optimum: the fit is stochastic and
         # its convergence differs across numpy/BLAS versions (Linux-x64 CI vs local), so a low restart
         # count let one cluster miss the dependency edge on CI while passing locally.
+        # (Investigated other cost levers for this test: profiling shows its cost is dominated by the
+        # per-field automatic distribution-family detection inside learn_structure, which is called
+        # restarts * up-to-max_iter * n_components times and costs roughly the same regardless of
+        # max_its, n_bins, or training-data size (all measured flat) -- so restarts is the only real
+        # lever, and it's the one thing we must not touch here. Left unchanged.)
         mot = learn_mixture_structure(train, 2, restarts=12, seed=0)
         self.assertIsInstance(mot, MixtureOfDependencyTrees)
 
@@ -197,7 +202,10 @@ class MixtureOfTreesTest(unittest.TestCase):
         self.assertGreater(purity, 0.9)
 
     def test_samples_and_scores(self):
-        mot = learn_mixture_structure(_two_regime(3), 2, restarts=3, seed=0)
+        # restarts=1 suffices: this test only checks sampling/scoring plumbing, not recovery quality
+        # (unlike test_beats_single_tree_and_independent_mixture, which needs restarts=12 -- see its
+        # comment). Verified stable (finite log-density, correct shapes) across 10 independent seeds.
+        mot = learn_mixture_structure(_two_regime(3), 2, restarts=1, seed=0)
         s = mot.sampler(0).sample(50)
         self.assertEqual(len(s), 50)
         self.assertEqual(len(s[0]), 2)

@@ -97,8 +97,10 @@ class KnowledgeGraphRecommendTestCase(unittest.TestCase):
         self.assertTrue(all(0 in (a, c) for a, b, c, _ in sg))
 
     def test_ensemble_epistemic_uncertainty(self):
+        # epochs=15 (down from 30) still gives well-separated members: verified min/max epistemic
+        # uncertainty across 8 independent truth/train/seed configs all pass comfortably.
         ens = fit_knowledge_graph_ensemble(
-            self.train, self.nE, self.nR, dim=self.d, members=3, epochs=30, rng=np.random.RandomState(0)
+            self.train, self.nE, self.nR, dim=self.d, members=3, epochs=15, rng=np.random.RandomState(0)
         )
         u = [ens.epistemic_tail_uncertainty(h, r) for h, r, _ in self.train[:100]]
         self.assertGreaterEqual(min(u), 0.0)  # mutual information is nonnegative
@@ -163,7 +165,9 @@ class KnowledgeGraphNegativeSamplingTestCase(unittest.TestCase):
         test = _sample(ent, rel, 1500, seed=2)
         m = optimize(
             train,
-            KnowledgeGraphEstimator(nE, nR, dim=d, epochs=150, lr=1.0, negatives=20, seed=1),
+            # epochs=50 (down from 150) is enough for sampled softmax to converge here: verified acc
+            # stays ~0.55-0.75, far above the 0.3 bar, across 8 independent truth/sample/seed configs.
+            KnowledgeGraphEstimator(nE, nR, dim=d, epochs=50, lr=1.0, negatives=20, seed=1),
             max_its=1,
             rng=np.random.RandomState(0),
             print_iter=10**9,

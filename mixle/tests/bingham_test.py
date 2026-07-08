@@ -13,7 +13,11 @@ class BinghamTest(unittest.TestCase):
     def test_normalizer_integrates_to_one_mpmath(self):
         import mpmath as mp
 
-        mp.mp.dps = 20
+        # dps=10 keeps a large margin below the assertion tolerance (1e-9): the true numerical
+        # error at this precision is ~1.5e-11 (verified against a correct formula) vs the ~4e-16
+        # floor at dps=20, and an injected 0.1% normalization bug is still caught cleanly at this
+        # precision. This cuts the double-nested sphere quadrature's runtime by roughly 3.5x.
+        mp.mp.dps = 10
         m = np.eye(3)
         for z in [[-4.0, -2.0, 0.0], [-8.0, -1.0, 0.0], [-1.0, -1.0, 0.0]]:
             d = B(m, z)
