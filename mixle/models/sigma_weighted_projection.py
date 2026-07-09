@@ -32,6 +32,7 @@ reimplementing them:
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -42,6 +43,9 @@ __all__ = [
     "sigma_weighted_low_rank",
     "sigma_weighted_block_sparse",
     "sigma_weighted_permutation",
+    "sigma_weighted_butterfly",
+    "ProjectionReport",
+    "project",
 ]
 
 
@@ -285,3 +289,211 @@ def sigma_weighted_permutation(
 
     _ = soft_plan  # the differentiable relaxation this function demonstrates; hard rounding uses `cost` directly
     return perm @ profile
+
+
+# --------------------------------------------------------------------------------------------------------
+# 4. butterfly -- alternating least squares over sparse butterfly-connectivity factors
+# --------------------------------------------------------------------------------------------------------
+
+
+def _next_pow2(n: int) -> int:
+    if n <= 1:
+        return 1
+    return 1 << (int(n) - 1).bit_length()
+
+
+def _butterfly_stage_matrix(n: int, stride: int, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Dense ``n x n`` matrix for one butterfly stage at the given ``stride``: row ``j`` is paired with row
+    ``j XOR stride`` (a self-inverse involution -- the SAME connectivity FFT's radix-2 decimation uses at
+    that stride, stride doubling stage to stage), with two FREE taps per row:
+    ``(S @ x)[j] = a[j] * x[j] + b[j] * x[j ^ stride]``.
+    """
+    partner = np.arange(n) ^ stride
+    idx = np.arange(n)
+    s = np.zeros((n, n), dtype=np.float64)
+    s[idx, idx] = a
+    s[idx, partner] = b
+    return s
+
+
+def _compose_apply_order(mats: list[np.ndarray], n: int) -> np.ndarray:
+    """Compose a list of stage matrices given in APPLICATION order (``mats[0]`` applied first to a column
+    vector), i.e. return ``mats[-1] @ ... @ mats[1] @ mats[0]``.
+    """
+    out = np.eye(n)
+    for m in mats:
+        out = m @ out
+    return out
+
+
+def sigma_weighted_butterfly(
+    w: Any,
+    sigma: Any,
+    n_stages: int | None = None,
+    n_sweeps: int = 4,
+) -> np.ndarray:
+    """Sigma-weighted BUTTERFLY structured projection: constrain ``What`` to be (the top-left
+    ``d_out x d_in`` block of) an ``N x N`` "butterfly matrix" -- a product of ``L`` sparse factors, each
+    with exactly 2 nonzeros per row connecting index ``j`` to ``j XOR stride`` (``stride`` doubling stage to
+    stage: 1, 2, 4, ...) -- the SAME block-diagonal-then-permute connectivity pattern FFT's radix-2
+    decimation uses. This gives ``O(N log N)`` free parameters (``2 * N`` per stage, ``L = log2(N)``
+    stages) instead of ``O(N^2)`` for a dense matrix, where ``N`` is the next power of two
+    ``>= max(d_out, d_in)``.
+
+    Solved by ALTERNATING LEAST SQUARES over the ``L`` stage factors, per the roadmap card's Steps: reusing
+    the SAME whiten-by-``Sigma^(1/2)`` reduction :func:`sigma_weighted_low_rank` uses (via
+    :func:`_symmetric_sqrt_and_pinv_sqrt`) to turn each per-stage subproblem into a plain (unweighted)
+    linear least-squares problem in that stage's ``2*N`` free parameters (closed-form, via
+    :func:`numpy.linalg.lstsq`) given every OTHER stage held fixed -- a genuine block-coordinate solve,
+    monotonically non-increasing in the Sigma-weighted objective per stage update (see
+    :func:`sigma_weighted_error`, the same convergence metric the other three solvers already use).
+
+    Two SIMPLIFICATIONS versus a textbook FFT butterfly, both bounded and stated here rather than hidden:
+
+    1. Each stage's two taps per row are FREE real parameters *fit to the data*, not fixed unitary FFT
+       twiddle factors -- this follows the "butterfly matrices for structured compression" line of work
+       (generalizing FFT's O(n log n) connectivity to a learnable factorization), not a literal (inverse)
+       Fourier transform.
+    2. Rectangular ``W`` is handled by zero-padding ``W``/``Sigma`` up to the square ``N x N`` problem and
+       reading off the top-left ``d_out x d_in`` block at the end. ``Sigma``'s padded rows/columns are zero
+       (those input directions cost nothing, same convention as :func:`_symmetric_sqrt_and_pinv_sqrt`'s
+       null-space handling), but padded OUTPUT rows (beyond ``d_out``, when ``d_out`` is not already a
+       power of two) are fit toward zero using the SAME shared stage parameters as the real rows -- a mild,
+       honest dilution of fitting capacity for non-power-of-two ``d_out``, not a hidden bug.
+    3. ``n_sweeps`` bounds the number of ALS passes over all ``L`` stages rather than iterating to
+       convergence -- the "fixed number of butterfly stages/sweeps" bounded-fix simplification the roadmap
+       card allows for. It does not make the family a no-op or fold it into another family: each stage
+       solve is a real, distinct least-squares fit and the returned ``What`` has the genuine sparse
+       butterfly parameter count, not a dense low-rank or block-sparse structure.
+    """
+    w = np.asarray(w, dtype=np.float64)
+    sigma = np.asarray(sigma, dtype=np.float64)
+    sigma = 0.5 * (sigma + sigma.T)
+    d_out, d_in = w.shape
+    if sigma.shape != (d_in, d_in):
+        raise ValueError(f"Sigma must be square with side == W.shape[1]; got W {w.shape}, Sigma {sigma.shape}")
+
+    n = _next_pow2(max(d_out, d_in, 2))
+    l_full = n.bit_length() - 1  # log2(n), n is a power of two
+    l = l_full if n_stages is None else int(max(1, min(n_stages, l_full)))
+    strides = [1 << i for i in range(l)]
+
+    w_pad = np.zeros((n, n), dtype=np.float64)
+    w_pad[:d_out, :d_in] = w
+    sigma_pad = np.zeros((n, n), dtype=np.float64)
+    sigma_pad[:d_in, :d_in] = sigma
+    sigma_half, _ = _symmetric_sqrt_and_pinv_sqrt(sigma_pad)
+
+    target = w_pad @ sigma_half  # (n, n); the whitened target the composed butterfly must match
+
+    # every stage starts at the identity map (a=1, b=0): deterministic, no RNG needed in a fit path (each
+    # stage's ALS solve below is an EXACT least-squares optimum given the others, regardless of starting
+    # point, so identity is as principled a start as any).
+    a = [np.ones(n) for _ in range(l)]
+    b = [np.zeros(n) for _ in range(l)]
+    stages = [_butterfly_stage_matrix(n, strides[i], a[i], b[i]) for i in range(l)]
+
+    idx = np.arange(n)
+    for _sweep in range(max(1, n_sweeps)):
+        for k in range(l):
+            pre = _compose_apply_order(stages[:k], n) if k > 0 else np.eye(n)
+            post = _compose_apply_order(stages[k + 1 :], n) if k < l - 1 else np.eye(n)
+            pre_prime = pre @ sigma_half  # (n, n); folds the whitening into the "pre" side of stage k
+
+            partner = idx ^ strides[k]
+            # column p (p < n): tap a_j basis contributes post[:, j] outer pre_prime[j, :]
+            # column p (p >= n): tap b_j basis contributes post[:, j] outer pre_prime[partner[j], :]
+            j_design = np.concatenate([idx, idx])
+            col_from = np.concatenate([idx, partner])
+            # design_tensor[p, i, ii] = post[i, j_design[p]] * pre_prime[col_from[p], ii]
+            design_tensor = post[:, j_design].T[:, :, None] * pre_prime[col_from, :][:, None, :]  # (2n, n, n)
+            design = design_tensor.reshape(2 * n, n * n).T  # (n*n, 2n)
+
+            theta, *_ = np.linalg.lstsq(design, target.reshape(-1), rcond=None)
+            a[k] = theta[:n]
+            b[k] = theta[n:]
+            stages[k] = _butterfly_stage_matrix(n, strides[k], a[k], b[k])
+
+    what_pad = _compose_apply_order(stages, n)
+    return what_pad[:d_out, :d_in]
+
+
+# --------------------------------------------------------------------------------------------------------
+# unified front door (roadmap G2's stated API): project(W, Sigma, structure=..., **kw) -> (What, report)
+# --------------------------------------------------------------------------------------------------------
+
+
+@dataclass
+class ProjectionReport:
+    """Uniform report shape :func:`project` returns alongside ``What``, regardless of ``structure``.
+
+    ``sigma_weighted_error`` is always the SAME objective (:func:`sigma_weighted_error`) every solver in
+    this module already minimizes/reports, computed once here so callers get one consistent number to
+    compare across families. ``stats`` carries whatever structure-specific numbers that solver's own
+    return value already lets a caller compute (rank, sparsity fraction, stage/parameter counts, ...) --
+    nothing new is invented here, this just wraps numbers each solver already makes derivable.
+    """
+
+    structure: str
+    sigma_weighted_error: float
+    stats: dict[str, Any] = field(default_factory=dict)
+
+
+def project(w: Any, sigma: Any, structure: str, **kw: Any) -> tuple[np.ndarray, ProjectionReport]:
+    """Unified front door for roadmap G2's four structure families:
+    ``structure in {"low_rank", "block_sparse", "butterfly", "perm_profile"}``.
+
+    Dispatches to this module's existing standalone solvers (:func:`sigma_weighted_low_rank`,
+    :func:`sigma_weighted_block_sparse`, :func:`sigma_weighted_butterfly`,
+    :func:`sigma_weighted_permutation`) -- this function does not reimplement any solver, it only picks one
+    by name and wraps its result (plus the shared :func:`sigma_weighted_error` metric and a few
+    structure-specific stats already derivable from that result) into a single :class:`ProjectionReport`
+    shape, so callers that want to pick a structure by string (e.g. a search/schedule over structures) do
+    not need a per-family if/elif of their own.
+
+    ``**kw`` per structure (forwarded to the underlying solver; see each solver's docstring for details):
+
+    * ``"low_rank"``: ``rank`` (int, required).
+    * ``"block_sparse"``: ``pattern`` (``"2:4"`` or a boolean mask shaped like ``W``; required), optional
+      ``max_iter``, ``tol``.
+    * ``"butterfly"``: optional ``n_stages``, ``n_sweeps``.
+    * ``"perm_profile"``: ``target_profile`` (required), optional ``temperature``, ``max_iter``.
+    """
+    w = np.asarray(w, dtype=np.float64)
+    sigma = np.asarray(sigma, dtype=np.float64)
+
+    if structure == "low_rank":
+        rank = kw["rank"]
+        what = sigma_weighted_low_rank(w, sigma, rank=rank)
+        stats: dict[str, Any] = {"requested_rank": int(rank), "achieved_rank": int(np.linalg.matrix_rank(what))}
+    elif structure == "block_sparse":
+        pattern = kw["pattern"]
+        extra = {k: v for k, v in kw.items() if k in ("max_iter", "tol")}
+        what = sigma_weighted_block_sparse(w, sigma, pattern, **extra)
+        stats = {
+            "pattern": pattern if isinstance(pattern, str) else "custom_mask",
+            "sparsity_fraction": float(np.mean(what == 0.0)),
+        }
+    elif structure == "butterfly":
+        extra = {k: v for k, v in kw.items() if k in ("n_stages", "n_sweeps")}
+        what = sigma_weighted_butterfly(w, sigma, **extra)
+        n = _next_pow2(max(w.shape[0], w.shape[1], 2))
+        l = (
+            n.bit_length() - 1
+            if extra.get("n_stages") is None
+            else int(max(1, min(extra["n_stages"], n.bit_length() - 1)))
+        )
+        stats = {"n": int(n), "n_stages": int(l), "param_count": int(2 * n * l)}
+    elif structure == "perm_profile":
+        target_profile = kw["target_profile"]
+        extra = {k: v for k, v in kw.items() if k in ("temperature", "max_iter")}
+        what = sigma_weighted_permutation(w, sigma, target_profile, **extra)
+        stats = {"n_rows": int(w.shape[0])}
+    else:
+        raise ValueError(
+            f"unrecognized structure {structure!r}; expected one of "
+            '"low_rank", "block_sparse", "butterfly", "perm_profile"'
+        )
+
+    err = sigma_weighted_error(w, what, sigma)
+    return what, ProjectionReport(structure=structure, sigma_weighted_error=err, stats=stats)
