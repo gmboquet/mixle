@@ -132,8 +132,8 @@ from mixle.models import GradEstimator
 
 # sequences: a list of observation series; nothing below fixes a parameter
 model = optimize(sequences, HiddenMarkovEstimator([
-    MixtureEstimator([GaussianEstimator(), GaussianEstimator()]),  # one state: a two-cluster mixture
-    GradEstimator(my_module),                                      # the other: a neural density
+    MixtureEstimator([GaussianEstimator()] * 5),  # one state: a five-cluster mixture
+    GradEstimator(my_module),                     # the other: a neural density
 ]))
 ```
 
