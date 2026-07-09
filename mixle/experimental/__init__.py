@@ -20,6 +20,12 @@ Current contents:
   the ``train_tbptt`` driver, and :class:`~mixle.experimental.context_spine.SlidingWindowSpine` -- the baseline
   mechanism (RoPE + sliding-window attention with a stop-gradient carried KV cache, Transformer-XL style) every
   later Track-E mechanism (E2-E6) is compared against. See ``notes/designs/E1.md`` for the design.
+- :mod:`mixle.experimental.retrieval_memory_spine` -- E6, retrieval memory over frozen past:
+  :class:`~mixle.experimental.retrieval_memory_spine.RetrievalMemorySpine` pairs E1's local sliding window
+  with a brute-force kNN index of detached past chunks, retrieving the top-k per query each step. Gradients
+  flow exactly through the retrieval softmax over the selected top-k; the archived index contents themselves
+  are stop-gradient -- that non-differentiable boundary is a receipt field on the returned state, not just a
+  docstring claim.
 
 Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
 run and reported on distinctly from the stable-package suite.
