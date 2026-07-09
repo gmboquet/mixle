@@ -220,13 +220,13 @@ Named variables can be shared across a model and constrained by comparisons.
 
 .. code-block:: python
 
-   from mixle.ppl import Mix, Normal, constrain
+   from mixle.ppl import Normal, constrain
 
    a = Normal(0.0, 10.0, name="a")
    b = Normal(0.0, 10.0, name="b")
 
-   ordered = constrain(a < b, Mix([Normal(a, 1.0), Normal(b, 1.0)]))
-   model = ordered.fit(data)
+   ordered = constrain(a < b)
+   samples = ordered.sample(1000)
 
 Use this for parameter tying, label-switching constraints, monotonicity, and
 other structural assumptions.

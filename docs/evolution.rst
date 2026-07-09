@@ -170,7 +170,7 @@ Typed Search Spaces
 
    space = Space({
        "components": Integer(1, 6),
-       "alpha": Real(0.1, 5.0, log=True),
+       "alpha": Real(0.1, 5.0),
        "family": Categorical(["gaussian", "student_t"]),
    })
 
