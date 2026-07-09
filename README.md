@@ -10,21 +10,33 @@
 ![tests](https://img.shields.io/badge/tests-2700%2B-brightgreen)
 [![docs](https://img.shields.io/badge/docs-gmboquet.github.io%2Fmixle-blue)](https://gmboquet.github.io/mixle/)
 
-**From data to a deployable model with very little code.** Hand mixle raw records and it works out a model
-and fits it for you. Hand it a plain PyTorch module and it fits in one call — no training loop, no
-batching / eval / convergence boilerplate. Hand it the slow, expensive thing doing a job today — a frontier
-LLM, an API, a rule — and it **distills a small local model that answers the easy cases itself and escalates
-only the hard ones**, with a confidence gate deciding when the local answer is safe and a cost model
-reporting exactly what you saved. Pieces compose without adapter classes or glue code, and the same program
-runs on a laptop or scales across Spark, Dask, Ray, or MPI with one `backend=` argument.
+**Lab-grade AI, without the lab.** mixle turns data — or a slow, expensive model — into something small,
+fast, and dependable you can put in production, usually in a single call.
 
-The idea is that you describe *what* you're modeling and mixle handles *how* to fit it. Nest a few pieces —
-a neural language model, a curve, a mixture, an HMM — and a single `optimize(...)` call fits the whole
-thing. The *how* follows from the structure, not a flag: closed-form where a part has one, gradient descent
-where it's a neural net, EM where there are latent variables, all inside one loop. The deeper machinery is
-there when you want it, but you rarely need it to get started.
+Underneath that one-line API is a complete probabilistic-modeling stack: around 90 distributions, mixtures
+and hidden Markov models, Bayesian inference from EM to NUTS, design of experiments, and calibrated
+uncertainty. At its core it is a serious statistics library — what sets it apart is that a neural network,
+a classical density, and a latent-variable model are all the same kind of object, so they compose freely
+and one `optimize(...)` call fits the whole thing.
 
-📖 **Full documentation:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) — guides, the model
+Three things people reach for it for:
+
+- **Less code.** No training loops, no batching or convergence boilerplate, no glue: point `optimize` at
+  your data or your PyTorch module and it does the heavy lifting.
+- **Lower cost.** Distill a slow, expensive model — a frontier LLM, an API, a rule — into a tiny local one
+  that answers the easy cases itself and escalates only the hard ones, and reports what it saved.
+- **Honest uncertainty.** It is calibrated to know when it is unsure and defer rather than guess, so it is
+  safe to put in front of users.
+
+mixle handles what you actually have — numbers, text, categories, mixed and missing values, directional and
+angular data, rankings, graphs — the same way, and scales from a laptop to a cluster with one `backend=`
+argument.
+
+Fitting follows from the structure, not a flag: closed-form where a part has a closed form, gradient descent
+where it is a neural network, EM where there are latent variables, all inside one loop. The deeper machinery
+is there when you want it, but you rarely need it to get started.
+
+**Full documentation:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) — guides, the model
 catalog, and the API reference.
 
 Release-branch notes live in [CHANGELOG.md](CHANGELOG.md) and
@@ -63,10 +75,10 @@ Development: `git clone … && pip install -e ".[all]"`.
 
 ## Quickstart
 
-**Both worlds, blended — frontier quality at a fraction of the cost.** Distill a slow, expensive teacher
-(a frontier LLM, a human, a rule) into a compact local model, then serve a *cascade*: a **neural** student
-answers when a **classical** conformal gate says it is confident, and only uncertain cases escalate to the
-teacher.
+**Both worlds, blended — the teacher's quality at a fraction of the cost.** Distill a slow, expensive
+teacher (a frontier LLM, a human, a rule) into a compact local model, then serve a *cascade*: a **neural**
+student answers when a **classical** conformal gate says it is confident, and only uncertain cases escalate
+to the teacher.
 
 ```python
 from mixle.task import distill, CalibratedTaskModel, Cascade, CostModel
@@ -84,7 +96,7 @@ student = distill(teacher, train, n=4, dim=512, hidden=[64], epochs=250,
 gated   = CalibratedTaskModel(student, alpha=0.1).calibrate(cal, teacher(cal))
 cascade = Cascade(gated, teacher, cost=CostModel(c_local=0.0, c_frontier=0.01))
 
-cascade.serve(stream)   # frontier-quality answers, ~92% handled locally
+cascade.serve(stream)   # matches the teacher, ~92% handled locally
 cascade.report()        # -> ~8% escalated; ~$2.76 saved / 300 reqs vs frontier
 ```
 
