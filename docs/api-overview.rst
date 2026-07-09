@@ -389,11 +389,11 @@ Model temporal processes
 .. code-block:: python
 
    from mixle.process import (
-       ContinuousTimeMarkovChainDistribution,
-      HawkesProcessDistribution,
-      InhomogeneousPoissonProcessDistribution,
-      RenewalProcessDistribution,
+       HawkesProcessDistribution,
+       InhomogeneousPoissonProcessDistribution,
+       RenewalProcessDistribution,
    )
+   from mixle.stats.processes.ctmc import ContinuousTimeMarkovChainDistribution
 
 The process namespace collects event-time, renewal, self-exciting,
 birth-death, CTMC, and random-partition families.
