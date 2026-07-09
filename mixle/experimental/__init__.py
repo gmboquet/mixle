@@ -34,6 +34,14 @@ Current contents:
   :class:`~mixle.experimental.ssm_hybrid.HybridBlock` composes E1's local windowed attention, E5 part 1's
   selective-scan SSM branch, and E2's moment-closure far field into one ``ContextMechanism``, with a real
   per-mechanism contribution receipt exposed via ``report()``. See ``notes/designs/E5.md`` for the design.
+- :mod:`mixle.experimental.long_context_eval` -- E7, the long-context referee suite (needle / copy /
+  multi-hop / multi-scale-perplexity probes, a length curriculum, matched-FLOPs / matched-state-bytes
+  bookkeeping) every Track-E mechanism is measured against on the same terms.
+- :mod:`mixle.experimental.summary_tree` -- E4, the hierarchical summary tree: E1's exact near field
+  plus a persistent, bounded far-field tree of learned summaries built via mixed-radix carry
+  propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
+  encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
+  stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
 
 Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
 run and reported on distinctly from the stable-package suite.

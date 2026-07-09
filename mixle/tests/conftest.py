@@ -284,6 +284,10 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # referee-suite comparison against local-only and SSM-only ablations -- several TBPTT training loops,
     # tagged slow for the same reason as the other Track-E mechanism tests.
     "ssm_hybrid_test.py": ("torch", "experimental", "slow"),
+    # E4 hierarchical summary tree (mixle/experimental/summary_tree.py): needle-suite training runs
+    # over several seeds (needle receipt + auxiliary-loss ablation) plus a re-chunking topology check
+    # -- several TBPTT training loops, tagged slow for the same reason as context_spine_test.py.
+    "summary_tree_test.py": ("torch", "experimental", "slow"),
 }
 
 
