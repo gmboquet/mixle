@@ -56,7 +56,7 @@ from mixle.inference.conditional_jit_controller import (
     ControllerAction,
     LearnedController,
 )
-from mixle.models.coarsening import CoarsenedLM, ProjectionReceipt, depth_merge
+from mixle.models.coarsening import ProjectionReceipt, depth_merge
 from mixle.models.moment_propagation import GaussianLaw
 from mixle.models.sigma_weighted_projection import (
     sigma_weighted_block_sparse,
@@ -73,6 +73,9 @@ try:
     _HAS_TORCH = True
 except ImportError:  # pragma: no cover - torch is optional
     _HAS_TORCH = False
+
+if _HAS_TORCH:
+    from mixle.models.coarsening import CoarsenedLM
 
 __all__ = [
     "STRUCTURE_EDIT_REGISTRY",

@@ -23,12 +23,13 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
-from mixle.models.grad_leaf import DataBufferAccumulatorFactory
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
 )
 
 
@@ -275,8 +276,6 @@ class NeuralCategoricalEstimator(ParameterEstimator):
         # ewc = (anchor_params, fisher_diag, lambda): the EWC anti-forgetting penalty for continued pretraining
         self.ewc = ewc
 
-    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
-        return DataBufferAccumulatorFactory(NeuralCategoricalEncoder(), n_fields=2)
     def accumulator_factory(self) -> NeuralCategoricalAccumulatorFactory:
         """Return an accumulator factory for weighted classification batches."""
         return NeuralCategoricalAccumulatorFactory()

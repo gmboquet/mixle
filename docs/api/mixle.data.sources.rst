@@ -11,6 +11,7 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.data.sources.array_source
    mixle.data.sources.arrow_source
    mixle.data.sources.graph_source
    mixle.data.sources.hadoop_source

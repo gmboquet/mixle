@@ -4,6 +4,7 @@ held-out modality never modeled natively; the fit-health-style gate correctly de
 graduate in both directions.
 """
 
+import importlib.util
 import unittest
 
 import numpy as np
@@ -18,6 +19,8 @@ from mixle.reason.zero_shot_bootstrap import (
 )
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 def _two_modality_joint() -> CrossModalJoint:
@@ -189,6 +192,7 @@ class InduceLeafForUnseenTypeTest(unittest.TestCase):
         # a classical family (multivariate Gaussian) -- not neural.
         self.assertIn("MultivariateGaussian", type(leaf).__name__)
 
+    @unittest.skipUnless(HAS_TORCH, "the high-dimensional path falls back to GradLeaf, which requires torch")
     def test_high_dimensional_numeric_blob_gets_a_neural_fallback(self):
         rng = np.random.RandomState(8)
         samples = [self._Blob(rng.normal(size=24)) for _ in range(50)]

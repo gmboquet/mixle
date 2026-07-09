@@ -82,7 +82,6 @@ class EMATeacher:
         for p in self.ema_model.parameters():
             p.requires_grad_(False)
 
-    @torch.no_grad()
     def update(self, student_model: Any) -> None:
         """One EMA step: pull every teacher tensor toward the student's current value.
 
@@ -91,6 +90,13 @@ class EMATeacher:
         to that storage more than once per step (a double update). ``seen`` dedupes by storage identity
         (``data_ptr()``) so every real tensor is updated exactly once, however many names alias it.
         """
+        # Not a @torch.no_grad() decorator: that evaluates torch.no_grad at class-definition (import)
+        # time, which breaks this class's whole point of being importable without torch installed
+        # (see _require_torch() in __init__). A `with` block defers the torch reference to call time.
+        with torch.no_grad():
+            self._update_impl(student_model)
+
+    def _update_impl(self, student_model: Any) -> None:
         d = self.decay
         student_state = student_model.state_dict()
         seen: set = set()

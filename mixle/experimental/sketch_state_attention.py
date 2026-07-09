@@ -38,8 +38,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from mixle.experimental.context_spine import _apply_rope, _rope_angles
-
 try:
     import torch
     import torch.nn as nn
@@ -48,6 +46,9 @@ try:
     _HAS_TORCH = True
 except ImportError:  # pragma: no cover - torch is optional
     _HAS_TORCH = False
+
+if _HAS_TORCH:
+    from mixle.experimental.context_spine import _apply_rope, _rope_angles
 
 __all__ = [
     "LinearAttentionState",

@@ -49,7 +49,8 @@ except ImportError:  # pragma: no cover - torch is optional
 # and the archived index (entries are stored post-RoPE, same as SlidingWindowSpine's cache -- see that
 # module's docstring). E2-E6 are documented to "differ only in what step's carried state contains"; the
 # positional-encoding convention is shared substrate, not a per-mechanism choice.
-from mixle.experimental.context_spine import _apply_rope, _rope_angles  # noqa: E402
+if _HAS_TORCH:
+    from mixle.experimental.context_spine import _apply_rope, _rope_angles  # noqa: E402
 
 __all__ = [
     "RETRIEVAL_MEMORY_UNAVAILABLE_PIECES",

@@ -50,12 +50,11 @@ try:
 except ImportError:  # pragma: no cover - torch is optional
     _HAS_TORCH = False
 
-from mixle.experimental.context_spine import (
-    SlidingWindowState,
-    _apply_rope,
-    _rope_angles,
-)
+from mixle.experimental.context_spine import SlidingWindowState
 from mixle.inference.structure import _split_separation
+
+if _HAS_TORCH:
+    from mixle.experimental.context_spine import _apply_rope, _rope_angles
 
 __all__ = [
     "E2_UNAVAILABLE_PIECES",

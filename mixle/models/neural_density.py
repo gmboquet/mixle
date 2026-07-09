@@ -21,8 +21,15 @@ from typing import Any
 
 import numpy as np
 
-from mixle.models._neural_serial import decode_module, encode_module
-from mixle.models.grad_leaf import GradEstimator, GradLeaf
+from mixle.models._neural_serial import check_finite, decode_module, encode_module
+from mixle.models.grad_leaf import GradLeaf
+from mixle.stats.compute.pdist import (
+    DataSequenceEncoder,
+    DistributionSampler,
+    ParameterEstimator,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
+)
 
 
 def _torch() -> Any:
@@ -40,16 +47,6 @@ class NeuralDensity(GradLeaf):
     pass through (see the grad_leaf module docstring for the control story).
     """
 
-    def estimator(self, pseudo_count: float | None = None) -> NeuralDensityEstimator:
-        return NeuralDensityEstimator(
-            self.module,
-            m_steps=self.m_steps,
-            lr=self.lr,
-            device=self.device,
-            name=self.name,
-            loss=self.loss,
-            optimizer=self.optimizer,
-        )
     __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
 
     def __init__(
@@ -122,19 +119,6 @@ class NeuralDensity(GradLeaf):
         )
 
 
-class NeuralDensityEstimator(GradEstimator):
-    """M-step: responsibility-weighted MLE -- ``max sum_i w_i log p(x_i)`` by gradient ascent on the module (warm)."""
-
-    def _leaf(self) -> NeuralDensity:
-        return NeuralDensity(
-            self.module,
-            m_steps=self.m_steps,
-            lr=self.lr,
-            device=self.device,
-            name=self.name,
-            loss=self.loss,
-            optimizer=self.optimizer,
-        )
 class NeuralDensitySampler(DistributionSampler):
     """Sampler for wrapped neural density modules exposing ``sample(n)``."""
 

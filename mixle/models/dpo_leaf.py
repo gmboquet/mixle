@@ -21,12 +21,13 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import decode_module, encode_module
-from mixle.models.grad_leaf import DataBufferAccumulatorFactory
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
 )
 
 
@@ -208,7 +209,7 @@ class DPOAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self) -> tuple:
         """Return buffered contexts, chosen actions, rejected actions, and weights."""
-        return (list(self.x), list(self.ch), list(self.rj), list(self.w))
+        return (list(self.x), list(self.ch), list(self.rj), np.asarray(self.w, dtype=float))
 
     def from_value(self, v: tuple) -> DPOAccumulator:
         """Restore accumulator buffers from a value tuple."""
@@ -239,8 +240,6 @@ class DPOModelEstimator(ParameterEstimator):
         self.lr = float(lr)
         self.device = device
 
-    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
-        return DataBufferAccumulatorFactory(DPOEncoder(), n_fields=3)
     def accumulator_factory(self) -> DPOAccumulatorFactory:
         """Return an accumulator factory for weighted preference triples."""
         return DPOAccumulatorFactory()

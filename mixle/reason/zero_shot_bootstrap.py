@@ -226,7 +226,11 @@ def _fit_generic_grad_density(arr: np.ndarray, *, max_its: int, n_components: in
     dim = arr.shape[1]
     module = _GenericDensityModule(dim, n_components=n_components)
     estimator = GradEstimator(module, m_steps=max(60, int(max_its) * 10))
-    data = [tuple(float(v) for v in row) for row in arr]
+    # NOT a tuple per row: GradLeafEncoder.seq_encode treats a tuple observation as one field PER
+    # POSITION (the conditional log_density(x, y, ...) convention) -- a 24-dim row as a 24-tuple was
+    # being split into 24 separate scalar fields instead of one vector field, so the module's
+    # log_density(x) (a single positional arg) was being called with 24 unpacked scalars.
+    data = [np.asarray(row, dtype=float) for row in arr]
     return optimize(data, estimator, max_its=1)
 
 

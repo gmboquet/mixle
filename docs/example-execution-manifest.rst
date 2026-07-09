@@ -39,9 +39,30 @@ The core package currently ships 48 Python example scripts:
 Release Execution Status
 ------------------------
 
-The current documentation state does not prove these examples execute against
-the release wheel. A public release should run examples from a clean install,
-not from a warm checkout or ``PYTHONPATH``.
+The 23 base-install ("Execute.") examples were run against the built
+``mixle-0.6.3`` wheel, installed into a bare venv (``pip install dist/mixle-0.6.3-py3-none-any.whl``,
+no extras, no editable install, no ``PYTHONPATH``), each with a 90s budget:
+
+* **21 passed**: ``enumeration_example.py``, ``extensibility_seams_example.py``,
+  ``gallery_combinators_example.py``, ``gallery_directional_example.py``,
+  ``gallery_graphs_example.py``, ``gallery_multivariate_example.py``,
+  ``gallery_processes_example.py``, ``gallery_rankings_example.py``,
+  ``gallery_structured_example.py``, ``gallery_univariate_example.py``,
+  ``heterogeneous_correctness_example.py``, ``hidden_association_example.py``,
+  ``hierarchical_mixture_example.py``, ``joint_mixture_example.py``,
+  ``latent_variable_models_example.py``, ``lookback_hmm_example.py``,
+  ``ppl_example.py``, ``semi_supervised_mixture_example.py``,
+  ``structure_learning_example.py``, ``structured_hmm_example.py``,
+  ``structured_leaves_example.py``.
+* **2 reclassified to blocked** (see the Inventory table below):
+  ``skeptic_challenge_example.py`` (needs ``scikit-learn``, not a mixle
+  dependency) and ``win_demo_example.py`` (needs ``torch``; its distillation
+  path has no classical fallback).
+
+The remaining examples (task/DOE/reasoning/vision workflows) were not executed
+in this pass -- they need optional extras, external datasets, model weights, or
+services per their Inventory entries below, none of which are provisioned in
+this environment.
 
 Execution status should be recorded as evidence, not inferred from import
 success or from an earlier notebook run. If an example writes an artifact, the
@@ -184,7 +205,9 @@ Inventory
    * - ``examples/shared_embedding_example.py``
      - Execute with optional-dependency status recorded.
    * - ``examples/skeptic_challenge_example.py``
-     - Execute.
+     - Blocked on ``scikit-learn`` (Act 1's sklearn-baseline comparison
+       imports it directly; not a mixle dependency or extra, install
+       separately to run).
    * - ``examples/structure_learning_example.py``
      - Execute.
    * - ``examples/structured_hmm_example.py``
@@ -204,7 +227,9 @@ Inventory
    * - ``examples/vision_edge_distillation/verify_on_laptop.py``
      - Execute when the distilled artifact exists; otherwise blocked.
    * - ``examples/win_demo_example.py``
-     - Execute.
+     - Blocked on ``torch`` (``solve()``'s MLP distillation path
+       (``mixle.task.distill._fit_mlp``) always needs torch, no classical
+       fallback; ``pip install mixle[torch]``).
 
 Evidence to Record
 ------------------

@@ -16,12 +16,13 @@ Subpackages
    mixle.doe
    mixle.engines
    mixle.enumeration
+   mixle.epistemic
    mixle.evolve
    mixle.experimental
    mixle.inference
    mixle.models
-   mixle.ppl
    mixle.pool
+   mixle.ppl
    mixle.reason
    mixle.represent
    mixle.stats

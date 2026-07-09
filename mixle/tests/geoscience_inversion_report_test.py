@@ -1,10 +1,13 @@
 """B7: sense -> simulate -> invert -> report -- the track-M full-loop demo (M0/M2/M3/M5/A1)."""
 
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
 
 import numpy as np
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples"))
 from geoscience_inversion_report import (  # noqa: E402
@@ -45,6 +48,7 @@ class SenseSimulateInvertReportTest(unittest.TestCase):
         self.assertEqual(amps.shape[1], 3)
         self.assertEqual(sim.receipt.method, "none")  # intervention only, no evidence to condition on
 
+    @unittest.skipUnless(HAS_TORCH, "invert_new_observation's learn_inverse requires torch")
     def test_m3_inverts_a_new_observation_close_to_the_true_depth(self):
         sim, wi_depths, _wi_amps = what_if_salt(self.net, seed=1)
         depth_prior = GaussianDistribution(mu=float(wi_depths.mean()), sigma2=float(wi_depths.var()))
@@ -58,6 +62,7 @@ class SenseSimulateInvertReportTest(unittest.TestCase):
         self.assertIsInstance(inv_model.receipts.sbc_pvalue, float)
         self.assertIn(0.9, inv_model.receipts.coverage)
 
+    @unittest.skipUnless(HAS_TORCH, "invert_new_observation's learn_inverse requires torch")
     def test_m5_report_serves_a_claim_that_brackets_the_truth(self):
         sim, wi_depths, _wi_amps = what_if_salt(self.net, seed=1)
         depth_prior = GaussianDistribution(mu=float(wi_depths.mean()), sigma2=float(wi_depths.var()))
@@ -78,6 +83,7 @@ class SenseSimulateInvertReportTest(unittest.TestCase):
         self.assertIsNotNone(claim)  # a calibrated candidate clears the threshold for this seeded run
         self.assertTrue(claim.contains(TRUE_DEPTH))
 
+    @unittest.skipUnless(HAS_TORCH, "main() calls invert_new_observation, which requires torch")
     def test_main_runs_end_to_end(self):
         main()  # exercises the full sense -> simulate -> invert -> report loop; asserts internally
 

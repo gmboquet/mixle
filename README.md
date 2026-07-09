@@ -51,7 +51,9 @@ Release-branch notes live in [CHANGELOG.md](CHANGELOG.md) and
 
 ## Installation
 
-Python 3.10+ (developed on 3.12). On PyPI as `mixle`; the import name is `mixle`.
+Python 3.10+ (developed on 3.12). On PyPI as `mixle`; the import name is `mixle`. CI tests Linux
+x86_64; macOS (incl. Apple Silicon) is the primary day-to-day dev platform and works in practice, but
+isn't CI-gated. Windows is untested and unclaimed.
 
 ```sh
 pip install mixle          # base (numpy, scipy, mpmath): every family, fit locally
@@ -64,8 +66,8 @@ The base install fits every distribution locally. Acceleration and scale-out are
 | -------------------------------------------------------- | ------------------------------------------------------------- |
 | `numba`                                                  | JIT-compiled hot paths (falls back to pure NumPy when absent) |
 | `torch`                                                  | GPU / autograd engine                                         |
-| `spark` · `dask` · `mpi`                                 | distributed estimation backends                               |
-| `pandas` · `arrow` · `sql` · `mongo` · `hadoop` · `data` | data-source connectors                                        |
+| `spark` · `dask` · `ray` · `lightning` · `mpi`           | distributed estimation backends                               |
+| `pandas` · `arrow` · `sql` · `mongo` · `hadoop` · `data` · `arrays` | data-source connectors                              |
 | `gmpy2`                                                  | GMP-FFT big-integer multiply for count-DP ranking             |
 | `umap`                                                   | model-based UMAP embeddings                                   |
 | `sympy` · `sage`                                         | symbolic / closed-form export                                 |
