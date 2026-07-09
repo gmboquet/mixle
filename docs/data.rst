@@ -55,10 +55,13 @@ problems early.
    ]
 
    conformed = schema.conform(rows)
-   report = check_dataset(rows, schema=schema)
 
 Use schema validation at the boundary of a pipeline. The fitted model can still
-receive ordinary Python records after they are conformed.
+receive ordinary Python records after they are conformed. Once a model exists,
+``check_dataset(model, data)`` derives the model's own schema (via
+``Schema.for_model``) and checks both coercion and support in one pass::
+
+   report = check_dataset(model, rows)
 
 Do not let schema coercion hide data quality problems. Record coercion errors,
 missing fields, dropped records, and unit conversions when the conformed data

@@ -76,10 +76,8 @@ Combinators are how a heterogeneous row becomes one model:
    from mixle.stats import CategoricalEstimator, GammaEstimator, RecordEstimator, field
 
    estimator = RecordEstimator(
-       {
-           field("event"): CategoricalEstimator(),
-           field("duration"): GammaEstimator(),
-       }
+       (field("event"), field("duration")),
+       (CategoricalEstimator(), GammaEstimator()),
    )
 
    model = optimize(records, estimator, out=None)
