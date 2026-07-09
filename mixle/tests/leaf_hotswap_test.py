@@ -58,9 +58,62 @@ class DiagGauss(torch.nn.Module):
         return self._dist().sample((n,))
 
 
+class BimodalGauss(torch.nn.Module):
+    """A genuinely bimodal density module (a learnable mixture-of-2-Gaussians): unlike
+    :class:`DiagGauss`, its architecture is NOT constrained to be Gaussian-shaped, so a
+    moment-matched Gaussian surrogate cannot trivially match it -- this is the adversarial fixture
+    the shipped acceptance test (criterion 1, "held-out density preserved") never actually
+    exercised, since :class:`DiagGauss` is itself Gaussian and a Gaussian surrogate matching a
+    Gaussian ground truth proves nothing about the general claim."""
+
+    def __init__(self, mu0=(-1.0, 1.0), log_sigma0: float = 0.0):
+        super().__init__()
+        self.mu = torch.nn.Parameter(torch.tensor(list(mu0), dtype=torch.float32))
+        self.log_sigma = torch.nn.Parameter(torch.full((2,), float(log_sigma0)))
+        self.logit_w = torch.nn.Parameter(torch.zeros(2))
+
+    def log_density(self, x):
+        x = x.reshape(-1, 1)
+        sigma = torch.exp(self.log_sigma)
+        comp_ll = torch.distributions.Normal(self.mu, sigma).log_prob(x)
+        log_w = torch.log_softmax(self.logit_w, dim=0)
+        return torch.logsumexp(comp_ll + log_w, dim=-1)
+
+    def sample(self, n: int):
+        w = torch.softmax(self.logit_w, dim=0)
+        comp = torch.multinomial(w, n, replacement=True)
+        sigma = torch.exp(self.log_sigma)
+        mu = self.mu[comp]
+        s = sigma[comp]
+        return (mu + s * torch.randn(n)).reshape(-1, 1)
+
+
 def _data(mu, sigma, n, seed):
     rng = np.random.RandomState(seed)
     return [float(v) for v in rng.normal(mu, sigma, n)]
+
+
+def _bimodal_data(n, seed, mu=(-3.0, 3.0), sigma=0.5):
+    """``n`` draws from an evenly-weighted N(``mu[0]``, ``sigma``) / N(``mu[1]``, ``sigma``) mixture
+    -- the adversarial "arbitrary complex leaf" ground truth for :class:`BimodalGauss`."""
+    rng = np.random.RandomState(seed)
+    n1 = n // 2
+    x = np.concatenate([rng.normal(mu[0], sigma, n1), rng.normal(mu[1], sigma, n - n1)])
+    rng.shuffle(x)
+    return [float(v) for v in x]
+
+
+def _fit_bimodal_near_convergence(data, seed, m_steps=400, max_its=60):
+    """Fit a :class:`BimodalGauss` ``GradLeaf`` close to its optimum on ``data``, mirroring
+    :func:`_fit_near_convergence`'s two-stage (EM-driven ``optimize`` then explicit extra gradient
+    rounds) convergence discipline."""
+    torch.manual_seed(seed)
+    fitted = optimize(data, BimodalGauss(mu0=(-1.0, 1.0)), max_its=max_its, out=None, prev_estimate=None)
+    estimator = GradEstimator(fitted.module, m_steps=m_steps, lr=5e-3)
+    acc = estimator.accumulator_factory().make()
+    enc = np.asarray(data)[:, None]
+    acc.seq_update(enc, np.ones(len(data)), None)
+    return estimator.estimate(float(len(data)), acc.value())
 
 
 def _fit_near_convergence(mu=3.0, sigma=1.0, n=600, seed=0, m_steps=200, max_its=40):
@@ -253,6 +306,105 @@ class SwapBackOnMisfitTestCase(unittest.TestCase):
         restored = swap_back(model, record, round_index=len(history))
         self.assertIs(restored.components[0], record.original)
         self.assertTrue(record.swapped_back)
+
+
+class MonotoneObjectiveGateCatchesBadSwapTestCase(unittest.TestCase):
+    """:func:`moment_matched_surrogate` is, by its own docstring, "a genuine fit... it reads no
+    attribute off ``gradient_leaf`` at all" -- a plain MLE Gaussian fit to the raw training data,
+    nothing more. On a genuinely bimodal leaf that is a BAD approximation (see
+    ``test_moment_matched_surrogate_collapses_a_bimodal_leaf_to_one_gaussian`` below), not merely a
+    coarse one. This class is what actually keeps :func:`run_em_with_hotswap` safe on such a leaf:
+    its per-round monotone-F accept/reject gate (the same construction D2/D3 already use) must
+    reject a swap-plus-refit round whose objective does not improve, and -- the specific bug fixed
+    alongside this test -- must roll the SWAP ITSELF back to the retained gradient leaf when it
+    does, not just skip the following M-step's parameter update. Before the fix, the swap was
+    applied to ``model`` unconditionally and eagerly (before the round's accept/reject check), and
+    the ``else`` branch of that check only skipped ``model = candidate`` -- it never undid the
+    swap, so a rejected round still silently returned the corrupted surrogate.
+    """
+
+    def test_moment_matched_surrogate_collapses_a_bimodal_leaf_to_one_gaussian(self):
+        """Reproduces the audit's adversarial finding directly against the primitive: a
+        ``BimodalGauss`` GradLeaf correctly learns two well-separated modes, but
+        ``moment_matched_surrogate`` -- which never looks at the leaf's own density, only at the
+        raw data -- collapses them into one wide Gaussian with a large held-out NLL penalty."""
+        train_data = _bimodal_data(2000, seed=1, mu=(-3.0, 3.0), sigma=0.5)
+        fitted = _fit_bimodal_near_convergence(train_data, seed=1)
+        holdout = np.asarray(_bimodal_data(1000, seed=99, mu=(-3.0, 3.0), sigma=0.5))[:, None]
+
+        learned_mu = sorted(fitted.module.mu.detach().numpy().tolist())
+        self.assertAlmostEqual(learned_mu[0], -3.0, delta=0.3)
+        self.assertAlmostEqual(learned_mu[1], 3.0, delta=0.3)
+
+        surrogate = moment_matched_surrogate(fitted, train_data)
+        grad_nll = float(-np.mean(fitted.seq_log_density(holdout)))
+        surrogate_nll = float(-np.mean(surrogate.seq_log_density(holdout)))
+        rel_degradation = (surrogate_nll - grad_nll) / grad_nll
+
+        print(
+            f"[D4 adversarial] bimodal leaf mu={learned_mu}, held-out NLL: gradient leaf={grad_nll:.4f} "
+            f"nats, surrogate={surrogate_nll:.4f} nats ({rel_degradation * 100:.1f}% relative degradation)"
+        )
+        # this is the module's documented, honest limitation: moment_matched_surrogate ALONE is a
+        # coarse, Gaussian-only fit whose quality is not guaranteed on a non-Gaussian leaf.
+        self.assertGreater(rel_degradation, 0.5, "a Gaussian surrogate should badly misfit a bimodal leaf")
+
+    def test_run_em_with_hotswap_rejects_and_reverts_a_bad_bimodal_swap(self):
+        """End to end: a mixture with a pre-plateaued, genuinely bimodal gradient leaf component
+        proposes a moment-matched swap exactly like the well-behaved (Gaussian-shaped) fixture
+        does, but here the surrogate is a bad approximation. The per-round monotone-F gate must (1)
+        reject that round (``accepted`` reads False), (2) leave NO record of a committed swap
+        (``swap_records`` empty -- the swap never survives to be returned), and (3) return a final
+        model whose component 0 is still the retained ``GradLeaf``, with held-out fit quality
+        essentially unaffected by the rejected swap attempt.
+        """
+        rng = np.random.RandomState(21)
+        comp0_data = _bimodal_data(1200, seed=22, mu=(-3.0, 3.0), sigma=0.5)
+        comp1_data = [float(v) for v in rng.normal(20.0, 1.0, 600)]
+        full_data = comp0_data + comp1_data
+        rng.shuffle(full_data)
+
+        pretrained = _fit_bimodal_near_convergence(comp0_data, seed=22)
+        comp0 = GradLeaf(pretrained.module, m_steps=30, lr=5e-3)
+        comp1 = GaussianDistribution(19.0, 1.5)
+        start = MixtureDistribution([comp0, comp1], [0.66, 0.34])
+        estimator = MixtureEstimator([GradEstimator(pretrained.module, m_steps=30, lr=5e-3), GaussianEstimator()])
+        enc = seq_encode(full_data, model=start)
+        holdout_for_comp0 = _bimodal_data(400, seed=23, mu=(-3.0, 3.0), sigma=0.5)
+
+        pre_swap_nll = float(-np.mean(pretrained.seq_log_density(np.asarray(holdout_for_comp0)[:, None])))
+
+        model, history, swap_records = run_em_with_hotswap(
+            enc,
+            estimator,
+            start,
+            max_its=10,
+            delta=1.0e-9,
+            plateau_patience=1,
+            holdout_data=holdout_for_comp0,
+            misfit_tol=0.15,
+        )
+
+        swap_attempted = any(h.swapped_this_round for h in history)
+        self.assertTrue(swap_attempted, "the plateaued bimodal leaf should still trigger a swap attempt")
+        rejected_rounds = [h for h in history if h.swapped_this_round and not h.accepted]
+        self.assertTrue(rejected_rounds, "the round proposing the bad swap should be rejected by the gate")
+
+        self.assertNotIn(0, swap_records, "a rejected swap must leave no committed SwapRecord for component 0")
+        self.assertIsInstance(
+            model.components[0], GradLeaf, "the retained gradient leaf must still be in place after rejection"
+        )
+
+        final_nll = float(-np.mean(model.components[0].seq_log_density(np.asarray(holdout_for_comp0)[:, None])))
+        print(
+            f"[D4 adversarial, end-to-end] pre-swap-attempt NLL={pre_swap_nll:.4f}, "
+            f"post-rejected-swap-attempt NLL={final_nll:.4f}"
+        )
+        self.assertLess(
+            abs(final_nll - pre_swap_nll),
+            0.2,
+            "a rejected bad swap must not measurably degrade the returned model's fit quality",
+        )
 
 
 class PlateauMonitorTestCase(unittest.TestCase):

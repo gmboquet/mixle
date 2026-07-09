@@ -27,9 +27,19 @@ receipt later shows the surrogate drifting away from the real held-out data (e.g
 regime shifts after the swap), :func:`swap_back` restores the exact retained object and gradient
 fitting resumes exactly where it left off -- "never truly forget", the same policy D2's freeze/
 roll-up commits to for frozen mixture components. F itself (the real Neal-Hinton free energy) is
-still the audit receipt: :func:`run_em_with_hotswap` gates every round's M-step (gradient OR
-closed-form) behind the same accept/reject monotone-F test D2/D3 already use, so a bad swap can
-cost speed (a rejected round, or a later swap-back) but never correctness.
+still the audit receipt: :func:`run_em_with_hotswap` gates every round's proposal -- the swap-in
+itself AND the following M-step (gradient OR closed-form), as one atomic unit -- behind the same
+accept/reject monotone-F test D2/D3 already use, so a bad swap can cost speed (a rejected-and-
+reverted round, or a later swap-back once already committed) but never correctness. This is the
+gate that actually makes the mechanism safe: :func:`moment_matched_surrogate` on its own is a
+plain Gaussian MLE fit with no guarantee of matching an arbitrary (e.g. multi-modal) gradient
+leaf's held-out density -- see that function's own docstring for a worked adversarial example and
+``mixle.tests.leaf_hotswap_test.MonotoneObjectiveGateCatchesBadSwapTestCase`` for the regression
+test proving the gate rejects and fully reverts (not merely skips the M-step of) exactly that
+case. Earlier revisions of this module applied a plateau-triggered swap to the working tree
+unconditionally, before the round's accept/reject check, and only skipped ``model = candidate`` on
+rejection -- so a rejected round still silently returned the corrupted surrogate; the gate now
+rolls the swap itself back too when a round is rejected.
 
 Scope: like D2/D3, this targets one gradient leaf embedded as a component of a
 :class:`~mixle.stats.latent.mixture.MixtureDistribution` (mixed freely with classical families,
@@ -204,6 +214,26 @@ def moment_matched_surrogate(
 
     ``gradient_leaf`` is accepted (rather than a bare module) purely as a type/documentation
     signal of intent -- see the module docstring's "why not G1" note -- it is not otherwise used.
+
+    IMPORTANT, honest limitation -- read before trusting this function's output alone: a single
+    Gaussian can only ever be as good an approximation as the true fitted density IS Gaussian.
+    Against a unimodal, roughly-Gaussian-shaped leaf (the common case for a single mixture
+    component pulling its own well-separated slice of responsibility-weighted data) this is an
+    excellent approximation. Against a leaf whose OWN fitted density is multi-modal, heavy-tailed,
+    or otherwise non-Gaussian, this function will silently produce a POOR approximation with no
+    warning -- e.g. on a genuinely bimodal ``GradLeaf`` (two well-separated modes,
+    ``mixle.tests.leaf_hotswap_test.BimodalGauss``) the moment-matched surrogate collapses both
+    modes into one wide Gaussian sitting between them, degrading held-out NLL by roughly 80%
+    relative to the original leaf (see
+    ``mixle.tests.leaf_hotswap_test.MonotoneObjectiveGateCatchesBadSwapTestCase``). This function
+    provides NO guarantee, on its own, that the surrogate's held-out density tracks the original
+    leaf's -- that guarantee, to the extent one exists, is earned entirely by
+    :func:`run_em_with_hotswap`'s per-round monotone-F accept/reject gate (see that function's own
+    docstring): a swap-plus-refit round that does not improve the real Neal-Hinton objective is
+    rejected and reverted, INCLUDING the swap itself, not merely the following M-step. Do not call
+    :func:`moment_matched_surrogate` outside that gated driver (or an equivalent one) and assume
+    the result is a safe stand-in for ``gradient_leaf`` -- verify with a real misfit receipt
+    (:func:`misfit_receipt`) against genuinely held-out data first.
     """
     if not isinstance(gradient_leaf, GradLeaf):
         raise TypeError("moment_matched_surrogate expects a GradLeaf (the D4 hot-swap target).")
@@ -347,6 +377,12 @@ class LeafHotswapStats:
     ``objective``), plus the D4-specific ``n_gradient_m_steps`` / ``n_closed_form_m_steps`` split
     that is literally what "faster to same F" is measured against: a swapped component's per-round
     M-step cost drops from D1's ``param_count * _GRADIENT_STEPS`` proxy to ``param_count``.
+
+    ``swapped_this_round`` is which components a plateau *proposed* a swap for this round -- it is
+    recorded even when ``accepted`` is False (a rejected round rolls the swap itself back out of
+    the returned model/``swap_records``, but the attempt still happened and is worth a receipt);
+    use ``n_swapped`` (or check ``idx in swap_records``) for which swaps are actually COMMITTED as
+    of this round.
     """
 
     round_index: int
@@ -490,6 +526,19 @@ def run_em_with_hotswap(
         if old_value is None:
             old_value = current_value
 
+        # ``pre_swap_model`` is the receipt of "the tree as it stood when ``current_value`` was
+        # measured" -- the ONLY state the round's accept/reject gate below is entitled to fall back
+        # to. A newly-triggered plateau swap is proposed into ``model`` below (so the very same
+        # round's closed-form M-step can immediately re-fit it against fresh responsibilities), but
+        # that proposal is provisional exactly like the M-step's own ``candidate``: if the round is
+        # rejected, EVERYTHING proposed this round -- the M-step AND the swap-in -- must roll back
+        # together, or a swap that measurably worsens the objective would silently survive into the
+        # returned model even though ``accepted`` reads False for that round (the bug this comment
+        # replaces: ``model`` used to be rebound in place by the swap loop below with no matching
+        # rollback path, so a rejected round still returned the swapped-in surrogate).
+        pre_swap_model = model
+        new_swap_ids: list[int] = []
+
         for idx in range(model.num_components):
             if idx in frozen_idx or idx in swapped_idx or model.zw[idx]:
                 continue
@@ -506,6 +555,7 @@ def run_em_with_hotswap(
             swap_records[idx] = record
             swapped_idx.add(idx)
             swapped_this_round.append(idx)
+            new_swap_ids.append(idx)
 
         candidate, n_grad, n_closed = _m_step_hotswap(enc_payload, estimator, model, gamma, frozen_idx, swapped_idx)
         candidate_frozen = detect_frozen(cache, candidate)
@@ -518,6 +568,18 @@ def run_em_with_hotswap(
             model = candidate
             round_value = candidate_value
         else:
+            # Roll back not just the M-step but this round's provisional swap-in(s) too: the gate
+            # rejected the round's objective, so the surrogate that produced it never earns a place
+            # in the returned model. The retained gradient leaf(s) go back into ``model`` exactly as
+            # :func:`swap_back` would restore them, the streak resets so the plateau monitor can
+            # retry cleanly next round, and any never-committed ``SwapRecord``/cache entry from this
+            # round's rejected proposal is discarded rather than left to look like a real swap.
+            model = pre_swap_model
+            for idx in new_swap_ids:
+                swapped_idx.discard(idx)
+                swap_records.pop(idx, None)
+                cache.invalidate(idx)
+                monitor.reset(idx)
             round_value = current_value
 
         history.append(
