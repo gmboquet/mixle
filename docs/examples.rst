@@ -5,6 +5,9 @@ Runnable examples live in ``examples/``. They are plain Python scripts, so the
 fastest way to learn a workflow is to run the script under the same environment
 you use for tests.
 
+For a shorter, receipt-focused index of the newer applied adapter and
+multimodal-pretraining workflows, see :doc:`examples_gallery`.
+
 Start with the base-install examples. Move to Torch, task, or real-data workflows
 only after the core distribution and inference path is clear.
 

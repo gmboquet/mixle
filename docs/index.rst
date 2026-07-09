@@ -219,6 +219,7 @@ human map for finding the right import.
    utilities-and-parallelism
    experimental-program
    examples
+   examples_gallery
    troubleshooting
    glossary
    extending
