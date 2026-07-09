@@ -120,24 +120,25 @@ Freeze submodules, swap the optimizer, or distribute the fit with `backend=`; pa
 training loop is checked by a test, not claimed here.
 
 **Compose to any depth; one call fits the whole thing.** You hand it estimators, not fitted
-distributions — you don't know the parameters yet, and that's the point. Nest them and a single
-`optimize` call learns every level together: here, a hidden Markov model whose two states emit through
-different learned models — a Gaussian mixture, and the neural density from above.
+distributions — you don't know the parameters yet, and that's the point. Real observations arrive in
+several channels at once; a composite models each channel with its own family — here a two-cluster
+Gaussian mixture on one, the neural density from above on the other — and a single `optimize` learns
+them together.
 
 ```python
-from mixle.stats import GaussianEstimator, MixtureEstimator, HiddenMarkovEstimator
+from mixle.stats import GaussianEstimator, MixtureEstimator, CompositeEstimator
 from mixle.models import GradEstimator
 
-# sequences: a list of observation series; nothing below fixes a parameter
-model = optimize(sequences, HiddenMarkovEstimator([
-    MixtureEstimator([GaussianEstimator(), GaussianEstimator()]),  # one state: a two-cluster mixture
-    GradEstimator(my_module),                                      # the other: a neural density
+# each record is a pair (x0, x1); nothing below fixes a parameter
+model = optimize(pairs, CompositeEstimator([
+    MixtureEstimator([GaussianEstimator(), GaussianEstimator()]),  # channel 0: a two-cluster mixture
+    GradEstimator(my_module),                                      # channel 1: a neural density
 ]))
 ```
 
-One call, each part fit by the right M-step: Baum-Welch for the Markov dynamics, EM for the mixture
-inside a state, gradient descent for the neural leaf. Every node is an estimator, so the tree nests as
-deep as the model does — the call at the top never changes.
+One call, each part fit by the right M-step: EM for the mixture, gradient descent for the neural leaf.
+Every node is an estimator, so this whole tree is itself just a node — drop it into a mixture, or make it
+the emission of a hidden Markov model, and the call at the top never changes.
 
 ## Engines & orchestration
 
