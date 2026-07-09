@@ -48,6 +48,7 @@ class TrustRegion:
 
     @property
     def collapsed(self) -> bool:
+        """Return whether the trust-region length has shrunk below its usable minimum."""
         return self.length < self.length_min
 
     def update(self, improved: bool) -> None:

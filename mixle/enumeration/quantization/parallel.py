@@ -101,12 +101,14 @@ class ConvolutionExecutor:
         self.close()
 
     def close(self) -> None:
+        """Close the worker pool, if one is active."""
         if self._pool is not None:
             self._pool.close()
             self._pool.join()
             self._pool = None
 
     def convolve(self, a, b, max_fine_bucket: int | None = None):
+        """Convolve two histograms, optionally using worker processes."""
         from mixle.enumeration.quantization.core import CountHistogram
 
         if not a.data or not b.data:

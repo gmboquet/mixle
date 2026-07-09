@@ -1,8 +1,8 @@
-"""Uncertainty quantification for LLM output -- the thing LLMs famously lack, on the mixle UQ spine.
+"""Uncertainty quantification for LLM output on Mixle's UQ surface.
 
-An LLM emits fluent text with no honest sense of whether it knows the answer. Wrapping *any*
-``generate(prompt) -> str`` callable, :class:`LLMUncertainty` turns repeated stochastic samples into
-calibrated uncertainty:
+An LLM can emit fluent text without calibrated confidence. Wrapping any
+``generate(prompt) -> str`` callable, :class:`LLMUncertainty` turns repeated
+stochastic samples into calibrated uncertainty:
 
 * **Semantic entropy** (Kuhn et al. 2023): sample the model ``n`` times, cluster the answers by
   *meaning* (not surface form), and take the entropy over meaning-clusters. High = the model
@@ -16,9 +16,10 @@ calibrated uncertainty:
   *when the model answers, it is correct with probability >= 1 - alpha* -- a finite-sample selective-
   risk guarantee. The model abstains on questions it does not know instead of confabulating.
 
-Domain-neutral in its dependency: it takes a plain ``generate`` callable and an ``equivalent``
-relation, so it works with a local ``mixle.task`` model, an OpenAI-compatible endpoint (mlops), or a
-mock -- no hard LLM dependency here.
+The dependency boundary is domain-neutral: it takes a plain ``generate``
+callable and an ``equivalent`` relation, so it works with a local
+``mixle.task`` model, an OpenAI-compatible endpoint, or a test double without a
+hard LLM dependency in this module.
 """
 
 from __future__ import annotations
@@ -153,6 +154,7 @@ class InformationAssessment:
 
     @property
     def fabricated(self) -> list[ClaimAssessment]:
+        """Return claims assessed as unreliable."""
         return [c for c in self.claims if not c.reliable]
 
 

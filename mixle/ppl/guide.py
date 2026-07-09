@@ -78,6 +78,7 @@ class Guide:
             self._latents[name] = (handle, family)
 
     def names(self) -> tuple[str, ...]:
+        """Return the declared latent names in guide order."""
         return tuple(self._latents)
 
     def __repr__(self) -> str:
@@ -110,15 +111,19 @@ class StructuredVIPosterior:
         return name  # a raw handle
 
     def posterior(self, name) -> dict:
+        """Return posterior parameters for a declared latent name or raw handle."""
         return self._g.posterior(self._handle(name))
 
     def mean(self, name):
+        """Return the posterior mean for a declared latent."""
         return self.posterior(name).get("mean")
 
     def samples(self, name, n: int = 4000, rng=None):
+        """Draw samples from the variational factor for a declared latent."""
         return self._g.samples(self._handle(name), n=n, rng=rng)
 
     def summary(self) -> dict:
+        """Return per-latent posterior parameters and ELBO metadata."""
         out = {name: self._g.posterior(h) for name, (h, _) in self._guide._latents.items()}
         out["elbo"] = self.elbo
         out["iterations"] = int(self.elbo_trace.size)
@@ -210,18 +215,22 @@ class AdmixturePosterior:
         self.acceptance_rate = None
 
     def topics(self):
+        """Return the posterior mean topic-word matrix ``E[beta]``."""
         return self._lam / self._lam.sum(axis=1, keepdims=True)
 
     def doc_topics(self, d=None):
+        """Return posterior mean document-topic weights for one document or all documents."""
         m = self._gamma / self._gamma.sum(axis=1, keepdims=True)
         return m if d is None else m[d]
 
     def posterior(self, topic):
+        """Return the fitted Dirichlet posterior for a topic handle or topic index."""
         k = self._topics.index(topic) if topic in self._topics else int(topic)
         a = self._lam[k]
         return {"alpha": a, "mean": a / a.sum()}
 
     def summary(self) -> dict:
+        """Return corpus-level topic count, vocabulary size, and likelihood metadata."""
         return {"n_topics": self._lam.shape[0], "vocab_size": self._lam.shape[1], "log_likelihood": self.log_likelihood}
 
 

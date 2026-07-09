@@ -11,8 +11,7 @@ sequence of values): ``y[g,i] ~ N(theta[g], sigma^2)`` with ``theta[g] ~ N(mu, t
 latent group mean gives a closed-form group likelihood ``y_g ~ N(mu*1, sigma^2 I + tau^2 11^T)``, so it
 follows the Distribution / Sampler / Estimator / Accumulator / DataEncoder contract: it fits through
 ``estimate(groups, dist.estimator())`` (empirical-Bayes EM over the latent means), scores groups with
-``log_density`` / ``seq_log_density``, and exposes the per-group shrinkage posteriors. Part of the
-earth-science/multiphysics/UQ plan (Phase 7, composition expressiveness: plates / hierarchy).
+``log_density`` / ``seq_log_density``, and exposes the per-group shrinkage posteriors.
 """
 
 from __future__ import annotations
@@ -62,6 +61,7 @@ class HierarchicalNormalDistribution(SequenceEncodableProbabilityDistribution):
         return n, ybar, float(np.sum((y - ybar) ** 2))
 
     def density(self, group) -> float:
+        """Return the marginal density of one observed group."""
         return float(np.exp(self.log_density(group)))
 
     def log_density(self, group) -> float:
@@ -70,6 +70,7 @@ class HierarchicalNormalDistribution(SequenceEncodableProbabilityDistribution):
         return float(self._group_log_density(np.array([n]), np.array([ybar]), np.array([sse]))[0])
 
     def seq_log_density(self, x) -> np.ndarray:
+        """Return vectorized marginal log likelihoods for encoded groups."""
         n, ybar, sse = x  # the encoder yields per-group (size, mean, within-SSE) arrays
         return self._group_log_density(n, ybar, sse)
 
@@ -87,16 +88,21 @@ class HierarchicalNormalDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.tau**2 / (self.tau**2 + self.sigma**2 / n))
 
     def sampler(self, seed: int | None = None) -> HierarchicalNormalSampler:
+        """Return a sampler for grouped observations from this hierarchy."""
         return HierarchicalNormalSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> HierarchicalNormalEstimator:
+        """Return an empirical-Bayes EM estimator for the hierarchy."""
         return HierarchicalNormalEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> HierarchicalNormalDataEncoder:
+        """Return the data encoder used by this distribution."""
         return HierarchicalNormalDataEncoder()
 
 
 class HierarchicalNormalSampler(DistributionSampler):
+    """Draw grouped observations from the two-level normal hierarchy."""
+
     def __init__(self, dist: HierarchicalNormalDistribution, seed: int | None = None):
         self.dist = dist
         self.rng = np.random.RandomState(seed)
@@ -114,6 +120,7 @@ class HierarchicalNormalDataEncoder:
     """Encode each group to its sufficient statistics ``(size, mean, within-group SSE)``."""
 
     def seq_encode(self, x):
+        """Encode groups as arrays of size, mean, and within-group SSE."""
         suff = np.array([HierarchicalNormalDistribution._suff(g) for g in x], dtype=float)
         return suff[:, 0], suff[:, 1], suff[:, 2]
 
@@ -128,6 +135,8 @@ class HierarchicalNormalEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> StatisticAccumulatorFactory:
+        """Return an accumulator factory for group sufficient statistics."""
+
         class _Factory(StatisticAccumulatorFactory):
             def make(self):
                 return HierarchicalNormalAccumulator()
@@ -135,6 +144,7 @@ class HierarchicalNormalEstimator(ParameterEstimator):
         return _Factory()
 
     def estimate(self, nobs, suff_stat) -> HierarchicalNormalDistribution:
+        """Fit ``mu``, ``tau``, and ``sigma`` by EM over latent group means."""
         n, ybar, sse_within = (np.asarray(a, dtype=float) for a in suff_stat)
         total = n.sum()
         mu = ybar.mean()
@@ -161,29 +171,37 @@ class HierarchicalNormalAccumulator:
         self.groups: list[tuple[float, float, float]] = []
 
     def update(self, x, weight, estimate):
+        """Append sufficient statistics for one observed group."""
         self.groups.append(HierarchicalNormalDistribution._suff(x))
 
     def initialize(self, x, weight, rng):
+        """Initialize statistics from one observed group."""
         self.groups.append(HierarchicalNormalDistribution._suff(x))
 
     def seq_update(self, x, weights, estimate):
+        """Append encoded sufficient statistics for a batch of groups."""
         n, ybar, sse = x
         self.groups.extend(zip(n.tolist(), ybar.tolist(), sse.tolist()))
 
     def seq_initialize(self, x, weights, rng):
+        """Initialize from encoded group sufficient statistics."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat):
+        """Merge another collection of group sufficient statistics."""
         self.groups.extend(zip(*(a.tolist() for a in suff_stat)))
         return self
 
     def value(self):
+        """Return grouped sufficient statistics as three aligned arrays."""
         arr = np.array(self.groups, dtype=float).reshape(-1, 3)
         return arr[:, 0], arr[:, 1], arr[:, 2]
 
     def from_value(self, x):
+        """Replace this accumulator from grouped sufficient-statistic arrays."""
         self.groups = list(zip(*(np.asarray(a, dtype=float).tolist() for a in x)))
         return self
 
     def acc_to_encoder(self):
+        """Return the encoder used by this accumulator."""
         return HierarchicalNormalDataEncoder()

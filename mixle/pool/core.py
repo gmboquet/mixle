@@ -50,6 +50,7 @@ class PoolResult:
 
     @property
     def ok(self) -> bool:
+        """Whether the job completed successfully."""
         return self.status == "done"
 
 
@@ -58,7 +59,9 @@ class Backend(Protocol):
 
     billable: bool
 
-    def submit(self, job: PoolJob) -> PoolResult: ...
+    def submit(self, job: PoolJob) -> PoolResult:
+        """Execute ``job`` and return a :class:`PoolResult`."""
+        ...
 
 
 class LocalBackend:
@@ -75,6 +78,7 @@ class LocalBackend:
         self._clock = clock
 
     def submit(self, job: PoolJob) -> PoolResult:
+        """Run ``job`` in this process and wrap the outcome as a pool result."""
         t0 = self._tick()
         try:
             artifact = job.run()

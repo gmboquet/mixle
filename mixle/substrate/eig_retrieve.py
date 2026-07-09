@@ -1,13 +1,15 @@
-"""Information-gain retrieval (workstream F6): score substrate items by how much they would actually move a
-belief, not by how textually similar they are to the query.
+"""Information-gain retrieval over substrate items.
+
+Score substrate items by how much they would actually move a belief, not by how
+textually similar they are to the query.
 
 :func:`~mixle.substrate.retrieve.retrieve` ranks by cosine/lexical similarity -- a sound default, but many
 similar-looking items can carry the *same* evidence (redundant), while a single differently-worded item can
 be decisive. :func:`eig_retrieve` instead scores each candidate by the entropy it would actually remove from a
 given :class:`~mixle.inference.belief.BeliefState` if assimilated, and greedily picks the highest-gain item
 each round, updating the running belief before scoring what remains -- so a second item redundant with the
-first correctly scores near zero the next round. The same greedy EIG scorer is the one workstream C5
-(experiment-design-as-planning) reuses; it is written once, here.
+first correctly scores near zero the next round. Experiment-design workflows can reuse the same greedy EIG
+scorer; it is written once, here.
 """
 
 from __future__ import annotations

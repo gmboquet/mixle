@@ -1,9 +1,4 @@
-"""Create, estimate, and sample from a multivariate Student's t distribution.
-
-Defines the MultivariateStudentTDistribution, MultivariateStudentTSampler,
-MultivariateStudentTAccumulatorFactory, MultivariateStudentTAccumulator,
-MultivariateStudentTEstimator, and the MultivariateStudentTDataEncoder classes for use with
-mixle.
+"""Multivariate Student's t distributions over real-valued vectors.
 
 Data type: np.ndarray[float] (a length-p real vector).
 
@@ -60,12 +55,14 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated multivariate Student-t kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for multivariate Student-t distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -111,26 +108,25 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """MultivariateStudentTDistribution object.
+        """Create a multivariate Student-t distribution.
 
         Args:
-            dof (float): Degrees of freedom nu > 0.
-            loc (Union[Sequence[float], np.ndarray]): Location vector mu of length p.
-            shape (Union[Sequence[Sequence[float]], np.ndarray]): p-by-p symmetric positive-definite
-                scale matrix Sigma.
-            name (Optional[str]): Optional name for object instance.
-            keys (Optional[str]): Optional key for merging sufficient statistics.
+            dof: Degrees of freedom, which must be positive and finite.
+            loc: Location vector of length ``p``.
+            shape: ``p`` by ``p`` symmetric positive-definite scale matrix.
+            name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
 
         Attributes:
-            dof (float): Degrees of freedom nu.
-            mu (np.ndarray): Location vector of length p.
-            shape (np.ndarray): Scale matrix Sigma (p-by-p).
-            inv_shape (np.ndarray): Cached Sigma^{-1}.
-            log_det (float): Cached log|Sigma|.
-            log_const (float): Cached log normalizing constant.
-            dim (int): Dimension p.
-            name (Optional[str]): Optional name for object instance.
-            keys (Optional[str]): Optional key for merging sufficient statistics.
+            dof: Degrees of freedom.
+            mu: Location vector.
+            shape: Scale matrix.
+            inv_shape: Cached inverse scale matrix.
+            log_det: Cached scale log-determinant.
+            log_const: Cached log normalizer.
+            dim: Observation dimension.
+            name: Optional diagnostic name.
+            keys: Optional sufficient-statistic key.
 
         """
         if dof <= 0.0 or not np.isfinite(dof):
@@ -156,7 +152,7 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of MultivariateStudentTDistribution object."""
+        """Return a readable distribution summary."""
         return "MultivariateStudentTDistribution(%s, %s, %s, name=%s, keys=%s)" % (
             repr(self.dof),
             repr([float(v) for v in self.mu]),
@@ -339,6 +335,7 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
     def update(
         self, x: Sequence[float] | np.ndarray, weight: float, estimate: MultivariateStudentTDistribution | None
     ) -> None:
+        """Accumulate one EM reweighted vector observation."""
         xx = np.asarray(x, dtype=float)
         self._ensure_dim(len(xx))
         u = self._weight_for(xx - estimate.mu, estimate) if estimate is not None else 1.0
@@ -349,9 +346,11 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum_uxx += wu * np.outer(xx, xx)
 
     def initialize(self, x: Sequence[float] | np.ndarray, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one vector observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: MultivariateStudentTDistribution | None) -> None:
+        """Accumulate EM reweighted statistics from encoded vectors."""
         self._ensure_dim(x.shape[1])
         if estimate is None:
             u = np.ones(x.shape[0])
@@ -366,9 +365,11 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum_uxx += (x * wu[:, None]).T @ x
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded vectors."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, np.ndarray, np.ndarray]) -> "MultivariateStudentTAccumulator":
+        """Merge another multivariate Student-t sufficient-statistic tuple."""
         count, sum_u, sum_ux, sum_uxx = suff_stat
         if sum_ux is not None:
             self._ensure_dim(len(sum_ux))
@@ -379,16 +380,19 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, float, np.ndarray | None, np.ndarray | None]:
+        """Return count, latent-weight total, weighted sum, and weighted second moment."""
         return self.count, self.sum_u, self.sum_ux, self.sum_uxx
 
     def from_value(
         self, x: tuple[float, float, np.ndarray | None, np.ndarray | None]
     ) -> "MultivariateStudentTAccumulator":
+        """Replace accumulator contents from sufficient statistics."""
         self.count, self.sum_u, self.sum_ux, self.sum_uxx = x
         self.dim = None if x[2] is None else len(x[2])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -396,10 +400,12 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "MultivariateStudentTDataEncoder":
+        """Return the encoder used by this accumulator."""
         return MultivariateStudentTDataEncoder()
 
 
@@ -412,6 +418,7 @@ class MultivariateStudentTAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> MultivariateStudentTAccumulator:
+        """Create a fresh multivariate Student-t accumulator."""
         return MultivariateStudentTAccumulator(dof=self.dof, dim=self.dim, keys=self.keys)
 
 
@@ -435,11 +442,13 @@ class MultivariateStudentTEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> MultivariateStudentTAccumulatorFactory:
+        """Return an accumulator factory for fixed-dof Student-t EM statistics."""
         return MultivariateStudentTAccumulatorFactory(dof=self.dof, dim=self.dim, keys=self.keys)
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[float, float, np.ndarray | None, np.ndarray | None]
     ) -> MultivariateStudentTDistribution:
+        """Estimate location and scale from EM reweighted statistics."""
         count, sum_u, sum_ux, sum_uxx = suff_stat
         if sum_ux is None or count <= 0.0 or sum_u <= 0.0:
             p = self.dim if self.dim is not None else 1
@@ -464,6 +473,7 @@ class MultivariateStudentTDataEncoder(DataSequenceEncoder):
         return isinstance(other, MultivariateStudentTDataEncoder)
 
     def seq_encode(self, x: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
+        """Encode observations as an ``(n, p)`` floating-point matrix."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.ndim != 2:
             rv = rv.reshape((len(x), -1))

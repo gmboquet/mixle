@@ -1,27 +1,21 @@
-"""Create, estimate, and sample from an integer PLSI model.
+"""Integer probabilistic latent semantic indexing models.
 
-Defines the IntegerProbabilisticLatentSemanticIndexingDistribution, IntegerProbabilisticLatentSemanticIndexingSampler, IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory, IntegerProbabilisticLatentSemanticIndexingAccumulator,
-IntegerProbabilisticLatentSemanticIndexingEstimator, and the IntegerProbabilisticLatentSemanticIndexingDataEncoder classes for use with mixle.
+An observation is a document id paired with a sparse integer bag of word/value
+counts:
 
-Consider an Integer PLSI model for a corpus of documents with S states, V word values, and D authors (doc_ids).
+    ``(doc_id, [(value_id, count), ...])``
 
-Let x (Tuple[int, Sequence[Tuple[int, float]]]) be an observation from a PLSI model, consisting of
+For ``S`` latent topics, ``V`` word values, and ``D`` document ids, the model
+uses:
 
-    x = (d, [(v_0, c_0), (v_1, c_1), ..., (v_{k-1}, c_{k-1})]),
+* ``state_word_mat[v, s] = p(value=v | topic=s)``;
+* ``doc_state_mat[d, s] = p(topic=s | document=d)``;
+* ``doc_vec[d] = p(document=d)``; and
+* an optional length model for total bag count.
 
-where the 'd' is some author (doc_id) in the corpus and each tuple (v_i, c_i) corresponds to a value-count couple
-for some value 'v_i' in dictionary of words used in the corpus. Let w denote the distinct words {v_i} in the document
-represented by x. The density for the PLSI model is given by
-
-    p_mat(w, d) = P_len(nn)*p_mat(d) prod_{j=0}^{k-1} ( sum_{s=0}^{S-1} p_mat(v_j | s )p_mat(s | d) )^(c_j),
-
-where P_len(nn) is the density of the length distribution for 'nn' representing the total number of words in
-the document (i.e. nn = sum_i c_i), p_mat(d) is the probability of observing a document from author 'd', p_mat(v_j|s) is the
-probability of observing word (integer-valued) given word-topic 's', and p_mat(s|d) are the weights for the word-topic for
-author 'd'.
-
-Note: To use this distribution, convert your words and authors of the corpus to unique integer keys.
-
+The log-density combines the document prior, the optional length density, and
+the topic-marginalized word probabilities for each sparse count entry. Caller
+data should use stable integer ids for documents and word values.
 """
 
 import itertools
@@ -71,33 +65,28 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         name: str | None = None,
     ) -> None:
-        """IntegerProbabilisticLatentSemanticIndexingDistribution object defining an Integer PLSI distribution.
+        """Create an integer PLSI distribution.
 
         Args:
-            state_word_mat (Union[List[List[float]], np.ndarray]): Array-like of floats that contains a
-                p_mat(word | states) for each word in corpus of documents. Cols should sum to 1.0
-            doc_state_mat (Union[List[List[float]], np.ndarray]): Array-like of floats that contains a p_mat(doc | states)
-                for each document id in corpus of documents. Rows should sum to 1.0
-            doc_vec (Union[List[float], np.ndarray]): Array-like containing prior for documents p_mat(d) for each
-                document id in corpus of documents. Should sum to 1.0
-            len_dist (Optional[SequenceEncodableProbabilityDistribution]): Optional distribution for the length of
-                each document (i.e. word count in an observed document). Should have support on positive integers.
-            name (Optional[str]): Set name to object instance.
+            state_word_mat: Word/value probabilities by latent topic. Columns
+                correspond to topics and should each sum to one.
+            doc_state_mat: Topic probabilities by document id. Rows correspond
+                to documents and should each sum to one.
+            doc_vec: Document prior probabilities. Entries should sum to one.
+            len_dist: Optional distribution for total bag length. ``None`` uses
+                the neutral null distribution.
+            name: Optional diagnostic name.
 
         Attributes:
-            prob_mat (np.ndarray): 2-d numpy array of floats containing p_mat(word | states) in each row. Dimension is
-                given by number of words times number of states.
-            state_mat (np.ndarray): 2-d numpy array of floats containing p_mat(doc | states) in each row. Dimension is
-                given by number of documents times number of states.
-            doc_vec (np.ndarray): 1-d numpy array of floats containing p_mat(doc=d) for each entry. Length is equal to
-                number of document ids.
-            log_doc_vec (np.ndarray): 1-d numpy array of the log(p_mat(doc=d)).
-            num_vals (int): Number of total words in corpus. (Number of rows in prob_mat).
-            num_states (int): Number of word topics (mixture components). (Number of columns in prob_mat/state_mat).
-            num_docs (int): Total number of document ids in corpus. (Number of rows in state_mat).
-            name (Optional[str]): Optional name for object instance.
-            len_dist (SequenceEncodableProbabilityDistribution): Distribution object for the number of words per
-                document. Defaults to the NullDistribution if None is passed.
+            prob_mat: Word/value probabilities by topic.
+            state_mat: Topic probabilities by document id.
+            doc_vec: Document prior probabilities.
+            log_doc_vec: Log of ``doc_vec``.
+            num_vals: Number of word/value ids.
+            num_states: Number of latent topics.
+            num_docs: Number of document ids.
+            name: Optional diagnostic name.
+            len_dist: Distribution for total bag length, or a null distribution.
 
         """
         self.prob_mat = np.asarray(state_word_mat, dtype=np.float64)
@@ -120,6 +109,7 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
         )
 
     def compute_declaration(self):
+        """Return the symbolic distribution declaration for code generation and PPL introspection."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ParameterSpec,
@@ -150,7 +140,7 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
         )
 
     def __str__(self) -> str:
-        """Return string representation of object instance."""
+        """Return a readable distribution summary."""
         s1 = ",".join(["[" + ",".join(map(str, self.prob_mat[i, :])) + "]" for i in range(len(self.prob_mat))])
         s2 = ",".join(["[" + ",".join(map(str, self.state_mat[i, :])) + "]" for i in range(len(self.state_mat))])
         s3 = ",".join(map(str, self.doc_vec))
@@ -348,17 +338,17 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
         return IntegerProbabilisticLatentSemanticIndexingEnumerator(self)
 
     def sampler(self, seed: int | None = None) -> "IntegerProbabilisticLatentSemanticIndexingSampler":
-        """Return an IntegerProbabilisticLatentSemanticIndexingSampler object from IntegerProbabilisticLatentSemanticIndexingDistribution instance."""
+        """Return a sampler for iid integer PLSI observations."""
         return IntegerProbabilisticLatentSemanticIndexingSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "IntegerProbabilisticLatentSemanticIndexingEstimator":
-        """Create an IntegerProbabilisticLatentSemanticIndexingEstimator object from IntegerProbabilisticLatentSemanticIndexingDistribution instance.
+        """Return an estimator initialized from this distribution's dimensions.
 
         Args:
-            pseudo_count (Optional[float]): Re-weight object instance sufficient statistics when passed to estimator.
+            pseudo_count: Optional smoothing count for topic, word, and document counts.
 
         Returns:
-            IntegerProbabilisticLatentSemanticIndexingEstimator object.
+            A configured integer PLSI estimator.
 
         """
         if pseudo_count is None:
@@ -382,7 +372,7 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
             )
 
     def dist_to_encoder(self) -> "IntegerProbabilisticLatentSemanticIndexingDataEncoder":
-        """Returns IntegerProbabilisticLatentSemanticIndexingDataEncoder object."""
+        """Return an encoder for integer PLSI observations."""
         return IntegerProbabilisticLatentSemanticIndexingDataEncoder(len_encoder=self.len_dist.dist_to_encoder())
 
 
@@ -432,6 +422,8 @@ def bag_stream(element_stream, len_dist, combine):
 
 
 class IntegerProbabilisticLatentSemanticIndexingEnumerator(DistributionEnumerator):
+    """Best-first enumerator for document-labelled integer PLSI bag observations."""
+
     def __init__(self, dist: IntegerProbabilisticLatentSemanticIndexingDistribution) -> None:
         """Best-first enumeration of ``(doc_id, bag)`` over the document-labelled multinomial mixture.
 
@@ -460,17 +452,19 @@ class IntegerProbabilisticLatentSemanticIndexingEnumerator(DistributionEnumerato
 
 
 class IntegerProbabilisticLatentSemanticIndexingSampler(DistributionSampler):
+    """Sampler for integer PLSI document ids, word-count bags, and document lengths."""
+
     def __init__(self, dist: IntegerProbabilisticLatentSemanticIndexingDistribution, seed: int | None = None) -> None:
-        """IntegerProbabilisticLatentSemanticIndexingSampler object for sampling from IntegerProbabilisticLatentSemanticIndexingDistribution.
+        """Create a sampler for an integer PLSI distribution.
 
         Args:
-            dist (IntegerProbabilisticLatentSemanticIndexingDistribution): IntegerProbabilisticLatentSemanticIndexingDistribution instance to sampler from.
-            seed (Optional[int]): Set seed for random number generator used in sampling.
+            dist: Distribution to sample from.
+            seed: Optional random seed.
 
         Attributes:
-            rng (RandomState): RandomState object with seed set if passed.
-            dist (IntegerProbabilisticLatentSemanticIndexingDistribution): IntegerProbabilisticLatentSemanticIndexingDistribution instance to sampler from.
-            size_rng (RandomState): RandomState object for sampling the length of documents.
+            rng: Random state used for document and topic draws.
+            dist: Distribution to sample from.
+            size_rng: Sampler for document lengths.
 
         """
         self.rng = np.random.RandomState(seed)
@@ -505,6 +499,8 @@ class IntegerProbabilisticLatentSemanticIndexingSampler(DistributionSampler):
 
 
 class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableStatisticAccumulator):
+    """EM sufficient-statistic accumulator for integer PLSI word, state, document, and length terms."""
+
     def __init__(
         self,
         num_vals: int,
@@ -514,37 +510,30 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
     ) -> None:
-        """IntegerProbabilisticLatentSemanticIndexingAccumulator object for aggregating sufficient statistics from observed data.
+        """Create an accumulator for integer PLSI sufficient statistics.
 
-        Note: Keys in order, words/values, states, documents.
+        Merge keys are ordered as ``(word_key, state_key, document_key)``.
 
         Args:
-            num_vals (int): Number of words in the corpus.
-            num_states (int): Number of word-topics.
-            num_docs (int): Number of authors (doc_ids) in the corpus.
-            len_acc (Optional[SequenceEncodableStatisticAccumulator]): Optional accumulator for the length of documents.
-                Should have support on non-negative integer values.
-            name (Optional[str]): Optional name for object instance.
-            keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Optional keys for words, states, and
-                authors (doc_ids).
+            num_vals: Number of word/value ids.
+            num_states: Number of latent topics.
+            num_docs: Number of document ids.
+            len_acc: Optional accumulator for total bag length.
+            name: Optional diagnostic name.
+            keys: Optional merge keys for word, state, and document counts.
 
         Attributes:
-            num_vals (int): Number of words in the corpus.
-            num_states (int): Number of word-topics or mixture components.
-            num_docs (int): Number of authors (doc_ids) in the corpus.
-            word_count (ndarray): Numpy array of shape num_states by num_vals for aggregating state/word counts.
-            comp_count (ndarray): Numpy array (num_docs by num_states) for aggregating doc/state counts.
-            doc_count (ndarray): Numpy array for aggregating counts of authors (prior on doc_ids).
-            name (Optional[str]): Name of object instance.
-            wc_key (Optional[str]): Key for merging 'word_count' with objects containing matching keys.
-            sc_key (Optional[str]): Key for merging 'comp_count' with objects containing matching keys.
-            dc_key (Optional[str]): Key for merging 'doc_count' with objects containing matching keys.
-            len_acc (SequenceEncodableStatisticAccumulator): Accumulator object for the lengths of documents (total
-                word counts). Defaults to the NullAccumulator if None is passed.
-
-            _init_rng (bool): True if RandomState objects for accumulator have been initialized.
-            _acc_rng (Optional[RandomState]): RandomState object for initializing the PLSI model.
-            _len_rng (Optional[RandomState]): RandomState object for initializing the length accumulator.
+            num_vals: Number of word/value ids.
+            num_states: Number of latent topics.
+            num_docs: Number of document ids.
+            word_count: Topic-by-word weighted counts.
+            comp_count: Document-by-topic weighted counts.
+            doc_count: Weighted document counts.
+            name: Optional diagnostic name.
+            wc_key: Merge key for ``word_count``.
+            sc_key: Merge key for ``comp_count``.
+            dc_key: Merge key for ``doc_count``.
+            len_acc: Accumulator for total bag length.
 
         """
         self.num_vals = num_vals
@@ -575,15 +564,12 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         weight: float,
         estimate: IntegerProbabilisticLatentSemanticIndexingDistribution,
     ) -> None:
-        """Update the sufficient statistics of object instance for a single observation x.
+        """Update sufficient statistics from one weighted sparse-bag observation.
 
         Args:
-            x (Tuple[int, Sequence[Tuple[int, float]]]): An observation from integer PLSI model.
-            weight (float): Observation weight.
-            estimate (IntegerProbabilisticLatentSemanticIndexingDistribution): Prior estimate of IntegerProbabilisticLatentSemanticIndexingDistribution object.
-
-        Returns:
-            None.
+            x: Integer PLSI observation as ``(doc_id, [(value_id, count), ...])``.
+            weight: Observation weight.
+            estimate: Previous integer PLSI estimate.
 
         """
         d_id = x[0]
@@ -599,7 +585,7 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         self.len_acc.update(np.sum(xc), weight, estimate.len_dist)
 
     def _rng_initialize(self, rng: RandomState) -> None:
-        """Initialize RandomState objects for accumulators from rng.
+        """Initialize accumulator random states from ``rng``.
 
         This function exists to ensure consistency between initialize() and seq_initialize() functions.
 
@@ -616,15 +602,12 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         self._init_rng = True
 
     def initialize(self, x: tuple[int, Sequence[tuple[int, float]]], weight: float, rng: RandomState) -> None:
-        """Initialize sufficient statistics of object instance with observation x.
+        """Initialize sufficient statistics from one weighted sparse-bag observation.
 
         Args:
-            x (Tuple[int, Sequence[Tuple[int, float]]]): An observation from integer PLSI model.
-            weight (float): Observation weight.
-            rng (RandomState): RandomState object for seeded initialization.
-
-        Returns:
-            None.
+            x: Integer PLSI observation as ``(doc_id, [(value_id, count), ...])``.
+            weight: Observation weight.
+            rng: Random state used for seeded initialization.
 
         """
         if not self._init_rng:
@@ -787,19 +770,16 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
     def combine(
         self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]
     ) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
-        """Combine the sufficient statistics in arg 'suff_stat' with object instance.
+        """Merge aggregated integer PLSI sufficient statistics into this accumulator.
 
-        Arg 'suff_stat' is Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]] containing:
-            suff_stat[0] (np.ndarray): State/word counts with matching dimension of num_states by num_vals.
-            suff_stat[1] (np.ndarray): Doc/state counts with matching dimension of num_docs by num_states.
-            suff_stat[2] (np.ndarray): Author counts with length (num_docs).
-            suff_stat[3] (Optional[SS1]): Sufficient statistics for the length of document distribution having type SS1.
+        The tuple is interpreted as ``(word_count, comp_count, doc_count,
+        length_stats)``.
 
         Args:
-            suff_stat: See above for details.
+            suff_stat: Aggregated integer PLSI sufficient statistics.
 
         Returns:
-            IntegerProbabilisticLatentSemanticIndexingAccumulator object.
+            This accumulator.
 
         """
         self.word_count += suff_stat[0]
@@ -811,33 +791,19 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, Any | None]:
-        """Returns sufficient statistics of IntegerProbabilisticLatentSemanticIndexingAccumulator object instance.
-
-        Returned value 'suff_stat' is Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]] containing:
-            suff_stat[0] (np.ndarray): State/word counts with matching dimension of num_states by num_vals.
-            suff_stat[1] (np.ndarray): Doc/state counts with matching dimension of num_docs by num_states.
-            suff_stat[2] (np.ndarray): Author counts with length (num_docs).
-            suff_stat[3] (Optional[SS1]): Sufficient statistics for the length of document distribution having type SS1.
-
-        """
+        """Return sufficient statistics as ``(word_count, comp_count, doc_count, length_stats)``."""
         return self.word_count, self.comp_count, self.doc_count, self.len_acc.value()
 
     def from_value(
         self, x: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]
     ) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
-        """Set the sufficient statistics of object instance to arg 'x' values.
-
-        Arg 'x' is Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[SS1]] containing:
-            x[0] (np.ndarray): State/word counts with matching dimension of num_states by num_vals.
-            x[1] (np.ndarray): Doc/state counts with matching dimension of num_docs by num_states.
-            x[2] (np.ndarray): Author counts with length (num_docs).
-            x[3] (Optional[SS1]): Sufficient statistics for the length of document distribution having type SS1.
+        """Replace this accumulator's sufficient statistics.
 
         Args:
-            x: Aggregated sufficient statistics. See above for details.
+            x: Aggregated sufficient statistics in ``value`` format.
 
         Returns:
-            IntegerProbabilisticLatentSemanticIndexingAccumulator object.
+            This accumulator.
 
         """
         self.word_count = x[0]
@@ -856,19 +822,16 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge the sufficient statistics of object instance with matching keys.
+        """Merge this accumulator into ``stats_dict`` under configured keys.
 
         If wc_key is set, merge the state/word count variable.
         If sc_key is set, merge the doc/state count variable.
         If dc_key is set, merge the author count variable.
 
-        Call key_merge() of accumulator for the length. Note nothing is done for this if default NullAccumulator is set.
+        The length accumulator receives the same merge request.
 
         Args:
-            stats_dict (Dict[str, Any]): Maps keys to sufficient statistics.
-
-        Returns:
-            None.
+            stats_dict: Mapping from merge keys to sufficient statistics.
 
         """
         if self.wc_key is not None:
@@ -892,20 +855,16 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         self.len_acc.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Set the sufficient statistics of object instance to matching key values in arg 'stats_dict'.
+        """Replace sufficient statistics from matching keys in ``stats_dict``.
 
         If wc_key is set, set the state/word count variable to matching key in stats_dict.
         If sc_key is set, set the doc/state count variable to matching key in stats_dict.
         If dc_key is set, set the author count variable to matching key in stats_dict.
 
-        Call key_replace() of accumulator for the length. Note nothing is done for this if default NullAccumulator is
-        set.
+        The length accumulator receives the same replace request.
 
         Args:
-            stats_dict (Dict[str, Any]): Maps keys to sufficient statistics.
-
-        Returns:
-            None.
+            stats_dict: Mapping from merge keys to sufficient statistics.
 
         """
         if self.wc_key is not None:
@@ -921,12 +880,14 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         self.len_acc.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "IntegerProbabilisticLatentSemanticIndexingDataEncoder":
-        """Return an IntegerProbabilisticLatentSemanticIndexingDataEncoder object."""
+        """Return an encoder compatible with integer PLSI observations."""
         len_encoder = self.len_acc.acc_to_encoder()
         return IntegerProbabilisticLatentSemanticIndexingDataEncoder(len_encoder=len_encoder)
 
 
 class IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for integer PLSI EM sufficient-statistic accumulators."""
+
     def __init__(
         self,
         num_vals: int,
@@ -936,26 +897,23 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory(StatisticAccu
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         name: str | None = None,
     ) -> None:
-        """IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory object for creating IntegerProbabilisticLatentSemanticIndexingAccumulator objects.
+        """Create an accumulator factory.
 
         Args:
-            num_vals (int): Number of words/values in PLSI.
-            num_states (int): Number of states in PLSI.
-            num_docs (int): Number of doc_ids (authors) in PLSI.
-            len_factory (Optional[StatisticsAccumulatorFactory]): Accumulator factory object for length distribution.
-            keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Set keys for merging
-                word, state, and doc sufficient statistics with matching keys.
-            name (Optional[str]): Set name for object.
+            num_vals: Number of word/value ids.
+            num_states: Number of latent topics.
+            num_docs: Number of document ids.
+            len_factory: Optional accumulator factory for total bag length.
+            keys: Optional merge keys for word, state, and document counts.
+            name: Optional diagnostic name.
 
         Attributes:
-            num_vals (int): Number of words/values in PLSI.
-            num_states (int): Number of states in PLSI.
-            num_docs (int): Number of doc_ids (authors) in PLSI.
-            len_factory (StatisticsAccumulatorFactory): Accumulator factory object for length distribution. Defaults
-                to the NullAccumulatorFactory(). Should have support on non-negative integers.
-            keys (Tuple[Optional[str], Optional[str], Optional[str]]): Set keys for merging word, state, and doc
-                sufficient statistics with matching keys.
-            name (Optional[str]): Set name for object.
+            num_vals: Number of word/value ids.
+            num_states: Number of latent topics.
+            num_docs: Number of document ids.
+            len_factory: Accumulator factory for total bag length.
+            keys: Optional sufficient-statistic merge keys.
+            name: Optional diagnostic name.
 
         """
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
@@ -966,7 +924,7 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory(StatisticAccu
         self.name = name
 
     def make(self) -> "IntegerProbabilisticLatentSemanticIndexingAccumulator":
-        """Returns IntegerProbabilisticLatentSemanticIndexingAccumulator object."""
+        """Return a fresh integer PLSI accumulator."""
         return IntegerProbabilisticLatentSemanticIndexingAccumulator(
             self.num_vals,
             self.num_states,
@@ -978,6 +936,8 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory(StatisticAccu
 
 
 class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
+    """Estimator for integer PLSI word/state/document probabilities and the optional length model."""
+
     def __init__(
         self,
         num_vals: int,
@@ -993,37 +953,28 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
     ) -> None:
-        """IntegerProbabilisticLatentSemanticIndexingEstimator for estimating integer PLSI distributions from aggregated sufficient statistics.
+        """Create an estimator for integer PLSI sufficient statistics.
 
         Args:
-            num_vals (int): Number of words/values in PLSI.
-            num_states (int): Number of states in PLSI.
-            num_docs (int): Number of doc_ids (authors) in PLSI.
-            len_estimator (Optional[ParameterEstimator]): Optional ParameterEstimator object for the length of
-                documents. Should have support on non-negative integers if not None.
-            pseudo_count (Optional[Tuple[Optional[float], Optional[float], Optional[float]]]): Optional re-weight
-                sufficient statistics in 'estimate()' function.
-            suff_stat (Optional[Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]]): Optional
-                Tuple of numpy arrays containing 'word_counts' (num_states by num_vals), 'state_counts' (num_docs by
-                num_states), and doc_counts (length num_docs).
-            name (Optional[str]): Set name to object instance.
-            keys (Tuple[Optional[str], Optional[str], Optional[str]]): Set keys for merging word, state, and doc
-                sufficient statistics with matching keys.
+            num_vals: Number of word/value ids.
+            num_states: Number of latent topics.
+            num_docs: Number of document ids.
+            len_estimator: Optional estimator for total bag length.
+            pseudo_count: Optional smoothing counts for word, state, and
+                document probabilities.
+            suff_stat: Optional prior word, state, and document sufficient statistics.
+            name: Optional diagnostic name.
+            keys: Optional merge keys for word, state, and document counts.
 
         Attributes:
-            num_vals (int): Number of words/values in PLSI.
-            num_states (int): Number of states in PLSI.
-            num_docs (int): Number of doc_ids (authors) in PLSI.
-            len_estimator (ParameterEstimator): Optional ParameterEstimator object for the length of documents. Should
-                have support on non-negative integers. Defaults to NullEstimator() if None is passed.
-            pseudo_count (Tuple[Optional[float], Optional[float], Optional[float]]): Optional re-weight sufficient
-                statistics in 'estimate()' function. Defaults to (None, None, None) if None is passed.
-            suff_stat (Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]): Optional
-                Tuple of numpy arrays containing 'word_counts' (num_states by num_vals), 'state_counts' (num_docs by
-                num_states), and doc_counts (length num_docs). Defaults to (None, None, None) if None is passed.
-            name (Optional[str]): Name of object instance.
-            keys (Tuple[Optional[str], Optional[str], Optional[str]]): Keys for merging word, state, and doc
-                sufficient statistics with matching keys.
+            num_vals: Number of word/value ids.
+            num_states: Number of latent topics.
+            num_docs: Number of document ids.
+            len_estimator: Estimator for total bag length.
+            pseudo_count: Smoothing counts.
+            suff_stat: Optional prior sufficient statistics.
+            name: Optional diagnostic name.
+            keys: Optional sufficient-statistic merge keys.
         """
         self.suff_stat = suff_stat if suff_stat is not None else (None, None, None)
         self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None, None)
@@ -1035,7 +986,7 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self) -> "IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory":
-        """Returns IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory object."""
+        """Return an accumulator factory matching this estimator."""
         len_est = self.len_estimator.accumulator_factory()
         return IntegerProbabilisticLatentSemanticIndexingAccumulatorFactory(
             self.num_vals, self.num_states, self.num_docs, len_est, self.keys
@@ -1044,14 +995,14 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, SS1 | None]
     ) -> "IntegerProbabilisticLatentSemanticIndexingDistribution":
-        """Estimate IntegerProbabilisticLatentSemanticIndexingDistribution from aggregated sufficient statistics in arg 'suff_stat'.
+        """Estimate an integer PLSI distribution from aggregated sufficient statistics.
 
         Args:
-            nobs (Optional[float]): Optional number of observations used to accumulate 'suff_stat'.
-            suff_stat: See above for details.
+            nobs: Optional observation count, accepted for the estimator interface.
+            suff_stat: Aggregated word, topic, document, and length statistics.
 
         Returns:
-            IntegerProbabilisticLatentSemanticIndexingDistribution object.
+            A fitted integer PLSI distribution.
 
         """
         word_count, comp_count, doc_count, len_suff_stats = suff_stat
@@ -1113,32 +1064,32 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
 
 
 class IntegerProbabilisticLatentSemanticIndexingDataEncoder(DataSequenceEncoder):
+    """Encode integer PLSI observations into flattened sparse bag arrays and length features."""
+
     def __init__(self, len_encoder: DataSequenceEncoder | None = NullDataEncoder()) -> None:
-        """IntegerProbabilisticLatentSemanticIndexingDataEncoder object for encoding sequences of iid observations from a PLSI model.
+        """Create an encoder for integer PLSI observations.
 
         Args:
-            len_encoder (Optional[DataSequenceEncoder]): Optional DataSequenceEncoder for the total number of words
-                in each document.
+            len_encoder: Optional encoder for total bag length.
 
         Attributes:
-            len_encoder (DataSequenceEncoder): DataSequenceEncoder for the total number of words in each document,
-                defaulting to NullDataEncoder if None is passed.
+            len_encoder: Encoder for total bag length.
 
         """
         self.len_encoder = len_encoder
 
     def __str__(self) -> str:
-        """Returns a string representation of object instance."""
+        """Return a readable encoder summary."""
         return "IntegerProbabilisticLatentSemanticIndexingDataEncoder(len_dist=" + str(self.len_encoder) + ")"
 
     def __eq__(self, other: object) -> bool:
-        """Check if object is equivalent to instance of IntegerProbabilisticLatentSemanticIndexingDataEncoder.
+        """Return whether ``other`` uses the same length encoder.
 
         Args:
-            other (object): Other object to compare to instance.
+            other: Object to compare.
 
         Returns:
-            True if object is an instance of IntegerProbabilisticLatentSemanticIndexingDataEncoder with matching 'len_encoder' attribute.
+            ``True`` when both encoders use equivalent length encoders.
 
         """
         if isinstance(other, IntegerProbabilisticLatentSemanticIndexingDataEncoder):
@@ -1149,14 +1100,13 @@ class IntegerProbabilisticLatentSemanticIndexingDataEncoder(DataSequenceEncoder)
     def seq_encode(
         self, x: Sequence[tuple[int, Sequence[tuple[int, float]]]]
     ) -> tuple[Any, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-        """Encode a sequence of iid PLSI observations for use with vectorized functions.
+        """Encode iid PLSI observations for vectorized ``seq_*`` methods.
 
         Input arg 'x' is a sequence of iid PLSI observations having form
 
         x = [ (doc_id, [(value, count),...]),... ].
 
-        The return value is a Tuple length 2. The first component contains data type Optional[T1] corresponding to the
-        sequence encoding of the lengths. The second component is a Tuple of length 6 containing
+        The return value has two entries. The first contains the optional length encoding. The second contains:
             xv (ndarray[int]): Numpy array of flattened word values.
             xc (ndarray[float]): Numpy array of flattened counts for word values above.
             xd (ndarray[int]): Document d_id for each word-count pair in the arrays above.
@@ -1203,6 +1153,7 @@ class IntegerProbabilisticLatentSemanticIndexingDataEncoder(DataSequenceEncoder)
     cache=True,
 )
 def fast_seq_log_density(xv, xc, xd, xi, xm, wmat, smat, dvec, out):
+    """Numba kernel for accumulating encoded integer PLSI log-density contributions."""
     n = len(xv)
     m = len(xm)
     k = smat.shape[1]
@@ -1223,6 +1174,7 @@ def fast_seq_log_density(xv, xc, xd, xi, xm, wmat, smat, dvec, out):
     "void(int32[:], float64[:], int32[:], int32[:], int32[:], float64[:,:], float64[:,:])", fastmath=True, cache=True
 )
 def fast_seq_component_log_density(xv, xc, xd, xi, xm, wmat, out):
+    """Numba kernel for accumulating per-state component log-density contributions."""
     n = len(xv)
     k = wmat.shape[1]
     for i in range(n):
@@ -1240,6 +1192,7 @@ def fast_seq_component_log_density(xv, xc, xd, xi, xm, wmat, out):
     cache=True,
 )
 def fast_seq_update(xv, xc, xd, xi, xm, weights, wmat, smat, wcnt, scnt, dcnt):
+    """Numba kernel for the integer PLSI EM expected-count update."""
     n = len(xv)
     m = len(xm)
     k = smat.shape[1]
@@ -1265,6 +1218,7 @@ def fast_seq_update(xv, xc, xd, xi, xm, weights, wmat, smat, wcnt, scnt, dcnt):
 
 @numba.njit("float64[:](float64[:,:], int32[:], float64[:,:], int32[:], float64[:])", cache=True)
 def index_dot(x, xi, y, yi, out):
+    """Return row-wise dot products ``x[xi[i]] @ y[yi[i]]`` into ``out``."""
     n = x.shape[1]
     for i in range(len(xi)):
         i1 = xi[i]
@@ -1276,6 +1230,7 @@ def index_dot(x, xi, y, yi, out):
 
 @numba.njit("float64[:](int32[:], float64[:], float64[:])", cache=True)
 def bincount(x, w, out):
+    """Accumulate weighted one-dimensional group sums into ``out``."""
     for i in range(len(x)):
         out[x[i]] += w[i]
     return out
@@ -1283,6 +1238,7 @@ def bincount(x, w, out):
 
 @numba.njit("float64[:,:](int32[:], float64[:,:], float64[:,:])", cache=True)
 def vec_bincount1(x, w, out):
+    """Accumulate matrix-row weights into groups indexed by ``x``."""
     n = w.shape[1]
     for i in range(len(x)):
         for j in range(n):
@@ -1292,6 +1248,7 @@ def vec_bincount1(x, w, out):
 
 @numba.njit("float64[:,:](int32[:], float64[:,:], int32[:], float64[:,:])", cache=True)
 def vec_bincount2(x, w, y, out):
+    """Accumulate rows ``w[y[i], :]`` into groups indexed by ``x``."""
     for i in range(len(x)):
         out[x[i], :] += w[y[i], :]
     return out

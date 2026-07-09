@@ -1,10 +1,10 @@
-"""Search a student recipe with ``mixle.doe`` -- find a small model that matches the teacher for the least compute.
+"""Search a student recipe with ``mixle.doe`` -- find a compact model that matches the teacher for the least compute.
 
 Distillation has knobs (feature width, hidden size, epochs, learning rate) that trade fidelity against training
 cost. Rather than grid-search them, :func:`tune_recipe` runs GP Bayesian optimization (``mixle.doe.minimize``)
 over the recipe space, distilling and scoring a handful of candidates and homing in on the best. The objective
 is held-out **agreement** with the teacher, optionally minus a compute penalty (``cost_weight``) so the search
-prefers the *cheapest* recipe that still matches -- the "minimize train time" pillar made concrete. Returns the
+prefers the lowest-cost recipe that still matches. Returns the
 re-distilled winner as a callable :class:`~mixle.task.model.TaskModel` plus the full search history.
 
 The recipe space is a few interpretable axes with sensible defaults; override ``space`` to widen or pin them.
@@ -36,12 +36,14 @@ class RecipeSpace:
     hidden_range: tuple[int, int] = (16, 128)
     epochs_range: tuple[int, int] = (50, 400)
     log10_lr_range: tuple[float, float] = (-3.0, -1.0)
-    n: int = 4  # n-gram order is fixed by default (cheap to pin; widen via a custom space if needed)
+    n: int = 4  # n-gram order is fixed by default; widen via a custom space if needed
 
     def dims(self) -> int:
+        """Return the normalized recipe-search dimensionality."""
         return 4
 
     def decode(self, point: np.ndarray) -> dict[str, Any]:
+        """Decode a normalized design point into a distillation recipe."""
         p = np.clip(np.asarray(point, dtype=np.float64), 0.0, 1.0)
         dim = int(self.dim_choices[min(len(self.dim_choices) - 1, int(p[0] * len(self.dim_choices)))])
         hidden = int(round(self.hidden_range[0] + p[1] * (self.hidden_range[1] - self.hidden_range[0])))
@@ -56,6 +58,7 @@ class RecipeSpace:
         return float(c) / float(hi)
 
     def bounds(self) -> list[tuple[float, float]]:
+        """Return normalized DOE bounds for recipe search."""
         return [(0.0, 1.0)] * self.dims()
 
 
@@ -87,7 +90,7 @@ def tune_recipe(
     """Bayesian-optimize the distillation recipe; return the best re-distilled :class:`TaskModel`.
 
     Maximizes held-out ``agreement(student, teacher, val_texts)`` minus ``cost_weight * relative_train_cost``.
-    Set ``cost_weight > 0`` to prefer the cheapest recipe that still matches the teacher. ``teacher`` is called
+    Set ``cost_weight > 0`` to prefer the lowest-cost recipe that still matches the teacher. ``teacher`` is called
     once per candidate on ``val_texts`` (cached across the search) and once per candidate on ``train_texts``.
     """
     from mixle.doe import minimize
@@ -170,19 +173,21 @@ def tune_recipe_for_routing(
     density_gate: bool = False,
     density_gate_alpha: float = 0.05,
 ) -> CalibratedTuneResult:
-    """Bayesian-optimize the distillation recipe, then calibrate the winner for routing -- all in one call.
+    """Optimize a distillation recipe and calibrate the winning model for routing.
 
-    Runs :func:`tune_recipe`'s search over a ``calibration_frac`` slice of ``val_texts`` held back first: that
-    slice never scores a candidate or influences the search, and is used only afterward to calibrate the
-    winning model into a :class:`~mixle.task.calibrate.CalibratedTaskModel`. The result is a task-specific
-    recipe -- the search picked the complexity and epoch budget for this data, not a fixed default -- that is
-    also immediately ``decide()``-able: drop it into :class:`~mixle.task.cascade.Cascade` or
-    :class:`~mixle.task.router.Router` for tiered serving with no separate calibration step to manage.
+    The search holds back a ``calibration_frac`` slice of ``val_texts`` before
+    evaluating candidate recipes. That slice does not score candidates or
+    influence the search; it is used afterward to calibrate the winning model
+    into a :class:`~mixle.task.calibrate.CalibratedTaskModel`. The result is a
+    task-specific recipe whose complexity and epoch budget were selected from
+    data and whose model can be passed directly to a
+    :class:`~mixle.task.cascade.Cascade` or :class:`~mixle.task.router.Router`.
 
-    ``teacher`` is also cheaper to call here than under :func:`tune_recipe` directly: every trial shares one
-    cache, so ``train_texts`` -- identical across every candidate recipe -- is queried only once for the whole
-    search rather than once per trial, and the calibration/search overlap in ``val_texts`` is never re-queried
-    either. Every distinct input is priced exactly once, however many candidates the search evaluates.
+    Teacher calls are shared through one cache. ``train_texts`` are queried
+    once for the whole search rather than once per trial, and validation inputs
+    that appear in both calibration and search slices are not queried twice.
+    Every distinct input is priced once, no matter how many candidate recipes
+    the search evaluates.
 
     ``density_gate=True`` wires the same OOD escalation as :func:`~mixle.task.distill.distill_for_routing`: a
     gate fit on ``train_texts``, its floor calibrated on the disjoint ``cal_texts`` slice.
@@ -192,8 +197,8 @@ def tune_recipe_for_routing(
     search_texts, _search_labels, cal_texts, cal_labels = _split_for_calibration(
         val_texts, val_truth, calibration_frac, seed
     )
-    # shared across every trial below: train_texts is identical candidate to candidate, so this cache also
-    # kills tune_recipe's normal per-trial re-query of train_texts, not just the val/search-slice overlap.
+    # Shared across every trial: train_texts is identical candidate to candidate, so this cache avoids
+    # tune_recipe's normal per-trial re-query as well as validation/calibration overlap.
     cached_teacher = _teacher_from_cache(dict(zip(val_texts, val_truth)), teacher)
     result = tune_recipe(
         cached_teacher,

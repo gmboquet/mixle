@@ -178,9 +178,11 @@ class DeterminizedSequenceDistribution(SequenceEncodableProbabilityDistribution)
         return "DeterminizedSequenceDistribution(states=%d, name=%s)" % (self.n_det_states, repr(self.name))
 
     def density(self, x) -> float:
+        """Return the probability of a terminal-ended sequence."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x) -> float:
+        """Return the unique deterministic path log-weight for a sequence."""
         if not x:
             return -np.inf
         q = 0
@@ -195,12 +197,15 @@ class DeterminizedSequenceDistribution(SequenceEncodableProbabilityDistribution)
         return -np.inf if a is None else lp + a
 
     def seq_log_density(self, x) -> np.ndarray:
+        """Return log-densities for a batch of encoded sequences."""
         return np.array([self.log_density(s) for s in x], dtype=float)
 
     def dist_to_encoder(self) -> DeterminizedDataEncoder:
+        """Return the passthrough sequence encoder for determinized machines."""
         return DeterminizedDataEncoder()
 
     def enumerator(self) -> DeterminizedEnumerator:
+        """Return an exact descending-probability enumerator."""
         return DeterminizedEnumerator(self)
 
     def quantized_count_index(self, quantizer, max_fine_bucket: int):
@@ -290,9 +295,11 @@ class DeterminizedSequenceDistribution(SequenceEncodableProbabilityDistribution)
         return CountIndex(total, getter), truncated
 
     def sampler(self, seed: int | None = None) -> DeterminizedSampler:
+        """Return a sampler that walks the deterministic weighted machine."""
         return DeterminizedSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None):
+        """Raise because determinized machines are derived views, not fitted families."""
         # a determinized machine is derived from a fitted HMM, not estimated from data
         raise NotImplementedError("DeterminizedSequenceDistribution is a derived view; fit the source HMM instead")
 
@@ -325,12 +332,15 @@ class DeterminizedSampler:
             q = nxt[i]
 
     def sample(self, size: int | None = None):
+        """Draw one terminal-ended sequence or a list of independent sequences."""
         if size is None:
             return self._one()
         return [self._one() for _ in range(size)]
 
 
 class DeterminizedDataEncoder(DataSequenceEncoder):
+    """Passthrough encoder for determinized sequence observations."""
+
     def __str__(self) -> str:
         return "DeterminizedDataEncoder"
 
@@ -338,6 +348,7 @@ class DeterminizedDataEncoder(DataSequenceEncoder):
         return isinstance(other, DeterminizedDataEncoder)
 
     def seq_encode(self, x):
+        """Return sequence observations as a list without transforming symbols."""
         return list(x)
 
 

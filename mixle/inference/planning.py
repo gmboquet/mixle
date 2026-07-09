@@ -47,6 +47,7 @@ class Guarantee(IntEnum):
 
     @property
     def label(self) -> str:
+        """Return the enum name used in reports."""
         return self.name
 
 
@@ -82,13 +83,16 @@ class EstimationCertificate:
 
     @property
     def gradient_blocks(self) -> list[BlockPlan]:
+        """Return blocks that require gradient optimization."""
         return [b for b in self.blocks if b.gradient]
 
     @property
     def closed_form_blocks(self) -> list[BlockPlan]:
+        """Return blocks with global or stronger guarantees."""
         return [b for b in self.blocks if b.guarantee >= Guarantee.GLOBAL]
 
     def as_dict(self) -> dict[str, Any]:
+        """Return the certificate as JSON-compatible data."""
         return {
             "guarantee": self.guarantee.label,
             "escape_tested": self.escape_tested,
@@ -126,6 +130,7 @@ class EstimationCertificate:
         return "\n".join(lines)
 
     def table(self) -> str:
+        """Render a human-readable block-level estimation table."""
         head = (
             f"EstimationCertificate: aggregate={self.guarantee.label}"
             f"{' (escape-tested)' if self.escape_tested else ''}, "
@@ -168,7 +173,7 @@ def _has_exact_density(obj: Any) -> bool:
 
 
 def _classify_process(obj: Any, name: str) -> BlockPlan | None:
-    """Point-process / temporal families whose estimator is known -> an honest, specific guarantee.
+    """Point-process / temporal families whose estimator is known -> a specific guarantee.
 
     These do not advertise ExponentialFamily, so without this they fall through to the conservative
     STATIONARY default -- which UNDER-states the ones with a genuine closed-form MLE and leaves the
@@ -246,7 +251,7 @@ def _classify_process(obj: Any, name: str) -> BlockPlan | None:
 
 
 def _classify_leaf(obj: Any, name: str) -> BlockPlan:
-    """One non-composite block -> its estimation method and guarantee (honest, capability-driven)."""
+    """One non-composite block -> its estimation method and capability-driven guarantee."""
     kind = type(obj).__name__
     if _is_neural(obj):
         return BlockPlan(
@@ -414,9 +419,9 @@ def certify(model: Any, *, escape_tested: bool = False, penalized: str | bool = 
     when the fit ran saddle-escape restarts (:meth:`mixle.Model.fit` sets this automatically), which
     upgrades EM blocks from ``STATIONARY`` to ``STATIONARY_ESCAPE_TESTED``.
 
-    Pass ``penalized`` (a reason string, or True) when the fit optimized a PENALIZED objective -- soft
+    Pass ``penalized`` (a reason string, or True) when the fit optimized a penalized objective -- soft
     constraints, conservation/PINN residual factors, potentials (E2). The optimum is then of the
-    penalized surrogate, NOT the likelihood, so no block may claim more than STATIONARY however clean
+    penalized surrogate, not the likelihood, so no block may claim more than STATIONARY however clean
     its own solver is: every stronger block is downgraded with the penalty named in its reason.
     """
     blocks: list[BlockPlan] = []
@@ -467,13 +472,16 @@ class EstimationSchedule:
 
     @property
     def per_round(self) -> list[SchedulePass]:
+        """Return schedule passes repeated inside each latent-variable round."""
         return [p for p in self.passes if p.repeat == "per_round"]
 
     @property
     def gradient_passes(self) -> list[SchedulePass]:
+        """Return schedule passes assigned to gradient optimization."""
         return [p for p in self.passes if p.kind == "gradient"]
 
     def describe(self) -> str:
+        """Return a compact prose description of the estimation schedule."""
         if not self.latent:
             steps = "; ".join(f"{p.block}: {p.method}" for p in self.passes)
             return f"one-shot ({len(self.passes)} independent block(s)): {steps}"

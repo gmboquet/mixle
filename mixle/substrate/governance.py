@@ -30,6 +30,7 @@ class Governance:
     approvers: dict[str, set[str]] = field(default_factory=dict)  # scope -> {approver id, ...}
 
     def may_approve(self, who: str, scope: str) -> bool:
+        """Return whether ``who`` is allowed to approve promotion into ``scope``."""
         return who in self.approvers.get(scope, set())
 
     def grant(self, who: str, scope: str) -> Governance:
@@ -55,7 +56,7 @@ def _restamp(substrate: Substrate, item: SubstrateItem, prov: dict[str, Any], *,
 
 
 def propose(substrate: Substrate, ids: list[str], *, to: str, by: str | None = None) -> list[str]:
-    """Mark items as pending promotion to scope ``to`` (they are NOT yet visible there). Returns the ids."""
+    """Mark items as pending promotion to scope ``to``; they are not yet visible there. Returns the ids."""
     proposed: list[str] = []
     for item_id in ids:
         item = substrate.get(item_id)

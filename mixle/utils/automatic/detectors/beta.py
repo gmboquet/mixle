@@ -1,4 +1,10 @@
-"""Beta continuous candidate -- unit-interval support (0, 1), flexible shapes via two positive params."""
+"""Automatic detector for beta-distributed proportions and rates.
+
+The beta candidate is reserved for finite samples whose observations all lie strictly inside the open unit
+interval. That support rule distinguishes rates, probabilities, and normalized scores from signed
+real-valued data or unbounded positive measurements. Parameter estimation pins ``loc`` and ``scale`` to
+``0`` and ``1`` so the score compares only shape flexibility against the BIC penalty.
+"""
 
 import math
 
@@ -9,15 +15,14 @@ from mixle.utils.automatic.detectors import Detector, register
 
 def _applies(arr: np.ndarray) -> bool:
     # Support gate: Beta lives on the open unit interval, so every observation must be strictly in
-    # (0, 1). This keeps the family out of the candidate set for signed (Gaussian) or unbounded
-    # positive (Exponential/Gamma) data, which is the whole no-steal guarantee.
+    # (0, 1). This keeps the family out of the candidate set for signed or unbounded data.
     if arr.size == 0:
         return False
     return bool(np.all(np.isfinite(arr)) and np.all(arr > 0.0) and np.all(arr < 1.0))
 
 
 def _fit(arr: np.ndarray) -> tuple[float, float] | None:
-    """Return MLE ``(a, b)`` with loc/scale pinned to the unit interval, or None if degenerate."""
+    """Return the MLE ``(a, b)`` with loc/scale pinned to the unit interval, or ``None``."""
     from scipy import stats
 
     if arr.size < 2:

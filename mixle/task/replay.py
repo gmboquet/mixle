@@ -1,12 +1,10 @@
 """Replayable execution traces -- record each step an executor took (tool, args, seed, result) as a
-plain JSON-able object, and re-run it later to prove the run was deterministic (workstream H2, built
-against :mod:`mixle.task.traces`' ``AgentTrace`` shape so the future orchestrator (C3-a) can emit one
-trace object that both this module and the plan model consume).
+plain JSON-able object, and re-run it later to prove the run was deterministic.
 
 A step is only trustworthy to replay if every source of randomness it used is named and captured --
 that is the whole point of recording ``seed`` per step rather than trusting global RNG state. ``replay``
-re-invokes each step's registered tool with the SAME args and seed and returns a new
-:class:`ExecutionTrace`; ``diff`` is the honest per-step comparison (bit-identical or not), never a
+re-invokes each step's registered tool with the same args and seed and returns a new
+:class:`ExecutionTrace`; ``diff`` is the per-step comparison (bit-identical or not), never a
 silent pass.
 """
 
@@ -28,10 +26,12 @@ class TraceStep:
     result: Any = None
 
     def to_json(self) -> dict[str, Any]:
+        """Serialize this trace step to JSON-compatible data."""
         return {"tool": self.tool, "args": self.args, "seed": self.seed, "result": self.result}
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> TraceStep:
+        """Reconstruct a trace step from JSON-compatible data."""
         return cls(tool=d["tool"], args=dict(d.get("args") or {}), seed=d.get("seed"), result=d.get("result"))
 
 
@@ -44,13 +44,16 @@ class ExecutionTrace:
     steps: list[TraceStep] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
+        """Serialize the full execution trace to JSON-compatible data."""
         return {"request": self.request, "steps": [s.to_json() for s in self.steps]}
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> ExecutionTrace:
+        """Reconstruct an execution trace from JSON-compatible data."""
         return cls(request=d["request"], steps=[TraceStep.from_json(s) for s in d.get("steps") or []])
 
     def dumps(self) -> str:
+        """Serialize the execution trace to a stable JSON string."""
         return json.dumps(self.to_json(), sort_keys=True)
 
 
@@ -84,5 +87,5 @@ def diff(a: ExecutionTrace, b: ExecutionTrace) -> list[tuple[int, str]]:
 
 
 def is_bit_identical_replay(trace: ExecutionTrace, tools: dict[str, Callable[..., Any]]) -> bool:
-    """Replay ``trace`` and assert every step reproduces exactly -- the load-bearing check for H2."""
+    """Replay ``trace`` and return whether every step reproduces exactly."""
     return not diff(trace, replay(trace, tools))

@@ -1,5 +1,4 @@
-"""System scorecard (workstream J: SCORE-a) -- one fixed held-out question set, evaluated every
-improve-round, a worsening round caught and reported rather than silently accepted.
+"""System-level scorecard for held-out question sets.
 
 Named ``SystemScorecard`` (not ``Scorecard``) to avoid colliding with
 :class:`mixle.task.scorecard.Scorecard` -- a different, narrower comparison (one student solution vs its
@@ -31,6 +30,7 @@ class SystemScorecard:
     n: int
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the scorecard into primitive fields."""
         return dict(self.__dict__)
 
 

@@ -1,18 +1,15 @@
-"""Cycle-consistency as the cross-modal calibration and abstention signal (workstream F5).
+"""Cycle-consistency diagnostics for cross-modal calibration and abstention.
 
-A forward transport's own reported confidence can be blind to a real failure mode: an observation
-function that COLLAPSES several distinct latents onto the same observed value is, by construction,
-just as "confident" (the noise model is unchanged) whether or not the collapse actually happened for
-this particular input -- marginal confidence has no way to see it. Round-trip closure does: draw
-several independent posterior samples of the latent given the observation, and check whether they
-AGREE WITH EACH OTHER (never against ground truth, which is unavailable at serving time) -- low
-self-agreement is exactly the signature of a collapsed, irrecoverable region. This is the
-"A -> B -> A on invariant content" test from the plan, made concrete and self-supervised: no oracle
-needed, only repeated draws from the transport already fit for :mod:`mixle.models.mixture_density`.
+A forward transport's reported confidence can miss an observation function that
+maps several latent states to the same observed value. Round-trip closure adds
+a self-supervised check: draw independent posterior samples of the latent given
+the observation, project them through the invariant content, and measure
+self-agreement. Low self-agreement indicates a region where the transport
+should abstain or escalate even if its marginal confidence is high.
 
-Built on the exact fitting/sampling contract CARD TRANSPORT-a (workstream F0) already proved usable and
-calibrated (:class:`~mixle.models.mixture_density.NeuralConditionalDensity` / ``build_mdn``, fit via
-:func:`mixle.inference.optimize`) -- this module adds no new transport family, only the diagnostic.
+The diagnostic uses :class:`~mixle.models.mixture_density.NeuralConditionalDensity`
+and ``build_mdn`` fitted via :func:`mixle.inference.optimize`; it does not add a
+new transport family.
 """
 
 from __future__ import annotations
@@ -28,9 +25,7 @@ from mixle.stats.latent.mixture import MixtureDistribution
 
 
 def _as_paired_batch(a: np.ndarray) -> np.ndarray:
-    """``(n,)`` -> ``(n, 1)`` (n scalar observations, NOT one n-dimensional row -- unlike
-    ``np.atleast_2d``, which assumes the opposite and would silently misinterpret a batch of scalar
-    samples as a single high-dimensional one); ``(n, d)`` passes through unchanged."""
+    """Return scalar batches as ``(n, 1)`` and matrix batches unchanged."""
     a = np.asarray(a, dtype=np.float64)
     return a.reshape(-1, 1) if a.ndim == 1 else a
 
@@ -49,12 +44,11 @@ def fit_cycle_transport(
     delta: float | None = 1.0e-9,
     reuse_estep_ll: bool = True,
 ) -> Any:
-    """Fit ``p(target | given)`` via a mixture density network (the same family/fitting path CARD
-    TRANSPORT-a already proved calibrated) and return the fitted distribution.
+    """Fit ``p(target | given)`` via a mixture density network.
 
     ``given``/``target`` are ``(n, d)`` arrays of paired observations. ``delta``/``reuse_estep_ll``
     default to :func:`~mixle.inference.optimize`'s own early-stopping; pass ``delta=None,
-    reuse_estep_ll=False`` for a harder, more multimodal target (mirrors TRANSPORT-a's nonlinear case).
+    reuse_estep_ll=False`` for a harder, more multimodal target.
     """
     import torch
 
@@ -88,14 +82,12 @@ def cycle_inconsistency(
     n_draws: int = 20,
     forward: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> float:
-    """Self-supervised reliability signal for one ``given_value``: disagreement among ``n_draws``
-    independent posterior samples of the target.
+    """Return disagreement among posterior target samples for one observation.
 
-    A well-determined (sharp) posterior yields draws that agree closely (low inconsistency); an
-    observation that collapsed several distinct targets onto this same ``given_value`` yields draws
-    that disagree (high inconsistency) -- computable with no access to the true target. If ``forward``
-    (the known A->B observation function) is supplied, agreement is checked in OBSERVATION space
-    (the literal round trip target -> forward(target)) instead of raw target space.
+    A well-determined posterior yields draws that agree closely. A collapsed
+    observation region yields draws that disagree, without needing the true
+    target at serving time. If ``forward`` is supplied, agreement is checked in
+    observation space rather than raw target space.
     """
     x_batch = np.repeat(np.atleast_2d(np.asarray(given_value, dtype=np.float64)), n_draws, axis=0)
     draws = np.asarray(sampler.sample_given_batch(x_batch), dtype=np.float64)
@@ -105,8 +97,7 @@ def cycle_inconsistency(
 
 
 def posterior_mean_estimate(sampler: Any, given_value: np.ndarray, *, n_draws: int = 20) -> np.ndarray:
-    """The point estimate a downstream consumer would actually use: the mean of ``n_draws`` posterior
-    samples of the target given ``given_value``."""
+    """Return the posterior-sample mean of the target given ``given_value``."""
     x_batch = np.repeat(np.atleast_2d(np.asarray(given_value, dtype=np.float64)), n_draws, axis=0)
     draws = np.asarray(sampler.sample_given_batch(x_batch), dtype=np.float64)
     return draws.mean(axis=0)
@@ -170,9 +161,10 @@ def joint_cycle_consistency_receipt(
 
 
 def selective_error(errors: Sequence[float], abstain_scores: Sequence[float], keep_frac: float) -> float:
-    """Mean error among the ``keep_frac`` fraction of examples with the LOWEST ``abstain_scores`` --
-    the examples a policy would actually answer (rather than escalate) at that coverage budget.
-    Lower is better: a good abstention signal keeps the examples it can actually get right.
+    """Return mean error on examples kept by the lowest abstention scores.
+
+    Lower is better: a useful abstention signal keeps examples the policy can
+    answer and escalates examples with higher expected error.
     """
     errors = np.asarray(errors, dtype=np.float64)
     abstain_scores = np.asarray(abstain_scores, dtype=np.float64)

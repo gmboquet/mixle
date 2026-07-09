@@ -24,6 +24,11 @@ Most scalar families are re-exported from ``mixle.stats``:
    residual = optimize(residuals, GaussianEstimator(), out=None)
    counts = optimize(event_counts, PoissonEstimator(), out=None)
 
+Treat scalar families as modeling assumptions, not defaults to apply blindly.
+Support, tails, skew, discreteness, and impossible observations should be
+checked before the fitted leaf becomes part of a larger record, mixture, or
+HMM.
+
 Continuous Families
 -------------------
 
@@ -184,6 +189,10 @@ For extremes:
 * use ``GeneralizedParetoEstimator`` for threshold exceedances;
 * use :doc:`analysis` for tail diagnostics before committing to a tail family.
 
+For all scalar choices, keep a simple baseline and a held-out score when the
+leaf affects a promoted model. A richer scalar family should earn its place
+with validation evidence, not only a better in-sample fit.
+
 Composition Example
 -------------------
 
@@ -218,6 +227,10 @@ Scalar families are often leaves in a larger record model:
 The same scalar leaf can appear inside a mixture, HMM emission, survival
 wrapper, transform, record field, or process model.
 
+When scalar leaves are nested, inspect field-level likelihoods before
+interpreting the whole model. A single poorly matched scalar field can dominate
+a composite score.
+
 Enumeration
 -----------
 
@@ -226,6 +239,18 @@ Finite and countable discrete families may expose enumerators. Use
 a continuous family must be quantized into finite support for downstream
 enumeration.
 
+Release Evidence
+----------------
+
+For scalar-family work, preserve:
+
+* support and unit assumptions;
+* baseline comparison for similar families;
+* held-out score or task metric when the leaf affects a promoted model;
+* non-finite, out-of-support, and impossible-observation behavior;
+* tail or dispersion diagnostics when using heavy-tail or count families; and
+* field-level diagnostics when scalar leaves are nested in structured models.
+
 API Reference
 -------------
 
@@ -233,4 +258,3 @@ The generated scalar-family modules live under:
 
 * :doc:`api/mixle.stats.univariate.continuous`;
 * :doc:`api/mixle.stats.univariate.discrete`.
-

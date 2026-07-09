@@ -1,14 +1,15 @@
-"""Precision-aware planning for distributed EM across HETEROGENEOUS compute.
+"""Precision-aware planning for distributed EM across heterogeneous compute.
 
-A 1000-worker pool is rarely uniform: some workers have GPU tensor cores (fast at fp8/bf16), others are
-CPU-only (fp32, or vectorized double-double for accuracy). This module decides, per worker, (a) how many
-rows of the E-step to give it -- balanced by its throughput -- and (b) which precision band to run, the
-fastest one its hardware supports that still meets the accuracy budget. It also sizes the k-way tree
-reduce depth so the fixed-size sufficient-statistic payloads fold in ``O(log W)`` rather than a single-root
-fan-in.
+Large worker pools are rarely uniform: some workers may have GPU tensor cores,
+while others are CPU-only or accuracy-oriented. This module chooses, per
+worker, how many E-step rows to assign and which precision band to run. The
+selected precision is the fastest supported band that still satisfies the
+requested error budget. The plan also sizes the k-way reduction depth so
+fixed-size sufficient-statistic payloads fold in ``O(log W)`` instead of a
+single-root fan-in.
 
-This is the planning layer (pure-Python, testable); the actual Spark ``treeReduce`` / MPI ``comm.reduce``
-dispatch that consumes the plan lives in mixle.inference and needs a real cluster to exercise.
+This module is the pure-Python planning layer. Spark, MPI, or other distributed
+dispatchers consume the returned plan from the inference layer.
 """
 
 from __future__ import annotations
@@ -18,8 +19,9 @@ from dataclasses import dataclass
 
 from mixle.engines.affine import UNIT_ROUNDOFF
 
-# Rough relative throughput multiplier per (device, precision) -- lower precision is faster on a GPU,
-# while on a CPU sub-f32 is a slowdown (no native arithmetic) and double-double costs ~15x.
+# Relative throughput multipliers per ``(device, precision)`` for planning.
+# Lower precision is faster on GPUs; sub-float32 arithmetic is slower on CPUs
+# without native support, and double-double arithmetic is much more expensive.
 _THROUGHPUT = {
     ("gpu", "fp8"): 4.0,
     ("gpu", "bfloat16"): 2.5,
@@ -44,6 +46,8 @@ class Worker:
 
 @dataclass(frozen=True)
 class WorkerAssignment:
+    """One worker's row allocation, precision, and effective throughput."""
+
     name: str
     rows: int
     precision: str
@@ -52,10 +56,13 @@ class WorkerAssignment:
 
 @dataclass(frozen=True)
 class HeterogeneousPlan:
+    """Assignments and reduction depth for heterogeneous execution."""
+
     assignments: tuple[WorkerAssignment, ...]
     reduce_depth: int
 
     def total_rows(self) -> int:
+        """Return total rows assigned across workers."""
         return sum(a.rows for a in self.assignments)
 
 
@@ -72,7 +79,7 @@ def _best_precision(worker: Worker, allowed: tuple[str, ...], op_count: int, tar
     """The highest-throughput precision the worker supports that is allowed and meets the budget."""
     candidates = [p for p in worker.precisions if p in allowed and _meets_budget(p, op_count, 1.0, target_rel_error)]
     if not candidates:
-        # fall back to the worker's most accurate supported+allowed precision (ignore the budget but be honest)
+        # Fall back to the worker's most accurate supported and allowed precision.
         candidates = [p for p in worker.precisions if p in allowed] or list(worker.precisions)
     return max(candidates, key=lambda p: _THROUGHPUT.get((worker.device, p), 0.5))
 

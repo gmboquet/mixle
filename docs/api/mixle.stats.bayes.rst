@@ -4,7 +4,6 @@ mixle.stats.bayes package
 .. automodule:: mixle.stats.bayes
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

@@ -16,6 +16,8 @@ from mixle.ppl.core import RandomVariable, register_composite
 
 
 class StateSpaceResult:
+    """Fitted univariate linear-Gaussian state-space model and smoothed latent path."""
+
     def __init__(self, phi, q, r, x0, P0, smoothed, smoothed_var, loglik):
         self.phi = float(phi)
         self.level_sd = float(math.sqrt(q))  # state innovation sd
@@ -46,6 +48,7 @@ class StateSpaceResult:
         return np.asarray(out)
 
     def summary(self):
+        """Return fitted dynamics, noise scales, initialization, and log likelihood."""
         return {
             "phi": self.phi,
             "level_sd": self.level_sd,
@@ -113,6 +116,7 @@ def _kalman_em(y, phi_free, max_its, tol):
 
 
 def statespace_fit(rv: RandomVariable, data, *, max_its: int = 200, tol: float = 1e-6, **_) -> RandomVariable:
+    """Fit a ``LocalLevel`` or ``AR1`` state-space expression by Kalman EM."""
     (phi_free,) = rv._args
     result = _kalman_em(data, bool(phi_free), max_its, tol)
     return RandomVariable._bound(None, name=rv._name, result=result)

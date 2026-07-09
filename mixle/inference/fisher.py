@@ -77,6 +77,7 @@ class SufficientStatisticVectorizer:
             return
 
     def fit(self, values: Sequence[Any]) -> SufficientStatisticVectorizer:
+        """Learn vector coordinates from structured sufficient-statistic values."""
         labels = []
         seen = set()
         for value in values:
@@ -89,6 +90,7 @@ class SufficientStatisticVectorizer:
         return self
 
     def partial_fit(self, values: Sequence[Any]) -> SufficientStatisticVectorizer:
+        """Extend vector coordinates with labels found in additional values."""
         for value in values:
             for label, _ in self._items(value):
                 if label not in self._index:
@@ -97,6 +99,7 @@ class SufficientStatisticVectorizer:
         return self
 
     def transform(self, values: Sequence[Any], extend: bool = False) -> np.ndarray:
+        """Vectorize structured sufficient-statistic values into a dense matrix."""
         if extend:
             self.partial_fit(values)
 
@@ -109,6 +112,7 @@ class SufficientStatisticVectorizer:
         return mat
 
     def fit_transform(self, values: Sequence[Any]) -> np.ndarray:
+        """Learn coordinates and vectorize values in one pass."""
         rows: list[list[tuple[int, float]]] = []
         labels: list[Path] = []
         index: dict[Path, int] = {}
@@ -134,6 +138,7 @@ class SufficientStatisticVectorizer:
         return mat
 
     def label_strings(self) -> list[str]:
+        """Return learned coordinate labels as dotted strings."""
         return [".".join(p) for p in self.labels]
 
 
@@ -184,11 +189,13 @@ class FisherView:
         return acc.value()
 
     def expected_structured_statistics(self, x: Any, estimate: Any | None = None, weight: float = 1.0) -> Any:
+        """Alias for posterior-expected structured sufficient statistics."""
         return self.structured_statistics(x, estimate=estimate, weight=weight)
 
     def sufficient_statistics(
         self, x: Any, estimate: Any | None = None, vectorizer: SufficientStatisticVectorizer | None = None
     ) -> np.ndarray:
+        """Return vectorized sufficient statistics for one observation."""
         ss = self.structured_statistics(x, estimate=estimate)
         vec = vectorizer if vectorizer is not None else SufficientStatisticVectorizer().fit([ss])
         return vec.transform([ss])[0]
@@ -196,6 +203,7 @@ class FisherView:
     def expected_sufficient_statistics(
         self, x: Any, estimate: Any | None = None, vectorizer: SufficientStatisticVectorizer | None = None
     ) -> np.ndarray:
+        """Alias for vectorized posterior-expected sufficient statistics."""
         return self.sufficient_statistics(x, estimate=estimate, vectorizer=vectorizer)
 
     def _n_encoded(self, enc_data: Any, estimate: Any | None) -> int:
@@ -263,6 +271,7 @@ class FisherView:
         vectorizer: SufficientStatisticVectorizer | None = None,
         fit: bool = True,
     ) -> np.ndarray:
+        """Alias for a matrix of posterior-expected sufficient statistics."""
         return self.statistics_matrix(data=data, enc_data=enc_data, estimate=estimate, vectorizer=vectorizer, fit=fit)
 
     def seq_expected_statistics(
@@ -272,6 +281,7 @@ class FisherView:
         vectorizer: SufficientStatisticVectorizer | None = None,
         fit: bool = True,
     ) -> np.ndarray:
+        """Return posterior-expected statistics for encoded observations."""
         return self.expected_statistics_matrix(enc_data=enc_data, estimate=estimate, vectorizer=vectorizer, fit=fit)
 
     @staticmethod
@@ -281,11 +291,13 @@ class FisherView:
         return x - mu.reshape((1, -1)), mu
 
     def mean_statistics(self, stats: np.ndarray | None = None, **kwargs: Any) -> np.ndarray:
+        """Return empirical mean sufficient statistics."""
         if stats is None:
             stats = self.statistics_matrix(**kwargs)
         return np.asarray(stats, dtype=np.float64).mean(axis=0)
 
     def score_center(self, stats: np.ndarray | None = None, **kwargs: Any) -> np.ndarray:
+        """Return the center used for score or Fisher-vector whitening."""
         model_mean = getattr(self, "_model_mean", None)
         if model_mean is not None:
             try:
@@ -377,6 +389,7 @@ class FisherView:
         ridge: float = 1.0e-8,
         **kwargs: Any,
     ) -> np.ndarray:
+        """Return centered statistics whitened by an observed Fisher metric."""
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
         mu = self.score_center(stats=stats) if center is None else np.asarray(center, dtype=np.float64)
@@ -412,6 +425,7 @@ class FisherView:
         vectorizer: SufficientStatisticVectorizer | None = None,
         ridge: float = 1.0e-8,
     ) -> np.ndarray:
+        """Return a single Fisher vector for one observation."""
         if vectorizer is None and not self.vectorizer.labels:
             stat = self.expected_sufficient_statistics(x, estimate=estimate)
         else:
@@ -460,15 +474,18 @@ class FixedFisherView(FisherView):
         raise NotImplementedError
 
     def structured_statistics(self, x: Any, estimate: Any | None = None, weight: float = 1.0) -> Any:
+        """Return fixed-coordinate sufficient statistics for one observation."""
         return self._statistics_from_data([x], estimate=estimate)[0] * weight
 
     def sufficient_statistics(
         self, x: Any, estimate: Any | None = None, vectorizer: SufficientStatisticVectorizer | None = None
     ) -> np.ndarray:
+        """Return projected sufficient statistics for one observation."""
         mat = self._statistics_from_data([x], estimate=estimate)
         return self._project_matrix(mat, vectorizer, fit=vectorizer is None)[0]
 
     def seq_structured_statistics(self, enc_data: Any, estimate: Any | None = None) -> list[Any]:
+        """Return fixed-coordinate statistics for encoded observations."""
         return [row for row in self._statistics_from_encoded(enc_data, estimate=estimate)]
 
     def statistics_matrix(
@@ -479,6 +496,7 @@ class FixedFisherView(FisherView):
         vectorizer: SufficientStatisticVectorizer | None = None,
         fit: bool = True,
     ) -> np.ndarray:
+        """Return projected fixed-coordinate statistics for raw or encoded data."""
         if data is None and enc_data is None:
             raise ValueError("statistics_matrix requires data or enc_data")
         if data is not None and enc_data is not None:
@@ -496,6 +514,7 @@ class FixedFisherView(FisherView):
         raise NotImplementedError
 
     def mean_statistics(self, stats: np.ndarray | None = None, model: bool = True, **kwargs: Any) -> np.ndarray:
+        """Return model-mean or empirical sufficient statistics."""
         if model or stats is None:
             return self._model_mean()
         return np.asarray(stats, dtype=np.float64).mean(axis=0)
@@ -503,6 +522,7 @@ class FixedFisherView(FisherView):
     def fisher_information(
         self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
     ) -> np.ndarray:
+        """Return model Fisher information in fixed coordinates."""
         info = np.asarray(self._model_fisher(), dtype=np.float64)
         if diagonal:
             return np.diag(info) + ridge
@@ -517,6 +537,7 @@ class FixedFisherView(FisherView):
         ridge: float = 1.0e-8,
         **kwargs: Any,
     ) -> np.ndarray:
+        """Return centered or whitened Fisher vectors in fixed coordinates."""
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
         centered = np.asarray(stats, dtype=np.float64)
@@ -540,6 +561,8 @@ class FixedFisherView(FisherView):
 
 
 class CountFisherView(FixedFisherView):
+    """Fixed Fisher view for scalar count-like families with analytic mean and variance."""
+
     def __init__(
         self,
         dist: Any,
@@ -730,6 +753,7 @@ class EmpiricalMetricFixedFisherView(FixedFisherView):
     """Fixed-coordinate view whose whitening falls back to empirical Fisher."""
 
     def mean_statistics(self, stats: np.ndarray | None = None, **kwargs: Any) -> np.ndarray:
+        """Return empirical mean statistics for the supplied data."""
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
         return np.asarray(stats, dtype=np.float64).mean(axis=0)
@@ -737,6 +761,7 @@ class EmpiricalMetricFixedFisherView(FixedFisherView):
     def fisher_information(
         self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
     ) -> np.ndarray:
+        """Return empirical Fisher information for this fixed-coordinate view."""
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
         return FisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge)
@@ -750,6 +775,7 @@ class EmpiricalMetricFixedFisherView(FixedFisherView):
         ridge: float = 1.0e-8,
         **kwargs: Any,
     ) -> np.ndarray:
+        """Return Fisher vectors using the empirical Fisher metric."""
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
         return FisherView.fisher_vectors(self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge)

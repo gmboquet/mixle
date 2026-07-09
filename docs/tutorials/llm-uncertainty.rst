@@ -38,6 +38,11 @@ relation.
 The equivalence function is part of the model. Record it with the application
 because changing it changes the uncertainty numbers.
 
+Test equivalence on examples where surface form differs but meaning is the
+same, and on examples where wording is similar but the answer is materially
+different. A weak equivalence relation can make disagreement disappear; an
+overly strict one can turn harmless paraphrases into false uncertainty.
+
 2. Assess One Prompt
 --------------------
 
@@ -52,6 +57,11 @@ because changing it changes the uncertainty numbers.
 
 ``confidence`` is the mass of the majority meaning cluster. ``semantic_entropy``
 is high when samples disagree about meaning, not merely wording.
+
+These values are decision signals, not proof of truth. A model can agree with
+itself and still be wrong, especially when the prompt lacks evidence or asks
+for a common misconception. Use retrieval, tools, human review, or a trusted
+label set when factual correctness matters.
 
 3. Decompose Prompt Sensitivity
 -------------------------------
@@ -77,6 +87,11 @@ ambiguity from prompt sensitivity.
 Epistemic uncertainty points to reducible sensitivity: prompt wording, model
 choice, retrieval context, or missing evidence. Aleatoric uncertainty points to
 ambiguity that remains inside each prompt.
+
+Use this decomposition to decide what to fix. High epistemic uncertainty often
+calls for clearer prompts, better context, or a different model. High
+aleatoric uncertainty often calls for a refusal, a clarifying question, or a
+workflow that returns multiple admissible answers.
 
 4. Calibrate Abstention
 -----------------------
@@ -104,10 +119,16 @@ After calibration, ``answer`` returns ``None`` below the learned confidence
 threshold. This is the operational payoff: the model can decline rather than
 fabricate.
 
+Choose the calibration set to match the prompts that will be served. A
+threshold learned from short factual questions should not be reused for legal
+summaries, scientific extraction, or multi-step planning without new evidence.
+Track both false answers and unnecessary abstentions so the system is not tuned
+to optimize only one side of the tradeoff.
+
 5. Inspect Claim Reliability
 ----------------------------
 
-A response can have a stable headline answer and still contain unsupported
+A response can have a stable main answer and still contain unsupported
 details. Claim assessment extracts claims from one response and checks whether
 independent samples corroborate them.
 
@@ -124,6 +145,19 @@ independent samples corroborate them.
 
 For serious use, pass a task-specific claim extractor and an entailment-style
 ``corroborates`` function. The defaults are intentionally lightweight.
+
+Claim reliability is most useful when the downstream workflow needs a partial
+answer. A response can be routed for review because one claim is weak while
+still preserving the supported claims for later use.
+
+Cost and Reproducibility
+------------------------
+
+Repeated sampling increases latency and spend. Pick ``n`` from the operational
+budget and validate the stability of the decision, not just the smoothness of
+the entropy estimate. When a hosted model is used, record the model identifier,
+sampling settings, prompt template, equivalence function, and calibration
+threshold with the serving artifact.
 
 Validation Checklist
 --------------------

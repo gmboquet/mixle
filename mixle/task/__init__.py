@@ -1,10 +1,10 @@
-"""Small, local, task-specific models -- train or distill one, save a durable artifact, call it as a function.
+"""Local task-specific models with durable artifacts and calibrated serving.
 
 The unit is a :class:`~mixle.task.model.TaskModel`: a fitted model scoped to *one* task (classify, extract,
-recommend a model shape, ...), small enough to run locally and fast, with a durable artifact (:mod:`~mixle.task.artifact`)
-so a plain Python program can load it in a fresh process and just call it. Producers:
+recommend a model shape, ...), scoped to one operational behavior and saved as a durable artifact
+(:mod:`~mixle.task.artifact`) so a plain Python program can load it in a fresh process and call it. Producers:
 
-  * :func:`~mixle.task.distill.distill` -- a teacher (any callable LM) labels data, a tiny student is fit to match;
+  * :func:`~mixle.task.distill.distill` -- a teacher callable labels data and a local student is fit to match;
   * :func:`~mixle.task.tune.tune_recipe` -- ``mixle.doe`` searches the student recipe to minimize train cost.
 
 This module's public surface re-exports the artifact contract; the model/distill/tune layers land on top.

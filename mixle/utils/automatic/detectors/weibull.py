@@ -1,4 +1,9 @@
-"""Weibull continuous candidate -- positive-support lifetime/strength family (shape != 1 signature)."""
+"""Automatic detector for positive Weibull lifetime or strength data.
+
+The detector fits a two-parameter Weibull with fixed zero location, rejects
+near-exponential shapes, and supplies scoring and factory hooks for automatic
+distribution selection.
+"""
 
 import math
 

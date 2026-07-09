@@ -1,9 +1,8 @@
-"""Edge distillation: jointly optimize the student's *structure* and its *training process* under a
-hard device budget -- driven by a model that designs models.
+"""Edge distillation under hard device budgets.
 
 :func:`mixle.task.tune_recipe` tunes one family's knobs with a soft cost penalty. An edge deployment
-is a different problem: the budget is **hard** (bytes of flash, ops per inference, "no torch on the
-device"), and the biggest wins come from choosing the right *kind* of student -- a hashed-feature MLP
+is a different problem: the budget is hard (bytes of flash, ops per inference, "no torch on the
+device"), and the largest gains often come from choosing the right *kind* of student -- a hashed-feature MLP
 versus a structured probabilistic classifier (a learned Bayesian network: kilobytes, torch-free,
 exactly calibrated posteriors) -- not from tweaking widths inside one kind.
 
@@ -22,9 +21,9 @@ This module makes both choices searchable, and makes the search itself a model:
 * :func:`distill_for_edge` -- the front door: screen candidates at reduced fidelity, promote the
   promising ones to full training, return the best student that *fits the device*, with the Pareto
   front over (bytes, agreement) and the updated :class:`DesignModel`.
-* :func:`distill_designer` -- the recursion made useful: distill the accumulated design ledger into
-  a tiny torch-free structured student that predicts whether a design is worth training -- the
-  design model, compressed by the very machinery it steers.
+* :func:`distill_designer` -- distill the accumulated design ledger into a
+  torch-free structured student that predicts whether a design is worth
+  training.
 
 Teachers are consulted once per dataset (labels are cached), never per candidate.
 """
@@ -104,7 +103,7 @@ class DeviceSpec:
         ``ops_per_second`` must come from a probe run **on the target device** for the student kind
         you deploy (:func:`measure_ops_per_second` measures it for a representative student) --
         throughput differs by orders of magnitude across devices and student kinds, so there is no
-        honest built-in constant.
+        portable built-in constant.
         """
         if max_ms <= 0 or ops_per_second <= 0:
             raise ValueError("max_ms and ops_per_second must be positive")
@@ -120,6 +119,7 @@ class DeviceSpec:
         return out
 
     def feasible(self, fp: EdgeFootprint) -> bool:
+        """Return whether a measured footprint satisfies device constraints."""
         if self.torch_free and not fp.torch_free:
             return False
         return all(v <= 0.0 for v in self.violations(fp))
@@ -219,9 +219,11 @@ class EdgeSpace:
     min_gain_range: tuple[float, float] = (0.0, 5.0)
 
     def dims(self) -> int:
+        """Return the normalized design-space dimensionality."""
         return 6
 
     def bounds(self) -> list[tuple[float, float]]:
+        """Return normalized design-space bounds for DOE search."""
         return [(0.0, 1.0)] * self.dims()
 
     def signature(self) -> str:
@@ -301,6 +303,7 @@ class DesignModel:
         fingerprint: Sequence[float] | None = None,
         **tag: Any,
     ) -> None:
+        """Append one evaluated design point and its feasibility metadata."""
         v = [float(t) for t in violations]
         if len(v) != self.n_constraints:
             raise ValueError(f"expected {self.n_constraints} violation values, got {len(v)}")
@@ -344,10 +347,10 @@ class DesignModel:
     ) -> np.ndarray:
         """The next design worth training: feasibility-weighted EI over everything seen so far.
 
-        ``prefilter`` closes the designer loop: pass a design judge -- typically the tiny student
+        ``prefilter`` closes the designer loop: pass a design judge -- typically the compact student
         from :func:`distill_designer`, called as ``prefilter(point_tuple) -> label`` -- and any
         proposal it labels ``"weak"`` is vetoed and re-drawn (fresh acquisition seed), up to
-        ``max_tries``. The distilled design knowledge thus skips known-bad designs before a single
+        ``max_tries``. The distilled design knowledge thus skips known weak designs before a single
         training run is spent; if every retry is vetoed the last proposal is returned anyway (the
         judge advises, the surrogate decides). ``fingerprint`` conditions the proposal on the current
         task (see :meth:`_fingerprint_bounds`); the returned point has design coords only.
@@ -434,6 +437,7 @@ class DesignModel:
 
     # -- persistence: design knowledge outlives the search --
     def to_json(self) -> dict[str, Any]:
+        """Serialize the design ledger for reuse across search runs."""
         return {
             "signature": self.signature,
             "n_constraints": self.n_constraints,
@@ -446,6 +450,7 @@ class DesignModel:
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> DesignModel:
+        """Reconstruct a design ledger from serialized JSON data."""
         m = cls(d["signature"], int(d["n_constraints"]), int(d.get("n_fingerprint", 0)))
         m.X = [list(map(float, r)) for r in d["X"]]
         m.quality = [float(v) for v in d["quality"]]
@@ -463,7 +468,7 @@ def task_fingerprint(data: Sequence[Any], labels: Sequence[Any]) -> list[float]:
     """A fixed small vector describing *which task this is*: the coords cross-task warm start keys on.
 
     ``(log10 #examples, #labels, #fields, fraction of categorical fields, normalized label entropy)``
-    -- cheap invariants of the dataset, O(1)-scaled so the design surrogate's default lengthscale
+    -- low-overhead invariants of the dataset, O(1)-scaled so the design surrogate's default lengthscale
     treats similar tasks as informative neighbors and dissimilar ones as weakly coupled.
     """
     labels = [str(y) for y in labels]
@@ -545,11 +550,11 @@ def distill_for_edge(
     The teacher labels ``train_data``/``val_data`` once (cached) -- or pass ``train_labels``/
     ``val_labels`` when the labels already exist (a harvested dataset, an upstream ``solve`` split)
     and the teacher is then never called (it may be ``None``). Candidates proposed by the
-    :class:`DesignModel` are trained at ``screen_fidelity`` (cheap), scored by held-out agreement,
+    :class:`DesignModel` are trained at ``screen_fidelity`` (reduced cost), scored by held-out agreement,
     and measured (:func:`footprint`); the top ``promote`` feasible screens are re-trained at full
     fidelity and the best feasible one wins (ties -> smaller). Pass a previous search's ``design``
     (same space + device shape) to warm-start: the surrogate already knows which regions blow the
-    budget. Pass ``designer`` (the tiny judge from :func:`distill_designer`) to veto known-weak
+    budget. Pass ``designer`` (the compact judge from :func:`distill_designer`) to veto known-weak
     proposals before any training is spent. If nothing fits the device, the least-infeasible student
     is returned with ``feasible=False`` -- inspect ``result.pareto`` for the real trade-off frontier.
     """
@@ -616,7 +621,7 @@ def distill_for_edge(
         if bits != 32:
             from mixle.task.quantize import quantize_mlp
 
-            student = quantize_mlp(student, bits=bits)  # scored quantized: measured bytes AND fidelity
+            student = quantize_mlp(student, bits=bits)  # scored quantized: measured bytes and fidelity
         return student
 
     trials: list[dict[str, Any]] = []
@@ -705,7 +710,7 @@ def distill_designer(
     quality_quantile: float = 0.5,
     seed: int = 0,
 ) -> TaskModel:
-    """Distill the design ledger into a tiny torch-free student that judges designs: point -> good/weak.
+    """Distill the design ledger into a compact torch-free student that judges designs: point -> good/weak.
 
     The :class:`DesignModel`'s rows are records (the design coordinates); a row is labeled ``good``
     when it was feasible on the device *and* its quality reached the ledger's ``quality_quantile``.

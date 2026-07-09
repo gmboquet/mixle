@@ -51,6 +51,11 @@ Start from the shape and support of one observation.
 The family can be nested. A mixture of records with a sequence field is still
 one estimator tree.
 
+Family choice should be justified by support, shape, and validation behavior.
+Do not choose a richer family only because it can fit the training data. For
+release evidence, compare against the simplest shape-preserving family that
+could plausibly explain the data.
+
 Detailed Catalogs
 -----------------
 
@@ -79,6 +84,10 @@ Basic Usage
 
 Distribution classes represent fitted models. Estimator classes represent what
 to fit.
+
+Keep that distinction visible in documentation and artifacts. A distribution
+object can score, sample, and expose capabilities; an estimator records the
+fitting family and sufficient-statistic route used to produce one.
 
 Combinators
 -----------
@@ -133,6 +142,10 @@ Latent families add hidden variables over otherwise ordinary observations.
 
 Latent models usually fit by EM or a variational route. Use
 :doc:`hmms-latent` for the HMM and structured-state workflow.
+
+Latent structure should not be treated as observed labels. Inspect
+responsibilities, state marginals, and restart stability before interpreting
+components, topics, or paths.
 
 Univariate Families
 -------------------
@@ -191,6 +204,10 @@ Bayesian Families
 Many estimators accept ``prior=``. With conjugate priors, the same fit surface
 can produce posterior-bearing models.
 
+When priors affect a public result, record the prior parameters and the
+sufficient statistics that updated them. Otherwise posterior changes are hard
+to reproduce from the fitted model alone.
+
 Generated Kernels and Capabilities
 ----------------------------------
 
@@ -207,6 +224,20 @@ the capability layer:
 
 Do not assume a family supports every operation because it supports
 ``log_density``. Capabilities are the public way to ask.
+
+Release Evidence
+----------------
+
+For distribution-family documentation or promoted artifacts, preserve:
+
+* the observation shape and support that motivated the family;
+* the estimator or prototype used to fit the model;
+* baseline comparisons for richer families such as mixtures, HMMs, or graph
+  models;
+* non-finite and impossible-observation behavior where relevant;
+* capability checks for any operation used downstream; and
+* provenance that distinguishes fitted distributions from estimators and
+  transformed artifacts.
 
 Related Guides
 --------------

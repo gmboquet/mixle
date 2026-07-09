@@ -88,6 +88,7 @@ class ContextPacket:
         ]
 
     def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable context-packet summary."""
         return {
             "task": self.task,
             "n_items": len(self.items),
@@ -110,17 +111,17 @@ class ContextPacket:
         expected_output_schema: dict[str, Any] | None = None,
         factuality: Any = None,
     ) -> dict[str, Any]:
-        """A plain dict shaped like ``mixle_knowledge.contracts.ContextPacket`` (id/project_id/task/
-        target_kind/target_id/token_budget/byte_budget/evidence_item_ids/constraints/citations/
-        expected_output_schema/payload) -- the substrate -> packet -> different-receiver round trip
-        (workstream E1 of the 0.6.3 frontier-capability plan). Constructing the validated pydantic
-        object is the receiving side's job (``ContextPacket(**packet.to_knowledge_dict(...))`` in
-        mixle-knowledge); this stays a plain dict on purpose so mixle core carries no dependency on
-        mixle-knowledge -- platform contract packages depend on core, never the other way.
+        """Return a plain dict shaped like ``mixle_knowledge.contracts.ContextPacket``.
 
-        ``factuality``, when given a :class:`~mixle.substrate.factuality.FactualityReceipt` (workstream
-        E3), travels in ``payload["factuality"]`` so a receiver can verify grounding before trusting the
-        packet: ``check_factuality(...)`` -> this packet -> the receiver's own re-verification.
+        The exported fields cover ``id``, ``project_id``, ``task``, ``target_kind``, ``target_id``,
+        token and byte budgets, evidence item identifiers, constraints, citations,
+        ``expected_output_schema``, and ``payload``. Constructing a validated pydantic object is the
+        receiving package's responsibility; core mixle intentionally keeps this as a dependency-free
+        dictionary so platform contract packages can depend on core rather than the reverse.
+
+        When ``factuality`` is a :class:`~mixle.substrate.factuality.FactualityReceipt`, it is included
+        in ``payload["factuality"]`` so receivers can inspect grounding metadata before trusting the
+        packet.
         """
         citations = [{"uri": p["source"] or f"substrate:{p['id']}", "media_type": p["kind"]} for p in self.provenance()]
         payload: dict[str, Any] = {
@@ -240,7 +241,7 @@ def assemble_context(
 
     Retrieves relevant items (:meth:`Substrate.search`), then packs them in descending relevance until
     the character budget or item cap is reached -- always keeping at least the single most relevant
-    item so a tiny budget still yields something. With ``compress=True``, an
+    item so a small budget still yields something. With ``compress=True``, an
     item too large to fit whole is extractively summarized to its query-relevant
     sentences instead of dropped; ``packet.preservation()`` reports what was
     kept. Emits a ``context`` event when telemetry is supplied.
@@ -304,8 +305,7 @@ class ReceiverProfile:
 
     A frontier LM and a local student are not the same target: the LM affords a large, prose-shaped
     context; the student needs a small, feature-shaped one. ``ReceiverProfile`` names that difference
-    so it is set once per receiver, not re-derived ad hoc at every call site (workstream E2:
-    receiver-conditioned compression)."""
+    so it is set once per receiver, not re-derived ad hoc at every call site."""
 
     name: str
     max_chars: int = 2000
@@ -314,6 +314,7 @@ class ReceiverProfile:
     compress: bool = False
 
     def to_budget(self) -> ContextBudget:
+        """Convert this receiver profile to a context budget."""
         return ContextBudget(max_chars=self.max_chars, max_items=self.max_items, shape=self.shape)
 
 
@@ -327,9 +328,11 @@ def assemble_for_receivers(
     telemetry: Any = None,
 ) -> dict[str, ContextPacket]:
     """Assemble ONE task-conditioned :class:`ContextPacket` per named receiver -- the concrete
-    receiver-conditioned compression from workstream E2: two receivers reading the SAME substrate for
-    the SAME task get genuinely different renderings (budget, shape, and -- via ``compress`` -- which
-    sentences survive), never the same blob truncated to fit.
+    receiver-conditioned compression path.
+
+    Two receivers reading the same substrate for the same task get genuinely different renderings:
+    budget, shape, and, via ``compress``, which sentences survive. The result is not the same blob
+    truncated to fit each consumer.
 
         packets = assemble_for_receivers(substrate, task, [
             ReceiverProfile("frontier_llm", max_chars=2000, shape="passages"),

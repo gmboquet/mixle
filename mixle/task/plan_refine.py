@@ -1,23 +1,23 @@
-"""``outcome_refine_planner`` -- outcome-trained decomposition beyond imitation (workstream C4).
+"""Outcome-trained plan refinement beyond imitation.
 
 Imitating harvested/teacher decompositions (:func:`~mixle.task.sft_plan.sft_planner`) can only reproduce
-known workflows. This is the expert-iteration step past it: propose K candidate plans from the CURRENT
-planner (:func:`~mixle.task.sft_plan.sample_plans`), verify each by REAL execution against a checker
-(never an LM's self-grade), and retrain the plan-writing LM on the verifiably-successful candidates
-(``LM.fit_pairs`` continues training the SAME module in place -- no cold restart)::
+known workflows. This expert-iteration step samples candidate plans from the
+current planner (:func:`~mixle.task.sft_plan.sample_plans`), verifies each with
+an executable checker, and retrains the plan-writing LM on verified-successful
+candidates::
 
     planner = sft_planner(teacher, requests, tools)              # imitation baseline
     planner, report = outcome_refine_planner(planner, tasks, verify_fn)
     report.solve_rate_before, report.solve_rate_after            # measured, not assumed
 
-``verify_fn(task, plan) -> bool`` is the one hard requirement: it must be an executable/ground-truth
-check, exactly like a :class:`~mixle.doe.oracle.VerifiableOracle` (workstream I) for the plan-decomposition
-domain -- a plan that only *looks* right is not a training signal.
+``verify_fn(task, plan) -> bool`` must be an executable or ground-truth check,
+such as a :class:`~mixle.doe.oracle.VerifiableOracle` for the
+plan-decomposition domain.
 
-This is the first slice of workstream C4 (one propose-verify-retrain round on a synthetic tool-world);
-NOT in this slice: the full expert-iteration outer loop across many rounds, DPO preference learning over
-plan pairs (the existing ``DPOModel``/``DPOModelEstimator`` fit that in), experiment-design-as-planning
-(C5, needs workstream-G posteriors + F6 EIG retrieval), and the orchestrator runtime (C6).
+This module implements one propose-verify-retrain round on a synthetic
+tool-world. The full expert-iteration outer loop, DPO preference learning over
+plan pairs, experiment-design-as-planning, and orchestrator runtime are separate
+surfaces.
 """
 
 from __future__ import annotations
@@ -30,10 +30,10 @@ from mixle.task.sft_plan import _PROMPT_SEP, GenerativePlanner, _serialize_plan,
 
 @dataclass
 class RefinementReport:
-    """A named, measured account of one outcome-refinement round -- never claimed, always computed."""
+    """Measured account of one outcome-refinement round."""
 
     tasks: int
-    verified_gain_pairs: int  # how many NEW verified-successful plans entered the training signal
+    verified_gain_pairs: int  # how many new verified-successful plans entered the training signal
     solve_rate_before: float
     solve_rate_after: float
 
@@ -54,14 +54,14 @@ def outcome_refine_planner(
     lr: float = 1e-3,
     seed: int = 0,
 ) -> tuple[GenerativePlanner, RefinementReport]:
-    """One propose -> verify -> retrain round. Mutates ``planner.lm`` in place; returns it plus a report.
+    """Run one propose-verify-retrain round and return the planner plus report.
 
     For each task: sample ``k`` candidate plans (:func:`~mixle.task.sft_plan.sample_plans`), keep the
-    ones ``verify_fn`` accepts (a real execution/ground-truth check), and -- for tasks with at least one
+    ones ``verify_fn`` accepts, and for tasks with at least one
     verified success -- add the highest-scoring verified candidate as a new supervised-fine-tuning pair.
     Fine-tunes the LM on every such pair in one ``fit_pairs`` call. ``solve_rate_before``/``_after`` are
-    measured on the SAME held-out ``tasks`` via the planner's own single-shot ``try_plan`` (matched
-    budget), before and after the retrain -- exactly the C4 acceptance criterion, not an aggregate over
+    measured on the same held-out ``tasks`` via the planner's own single-shot ``try_plan`` (matched
+    budget), before and after the retrain -- not an aggregate over
     the k samples used to harvest the training signal.
     """
     tasks = list(tasks)
@@ -73,7 +73,7 @@ def outcome_refine_planner(
         verified = [plan for plan, _score in samples if plan is not None and verify_fn(task, plan)]
         if not verified:
             continue
-        best_plan = verified[0]  # sample_plans returns highest-score-first; the first VERIFIED one wins
+        best_plan = verified[0]  # sample_plans returns highest-score-first; keep the first verified plan
         prompt = planner.codec.encode(str(task) + _PROMPT_SEP)
         completion = planner.codec.encode(_serialize_plan(best_plan))
         new_pairs.append((prompt, completion))

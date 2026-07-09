@@ -114,12 +114,14 @@ class GeneralizedExtremeValueDistribution(SequenceEncodableProbabilityDistributi
     # --- compute-engine backend (numpy + torch/GPU): scoring + sufficient statistics in engine ops ---
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated GEV kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for GEV distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -258,6 +260,7 @@ class GeneralizedExtremeValueSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one sample or an array of iid samples by inverse CDF."""
         d = self.dist
         e = -np.log(self.rng.uniform(size=size))  # -log U ~ Exp(1) = the standard Gumbel core
         if abs(d.shape) < _XI_TOL:
@@ -279,17 +282,20 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: GeneralizedExtremeValueDistribution | None) -> None:
+        """Accumulate weighted first three raw moments for one observation."""
         self.sum += x * weight
         self.sum2 += x * x * weight
         self.sum3 += x * x * x * weight
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: np.ndarray, weights: np.ndarray, estimate: GeneralizedExtremeValueDistribution | None
     ) -> None:
+        """Accumulate weighted first three raw moments from encoded data."""
         xx = np.asarray(x, dtype=np.float64)
         self.sum += np.dot(xx, weights)
         self.sum2 += np.dot(xx * xx, weights)
@@ -297,9 +303,11 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float, float]) -> "GeneralizedExtremeValueAccumulator":
+        """Merge another GEV sufficient-statistic tuple."""
         self.sum += suff_stat[0]
         self.sum2 += suff_stat[1]
         self.sum3 += suff_stat[2]
@@ -307,13 +315,16 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, float, float, float]:
+        """Return raw moment sums and observation count."""
         return self.sum, self.sum2, self.sum3, self.count
 
     def from_value(self, x: tuple[float, float, float, float]) -> "GeneralizedExtremeValueAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.sum, self.sum2, self.sum3, self.count = float(x[0]), float(x[1]), float(x[2]), float(x[3])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -321,10 +332,12 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "GeneralizedExtremeValueDataEncoder":
+        """Return the encoder used by this accumulator."""
         return GeneralizedExtremeValueDataEncoder()
 
 
@@ -336,6 +349,7 @@ class GeneralizedExtremeValueAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> GeneralizedExtremeValueAccumulator:
+        """Create a fresh GEV accumulator."""
         return GeneralizedExtremeValueAccumulator(name=self.name, keys=self.keys)
 
 
@@ -359,11 +373,13 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> GeneralizedExtremeValueAccumulatorFactory:
+        """Return an accumulator factory for GEV raw-moment statistics."""
         return GeneralizedExtremeValueAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[float, float, float, float]
     ) -> GeneralizedExtremeValueDistribution:
+        """Estimate location, scale, and shape from weighted moments."""
         sum_x, sum_x2, sum_x3, count = suff_stat
         if count <= 0.0:
             return GeneralizedExtremeValueDistribution(0.0, 1.0, 0.0, name=self.name, keys=self.keys)
@@ -394,4 +410,5 @@ class GeneralizedExtremeValueDataEncoder(DataSequenceEncoder):
         return isinstance(other, GeneralizedExtremeValueDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
+        """Encode observations as a floating-point array."""
         return np.asarray(x, dtype=np.float64)

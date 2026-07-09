@@ -92,7 +92,7 @@ class InhomogeneousPoissonProcessDistribution(SequenceEncodableProbabilityDistri
         self._integral = float(np.sum(self.rates * self.widths))
 
     def __str__(self) -> str:
-        """Returns string representation of InhomogeneousPoissonProcessDistribution object."""
+        """Return a constructor-style representation of the inhomogeneous Poisson process."""
         return "InhomogeneousPoissonProcessDistribution(%s, edges=%s, name=%s, keys=%s)" % (
             repr(list(self.rates)),
             repr(list(self.edges)),
@@ -217,41 +217,50 @@ class InhomogeneousPoissonProcessAccumulator(SequenceEncodableStatisticAccumulat
         return counts.astype(np.float64)
 
     def update(self, x: Any, weight: float, estimate: InhomogeneousPoissonProcessDistribution | None) -> None:
+        """Accumulate weighted per-bin counts for one event-time realization."""
         self.bin_counts += weight * self._counts(x)
         self.n_realizations += weight
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics with one weighted realization."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any | None) -> None:
+        """Accumulate weighted per-bin counts from encoded realizations."""
         counts = np.asarray(x, dtype=np.float64)
         ww = np.asarray(weights, dtype=np.float64)
         self.bin_counts += ww @ counts
         self.n_realizations += ww.sum()
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics from encoded realizations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[np.ndarray, float]) -> "InhomogeneousPoissonProcessAccumulator":
+        """Merge serialized bin-count statistics into this accumulator."""
         self.bin_counts += suff_stat[0]
         self.n_realizations += suff_stat[1]
         return self
 
     def value(self) -> tuple[np.ndarray, float]:
+        """Return the weighted bin counts and weighted realization count."""
         return self.bin_counts.copy(), self.n_realizations
 
     def from_value(self, x: tuple[np.ndarray, float]) -> "InhomogeneousPoissonProcessAccumulator":
+        """Restore the accumulator from serialized bin-count statistics."""
         self.bin_counts = np.asarray(x[0], dtype=np.float64).copy()
         self.n_realizations = float(x[1])
         self.num_bins = self.bin_counts.size
         return self
 
     def scale(self, c: float) -> "InhomogeneousPoissonProcessAccumulator":
+        """Scale accumulated sufficient statistics by a constant."""
         self.bin_counts *= c
         self.n_realizations *= c
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into a keyed statistics dictionary."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 bc, nr = stats_dict[self.keys]
@@ -261,12 +270,14 @@ class InhomogeneousPoissonProcessAccumulator(SequenceEncodableStatisticAccumulat
                 stats_dict[self.keys] = (self.bin_counts.copy(), self.n_realizations)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from a keyed statistics dictionary."""
         if self.keys is not None and self.keys in stats_dict:
             bc, nr = stats_dict[self.keys]
             self.bin_counts = np.asarray(bc, dtype=np.float64).copy()
             self.n_realizations = float(nr)
 
     def acc_to_encoder(self) -> "InhomogeneousPoissonProcessDataEncoder":
+        """Return an encoder that bins event times on this accumulator's edges."""
         return InhomogeneousPoissonProcessDataEncoder(self.edges)
 
 
@@ -279,6 +290,7 @@ class InhomogeneousPoissonProcessAccumulatorFactory(StatisticAccumulatorFactory)
         self.keys = keys
 
     def make(self) -> "InhomogeneousPoissonProcessAccumulator":
+        """Create an empty inhomogeneous Poisson process accumulator."""
         return InhomogeneousPoissonProcessAccumulator(self.edges, name=self.name, keys=self.keys)
 
 
@@ -299,6 +311,7 @@ class InhomogeneousPoissonProcessEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> "InhomogeneousPoissonProcessAccumulatorFactory":
+        """Return a factory for inhomogeneous Poisson sufficient-statistic accumulators."""
         return InhomogeneousPoissonProcessAccumulatorFactory(self.edges, name=self.name, keys=self.keys)
 
     def estimate(
@@ -324,6 +337,7 @@ class InhomogeneousPoissonProcessDataEncoder(DataSequenceEncoder):
         return isinstance(other, InhomogeneousPoissonProcessDataEncoder) and np.array_equal(self.edges, other.edges)
 
     def seq_encode(self, x: Sequence[Any]) -> np.ndarray:
+        """Encode event-time realizations as per-bin count rows."""
         t_min = float(self.edges[0])
         t_max = float(self.edges[-1])
         rows = []

@@ -1,7 +1,7 @@
 """Cost-aware multi-fidelity Bayesian optimization.
 
-Many expensive objectives have cheap approximations -- a coarser mesh, fewer Monte-Carlo samples, a
-shorter training run. Multi-fidelity BO exploits them: it spends cheap low-fidelity evaluations to
+Many expensive objectives have lower-fidelity approximations -- a coarser mesh, fewer Monte-Carlo samples, a
+shorter training run. Multi-fidelity BO exploits them: it spends low-cost low-fidelity evaluations to
 locate good regions and reserves the expensive high-fidelity ones for refinement, reaching the optimum
 of the true (target) objective for a fraction of the cost of optimizing it directly.
 

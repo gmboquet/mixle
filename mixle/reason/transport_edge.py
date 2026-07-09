@@ -1,24 +1,18 @@
-"""Per-edge cross-modal transport premise check (CARD F2-a, workstream F2).
+"""Per-edge premise checks for cross-modal transport.
 
-TRANSPORT-a (the F0 gate) cleared a plain mixture-density conditional transport on two TOY inverses
-before any belief graph was trusted to rest on it -- but that GO decision was scoped to those toys.
-Per the plan, EVERY real modality edge must re-prove the same premise on ITS OWN data before an
-equivariant (A3 quotient) refinement is even considered: "PREMISE FIRST -- re-prove a plain
-conditional transport is usable + calibrated on THAT pair ... THEN the equivariant refinement only
-if the plain conditional is usable."
+Every real modality edge should prove that a plain conditional transport is
+usable and calibrated on that edge's own data before the edge is trusted in a
+belief graph. Calibration is checked against held-out truth for the edge rather
+than transferred from unrelated examples.
 
-This module promotes TRANSPORT-a's fit + calibration-check machinery (mixle/tests/transport_proof_test.py)
-into a reusable per-edge check, with the same two kill criteria:
+This module exposes a reusable per-edge check with two decisions:
 
-  * premise fails  -> the edge does not exist for cross-modal purposes; route around it / drop the pair.
-  * premise passes -> the plain conditional is kept AS-IS. No equivariant refinement is attempted here:
-    A3-a's own research spike already recorded a negative result for the quotient-leaf refinement
-    (no measured sample/parameter-efficiency win), so there is nothing to graft on even when the
-    premise clears.
+* premise fails: the edge should not be used for cross-modal purposes;
+* premise passes: the plain conditional transport may be composed as-is.
 
-Calibration only -- deliberately no closed-form/reference-posterior check, since a genuine edge (unlike
-TRANSPORT-a's toys) has none: coverage of the transport's own credible intervals against held-out
-truth is the only metric a real edge can offer.
+The check focuses on calibration because a genuine edge usually does not have a
+closed-form reference posterior. Coverage of the transport's credible intervals
+against held-out truth is the available metric for a real edge.
 """
 
 from __future__ import annotations
@@ -32,7 +26,7 @@ from mixle.inference import optimize
 from mixle.models.mixture_density import NeuralConditionalDensity, build_mdn
 
 ALPHA = 0.10  # 90% nominal credible-interval coverage
-COVERAGE_P_FLOOR = 0.01  # binomial-test p-value floor below which coverage is NOT consistent with nominal
+COVERAGE_P_FLOOR = 0.01  # p-value floor below which coverage is inconsistent with nominal
 
 
 def fit_conditional_transport(
@@ -48,13 +42,12 @@ def fit_conditional_transport(
     delta: float | None = 1.0e-9,
     reuse_estep_ll: bool = True,
 ):
-    """Fit ``p(cond | target)`` via a mixture density network and return a SAMPLER exposing
-    ``sample_given(cond) -> target``; ``data`` is ``(cond, target)`` pairs.
+    """Fit ``p(cond | target)`` and return a sampler with ``sample_given``.
 
-    Same family and defaults TRANSPORT-a validated (:func:`mixle.models.mixture_density.build_mdn` +
-    :class:`~mixle.models.mixture_density.NeuralConditionalDensity`, fit through :func:`optimize`).
+    Uses :func:`mixle.models.mixture_density.build_mdn` and
+    :class:`~mixle.models.mixture_density.NeuralConditionalDensity`, fit through :func:`optimize`.
     Pass ``delta=None, reuse_estep_ll=False`` for an edge whose relationship needs the full iteration
-    budget rather than early-stopping (TRANSPORT-a's own nonlinear case needed this).
+    budget rather than early stopping.
     """
     module = build_mdn(x_dim=x_dim, y_dim=y_dim, k=k, hidden=32, layers=2)
     leaf = NeuralConditionalDensity(module, m_steps=m_steps, lr=lr)
@@ -71,9 +64,7 @@ def fit_conditional_transport(
 
 
 def marginal_coverage(sampler, x_test, y_test, *, n_draws: int = 200):
-    """Per-dimension credible-interval coverage: for each held-out ``(x, y)``, does the
-    ``[alpha/2, 1-alpha/2]`` quantile interval of ``n_draws`` posterior samples (given ``y``) contain
-    the true ``x``, per dimension?"""
+    """Return per-dimension credible-interval coverage flags."""
     d = x_test.shape[1]
     covered = [[] for _ in range(d)]
     for i in range(len(x_test)):
@@ -97,8 +88,7 @@ def coverage_consistent_with_nominal(covered_flags) -> tuple[float, float]:
 
 @dataclass
 class EdgeTransportVerdict:
-    """The premise-first decision for ONE real modality edge -- computed, not assumed to transfer
-    from any other edge's (or TRANSPORT-a's toy) verdict."""
+    """Premise decision for one real modality edge, computed on that edge."""
 
     edge_name: str
     usable: bool
@@ -108,9 +98,7 @@ class EdgeTransportVerdict:
 
 
 def verify_edge_transport(edge_name: str, sampler, x_test, y_test, *, n_draws: int = 200) -> EdgeTransportVerdict:
-    """Run the premise check for one edge: fit (via :func:`fit_conditional_transport`) happens
-    upstream; this checks the RESULTING sampler's calibration against held-out truth. ``usable`` is
-    True only if every dimension's coverage is statistically consistent with the nominal rate."""
+    """Check one fitted edge sampler against held-out calibration data."""
     covered = marginal_coverage(sampler, x_test, y_test, n_draws=n_draws)
     rates, p_values = [], []
     for dim_covered in covered:

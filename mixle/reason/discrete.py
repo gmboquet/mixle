@@ -34,17 +34,21 @@ class DiscreteAnswer:
 
     @property
     def probs(self) -> np.ndarray:
+        """Return posterior probabilities over hypotheses."""
         return self.belief.mean()
 
     def map(self) -> Any:
+        """Return the most likely hypothesis."""
         return self.belief.map()
 
     def top(self, k: int = 3) -> list[tuple[Any, float]]:
+        """Return the top ``k`` hypotheses and probabilities."""
         p = self.belief.probs
         order = np.argsort(-p)[: int(k)]
         return [(self.belief.labels[int(i)], float(p[i])) for i in order]
 
     def summary(self) -> str:
+        """Render hypothesis probabilities and attribution contributions."""
         lines = ["hypotheses: " + ", ".join(f"{h}={p:.3f}" for h, p in self.top(len(self.belief.labels)))]
         lines += [f"  {name}: removed {nats:+.2f} nats" for name, nats in self.attribution]
         lines.append(f"  residual entropy: {self.belief.entropy():.2f} nats")

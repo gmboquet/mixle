@@ -1,4 +1,9 @@
-"""Negative-binomial discrete candidate -- overdispersed counts (variance > mean, unlike Poisson)."""
+"""Automatic detector for overdispersed negative-binomial count data.
+
+The detector accepts non-negative integer samples whose variance clearly exceeds
+the mean, estimates moment-based parameters, and exposes the distribution
+factory for automatic model selection.
+"""
 
 import numpy as np
 

@@ -1,4 +1,8 @@
-"""NumPy implementation of the ComputeEngine protocol."""
+"""NumPy and SciPy implementation of the ``ComputeEngine`` protocol.
+
+The engine is the default host execution path for local scoring, sufficient
+statistics, generated kernels, and optional fused NumPy/Numba mixture kernels.
+"""
 
 from __future__ import annotations
 
@@ -20,9 +24,9 @@ class NumpyEngine(ComputeEngine):
     # on the host (no engine-resident round-trip to avoid).
     supports_numba = True
     resident_estep = False
-    # Opt-in: route a fusible composite/mixture of cheap leaves to the source-generated single-pass fused
-    # numba kernel (mixle.stats.compute.fused_codegen). Off on the default engine so the established kernels
-    # and their tight host-parity contracts are unchanged; ``FUSED_NUMPY_ENGINE`` flips it on.
+    # Opt-in: route a fusible composite/mixture of low-cost leaves to the source-generated single-pass
+    # fused numba kernel (mixle.stats.compute.fused_codegen). Off on the default engine so the established
+    # kernels and their tight host-parity contracts are unchanged; ``FUSED_NUMPY_ENGINE`` flips it on.
     prefer_fused = False
 
     device = "cpu"

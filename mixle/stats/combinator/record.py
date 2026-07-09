@@ -334,6 +334,8 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class RecordEnumerator(DistributionEnumerator):
+    """Enumerate named records over field supports in descending joint probability order."""
+
     def __init__(self, dist: RecordDistribution) -> None:
         """Enumerates mapping records over the field supports in descending joint probability order.
 
@@ -356,6 +358,8 @@ class RecordEnumerator(DistributionEnumerator):
 
 
 class RecordConditionalEnumerator(DistributionEnumerator):
+    """Enumerate complete records that agree with fixed conditioning fields."""
+
     def __init__(self, dist: RecordDistribution, given: dict[Any, Any]) -> None:
         """Enumerate complete records consistent with the fixed fields ``given``, best-first.
 

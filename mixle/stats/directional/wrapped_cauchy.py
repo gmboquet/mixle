@@ -82,12 +82,14 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
     # parameter-side trig is host-scalar math, so scoring needs no engine trig at all. ---
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated wrapped-Cauchy kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for wrapped Cauchy distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -182,6 +184,7 @@ class WrappedCauchySampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one angle or an array of iid angles."""
         d = self.dist
         n = 1 if size is None else int(size)
         if d.rho == 0.0:  # uniform on the circle
@@ -204,14 +207,17 @@ class WrappedCauchyAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: WrappedCauchyDistribution | None) -> None:
+        """Accumulate one weighted circular resultant contribution."""
         self.sum_cos += weight * math.cos(float(x))
         self.sum_sin += weight * math.sin(float(x))
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one angle."""
         self.update(x, weight, None)
 
     def seq_update(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: Any) -> None:
+        """Accumulate circular-resultant statistics from encoded cos/sin values."""
         cos_t, sin_t = x
         w = np.asarray(weights, dtype=np.float64)
         self.sum_cos += float(np.dot(cos_t, w))
@@ -219,22 +225,27 @@ class WrappedCauchyAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += float(w.sum())
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded angles."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "WrappedCauchyAccumulator":
+        """Merge another wrapped-Cauchy sufficient-statistic tuple."""
         self.sum_cos += suff_stat[0]
         self.sum_sin += suff_stat[1]
         self.count += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return cosine sum, sine sum, and total weight."""
         return self.sum_cos, self.sum_sin, self.count
 
     def from_value(self, x: tuple[float, float, float]) -> "WrappedCauchyAccumulator":
+        """Replace accumulator contents from circular-resultant statistics."""
         self.sum_cos, self.sum_sin, self.count = float(x[0]), float(x[1]), float(x[2])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -242,10 +253,12 @@ class WrappedCauchyAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "WrappedCauchyDataEncoder":
+        """Return the encoder used by this accumulator."""
         return WrappedCauchyDataEncoder()
 
 
@@ -257,6 +270,7 @@ class WrappedCauchyAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> WrappedCauchyAccumulator:
+        """Create a fresh wrapped-Cauchy accumulator."""
         return WrappedCauchyAccumulator(name=self.name, keys=self.keys)
 
 
@@ -269,9 +283,11 @@ class WrappedCauchyEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> WrappedCauchyAccumulatorFactory:
+        """Return an accumulator factory for circular-resultant statistics."""
         return WrappedCauchyAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> WrappedCauchyDistribution:
+        """Estimate mean direction and concentration from the mean resultant."""
         sum_cos, sum_sin, count = suff_stat
         if count <= 0.0:
             return WrappedCauchyDistribution(0.0, 0.0, name=self.name, keys=self.keys)
@@ -291,5 +307,6 @@ class WrappedCauchyDataEncoder(DataSequenceEncoder):
         return isinstance(other, WrappedCauchyDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+        """Encode angles as cosine and sine arrays."""
         theta = np.asarray(x, dtype=np.float64)
         return np.cos(theta), np.sin(theta)

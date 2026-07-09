@@ -8,9 +8,9 @@ such that the maximum-entropy (Boltzmann-rational) policy induced by those weigh
 expert's empirical feature expectations. That match is the algorithm's own optimality certificate
 (feature-expectation matching at convergence), not a proxy metric graded after the fact.
 
-Differs from :mod:`mixle.task.plan_model` (CARD C1-a), which fits a Markov chain directly over
-observed action sequences -- it models WHAT the expert did. This module additionally explains WHY,
-recovering the reward the expert's behavior is consistent with, over the same
+Differs from :mod:`mixle.task.plan_model`, which fits a Markov chain directly over observed action
+sequences and models what the expert did. This module additionally explains why by recovering the
+reward the expert's behavior is consistent with, over the same
 :class:`~mixle.task.rl.GridWorld` environment shape.
 
     world = GridWorld(size=5, goal=(4, 4))
@@ -121,6 +121,7 @@ class MaxEntIRLResult:
     history: list[float]
 
     def reward(self, features: np.ndarray) -> np.ndarray:
+        """Evaluate the learned linear reward on feature rows."""
         return features @ self.reward_weights
 
 

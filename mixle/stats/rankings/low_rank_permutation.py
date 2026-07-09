@@ -74,6 +74,7 @@ class LowRankPermutationDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare the NumPy and numba execution path used by low-rank permutation kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(
@@ -115,13 +116,16 @@ class LowRankPermutationDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def density(self, x: Sequence[int]) -> float:
+        """Return the probability of one ordering."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: Sequence[int]) -> float:
+        """Return the log-probability of one ordering."""
         x = np.asarray(x, dtype=np.int64)
         return float(self.s[x, np.arange(self.dim)].sum() - self.log_z)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return vectorized log-probabilities for encoded orderings."""
         ranks = np.arange(self.dim)
         return self.s[x, ranks[None, :]].sum(axis=1) - self.log_z
 
@@ -131,9 +135,11 @@ class LowRankPermutationDistribution(SequenceEncodableProbabilityDistribution):
         return p
 
     def sampler(self, seed: int | None = None) -> LowRankPermutationSampler:
+        """Return a Metropolis sampler for this low-rank assignment model."""
         return LowRankPermutationSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> LowRankPermutationEstimator:
+        """Return a Sinkhorn-marginal estimator with this dimension and rank."""
         return LowRankPermutationEstimator(
             dim=self.dim,
             rank=self.rank,
@@ -144,6 +150,7 @@ class LowRankPermutationDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def dist_to_encoder(self) -> LowRankPermutationDataEncoder:
+        """Return the full-ranking encoder used by vectorized methods."""
         return LowRankPermutationDataEncoder(dim=self.dim)
 
 
@@ -159,6 +166,7 @@ class LowRankPermutationSampler(DistributionSampler):
         self.thin = thin
 
     def sample(self, size: int | None = None) -> list[int] | list[list[int]]:
+        """Draw one ordering or ``size`` approximate iid orderings."""
         k = 1 if size is None else size
         seed = int(self.rng.randint(0, 2**31 - 1))
         arr = _mh_assignment(np.ascontiguousarray(self.dist.s), k, self.burn, self.thin, seed)
@@ -176,34 +184,42 @@ class LowRankPermutationAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: Sequence[int], weight: float, estimate: Any) -> None:
+        """Update item-by-rank counts from one weighted ordering."""
         self.seq_update(np.asarray([x], dtype=np.int64), np.asarray([weight], dtype=float), estimate)
 
     def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
+        """Initialize item-by-rank counts from one weighted ordering."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
+        """Update item-by-rank counts from encoded orderings."""
         ranks = np.arange(self.dim)
         for row, w in zip(x, weights):
             self.counts[row, ranks] += w
         self.count += float(np.sum(weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize item-by-rank counts from encoded orderings."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat) -> LowRankPermutationAccumulator:
+        """Merge observation weight and item-by-rank count statistics."""
         self.count += suff_stat[0]
         self.counts += suff_stat[1]
         return self
 
     def value(self):
+        """Return accumulated observation weight and item-by-rank counts."""
         return self.count, self.counts
 
     def from_value(self, x) -> LowRankPermutationAccumulator:
+        """Restore accumulator state from ``value`` output."""
         self.count, self.counts = x[0], np.asarray(x[1])
         self.dim = self.counts.shape[0]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -211,19 +227,24 @@ class LowRankPermutationAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> LowRankPermutationDataEncoder:
+        """Return the encoder compatible with item-by-rank sufficient statistics."""
         return LowRankPermutationDataEncoder(dim=self.dim)
 
 
 class LowRankPermutationAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create accumulators for low-rank permutation sufficient statistics."""
+
     def __init__(self, dim: int, keys: str | None = None) -> None:
         self.dim = dim
         self.keys = keys
 
     def make(self) -> LowRankPermutationAccumulator:
+        """Create an empty low-rank permutation accumulator."""
         return LowRankPermutationAccumulator(dim=self.dim, keys=self.keys)
 
 
@@ -253,9 +274,11 @@ class LowRankPermutationEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> LowRankPermutationAccumulatorFactory:
+        """Return a factory for low-rank permutation sufficient-statistic accumulators."""
         return LowRankPermutationAccumulatorFactory(dim=self.dim, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat) -> LowRankPermutationDistribution:
+        """Estimate low-rank score factors from item-by-rank marginal counts."""
         count, counts = suff_stat
         n, r = self.dim, self.rank
         kw = dict(max_exact=self.max_exact, sinkhorn_iter=self.sinkhorn_iter, name=self.name, keys=self.keys)
@@ -289,6 +312,7 @@ class LowRankPermutationDataEncoder(DataSequenceEncoder):
         return isinstance(other, LowRankPermutationDataEncoder)
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray:
+        """Validate and encode full orderings as a dense integer matrix."""
         rv = np.asarray([list(row) for row in x], dtype=np.int64)
         if rv.ndim != 2 or rv.shape[0] == 0:
             raise ValueError("LowRankPermutationDistribution requires a non-empty sequence of orderings.")

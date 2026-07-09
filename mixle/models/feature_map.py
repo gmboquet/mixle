@@ -1,7 +1,6 @@
-"""``FeatureMapDensity`` -- a frozen, deterministic feature map composed with any inner density.
+"""Frozen deterministic feature maps composed with inner densities.
 
-The "frozen encoder + structured head" pattern from the workstream-A model-structure plan: a
-deterministic, non-invertible feature function (for example
+A deterministic, non-invertible feature function (for example
 :func:`mixle.represent.modality.image_features`) reduces a raw item -- an image array, a signal, any
 shape a plain scalar/vector family cannot represent -- to a fixed-length vector, and an inner
 distribution/estimator (any five-piece mixle family, including a neural density) is fit on the
@@ -66,22 +65,28 @@ class FeatureMapDensity(SequenceEncodableProbabilityDistribution):
         return f"FeatureMapDensity({self.feature_name!r}, {self.inner})"
 
     def density(self, x: Any) -> float:
+        """Return the induced feature-space density at raw item ``x``."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: Any) -> float:
+        """Return ``log p(feature_fn(x))`` under the inner distribution."""
         return float(self.inner.log_density(feature_fn(self.feature_name)(x)))
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return inner log densities for an already-featurized batch."""
         # x is the already-featurized (n, d) batch produced by FeatureMapEncoder.seq_encode.
         return self.inner.seq_log_density(x)
 
     def sampler(self, seed: int | None = None) -> FeatureMapSampler:
+        """Return a sampler for the inner feature-space distribution."""
         return FeatureMapSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> FeatureMapEstimator:
+        """Return an estimator that fits the inner estimator on registered features."""
         return FeatureMapEstimator(self.feature_name, self.inner.estimator(pseudo_count), name=self.name)
 
     def dist_to_encoder(self) -> FeatureMapEncoder:
+        """Return the encoder that maps raw items to feature vectors."""
         return FeatureMapEncoder(self.feature_name)
 
     # to_dict/from_dict are inherited from ProbabilityDistribution: they delegate to the generic
@@ -97,6 +102,8 @@ class FeatureMapDensity(SequenceEncodableProbabilityDistribution):
 
 
 class FeatureMapSampler(DistributionSampler):
+    """Sampler for the feature-space distribution induced by a feature-map leaf."""
+
     def __init__(self, dist: FeatureMapDensity, seed: int | None = None) -> None:
         self.dist = dist
         self.inner_sampler = dist.inner.sampler(seed)
@@ -107,6 +114,8 @@ class FeatureMapSampler(DistributionSampler):
 
 
 class FeatureMapEncoder(DataSequenceEncoder):
+    """Encode raw items by applying a registered deterministic feature function."""
+
     def __init__(self, feature_name: str) -> None:
         self.feature_name = feature_name
 
@@ -117,50 +126,64 @@ class FeatureMapEncoder(DataSequenceEncoder):
         return isinstance(other, FeatureMapEncoder) and other.feature_name == self.feature_name
 
     def seq_encode(self, data: list) -> np.ndarray:
+        """Convert raw items into a stacked feature matrix."""
         fn = feature_fn(self.feature_name)
         return np.stack([np.asarray(fn(x), dtype=float) for x in data])
 
 
 class FeatureMapAccumulator(SequenceEncodableStatisticAccumulator):
+    """Delegate accumulation to the inner estimator after feature extraction."""
+
     def __init__(self, feature_name: str, inner_acc: Any) -> None:
         self.feature_name = feature_name
         self.inner_acc = inner_acc
 
     def update(self, x: Any, weight: float, estimate: Any) -> None:
+        """Feature-map one raw item and add it to the inner accumulator."""
         inner_estimate = estimate.inner if estimate is not None else None
         self.inner_acc.update(feature_fn(self.feature_name)(x), weight, inner_estimate)
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
+        """Pass an already-featurized batch through to the inner accumulator."""
         inner_estimate = estimate.inner if estimate is not None else None
         self.inner_acc.seq_update(enc, weights, inner_estimate)
 
     def initialize(self, x: Any, weight: float, rng: Any) -> None:
+        """Initialize the inner accumulator from one feature-mapped item."""
         self.inner_acc.initialize(feature_fn(self.feature_name)(x), weight, rng)
 
     def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
+        """Initialize the inner accumulator from an encoded feature batch."""
         self.inner_acc.seq_initialize(enc, weights, rng)
 
     def combine(self, other: Any) -> FeatureMapAccumulator:
+        """Merge sufficient statistics into the inner accumulator."""
         self.inner_acc.combine(other)
         return self
 
     def value(self) -> Any:
+        """Return the inner accumulator's sufficient-statistic value."""
         return self.inner_acc.value()
 
     def from_value(self, v: Any) -> FeatureMapAccumulator:
+        """Restore the inner accumulator from its value representation."""
         self.inner_acc.from_value(v)
         return self
 
     def acc_to_encoder(self) -> FeatureMapEncoder:
+        """Return the feature-map encoder expected by this accumulator."""
         return FeatureMapEncoder(self.feature_name)
 
 
 class FeatureMapAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for feature-map accumulators wrapping an inner accumulator factory."""
+
     def __init__(self, feature_name: str, inner_factory: Any) -> None:
         self.feature_name = feature_name
         self.inner_factory = inner_factory
 
     def make(self) -> FeatureMapAccumulator:
+        """Create a fresh feature-map accumulator."""
         return FeatureMapAccumulator(self.feature_name, self.inner_factory.make())
 
 
@@ -173,9 +196,11 @@ class FeatureMapEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self) -> FeatureMapAccumulatorFactory:
+        """Return an accumulator factory that feature-maps raw inputs before inner accumulation."""
         return FeatureMapAccumulatorFactory(self.feature_name, self.inner.accumulator_factory())
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> FeatureMapDensity:
+        """Estimate the inner distribution and wrap it as a feature-map density."""
         return FeatureMapDensity(self.feature_name, self.inner.estimate(nobs, suff_stat), name=self.name)
 
 

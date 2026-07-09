@@ -97,10 +97,12 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
         return f"NeuralConditionalDensity({type(self.module).__name__})"
 
     def log_density(self, xy: Any) -> float:
+        """Return ``log p(y | x)`` for one observation pair ``(x, y)``."""
         x, y = xy
         return float(self.seq_log_density(([np.atleast_1d(x)], [np.atleast_1d(y)]))[0])
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
+        """Return per-row conditional log densities for encoded ``(x, y)`` arrays."""
         torch = _torch()
         xs, ys = enc
         xx = check_finite(np.atleast_2d(np.asarray(xs, dtype=float)), "NeuralConditionalDensity.seq_log_density (x)")
@@ -112,14 +114,17 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
             return self.module.log_density(xt, yt).cpu().numpy().reshape(-1)
 
     def sampler(self, seed: int | None = None) -> NeuralConditionalDensitySampler:
+        """Return a conditional sampler for drawing ``y`` given ``x``."""
         return NeuralConditionalDensitySampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> NeuralConditionalDensityEstimator:
+        """Return the generalized-EM estimator for weighted conditional-density training."""
         return NeuralConditionalDensityEstimator(
             self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name
         )
 
     def dist_to_encoder(self) -> NeuralConditionalDensityEncoder:
+        """Return the encoder for ``(x, y)`` observation pairs."""
         return NeuralConditionalDensityEncoder()
 
     # --- serialization: persist hparams + the module (as portable bytes); registered below so a mixture holding
@@ -134,6 +139,7 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
         self.module = decode_module(state["module"])
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize hyperparameters and module bytes for registry-based round trips."""
         return {
             "m_steps": self.m_steps,
             "lr": self.lr,
@@ -144,6 +150,7 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> NeuralConditionalDensity:
+        """Rebuild a :class:`NeuralConditionalDensity` from :meth:`to_dict` output."""
         return cls(
             decode_module(payload["module"]),
             m_steps=payload["m_steps"],
@@ -154,14 +161,18 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
 
 
 class NeuralConditionalDensitySampler(DistributionSampler):
+    """Conditional sampler for modules exposing ``sample_given(x)``."""
+
     def __init__(self, dist: NeuralConditionalDensity, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Raise because the leaf defines ``p(y | x)`` and has no marginal ``p(x)``."""
         raise NotImplementedError("NeuralConditionalDensity is conditional p(y|x); use sampler().sample_given(x).")
 
     def sample_given(self, x: Any) -> np.ndarray:
+        """Draw one response from ``p(y | x)`` using the wrapped module."""
         torch = _torch()
         self.dist.module.to(self.dist.device).eval()
         torch.manual_seed(int(self.rng.randint(0, 2**31 - 1)))
@@ -170,13 +181,13 @@ class NeuralConditionalDensitySampler(DistributionSampler):
             return self.dist.module.sample_given(xt).cpu().numpy()[0]
 
     def sample_given_batch(self, x_batch: Any) -> np.ndarray:
-        """One draw of ``y ~ p(y | x)`` for EVERY row of ``x_batch`` (shape ``(n, x_dim)``), in ONE
+        """One draw of ``y ~ p(y | x)`` for every row of ``x_batch`` (shape ``(n, x_dim)``), in one
         batched forward pass -- statistically identical to calling :meth:`sample_given` once per row
         (same model, same per-draw sampling procedure), just without paying framework/dispatch
         overhead per row. That per-call overhead dominates a Python loop of hundreds of individual
         ``sample_given`` calls, which is exactly the shape both a particle-walk step (many different
         x's, one draw each) and a per-point coverage check (repeat one x, many draws) reduce to --
-        both call sites use this to speed up the SAME check/walk rather than shrink it. Repeat a row
+        both call sites use this to speed up the same check/walk rather than shrink it. Repeat a row
         of ``x_batch`` to draw more than once from the same ``x``."""
         torch = _torch()
         self.dist.module.to(self.dist.device).eval()
@@ -189,6 +200,8 @@ class NeuralConditionalDensitySampler(DistributionSampler):
 
 
 class NeuralConditionalDensityEncoder(DataSequenceEncoder):
+    """Encode ``(x, y)`` pairs for vectorized conditional-density scoring and fitting."""
+
     def __str__(self) -> str:
         return "NeuralConditionalDensityEncoder"
 
@@ -196,9 +209,79 @@ class NeuralConditionalDensityEncoder(DataSequenceEncoder):
         return isinstance(other, NeuralConditionalDensityEncoder)
 
     def seq_encode(self, data: list) -> tuple[np.ndarray, np.ndarray]:
+        """Convert a list of ``(x, y)`` pairs into batched feature and target arrays."""
         x = np.array([np.atleast_1d(np.asarray(xy[0], dtype=float)) for xy in data])
         y = np.array([np.atleast_1d(np.asarray(xy[1], dtype=float)) for xy in data])
         return (x, y)
+
+
+class NeuralConditionalDensityAccumulator(SequenceEncodableStatisticAccumulator):
+    """Buffers responsibility-weighted ``(x, y)`` pairs for the M-step (the weights are the E-step soft counts)."""
+
+    def __init__(self) -> None:
+        self.x: list = []
+        self.y: list = []
+        self.w: list = []
+
+    # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
+    def update(self, xy: Any, weight: float, estimate: Any) -> None:
+        """Add one weighted observation pair to the accumulator."""
+        self.x.append(np.atleast_1d(np.asarray(xy[0], dtype=float))[None, ...])
+        self.y.append(np.atleast_1d(np.asarray(xy[1], dtype=float))[None, ...])
+        self.w.append(np.asarray([float(weight)], dtype=float))
+
+    def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
+        """Add a batch of encoded observation pairs and responsibility weights."""
+        x, y = enc
+        xb = np.asarray(x, dtype=float)
+        yb = np.asarray(y, dtype=float)
+        self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
+        self.y.append(yb.reshape(yb.shape[0], 1) if yb.ndim == 1 else yb)
+        self.w.append(np.asarray(weights, dtype=float).ravel())
+
+    def initialize(self, xy: Any, weight: float, rng: Any) -> None:
+        """Initialize from one observation using the ordinary update path."""
+        self.update(xy, weight, None)
+
+    def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
+        """Initialize from an encoded batch using the ordinary batch update path."""
+        self.seq_update(enc, weights, None)
+
+    def combine(self, other: Any) -> NeuralConditionalDensityAccumulator:
+        """Merge the value tuple from another conditional-density accumulator."""
+        xo, yo, wo = other
+        if len(xo):
+            self.x.append(np.asarray(xo, dtype=float))
+            self.y.append(np.asarray(yo, dtype=float))
+            self.w.append(np.asarray(wo, dtype=float).ravel())
+        return self
+
+    def value(self) -> tuple:
+        """Return contiguous ``(x, y, weights)`` arrays for the M-step."""
+        x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
+        y = np.concatenate(self.y, axis=0) if self.y else np.zeros((0, 0))
+        w = np.concatenate(self.w) if self.w else np.zeros((0,))
+        return (x, y, w)
+
+    def from_value(self, value: tuple) -> NeuralConditionalDensityAccumulator:
+        """Restore accumulator buffers from a value tuple."""
+        x, y, w = value
+        self.x = [np.asarray(x, dtype=float)] if len(x) else []
+        self.y = [np.asarray(y, dtype=float)] if len(y) else []
+        self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
+        return self
+
+    def acc_to_encoder(self) -> NeuralConditionalDensityEncoder:
+        """Return the encoder expected by this accumulator."""
+        return NeuralConditionalDensityEncoder()
+
+
+class NeuralConditionalDensityAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for conditional-density accumulators."""
+
+    def make(self) -> NeuralConditionalDensityAccumulator:
+        """Create a fresh accumulator."""
+        return NeuralConditionalDensityAccumulator()
 
 
 class NeuralConditionalDensityEstimator(ParameterEstimator):
@@ -215,6 +298,9 @@ class NeuralConditionalDensityEstimator(ParameterEstimator):
 
     def accumulator_factory(self) -> DataBufferAccumulatorFactory:
         return DataBufferAccumulatorFactory(NeuralConditionalDensityEncoder(), n_fields=2)
+    def accumulator_factory(self) -> NeuralConditionalDensityAccumulatorFactory:
+        """Return an accumulator factory for weighted conditional-density batches."""
+        return NeuralConditionalDensityAccumulatorFactory()
 
     def _make(self) -> NeuralConditionalDensity:
         return NeuralConditionalDensity(
@@ -222,6 +308,7 @@ class NeuralConditionalDensityEstimator(ParameterEstimator):
         )
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralConditionalDensity:
+        """Run the weighted conditional log-likelihood M-step and return the updated leaf."""
         torch = _torch()
         xs, ys, ws = suff_stat
         if len(xs) == 0:
@@ -311,8 +398,8 @@ def build_conditional_flow(x_dim: int, y_dim: int, *, hidden: int = 32, layers: 
     The exact-density counterpart to :func:`build_mdn`. Each affine-coupling layer's shift/scale networks take
     both the passed-through ``y`` coordinates *and* ``x``, so the whole invertible ``y``-transform bends with the
     input -- capturing *within-``y``* dependence (e.g. ``y2`` a nonlinear function of ``y1``) that a single-Gaussian
-    :class:`~mixle.models.neural_leaf.NeuralGaussian` (isotropic mean-only) cannot, while keeping an exact log-density
-    (so it composes honestly, unlike a bound). Needs ``y_dim >= 2`` for the coupling to be non-trivial. Exposes
+    :class:`~mixle.models.neural_leaf.NeuralGaussian` (isotropic mean-only) cannot, while keeping an exact
+    log-density rather than a bound. Needs ``y_dim >= 2`` for the coupling to be non-trivial. Exposes
     ``log_density(x, y)`` and ``sample_given(x)`` -- the contract a :class:`NeuralConditionalDensity` adapts.
     """
     return _module_class("ConditionalFlow")(x_dim, y_dim, hidden, layers)
@@ -509,7 +596,7 @@ def build_conditional_autoregressive_categorical(x_dim: int, y_dim: int, n_categ
     counterpart to :func:`build_conditional_flow`. It factorizes ``p(y | x) = prod_i p(y_i | y_{<i}, x)`` with a
     MADE-masked net over ``y`` into which ``x`` is injected *unmasked* (degree 0, so every coordinate may depend on
     ``x``). Each per-coordinate softmax is exactly a conditional, so the density is **exactly normalized** and
-    composes honestly. Exposes ``log_density(x, y)`` and ``sample_given(x)`` -- the contract a
+    comparable to other exact discrete conditional leaves. Exposes ``log_density(x, y)`` and ``sample_given(x)`` -- the contract a
     :class:`NeuralConditionalDensity` adapts.
     """
     return _module_class("ConditionalAutoregressiveCategorical")(x_dim, y_dim, n_categories, hidden)

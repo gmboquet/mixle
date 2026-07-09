@@ -1,4 +1,4 @@
-"""Create, estimate, and sample from a beta distribution on (0, 1).
+"""Beta distributions over values in the unit interval.
 
 Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
@@ -24,6 +24,8 @@ from mixle.utils.special import digamma, gammaln, trigamma
 
 
 class BetaFisherView(FixedFisherView):
+    """Fisher view for Beta sufficient statistics."""
+
     def __init__(self, dist: Any) -> None:
         super().__init__(dist, [("count",), ("log_x",), ("log1m_x",)])
 
@@ -68,12 +70,14 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated Beta kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for Beta distributions."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -288,6 +292,7 @@ class BetaSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one sample or an array of iid samples."""
         return self.rng.beta(self.dist.a, self.dist.b, size=size)
 
 
@@ -304,6 +309,7 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: BetaDistribution | None) -> None:
+        """Accumulate weighted statistics for one observation in ``(0, 1)``."""
         if x <= 0.0 or x >= 1.0:
             raise ValueError("BetaDistribution requires observations in (0, 1).")
         self.count += weight
@@ -313,6 +319,7 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 += x * x * weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(
@@ -321,6 +328,7 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
         weights: np.ndarray,
         estimate: BetaDistribution | None,
     ) -> None:
+        """Accumulate weighted statistics from encoded observations."""
         lx, l1mx, xx, xx2 = x
         self.count += np.sum(weights, dtype=np.float64)
         self.sum_of_logs += np.dot(lx, weights)
@@ -331,9 +339,11 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(
         self, x: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None
     ) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float, float, float]) -> "BetaAccumulator":
+        """Merge another Beta sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.sum_of_logs += suff_stat[1]
         self.sum_of_log1m += suff_stat[2]
@@ -342,9 +352,11 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, float, float, float, float]:
+        """Return the accumulated Beta sufficient statistics."""
         return self.count, self.sum_of_logs, self.sum_of_log1m, self.sum, self.sum2
 
     def from_value(self, x: tuple[float, float, float, float, float]) -> "BetaAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.count = x[0]
         self.sum_of_logs = x[1]
         self.sum_of_log1m = x[2]
@@ -353,6 +365,7 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -360,10 +373,12 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "BetaDataEncoder":
+        """Return the encoder used by this accumulator."""
         return BetaDataEncoder()
 
 
@@ -375,6 +390,7 @@ class BetaAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> BetaAccumulator:
+        """Create a fresh Beta accumulator."""
         return BetaAccumulator(name=self.name, keys=self.keys)
 
 
@@ -396,6 +412,7 @@ class BetaEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> BetaAccumulatorFactory:
+        """Return an accumulator factory for Beta sufficient statistics."""
         return BetaAccumulatorFactory(name=self.name, keys=self.keys)
 
     @staticmethod
@@ -412,6 +429,7 @@ class BetaEstimator(ParameterEstimator):
         return np.array([1.0, 1.0], dtype=np.float64)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float, float]) -> BetaDistribution:
+        """Estimate Beta shape parameters from weighted sufficient statistics."""
         count, sum_log_x, sum_log1m, sum_x, sum_x2 = suff_stat
         if count <= 0.0 and self.pseudo_count is None:
             return BetaDistribution(1.0, 1.0, name=self.name, keys=self.keys)
@@ -442,6 +460,7 @@ class BetaDataEncoder(DataSequenceEncoder):
         return isinstance(other, BetaDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Encode observations as log and moment arrays for vectorized updates."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and (np.any(rv <= 0.0) or np.any(rv >= 1.0) or np.any(np.isnan(rv))):
             raise ValueError("BetaDistribution requires observations in (0, 1).")

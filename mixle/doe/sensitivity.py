@@ -96,7 +96,7 @@ def morris_screening(
     seed: int = 0,
     names: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Morris elementary-effects screening -- a cheap first factor ranking.
+    """Morris elementary-effects screening -- a low-cost first factor ranking.
 
     Walks ``trajectories`` one-factor-at-a-time paths on a ``levels``-grid; the mean absolute elementary
     effect ``mu_star[i]`` ranks influence and the spread ``sigma[i]`` flags nonlinearity/interactions.
@@ -198,7 +198,7 @@ def dgsm(
 
     ``nu[i] = E[(df/dx_i)^2]`` over the input box, estimated by central finite differences at ``n``
     low-discrepancy points. Unlike the first-order Sobol index, a DGSM is nonzero whenever an input
-    matters *anywhere* -- including purely through interactions -- so it is a cheap, robust screen that
+    matters *anywhere* -- including purely through interactions -- so it is a low-cost, robust screen that
     upper-bounds the total Sobol index (Sobol & Kucherenko, via the Poincare inequality:
     ``ST[i] <= (L_i / pi)^2 * nu[i] / Var(y)`` for a uniform input of width ``L_i``). The reported
     ``importance`` is ``L_i^2 * nu[i]`` normalized to sum to one -- a dimensionless influence ranking.

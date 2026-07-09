@@ -65,7 +65,7 @@ def ingest_artifacts(substrate: Substrate, registry_root: str, *, scope: str = "
     for manifest_path in sorted(root.rglob("manifest.json")):
         try:
             manifest = json.loads(manifest_path.read_text())
-        except Exception:  # noqa: BLE001 - a broken manifest is skipped, not fatal
+        except Exception:  # noqa: BLE001 - an unreadable manifest is skipped, not fatal
             continue
         adir = manifest_path.parent
         meta = manifest.get("meta", {}) if isinstance(manifest, dict) else {}

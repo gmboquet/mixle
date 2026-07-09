@@ -33,6 +33,7 @@ class Answer:
         return self.context.provenance()
 
     def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable answer with citations and confidence."""
         return {
             "question": self.question,
             "answer": self.answer,
@@ -59,7 +60,7 @@ def answer_from_substrate(
     """Answer ``question`` from ``substrate`` via ``answerer``, or abstain when evidence is too thin.
 
     Args:
-        answerer: ``(question, context_text) -> answer_str`` -- any model/rule; called ONLY when there
+        answerer: ``(question, context_text) -> answer_str`` -- any model/rule; called only when there
             is enough evidence above the confidence floor (so a weak retrieval never fabricates).
         budget: the context budget handed to the answerer (default 2000 chars).
         hops: 1 = single-shot :func:`retrieve`; >1 = :func:`multihop` chaining that many hops.

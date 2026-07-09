@@ -96,6 +96,7 @@ class RegressionResult:
         return out
 
     def summary(self):
+        """Return coefficient summaries and residual scale metadata."""
         return {"coefficients": self.coefficients, "sigma": self.sigma}
 
     def to_exponential_family(self, engine=None):
@@ -240,6 +241,7 @@ class LMMResult:
         self.predictive = None
 
     def summary(self):
+        """Return fixed effects, random-effects covariance, scale, and group count."""
         return {
             "coefficients": self.coefficients,
             "random_cov": self.random_cov,
@@ -332,6 +334,7 @@ class GLMMResult:
         self.predictive = None
 
     def summary(self):
+        """Return fixed effects, random-effects covariance, link, and group count."""
         return {
             "coefficients": self.coefficients,
             "random_cov": self.random_cov,
@@ -369,8 +372,8 @@ def _glmm_fit(rv, y, given, linpred, link, max_iter, tol):
     G = levels.size
     groups = [np.where(g == gi)[0] for gi in range(G)]
 
-    # Honesty (C3): PQL is mildly biased for binary data with few observations per group. Warn so the
-    # user reads the estimates as approximate rather than treating them as a clean posterior.
+    # PQL is mildly biased for binary data with few observations per group. Warn so the user reads the estimates as
+    # approximate rather than treating them as a full posterior.
     if link == "logit":
         min_per_group = min((ix.size for ix in groups), default=0)
         if min_per_group < 5:
@@ -506,6 +509,7 @@ class LocationScaleResult:
         return {"loc": loc, "scale": scale}
 
     def summary(self):
+        """Return separate coefficient summaries for location and scale predictors."""
         return {"mean_coefficients": self.coefficients, "scale_coefficients": self.scale_coefficients}
 
 
@@ -661,6 +665,7 @@ def _quantile_fit(rv: RandomVariable, data, given, tau: float) -> RandomVariable
 def regression_fit(
     rv: RandomVariable, data, *, given=None, max_iter: int = 100, tol: float = 1e-9, quantile=None, l2=0.0, **_
 ) -> RandomVariable:
+    """Fit a PPL regression expression using the appropriate linear-model route."""
     linpred0 = next((a for a in rv._args if isinstance(a, _LinearPredictor)), None)
     if quantile is not None:  # pinball-loss quantile regression (same linear-predictor syntax)
         return _quantile_fit(rv, data, given or {}, float(quantile))
