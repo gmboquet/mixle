@@ -74,23 +74,172 @@ pass across the automatic-inference and design-of-experiments subsystems.
 ### Changed
 
 - `pinn_leaf.py` renamed to `pinn.py`; the "leaf" suffix dropped from PINN naming throughout.
-- Default `pytest` worker count capped (`-n 4` instead of `-n auto`) to stop individual test runs
-  from oversubscribing shared CI/dev machines when many run concurrently.
 - Several `mixle/doe` tests re-marked `slow` (heavy Monte Carlo / neural-density fits) so the default
   fast test gate stays fast; a real duplicate-training bug (an estimator refit once per test instead
   of once per class) fixed alongside the re-marking.
 
-## [0.6.2]
+## [0.6.2] — 2026-07-05
 
-- Test-suite hardening: skip embedder-path `Budget` cases when torch is absent.
+Workstream: the "frontier ecosystem" reasoning/knowledge stack (substrate, retrieval, the `Reasoner`
+facade, `Harness` products, factuality receipts, governance/trust) built out across roughly twenty
+parallel workstreams, plus a hardening pass on weighted accumulators, the model registry, MVN/HMM
+numerics, and Torch DTensor sharding.
 
-## [0.6.1]
+### Added
 
-- Maintenance release.
+- Knowledge substrate and reasoning stack: typed/provenanced/scoped storage, multi-hop retrieval,
+  `answer_from_substrate` with abstain-and-cite, the full `investigate()` action space
+  (retrieve/compute/simulate/create/delegate), the `Reasoner` facade (`answer`/`ingest`/`improve`),
+  and the `Harness` product with domain templates and a registry.
+- Factuality receipts and a knowledge-graph/ontology stack: constrained decoding against an ontology,
+  KG-RAG retrieval, estimation certificates and planner, calibration folded in as a post-condition,
+  telemetry dashboards, learned pool/reasoner routing policies, governance/sharing controls, and a
+  trust/audit trail.
+- Cross-modal reasoning graph nodes, file connectors, exchangeability preconditions, and a
+  context-packet/compression layer; four flagship example applications plus vision/edge-distillation
+  demos; the "Scientist" laptop product.
+- Neural-density families made directly constructible via kwargs (e.g. `VAE(dim=8, latent=2)`)
+  instead of `build_*` factories; broadened distillation task support (response/multi-teacher/hint/
+  attention/relational/sequence); pickle + `to_dict`/`to_json` serialization for `StreamingTransformer`
+  and DPO leaves; optional percentile clipping in `quantize` to bound int4 outlier collapse.
 
-## [0.6.0] — First release under the `mixle` name
+### Fixed
 
-Renamed from `pysparkplug`. Highlights since 0.5.2:
+- `mixle.models`: `DPOAccumulator` and `StreamingTransformerAccumulator` silently ignored per-sample/
+  per-token weights -- `update`/`seq_update` dropped the weight and `value()`/`estimate()` computed an
+  unweighted mean loss, so weighted EM, mixture responsibilities, streaming decay, or explicit sample
+  weighting had no effect on DPO or streaming-transformer fits (bit-identical output regardless of
+  weight). Weight now carried through the full accumulate/value/M-step path.
+- `mixle.inference.production.registry`: `header()`/`metadata()` raised a bare `IndexError` and
+  `get()` leaked a raw `FileNotFoundError` with the store path on an unregistered name/missing
+  version -- unified behind a single `_resolve_version` guard that raises a consistent `KeyError`.
+  Also fixed an unsanitized name/version/alias join onto the store root (a path-traversal vector if
+  names are ever API-supplied).
+- `mixle.inference.structure`: `_clone` cloned an estimator template via `eval(str(estimator))`;
+  since most estimators use the default `<object at 0x...>` repr, the eval always raised
+  `SyntaxError` and silently fell back to returning the same shared object rather than a copy --
+  correct only by luck for stateless estimators. Replaced with `copy.deepcopy`.
+- `mixle.task`: a saved `Solution` with `qhat=inf` reloaded as `None` and broke every subsequent call;
+  `inf` is now persisted explicitly. `batch([])`/empty-input handling now returns `[]` uniformly.
+- Neural leaves (`NeuralGaussian`, `softmax_leaf`, `mixture_density`, `energy`, `neural_density`):
+  accumulators appended one ndarray per row and `np.stack`-ed the entire dataset every EM iteration
+  (profiled as a major blowup at scale); rewritten to concatenate once at `value()`. Also fixed an
+  array-truthiness bug (`if not xs` raised `ValueError` on an ndarray instead of detecting empty
+  input), streamed `LM.nll` via chunking instead of one large `np.stack`, and made `make_mlp` raise
+  on non-positive dims instead of silently building a degenerate constant net.
+- `mixle.stats` MVN: `_robust_cho_factor` -- float32 (MPS/CUDA) MVN mixture EM crashed with "leading
+  minor not positive definite" at higher dims from catastrophic cancellation; now symmetrizes and
+  adds trace-scaled jitter only on failure (float64 path unchanged). Separately fixed an
+  `(N,K,dim,dim)` memory blowup that OOM'd GPU MVN-mixture fits.
+- `mixle.engines` (Torch/DTensor): component-sharding raised `ImportError` on torch 2.0-2.4 even
+  though DTensor was reachable via a private module path pre-2.5; fixed with a public-then-private
+  import fallback, and the sharded EM fit itself is now explicitly gated to torch >= 2.5 with an
+  actionable error instead of crashing on an unsupported `logsumexp`/`isinf` sharding strategy.
+- `mixle.inference.glm`: IRLS crashed on rank-deficient/collinear designs (e.g. correlated
+  feature-vector parents in cross-modal graph fits); `_solve_psd` now falls back to minimum-norm
+  `lstsq`/`pinv` at all three IRLS solve sites, bit-unchanged at full rank.
+- `mixle.stats` HMM: the HMM distribution defaulted `use_numba=False` while the estimator defaulted
+  it to `HAS_NUMBA`; since `optimize(prev_estimate=init)` encodes data through the distribution's
+  encoder, the common "pass an init" HMM fit silently never used numba (~90x slower than expected).
+  Distribution default now matches the estimator.
+
+### Changed
+
+- `mixle.stats` MVN covariance accumulation switched from `np.einsum` to a BLAS `matmul` -- 2.7x
+  faster end-to-end MVN mixture fits, byte-exact.
+- `mixle.stats` HMM distribution's `use_numba` default changed from `False` to `HAS_NUMBA`;
+  behavior-preserving (bit-identical) but changes default performance characteristics, and an
+  explicit `use_numba=False` is still respected.
+- Neural-density model construction moved from `build_*` factory functions to direct constructible
+  construction -- an API-shape change for consumers of the old factories.
+- `mixle.utils.builder` removed as dead code; example/benchmark harnesses moved out of tracked
+  `examples/` into gitignored `benchmarks/`.
+
+## [0.6.1] — 2026-07-04
+
+Workstream: the `mixle.task`/`solve()` lifecycle facade (rigid function to deployed, monitored
+model), exact/approximate enumeration engines, neural-density adapters wired into the PPL, a
+structured HMM/HSMM/Bayesian-network family, cross-modal fusion and LLM uncertainty quantification,
+and a precision/distributed-compute engine push (LNS integer arithmetic, JAX/XLA jitted EM,
+FSDP2/Spark/MPI transports).
+
+### Added
+
+- `mixle.task`/`solve()` lifecycle facade: `solve()` closing the loop from a rigid function to a
+  deployed model with a reliability/OOD gate, `solve(synthesize=N)` generative dataset creation,
+  `Solution` save/load/verification records across regression/multi-label/structured tasks,
+  `Solution.health()` live-traffic conformal monitoring, `Cascade` serving with realized savings and
+  self-improving harvest, cost-economics route recommendation, calibrated N-tier `Router`, generative
+  and grammar-constrained plan decoding, distillation planners/tool-callers, edge distillation with
+  int8/int4 quantization and device-budget search, and structured-record extraction tasks
+  (`HashedRecord`, active labeling, `recommend_model`).
+- Enumeration engines for exact/approximate ranking: `LatticeEnvelopeIndex`, `RescoredIndex`
+  speculative enumeration, certified `branch_cap` pruning, `HMMPathIndex` quantized count-DP,
+  `AREnvelopeIndex` for LLM deep enumeration, a persistent `SeekIndex`, a numpy/batched fast path
+  (~24x on gpt2), and quantized-inference certificates (`logit_error_bucket_slack`).
+- Neural-density adapters wired into the PPL as first-class constructors (`NeuralDensity`,
+  `NeuralConditionalDensity` wrapping VAE/MAF/MDN/autoregressive/flow torch models), `EnergyModel`
+  (NCE + Langevin), `fisher_merge` closed-form Fisher-weighted parameter merge, closed-form
+  variational GMM collapse/Runnalls KL mixture reduction, new conjugacy pairs (NIG, Gamma-rate,
+  Categorical-Dirichlet, NegBinomial-Beta), and an `explain_fit`/`describe`/`how='laplace'`
+  escalation ladder.
+- Structured HMM/Bayesian-network family: `StructuredHMM` with low-rank/Kronecker/block-diagonal
+  transitions and streaming/parallel Baum-Welch, `ExplicitDurationHMM`/HSMM with segment decoding,
+  `InputOutputHMM`, scheduled (length/position-conditional) HMMs, and Bayesian networks with
+  heterogeneous regression/GLM/linear-Gaussian edges, mixture-of-DAGs, and `counterfactual()`
+  do/abduction-action-prediction.
+- Cross-modal fusion and uncertainty: `ProductOfExpertsFusion`, `StructuredFusionClassifier`,
+  `CrossModalModel` PoE-VAE with conformal intervals, `CrossModalStore` cross-modal RAG,
+  `LLMUncertainty` semantic-entropy plus conformal abstain, claim-level UQ, `BeliefState`
+  epistemic-aleatoric decomposition, `DiscreteAnswer.decide`, and the `mixle.reason` front door.
+- Compute engines: LNS (logarithmic number system) integer arithmetic with an integer log-sum-exp
+  kernel (14x on LM cross-entropy), packed binary/ternary/sub-byte precision kernels, an MPFR
+  arbitrary-precision tail, a precision-spectrum planner with data-aware `optimize(precision=)`,
+  torch/GPU scoring rolled out across roughly twenty distribution families, distributed EM transports
+  (MPI, Spark, FSDP2/CUDA bf16 with DCP sharded checkpoints), and JAX/XLA jitted EM verified ~21x on
+  Apple M4.
+- `mixle.evolve` Phase 1: typed search space, bandit-population meta-search, and structure operators;
+  declarative `LM`/streaming-transformer/DPO leaves with SFT loss-masking and CPT+EWC.
+
+### Fixed
+
+- `mixle` package `__all__`: `ExplicitDurationHMM` was listed but its import line had been dropped by
+  a linter re-sort, so `from mixle import *` raised `AttributeError` and broke roughly 70 test
+  collections.
+- `mixle.inference.streaming`: a circular import through the `mixle.stats` package surface broke
+  `mixle.inference` on import.
+- `hmm_engine_forward_backward`: read a tensor's shape via `np.asarray` after it had already moved
+  onto the torch/MPS engine, crashing GPU forward-backward with a device-conversion error; a related
+  `max()` bug was also blocking tweedie torch/GPU scoring.
+- `should_auto_fuse`: auto-fusion policy checked fusibility/workload but not numba availability, so a
+  numba-free install crashed with `ModuleNotFoundError` mid-fit instead of falling back gracefully.
+- PPL conjugate-bridge routing: an unsound route for a binary (logit) GLMM fit by PQL; `how='auto'`
+  now warns instead of silently returning a MAP point estimate when the prior has no closed-form
+  posterior.
+- Constrained plan decoding: an earlier grammar constraint guaranteed output form but not content,
+  making an undertrained model more confidently wrong (a silent correctness regression) -- fixed with
+  a calibrated confidence floor.
+- Enumeration: an earlier "NTT loses to Kronecker" benchmark conclusion was an implementation
+  artifact rather than a real limitation; exact multi-prime NTT convolution now lands correctly.
+- The README hero example referenced an unused/mislabeled estimator and didn't run; replaced with a
+  correct, self-contained hierarchical-mixture topic model, and all runnable README blocks now
+  execute standalone.
+- Several flaky/order-dependent tests that were masking shared-state bugs: an unrestored
+  `set_default_dtype(float64)` leaking across co-scheduled tests, neural-density adapter tests
+  depending on global RNG state, and a wall-clock timing assertion invertible under load.
+
+### Changed
+
+- **Breaking**: `optimize(data)`/`fit(data)` now perform automatic dependency-structure discovery by
+  default (previously opt-in); text fields also now join the dependency graph.
+- Neural leaf classes renamed off the tree-position "...Leaf" suffix, with back-compat aliases kept
+  (e.g. `NeuralDensityLeaf` -> `NeuralDensity`, `StreamingTransformerLeaf` -> `TransformerLMEstimator`).
+- `mixle.program` (the closure-taking declarative optimization surface) demoted to
+  `mixle.experimental.program` as not yet mature; no deletions.
+- `benchmarks/` removed from the repo and gitignored; Sphinx `docs/` un-ignored and published to
+  GitHub Pages instead of the ad hoc README-embedded examples.
+
+## [0.6.0] — First mixle release
 
 - PPL language core: deterministic-expression slots, `potential()` custom factors,
   `.each(by=)` indexed-flat hierarchical models, data-indexed latents (`theta[Field]`), non-Normal
@@ -98,29 +247,10 @@ Renamed from `pysparkplug`. Highlights since 0.5.2:
 - Automatic-inference `fit` API: prototype/data coercion, `fit` forwards all `optimize` kwargs.
 - Categorical/Dirichlet free-dimension inference.
 - Streaming-estimator unification.
-
-## [0.5.2]
-
-- Maintenance release.
-
-## [0.5.1]
-
-- Added lower bounds to every optional-dependency extra (not just the always-installed core), so a
-  user selecting an extra with a too-old version gets a clear resolver error instead of a broken
-  connector: `tbb>=2021.6`, `pandas>=2.0`, `pyarrow>=14`, `sqlalchemy>=2.0`, `pymongo>=4.3`,
-  `fsspec>=2023.1.0`, `networkx>=3.0`, `gmpy2>=2.1`, `pyspark>=3.4`, `dask`/`distributed>=2023.5.0`,
-  `torch>=2.0`, `mpi4py>=3.1`.
-
-## [0.5.0]
-
-- Added lower-bound pins for the always-installed core dependencies (`numpy>=1.26`, `scipy>=1.11`,
-  `mpmath>=1.3`) so users on older releases get a clear resolver error instead of obscure runtime
-  breakage.
+- Lower-bound version pins across the always-installed core and every optional-dependency extra, so
+  users on too-old dependencies get a clear resolver error instead of obscure runtime breakage.
 
 [Unreleased]: https://github.com/gmboquet/mixle/compare/v0.6.2...HEAD
 [0.6.2]: https://github.com/gmboquet/mixle/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/gmboquet/mixle/compare/v0.6.0...v0.6.1
-[0.6.0]: https://github.com/gmboquet/mixle/compare/v0.5.2...v0.6.0
-[0.5.2]: https://github.com/gmboquet/mixle/compare/v0.5.1...v0.5.2
-[0.5.1]: https://github.com/gmboquet/mixle/compare/v0.5.0...v0.5.1
-[0.5.0]: https://github.com/gmboquet/mixle/releases/tag/v0.5.0
+[0.6.0]: https://github.com/gmboquet/mixle/releases/tag/v0.6.0
