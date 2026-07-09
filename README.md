@@ -10,16 +10,15 @@
 ![tests](https://img.shields.io/badge/tests-2700%2B-brightgreen)
 [![docs](https://img.shields.io/badge/docs-gmboquet.github.io%2Fmixle-blue)](https://gmboquet.github.io/mixle/)
 
-**Lab-grade AI, without the lab.** mixle turns data — or a slow, expensive model — into something small,
-fast, and dependable you can put in production, usually in a single call.
+**mixle is a Python library for specifying, training, deploying, and maintaining models of heterogeneous
+data.** Behind a one-line API — hand it raw data and it selects and fits a model; hand it a structure and it
+fits that — is a complete probabilistic-modeling stack: around 90 distributions, mixtures and hidden Markov
+models, automatic model selection, Bayesian inference from EM to NUTS, design-of-experiments optimization,
+and calibrated, monitored deployment. It is a serious statistics library at its core, with one idea that
+ties it together: a classical distribution, a neural network, and a latent-variable model are the same kind
+of object, so they compose freely and one `optimize(...)` call fits the whole thing.
 
-Underneath that one-line API is a complete probabilistic-modeling stack: around 90 distributions, mixtures
-and hidden Markov models, Bayesian inference from EM to NUTS, design of experiments, and calibrated
-uncertainty. At its core it is a serious statistics library — what sets it apart is that a neural network,
-a classical density, and a latent-variable model are all the same kind of object, so they compose freely
-and one `optimize(...)` call fits the whole thing.
-
-Three things people reach for it for:
+Lab-grade AI, without the lab. Three things people reach for it for:
 
 - **Less code.** No training loops, no batching or convergence boilerplate, no glue: point `optimize` at
   your data or your PyTorch module and it does the heavy lifting.
