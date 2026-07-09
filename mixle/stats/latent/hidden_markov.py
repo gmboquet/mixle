@@ -64,6 +64,7 @@ from mixle.stats.latent._hidden_markov_numba_kernels import (
     numba_baum_welch_alphas,
     numba_seq_log_density,
 )
+from mixle.stats.latent.heterogeneous_mixture import HeterogeneousMixtureDataEncoder
 from mixle.stats.latent.mixture import MixtureDistribution
 from mixle.stats.sequences.markov_chain import MarkovChainDistribution, stationary_distribution
 from mixle.utils.aliasing import MISSING, coalesce_alias, require
@@ -264,6 +265,76 @@ def terminal_forward_backward(
     return log_p, gamma, xi
 
 
+# A hidden Markov model may give every hidden state its own emission family (a Gaussian mixture in one
+# state, a neural density in another). Each state's own ``seq_log_density``/``seq_update`` already
+# dispatches correctly for any family -- the only thing that has to change is which *encoded view* of
+# the raw data a given state reads. The helpers below build that view once per fit (not per EM
+# iteration) and cache a `homogeneous` flag so the common single-family case -- what large models
+# almost always are -- takes the exact same code path as before: one shared encoder, one encoded array,
+# no grouping, no extra allocation. Only a genuinely mixed model pays for per-family encoding, and that
+# cost is proportional to the number of *distinct* families in use, not the number of states.
+
+
+def _emission_encoders_from_dists(topics):
+    """Emission encoders for a sequence of emission *distributions*, one per hidden state."""
+    return [topic.dist_to_encoder() for topic in topics]
+
+
+def _emission_encoders_from_accumulators(accumulators):
+    """Emission encoders for a sequence of emission *accumulators*, one per hidden state."""
+    return [accumulator.acc_to_encoder() for accumulator in accumulators]
+
+
+def _encoders_all_equal(encoders):
+    """Whether every encoder is interchangeable with ``encoders[0]``.
+
+    Compares both directions (``a == b or b == a``) since encoder ``__eq__`` is not always symmetric --
+    e.g. ``MixtureDataEncoder`` delegates to its single component encoder when homogeneous, so a
+    homogeneous mixture and its bare component encoder compare equal only in that direction."""
+    if len(encoders) <= 1:
+        return True
+    reference = encoders[0]
+    return all(reference == other or other == reference for other in encoders[1:])
+
+
+def _build_emission_encoder(encoders):
+    """Build the encoder an HMM uses for its emissions, and whether it is the plain single-family case.
+
+    Homogeneous (all states share one interchangeable encoder -- the common case): returns that single
+    encoder unchanged, so ``seq_encode`` produces exactly the one shared array it always has, with no
+    new object types or per-family duplication.
+
+    Heterogeneous: returns a ``HeterogeneousMixtureDataEncoder`` over the per-state encoders, which
+    groups states by distinct encoder and encodes the raw sequence once per distinct family (not once
+    per state) -- see ``heterogeneous_mixture.py``, which mixle already relies on for exactly this
+    problem in (non-temporal) mixtures.
+    """
+    homogeneous = _encoders_all_equal(encoders)
+    if homogeneous:
+        return encoders[0], True
+    return HeterogeneousMixtureDataEncoder(encoders), False
+
+
+def _iter_emission_groups(tagged_enc_data):
+    """Yield ``(state_indices, group_encoded_data)`` pairs from a ``HeterogeneousMixtureDataEncoder``
+    emission encoding. Every state index appears in exactly one yielded group. Only used on the
+    heterogeneous path; the homogeneous path never builds or consumes this structure."""
+    tag_list, enc_list = tagged_enc_data
+    return zip(tag_list, enc_list)
+
+
+def _expand_state_encodings(tagged_enc_data, num_states):
+    """List of length ``num_states`` mapping each state index to its group's encoded emission data.
+
+    Only used where a per-state closure (e.g. dispatched through ``_par_states``) needs a plain
+    index lookup rather than a group loop; the homogeneous path never builds this list."""
+    out = [None] * num_states
+    for group_indices, group_enc in _iter_emission_groups(tagged_enc_data):
+        for i in group_indices:
+            out[int(i)] = group_enc
+    return out
+
+
 class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
     """Hidden Markov model distribution for variable-length observation sequences."""
 
@@ -362,6 +433,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             self.has_topics = False
 
         self.set_prior(prior)
+
+        # Cached once (not per EM iteration): whether every state shares one interchangeable emission
+        # encoder. The common case (a single family across all states) then takes exactly today's code
+        # path everywhere below -- no grouping, no extra allocation, no per-family re-encoding.
+        self._homogeneous_emissions = _encoders_all_equal(_emission_encoders_from_dists(self.topics))
 
     def get_prior(self):
         """Returns the chain conjugate prior in ``(init_prior, row_priors)`` form (or None).
@@ -746,8 +822,13 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         (tot_cnt, _idx_bands, _has_next, len_vec, idx_mat, _idx_vec, enc_data), _, _len_enc = x0
         k = self.n_states
         log_b_all = np.empty((tot_cnt, k))
-        for j in range(k):
-            log_b_all[:, j] = self.topics[j].seq_log_density(enc_data)
+        if self._homogeneous_emissions:
+            for j in range(k):
+                log_b_all[:, j] = self.topics[j].seq_log_density(enc_data)
+        else:
+            for group_indices, group_enc in _iter_emission_groups(enc_data):
+                for j in group_indices:
+                    log_b_all[:, j] = self.topics[j].seq_log_density(group_enc)
         out = np.empty(idx_mat.shape[0], dtype=np.float64)
         for s in range(idx_mat.shape[0]):
             length = int(len_vec[s])
@@ -783,8 +864,13 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             ll_ret = np.zeros(num_seq)
 
             # Compute state likelihood vectors and scale the max to one
-            for i in range(num_states):
-                pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
+            if self._homogeneous_emissions:
+                for i in range(num_states):
+                    pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
+            else:
+                for group_indices, group_enc in _iter_emission_groups(enc_data):
+                    for i in group_indices:
+                        pr_obs[:, i] = self.topics[i].seq_log_density(group_enc)
 
             with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> ll_ret sanitized below
                 pr_max0 = pr_obs.max(axis=1, keepdims=True)
@@ -838,8 +924,13 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             tz = np.concatenate([[0], sz]).cumsum().astype(dtype=np.int32)
 
             # Compute state likelihood vectors and scale the max to one
-            for i in range(num_states):
-                pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
+            if self._homogeneous_emissions:
+                for i in range(num_states):
+                    pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
+            else:
+                for group_indices, group_enc in _iter_emission_groups(enc_data):
+                    for i in group_indices:
+                        pr_obs[:, i] = self.topics[i].seq_log_density(group_enc)
 
             with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> sanitized after the kernel
                 pr_max0 = pr_obs.max(axis=1)
@@ -892,9 +983,14 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 rv = rv + backend_seq_log_density(self.len_dist, len_enc, engine)
             return rv
 
-        pr_obs = []
-        for i in range(num_states):
-            pr_obs.append(backend_seq_log_density(self.topics[i], enc_data, engine))
+        pr_obs = [None] * num_states
+        if self._homogeneous_emissions:
+            for i in range(num_states):
+                pr_obs[i] = backend_seq_log_density(self.topics[i], enc_data, engine)
+        else:
+            for group_indices, group_enc in _iter_emission_groups(enc_data):
+                for i in group_indices:
+                    pr_obs[i] = backend_seq_log_density(self.topics[i], group_enc, engine)
         pr_obs = engine.stack(pr_obs, axis=1)
 
         pr_max0 = engine.max(pr_obs, axis=1)
@@ -948,13 +1044,18 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         if tot == 0:
             rv = engine.zeros(n_seq)
         else:
-            pr_dev = hmm_engine_emissions(self.topics, enc_data, engine)
+            pr_dev = hmm_engine_emissions(self.topics, enc_data, engine, self._homogeneous_emissions)
             if pr_dev is not None:  # emissions scored + padded on the engine (no host round-trip)
                 padded, mask = hmm_engine_pad_log_emissions(pr_dev, sz, engine)
             else:
                 pr_obs = np.empty((tot, self.n_states), dtype=np.float64)
-                for i in range(self.n_states):
-                    pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
+                if self._homogeneous_emissions:
+                    for i in range(self.n_states):
+                        pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
+                else:
+                    for group_indices, group_enc in _iter_emission_groups(enc_data):
+                        for i in group_indices:
+                            pr_obs[:, i] = self.topics[i].seq_log_density(group_enc)
                 padded, mask, _ = hmm_pad_log_emissions(pr_obs, sz)
             with np.errstate(divide="ignore"):
                 log_w = np.log(self.w)
@@ -1183,7 +1284,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
     def dist_to_encoder(self) -> HiddenMarkovDataEncoder:
         """Return an encoder for HMM observation sequences and optional lengths."""
-        emission_encoder = self.topics[0].dist_to_encoder()
+        emission_encoder, _ = _build_emission_encoder(_emission_encoders_from_dists(self.topics))
         len_encoder = self.len_dist.dist_to_encoder()
 
         return HiddenMarkovDataEncoder(
@@ -2274,6 +2375,9 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self.use_numba = use_numba
         self.name = name
 
+        # Cached once (not per EM iteration); see HiddenMarkovModelDistribution.__init__.
+        self._homogeneous_emissions = _encoders_all_equal(_emission_encoders_from_accumulators(accumulators))
+
         # Data log-likelihood accumulated as a byproduct of the E-step forward pass, only when
         # _track_ll is enabled. Used by the fused-EM fast path in optimize(reuse_estep_ll=True);
         # not part of value(). Off by default so the standard path pays nothing.
@@ -2439,10 +2543,17 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 steps[cond] += 1
                 cond = steps < sz_next
 
-            for j in range(self.num_states):
-                w = weights[idx_vec]
-                w[idx != j] = 0.0
-                self.accumulators[j].seq_initialize(xs_enc, w.flatten(), self._acc_rng[j])
+            if self._homogeneous_emissions:
+                for j in range(self.num_states):
+                    w = weights[idx_vec]
+                    w[idx != j] = 0.0
+                    self.accumulators[j].seq_initialize(xs_enc, w.flatten(), self._acc_rng[j])
+            else:
+                for group_indices, group_enc in _iter_emission_groups(xs_enc):
+                    for j in group_indices:
+                        w = weights[idx_vec]
+                        w[idx != j] = 0.0
+                        self.accumulators[j].seq_initialize(group_enc, w.flatten(), self._acc_rng[j])
 
         else:
             (idx, sz, xs), len_enc = x1
@@ -2474,10 +2585,17 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             band_seq_i = [j for t in range(max_len) for j in range(len(nz_len_vec)) if t < nz_len_vec[j]]
             idx_vec = orig_ids_nz[np.asarray(band_seq_i, dtype=int)]
 
-            for j in range(self.num_states):
-                w = weights[idx_vec]
-                w[states != j] = 0.0
-                self.accumulators[j].seq_initialize(xs, w.flatten(), self._acc_rng[j])
+            if self._homogeneous_emissions:
+                for j in range(self.num_states):
+                    w = weights[idx_vec]
+                    w[states != j] = 0.0
+                    self.accumulators[j].seq_initialize(xs, w.flatten(), self._acc_rng[j])
+            else:
+                for group_indices, group_enc in _iter_emission_groups(xs):
+                    for j in group_indices:
+                        w = weights[idx_vec]
+                        w[states != j] = 0.0
+                        self.accumulators[j].seq_initialize(group_enc, w.flatten(), self._acc_rng[j])
 
             sz_next = sz.copy()[nz_idx] - 1
             steps = np.zeros(len(sz_next), dtype=int)
@@ -2511,8 +2629,13 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         (tot_cnt, _ib, _hn, len_vec, idx_mat, _iv, enc_data), _, _le = x0
         k = self.num_states
         log_b_all = np.empty((tot_cnt, k))
-        for j in range(k):
-            log_b_all[:, j] = estimate.topics[j].seq_log_density(enc_data)
+        if self._homogeneous_emissions:
+            for j in range(k):
+                log_b_all[:, j] = estimate.topics[j].seq_log_density(enc_data)
+        else:
+            for group_indices, group_enc in _iter_emission_groups(enc_data):
+                for j in group_indices:
+                    log_b_all[:, j] = estimate.topics[j].seq_log_density(group_enc)
         log_w, log_a, term = estimate.log_w, estimate.log_transitions, estimate._terminal_mask
         weights = np.asarray(weights, dtype=np.float64)
         gamma_flat = np.zeros((tot_cnt, k))
@@ -2529,8 +2652,13 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             gamma_flat[rows] += ws * gamma
             self.trans_counts += ws * xi.sum(axis=0)
         self.state_counts += gamma_flat.sum(axis=0)
-        for j in range(k):
-            self.accumulators[j].seq_update(enc_data, gamma_flat[:, j], estimate.topics[j])
+        if self._homogeneous_emissions:
+            for j in range(k):
+                self.accumulators[j].seq_update(enc_data, gamma_flat[:, j], estimate.topics[j])
+        else:
+            for group_indices, group_enc in _iter_emission_groups(enc_data):
+                for j in group_indices:
+                    self.accumulators[j].seq_update(group_enc, gamma_flat[:, j], estimate.topics[j])
 
     def seq_update(self, x, weights: np.ndarray, estimate: HiddenMarkovModelDistribution) -> None:
         """Vectorized accumulator update from encoded HMM observation sequences.
@@ -2594,8 +2722,16 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             alphas = np.zeros((tot_cnt, num_states))
 
             # Compute state likelihood vectors and scale the max to one (state-parallel: disjoint columns)
-            def _score0(i: int) -> None:
-                pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+            if self._homogeneous_emissions:
+
+                def _score0(i: int) -> None:
+                    pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+
+            else:
+                _state_enc0 = _expand_state_encodings(enc_data, num_states)
+
+                def _score0(i: int) -> None:
+                    pr_obs[:, i] = estimate.topics[i].seq_log_density(_state_enc0[i])
 
             _par_states(num_states, _score0, self._state_workers, pr_obs.shape[0] * num_states)
 
@@ -2686,10 +2822,19 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 self.trans_counts += xi_loc.sum(axis=0)
 
             # Aggregate sufficient statistics (state-parallel: disjoint per-state accumulators)
-            def _accum0(i: int) -> None:
-                # alphas[:,i] *= weights[idx_vec]/np.maximum(len_vec[idx_vec], 1.0)
-                alphas[:, i] *= weights[idx_vec]
-                self.accumulators[i].seq_update(enc_data, alphas[:, i], estimate.topics[i])
+            if self._homogeneous_emissions:
+
+                def _accum0(i: int) -> None:
+                    # alphas[:,i] *= weights[idx_vec]/np.maximum(len_vec[idx_vec], 1.0)
+                    alphas[:, i] *= weights[idx_vec]
+                    self.accumulators[i].seq_update(enc_data, alphas[:, i], estimate.topics[i])
+
+            else:
+                _state_enc0 = _expand_state_encodings(enc_data, num_states)
+
+                def _accum0(i: int) -> None:
+                    alphas[:, i] *= weights[idx_vec]
+                    self.accumulators[i].seq_update(_state_enc0[i], alphas[:, i], estimate.topics[i])
 
             _par_states(num_states, _accum0, self._state_workers, alphas.shape[0] * num_states)
 
@@ -2725,8 +2870,16 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             tran_mat = estimate.transitions
 
             # Compute state likelihood vectors and scale the max to one (state-parallel: disjoint columns)
-            def _score1(i: int) -> None:
-                pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+            if self._homogeneous_emissions:
+
+                def _score1(i: int) -> None:
+                    pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+
+            else:
+                _state_enc1 = _expand_state_encodings(enc_data, num_states)
+
+                def _score1(i: int) -> None:
+                    pr_obs[:, i] = estimate.topics[i].seq_log_density(_state_enc1[i])
 
             _par_states(num_states, _score1, self._state_workers, pr_obs.shape[0] * num_states)
 
@@ -2758,8 +2911,16 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
             # numba_baum_welch2.parallel_diagnostics(level=4)
 
-            def _accum1(i: int) -> None:  # state-parallel: disjoint per-state accumulators
-                self.accumulators[i].seq_update(enc_data, alphas[:, i], estimate.topics[i])
+            if self._homogeneous_emissions:
+
+                def _accum1(i: int) -> None:  # state-parallel: disjoint per-state accumulators
+                    self.accumulators[i].seq_update(enc_data, alphas[:, i], estimate.topics[i])
+
+            else:
+                _state_enc1 = _expand_state_encodings(enc_data, num_states)
+
+                def _accum1(i: int) -> None:
+                    self.accumulators[i].seq_update(_state_enc1[i], alphas[:, i], estimate.topics[i])
 
             _par_states(num_states, _accum1, self._state_workers, alphas.shape[0] * num_states)
 
@@ -2791,13 +2952,18 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             sz = np.asarray(sz)
             tot_cnt = int(sz.sum())
             offsets = np.concatenate([[0], np.cumsum(sz)]).astype(np.int64)  # gamma scatter below
-            pr_dev = hmm_engine_emissions(estimate.topics, enc_data, engine)
+            pr_dev = hmm_engine_emissions(estimate.topics, enc_data, engine, self._homogeneous_emissions)
             if pr_dev is not None:  # emissions scored + padded on the engine (no host round-trip)
                 padded, mask = hmm_engine_pad_log_emissions(pr_dev, sz, engine)
             else:
                 pr_obs = np.empty((tot_cnt, num_states), dtype=np.float64)
-                for i in range(num_states):
-                    pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+                if self._homogeneous_emissions:
+                    for i in range(num_states):
+                        pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+                else:
+                    for group_indices, group_enc in _iter_emission_groups(enc_data):
+                        for i in group_indices:
+                            pr_obs[:, i] = estimate.topics[i].seq_log_density(group_enc)
                 padded, mask, _ = hmm_pad_log_emissions(pr_obs, sz)
             scatter = None
         else:
@@ -2806,8 +2972,13 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             # the index map for scattering gamma back to the flat emission order.
             (tot_cnt, idx_bands, has_next, len_vec, idx_mat, idx_vec, enc_data), _, len_enc = x0
             pr_obs = np.empty((tot_cnt, num_states), dtype=np.float64)
-            for i in range(num_states):
-                pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+            if self._homogeneous_emissions:
+                for i in range(num_states):
+                    pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_data)
+            else:
+                for group_indices, group_enc in _iter_emission_groups(enc_data):
+                    for i in group_indices:
+                        pr_obs[:, i] = estimate.topics[i].seq_log_density(group_enc)
             n_seq, tmax = idx_mat.shape
             valid = idx_mat >= 0
             padded = np.full((n_seq, tmax, num_states), -np.inf, dtype=np.float64)
@@ -2833,8 +3004,13 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self.init_counts += pi.sum(axis=0)
         self.trans_counts += xi_sum
         self.state_counts += gamma_flat.sum(axis=0)
-        for i in range(num_states):
-            self.accumulators[i].seq_update(enc_data, gamma_flat[:, i], estimate.topics[i])
+        if self._homogeneous_emissions:
+            for i in range(num_states):
+                self.accumulators[i].seq_update(enc_data, gamma_flat[:, i], estimate.topics[i])
+        else:
+            for group_indices, group_enc in _iter_emission_groups(enc_data):
+                for i in group_indices:
+                    self.accumulators[i].seq_update(group_enc, gamma_flat[:, i], estimate.topics[i])
         if self.len_accumulator is not None:
             self.len_accumulator.seq_update(len_enc, weights_np, estimate.len_dist)
 
@@ -3020,7 +3196,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
     def acc_to_encoder(self) -> HiddenMarkovDataEncoder:
         """Return an encoder matching this accumulator's emissions, lengths, and backend."""
-        emission_encoder = self.accumulators[0].acc_to_encoder()
+        emission_encoder, _ = _build_emission_encoder(_emission_encoders_from_accumulators(self.accumulators))
         len_encoder = self.len_accumulator.acc_to_encoder()
 
         return HiddenMarkovDataEncoder(
@@ -3532,17 +3708,22 @@ def hmm_pad_log_emissions(log_emit_flat, sz):
     return padded, mask, offsets
 
 
-def hmm_engine_emissions(topics, enc_data, engine):
+def hmm_engine_emissions(topics, enc_data, engine, homogeneous=True):
     """Per-state log emissions scored ON the engine — an (tot, S) engine tensor — or ``None`` when any
     topic lacks engine scoring (the caller falls back to the host loop)."""
     from mixle.stats.compute.backend import BackendScoringError, backend_seq_log_density
 
     cols = []
-    for t in topics:
-        try:
-            cols.append(backend_seq_log_density(t, enc_data, engine))
-        except BackendScoringError:
-            return None
+    try:
+        if homogeneous:
+            for t in topics:
+                cols.append(backend_seq_log_density(t, enc_data, engine))
+        else:
+            state_enc = _expand_state_encodings(enc_data, len(topics))
+            for t, e in zip(topics, state_enc):
+                cols.append(backend_seq_log_density(t, e, engine))
+    except BackendScoringError:
+        return None
     return engine.stack(cols, axis=1)
 
 
