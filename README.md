@@ -119,16 +119,19 @@ model.module                     # the raw module back, nothing trapped
 Freeze submodules, swap the optimizer, or distribute the fit with `backend=`; parity with a hand-written
 training loop is checked by a test, not claimed here.
 
-**Compose to any depth; one call fits the whole thing.** Nest mixtures, sequences, and hidden Markov models,
-and drop a neural leaf in wherever a classical one goes.
+**Compose to any depth; one call fits the whole thing.** A neural network and a Gaussian are the same
+kind of object here, so they go in the same mixture — and a single `optimize` call trains both.
 
 ```python
+from mixle.models import GradLeaf
 from mixle.stats import GaussianDistribution, MixtureDistribution
 
-model = optimize(x, MixtureDistribution([GaussianDistribution(-2, 1), GaussianDistribution(2, 1)]))
+# the module from above, now one component of a mixture — fit jointly in a single call
+model = optimize(x, MixtureDistribution([GradLeaf(my_module), GaussianDistribution(0, 1)], [0.5, 0.5]))
 ```
 
-Swap either component for a neural density, an HMM, or a PCFG — the call is the same.
+One call, each piece fit the right way: EM over the mixture, gradient descent inside the neural leaf, a
+closed-form update for the Gaussian. Nest deeper — sequences, hidden Markov models, a PCFG — and it holds.
 
 ## Engines & orchestration
 
