@@ -170,6 +170,24 @@ def classify_causal_lm_params(model) -> dict[str, Role]:
     return roles
 
 
+def enable_mup_attention(model, enabled: bool = True) -> None:
+    """Turn on (or off) muP attention-logit scaling on every block of a :class:`CausalLM`.
+
+    Standard attention scales ``QK^T`` by ``1/sqrt(head_dim)`` (the usual "softmax temperature"
+    choice). muP (Tensor Programs V, Table 3 -- the attention-logit row of the abc-parametrization)
+    instead requires ``1/head_dim``: because muP's hidden-role init/lr rules make the *correlation*
+    structure of ``q``/``k`` grow with width (not just their per-coordinate variance, which standard
+    ``1/sqrt(head_dim)`` scaling was already designed to control), the standard scale under-divides
+    at wide models and lets attention-logit scale drift with width -- exactly the kind of hidden
+    per-layer-role mismatch that breaks the zero-shot lr-transfer guarantee. See
+    ``mixle.models.transformer.CausalAttention.mup_attention``, which this flips.
+    """
+    if not _HAS_TORCH:  # pragma: no cover - torch is optional
+        raise ImportError("enable_mup_attention requires torch.")
+    for block in model.blocks:
+        block.attn.mup_attention = bool(enabled)
+
+
 def apply_mup_init(model, *, base_width: int, base_std: float = 0.02) -> None:
     """Re-initialize ``model`` in place per the muP init rules, relative to ``base_width``.
 
@@ -179,6 +197,10 @@ def apply_mup_init(model, *, base_width: int, base_std: float = 0.02) -> None:
     LayerNorm weight/bias keep their identity init (``1`` / ``0``, unaffected by width, matching the
     ``"input"`` role's no-rescale treatment); every other bias is zero-initialized (muP does not
     rescale bias init); every other weight matrix is drawn ``Normal(0, base_std * init_std_multiplier(role, width_mult))``.
+    Also turns on muP attention-logit scaling (:func:`enable_mup_attention`) on every block -- the
+    ``1/head_dim`` QK scaling is as much a part of "the model is parametrized under muP" as the
+    init/lr rules above, and previously being left at the standard ``1/sqrt(head_dim)`` scale was an
+    unintentional gap between what this module documented and what it actually configured.
     """
     if not _HAS_TORCH:  # pragma: no cover - torch is optional
         raise ImportError("apply_mup_init requires torch.")
@@ -198,6 +220,7 @@ def apply_mup_init(model, *, base_width: int, base_std: float = 0.02) -> None:
             continue
         std = base_std * init_std_multiplier(role, width_mult)
         nn.init.normal_(p, mean=0.0, std=std)
+    enable_mup_attention(model, enabled=True)
 
 
 @dataclass(frozen=True)
@@ -237,6 +260,7 @@ __all__ = [
     "MuPParamGroup",
     "Role",
     "apply_mup_init",
+    "enable_mup_attention",
     "classify_causal_lm_params",
     "init_std_multiplier",
     "lr_multiplier",

@@ -34,11 +34,21 @@ if _HAS_TORCH:
             self.h = n_head
             self.qkv = nn.Linear(d_model, 3 * d_model)
             self.proj = nn.Linear(d_model, d_model)
+            # muP attention scaling (see mixle.models.mup): standard attention scales QK^T by
+            # 1/sqrt(head_dim); muP (Tensor Programs V, Table 3) instead requires 1/head_dim so the
+            # pre-softmax logit scale stays width-independent under the "hidden" role's init/lr rules.
+            # Off by default (the standard 1/sqrt(head_dim) scaling); mixle.models.mup.apply_mup_init
+            # turns it on for a model being run under muP.
+            self.mup_attention = False
 
         def forward(self, x: Any) -> Any:
             b, t, d = x.shape
-            qkv = self.qkv(x).reshape(b, t, 3, self.h, d // self.h).permute(2, 0, 3, 1, 4)
-            o = F.scaled_dot_product_attention(qkv[0], qkv[1], qkv[2], is_causal=True)  # FlashAttention path (CUDA)
+            head_dim = d // self.h
+            qkv = self.qkv(x).reshape(b, t, 3, self.h, head_dim).permute(2, 0, 3, 1, 4)
+            scale = 1.0 / head_dim if self.mup_attention else None
+            o = F.scaled_dot_product_attention(
+                qkv[0], qkv[1], qkv[2], is_causal=True, scale=scale
+            )  # FlashAttention path (CUDA)
             return self.proj(o.transpose(1, 2).reshape(b, t, d))
 
     class Block(nn.Module):
