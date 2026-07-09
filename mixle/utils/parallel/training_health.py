@@ -22,6 +22,11 @@ Four things are tracked:
   has not been updated with any post-restart value yet), so a resume that silently drops optimizer/RNG
   state and produces a real loss jump is caught as ``restart_discontinuity`` -- a well-behaved resume is
   not.
+* **Dead-rank liveness** -- ``observe_rank_step(rank, step)`` is a per-rank heartbeat: a data-parallel loop
+  calls it once per step per rank (mirroring how :class:`~mixle.utils.parallel.fault_tolerant_training.
+  ElasticTrainingJob` already tracks ``dead_ranks`` for gradient-averaging purposes, but that bookkeeping
+  never surfaced as a *health receipt* -- this does). ``check_rank_liveness(current_step)`` flags any rank
+  that has gone silent for more than ``rank_heartbeat_threshold`` steps as ``dead_rank``, once per outage.
 
 No cluster is required to exercise any of this: the FLOPs accounting and anomaly math are exact regardless
 of scale, and the tests drive a real (tiny) :func:`mixle.models.transformer.build_causal_lm` for a handful
@@ -220,6 +225,7 @@ class Anomaly:
 
     step: int
     kind: str  # "nan_inf_loss" | "nan_inf_grad" | "loss_spike" | "grad_norm_spike" | "restart_discontinuity"
+    # | "dead_rank"
     value: float
     baseline: float | None
     z_score: float | None
@@ -249,11 +255,13 @@ class TrainingHealthMonitor:
         grad_window: int = 20,
         grad_min_periods: int = 5,
         grad_z_thresh: float = 6.0,
+        rank_heartbeat_threshold: int = 50,
     ) -> None:
         self.flop_config = flop_config
         self.peak_flops_per_sec = peak_flops_per_sec
         self.loss_z_thresh = float(loss_z_thresh)
         self.grad_z_thresh = float(grad_z_thresh)
+        self.rank_heartbeat_threshold = int(rank_heartbeat_threshold)
 
         self._loss_baseline = RollingBaseline(window=loss_window, min_periods=loss_min_periods)
         self._grad_baseline = RollingBaseline(window=grad_window, min_periods=grad_min_periods)
@@ -262,6 +270,8 @@ class TrainingHealthMonitor:
         self.anomalies: list[Anomaly] = []
         self.mfu_samples: list[MFUSample] = []
         self._pending_restart_step: int | None = None  # step index whose *next* observation is post-restart
+        self._rank_last_seen: dict[str, int] = {}  # rank name -> last step it reported a heartbeat
+        self._dead_ranks_flagged: set[str] = set()  # ranks already flagged dead in the current outage
 
     def observe_step(
         self,
@@ -351,6 +361,40 @@ class TrainingHealthMonitor:
                 )
             )
 
+        self.anomalies.extend(found)
+        return found
+
+    def observe_rank_step(self, rank: str | int, step: int) -> None:
+        """Record a per-rank heartbeat: ``rank`` reported liveness (e.g. completed a local forward+backward)
+        at ``step``. Call once per step per rank; combine with :meth:`check_rank_liveness` to detect a rank
+        that has stopped reporting. A rank reporting again after an outage clears its ``dead_rank`` flag so a
+        later re-death can be flagged again.
+        """
+        name = str(rank)
+        self._rank_last_seen[name] = int(step)
+        self._dead_ranks_flagged.discard(name)
+
+    def check_rank_liveness(self, current_step: int) -> list[Anomaly]:
+        """Flag any known rank that has not reported a heartbeat (:meth:`observe_rank_step`) for more than
+        ``rank_heartbeat_threshold`` steps as ``dead_rank``. Raised once per outage (not once per step) --
+        the flag is cleared the next time that rank reports in, so a respawned/recovered rank can be caught
+        going dead again later.
+        """
+        found: list[Anomaly] = []
+        for rank, last_seen in self._rank_last_seen.items():
+            silence = current_step - last_seen
+            if silence > self.rank_heartbeat_threshold and rank not in self._dead_ranks_flagged:
+                found.append(
+                    Anomaly(
+                        step=last_seen,
+                        kind="dead_rank",
+                        value=float(silence),
+                        baseline=float(self.rank_heartbeat_threshold),
+                        z_score=None,
+                        detected_at_step=current_step,
+                    )
+                )
+                self._dead_ranks_flagged.add(rank)
         self.anomalies.extend(found)
         return found
 
