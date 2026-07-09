@@ -125,6 +125,7 @@ from mixle.task.imagine import (
     ceiling_report,
     propose_structure,
 )
+from mixle.task.inverse import InverseModel, InverseReceipts, learn_inverse
 from mixle.task.irl import MaxEntIRLResult, max_ent_irl, rollout_states, state_features
 from mixle.task.llm import (
     CallableLLM,
@@ -275,6 +276,9 @@ __all__ = [
     "StructuralCandidate",
     "ceiling_report",
     "propose_structure",
+    "InverseModel",
+    "InverseReceipts",
+    "learn_inverse",
     "FieldChoice",
     "GenerativeTextIO",
     "extractive_capture_profile",
