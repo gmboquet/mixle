@@ -1783,7 +1783,7 @@ class RandomVariable:
         return "mcmc", "structured/composite model -> MCMC for the posterior -- the general rung"
 
     def explain_fit(self, *, how="auto", constraints=None, potentials=None, **_) -> dict:
-        """Report which inference route ``.fit(how=...)`` will take without fitting.
+        """Report which inference route ``.fit(how=...)`` took (or would take, before fitting).
 
         Returns ``{'route', 'reason', 'caveats'}``. This is the inspection
         surface for Mixle's automatic cross-family inference selection:
@@ -1791,7 +1791,22 @@ class RandomVariable:
         type it returns, and which diagnostics or limitations apply. The route
         mirrors :meth:`fit` exactly by sharing :meth:`_resolve_auto` for the flat
         tree and re-checking the same structural short-circuits.
+
+        Called on a **bound** RV (the result of ``.fit(...)``), this reports what that fit actually
+        did -- ``fit()`` stashes its own answer to this question, computed while the pre-fit expression
+        still carried its priors, since a bound RV's ``_args`` is always empty and cannot be re-derived
+        from. Raises if that record is unavailable (e.g. the model was reloaded from a saved artifact,
+        which does not round-trip it) -- call ``explain_fit()`` on the pre-fit expression instead.
         """
+        if self._kind == "bound":
+            cached = self._cache.get("_fit_explanation")
+            if cached is not None:
+                return dict(cached)
+            raise RuntimeError(
+                "explain_fit() has no record of how this bound model was fit (e.g. it was reloaded "
+                "from a saved artifact, or built directly rather than through .fit()). Call "
+                "explain_fit() on the pre-fit expression instead, or re-fit for a fresh explanation."
+            )
         if how == "posterior":
             route, reason = self._resolve_posterior_ladder()
         elif how != "auto":
@@ -1881,18 +1896,34 @@ class RandomVariable:
         if hasattr(data, "__len__") and len(data) == 0:
             raise ValueError("fit() received empty data.")
 
+        # ``self`` (the pre-fit expression) still has its priors/args intact here, no matter which
+        # branch below returns -- unlike the bound RV that comes back, whose _args is always empty. Stash
+        # explain_fit()'s answer for the *originally requested* how onto the result so a bound RV's own
+        # .explain_fit() reports what actually happened, instead of re-deriving from a structure that no
+        # longer carries it (see the "bound" branch in explain_fit()).
+        _original_how = how
+
+        def _stash_explanation(rv):
+            try:
+                rv._cache["_fit_explanation"] = self.explain_fit(
+                    how=_original_how, constraints=kw.get("constraints"), potentials=kw.get("potentials")
+                )
+            except Exception:  # noqa: BLE001 - best-effort; must never block a fit
+                pass
+            return rv
+
         if self._kind == "sample" and any(_expr_has_gather(a) for a in self._args):
             # A data-indexed latent (theta[Field("g")]) makes the parameter per-observation -> the
             # per-observation (indexed) target.
             from mixle.ppl import inference as _inf
 
-            return _inf.indexed_fit(self, data, how=how, **kw)
+            return _stash_explanation(_inf.indexed_fit(self, data, how=how, **kw))
 
         # regression / GLM: a linear predictor (covariates) in a parameter slot
         if self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
             from mixle.ppl import regression as _reg
 
-            return _reg.regression_fit(self, data, **kw)
+            return _stash_explanation(_reg.regression_fit(self, data, **kw))
 
         # neural conditional: a Net/Conv (nonlinear predictor) in a parameter slot -> a neural-headed leaf
         if self._kind == "sample" and any(isinstance(a, _NeuralPredictor) for a in self._args):
@@ -1904,7 +1935,7 @@ class RandomVariable:
         # own their fit through the registered fit_fn hook -- no per-family branch in core. State-space
         # is registered in mixle.ppl.statespace; PDEStateSpace by the mixle-pde plugin.
         if self._kind == "sample" and isinstance(self._family, CompositeFamily) and self._family.fit_fn is not None:
-            return self._family.fit_fn(self, data, **kw)
+            return _stash_explanation(self._family.fit_fn(self, data, **kw))
 
         # Indexed-flat hierarchical: Normal(Normal(m, t).each(by="g"), s).fit(y, given={"g": labels}).
         # Reshape the flat observation array into per-group lists (sorted unique labels) so the existing
@@ -2009,7 +2040,7 @@ class RandomVariable:
                     result._cache["certificate"] = _certify(target, penalized=why)
                 except Exception:  # noqa: BLE001 - certification must never break a fit
                     pass
-            return result
+            return _stash_explanation(result)
         # EM / MLE path
         est = lower(self, target="estimator")
         if missing == "marginalize":
@@ -2068,7 +2099,7 @@ class RandomVariable:
             from mixle.stats.missing import unwrap_marginalized
 
             fitted = unwrap_marginalized(fitted)  # strip the Optional wrappers; recover the base model
-        return RandomVariable._bound(fitted, name=self._name)
+        return _stash_explanation(RandomVariable._bound(fitted, name=self._name))
 
     def __repr__(self) -> str:
         if self._kind == "bound":
