@@ -1,17 +1,17 @@
 Local Reasoning Ecosystem
 =========================
 
-Version 0.6.2 adds a local reasoning layer around Mixle's model and task
-objects. The purpose is to make evidence acquisition explicit: retrieve what
-is already known, run local skills when they are available, simulate or create
-artifacts when that is the cheapest useful action, and abstain when the system
-does not have enough evidence to answer.
+Mixle includes a local reasoning layer around model and task objects. The
+purpose is to make evidence acquisition explicit: retrieve what is already
+known, run local skills when they are available, simulate or create artifacts
+when that is the lowest-cost useful action, and abstain when the system does not
+have enough evidence to answer.
 
 This layer is separate from the core probability library. Use
 ``mixle.stats`` and ``mixle.inference.optimize`` for ordinary model fitting.
 Use the ecosystem surfaces when you are building an application that needs
-knowledge, provenance, tool-like capabilities, routing decisions, and local
-audit records around fitted models.
+knowledge, provenance, callable capabilities, routing decisions, and local audit
+records around fitted models.
 
 Main Surfaces
 -------------
@@ -70,7 +70,11 @@ build a learned embedding index through ``Substrate.reindex``. The public
 contract is the store, item typing, scope filtering, and provenance trail; the
 ranker can improve without changing callers.
 
-Answering And Investigation
+Treat the substrate as application data. Record ingestion source, scope,
+redaction status, and reindex configuration when stored items are used as
+evidence for a release-facing answer.
+
+Answering and Investigation
 ---------------------------
 
 ``answer_from_substrate`` is the simple path: retrieve evidence, assemble a
@@ -108,7 +112,11 @@ The returned ``Investigation`` records the fired actions, evidence fragments,
 confidence, spending, and optional factuality receipt. Verification does not
 replace the answer; it attaches a receipt so callers can gate on it.
 
-Trust, Scope, And Governance
+Investigation traces should be kept when answers are reviewed later. A final
+answer without the retrieved evidence, skipped actions, and spending record is
+not enough to audit the reasoning path.
+
+Trust, Scope, and Governance
 ----------------------------
 
 The substrate includes operational controls around the knowledge store:
@@ -129,7 +137,11 @@ These tools do not turn a local store into an enterprise governance platform.
 They make the application-level contract inspectable: what was stored, who can
 see it, what it derives from, and which claims can be cited.
 
-Pool And Placement
+Before sharing or publishing substrate-derived artifacts, run the same data and
+secret review used for model examples. Provenance can contain sensitive source
+names even when item text has been redacted.
+
+Pool and Placement
 ------------------
 
 ``plan_placement`` in :mod:`mixle.inference` decides which certified estimation
@@ -154,7 +166,11 @@ The default backend is local, so the abstraction works without external
 infrastructure. Billable backends are expected to require explicit
 confirmation and reject jobs above budget.
 
-Telemetry And Learned Orchestration
+Pool decisions should be logged with cost estimates, confirmation state, and
+resolved backend. A job that falls back to local execution should say so in the
+receipt rather than looking like remote capacity was used.
+
+Telemetry and Learned Orchestration
 -----------------------------------
 
 ``Telemetry`` records decisions as rows of ``(features, choice, outcome)``.
@@ -178,6 +194,10 @@ Telemetry events intentionally carry decision features and outcomes, not raw
 user content. Treat the JSONL log as application data: rotate it, scope it, and
 review it before using it to train routing policy.
 
+Learned orchestration should train only from reviewed telemetry. A policy
+trained on stale, redacted, or biased routing logs can make confident placement
+decisions for the wrong reason.
+
 Scientist
 ---------
 
@@ -194,6 +214,23 @@ reasoning; it is not required for the core library.
 The module sets offline Hugging Face environment defaults and expects weights
 to already be available in the local cache. Use it deliberately when those
 assets and dependencies are part of the application.
+
+Scientist workflows should be documented as optional assembled applications.
+Record model-weight identity, local-cache status, dependency extras, and
+whether answer generation was actually exercised before presenting results as
+release evidence.
+
+Validation Evidence
+-------------------
+
+For local reasoning ecosystem workflows, preserve:
+
+* substrate ingestion sources, scopes, and redaction status;
+* retrieval or investigation traces with cited evidence;
+* skill certificates or fallback behavior;
+* pool placement decisions, budgets, and backend resolution;
+* telemetry retention and review status; and
+* optional scientist dependency and model-weight evidence.
 
 API Reference
 -------------

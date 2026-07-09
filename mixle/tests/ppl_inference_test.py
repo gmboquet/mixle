@@ -1,6 +1,7 @@
 """Tests for mixle.ppl Bayesian inference: MAP and parameter MCMC (build slice 7)."""
 
 import importlib.util
+import pickle
 import unittest
 
 import numpy as np
@@ -130,6 +131,31 @@ class PPLExplainFitTestCase(unittest.TestCase):
         p = Normal(free, free).explain_fit(how="nuts")
         self.assertEqual(p["route"], "nuts")
         self.assertIn("nuts", p["reason"])
+
+    def test_bound_rv_explain_fit_reports_the_actual_route(self):
+        # A bound RV's _args is always empty, so re-deriving the route from its structure (as if it
+        # were the pre-fit expression) silently falls through to "em, no priors" regardless of what
+        # actually happened. fit() must stash the real answer instead.
+        rng = np.random.RandomState(0)
+        conjugate = Poisson(Gamma(2.0, 1.0)).fit(list(rng.poisson(3.0, 500)))
+        self.assertEqual(conjugate.explain_fit()["route"], "conjugate")
+
+        em = Normal(free, free).fit(list(rng.normal(5.0, 2.0, 800)))
+        self.assertEqual(em.explain_fit()["route"], "em")
+
+        map_route = Normal(Normal(0, 10), free).fit(list(rng.normal(5.0, 2.0, 800)))
+        self.assertEqual(map_route.explain_fit()["route"], "map")
+
+        hierarchical = Normal(Normal(0, 5).each(), free).fit([[1.0, 1.2], [5.0, 4.8], [-1.0, -0.9]])
+        self.assertEqual(hierarchical.explain_fit()["route"], "hierarchical")
+
+    def test_bound_rv_without_cached_explanation_raises(self):
+        # A model reloaded from a saved artifact (or otherwise bound without going through .fit())
+        # has no stashed explanation; report that honestly rather than guessing.
+        m = Normal(free, free).fit(list(np.random.RandomState(0).normal(size=50)))
+        reloaded = pickle.loads(pickle.dumps(m))
+        with self.assertRaises(RuntimeError):
+            reloaded.explain_fit()
 
 
 class PPLDeterministicExpressionTestCase(unittest.TestCase):

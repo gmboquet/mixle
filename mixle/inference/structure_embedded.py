@@ -50,9 +50,11 @@ class EmbeddedFieldCodec:
     representatives: list[str]  # one training example per cluster, nearest its centroid (for describe())
 
     def vector(self, value: Any) -> np.ndarray:
+        """Embed one field value as a numeric vector."""
         return np.asarray(self.embedder.transform(str(value)), dtype=np.float64)
 
     def vectors(self, values: Sequence[Any]) -> np.ndarray:
+        """Embed a sequence of field values as a matrix."""
         return np.asarray(self.embedder.transform([str(v) for v in values]), dtype=np.float64)
 
 
@@ -75,6 +77,7 @@ class EmbeddedStructureModel:
         return tuple(vals)
 
     def encode_records(self, rows: Sequence[tuple]) -> list[tuple]:
+        """Replace configured text fields with embedding vectors for each record."""
         rows = [list(r) for r in rows]
         for i, codec in self.codecs.items():
             vecs = codec.vectors([r[i] for r in rows])
@@ -83,12 +86,15 @@ class EmbeddedStructureModel:
         return [tuple(r) for r in rows]
 
     def edges(self) -> list[tuple[int, int]]:
+        """Return discovered graph edges."""
         return self.net.edges()
 
     def log_density(self, x: tuple) -> float:
+        """Evaluate log density after embedding text fields in one record."""
         return float(self.net.log_density(self.encode_record(x)))
 
     def seq_log_density(self, rows: Sequence[tuple]) -> np.ndarray:
+        """Evaluate log density for records after embedding text fields."""
         embedded = self.encode_records(list(rows))
         return np.asarray(self.net.seq_log_density(self.net.dist_to_encoder().seq_encode(embedded)))
 

@@ -5,12 +5,14 @@ import unittest
 import numpy as np
 
 from mixle.inference import (
+    conformal_label_threshold,
     cv_plus,
     jackknife_plus,
     mondrian_conformal,
     split_conformal,
     weighted_conformal,
 )
+from mixle.inference.conformal import _conformal_quantile
 
 
 def _fit_predict(x_tr, y_tr, x_eval):
@@ -117,6 +119,42 @@ class WeightedTest(unittest.TestCase):
         cov = np.mean((test_y >= lo) & (test_y <= hi))
         # weighted conformal keeps coverage close to nominal under the shift
         self.assertGreater(cov, 0.85)
+
+
+class ConformalQuantileBoundaryTest(unittest.TestCase):
+    """Regression: _conformal_quantile's ``s[k - 1]`` used to wrap around via Python negative indexing
+    to ``s[-1]`` (the MAXIMUM score) whenever ``k <= 0`` -- exactly at ``alpha == 1.0`` (0% coverage
+    requested) -- returning the loosest threshold instead of the tightest, and either an arbitrary
+    interior score or an uncaught IndexError for alpha > 1."""
+
+    def test_alpha_one_returns_the_minimum_score_not_the_maximum(self):
+        s = np.sort(np.random.RandomState(1).rand(50))
+        self.assertAlmostEqual(_conformal_quantile(s, 1.0), float(s.min()))
+
+    def test_quantile_is_monotonically_non_increasing_in_alpha_through_the_boundary(self):
+        s = np.random.RandomState(2).rand(50)
+        alphas = [0.5, 0.9, 0.99, 0.999999, 1.0]
+        qhats = [_conformal_quantile(s, a) for a in alphas]
+        for a, b in zip(qhats, qhats[1:]):
+            self.assertGreaterEqual(a, b)  # non-increasing as alpha climbs toward 1, no jump back up
+
+    def test_alpha_above_one_raises_instead_of_wrapping_or_crashing(self):
+        s = np.random.RandomState(3).rand(20)
+        with self.assertRaises(ValueError):
+            _conformal_quantile(s, 1.2)
+
+    def test_alpha_below_zero_raises(self):
+        s = np.random.RandomState(3).rand(20)
+        with self.assertRaises(ValueError):
+            _conformal_quantile(s, -0.1)
+
+    def test_label_threshold_does_not_flip_from_escalate_to_confident_at_alpha_one(self):
+        # A near-uniform-looking calibration set with a confident test point: as alpha climbs, the
+        # LAC threshold should only get tighter (harder to satisfy), never loosen back up at alpha=1.
+        cal_prob_true = np.array([0.9, 0.85, 0.8, 0.75, 0.7, 0.6, 0.55, 0.5, 0.4, 0.2])
+        qhats = [conformal_label_threshold(cal_prob_true, alpha=a) for a in (0.8, 0.95, 0.999, 1.0)]
+        for a, b in zip(qhats, qhats[1:]):
+            self.assertLessEqual(b, a)  # threshold only tightens (shrinks) as alpha -> 1, never jumps up
 
 
 if __name__ == "__main__":

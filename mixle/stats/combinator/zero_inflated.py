@@ -62,7 +62,7 @@ class ZeroInflatedDistribution(SequenceEncodableProbabilityDistribution):
         self._log1mpi = math.log1p(-self.pi)
 
     def __str__(self) -> str:
-        """Returns string representation of ZeroInflatedDistribution object."""
+        """Return a constructor-style representation of the zero-inflated distribution."""
         return "ZeroInflatedDistribution(%s, %s, name=%s, keys=%s)" % (
             str(self.base),
             repr(self.pi),
@@ -146,6 +146,7 @@ class ZeroInflatedAccumulator(SequenceEncodableStatisticAccumulator):
         return estimate.pi / denom if denom > 0.0 else 0.0
 
     def update(self, x: Any, weight: float, estimate: ZeroInflatedDistribution | None) -> None:
+        """Accumulate one observation with EM responsibility for structural zeros."""
         if estimate is None or x != 0:
             self.base_accumulator.update(x, weight, None if estimate is None else estimate.base)
         else:
@@ -155,6 +156,7 @@ class ZeroInflatedAccumulator(SequenceEncodableStatisticAccumulator):
         self.total += weight
 
     def seq_update(self, x: tuple[Any, np.ndarray], weights: np.ndarray, estimate: ZeroInflatedDistribution) -> None:
+        """Accumulate encoded observations with zero-source responsibilities."""
         base_enc, zero_mask = x
         w = np.asarray(weights, dtype=np.float64)
         r = self._responsibility(estimate)
@@ -165,12 +167,14 @@ class ZeroInflatedAccumulator(SequenceEncodableStatisticAccumulator):
         self.total += float(np.sum(w))
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize the accumulator using a half-structural responsibility for zeros."""
         self.base_accumulator.initialize(x, weight, rng)
         if x == 0:
             self.inflation_count += 0.5 * weight  # heuristic: half the zeros start as structural
         self.total += weight
 
     def seq_initialize(self, x: tuple[Any, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize encoded observations using half-structural zero responsibilities."""
         base_enc, zero_mask = x
         w = np.asarray(weights, dtype=np.float64)
         self.base_accumulator.seq_initialize(base_enc, w, rng)
@@ -178,6 +182,7 @@ class ZeroInflatedAccumulator(SequenceEncodableStatisticAccumulator):
         self.total += float(np.sum(w))
 
     def combine(self, suff_stat: tuple[Any, float, float]) -> "ZeroInflatedAccumulator":
+        """Merge serialized base statistics and inflation counts into this accumulator."""
         base_ss, ic, t = suff_stat
         self.base_accumulator.combine(base_ss)
         self.inflation_count += ic
@@ -185,9 +190,11 @@ class ZeroInflatedAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[Any, float, float]:
+        """Return base statistics, expected structural-zero weight, and total weight."""
         return self.base_accumulator.value(), self.inflation_count, self.total
 
     def from_value(self, x: tuple[Any, float, float]) -> "ZeroInflatedAccumulator":
+        """Restore the accumulator from serialized zero-inflated statistics."""
         base_ss, ic, t = x
         self.base_accumulator.from_value(base_ss)
         self.inflation_count = float(ic)
@@ -195,12 +202,14 @@ class ZeroInflatedAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def scale(self, c: float) -> "ZeroInflatedAccumulator":
+        """Scale base statistics and inflation counts by a constant."""
         self.base_accumulator.scale(c)
         self.inflation_count *= c
         self.total *= c
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge base and inflation statistics into a keyed statistics dictionary."""
         self.base_accumulator.key_merge(stats_dict)
         if self.keys is not None:
             if self.keys in stats_dict:
@@ -211,11 +220,13 @@ class ZeroInflatedAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = (self.inflation_count, self.total)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace base and inflation statistics from a keyed statistics dictionary."""
         self.base_accumulator.key_replace(stats_dict)
         if self.keys is not None and self.keys in stats_dict:
             self.inflation_count, self.total = stats_dict[self.keys]
 
     def acc_to_encoder(self) -> "ZeroInflatedDataEncoder":
+        """Return an encoder that augments the base encoding with a zero mask."""
         return ZeroInflatedDataEncoder(self.base_accumulator.acc_to_encoder())
 
 
@@ -227,6 +238,7 @@ class ZeroInflatedAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> ZeroInflatedAccumulator:
+        """Create an empty zero-inflated accumulator."""
         return ZeroInflatedAccumulator(self.base_factory.make(), keys=self.keys)
 
 
@@ -246,9 +258,11 @@ class ZeroInflatedEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> ZeroInflatedAccumulatorFactory:
+        """Return a factory for zero-inflated sufficient-statistic accumulators."""
         return ZeroInflatedAccumulatorFactory(self.base_estimator.accumulator_factory(), keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[Any, float, float]) -> ZeroInflatedDistribution:
+        """Estimate the base distribution and structural-zero probability."""
         base_ss, inflation_count, total = suff_stat
         base = self.base_estimator.estimate(nobs, base_ss)
         if self.pseudo_count is not None:

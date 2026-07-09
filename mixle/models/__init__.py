@@ -46,8 +46,15 @@ from mixle.models.dirichlet_process_mixture import (
 )
 from mixle.models.dpo_leaf import DPOLeaf, DPOModel
 from mixle.models.embedding import CategoricalEmbedding
-from mixle.models.energy import EnergyModel, build_energy_net
+from mixle.models.energy import (
+    EnergyModel,
+    build_convex_energy_net,
+    build_energy_net,
+    build_product_energy_net,
+)
+from mixle.models.feature_map import FeatureMapDensity, FeatureMapEstimator, feature_fn, register_feature_fn
 from mixle.models.gaussian_process import GaussianProcessRegressor
+from mixle.models.grad_leaf import GradEstimator, GradLeaf
 from mixle.models.grammar import (
     GrammarLearningResult,
     PCFGParseNode,
@@ -56,6 +63,7 @@ from mixle.models.grammar import (
     pcfg_log_likelihood,
     viterbi_parse,
 )
+from mixle.models.hamiltonian import HamiltonianNet, leapfrog_rollout
 from mixle.models.knowledge_graph import KnowledgeGraphFitResult, TransEKnowledgeGraphModel
 from mixle.models.language_model import LM
 from mixle.models.mixture_density import (
@@ -63,12 +71,25 @@ from mixle.models.mixture_density import (
     build_conditional_autoregressive_categorical,
     build_conditional_flow,
     build_mdn,
+    build_projection_leaf,
+)
+from mixle.models.mup import (
+    apply_mup_init,
+    classify_causal_lm_params,
+    init_std_multiplier,
+    lr_multiplier,
+    mup_param_groups,
+    output_forward_multiplier,
+    transfer_init_std,
+    transfer_lr,
 )
 from mixle.models.neural import (
     CategoricalClassificationNeuralNetwork,
     GaussianRegressionNeuralNetwork,
     PoissonRegressionNeuralNetwork,
+    make_deep_set,
     make_mlp,
+    make_monotonic_mlp,
 )
 from mixle.models.neural_density import (
     NeuralDensity,
@@ -91,6 +112,8 @@ from mixle.models.partially_observable_markov_decision_process import (
     PartiallyObservableMarkovDecisionProcessModel,
     baum_welch_pomdp,
 )
+from mixle.models.pinn import PINNRegression, PINNRegressionEstimator
+from mixle.models.qat import QATWrapper, apply_qat, fake_quantize, fake_quantize_int4, set_fake_quant_enabled
 from mixle.models.random_forest import (
     RandomForestConditional,
     RandomForestEstimator,
@@ -131,6 +154,8 @@ __all__ = [
     "GaussianRegressionNeuralNetwork",
     "NeuralCategorical",
     "NeuralConditionalDensity",
+    "GradEstimator",
+    "GradLeaf",
     "NeuralDensity",
     "NeuralDensityEstimator",
     "NeuralGaussian",
@@ -141,6 +166,11 @@ __all__ = [
     "DiscreteAR",
     "DPOModel",
     "EnergyModel",
+    # frozen-encoder + structured-head composition for modality routing
+    "FeatureMapDensity",
+    "FeatureMapEstimator",
+    "feature_fn",
+    "register_feature_fn",
     "StreamingTransformer",
     # deprecated "...Leaf" aliases (kept for back-compat; prefer the names above)
     "NeuralLeaf",
@@ -156,8 +186,17 @@ __all__ = [
     "lm_train_fn",
     "snapshot",
     "tune_training",
+    "apply_mup_init",
+    "classify_causal_lm_params",
+    "init_std_multiplier",
+    "lr_multiplier",
+    "mup_param_groups",
+    "output_forward_multiplier",
+    "transfer_init_std",
+    "transfer_lr",
     "stream_fit",
     "GrammarLearningResult",
+    "HamiltonianNet",
     "HardEMResult",
     "KnowledgeGraphFitResult",
     "PartiallyObservableMarkovDecisionProcessFilterResult",
@@ -165,6 +204,13 @@ __all__ = [
     "PartiallyObservableMarkovDecisionProcessModel",
     "PartiallyDirectedGraph",
     "PCFGParseNode",
+    "PINNRegression",
+    "PINNRegressionEstimator",
+    "QATWrapper",
+    "apply_qat",
+    "fake_quantize",
+    "fake_quantize_int4",
+    "set_fake_quant_enabled",
     "PoissonRegressionNeuralNetwork",
     "RandomForestConditional",
     "RandomForestEstimator",
@@ -183,16 +229,22 @@ __all__ = [
     "gaussian_partial_correlation",
     "grammar_rule_table",
     "hard_em_stochastic_block_model",
+    "leapfrog_rollout",
     "learn_pc_skeleton",
     "build_autoregressive_categorical",
     "build_conditional_autoregressive_categorical",
     "build_conditional_flow",
+    "build_convex_energy_net",
     "build_coupling_flow",
     "build_energy_net",
     "build_maf",
     "build_mdn",
+    "build_product_energy_net",
+    "build_projection_leaf",
     "build_vae",
+    "make_deep_set",
     "make_mlp",
+    "make_monotonic_mlp",
     "mean_stick_weights",
     "orient_v_structures",
     "pcfg_log_likelihood",

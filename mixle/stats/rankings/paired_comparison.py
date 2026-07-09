@@ -48,6 +48,7 @@ class ThurstoneMostellerDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Return backend capabilities for the probit pairwise likelihood."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(
@@ -74,26 +75,34 @@ class ThurstoneMostellerDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def density(self, x: tuple[int, int]) -> float:
+        """Return the probability mass of one winner-loser pair."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: tuple[int, int]) -> float:
+        """Return the log probability of one winner-loser pair."""
         return float(self.seq_log_density(np.asarray([x], dtype=np.int64))[0])
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Score encoded winner-loser pairs."""
         z = (self.mu[x[:, 0]] - self.mu[x[:, 1]]) / _SQRT2
         return np.log(np.clip(ndtr(z), 1e-300, 1.0)) - self.log_pairs
 
     def sampler(self, seed: int | None = None) -> ThurstoneMostellerSampler:
+        """Return a sampler for winner-loser comparisons."""
         return ThurstoneMostellerSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> ThurstoneMostellerEstimator:
+        """Return the least-squares probit paired-comparison estimator."""
         return ThurstoneMostellerEstimator(dim=self.dim, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> PairDataEncoder:
+        """Return the encoder for winner-loser pair data."""
         return PairDataEncoder(dim=self.dim)
 
 
 class ThurstoneMostellerSampler(DistributionSampler):
+    """Sampler for Thurstone-Mosteller winner-loser comparisons."""
+
     def __init__(self, dist: ThurstoneMostellerDistribution, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = RandomState(seed)
@@ -105,6 +114,7 @@ class ThurstoneMostellerSampler(DistributionSampler):
         return (int(i), int(j)) if self.rng.rand() < p else (int(j), int(i))
 
     def sample(self, size: int | None = None) -> tuple[int, int] | list[tuple[int, int]]:
+        """Draw one comparison or a list of comparisons."""
         if size is None:
             return self._sample_one()
         return [self._sample_one() for _ in range(size)]
@@ -120,49 +130,62 @@ class PairWinAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: tuple[int, int], weight: float, estimate: Any) -> None:
+        """Accumulate one weighted winner-loser observation."""
         self.wins[int(x[0]), int(x[1])] += weight
         self.count += weight
 
     def initialize(self, x: tuple[int, int], weight: float, rng: RandomState | None) -> None:
+        """Initialize sufficient statistics from one weighted pair."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
+        """Accumulate weighted winner-loser pairs from an encoded batch."""
         np.add.at(self.wins, (x[:, 0], x[:, 1]), weights)
         self.count += float(np.sum(weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize sufficient statistics from an encoded weighted batch."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat) -> PairWinAccumulator:
+        """Merge serialized win-count sufficient statistics."""
         self.count += suff_stat[0]
         self.wins += suff_stat[1]
         return self
 
     def value(self):
+        """Return serialized win-count sufficient statistics."""
         return self.count, self.wins
 
     def from_value(self, x) -> PairWinAccumulator:
+        """Restore accumulator state from serialized win counts."""
         self.count, self.wins = x[0], np.asarray(x[1])
         self.dim = self.wins.shape[0]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge tied win-count statistics into ``stats_dict``."""
         if self.keys is not None:
             stats_dict[self.keys] = stats_dict[self.keys].combine(self.value()) if self.keys in stats_dict else self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace tied win-count statistics from ``stats_dict``."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> PairDataEncoder:
+        """Return the encoder associated with this accumulator."""
         return PairDataEncoder(dim=self.dim)
 
 
 class PairWinAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for paired win-count accumulators."""
+
     def __init__(self, dim: int, keys: str | None = None) -> None:
         self.dim, self.keys = dim, keys
 
     def make(self) -> PairWinAccumulator:
+        """Create a fresh paired-win accumulator."""
         return PairWinAccumulator(dim=self.dim, keys=self.keys)
 
 
@@ -175,9 +198,11 @@ class ThurstoneMostellerEstimator(ParameterEstimator):
         self.dim, self.name, self.keys = int(dim), name, keys
 
     def accumulator_factory(self) -> PairWinAccumulatorFactory:
+        """Return the accumulator factory used by this estimator."""
         return PairWinAccumulatorFactory(dim=self.dim, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat) -> ThurstoneMostellerDistribution:
+        """Estimate Thurstone-Mosteller utilities from win-count statistics."""
         count, wins = suff_stat
         n = self.dim
         if count <= 0.0:
@@ -203,6 +228,7 @@ class PairDataEncoder(DataSequenceEncoder):
         return isinstance(other, PairDataEncoder)
 
     def seq_encode(self, x: Sequence[tuple[int, int]]) -> np.ndarray:
+        """Encode winner-loser pairs as an integer ``(N, 2)`` array."""
         rv = np.asarray([list(p) for p in x], dtype=np.int64)
         if rv.ndim != 2 or rv.shape[1] != 2 or rv.shape[0] == 0:
             raise ValueError("requires a non-empty sequence of (winner, loser) pairs.")
@@ -227,6 +253,7 @@ class _TieEncoder(DataSequenceEncoder):
         return isinstance(other, _TieEncoder)
 
     def seq_encode(self, x: Sequence[tuple[int, int, int]]) -> np.ndarray:
+        """Encode and canonicalize tie-model comparison triples."""
         rv = np.asarray([list(t) for t in x], dtype=np.int64)
         if rv.ndim != 2 or rv.shape[1] != 3 or rv.shape[0] == 0:
             raise ValueError("requires a non-empty sequence of (i, j, outcome) triples.")
@@ -251,12 +278,15 @@ class _TieAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x, weight: float, estimate: Any) -> None:
+        """Accumulate one weighted comparison triple."""
         self.seq_update(np.asarray([x], dtype=np.int64), np.asarray([weight], dtype=float), estimate)
 
     def initialize(self, x, weight: float, rng: RandomState | None) -> None:
+        """Initialize sufficient statistics from one weighted comparison."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
+        """Accumulate weighted tie-model comparisons from an encoded batch."""
         lo, hi, o = x[:, 0], x[:, 1], x[:, 2]
         m0, m1, m2 = o == 0, o == 1, o == 2
         np.add.at(self.wins, (lo[m0], hi[m0]), weights[m0])
@@ -265,31 +295,38 @@ class _TieAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += float(np.sum(weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize sufficient statistics from an encoded weighted batch."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat) -> _TieAccumulator:
+        """Merge serialized win-and-tie sufficient statistics."""
         self.count += suff_stat[0]
         self.wins += suff_stat[1]
         self.ties += suff_stat[2]
         return self
 
     def value(self):
+        """Return serialized win-and-tie sufficient statistics."""
         return self.count, self.wins, self.ties
 
     def from_value(self, x) -> _TieAccumulator:
+        """Restore accumulator state from serialized win-and-tie statistics."""
         self.count, self.wins, self.ties = x[0], np.asarray(x[1]), np.asarray(x[2])
         self.dim = self.wins.shape[0]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge tied win-and-tie statistics into ``stats_dict``."""
         if self.keys is not None:
             stats_dict[self.keys] = stats_dict[self.keys].combine(self.value()) if self.keys in stats_dict else self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace tied win-and-tie statistics from ``stats_dict``."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> _TieEncoder:
+        """Return the encoder associated with this accumulator."""
         return _TieEncoder(dim=self.dim)
 
 
@@ -298,6 +335,7 @@ class _TieAccumulatorFactory(StatisticAccumulatorFactory):
         self.dim, self.keys = dim, keys
 
     def make(self) -> _TieAccumulator:
+        """Create a fresh tie-model accumulator."""
         return _TieAccumulator(dim=self.dim, keys=self.keys)
 
 
@@ -306,6 +344,7 @@ class _BaseTieDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Return backend capabilities for paired-comparison tie likelihoods."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(
@@ -326,27 +365,34 @@ class _BaseTieDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def _outcome_logp(self, lo: np.ndarray, hi: np.ndarray, o: np.ndarray) -> np.ndarray:
+        """Return outcome log probabilities for canonicalized comparison triples."""
         raise NotImplementedError
 
     def density(self, x) -> float:
+        """Return the probability mass of one comparison triple."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x) -> float:
+        """Return the log probability of one comparison triple."""
         i, j, o = int(x[0]), int(x[1]), int(x[2])
         if i > j:
             i, j, o = j, i, (o if o == 2 else 1 - o)
         return float(self._outcome_logp(np.array([i]), np.array([j]), np.array([o]))[0]) - self.log_pairs
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Score encoded canonicalized comparison triples."""
         return self._outcome_logp(x[:, 0], x[:, 1], x[:, 2]) - self.log_pairs
 
     def _sample_outcome(self, i: int, j: int, rng: RandomState) -> int:
+        """Sample an outcome code for the canonical pair ``i < j``."""
         raise NotImplementedError
 
     def sampler(self, seed: int | None = None):
+        """Return a sampler for tie-model comparison triples."""
         return _TieSampler(self, seed)
 
     def dist_to_encoder(self) -> _TieEncoder:
+        """Return the encoder for tie-model comparison triples."""
         return _TieEncoder(dim=self.dim)
 
 
@@ -361,6 +407,7 @@ class _TieSampler(DistributionSampler):
         return (int(i), int(j), int(self.dist._sample_outcome(int(i), int(j), self.rng)))
 
     def sample(self, size: int | None = None):
+        """Draw one comparison triple or a list of triples."""
         if size is None:
             return self._sample_one()
         return [self._sample_one() for _ in range(size)]
@@ -383,6 +430,7 @@ class DavidsonDistribution(_BaseTieDistribution):
         )
 
     def _outcome_logp(self, lo, hi, o):
+        """Return Davidson log probabilities for canonicalized outcomes."""
         wi, wj = np.exp(self.log_w[lo]), np.exp(self.log_w[hi])
         g = np.sqrt(wi * wj)
         denom = wi + wj + self.nu * g
@@ -390,12 +438,14 @@ class DavidsonDistribution(_BaseTieDistribution):
         return np.log(num) - np.log(denom)
 
     def _sample_outcome(self, i, j, rng):
+        """Sample a Davidson outcome code for a canonical pair."""
         wi, wj = math.exp(self.log_w[i]), math.exp(self.log_w[j])
         g = math.sqrt(wi * wj)
         denom = wi + wj + self.nu * g
         return int(rng.choice(3, p=[wi / denom, wj / denom, self.nu * g / denom]))
 
     def estimator(self, pseudo_count: float | None = None):
+        """Return the maximum-likelihood Davidson estimator."""
         return DavidsonEstimator(dim=self.dim, name=self.name, keys=self.keys)
 
 
@@ -416,6 +466,7 @@ class RaoKupperDistribution(_BaseTieDistribution):
         )
 
     def _outcome_logp(self, lo, hi, o):
+        """Return Rao-Kupper log probabilities for canonicalized outcomes."""
         wi, wj, nu = np.exp(self.log_w[lo]), np.exp(self.log_w[hi]), self.nu
         p_i = wi / (wi + nu * wj)
         p_j = wj / (nu * wi + wj)
@@ -423,12 +474,14 @@ class RaoKupperDistribution(_BaseTieDistribution):
         return np.log(np.where(o == 0, p_i, np.where(o == 1, p_j, p_tie)))
 
     def _sample_outcome(self, i, j, rng):
+        """Sample a Rao-Kupper outcome code for a canonical pair."""
         wi, wj, nu = math.exp(self.log_w[i]), math.exp(self.log_w[j]), self.nu
         p_i = wi / (wi + nu * wj)
         p_j = wj / (nu * wi + wj)
         return int(rng.choice(3, p=[p_i, p_j, max(1.0 - p_i - p_j, 0.0)]))
 
     def estimator(self, pseudo_count: float | None = None):
+        """Return the maximum-likelihood Rao-Kupper estimator."""
         return RaoKupperEstimator(dim=self.dim, name=self.name, keys=self.keys)
 
 
@@ -468,9 +521,11 @@ class DavidsonEstimator(ParameterEstimator):
         self.dim, self.name, self.keys = int(dim), name, keys
 
     def accumulator_factory(self) -> _TieAccumulatorFactory:
+        """Return the accumulator factory used by this estimator."""
         return _TieAccumulatorFactory(dim=self.dim, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat) -> DavidsonDistribution:
+        """Estimate Davidson worths and tie parameter from sufficient statistics."""
         count, wins, ties = suff_stat
         if count <= 0.0:
             return DavidsonDistribution(np.zeros(self.dim), 1.0, name=self.name, keys=self.keys)
@@ -489,9 +544,11 @@ class RaoKupperEstimator(ParameterEstimator):
         self.dim, self.name, self.keys = int(dim), name, keys
 
     def accumulator_factory(self) -> _TieAccumulatorFactory:
+        """Return the accumulator factory used by this estimator."""
         return _TieAccumulatorFactory(dim=self.dim, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat) -> RaoKupperDistribution:
+        """Estimate Rao-Kupper worths and threshold from sufficient statistics."""
         count, wins, ties = suff_stat
         if count <= 0.0:
             return RaoKupperDistribution(np.zeros(self.dim), 1.5, name=self.name, keys=self.keys)

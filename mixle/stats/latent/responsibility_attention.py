@@ -154,9 +154,11 @@ class ResponsibilityAttentionDistribution(SequenceEncodableProbabilityDistributi
         return pred[0] if np.ndim(context) == 1 else pred
 
     def sampler(self, seed: int | None = None) -> ResponsibilityAttentionSampler:
+        """Return a sampler for synthetic responsibility-attention observations."""
         return ResponsibilityAttentionSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> ResponsibilityAttentionEstimator:
+        """Return a closed-form EM estimator for this attention head."""
         return ResponsibilityAttentionEstimator(
             num_symbols=self.num_symbols,
             context_length=self.context_length,
@@ -168,6 +170,7 @@ class ResponsibilityAttentionDistribution(SequenceEncodableProbabilityDistributi
         )
 
     def dist_to_encoder(self) -> ResponsibilityAttentionDataEncoder:
+        """Return the encoder for contexts, query vectors, and targets."""
         return ResponsibilityAttentionDataEncoder()
 
 
@@ -179,6 +182,7 @@ class ResponsibilityAttentionSampler(DistributionSampler):
         self.rng = RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Draw one observation or ``size`` iid synthetic observations."""
         n = 1 if size is None else size
         d = self.dist
         out = []
@@ -229,18 +233,22 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         self.query_sq += float(np.sum(r.sum(axis=1) * np.einsum("nd,nd->n", y, y)))
 
     def update(self, x, weight: float, estimate: ResponsibilityAttentionDistribution | None) -> None:
+        """Update sufficient statistics from one weighted observation."""
         enc = ResponsibilityAttentionDataEncoder().seq_encode([x])
         self.seq_update(enc, np.array([weight], dtype=float), estimate)
 
     def seq_update(self, x, weights: np.ndarray, estimate: ResponsibilityAttentionDistribution | None) -> None:
+        """Update sufficient statistics from encoded observations."""
         _, r = _normalize_rows(_log_weights(x, estimate))
         self._accumulate(x, r * weights[:, None])
 
     def initialize(self, x, weight: float, rng: RandomState) -> None:
+        """Initialize sufficient statistics from one weighted observation."""
         enc = ResponsibilityAttentionDataEncoder().seq_encode([x])
         self.seq_initialize(enc, np.array([weight], dtype=float), rng)
 
     def seq_initialize(self, x, weights: np.ndarray, rng: RandomState) -> None:
+        """Initialize sufficient statistics with random attention responsibilities."""
         # random responsibilities break the symmetry the M-step would otherwise preserve
         ctx = x[0]
         n, N = ctx.shape
@@ -248,6 +256,7 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         self._accumulate(x, r * weights[:, None])
 
     def combine(self, suff_stat) -> ResponsibilityAttentionAccumulator:
+        """Merge key, emission, position, and query-scatter statistics."""
         ks, km, ec, pc, qsq = suff_stat
         self.key_sum += ks
         self.key_mass += km
@@ -257,6 +266,7 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self):
+        """Return a snapshot of additive attention sufficient statistics."""
         # copies: value() is a snapshot, so combine()/key_merge()/distributed reduction can never
         # alias an accumulator's own arrays
         return (
@@ -268,6 +278,7 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         )
 
     def from_value(self, x) -> ResponsibilityAttentionAccumulator:
+        """Restore attention sufficient statistics from ``value`` output."""
         self.key_sum, self.key_mass, self.emission_count, self.position_count = (
             np.asarray(v, dtype=float) for v in x[:4]
         )
@@ -275,6 +286,7 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 self.combine(stats_dict[self.keys])
@@ -282,14 +294,18 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self.value()
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys])
 
     def acc_to_encoder(self) -> ResponsibilityAttentionDataEncoder:
+        """Return the encoder compatible with this accumulator."""
         return ResponsibilityAttentionDataEncoder()
 
 
 class ResponsibilityAttentionAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create accumulators for responsibility-attention EM statistics."""
+
     def __init__(
         self,
         num_symbols: int,
@@ -307,6 +323,7 @@ class ResponsibilityAttentionAccumulatorFactory(StatisticAccumulatorFactory):
         self.name = name
 
     def make(self) -> ResponsibilityAttentionAccumulator:
+        """Create an empty responsibility-attention accumulator."""
         return ResponsibilityAttentionAccumulator(
             self.num_symbols, self.context_length, self.query_dim, self.num_targets, keys=self.keys, name=self.name
         )
@@ -353,11 +370,13 @@ class ResponsibilityAttentionEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> ResponsibilityAttentionAccumulatorFactory:
+        """Return a factory for responsibility-attention sufficient-statistic accumulators."""
         return ResponsibilityAttentionAccumulatorFactory(
             self.num_symbols, self.context_length, self.query_dim, self.num_targets, keys=self.keys, name=self.name
         )
 
     def estimate(self, nobs: float | None, suff_stat) -> ResponsibilityAttentionDistribution:
+        """Estimate key means, emissions, position prior, and optional gate variance."""
         key_sum, key_mass, emission_count, position_count, query_sq = suff_stat
         # keys: responsibility-weighted mean query per symbol (GMM mean update)
         denom = np.clip(key_mass, 1e-12, None)
@@ -392,6 +411,7 @@ class ResponsibilityAttentionDataEncoder(DataSequenceEncoder):
         return isinstance(other, ResponsibilityAttentionDataEncoder)
 
     def seq_encode(self, x: Sequence[tuple[Any, Any, int]]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Encode ``(context, query, target)`` observations."""
         ctx = np.asarray([np.asarray(xi[0], dtype=int) for xi in x], dtype=int)
         y = np.asarray([np.asarray(xi[1], dtype=float) for xi in x], dtype=float)
         t = np.asarray([int(xi[2]) for xi in x], dtype=int)
@@ -412,7 +432,7 @@ def sequence_to_triples(
     ``query`` derived from the current token ``tokens[p]`` (its embedding, or a one-hot), and
     ``target = tokens[p+1]``. This is the bridge from a real sequence to the iid-triple leaf.
 
-    Honest scope: with the *single-hop* leaf this yields an attention-weighted next-token model whose
+    Scope: with the *single-hop* leaf this yields an attention-weighted next-token model whose
     predictive is a function of the current token (an attention-flavoured **bigram**) -- because the
     emission is keyed by the attended token's identity, the prediction depends only on which token the
     query selects. In-context copy / induction (example-specific values) is what the multi-hop /

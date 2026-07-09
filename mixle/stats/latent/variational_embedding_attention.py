@@ -22,7 +22,7 @@ Fitting is **variational EM**, run through the ordinary :func:`mixle.inference.o
 
 Because tying ties the query and key roles, a symbol's embedding learned from its appearances as a key
 (in context) also serves as its query -- so the model transfers a representation across roles, which a
-lookup/one-hot query cannot. Honest caveats: the objective is an ELBO (a bound, monotone in the bound,
+lookup/one-hot query cannot. Caveats: the objective is an ELBO (a bound, monotone in the bound,
 not the exact likelihood); the embedding posterior is a *global* latent fit by an inner gradient step,
 so this estimator is single-process for the embedding update (the discrete-attention / emission /
 prior parts remain ordinary additive EM).
@@ -126,6 +126,7 @@ class VariationalEmbeddingAttentionDistribution(SequenceEncodableProbabilityDist
         )
 
     def density(self, x: tuple[Any, int, int]) -> float:
+        """Return the posterior-mean probability of one attention observation."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: tuple[Any, int, int]) -> float:
@@ -156,9 +157,11 @@ class VariationalEmbeddingAttentionDistribution(SequenceEncodableProbabilityDist
         return self.mean
 
     def sampler(self, seed: int | None = None) -> VariationalEmbeddingAttentionSampler:
+        """Return a sampler for synthetic latent-embedding attention observations."""
         return VariationalEmbeddingAttentionSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> VariationalEmbeddingAttentionEstimator:
+        """Return a variational EM estimator initialized with this model's dimensions."""
         return VariationalEmbeddingAttentionEstimator(
             num_symbols=self.num_symbols,
             context_length=self.context_length,
@@ -169,6 +172,7 @@ class VariationalEmbeddingAttentionDistribution(SequenceEncodableProbabilityDist
         )
 
     def dist_to_encoder(self) -> VariationalEmbeddingAttentionDataEncoder:
+        """Return the encoder for contexts, queries, and targets."""
         return VariationalEmbeddingAttentionDataEncoder()
 
 
@@ -180,6 +184,7 @@ class VariationalEmbeddingAttentionSampler(DistributionSampler):
         self.rng = RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Draw one observation or ``size`` iid synthetic observations."""
         n = 1 if size is None else size
         d = self.dist
         embed = d.mean + np.exp(0.5 * d.log_var) * self.rng.randn(*d.mean.shape)
@@ -214,6 +219,7 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
         self.name = name
 
     def seq_update(self, x, weights, estimate: VariationalEmbeddingAttentionDistribution) -> None:
+        """Update ELBO gradients and closed-form count statistics from encoded observations."""
         ctx, q, t = x
         w = np.asarray(weights, dtype=float)
         m, log_v, sigma2 = estimate.mean, estimate.log_var, estimate.sigma2
@@ -233,10 +239,12 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
         self.n += float(w.sum())
 
     def update(self, x, weight: float, estimate) -> None:
+        """Update from one weighted latent-embedding attention observation."""
         enc = VariationalEmbeddingAttentionDataEncoder().seq_encode([x])
         self.seq_update(enc, np.array([weight], dtype=float), estimate)
 
     def seq_initialize(self, x, weights, rng: RandomState) -> None:
+        """Initialize emission and position counts with random attention responsibilities."""
         # no gradient yet (embeddings are initialised by the estimator); seed emission/position from
         # random attention so the first M-step is non-degenerate
         ctx, q, t = x
@@ -248,10 +256,12 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
         self.n += float(w.sum())
 
     def initialize(self, x, weight: float, rng: RandomState) -> None:
+        """Initialize from one weighted latent-embedding attention observation."""
         enc = VariationalEmbeddingAttentionDataEncoder().seq_encode([x])
         self.seq_initialize(enc, np.array([weight], dtype=float), rng)
 
     def combine(self, suff_stat) -> VariationalEmbeddingAttentionAccumulator:
+        """Merge ELBO gradients, emission counts, position counts, and scalar totals."""
         gm, glv, ec, pc, ll, n = suff_stat
         self.grad_m += gm
         self.grad_logv += glv
@@ -262,6 +272,7 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
         return self
 
     def value(self):
+        """Return accumulated gradients, count statistics, log-likelihood, and total weight."""
         return (
             self.grad_m.copy(),
             self.grad_logv.copy(),
@@ -272,6 +283,7 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
         )
 
     def from_value(self, x) -> VariationalEmbeddingAttentionAccumulator:
+        """Restore accumulator state from ``value`` output."""
         self.grad_m, self.grad_logv, self.emission_count, self.position_count = (
             np.asarray(v, dtype=float) for v in x[:4]
         )
@@ -280,6 +292,7 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 self.combine(stats_dict[self.keys])
@@ -287,20 +300,25 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
                 stats_dict[self.keys] = self.value()
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys])
 
     def acc_to_encoder(self) -> VariationalEmbeddingAttentionDataEncoder:
+        """Return the encoder compatible with this accumulator."""
         return VariationalEmbeddingAttentionDataEncoder()
 
 
 class VariationalEmbeddingAttentionAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create accumulators for variational embedding attention EM steps."""
+
     def __init__(self, estimator: VariationalEmbeddingAttentionEstimator, keys=None, name=None) -> None:
         self.est = estimator
         self.keys = keys
         self.name = name
 
     def make(self) -> VariationalEmbeddingAttentionAccumulator:
+        """Create an accumulator with a deterministic per-iteration Monte-Carlo seed."""
         e = self.est
         # vary the reparameterization noise across EM iterations (e._t advances each estimate)
         seed = (e.seed * 1_000_003 + e._t) % (2**31)
@@ -357,6 +375,7 @@ class VariationalEmbeddingAttentionEstimator(ParameterEstimator):
         self._t = 0
 
     def accumulator_factory(self) -> VariationalEmbeddingAttentionAccumulatorFactory:
+        """Return a factory for variational embedding attention accumulators."""
         return VariationalEmbeddingAttentionAccumulatorFactory(self, keys=self.keys, name=self.name)
 
     def _init_state(self) -> None:
@@ -378,6 +397,7 @@ class VariationalEmbeddingAttentionEstimator(ParameterEstimator):
         return param + self.lr * mhat / (np.sqrt(vhat) + eps), m1, m2
 
     def estimate(self, nobs: float | None, suff_stat) -> VariationalEmbeddingAttentionDistribution:
+        """Apply one variational EM update and return the updated attention distribution."""
         grad_m, grad_logv, emission_count, position_count, _ll, _n = suff_stat
         first = self.mean is None
         if first:
@@ -411,6 +431,7 @@ class VariationalEmbeddingAttentionDataEncoder(DataSequenceEncoder):
         return isinstance(other, VariationalEmbeddingAttentionDataEncoder)
 
     def seq_encode(self, x: Sequence[tuple[Any, int, int]]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Encode ``(context_symbols, query, target)`` observations."""
         ctx = np.asarray([np.asarray(xi[0], dtype=int) for xi in x], dtype=int)
         q = np.asarray([int(xi[1]) for xi in x], dtype=int)
         t = np.asarray([int(xi[2]) for xi in x], dtype=int)

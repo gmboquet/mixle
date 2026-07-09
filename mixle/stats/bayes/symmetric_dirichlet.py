@@ -30,7 +30,7 @@ class SymmetricDirichletDistribution(SequenceEncodableProbabilityDistribution):
     from each observation (or fixed with dim for sampling)."""
 
     def __init__(self, alpha: float, dim: int | None = None, name: str | None = None) -> None:
-        """SymmetricDirichletDistribution object.
+        """Create a symmetric Dirichlet distribution.
 
         Args:
             alpha (float): Shared positive concentration parameter.
@@ -133,6 +133,7 @@ class SymmetricDirichletDataEncoder(DataSequenceEncoder):
         return isinstance(other, SymmetricDirichletDataEncoder)
 
     def seq_encode(self, x: Any) -> np.ndarray:
+        """Encode simplex observations and their clipped log values."""
         import sys
 
         rv = np.asarray(x, dtype=float)

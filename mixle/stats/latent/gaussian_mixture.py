@@ -1,27 +1,17 @@
-"""Create, estimate, and sample from a mixture of multivariate Gaussian distributions.
+"""Multivariate Gaussian mixtures built on the generic mixture machinery.
 
-Defines the GaussianMixtureDistribution, GaussianMixtureSampler, GaussianMixtureAccumulator,
-GaussianMixtureEstimatorAccumulatorFactory, GaussianMixtureEstimator, and the GaussianMixtureDataEncoder
-classes for use with mixle.
-
-Data type: Union[List[float], np.ndarray]. Each observation is a length-d real vector.
+The Gaussian mixture classes are thin specializations of
+``mixle.stats.latent.mixture``. They construct multivariate-Gaussian
+components from packed ``(mu, sig2)`` arrays and reuse the generic mixture
+scoring, posterior, EM, fused-likelihood, keying, and stability behavior.
 
 A K-component multivariate Gaussian mixture has density
 
     P(x) = sum_{k=1}^{K} w_k * N(x; mu_k, sigma_k),
 
-where w is a vector of K mixture weights summing to 1.0, mu_k is the length-d mean of component k, and
-sigma_k is the d-by-d positive-definite covariance matrix of component k. For convenience the covariance
-argument 'sig2' may also be given as a (K, d) array of per-component diagonal variances, which is expanded
-to full diagonal covariance matrices.
-
-Implementation note: GaussianMixtureDistribution and friends are thin specializations of the generic
-mixture machinery in :mod:`mixle.stats.latent.mixture`. The vectorized E-step (seq_log_density,
-seq_posterior, Accumulator.seq_update, the fused-EM _track_ll path), scalar update/posterior, weight
-M-step, and key merge/replace are all inherited unchanged -- the only Gaussian-specific pieces are
-constructing the multivariate-Gaussian components from (mu, sig2), repacking mu/covar in estimate(),
-the (n, d) ndarray sampler output, and the Gaussian data encoder.
-
+where each observation is a length-d real vector. ``sig2`` may be supplied as
+full ``(K, d, d)`` covariance matrices or as per-component diagonal variances
+with shape ``(K, d)``.
 """
 
 from collections.abc import Sequence
@@ -62,32 +52,25 @@ def _pack_sig2(sig2: Sequence[Any] | np.ndarray, num_comp: int, dim: int) -> np.
 
 
 class GaussianMixtureDistribution(MixtureDistribution):
-    """GaussianMixtureDistribution object for a mixture of full-covariance multivariate Gaussians.
+    """Finite mixture of full-covariance multivariate Gaussian components.
 
-    A thin specialization of :class:`~mixle.stats.latent.mixture.MixtureDistribution` whose components
-    are :class:`~mixle.stats.multivariate.multivariate_gaussian.MultivariateGaussianDistribution`
-    objects built from ``(mu, sig2)``. All density/posterior machinery is inherited from the base
-    mixture; only the (mu, sig2) constructor packing, ``__str__``, and the Gaussian sampler/encoder
-    wiring are Gaussian-specific.
+    The constructor packs each ``(mu[k], sig2[k])`` pair into a
+    :class:`~mixle.stats.multivariate.multivariate_gaussian.MultivariateGaussianDistribution`.
+    Density, posterior responsibility, and vectorized scoring behavior are
+    inherited from :class:`~mixle.stats.latent.mixture.MixtureDistribution`.
 
     Args:
-        mu (Union[Sequence[Sequence[float]], np.ndarray]): Component means with shape (K, d).
-        sig2 (Union[Sequence[Any], np.ndarray]): Component covariances. Either a (K, d, d) array of full
-            covariance matrices or a (K, d) array of per-component diagonal variances.
-        w (Union[Sequence[float], np.ndarray]): Mixture weights of length K, must sum to 1.0.
-        name (Optional[str]): Assign string name to GaussianMixtureDistribution object.
+        mu: Component means with shape ``(K, d)``.
+        sig2: Component covariance matrices with shape ``(K, d, d)`` or
+            diagonal variances with shape ``(K, d)``.
+        w: Mixture weights with length ``K``.
+        name: Optional diagnostic name.
+        weights: Alias for ``w``.
 
     Attributes:
-        dim (int): Dimension d of the component Gaussians.
-        num_components (int): Number of mixture components K.
-        mu (np.ndarray): Component means with shape (K, d).
-        sig2 (np.ndarray): Component covariance matrices with shape (K, d, d).
-        w (np.ndarray): Mixture weights of length K.
-        zw (np.ndarray): Boolean array, True where a mixture weight is exactly 0.0.
-        log_w (np.ndarray): Log of mixture weights, -np.inf where zw is True.
-        components (List[MultivariateGaussianDistribution]): Component distributions.
-        name (Optional[str]): Name of object instance.
-
+        mu: Component means as a ``(K, d)`` NumPy array.
+        sig2: Component covariance matrices as a ``(K, d, d)`` NumPy array.
+        dim: Observation dimension.
     """
 
     def __init__(
@@ -111,7 +94,7 @@ class GaussianMixtureDistribution(MixtureDistribution):
         super().__init__(components, np.asarray(w, dtype=float), name=name)
 
     def __str__(self) -> str:
-        """Return string representation of GaussianMixtureDistribution object instance."""
+        """Return a constructor-style representation of the Gaussian mixture."""
         s1 = repr([list(u) for u in self.mu])
         s2 = repr([[list(v) for v in u] for u in self.sig2])
         s3 = repr(list(self.w))
@@ -119,6 +102,7 @@ class GaussianMixtureDistribution(MixtureDistribution):
         return "GaussianMixtureDistribution(%s, %s, %s, name=%s)" % (s1, s2, s3, s4)
 
     def density_semantics(self):
+        """Return exact-or-approximate density semantics joined from Gaussian components."""
         from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
 
         children = list(self.components)
@@ -126,26 +110,24 @@ class GaussianMixtureDistribution(MixtureDistribution):
         return join_density_semantics(sems) if sems else DensitySemantics.EXACT
 
     def sampler(self, seed: int | None = None) -> "GaussianMixtureSampler":
-        """Create GaussianMixtureSampler for sampling from GaussianMixtureDistribution instance.
+        """Return a sampler that draws vectors from this Gaussian mixture.
 
         Args:
-            seed (Optional[int]): Seed to set for sampling with RandomState.
+            seed: Optional seed for reproducible component and Gaussian draws.
 
         Returns:
-            GaussianMixtureSampler object.
-
+            ``GaussianMixtureSampler`` bound to this distribution.
         """
         return GaussianMixtureSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "GaussianMixtureEstimator":
-        """Create GaussianMixtureEstimator for estimating GaussianMixtureDistribution.
+        """Return an estimator with matching Gaussian component structure.
 
         Args:
-            pseudo_count (Optional[float]): Used to inflate sufficient statistics in estimation.
+            pseudo_count: Optional smoothing mass for mixture weights.
 
         Returns:
-            GaussianMixtureEstimator object.
-
+            ``GaussianMixtureEstimator`` suitable for fitting length-d vectors.
         """
         if pseudo_count is not None:
             return GaussianMixtureEstimator(
@@ -157,22 +139,20 @@ class GaussianMixtureDistribution(MixtureDistribution):
             return GaussianMixtureEstimator([u.estimator() for u in self.components], name=self.name)
 
     def dist_to_encoder(self) -> "GaussianMixtureDataEncoder":
-        """Returns a GaussianMixtureDataEncoder object for encoding sequences of iid observations."""
+        """Return the Gaussian mixture encoder for iid vector observations."""
         return GaussianMixtureDataEncoder(encoder=self.components[0].dist_to_encoder())
 
 
 class GaussianMixtureSampler(DistributionSampler):
-    """GaussianMixtureSampler object used to generate samples from a GaussianMixtureDistribution.
+    """Sampler for iid draws from a Gaussian mixture.
 
     Args:
-        dist (GaussianMixtureDistribution): GaussianMixtureDistribution to draw samples from.
-        seed (Optional[int]): Seed to set for sampling with RandomState.
+        dist: Gaussian mixture distribution to sample from.
+        seed: Optional seed for reproducible component and Gaussian draws.
 
     Attributes:
-        dist (GaussianMixtureDistribution): GaussianMixtureDistribution to draw samples from.
-        rng (RandomState): Seeded RandomState for sampling component labels.
-        compSamplers (List[MultivariateGaussianSampler]): Samplers for each mixture component.
-
+        rng: Random state used for component labels.
+        compSamplers: Per-component Gaussian samplers.
     """
 
     def __init__(self, dist: GaussianMixtureDistribution, seed: int | None = None) -> None:
@@ -207,18 +187,17 @@ class GaussianMixtureSampler(DistributionSampler):
 
 
 class GaussianMixtureAccumulator(MixtureAccumulator):
-    """GaussianMixtureAccumulator object used to aggregate sufficient statistics of observed data.
+    """EM accumulator for Gaussian mixture responsibilities and component stats.
 
-    A thin specialization of :class:`~mixle.stats.latent.mixture.MixtureAccumulator`: the vectorized
-    E-step (seq_update / seq_initialize, the fused-EM ``_track_ll`` path), scalar update/initialize,
-    combine/value/from_value, and key merge/replace are all inherited unchanged. Only the Gaussian
-    data encoder is Gaussian-specific.
+    Vectorized E-step, fused-likelihood tracking, scalar update/initialize,
+    combine/value/from_value, and key merge/replace behavior are inherited from
+    :class:`~mixle.stats.latent.mixture.MixtureAccumulator`. The specialization
+    only supplies the Gaussian mixture encoder.
 
     Args:
-        accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Accumulators for the mixture
-            components (one MultivariateGaussianAccumulator per component).
-        keys (Tuple[Optional[str], Optional[str]]): Set keys for weights and mixture components.
-
+        accumulators: Component accumulators, typically one multivariate
+            Gaussian accumulator per component.
+        keys: Optional shared-statistic keys for weights and components.
     """
 
     def __init__(
@@ -229,23 +208,17 @@ class GaussianMixtureAccumulator(MixtureAccumulator):
         super().__init__(accumulators, keys=keys)
 
     def acc_to_encoder(self) -> "GaussianMixtureDataEncoder":
-        """Returns a GaussianMixtureDataEncoder object for encoding sequences of iid observations."""
+        """Return an encoder compatible with the component accumulators."""
         return GaussianMixtureDataEncoder(encoder=self.accumulators[0].acc_to_encoder())
 
 
 class GaussianMixtureEstimatorAccumulatorFactory(MixtureAccumulatorFactory):
-    """GaussianMixtureEstimatorAccumulatorFactory object for creating GaussianMixtureAccumulator objects.
+    """Factory for Gaussian mixture EM accumulators.
 
     Args:
-        factories (Sequence[StatisticAccumulatorFactory]): Factories for the component accumulators.
-        dim (int): Number of mixture components K. Must equal the length of factories.
-        keys (Tuple[Optional[str], Optional[str]]): Keys for weights and component aggregations.
-
-    Attributes:
-        factories (Sequence[StatisticAccumulatorFactory]): Factories for the component accumulators.
-        dim (int): Number of mixture components K.
-        keys (Tuple[Optional[str], Optional[str]]): Keys for weights and component aggregations.
-
+        factories: Component accumulator factories.
+        dim: Number of mixture components.
+        keys: Optional shared-statistic keys for weights and components.
     """
 
     def __init__(
@@ -258,38 +231,27 @@ class GaussianMixtureEstimatorAccumulatorFactory(MixtureAccumulatorFactory):
         self.dim = dim
 
     def make(self) -> "GaussianMixtureAccumulator":
-        """Returns a GaussianMixtureAccumulator with freshly made component accumulators."""
+        """Return a fresh Gaussian mixture accumulator."""
         return GaussianMixtureAccumulator([self.factories[i].make() for i in range(self.dim)], self.keys)
 
 
 class GaussianMixtureEstimator(MixtureEstimator):
-    """GaussianMixtureEstimator object for estimating GaussianMixtureDistribution from sufficient statistics.
+    """EM estimator for a multivariate Gaussian mixture.
 
-    A thin specialization of :class:`~mixle.stats.latent.mixture.MixtureEstimator`: the weight M-step
-    (incl. pseudo_count / suff_stat regularization) is inherited unchanged; only the final repacking of
-    the estimated components into a :class:`GaussianMixtureDistribution` (reading each component's
-    ``mu`` / ``covar``) is Gaussian-specific.
+    The weight M-step and robustness options are inherited from
+    :class:`~mixle.stats.latent.mixture.MixtureEstimator`. The specialization
+    repacks fitted Gaussian components into ``(mu, sig2, w)`` arrays for a
+    :class:`GaussianMixtureDistribution`.
 
     Args:
-        estimators (Sequence[ParameterEstimator]): ParameterEstimator objects for the mixture
-            components (typically MultivariateGaussianEstimator objects).
-        name (Optional[str]): Set name for object instance.
-        conj_prior_params (Optional[Any]): Reserved for conjugate prior parameters (currently unused).
-        suff_stat (Optional[np.ndarray]): Prior mixture weights used with pseudo_count to regularize
-            the weight estimate. Must have length equal to the number of components.
-        pseudo_count (Optional[float]): Used to re-weight the mixture weight sufficient statistics
-            in estimation.
-        keys (Tuple[Optional[str], Optional[str]]): Set keys for the weights and component statistics.
-
-    Attributes:
-        num_components (int): Number of mixture components K.
-        estimators (Sequence[ParameterEstimator]): Component estimators.
-        pseudo_count (Optional[float]): Weight regularization constant.
-        suff_stat (Optional[np.ndarray]): Prior mixture weights.
-        conj_prior_params (Optional[Any]): Reserved for conjugate prior parameters (currently unused).
-        keys (Tuple[Optional[str], Optional[str]]): Keys for the weights and component statistics.
-        name (Optional[str]): Name of object instance.
-
+        estimators: Component estimators, typically multivariate Gaussian
+            estimators.
+        name: Optional diagnostic name.
+        conj_prior_params: Reserved compatibility slot.
+        suff_stat: Optional prior component-count vector used with
+            ``pseudo_count``.
+        pseudo_count: Optional smoothing mass for mixture weights.
+        keys: Optional shared-statistic keys for weights and components.
     """
 
     def __init__(
@@ -305,30 +267,33 @@ class GaussianMixtureEstimator(MixtureEstimator):
         self.conj_prior_params = conj_prior_params
 
     def accumulator_factory(self) -> "GaussianMixtureEstimatorAccumulatorFactory":
-        """Returns a GaussianMixtureEstimatorAccumulatorFactory built from the component estimators."""
+        """Return a Gaussian mixture accumulator factory."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         return GaussianMixtureEstimatorAccumulatorFactory(est_factories, self.num_components, self.keys)
 
     def accumulatorFactory(self) -> "GaussianMixtureEstimatorAccumulatorFactory":
-        """Deprecated alias for accumulator_factory()."""
+        """Backward-compatible alias for :meth:`accumulator_factory`.
+
+        New code should call ``accumulator_factory``. The camelCase name remains
+        available for older callers and returns the same factory.
+        """
         return self.accumulator_factory()
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, tuple[Any, ...]]
     ) -> "GaussianMixtureDistribution":
-        """Estimate a GaussianMixtureDistribution from aggregated sufficient statistics.
+        """Estimate a Gaussian mixture from aggregated EM sufficient statistics.
 
-        The component M-step and weight estimate (incl. pseudo_count / suff_stat regularization) reuse
-        the generic MixtureEstimator path; the estimated components are then repacked into a
-        GaussianMixtureDistribution via each component's ``mu`` / ``covar``.
+        The component M-step and weight estimate reuse the generic mixture
+        estimator path. The fitted component means and covariances are then
+        repacked into a ``GaussianMixtureDistribution``.
 
         Args:
-            nobs (Optional[float]): Not used. Kept for consistency with ParameterEstimator.
-            suff_stat: Tuple of (component counts, tuple of K component sufficient statistics).
+            nobs: Unused compatibility argument from ``ParameterEstimator``.
+            suff_stat: ``(component_counts, component_suff_stats)`` tuple.
 
         Returns:
-            GaussianMixtureDistribution object.
-
+            Fitted Gaussian mixture distribution.
         """
         base = super().estimate(nobs, suff_stat)
         mu = np.asarray([comp.mu for comp in base.components])
@@ -337,33 +302,28 @@ class GaussianMixtureEstimator(MixtureEstimator):
 
 
 class GaussianMixtureDataEncoder(MixtureDataEncoder):
-    """GaussianMixtureDataEncoder object for encoding sequences of iid Gaussian mixture observations.
+    """Encoder for iid vector observations in a Gaussian mixture.
 
     Args:
-        encoder (Optional[DataSequenceEncoder]): DataSequenceEncoder for the component distributions.
-            Defaults to a MultivariateGaussianDataEncoder.
-
-    Attributes:
-        encoder (DataSequenceEncoder): DataSequenceEncoder for the component distributions.
-
+        encoder: Optional component encoder. Defaults to
+            ``MultivariateGaussianDataEncoder``.
     """
 
     def __init__(self, encoder: DataSequenceEncoder | None = None) -> None:
         super().__init__(encoder if encoder is not None else MultivariateGaussianDataEncoder())
 
     def __str__(self) -> str:
-        """Returns string representation of GaussianMixtureDataEncoder object."""
+        """Return a constructor-style representation of the encoder."""
         return "GaussianMixtureDataEncoder(" + str(self.encoder) + ")"
 
     def __eq__(self, other: object) -> bool:
-        """Checks if other object is an equivalent GaussianMixtureDataEncoder.
+        """Return whether ``other`` is an equivalent Gaussian mixture encoder.
 
         Args:
-            other (object): Object to compare against.
+            other: Object to compare against.
 
         Returns:
             True if other is a GaussianMixtureDataEncoder with an equal component encoder.
-
         """
         if isinstance(other, GaussianMixtureDataEncoder):
             return self.encoder == other.encoder
@@ -371,5 +331,5 @@ class GaussianMixtureDataEncoder(MixtureDataEncoder):
             return False
 
 
-# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+# --- Backward-compatible API naming aliases ---
 GaussianMixtureAccumulatorFactory = GaussianMixtureEstimatorAccumulatorFactory

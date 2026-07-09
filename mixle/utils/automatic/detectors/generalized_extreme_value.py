@@ -3,7 +3,7 @@
 GEV is the Fisher-Tippett-Gnedenko limit for normalized block maxima (floods, wind speeds, record
 losses). It is a flexible 3-parameter family (location, scale, shape) whose Gumbel sub-case (shape 0)
 spans all reals, so the support gate is any real-valued data; the 3-parameter BIC penalty keeps it
-from stealing the simpler symmetric Gaussian / monotone Exponential when those are the honest fit.
+from stealing the simpler symmetric Gaussian / monotone Exponential when those are the appropriate fit.
 """
 
 import math
@@ -50,8 +50,11 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
 
 def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
     from mixle.stats import GeneralizedExtremeValueDistribution
+    from mixle.utils.automatic.profiling import _value_array_from_vdict
 
-    return GeneralizedExtremeValueDistribution(0.0, 1.0, 0.1).estimator()
+    fit = _fit_params(_value_array_from_vdict(vdict))
+    c, loc, scale = fit if fit is not None else (0.1, 0.0, 1.0)
+    return GeneralizedExtremeValueDistribution(loc, scale, c).estimator(pseudo_count=pseudo_count)
 
 
 def _cdf(arr: np.ndarray):

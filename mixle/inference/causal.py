@@ -1,12 +1,12 @@
 """``do`` -- interventions on a learned heterogeneous Bayesian network (graph-surgery semantics).
 
 The causality front door over :func:`mixle.inference.bayesian_network.learn_bayesian_network`. An
-intervention ``do(net, {field: value})`` CLAMPS the intervened fields during ancestral sampling —
+intervention ``do(net, {field: value})`` clamps the intervened fields during ancestral sampling —
 their own factors (and hence their parents) are cut out of the generation, which is exactly Pearl's
 graph surgery — and everything downstream flows through the fitted conditional factors::
 
     net = learn_bayesian_network(records)
-    world = do(net, {0: 2.0})                    # the world where field 0 is SET to 2.0
+    world = do(net, {0: 2.0})                    # the world where field 0 is set to 2.0
     world.sample(1000)                            # interventional draws
     world.expectation(2)                          # E[field 2 | do(field 0 = 2.0)]
     average_causal_effect(net, 0, 2.0, 0.0, outcome=2)   # E[Y|do(a)] - E[Y|do(b)]
@@ -77,17 +77,17 @@ def average_causal_effect(
 
 
 def counterfactual(net: Any, observed: tuple, interventions: dict[int, Any]) -> tuple:
-    """What THIS observed record would have been under the intervention (abduction-action-prediction).
+    """What this observed record would have been under the intervention (abduction-action-prediction).
 
     Per Pearl's three steps, walked in topological order:
 
       * **abduction** -- a linear-Gaussian field's exogenous noise is point-identified from the row:
         its residual ``eps = observed - coef @ parents_observed``;
       * **action** -- intervened fields take their ``do`` values;
-      * **prediction** -- the SAME residual replays through the counterfactual parents:
+      * **prediction** -- the same residual replays through the counterfactual parents:
         ``cf = coef @ parents_cf + eps``.
 
-    Honest boundaries: (1) a field that is not linear-Gaussian keeps its observed value only while its
+    Boundaries: (1) a field that is not linear-Gaussian keeps its observed value only while its
     parents are unchanged under the intervention (that much IS identified); if its parents change, its
     exogenous noise cannot be recovered from one observation and this raises — use
     :func:`average_causal_effect` for the population answer instead of a guessed individual one.

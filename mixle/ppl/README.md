@@ -1,8 +1,8 @@
-# mixle.ppl — probabilistic programming, the mixle way
+# mixle.ppl — probabilistic programming for Mixle distributions
 
-An elegant, fast PPL surface over mixle's distribution + sufficient-statistic
-engine. **EM / variational-Bayes at the core, exact where structure allows, MCMC when
-you want it** — and a one-line modeling surface.
+`mixle.ppl` is a compact probabilistic-programming surface over Mixle's distribution and
+sufficient-statistic engine. It uses EM and variational Bayes where the model structure supports them,
+exact conjugate updates where available, and MCMC when full posterior sampling is required.
 
 ```python
 from mixle.ppl import Normal, free
@@ -10,10 +10,10 @@ m = Normal(free, free).fit(data)     # fit by EM
 m.sample(100); m.log_prob(x)         # query
 ```
 
-There is one rule: a model is plain mixle construction where a parameter slot may
+The core rule is simple: a model is ordinary Mixle construction where a parameter slot may
 hold a **value** (fixed), the token **`free`** (estimate it), or **another distribution**
-(make it random). That's the whole language. The 86 `mixle.stats` distributions are
-untouched; this is a thin, optional dialect. Design: [../../notes/ppl-syntax-spec.md](../../notes/ppl-syntax-spec.md).
+(make it random). The `mixle.stats` distributions are untouched; this is a thin, optional dialect over the existing distribution and
+estimator contracts.
 
 ## Install / import
 
@@ -109,7 +109,7 @@ AR1().fit(timeseries)                                 # AR(1) + noise; estimates
 
 A *prior* is just a distribution in the slot — no special syntax.
 
-### Exact, instant: conjugate posteriors (the VB ideal)
+### Exact conjugate posteriors
 
 When the prior is conjugate to the likelihood, `fit` returns the **closed-form**
 posterior — exact, no iteration, no sampling:
@@ -377,8 +377,8 @@ compare([m1, m2], data, by="waic")   # 'aic' | 'bic' | 'loglik' | 'waic' | 'loo'
   `seq_log_density` / `seq_update` engine underneath.
 - **Optional**: every concrete distribution still works directly; `.dist` is always there.
 
-See [../../notes/ppl-syntax-spec.md](../../notes/ppl-syntax-spec.md) for the full charter
-and invariants.
+These guarantees keep the PPL surface inspectable: model declarations lower to
+ordinary Mixle objects, and unsupported combinations should fail explicitly.
 
 ## Performance & execution stack
 
@@ -399,7 +399,8 @@ mixtures, HMMs, sequences, LDA, MVN) via `.fit()` / `fit(how="em")`. The Bayesia
 (`conjugate`, `hierarchical`, `vmp`, `vi`, `mcmc`, `hmc`, regression, state-space) are
 vectorized NumPy and single-machine: conjugate is one O(N) pass; hierarchical/VMP are
 vectorized over groups; MCMC/HMC/VI score each step through the vectorized `seq_log_density`.
-Distributing those is future work; the heavy-data workhorses already scale.
+The distributed path is centered on the EM/MLE workflows listed above; use the single-machine
+Bayesian routes when their posterior semantics are the primary requirement.
 
 ## Status
 

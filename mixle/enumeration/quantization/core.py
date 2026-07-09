@@ -23,7 +23,7 @@ This module provides that semiring:
   - :class:`CountIndex` pairs a histogram with a structural *unranker*
     ``get_in_bucket(fine_bucket, offset) -> (value, exact_log_prob)``.
   - :func:`leaf_count_index` builds a :class:`CountIndex` from any exact enumerator,
-    bounded by depth (cheap for small/closed-form leaves).
+    bounded by depth (efficient for small/closed-form leaves).
   - :func:`convolve_indices` composes child indices (the Composite reference case),
     and :func:`build_budget_index` accumulates coarse bins until the cumulative count
     reaches the requested ``2**budget_bits`` budget, returning a
@@ -207,7 +207,7 @@ def _convolve_ntt(a: list[int], b: list[int], width: int, bucket_delta_bits: flo
         fb[: len(b)] = b
         reduce = lambda arr, pp: arr % pp  # noqa: E731 - vectorized residues
     else:
-        fa, fb = a, b  # counts above 2^64: reduce per prime with Python int mod (O(n), cheap vs the multiply)
+        fa, fb = a, b  # counts above 2^64: reduce per prime with Python int mod (O(n), low-overhead vs the multiply)
 
         def reduce(arr: Any, pp: Any) -> Any:
             out = np.zeros(n, dtype=np.uint64)
@@ -232,7 +232,7 @@ def _convolve_ntt(a: list[int], b: list[int], width: int, bucket_delta_bits: flo
         return (a1 + np.uint64(_NTT_P1) * t).tolist()  # < p1*p2 < 2^62: exact in uint64
 
     # 3+ primes: Garner mixed-radix digits, every intermediate in uint64 (digits and moduli < 2^31,
-    # so d*p products < 2^62); only the final positional assembly leaves machine words, one cheap
+    # so d*p products < 2^62); only the final positional assembly leaves machine words, one low-overhead
     # Python big-int expression per KEPT coefficient (the same order of per-element work as
     # Kronecker's from_bytes unpack).
     digits = [residues[0]]
@@ -398,6 +398,7 @@ class CountHistogram:
 
     @classmethod
     def empty(cls) -> "CountHistogram":
+        """Return an empty histogram."""
         return cls(0, [])
 
     @classmethod
@@ -406,15 +407,19 @@ class CountHistogram:
         return cls(fine_bucket, [int(count)])
 
     def is_empty(self) -> bool:
+        """Return whether the histogram has no stored counts."""
         return not self.data
 
     def total(self) -> int:
+        """Return the total count across buckets."""
         return sum(self.data)
 
     def max_bucket(self) -> int | None:
+        """Return the largest occupied fine bucket, if any."""
         return None if not self.data else self.base + len(self.data) - 1
 
     def count_at(self, fine_bucket: int) -> int:
+        """Return the count at a fine bucket."""
         i = int(fine_bucket) - self.base
         return self.data[i] if 0 <= i < len(self.data) else 0
 
@@ -561,9 +566,11 @@ class CountIndex:
         self.dropped_upper = float(dropped_upper)
 
     def total(self) -> int:
+        """Return total count represented by the index."""
         return self.hist.total()
 
     def get_in_bucket(self, fine_bucket: int, offset: int) -> tuple[Any, float]:
+        """Return the item at an offset within a fine bucket."""
         if offset < 0 or offset >= self.hist.count_at(fine_bucket):
             raise IndexError("offset %d outside fine bucket %d" % (offset, fine_bucket))
         return self._getter(int(fine_bucket), int(offset))
@@ -575,7 +582,7 @@ def leaf_count_index(
     """Build a CountIndex from an exact descending-probability enumerator, bounded by depth.
 
     Pulls items until their fine bucket exceeds ``max_fine_bucket`` (or, if ``max_items`` is given,
-    until that many items have been taken). Cheap for closed-form or small-support leaves (a
+    until that many items have been taken). Efficient for closed-form or small-support leaves (a
     geometric/Poisson has ~depth items within a depth bound); the ``max_items`` cap is the brake for
     the enumerate-and-bin fallback over exponential-support families that cannot count structurally.
     Returns ``(index, truncated)`` where ``truncated`` is True if in-bound items were left untaken.

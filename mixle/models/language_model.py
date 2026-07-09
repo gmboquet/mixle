@@ -1,4 +1,4 @@
-"""``LM`` -- a declarative autoregressive language model tying the frontier-LLM stack into one usable object.
+"""``LM`` -- a declarative autoregressive language model with fit, generation, and scoring helpers.
 
 A causal Transformer trained on a token stream::
 
@@ -12,7 +12,7 @@ A causal Transformer trained on a token stream::
 ``distributed=True`` it dispatches through ``StreamingTokenEncodedData`` (per-rank shard, in-backward all-reduce,
 FSDP2/ZeRO-3 + bf16 + DCP on CUDA). ``fit_pairs`` is the SFT stage: dense all-position teacher forcing on
 ``(prompt, completion)`` pairs with the loss masked to completions -- the shape needed to distill verified
-trajectories (e.g. execution-checked ``page -> parser code`` pairs from a data factory) into a tiny model.
+trajectories into a compact model.
 The rest of the multi-stage pipeline (CPT-with-EWC, DPO) is ``mixle.models.continual`` / ``mixle.models.dpo_leaf``.
 """
 
@@ -129,8 +129,21 @@ class LM:
         distributed: bool = False,
         precision: str = "fp32",
         shuffle: bool = True,
+        tp_size: int = 1,
+        pp_size: int = 1,
+        cp_size: int = 1,
     ) -> LM:
-        """Pretrain (or continue) on a token-id array via the streaming estimator; the corpus is never buffered."""
+        """Pretrain (or continue) on a token-id array via the streaming estimator; the corpus is never buffered.
+
+        ``tp_size``/``pp_size``/``cp_size`` (only meaningful with ``distributed=True``) are the F1 N-D
+        parallelism dimensions -- tensor/pipeline/context parallel, ORTHOGONAL to the data-parallel axis
+        (DDP on CPU, FSDP2/ZeRO-3 on CUDA) this handle already runs. They default to 1 (off): the plan is
+        validated against the model's real dimensions (``n_head % tp_size``, ``pp_size <= n_layer``,
+        ``block % cp_size``) so a bad plan fails fast, using the sharding/reconstruction mechanism in
+        ``mixle.utils.parallel.tensor_pipeline_context_parallel`` (tested there at small scale against the
+        dense forward). Composing the validated plan into real per-axis multi-GPU process groups is the
+        piece that needs actual hardware this environment does not have -- see that module's docstring.
+        """
         self._check_ids(token_ids, "fit")
         if distributed:
             from mixle.models.streaming_transformer_leaf import StreamingTransformerLeafEstimator
@@ -138,7 +151,15 @@ class LM:
             from mixle.utils.parallel.torch_neural import StreamingTokenEncodedData
 
             handle = StreamingTokenEncodedData(
-                token_ids, block=self.block, batch_size=batch_size, epochs=epochs, shuffle=shuffle, precision=precision
+                token_ids,
+                block=self.block,
+                batch_size=batch_size,
+                epochs=epochs,
+                shuffle=shuffle,
+                precision=precision,
+                tp_size=tp_size,
+                pp_size=pp_size,
+                cp_size=cp_size,
             )
             est = StreamingTransformerLeafEstimator(self.module, lr=lr, device=self.device)
             self.module = seq_estimate(handle, est, None).module

@@ -4,13 +4,13 @@ The one sub-byte path that is *real arithmetic* (not dequant-then-fp32): pack a 
 ``a . b = D - 2*popcount(a XOR b)`` (binary) / a two-plane popcount (ternary). The hardware popcount does
 64 lanes per instruction with no rounding, and the packed data is 32x smaller than float64.
 
-HONEST PERFORMANCE: whether this beats fp32 depends entirely on the fp32 baseline. Measured on Apple
-silicon, a cache-resident GEMM goes through the AMX matrix coprocessor (Accelerate BLAS), which is so fast
-that this popcount kernel is ~2x SLOWER -- here the win is *storage/bandwidth*, not compute. On a CPU
-without a matrix unit (popcount vs AVX-512 fp32), on memory-bound problems, or for genuinely binary/ternary
-models where fp32 wastes 32x the bytes, it is a compute win. The kernel is always *exact*; pick it by the
-regime, not blindly. The compiled extension is optional (``build_kernels.compile_bitpacked_kernels``); a
-correct (slower) numpy ``bitwise_count`` fallback runs when it is absent.
+Performance depends on the fp32 baseline. On Apple silicon, cache-resident GEMM goes through the AMX
+matrix coprocessor (Accelerate BLAS), which can make this popcount kernel slower; the advantage there is
+storage and bandwidth rather than compute. On CPUs without a matrix unit, memory-bound problems, or
+native binary/ternary models where fp32 wastes 32x the bytes, it can be a compute win. The kernel is
+always *exact*; select it for the measured regime. The compiled extension is optional
+(``build_kernels.compile_bitpacked_kernels``); a correct but slower numpy ``bitwise_count`` fallback runs
+when it is absent.
 """
 
 from __future__ import annotations

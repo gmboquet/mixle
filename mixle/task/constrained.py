@@ -46,6 +46,7 @@ class PlanGrammar:
         self.request = str(request)
 
     def start(self) -> _State:
+        """Return the initial parser state."""
         return _State(mode="name")
 
     def _name_candidates(self, s: _State) -> list[str]:
@@ -53,6 +54,7 @@ class PlanGrammar:
         return [*names, _DONE] if s.first_step else names
 
     def allowed(self, s: _State) -> set[str]:
+        """Return characters allowed from parser state ``s``."""
         if s.pending:
             return {s.pending[0]}
         if s.mode == "terminal":
@@ -94,6 +96,7 @@ class PlanGrammar:
         raise AssertionError(f"unknown mode {s.mode!r}")
 
     def advance(self, s: _State, c: str) -> _State:
+        """Advance parser state ``s`` by one character."""
         if s.pending:
             rest = s.pending[1:]
             if rest:

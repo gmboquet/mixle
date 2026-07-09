@@ -333,7 +333,7 @@ def nuts_torch(
 
     **Performance note (be deliberate about when to use this):** on CPU this is typically *slower*
     than the numpy :func:`nuts` (per-op torch dispatch + host syncs in the tree dominate when the
-    target is cheap). Its value is **GPU** (``device=``) and large autodiff targets. For CPU work
+    target is low-cost). Its value is **GPU** (``device=``) and large autodiff targets. For CPU work
     prefer the numpy backend, numba (analytic gradient), or the jax/NumPyro backend (XLA,
     vectorized multi-chain). Chains run in a Python loop (per-chain latency).
     """
@@ -392,7 +392,7 @@ def _nuts_jax(
     """NUTS via NumPyro: autodiff + XLA + vectorized multi-chain; GPU on CUDA (hardware-agnostic).
 
     The user supplies a jax scalar ``logp(theta)``; we run NumPyro's NUTS over
-    ``potential_fn = -logp`` so the dynamic tree / dense-mass warmup come from NumPyro (we do NOT
+    ``potential_fn = -logp`` so the dynamic tree / dense-mass warmup come from NumPyro (we do not
     hand-roll the tree). For ``chains > 1`` the chains are vectorized (init shape ``(chains, d)``).
     JAX picks the device automatically (GPU if a CUDA build is installed) — no device special-casing.
     """

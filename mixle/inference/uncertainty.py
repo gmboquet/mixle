@@ -108,7 +108,7 @@ def decompose_entropy(member_probs: Any) -> UncertaintyDecomposition:
     Returns:
         An :class:`UncertaintyDecomposition` with ``kind="entropy"`` (nats). ``epistemic`` is the
         mutual information ``H(mean) - mean H`` and is clamped to ``>= 0`` (it is non-negative in
-        exact arithmetic; the clamp only removes tiny floating-point negatives).
+        exact arithmetic; the clamp only removes small floating-point negatives).
     """
     p = np.asarray(member_probs, dtype=float)
     if p.ndim < 2:

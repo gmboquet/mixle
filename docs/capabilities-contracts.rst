@@ -1,4 +1,4 @@
-Capabilities And Contracts
+Capabilities and Contracts
 ==========================
 
 Mixle models are meant to compose across distribution families, latent
@@ -25,6 +25,10 @@ The public inspection helpers are available from the top-level package:
 Use these calls before relying on optional behavior. A model may be a valid
 probability distribution without being enumerable, conditionable, conjugate,
 rankable, or backend-resident.
+
+Put capability checks near the code that depends on them. A capability observed
+for one fitted object does not automatically apply to a transformed,
+quantized, projected, or wrapped object.
 
 Method-Presence Capabilities
 ----------------------------
@@ -60,6 +64,10 @@ Some capabilities are detected by method surface:
 Method-presence capabilities are useful for extension because they let a new
 family participate by implementing the relevant methods, not by registering
 itself in every caller.
+
+Method presence is only the first gate. The method must also preserve the
+documented semantics, such as normalization after conditioning or parity
+between scalar and vectorized scoring.
 
 Predicate Capabilities
 ----------------------
@@ -108,6 +116,9 @@ Other capabilities are predicates over semantics or metadata:
 Predicate capabilities keep important distinctions visible. For example, a
 variational topic model may be scoreable but not ``ExactDensity`` if the score
 is an ELBO. A continuous model may support moments but not enumeration.
+
+When a workflow depends on exactness, require the exact capability explicitly.
+A finite numeric score is not proof that the score has exact-density semantics.
 
 Helper Functions
 ----------------
@@ -177,6 +188,10 @@ The most important extension rule is that scalar and sequence paths must agree.
 For a new family, ``log_density(x)`` and ``seq_log_density(encoder.seq_encode([x]))``
 should report the same value up to numerical tolerance.
 
+That parity check should include malformed or impossible observations when the
+family has restricted support. The scalar and encoded paths should agree on
+``-inf`` and supported missing-data behavior, not only on ordinary rows.
+
 Density Semantics
 -----------------
 
@@ -199,6 +214,10 @@ Density Semantics
 Combinators combine child semantics with ``join_density_semantics``. Callers
 that require true likelihoods should use ``require(obj, ExactDensity)`` rather
 than trusting a numeric value blindly.
+
+Release artifacts should record when a score is a bound or estimate. This is
+especially important when score tables are later used for model comparison,
+enumeration, or promotion gates.
 
 Subsystem Contracts
 -------------------
@@ -236,6 +255,18 @@ Common mistakes:
   deliberately;
 * adding a backend method that changes model semantics compared with the scalar
   path.
+
+Release Evidence
+----------------
+
+For new or documented capabilities, preserve:
+
+* the object returned by ``mixle.describe``;
+* the required capabilities checked by downstream operations;
+* scalar/vectorized parity evidence for probability families;
+* exact-density or bound semantics when scores are compared;
+* backend parity evidence when engine-resident paths are advertised; and
+* negative tests showing that unsupported operations fail clearly.
 
 API Reference
 -------------

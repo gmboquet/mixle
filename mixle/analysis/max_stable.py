@@ -5,7 +5,7 @@ spatially *dependent*, and that dependence has its own limit law -- a max-stable
 ordinary GEV/GPD (treated independently per site) misses. The Smith model is the canonical one:
 ``Z(s) = max_i xi_i * phi_Sigma(s - U_i)`` over a Poisson storm process, giving unit-Frechet margins and a
 closed-form pairwise dependence. The extremal coefficient ``theta(h) in [1, 2]`` summarizes it: 1 = full
-dependence (extremes always co-occur), 2 = independence. Part of the earth-science/UQ work (Phase 6).
+dependence (extremes always co-occur), 2 = independence.
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ class SmithMaxStable:
         return float(np.exp(-v))
 
     def sampler(self, locations: np.ndarray, seed: int | None = None) -> SmithMaxStableSampler:
+        """Return a sampler over the requested spatial locations."""
         return SmithMaxStableSampler(self, np.atleast_2d(np.asarray(locations, dtype=float)), seed)
 
 
@@ -80,6 +81,8 @@ def fit_smith_maxstable(locations: np.ndarray, fields: np.ndarray) -> SmithMaxSt
 
 
 class SmithMaxStableSampler:
+    """Sampler for a fitted Smith max-stable process at fixed locations."""
+
     def __init__(self, dist: SmithMaxStable, locations: np.ndarray, seed: int | None = None):
         self.dist = dist
         self.loc = locations

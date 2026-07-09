@@ -22,11 +22,11 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
+from mixle.models.grad_leaf import GradLeaf
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
-    SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
@@ -38,8 +38,14 @@ def _torch() -> Any:
     return torch
 
 
-class NeuralDensity(SequenceEncodableProbabilityDistribution):
-    """Wrap a torch density ``module`` (``module.log_density(x) -> (n,)``) as a composable mixle distribution."""
+class NeuralDensity(GradLeaf):
+    """Wrap a torch density ``module`` (``module.log_density(x) -> (n,)``) as a composable mixle distribution.
+
+    A thin named subclass of :class:`~mixle.models.grad_leaf.GradLeaf` -- the generic bridge owns the
+    manufactured contract (buffer accumulator, array encoder, gradient M-step, sampler); this class owns
+    only its name, its JSON payload, and its ready-module builders below. ``loss``/``optimizer`` hooks
+    pass through (see the grad_leaf module docstring for the control story).
+    """
 
     __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
 
@@ -56,9 +62,11 @@ class NeuralDensity(SequenceEncodableProbabilityDistribution):
         return f"NeuralDensity({type(self.module).__name__})"
 
     def log_density(self, x: Any) -> float:
+        """Return ``log p(x)`` for one observation under the wrapped density module."""
         return float(self.seq_log_density(np.atleast_2d(np.asarray(x, dtype=float)))[0])
 
     def seq_log_density(self, x: Any) -> np.ndarray:
+        """Return per-row log densities for encoded observations."""
         torch = _torch()
         xx = check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "NeuralDensity.seq_log_density")
         self.module.to(self.device).eval()
@@ -67,12 +75,15 @@ class NeuralDensity(SequenceEncodableProbabilityDistribution):
             return self.module.log_density(xt).cpu().numpy().reshape(-1)
 
     def sampler(self, seed: int | None = None) -> NeuralDensitySampler:
+        """Return a sampler delegating to the wrapped module's ``sample`` method."""
         return NeuralDensitySampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> NeuralDensityEstimator:
+        """Return the generalized-EM estimator for weighted neural-density training."""
         return NeuralDensityEstimator(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
 
     def dist_to_encoder(self) -> NeuralDensityEncoder:
+        """Return the encoder for vectorized neural-density scoring and fitting."""
         return NeuralDensityEncoder()
 
     # --- serialization: persist hparams + the module (as portable bytes); registered below so a mixture holding
@@ -87,6 +98,7 @@ class NeuralDensity(SequenceEncodableProbabilityDistribution):
         self.module = decode_module(state["module"])
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize hyperparameters and module bytes for registry-based round trips."""
         return {
             "m_steps": self.m_steps,
             "lr": self.lr,
@@ -97,6 +109,7 @@ class NeuralDensity(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> NeuralDensity:
+        """Rebuild a :class:`NeuralDensity` from :meth:`to_dict` output."""
         return cls(
             decode_module(payload["module"]),
             m_steps=payload["m_steps"],
@@ -107,11 +120,14 @@ class NeuralDensity(SequenceEncodableProbabilityDistribution):
 
 
 class NeuralDensitySampler(DistributionSampler):
+    """Sampler for wrapped neural density modules exposing ``sample(n)``."""
+
     def __init__(self, dist: NeuralDensity, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Draw observations from the wrapped module's sampler."""
         torch = _torch()
         n = int(size or 1)
         self.dist.module.to(self.dist.device).eval()
@@ -122,6 +138,8 @@ class NeuralDensitySampler(DistributionSampler):
 
 
 class NeuralDensityEncoder(DataSequenceEncoder):
+    """Encode observations for vectorized neural-density scoring and fitting."""
+
     def __str__(self) -> str:
         return "NeuralDensityEncoder"
 
@@ -129,6 +147,7 @@ class NeuralDensityEncoder(DataSequenceEncoder):
         return isinstance(other, NeuralDensityEncoder)
 
     def seq_encode(self, data: list) -> np.ndarray:
+        """Convert observations to a two-dimensional float array."""
         return np.array([np.atleast_1d(np.asarray(x, dtype=float)) for x in data])
 
 
@@ -141,21 +160,26 @@ class NeuralDensityAccumulator(SequenceEncodableStatisticAccumulator):
 
     # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
     def update(self, x: Any, weight: float, estimate: Any) -> None:
+        """Add one weighted observation to the accumulator."""
         self.x.append(np.atleast_1d(np.asarray(x, dtype=float))[None, ...])
         self.w.append(np.asarray([float(weight)], dtype=float))
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
+        """Add an encoded batch and responsibility weights to the accumulator."""
         xb = np.asarray(enc, dtype=float)
         self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
         self.w.append(np.asarray(weights, dtype=float).ravel())
 
     def initialize(self, x: Any, weight: float, rng: Any) -> None:
+        """Initialize from one observation using the ordinary update path."""
         self.update(x, weight, None)
 
     def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
+        """Initialize from an encoded batch using the ordinary batch update path."""
         self.seq_update(enc, weights, None)
 
     def combine(self, other: Any) -> NeuralDensityAccumulator:
+        """Merge the value tuple from another neural-density accumulator."""
         xs, ws = other
         if len(xs):
             self.x.append(np.asarray(xs, dtype=float))
@@ -163,22 +187,28 @@ class NeuralDensityAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple:
+        """Return contiguous ``(x, weights)`` arrays for the M-step."""
         x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
         w = np.concatenate(self.w) if self.w else np.zeros((0,))
         return (x, w)
 
     def from_value(self, v: tuple) -> NeuralDensityAccumulator:
+        """Restore accumulator buffers from a value tuple."""
         x, w = v
         self.x = [np.asarray(x, dtype=float)] if len(x) else []
         self.w = [np.asarray(w, dtype=float).ravel()] if len(w) else []
         return self
 
     def acc_to_encoder(self) -> NeuralDensityEncoder:
+        """Return the encoder expected by this accumulator."""
         return NeuralDensityEncoder()
 
 
 class NeuralDensityAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for neural-density accumulators."""
+
     def make(self) -> NeuralDensityAccumulator:
+        """Create a fresh accumulator."""
         return NeuralDensityAccumulator()
 
 
@@ -195,9 +225,11 @@ class NeuralDensityEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self) -> NeuralDensityAccumulatorFactory:
+        """Return an accumulator factory for weighted neural-density batches."""
         return NeuralDensityAccumulatorFactory()
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralDensity:
+        """Run the weighted neural-density M-step and return the updated leaf."""
         torch = _torch()
         xs, ws = suff_stat
         if len(xs) == 0:
@@ -327,22 +359,20 @@ def build_coupling_flow(dim: int, *, hidden: int = 32, layers: int = 4) -> Any:
 _register_module_class("CouplingFlow", _build_coupling_flow_class)
 
 
-# --- a second, structurally different instance: a variational autoencoder (a LATENT-VARIABLE density) --------
+# --- a second, structurally different instance: a variational autoencoder (a latent-variable density) ---------
 
 
 def build_vae(dim: int, *, latent: int = 2, hidden: int = 32) -> Any:
-    """A variational autoencoder over ``R^dim`` -- a *latent-variable* density ``p(x) = int p(x | z) p(z) dz``.
+    """Build a variational autoencoder over ``R^dim``.
 
     An amortized encoder ``q(z | x)`` and a decoder ``p(x | z)`` (diagonal-Gaussian, learned observation scale)
-    are trained by the ELBO with the reparameterization trick. It is a genuinely different *family* from the
-    flow -- structure through a low-dimensional latent, not an invertible map -- yet it plugs into the **same**
-    :class:`NeuralDensity` adapter, because it exposes the same two methods.
+    are trained by the ELBO with the reparameterization trick. This is a different family from a flow: structure
+    is represented through a low-dimensional latent rather than an invertible map, while the same
+    :class:`NeuralDensity` adapter can still use it because it exposes the same two methods.
 
-    Caveat, stated plainly: ``log_density(x)`` returns the **ELBO**, a *lower bound* on ``log p(x)``, not the exact
-    value (the flow's is exact). So a VAE leaf is honest on its own, in a mixture *of VAEs*, or against another
-    bounded leaf -- but mixing it with an exact-density leaf (a Gaussian, a flow) compares a bound against an exact
-    value and will under-weight the VAE. Because ELBO <= log p(x), a VAE that *beats* an exact leaf on held-out
-    data still wins by at least that margin; a VAE that loses may not actually be worse.
+    ``log_density(x)`` returns the **ELBO**, a lower bound on ``log p(x)``, not the exact value. Compare VAE
+    leaves with other bounded leaves whenever possible. Mixing a VAE with an exact-density leaf, such as a
+    Gaussian or flow, compares a bound against an exact value and can under-weight the VAE.
 
     ``log_density`` is **deterministic**: it evaluates the ELBO at the encoder mean ``z = mu(x)`` (no ``randn``
     resample), so repeated scoring of the same ``x`` is bit-identical and an EM log-likelihood stays monotone.
@@ -395,7 +425,7 @@ def _build_vae_class(torch: Any, nn: Any) -> Any:
 _register_module_class("VAE", _build_vae_class)
 
 
-# --- a third instance: a masked autoregressive flow (MAF) -- exact multivariate p(x), composes honestly --------
+# --- a third instance: a masked autoregressive flow (MAF) -- exact multivariate p(x) --------------------------
 
 
 def build_maf(dim: int, *, hidden: int = 64, blocks: int = 3) -> Any:
@@ -403,9 +433,9 @@ def build_maf(dim: int, *, hidden: int = 64, blocks: int = 3) -> Any:
     rule, each ``p(x_i | x_{<i})`` an affine map with autoregressive (MADE-masked) mean and log-scale.
 
     Unlike the coupling flow it conditions every coordinate on *all* earlier ones (a richer autoregressive
-    dependence), and unlike the VAE its ``log_density`` is exact -- so it composes **honestly** in a mixture with a
-    Gaussian, a flow, or any exact leaf. Sampling is the sequential inverse (one coordinate at a time). Another
-    ready module for :class:`NeuralDensity`; the adapter is unchanged.
+    dependence), and unlike the VAE its ``log_density`` is exact. It can therefore be compared directly with a
+    Gaussian, a flow, or another exact-density leaf. Sampling is the sequential inverse (one coordinate at a
+    time). Another ready module for :class:`NeuralDensity`; the adapter is unchanged.
     """
     return _module_class("MAF")(dim, hidden, blocks)
 
@@ -506,8 +536,8 @@ def build_autoregressive_categorical(dim: int, n_categories: int, *, hidden: int
 
     The continuous flows/VAE above model ``R^d``; heterogeneous data is also categorical. This factorizes
     ``p(x) = prod_i p(x_i | x_{<i})`` with a MADE-masked network whose per-coordinate softmax *is* each conditional,
-    so the density is **exactly normalized** (sums to 1 over the finite space) and composes honestly in a mixture
-    with count/categorical families. ``log_density`` sums the picked log-softmax logits; ``sample`` fills the vector
+    so the density is **exactly normalized** (sums to 1 over the finite space) and can be compared directly with
+    count/categorical families. ``log_density`` sums the picked log-softmax logits; ``sample`` fills the vector
     one coordinate at a time. Another ready module for :class:`NeuralDensity`; the adapter is unchanged.
     """
     return _module_class("AutoregressiveCategorical")(dim, n_categories, hidden)

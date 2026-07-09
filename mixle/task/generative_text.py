@@ -80,17 +80,21 @@ class GenerativeTextIO:
         return doc / np.maximum(lens, 1.0)
 
     def predict_batch(self, model: Any, raw_inputs: list[Any]) -> list[str]:
+        """Return the highest-scoring generative class for each input."""
         idx = self.logits_batch(model, raw_inputs).argmax(axis=1)
         return [self.labels[i] for i in idx]
 
     def predict(self, model: Any, raw_input: Any) -> str:
+        """Return the highest-scoring generative class for one input."""
         return self.predict_batch(model, [raw_input])[0]
 
     def to_spec(self) -> dict[str, Any]:
+        """Serialize the generative text adapter."""
         return {"kind": self.kind, "labels": self.labels, "vocab": self._vocab_list, "log_prior": self.log_prior}
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> GenerativeTextIO:
+        """Reconstruct the generative text adapter from a spec."""
         return cls(spec["labels"], spec["vocab"], spec["log_prior"])
 
 

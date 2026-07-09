@@ -62,9 +62,11 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
 
 def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
     from mixle.stats import GeneralizedGaussianDistribution
+    from mixle.utils.automatic.profiling import _value_array_from_vdict
 
-    # mu=0, alpha (scale)=1, beta (shape)=2 -> the estimator re-fits all three from data.
-    return GeneralizedGaussianDistribution(0.0, 1.0, 2.0).estimator()
+    fit = _fit(_value_array_from_vdict(vdict))
+    beta, loc, scale = fit if fit is not None else (2.0, 0.0, 1.0)
+    return GeneralizedGaussianDistribution(loc, scale, beta).estimator(pseudo_count=pseudo_count)
 
 
 def _cdf(arr: np.ndarray):

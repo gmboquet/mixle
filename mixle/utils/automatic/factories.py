@@ -117,6 +117,7 @@ DictRecordEstimator = _estimator_provider(False).DictRecordEstimator
 
 
 def get_optional_estimator(est: ParameterEstimator, missing_value: Any | None = None, use_bstats: bool = False):
+    """Wrap an estimator with an optional/missing-value model."""
     return _estimator_provider(use_bstats).OptionalEstimator(est, missing_value=missing_value)
 
 
@@ -143,6 +144,7 @@ def get_sequence_estimator(
     emp_suff_stat: bool = True,
     use_bstats: bool = False,
 ) -> "ParameterEstimator":
+    """Return a sequence estimator with an optional empirical length model."""
     len_est = None
     if len_dict:
         len_est = get_length_estimator(len_dict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
@@ -168,20 +170,24 @@ def get_set_estimator(
 
 
 def get_ignored_estimator(use_bstats: bool = False) -> "ParameterEstimator":
+    """Return the estimator used for ignored or non-modelable fields."""
     return _estimator_provider(use_bstats).IgnoredEstimator()
 
 
 def get_composite_estimator(ests: Sequence[ParameterEstimator], use_bstats: bool = False) -> "ParameterEstimator":
+    """Return a composite estimator over an ordered list of field estimators."""
     return _estimator_provider(use_bstats).CompositeEstimator(ests)
 
 
 def get_dict_record_estimator(keys: Sequence[Any], ests: Sequence[ParameterEstimator]) -> "ParameterEstimator":
+    """Return a record estimator keyed by dictionary field names."""
     return DictRecordEstimator(keys, ests)
 
 
 def get_categorical_estimator(
     vdict: dict[T, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
 ) -> "ParameterEstimator":
+    """Return a categorical estimator from observed value counts."""
     provider = _estimator_provider(use_bstats)
     if use_bstats:
         return provider.CategoricalEstimator(prior=_categorical_default_prior(vdict))
@@ -212,6 +218,7 @@ def _dense_integer_support(vdict: dict[Any, float]) -> bool:
 def get_integer_categorical_estimator(
     vdict: dict[int, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
 ) -> "ParameterEstimator":
+    """Return an integer-categorical estimator over the observed dense support."""
     min_val, max_val, width = _integer_range(vdict)
 
     if use_bstats:
@@ -236,6 +243,7 @@ def get_integer_categorical_estimator(
 def get_poisson_estimator(
     vdict: dict[int, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
 ) -> "ParameterEstimator":
+    """Return a Poisson count estimator from empirical integer counts."""
 
     if use_bstats:
         return _estimator_provider(True).PoissonEstimator(prior=_poisson_default_prior())
@@ -249,7 +257,10 @@ def get_poisson_estimator(
                 ss_0 += v
                 ss_1 += k * v
 
-        ss_1 = ss_1 / ss_0
+        # ss_0 is 0 when vdict is empty or every key was filtered out (non-finite) -- no data to
+        # estimate a mean from, so fall back the same way the emp_suff_stat=False branch does below,
+        # rather than dividing by zero.
+        ss_1 = ss_1 / ss_0 if ss_0 > 0.0 else (1.0 if pseudo_count is not None else None)
 
     elif pseudo_count is not None:
         ss_1 = 1.0
@@ -266,6 +277,7 @@ def get_gaussian_estimator(
     emp_suff_stat: bool = True,
     use_bstats: bool = False,
 ) -> "ParameterEstimator":
+    """Return a univariate Gaussian estimator from weighted numeric values."""
 
     if emp_suff_stat:
         ss_0 = 0.0
@@ -276,8 +288,15 @@ def get_gaussian_estimator(
                 ss_0 += v
                 ss_1 += k * v
                 ss_2 += k * k * v
-        ss_1 = ss_1 / ss_0
-        ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
+        # ss_0 is 0 when vdict is empty or every key was non-finite -- no data to estimate mean/variance
+        # from, so fall back the same way the emp_suff_stat=False branch does below.
+        if ss_0 > 0.0:
+            ss_1 = ss_1 / ss_0
+            ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
+        elif pseudo_count is not None:
+            ss_1, ss_2 = 1.0e-6, 1.0e-6
+        else:
+            ss_1, ss_2 = None, None
 
     elif pseudo_count is not None:
         ss_1 = 1.0e-6
@@ -311,8 +330,16 @@ def get_lognormal_estimator(
                 ss_0 += v
                 ss_1 += lk * v
                 ss_2 += lk * lk * v
-        ss_1 = ss_1 / ss_0
-        ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
+        # ss_0 is 0 when vdict is empty or every key was non-positive/non-finite (log-normal needs
+        # strictly positive values) -- no data to estimate mean/variance from, fall back like the
+        # emp_suff_stat=False branch does below rather than dividing by zero.
+        if ss_0 > 0.0:
+            ss_1 = ss_1 / ss_0
+            ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
+        elif pseudo_count is not None:
+            ss_1, ss_2 = 1.0e-6, 1.0e-6
+        else:
+            ss_1, ss_2 = None, None
     elif pseudo_count is not None:
         ss_1 = 1.0e-6
         ss_2 = 1.0e-6
@@ -396,9 +423,51 @@ def get_gaussian_mixture_estimator(
 
 
 def get_multivariate_gaussian_estimator(dim: int, use_bstats: bool = False) -> "ParameterEstimator":
+    """Return a multivariate Gaussian estimator for vectors of dimension ``dim``."""
     if use_bstats:
         return _estimator_provider(True).MultivariateGaussianEstimator(dim=dim, prior=_mvn_default_prior(dim))
     return _estimator_provider(False).MultivariateGaussianEstimator(dim=dim)
+
+
+# --- modality-fingerprint routing ---------------------------------------------------------
+#
+# A fixed-length numeric vector is not always "low-dimensional tabular numeric": at moderate-to-high
+# dimension it is much more often an embedding (a frozen encoder's output, a pooled feature vector) than
+# a handful of jointly-Gaussian measurements, and a bare multivariate Gaussian is the wrong default there
+# -- it can only capture a unimodal ellipsoid, not the manifold structure embeddings actually have. Above
+# EMBEDDING_MIN_DIM, route to a hybrid neural density (an exact normalizing flow) instead. A 2-D/3-D
+# numeric array (an image-shaped field) is routed through a frozen, deterministic feature extractor
+# (mixle.represent.modality.image_features) into the same hybrid density -- the "frozen encoder +
+# structured head" pattern. Below the threshold (plain low-dim tabular numeric) nothing changes: this is
+# additive, not a replacement of the existing per-coordinate/MVN path.
+EMBEDDING_MIN_DIM = 16
+IMAGE_FEATURE_DIM = 16
+
+
+def _has_torch() -> bool:
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def get_hybrid_embedding_estimator(dim: int) -> "ParameterEstimator":
+    """An exact neural density (a coupling flow) over an embedding-shaped ``dim``-vector field."""
+    from mixle.models.neural_families import Flow
+
+    return Flow(dim=dim).estimator()
+
+
+def get_hybrid_image_estimator(dim: int = IMAGE_FEATURE_DIM) -> "ParameterEstimator":
+    """A frozen ``image_features`` extractor composed with an exact neural density over the induced features."""
+    from mixle.models.feature_map import FeatureMapEstimator, register_feature_fn
+    from mixle.models.neural_families import Flow
+    from mixle.represent.modality import image_features
+
+    name = f"image_features_{dim}"
+    register_feature_fn(name, lambda img, _dim=dim: image_features(img, dim=_dim))
+    return FeatureMapEstimator(name, Flow(dim=dim).estimator())
 
 
 def get_dpm_mixture(
@@ -439,7 +508,7 @@ def get_dpm_mixture(
     from .profiling import get_estimator
 
     if rng is None:
-        rng = np.random.RandomState()
+        rng = np.random.RandomState(0)  # fixed default: an un-seeded fit is deterministic
     if out is None:
         out = sys.stdout
 

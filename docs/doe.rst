@@ -53,6 +53,9 @@ Use diagnostics before spending an expensive run budget:
 Diagnostics help compare coverage, spacing, and projection behavior across
 candidate designs.
 
+Run diagnostics before evaluating the expensive function. Once budget has been
+spent, a poor design cannot be repaired without changing the evidence trail.
+
 Bayesian Optimization
 ---------------------
 
@@ -82,6 +85,9 @@ knowledge gradient. Advanced routes include Monte-Carlo q-EI, local
 penalization, max-value entropy search, trust-region BO, constrained BO,
 multi-objective BO, and multi-fidelity BO.
 
+Record the acquisition, surrogate, seed, bounds, and evaluated points. Bayesian
+optimization evidence is a path, not only the final best value.
+
 Active Learning
 ---------------
 
@@ -102,6 +108,192 @@ estimate.
 Lower-level scoring functions include ``alm_scores``, ``alc_scores``,
 ``expected_information_gain_linear``, and ``expected_information_gain_nmc``.
 
+Active-learning batches should be evaluated on held-out or downstream task
+metrics. A high acquisition score means the point is informative under the
+surrogate, not that the resulting model improved.
+
+Distillation and Cross-Modal Training Designs
+---------------------------------------------
+
+``mixle.doe.distillation`` treats teacher calls, human labels, and paired
+cross-modal records as expensive experiments. The selectors work from a fixed
+candidate pool and return the indices worth spending budget on.
+
+Candidate-Pool Contract
+~~~~~~~~~~~~~~~~~~~~~~~
+
+A distillation design is only meaningful relative to the pool it selected
+from. Keep the following fields with the design artifact:
+
+* a stable pool identifier or data fingerprint;
+* the row order used by the selector;
+* exclusion rules applied before selection;
+* task labels, modality labels, costs, preferences, and uncertainty vectors;
+* random seed and scoring weights; and
+* the selected indices plus candidate and selected scores.
+
+Do not treat selected indices as portable row identifiers unless the pool
+fingerprint and filtering rules travel with them. If a later run changes the
+pool, re-run the selector rather than reusing indices from a different
+candidate universe.
+
+Use ``distillation_design`` for one pool:
+
+.. code-block:: python
+
+   import numpy as np
+
+   from mixle.doe import distillation_design
+
+   embeddings = np.asarray(pool_embeddings)
+   design = distillation_design(
+       embeddings,
+       n=32,
+       task_labels=task_names,
+       modalities=modality_tags,
+       uncertainty=student_uncertainty,
+       cost=teacher_cost,
+       task_coverage_weight=2.0,
+       modality_coverage_weight=1.5,
+       seed=0,
+   )
+
+   selected_examples = [pool[i] for i in design.indices]
+
+The score balances uncertainty, diversity in feature space, task coverage,
+modality coverage, preference, and cost. ``task_labels`` and ``modalities`` may
+be one tag per row or several tags per row.
+
+Keep candidate-pool identity and exclusion rules with the design. A selector
+can only choose from the pool it was given, so missing or filtered candidates
+are part of the evidence.
+
+Use ``multitask_distillation_design`` when the call site should read as a
+multi-task selector:
+
+.. code-block:: python
+
+   from mixle.doe import multitask_distillation_design
+
+   batch = multitask_distillation_design(
+       embeddings,
+       24,
+       task_labels=[["caption"], ["retrieval", "caption"], ["qa"]],
+       uncertainty=per_task_uncertainty,
+       task_weights={"caption": 2.0, "retrieval": 1.0, "qa": 1.0},
+       seed=1,
+   )
+
+The returned ``DistillationDesign`` includes ``task_counts``, candidate scores,
+selected scores, and metadata describing the target coverage.
+
+Use ``cross_modal_distillation_design`` when rows may have several modality
+views and the training batch should contain paired or aligned examples:
+
+.. code-block:: python
+
+   from mixle.doe import cross_modal_distillation_design
+
+   paired = cross_modal_distillation_design(
+       {
+           "text": text_embeddings,
+           "image": image_embeddings,
+           "signal": signal_features,
+       },
+       n=20,
+       task_labels=task_names,
+       required_modalities=["text", "image"],
+       min_modalities=2,
+       alignment_weight=2.0,
+       seed=2,
+   )
+
+Rows with non-finite coordinates in one modality are treated as missing for
+that modality. Eligibility then follows ``min_modalities`` and
+``required_modalities``. Non-finite uncertainty, preference, cost, or coverage
+weights are rejected because those vectors define the ranking objective.
+
+Record missing-modality counts and rejected ranking vectors. Cross-modal design
+quality depends on which rows were eligible, not only on which rows were
+selected.
+
+Task and Modality Coverage
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Task and modality coverage terms are batch-shaping constraints, not guarantees
+that a teacher is correct or a student will improve. Use them to make expensive
+labels more representative, then measure the downstream student on held-out
+task metrics.
+
+For multi-task distillation:
+
+* define task tags before looking at the selector output;
+* keep task weights in the artifact when some tasks are deliberately more
+  important;
+* inspect ``task_counts`` for rare-task starvation; and
+* separate teacher uncertainty from task coverage in the run report.
+
+For cross-modal training:
+
+* record which modalities were required and which were optional;
+* distinguish missing modality views from non-finite ranking vectors;
+* validate pair alignment before selection; and
+* report held-out performance by modality availability pattern.
+
+Interpreting Distillation Designs
+---------------------------------
+
+All distillation selectors return a ``DistillationDesign``. Treat it as part
+of the experiment record, not just as a list of row numbers:
+
+``indices``
+    The candidate-pool indices selected for labeling, teacher calls, or paired
+    training. These indices only make sense with the exact pool and filtering
+    rules used for the run.
+
+``scores``
+    The final sequential merit values for the selected rows. Use them for
+    audit and debugging, not as calibrated probabilities.
+
+``candidate_scores``
+    The base uncertainty/preference contribution before diversity, coverage,
+    and cost are applied. This helps separate "the student was uncertain" from
+    "the batch needed a task or modality."
+
+``task_counts`` and ``modality_counts``
+    The realized coverage of the selected batch.
+
+``metadata``
+    Target coverage, eligible row count, and the scoring weights used by the
+    selector.
+
+For ordinary ``distillation_design``, non-finite feature coordinates are
+filled by a column mean only inside the standardized design geometry so that a
+partly missing embedding dimension does not crash the selector. The original
+candidate pool is not modified. For ``cross_modal_distillation_design``,
+non-finite coordinates mark that modality as missing for that row; eligibility
+then follows the required-modality and minimum-modality settings. Ranking
+vectors such as ``uncertainty``, ``preference``, and ``cost`` must be finite
+because they directly define the optimization objective.
+
+Choosing a Selector
+-------------------
+
+Use the selector that matches the budget question:
+
+* use ``distillation_design`` when every row is one candidate and task or
+  modality tags are optional coverage metadata;
+* use ``multitask_distillation_design`` when the call site should make the
+  multi-task intent explicit, especially with per-task uncertainty or
+  ``task_weights``;
+* use ``cross_modal_distillation_design`` when each row can contain several
+  aligned views and the batch must satisfy modality-presence constraints.
+
+If a pool includes both high-risk and low-risk tasks, keep the task tags and
+weights in the run artifact. Without those fields, a later reader cannot tell
+whether the design under-sampled a rare task or whether that task was never in
+scope.
+
 Sensitivity Analysis
 --------------------
 
@@ -116,6 +308,9 @@ Sensitivity tools quantify which inputs matter.
 
 Use Morris screening for a cheaper qualitative pass and Sobol indices when you
 need variance-based main and interaction effects.
+
+Sensitivity analysis should name the input distribution and parameter bounds
+being analyzed. Indices are not transferable when the operating region changes.
 
 Uncertainty Propagation and Calibration
 ---------------------------------------
@@ -137,6 +332,35 @@ How DOE Connects to Task Distillation
 distillation treats teacher calls as an expensive experiment and spends the
 label budget on informative examples. Use :doc:`task-distillation` for the
 task-facing workflow.
+``mixle.task`` owns the teacher/student artifact lifecycle. ``mixle.doe`` owns
+pool selection. A common loop is:
+
+1. embed or featurize an unlabeled pool;
+2. use ``distillation_design`` or ``cross_modal_distillation_design`` to choose
+   the next teacher batch;
+3. call the teacher only for the selected rows;
+4. train, calibrate, and profile the student with :doc:`task-distillation`;
+5. feed escalations, disagreement cases, failed capability probes, or
+   under-covered tasks back as ``reference_features`` or higher
+   ``uncertainty`` in the next design.
+
+This keeps distillation budgets auditable. The design result records which
+coverage targets were requested, how many tasks and modalities were selected,
+and what score drove each picked row.
+
+Release Evidence
+----------------
+
+For DOE workflows, preserve:
+
+* bounds, constraints, random seed, and initial design;
+* design diagnostics before expensive evaluations;
+* surrogate and acquisition settings for sequential design;
+* evaluated points, failed evaluations, and timeout policy;
+* candidate-pool identity, missing-modality counts, and rejected rows for
+  distillation selectors;
+* sensitivity or propagation assumptions; and
+* the downstream metric that consumed the design.
 
 API Map
 -------

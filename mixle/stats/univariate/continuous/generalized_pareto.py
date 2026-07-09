@@ -96,12 +96,14 @@ class GeneralizedParetoDistribution(SequenceEncodableProbabilityDistribution):
     # --- compute-engine backend (numpy + torch/GPU): scoring + sufficient statistics in engine ops ---
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated generalized-Pareto kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for generalized Pareto distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -219,6 +221,7 @@ class GeneralizedParetoSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one sample or an array of iid samples by inverse CDF."""
         d = self.dist
         u = self.rng.uniform(size=size)  # uniform; 1-U is also uniform, so use U directly below
         if abs(d.shape) < _XI_TOL:
@@ -239,36 +242,44 @@ class GeneralizedParetoAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: GeneralizedParetoDistribution | None) -> None:
+        """Accumulate weighted first and second moments for one observation."""
         self.sum += x * weight
         self.sum2 += x * x * weight
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: GeneralizedParetoDistribution | None) -> None:
+        """Accumulate weighted first and second moments from encoded data."""
         xx = np.asarray(x, dtype=np.float64)
         self.sum += np.dot(xx, weights)
         self.sum2 += np.dot(xx * xx, weights)
         self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "GeneralizedParetoAccumulator":
+        """Merge another generalized-Pareto sufficient-statistic tuple."""
         self.sum += suff_stat[0]
         self.sum2 += suff_stat[1]
         self.count += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return accumulated sum, second moment sum, and count."""
         return self.sum, self.sum2, self.count
 
     def from_value(self, x: tuple[float, float, float]) -> "GeneralizedParetoAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.sum, self.sum2, self.count = float(x[0]), float(x[1]), float(x[2])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -276,10 +287,12 @@ class GeneralizedParetoAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "GeneralizedParetoDataEncoder":
+        """Return the encoder used by this accumulator."""
         return GeneralizedParetoDataEncoder()
 
 
@@ -291,6 +304,7 @@ class GeneralizedParetoAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> GeneralizedParetoAccumulator:
+        """Create a fresh generalized-Pareto accumulator."""
         return GeneralizedParetoAccumulator(name=self.name, keys=self.keys)
 
 
@@ -316,9 +330,11 @@ class GeneralizedParetoEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> GeneralizedParetoAccumulatorFactory:
+        """Return an accumulator factory for generalized-Pareto moments."""
         return GeneralizedParetoAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> GeneralizedParetoDistribution:
+        """Estimate scale and shape from exceedance moments at the fixed location."""
         sum_x, sum_x2, count = suff_stat
         if count <= 0.0:
             return GeneralizedParetoDistribution(1.0, 0.0, loc=self.loc, name=self.name, keys=self.keys)
@@ -345,4 +361,5 @@ class GeneralizedParetoDataEncoder(DataSequenceEncoder):
         return isinstance(other, GeneralizedParetoDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
+        """Encode observations as a floating-point array."""
         return np.asarray(x, dtype=np.float64)

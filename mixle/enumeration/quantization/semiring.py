@@ -65,19 +65,29 @@ class DecomposableSemiring(abc.ABC):
     """
 
     @abc.abstractmethod
-    def zero(self) -> E: ...
+    def zero(self) -> E:
+        """Return the additive identity."""
+        ...
 
     @abc.abstractmethod
-    def one(self) -> E: ...
+    def one(self) -> E:
+        """Return the multiplicative identity."""
+        ...
 
     @abc.abstractmethod
-    def leaf(self, value: Any, log_prob: float, quantizer: Quantizer) -> E: ...
+    def leaf(self, value: Any, log_prob: float, quantizer: Quantizer) -> E:
+        """Lift one scored atom into the semiring carrier."""
+        ...
 
     @abc.abstractmethod
-    def plus(self, a: E, b: E) -> E: ...
+    def plus(self, a: E, b: E) -> E:
+        """Combine mutually exclusive alternatives."""
+        ...
 
     @abc.abstractmethod
-    def times(self, a: E, b: E, quantizer: Quantizer, max_fine_bucket: int) -> E: ...
+    def times(self, a: E, b: E, quantizer: Quantizer, max_fine_bucket: int) -> E:
+        """Compose independent factors."""
+        ...
 
     def product(self, elements: Sequence[E], quantizer: Quantizer, max_fine_bucket: int) -> E:
         """n-ary ``times``. Default folds ``times``; carriers may override for efficiency/order."""
@@ -170,12 +180,15 @@ class CountSemiring(DecomposableSemiring):
     """
 
     def zero(self) -> _CNode:
+        """Return the empty count carrier."""
         return _CNode("empty", CountHistogram.empty())
 
     def one(self) -> _CNode:
+        """Return the count carrier identity for product composition."""
         return _CNode("leaf", CountHistogram.delta(0, 1), value=(), lp=0.0)
 
     def leaf(self, value: Any, log_prob: float, quantizer: Quantizer) -> _CNode:
+        """Lift a scored value into a count carrier node."""
         fb = quantizer.fine_bucket(log_prob)
         return _CNode("leaf", CountHistogram.delta(fb, 1), value=value, lp=float(log_prob))
 
@@ -186,12 +199,15 @@ class CountSemiring(DecomposableSemiring):
         return leaf_count_index(enum, quantizer, max_fine_bucket)
 
     def plus(self, a, b) -> _CNode:
+        """Add count carriers for alternative branches."""
         return _CNode("plus", a.hist.add(b.hist), a=a, b=b)
 
     def times(self, a, b, quantizer: Quantizer, max_fine_bucket: int) -> CountIndex:
+        """Convolve count carriers for independent factors."""
         return convolve_indices([a, b], quantizer, max_fine_bucket)
 
     def product(self, elements: Sequence[Any], quantizer: Quantizer, max_fine_bucket: int) -> CountIndex:
+        """Convolve an n-ary collection of count carriers."""
         # Flat n-ary convolution (suffix-histogram unranker) -- identical bin counts and within-bucket
         # order to the previous hand-written composite path.
         return convolve_indices(list(elements), quantizer, max_fine_bucket)
@@ -284,20 +300,25 @@ class TropicalSemiring(DecomposableSemiring):
     """
 
     def zero(self) -> _Trop:
+        """Return the tropical additive identity."""
         return _Trop(float("-inf"), None)
 
     def one(self) -> _Trop:
+        """Return the tropical multiplicative identity."""
         return _Trop(0.0, ())
 
     def leaf(self, value: Any, log_prob: float, quantizer: Quantizer | None = None) -> _Trop:
+        """Lift a scored value into the tropical carrier."""
         return _Trop(float(log_prob), (value,))
 
     def plus(self, a: _Trop, b: _Trop) -> _Trop:
+        """Keep the higher-scoring alternative."""
         return a if a.best_lp >= b.best_lp else b
 
     def times(
         self, a: _Trop, b: _Trop, quantizer: Quantizer | None = None, max_fine_bucket: int | None = None
     ) -> _Trop:
+        """Compose independent witnesses by adding scores."""
         if a.witness is None or b.witness is None:
             return _Trop(float("-inf"), None)
         return _Trop(a.best_lp + b.best_lp, a.witness + b.witness)
@@ -305,6 +326,7 @@ class TropicalSemiring(DecomposableSemiring):
     def product(
         self, elements: Sequence[_Trop], quantizer: Quantizer | None = None, max_fine_bucket: int | None = None
     ) -> _Trop:
+        """Compose an n-ary collection of tropical carriers."""
         total_lp = 0.0
         witness: tuple = ()
         for e in elements:

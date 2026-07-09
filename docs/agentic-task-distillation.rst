@@ -8,7 +8,7 @@ Agentic Task Distillation
 * agentic replacement: ``request -> tool call`` or
   ``request -> verified plan``.
 
-The agentic track keeps the same honesty rule as the classifier track: local
+The agentic track keeps the same verification rule as the classifier track: local
 models only emit actions when the action is structurally valid and calibrated
 enough to trust. Uncertain, malformed, missing-argument, or failed plans
 escalate to the teacher and become training traces for the next round.
@@ -31,6 +31,10 @@ Tool-calling and planning start with ``ToolSpec``:
 ``args`` is the set of argument fields the tool accepts. ``required`` defaults
 to all arguments. A local planner may not emit a call unless every required
 argument is present.
+
+Tool specs are part of the safety boundary. Version them with the artifact and
+record any argument constraints, extractive-field requirements, and tools that
+are deliberately unavailable to the local planner.
 
 Single-Step Tool Calling
 ------------------------
@@ -55,6 +59,10 @@ The returned ``ToolCaller`` emits a local call only when tool selection and
 required argument extraction both succeed. Otherwise it calls the teacher,
 returns the teacher call with ``"escalate": True``, and stores the trace in
 ``harvested``.
+
+Measure local calls and escalations separately. A high local-call rate is not a
+success if the emitted calls are malformed, unauthorized, or wrong under the
+tool execution contract.
 
 Stepwise Planning
 -----------------
@@ -82,8 +90,12 @@ executes it, and repeats until ``STOP``.
    out = planner("refund order A-102 and notify the customer")
 
 Use this planner when plan templates are regular enough that next-step
-classification is the right abstraction. It is usually cheaper and easier to
+classification is the right abstraction. It is usually lower-cost and easier to
 verify than a generative planner.
+
+Stepwise planners should be evaluated at both step and plan level. A plan can
+have accurate early steps and still fail because a later argument is missing or
+because execution state changed after a lookup.
 
 Trace-SFT Planning
 ------------------
@@ -130,6 +142,10 @@ variable-length plans, shared argument syntax, or many tools where a separate
 next-step classifier would be cumbersome. Do not use it as a license to trust
 free-form text. The parser gate is the contract.
 
+Keep parser failures, grammar rejections, and low-confidence generations in
+the report. They are evidence that the escalation path is doing useful work,
+not noise to hide from the scorecard.
+
 Harvesting Existing Agent Traces
 --------------------------------
 
@@ -160,6 +176,9 @@ teachers for tool calling and planning:
 The default location is ``~/.mixle-agent/conversations``. Each stored
 conversation is split into ``AgentTrace`` objects:
 
+Stored traces are application data. Review them for secrets, private tool
+arguments, and stale tool schemas before using them as teachers.
+
 ``parse_conversation`` is the lower-level helper for a single already-loaded
 conversation document. Use ``harvest_agent_traces`` for normal directory-level
 loading.
@@ -181,7 +200,10 @@ arguments are keys present in every observed call for that tool. The teacher
 views are lookup tables over the harvested requests, so distilling from history
 does not call a frontier model.
 
-Serving And Artifacts
+Inferred required arguments should be reviewed before training. Historical
+traces can omit rare but mandatory fields if the trace set is narrow.
+
+Serving and Artifacts
 ---------------------
 
 ``GenerativePlanner.save(path)`` writes the LM module, codec, tool specs,
@@ -194,9 +216,13 @@ serving planner and requires the teacher fallback:
    restored = type(gen).load(path, teacher=teacher_plan)
 
 The teacher remains part of the artifact boundary because escalation is not an
-error. It is how the system stays honest when the local plan is not safe.
+error. It is how the system remains explicit when the local plan is not safe.
 
-Choosing The Planner
+Artifact reviews should load the planner, run a held-out trace set, and verify
+that escalation still reaches the intended teacher. A saved planner without a
+working fallback is not a complete serving artifact.
+
+Choosing the Planner
 --------------------
 
 .. list-table::
@@ -216,6 +242,18 @@ Choosing The Planner
 For all three, measure held-out agreement and live escalation rate. A low
 escalation rate is useful only if the non-escalated plans are correct and
 execution-verified.
+
+Release Evidence
+----------------
+
+For agentic distillation, preserve:
+
+* tool specs, argument constraints, and unavailable-tool policy;
+* held-out tool-call and full-plan agreement;
+* parser, grammar, validation, and execution-failure counts;
+* escalation rate and teacher fallback identity;
+* harvested-trace provenance and secret-review status; and
+* artifact reload and fallback smoke tests.
 
 API Reference
 -------------

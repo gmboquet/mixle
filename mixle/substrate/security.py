@@ -6,7 +6,7 @@ bearer tokens, AWS keys, private-key blocks, credentials embedded in URLs, and `
 assignments of sensitive names); :func:`redact_secrets` masks them in place; :func:`scan_item` /
 :func:`scan_substrate` sweep stored items and :func:`safe_text` gives a redact-before-store guard.
 
-The patterns are deliberately conservative and named -- each finding says WHICH rule matched, so a
+    The patterns are deliberately conservative and named -- each finding says which rule matched, so a
 false positive is inspectable rather than mysterious. This is detection, not a vault: it catches the
 common leaks (a pasted key, a token in a log line) so they don't get indexed and served, and it flags
 the rest for review. Redaction preserves a short prefix so a human can still recognize which key it was
@@ -58,12 +58,15 @@ class SecretScan:
 
     @property
     def clean(self) -> bool:
+        """Whether the scan found no secrets."""
         return not self.findings
 
     def rules(self) -> list[str]:
+        """Return the sorted names of triggered secret-detection rules."""
         return sorted({f.rule for f in self.findings})
 
     def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable scan summary."""
         return {
             "clean": self.clean,
             "n_findings": len(self.findings),
@@ -125,10 +128,10 @@ def scan_item(item: Any) -> SecretScan:
 
 
 def scan_substrate(substrate: Any, *, scope: str | None = None) -> dict[str, Any]:
-    """Sweep a substrate for leaked secrets: which items are dirty and which rules tripped.
+    """Sweep a substrate for leaked secrets and report which stored items triggered rules.
 
-    Returns ``{n_items, n_dirty, dirty: [{item_id, rules}]}`` -- a leak surface at a glance, so a pasted
-    key or a token in a stored trace surfaces as a finding rather than sitting indexed and searchable."""
+    Returns ``{n_items, n_dirty, dirty: [{item_id, rules}]}`` for compatibility with existing callers; entries in
+    ``dirty`` are the items that matched one or more secret-detection rules."""
     items = substrate.all(scope=scope)
     dirty: list[dict[str, Any]] = []
     for it in items:

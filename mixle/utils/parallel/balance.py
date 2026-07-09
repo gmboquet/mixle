@@ -18,7 +18,7 @@ balance the load we therefore:
   * **balance the model split by FLOPs**, not bytes -- a memory-light but compute-heavy leaf (a GP, a big
     quadratic form) must not become the straggler everyone waits on.
 
-This covers the whole spectrum the same way: a tiny model on lots of data -> ``M=1, D=P`` (data-parallel);
+This covers the whole spectrum the same way: a compact model on lots of data -> ``M=1, D=P`` (data-parallel);
 a model too big for one worker -> ``M`` from memory, ``D`` fills the rest; a huge model on a *single*
 observation (``N=1``) -> ``D=1, M=`` as many model shards as the model exposes; and an unbalanced
 heterogeneous nest -> the FLOP cost model finds where the work is and the split equalizes it.
@@ -60,10 +60,12 @@ class BalancePlan:
 
     @property
     def is_model_parallel(self) -> bool:
+        """Whether the selected worker grid includes model parallelism."""
         return self.model_parallel > 1
 
     @property
     def workers_idle(self) -> int:
+        """Number of available workers left unused by the selected grid."""
         return max(0, self.workers_total - self.workers_used)
 
 
@@ -136,7 +138,7 @@ def balance_plan(model: Any, resources: Resources, *, n_data: int) -> BalancePla
         cuts = tuple(out)
 
     if workers_used < p and m == 1 and max_units <= 1 and n_data < p:
-        # the honest corner: too few observations to data-parallel AND the model exposes no axis to split
+        # the explicit corner: too few observations to data-parallel AND the model exposes no axis to split
         # (e.g. a single dense HMM). Naive model-parallelism can't help -- this needs a STRUCTURED
         # decomposition (sparse/banded/Kronecker transitions, or a Composite/Mixture of sub-models).
         why = (

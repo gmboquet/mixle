@@ -55,10 +55,12 @@ class SubstrateItem:
             raise ValueError(f"unknown modality {self.kind!r}; expected one of {MODALITIES}")
 
     def to_json(self) -> dict[str, Any]:
+        """Return this item as a JSON-serializable dictionary."""
         return asdict(self)
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> SubstrateItem:
+        """Build a substrate item from its serialized dictionary form."""
         return cls(**d)
 
 
@@ -82,7 +84,7 @@ class Substrate:
 
     # -- CRUD --------------------------------------------------------------------------------------
     def put(self, item: SubstrateItem) -> str:
-        """Add or replace an item; returns its id. Marks the semantic index dirty for text items."""
+        """Add or replace an item; returns its id and schedules semantic-index rebuilds for text items."""
         self._items[item.id] = item
         if item.kind in ("text", "artifact", "trace", "context") and item.text:
             self._dirty = True
@@ -93,15 +95,18 @@ class Substrate:
         return self.put(SubstrateItem(kind=kind, text=text, **kw))
 
     def get(self, item_id: str) -> SubstrateItem | None:
+        """Return an item by id, or ``None`` when it is absent."""
         return self._items.get(item_id)
 
     def remove(self, item_id: str) -> bool:
+        """Remove an item by id and return whether anything was deleted."""
         existed = self._items.pop(item_id, None) is not None
         if existed:
             self._dirty = True
         return existed
 
     def all(self, *, kind: str | None = None, scope: str | None = None) -> list[SubstrateItem]:
+        """Return stored items, optionally filtered by kind and scope."""
         out = list(self._items.values())
         if kind is not None:
             out = [i for i in out if i.kind == kind]
@@ -119,10 +124,10 @@ class Substrate:
     def reindex(self) -> None:
         """(Re)fit the embedding index over the current text-bearing items. Idempotent, lazy-called."""
         items = self._text_items(scope=None)
-        if len(items) < 8:  # tiny corpus: a learned embedder scores junk queries near real docs
+        if len(items) < 8:  # small corpus: a learned embedder can over-rank unsupported queries
             # (an out-of-vocabulary query lands close to SOMETHING when there are only a handful of
             # vectors), so retrieval stays on the deterministic lexical path until the corpus can
-            # actually support an embedding -- the no-fuzzy-embedder-on-a-tiny-corpus discipline.
+            # actually support an embedding; small corpora stay on lexical retrieval.
             self._embedder, self._embed_ids, self._dirty = None, [i.id for i in items], False
             return
         from mixle.represent import fit_embedder
@@ -176,6 +181,7 @@ class Substrate:
         return str(target)
 
     def load(self, root: str | None = None) -> None:
+        """Load items from ``{root}/items.jsonl`` into this shard."""
         target = Path(root) if root is not None else self.root
         if target is None:
             raise ValueError("Substrate.load needs a root")

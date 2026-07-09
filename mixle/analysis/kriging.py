@@ -73,6 +73,7 @@ class Variogram:
     anisotropy: tuple[float, float] | None = None
 
     def gamma(self, h: np.ndarray) -> np.ndarray:
+        """Evaluate the semivariogram at lag distances."""
         return self.nugget * (np.asarray(h) > 0) + self.psill * _shape(self.model, h, self.rng, self.nu)
 
     def cov_field(self, h: np.ndarray) -> np.ndarray:

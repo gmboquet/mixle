@@ -71,7 +71,7 @@ Maturity Map
        logs, and drift reports. Treat these as building blocks around a fitted
        model, not as a full deployment system.
 
-What Is Safe To Build On First
+What Is Safe to Build on First
 ------------------------------
 
 For ordinary work, start with:
@@ -83,7 +83,34 @@ For ordinary work, start with:
 
 That path exercises the oldest and most coherent part of the codebase.
 
-How To Treat ``mixle.models``
+Evidence Ladder
+---------------
+
+Choose validation depth from the maturity of the surface and the consequence
+of the decision:
+
+``exploration``
+    A notebook or local experiment can rely on a smoke fit, shape inspection,
+    and a small diagnostic plot, provided the result is not described as
+    production evidence.
+
+``candidate``
+    A model or workflow being compared for real use needs held-out scoring,
+    capability checks, deterministic seeds where relevant, and recorded
+    assumptions about missing data, optional dependencies, and artifacts.
+
+``promotion``
+    A promoted model needs provenance, restart or stability evidence for latent
+    models, calibration or drift evidence when probabilities drive decisions,
+    and a clear record of rejected alternatives.
+
+``release``
+    A public release needs strict Sphinx docs, wheel build and clean install
+    evidence, import sweeps, tests/examples/notebooks that match the claimed
+    surfaces, and the coordinated release manifest described in
+    :doc:`release-readiness` and :doc:`family-release`.
+
+How to Treat ``mixle.models``
 -----------------------------
 
 ``mixle.models`` is useful, but it is not the conceptual center of the package.
@@ -105,8 +132,27 @@ For ordinary distribution modeling, start with ``mixle.stats`` and
 needs a neural leaf, Gaussian process, graph model, grammar, random forest,
 DPM, POMDP, or other applied helper.
 
-How To Treat The v0.6.2 Runtime Surfaces
+How Documentation Should Signal Maturity
 ----------------------------------------
+
+Documentation should make maturity visible without turning every page into a
+warning label. Use stable, factual language:
+
+* stable core pages should document contracts, supported shapes, and expected
+  failure behavior;
+* active-development pages should include route explanations, validation
+  requirements, and unsupported combinations;
+* incubating pages should name optional dependencies, artifact checks, and
+  held-out evidence before deployment claims;
+* release notes should distinguish shipped behavior from work still under
+  review.
+
+Avoid implying that a surface is production-ready because it appears in the API
+reference. Generated reference coverage proves import visibility, not maturity,
+calibration, or deployment readiness.
+
+How to Treat Runtime Surfaces
+-----------------------------
 
 The substrate, reasoner, pool, telemetry, and scientist layers are application
 surfaces. They are valuable because they connect fitted models to knowledge,

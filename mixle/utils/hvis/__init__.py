@@ -7,12 +7,18 @@ are supported (the `affinity` argument):
 
 - 'local' (the 'auto' default whenever raw data is available): the model is
   flattened into leaf fields and each field contributes a local statistical
-  affinity. Discrete fields use the per-field posterior Bhattacharyya
-  geometry; continuous/count fields additionally use a component-local
-  Mahalanobis metric in sufficient-statistic-like coordinates learned from
-  the realized data. Thus the same component is no longer a zero-distance
-  quotient: within-component neighborhoods are resolved when the field has
-  actual local structure.
+  affinity combining the per-field posterior (between-cluster structure)
+  with a component-local Mahalanobis metric (within-cluster structure).
+  Continuous/count fields use their native coordinates; every other leaf --
+  HMMs, Markov chains, categoricals, sequence-of-discrete element fields --
+  uses typicality coordinates (per-component log-density; per-token rate
+  plus a log-length axis for sequence-valued leaves), so no field type
+  degrades to posterior-only geometry. Thus the same component is never a
+  zero-distance quotient: sharp posteriors stop collapsing clusters into
+  tiny structureless points, variable-length fields keep length as one
+  honest axis instead of the dominant one, and mixed continuous/discrete
+  fields are made commensurate by the per-component whitening. See
+  affinity_health() for measurable receipts of these degeneracies.
 
 - 'balanced': the model
   is flattened into its leaf fields (nested composites, sequence
@@ -150,7 +156,16 @@ from mixle.utils.hvis.affinity import (
     _resolve_affinity as _resolve_affinity,
 )
 from mixle.utils.hvis.affinity import (
+    affinity_health as affinity_health,
+)
+from mixle.utils.hvis.affinity import (
     balanced_factors as balanced_factors,
+)
+from mixle.utils.hvis.affinity import (
+    barycentric_init as barycentric_init,
+)
+from mixle.utils.hvis.affinity import (
+    component_map as component_map,
 )
 from mixle.utils.hvis.affinity import (
     conditional_pmat as conditional_pmat,
@@ -165,7 +180,31 @@ from mixle.utils.hvis.affinity import (
     local_factors as local_factors,
 )
 from mixle.utils.hvis.affinity import (
+    log_affinity_block as log_affinity_block,
+)
+from mixle.utils.hvis.affinity import (
+    mixture_coordinates as mixture_coordinates,
+)
+from mixle.utils.hvis.affinity import (
     model_log_affinity as model_log_affinity,
+)
+from mixle.utils.hvis.direct import (
+    ModelMap as ModelMap,
+)
+from mixle.utils.hvis.direct import (
+    model_map as model_map,
+)
+from mixle.utils.hvis.distributed import (
+    FiberStats as FiberStats,
+)
+from mixle.utils.hvis.distributed import (
+    distributed_model_map as distributed_model_map,
+)
+from mixle.utils.hvis.distributed import (
+    fiber_stats as fiber_stats,
+)
+from mixle.utils.hvis.distributed import (
+    fuzzy_nerve_from_stats as fuzzy_nerve_from_stats,
 )
 from mixle.utils.hvis.embed import (
     dpmsne as dpmsne,
@@ -175,6 +214,21 @@ from mixle.utils.hvis.embed import (
 )
 from mixle.utils.hvis.embed import (
     humap as humap,
+)
+from mixle.utils.hvis.front import (
+    Map as Map,
+)
+from mixle.utils.hvis.front import (
+    hvis_map as hvis_map,
+)
+from mixle.utils.hvis.goals import (
+    Anchor as Anchor,
+)
+from mixle.utils.hvis.goals import (
+    AxisAlign as AxisAlign,
+)
+from mixle.utils.hvis.goals import (
+    LabelCohesion as LabelCohesion,
 )
 from mixle.utils.hvis.neighbors import (
     _augment_candidates as _augment_candidates,
@@ -202,6 +256,27 @@ from mixle.utils.hvis.neighbors import (
 )
 from mixle.utils.hvis.neighbors import (
     sparse_model_distances as sparse_model_distances,
+)
+from mixle.utils.hvis.stream import (
+    StreamingHvis as StreamingHvis,
+)
+from mixle.utils.hvis.stream import (
+    place_in_atlas as place_in_atlas,
+)
+from mixle.utils.hvis.topology import (
+    component_tree as component_tree,
+)
+from mixle.utils.hvis.topology import (
+    embedding_health as embedding_health,
+)
+from mixle.utils.hvis.topology import (
+    fuzzy_nerve as fuzzy_nerve,
+)
+from mixle.utils.hvis.topology import (
+    model_fit_health as model_fit_health,
+)
+from mixle.utils.hvis.topology import (
+    nerve_report as nerve_report,
 )
 from mixle.utils.hvis.tsne import (
     _barnes_hut_negative_forces as _barnes_hut_negative_forces,
@@ -281,9 +356,29 @@ from mixle.utils.hvis.tsne import (
 
 __all__ = [
     "htsne",
+    "StreamingHvis",
+    "place_in_atlas",
+    "Anchor",
+    "LabelCohesion",
+    "AxisAlign",
     "humap",
     "dpmsne",
     "model_log_affinity",
+    "affinity_health",
+    "log_affinity_block",
+    "mixture_coordinates",
+    "component_map",
+    "barycentric_init",
+    "model_map",
+    "ModelMap",
+    "fuzzy_nerve",
+    "nerve_report",
+    "embedding_health",
+    "model_fit_health",
+    "component_tree",
+    "hvis_map",
+    "Map",
+    "map",
     "sparse_model_distances",
     "approx_sparse_model_distances",
     "model_knn",
@@ -293,3 +388,6 @@ __all__ = [
     "fisher_factors",
     "tsne_barnes_hut",
 ]
+
+# the design review promised hvis.map(); hvis_map is the shadow-safe import name.
+map = hvis_map  # noqa: A001

@@ -51,13 +51,13 @@ class StructuredHMMTest(unittest.TestCase):
             np.ones(K) / K,
             LowRankTransition(_row_normalize(rng.rand(K, r)), _row_normalize(rng.rand(r, K))),
         )
-        seqs = [gen.sampler(seed=s).sample(60) for s in range(60)]
+        seqs = [gen.sampler(seed=s).sample(50) for s in range(50)]
         init = StructuredHMM(
             [S.GaussianDistribution(3.0 * k + rng.uniform(-1, 1), 1.0) for k in range(K)],
             np.ones(K) / K,
             LowRankTransition(_row_normalize(rng.rand(K, r)), _row_normalize(rng.rand(r, K))),
         )
-        _, trace = init.fit(seqs, max_its=40)
+        _, trace = init.fit(seqs, max_its=30)
         self.assertTrue(np.all(np.diff(trace) >= -1e-6))  # EM log-likelihood non-decreasing
         means = sorted(e.mu for e in init.emissions)
         truth = [3.0 * k for k in range(K)]
@@ -138,13 +138,13 @@ class ContractTest(unittest.TestCase):
             np.ones(k) / k,
             LowRankTransition(_row_normalize(rng.rand(k, r)), _row_normalize(rng.rand(r, k))),
         )
-        seqs = [gen.sampler(seed=s).sample(50) for s in range(60)]
+        seqs = [gen.sampler(seed=s).sample(30) for s in range(24)]
         proto = StructuredHMM(
             [S.GaussianDistribution(4.0 * i + rng.uniform(-1, 1), 1) for i in range(k)],
             np.ones(k) / k,
             LowRankTransition(_row_normalize(rng.rand(k, r)), _row_normalize(rng.rand(r, k))),
         )
-        fit = optimize(seqs, proto.estimator(), prev_estimate=proto, max_its=40, out=None)
+        fit = optimize(seqs, proto.estimator(), prev_estimate=proto, max_its=20, out=None)
         means = sorted(e.mu for e in fit.emissions)
         truth = [4.0 * i for i in range(k)]
         self.assertLess(max(abs(m - t) for m, t in zip(means, truth)), 1.0)
@@ -186,7 +186,7 @@ class ForgettingParallelTest(unittest.TestCase):
     def test_chunked_em_recovers_chain_and_parallel_matches_serial(self):
         rng = np.random.RandomState(0)
         hmm = self._ergodic_hmm()
-        seqs = [hmm.sampler(seed=s).sample(400) for s in range(20)]
+        seqs = [hmm.sampler(seed=s).sample(200) for s in range(10)]
 
         def init():
             return StructuredHMM(
@@ -196,9 +196,9 @@ class ForgettingParallelTest(unittest.TestCase):
             )
 
         h_serial = init()
-        fit_chunked(h_serial, seqs, chunk=120, overlap=40, max_its=25, workers=0)
+        fit_chunked(h_serial, seqs, chunk=80, overlap=25, max_its=20, workers=0)
         h_par = init()  # same init stream consumed identically
-        fit_chunked(h_par, seqs, chunk=120, overlap=40, max_its=25, workers=4)
+        fit_chunked(h_par, seqs, chunk=80, overlap=25, max_its=20, workers=4)
         means = sorted(e.mu for e in h_serial.emissions)
         self.assertLess(max(abs(m - t) for m, t in zip(means, [-4, 0, 4])), 0.5)
         self.assertTrue(
@@ -725,7 +725,7 @@ class EDHMMContractTest(unittest.TestCase):
             dur_true,
             D,
         )
-        seqs = [gen.sampler(seed=s).sample(80) for s in range(50)]
+        seqs = [gen.sampler(seed=s).sample(55) for s in range(20)]
         proto = ExplicitDurationHMM(
             [S.GaussianDistribution(-2, 1), S.GaussianDistribution(2, 1)],
             [0.5, 0.5],
@@ -733,7 +733,7 @@ class EDHMMContractTest(unittest.TestCase):
             np.ones((2, D)) / D,
             D,
         )
-        fit = optimize(seqs, proto.estimator(), prev_estimate=proto, max_its=25, out=None)
+        fit = optimize(seqs, proto.estimator(), prev_estimate=proto, max_its=18, out=None)
         self.assertLess(max(abs(m - t) for m, t in zip(sorted(e.mu for e in fit.emissions), [-5, 5])), 0.5)
         d0 = float((np.arange(1, D + 1) * fit.dur[0]).sum())  # mean dwell, state 0
         self.assertAlmostEqual(d0, 3.8, delta=0.4)

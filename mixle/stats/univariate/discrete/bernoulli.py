@@ -1,4 +1,4 @@
-"""Create, estimate, enumerate, and sample from a Bernoulli distribution.
+"""Bernoulli distributions over binary outcomes.
 
 Data type: bool or values in {0, 1}. The distribution has success
 probability p and log-density log(p) for True/1 and log(1-p) for False/0.
@@ -37,12 +37,14 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated Bernoulli kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch", "jax"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for Bernoulli distributions."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -303,6 +305,7 @@ class BernoulliSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> bool | Sequence[bool]:
+        """Draw one sample or a list of iid samples."""
         rv = self.rng.rand() < self.dist.p if size is None else self.rng.rand(size) < self.dist.p
         return bool(rv) if size is None else rv.tolist()
 
@@ -317,6 +320,7 @@ class BernoulliAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: bool | int, weight: float, estimate: BernoulliDistribution | None) -> None:
+        """Accumulate weighted success and count statistics for one observation."""
         xx = BernoulliDistribution._as_bool(x)
         if xx is None:
             raise ValueError("BernoulliDistribution requires observations in {False, True} or {0, 1}.")
@@ -324,29 +328,36 @@ class BernoulliAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += weight
 
     def initialize(self, x: bool | int, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: BernoulliDistribution | None) -> None:
+        """Accumulate weighted statistics from encoded observations."""
         self.sum += np.dot(x.astype(np.float64), weights)
         self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float]) -> "BernoulliAccumulator":
+        """Merge another Bernoulli sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.sum += suff_stat[1]
         return self
 
     def value(self) -> tuple[float, float]:
+        """Return the accumulated count and success total."""
         return self.count, self.sum
 
     def from_value(self, x: tuple[float, float]) -> "BernoulliAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.count = x[0]
         self.sum = x[1]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -354,10 +365,12 @@ class BernoulliAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "BernoulliDataEncoder":
+        """Return the encoder used by this accumulator."""
         return BernoulliDataEncoder()
 
 
@@ -369,6 +382,7 @@ class BernoulliAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> BernoulliAccumulator:
+        """Create a fresh Bernoulli accumulator."""
         return BernoulliAccumulator(name=self.name, keys=self.keys)
 
 
@@ -391,6 +405,7 @@ class BernoulliEstimator(ParameterEstimator):
         self.has_conj_prior = isinstance(prior, BetaDistribution)
 
     def accumulator_factory(self) -> BernoulliAccumulatorFactory:
+        """Return an accumulator factory for Bernoulli sufficient statistics."""
         return BernoulliAccumulatorFactory(name=self.name, keys=self.keys)
 
     def model_log_density(self, model: "BernoulliDistribution") -> float:
@@ -421,6 +436,7 @@ class BernoulliEstimator(ParameterEstimator):
         return BernoulliDistribution(p, name=self.name, keys=self.keys, prior=BetaDistribution(new_a, new_b))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> BernoulliDistribution:
+        """Estimate the Bernoulli success probability from weighted counts."""
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
         count, psum = suff_stat
@@ -443,6 +459,7 @@ class BernoulliDataEncoder(DataSequenceEncoder):
         return isinstance(other, BernoulliDataEncoder)
 
     def seq_encode(self, x: Sequence[bool | int]) -> np.ndarray:
+        """Encode Bernoulli observations as a boolean array."""
         rv = np.asarray(x)
         valid = (rv == 0) | (rv == 1)
         if not np.all(valid):

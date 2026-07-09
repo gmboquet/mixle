@@ -31,7 +31,7 @@ class CreatedModel:
 
     @property
     def guarantee(self) -> Any:
-        """The aggregate estimation guarantee (MIN over blocks) -- the artifact's headline claim."""
+        """The aggregate estimation guarantee (MIN over blocks) -- the artifact's summary claim."""
         return self.certificate.guarantee
 
     def why(self) -> str:
@@ -103,7 +103,7 @@ def create(
             from mixle.inference.uq import uq as _uq
 
             uq_handle = _uq(model, fit_rows)
-        except Exception:  # noqa: BLE001 - UQ is optional; absence is honest, not a crash
+        except Exception:  # noqa: BLE001 - UQ is optional; absence is explicit, not a crash
             uq_handle = None
 
     # M2 precondition: pooling rows into one model assumes exchangeability -- test it, record the

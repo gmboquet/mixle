@@ -106,6 +106,8 @@ def score_drift(model: Any, reference: Any, current: Any) -> dict:
 
 @dataclass
 class DriftReport:
+    """Drift decision, aggregate score, feature details, and thresholds."""
+
     drift: bool
     score: dict
     per_feature: dict = field(default_factory=dict)

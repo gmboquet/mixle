@@ -1,12 +1,12 @@
-"""``auto_select`` + ``search``: the "propose a better mixle model from data" / config-search front door.
+"""``auto_select`` and ``search``: model selection and config search from data.
 
-* :func:`auto_select` (Phase 1) elevates the existing automatic engine
-  (:func:`mixle.utils.automatic.get_estimator`) into the evolve contract and -- when the criterion is a
-  proper-score :class:`~mixle.evolve.objective.Objective` -- adds the held-out champion/challenger gate
-  on top of the in-sample BIC pick, so the returned model wins *out of sample*, not merely on BIC.
+* :func:`auto_select` elevates the existing automatic engine
+  (:func:`mixle.utils.automatic.get_estimator`) into the evolve contract and, when the criterion is a
+  proper-score :class:`~mixle.evolve.objective.Objective`, adds the held-out champion/challenger gate
+  on top of the in-sample BIC pick so the returned model wins *out of sample*, not merely on BIC.
 
-* :func:`search` (Phase 2-3) searches a typed :class:`~mixle.evolve.space.Space` for the config that
-  builds the best model under a held-out :class:`Objective`, with three interchangeable backends:
+* :func:`search` searches a typed :class:`~mixle.evolve.space.Space` for the config that builds the best
+  model under a held-out :class:`Objective`, with three interchangeable backends:
 
     * ``method='bo'``          -- encode the space as a numeric box and drive :func:`mixle.doe.minimize`.
     * ``method='evolutionary'``-- a (mu + lambda) loop over :meth:`Space.sample` / :meth:`Space.neighbors`.
@@ -54,7 +54,7 @@ def auto_select(
 
     Args:
         data: the raw dataset.
-        space: reserved for the Phase-2 typed search space; must be ``None`` in Phase 1.
+        space: reserved for typed search-space selection; must currently be ``None`` for ``auto_select``.
         criterion: ``'bic'`` (delegate to the automatic in-sample pick) or a proper-score
             :class:`~mixle.evolve.objective.Objective` (add the held-out verify gate on top of BIC).
         verify: when ``criterion`` is an :class:`Objective`, whether to run the held-out gate (the BIC

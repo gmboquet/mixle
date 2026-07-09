@@ -257,7 +257,7 @@ class _GLMFactor:
 
     The child's kind picks the family: exactly two levels -> Bernoulli logistic; nonnegative integer
     counts -> Poisson log-link; K>2 categorical -> multinomial logistic (softmax, class 0 reference)
-    with a tiny ridge so perfectly-separable data keeps a finite, deterministic optimum. The design
+    with a small ridge so perfectly separable data keeps a finite, deterministic optimum. The design
     matrix mirrors the CLG node: continuous parents raw + one-hot(drop-first) discrete parents + 1.
     """
 
@@ -476,12 +476,15 @@ class HeterogeneousBayesianNetwork:
         return f"HeterogeneousBayesianNetwork(fields={len(self.factors)}, edges=[{', '.join(e) or 'none'}])"
 
     def edges(self) -> list[tuple[int, int]]:
+        """Return DAG edges as ``(parent_field, child_field)`` pairs."""
         return [(p, f.child) for f in self.factors for p in f.parents]
 
     def log_density(self, x: tuple) -> float:
+        """Evaluate the joint log density of one record."""
         return float(sum(f.log_density(x) for f in self.factors))
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
+        """Evaluate joint log density for encoded records."""
         cols, n = encoded
         out = np.zeros(n, dtype=np.float64)
         for f in self.factors:
@@ -489,9 +492,11 @@ class HeterogeneousBayesianNetwork:
         return out
 
     def dist_to_encoder(self) -> Any:
+        """Return the encoder for record batches consumed by ``seq_log_density``."""
         return _BNEncoder(len(self.factors))
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return a sampler for the fitted Bayesian network."""
         return _BNSampler(self, seed)
 
 
@@ -540,19 +545,23 @@ class MixtureOfBayesianNetworks:
         return np.stack([c.seq_log_density(encoded) for c in self.components], axis=1)  # (n, K)
 
     def log_density(self, x: tuple) -> float:
+        """Evaluate the mixture joint log density of one record."""
         from scipy.special import logsumexp
 
         return float(logsumexp(self.log_weights + np.array([c.log_density(x) for c in self.components])))
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
+        """Evaluate mixture joint log density for encoded records."""
         from scipy.special import logsumexp
 
         return logsumexp(self._component_ll(encoded) + self.log_weights[None, :], axis=1)
 
     def dist_to_encoder(self) -> Any:
+        """Return the record encoder shared by all mixture components."""
         return _BNEncoder(len(self.components[0].factors))
 
     def responsibilities(self, data: Sequence[tuple]) -> np.ndarray:
+        """Return posterior component probabilities for each record."""
         enc = self.dist_to_encoder().seq_encode(list(data))
         joint = self._component_ll(enc) + self.log_weights[None, :]
         joint -= joint.max(axis=1, keepdims=True)
@@ -560,10 +569,12 @@ class MixtureOfBayesianNetworks:
         return r / r.sum(axis=1, keepdims=True)
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return a sampler for the mixture of Bayesian networks."""
         return _BNMixtureSampler(self, seed)
 
     @property
     def n_components(self) -> int:
+        """Return the number of mixture components."""
         return len(self.components)
 
 
@@ -589,7 +600,7 @@ def learn_mixture_bayesian_network(
     max_its: int = 30,
     em: str = "hard",
 ) -> MixtureOfBayesianNetworks:
-    """Fit a :class:`MixtureOfBayesianNetworks` by EM -- discover clusters AND each cluster's DAG.
+    """Fit a :class:`MixtureOfBayesianNetworks` by EM: discover clusters and each cluster's DAG.
 
     ``em="hard"`` (default): each iteration re-learns a network per cluster on its assigned points and
     reassigns every record to its most-probable cluster, until assignments stabilize. ``em="soft"``:
@@ -657,7 +668,7 @@ def _hard_em_run(data, n_components, assign, learn, max_iter, min_size, rng):
 def _soft_em_run(data, n_components, assign, learn, max_iter, tol: float = 1e-5):
     n = len(data)
     # a soft one-hot init: 0.95 on the seeded cluster, the rest spread — enough overlap to move points,
-    # NOT a running floor (a persistent floor makes every component carry a sliver of every regime,
+    # This is not a running floor: a persistent floor makes every component carry a sliver of every regime,
     # inflating its variance and dragging the whole mixture below the hard-EM fit).
     r = np.full((n, n_components), 0.05 / max(n_components - 1, 1))
     r[np.arange(n), assign] = 0.95
@@ -774,7 +785,7 @@ def learn_bayesian_network(
         factors[c] = _fit_factor(c, [], cols, discrete, levels, templates[c], max_its, w, vec_dims)
         base_ll[c] = _wsum(factors[c].seq_log_density(cols))
 
-    # global greedy: each round add the single best-penalized-gain edge over the WHOLE graph, so the cheaper
+    # global greedy: each round add the single best-penalized-gain edge over the whole graph, so the cheaper
     # (fewer-parameter) orientation of a dependence wins instead of whichever node happened to be visited first.
     log_n = np.log(max(n_eff, 2.0))
     while True:

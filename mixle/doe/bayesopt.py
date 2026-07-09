@@ -121,7 +121,7 @@ def thompson_sampling(
     Returns a merit (maximized over candidates) equal to the drawn value when maximizing and its
     negation when minimizing, so the selected point is the optimum of the *sampled* objective. A
     randomized, exploration-aware acquisition -- repeated proposals explore competing optima in
-    proportion to posterior probability, with no exploration knob to tune. This is the cheap *marginal*
+    proportion to posterior probability, with no exploration knob to tune. This is the low-cost *marginal*
     variant (independent per-candidate draws, ignoring the GP's cross-candidate correlation); pass an
     ``rng`` (via ``acq_kwargs``) for reproducible proposals. ``best`` is ignored.
     """
@@ -198,7 +198,12 @@ def _fit_surrogate(x: np.ndarray, y: np.ndarray, gp: Surrogate | None, fit_kwarg
     if gp is None:
         from mixle.models.gaussian_process import GaussianProcessRegressor
 
-        scale = float(np.std(y)) or 1.0
+        # np.std([]) is nan (with a RuntimeWarning), and `nan or 1.0` evaluates to nan -- nan is
+        # truthy, so the `or` fallback only ever caught the exact-zero-variance case, not the
+        # empty-y case. An empty y is a real, documented path: BayesianOptimizer.ask(q) with
+        # q > n_init before any tell() calls propose_batch with zero observations.
+        std = float(np.std(y)) if y.size > 0 else 0.0
+        scale = std if std > 0.0 else 1.0
         gp = GaussianProcessRegressor(lengthscale=1.0, amplitude=scale, noise=0.1 * scale + 1.0e-6)
     kwargs = {"out": None, **(fit_kwargs or {})}
     gp.fit(x, y, **kwargs)
@@ -219,6 +224,14 @@ def _propose_one(
     fit_kwargs: dict[str, Any] | None,
 ) -> tuple[np.ndarray, float, Surrogate]:
     """Fit the surrogate, score Latin-hypercube candidates, return (best point, its merit, fitted gp)."""
+    if int(n_candidates) <= 0:
+        raise ValueError("n_candidates must be positive.")
+    if y.size == 0:
+        # np.min/np.max on an empty y crashes with an opaque "zero-size array" ValueError. This is a
+        # real, reachable path: BayesianOptimizer.ask(q) with q > n_init before any tell() calls
+        # propose_next/propose_batch with zero observations -- there is no incumbent to score
+        # acquisition against yet, so name that clearly instead of a generic numpy crash.
+        raise ValueError("cannot propose an acquisition-based point with zero observations; call tell() first.")
     gp = _fit_surrogate(x, y, gp, fit_kwargs)
     candidates = latin_hypercube(b, n_candidates, rng)
     mean, cov = gp.predict(x, y, candidates, return_cov=True)
@@ -299,6 +312,8 @@ def propose_knowledge_gradient(
     look-ahead Bayesian-optimization proposal. ``maximize`` selects the objective sense (the mean is
     negated for minimization).
     """
+    if int(n_candidates) <= 0:
+        raise ValueError("n_candidates must be positive.")
     x, y = _validate_xy(x, y)
     b = _as_bounds(bounds)
     rng = _as_rng(seed)

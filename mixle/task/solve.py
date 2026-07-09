@@ -1,25 +1,26 @@
-"""``solve`` -- point mixle at a function and get back a deployable model that does its job.
+"""Train, calibrate, and serve a task model from an existing teacher.
 
-The closed loop the task spine was building toward, in one call. ``teacher`` is whatever currently
-performs the task -- a rule cascade, a legacy scoring routine, an expensive API. ``solve`` uses it to
-*create the dataset* (the teacher labels the example inputs), *proposes and trains* a student matched to
-the input shape (text / record / structured), *calibrates* an honest answer-or-escalate rule on held-out
-data (conformal, so "confident" has a coverage guarantee), *verifies* the student against the teacher, and
-returns a :class:`Solution`: a drop-in callable that answers locally when it is sure and falls back to the
-teacher when it is not. Wrong answers are bounded by the calibration; unfamiliar inputs route to the code
-that already works.
+``solve`` converts a callable teacher into a deployable :class:`Solution`.
+The teacher may be a rule cascade, legacy scoring routine, API client, or any
+other callable that currently performs the task. The solver labels example
+inputs with that teacher, trains a student matched to the input shape, calibrates
+an answer-or-escalate rule on held-out data, verifies agreement against the
+teacher, and returns a callable object that answers locally when calibrated
+confidence is sufficient.
 
-The loop then compounds: every escalated request is a teacher-labeled example exactly where the student is
-weak. ``Solution.improve()`` re-distills with those harvested labels and promotes the new student only if
-it verifies at least as well (anti-regression) -- so the deployed thing gets cheaper the longer it runs.
+Escalated requests remain useful after deployment. They are teacher-labeled
+examples from the part of the input space where the student abstained.
+``Solution.improve()`` re-distills with those harvested labels and promotes the
+new student only when it preserves the verified agreement and escalation gates.
 
-    def route(ticket): ...                      # 400 lines of if/elif that must not break
+    def route(ticket): ...                      # existing production rule or service
     sol = solve(route, tickets)                 # dataset <- route(t) for t in tickets; train; calibrate
-    sol(ticket)                                 # answers locally or calls route() -- safe to deploy today
+    sol(ticket)                                 # answer locally or escalate to route()
     sol.report()                                # agreement, escalation rate, realized cost
     sol.improve()                               # fold escalations back in; promote only if better
 
-``solve`` is deterministic given ``seed``. Only the student fit needs torch; the teacher stays opaque.
+``solve`` is deterministic given ``seed``. Only student training requires the
+optional neural dependency; the teacher remains an external callable.
 """
 
 from __future__ import annotations
@@ -42,8 +43,7 @@ from mixle.task.tune import RecipeSpace
 
 
 def _label_with(teacher: Callable[..., Any], items: list) -> list:
-    """Label ``items`` with a per-item or batched teacher. A rigid per-item function may *raise* when
-    handed the whole list (e.g. ``ticket['amount']`` on a list), so the batched probe must catch."""
+    """Label ``items`` with either a per-item or batched teacher callable."""
     try:
         out = teacher(items)
         if isinstance(out, (list, tuple)) and len(out) == len(items):
@@ -54,8 +54,7 @@ def _label_with(teacher: Callable[..., Any], items: list) -> list:
 
 
 def _batch_view(teacher: Callable[..., Any]) -> Callable[[list], list]:
-    """A strictly batched (list -> list) view of the teacher, safe for per-item rigid functions.
-    ``Cascade`` probes its teacher with ``teacher([x])``, which raises on e.g. dict-record rules."""
+    """Return a strict ``list -> list`` teacher view for cascade probes."""
 
     def batched(batch: list) -> list:
         return _label_with(teacher, list(batch))
@@ -64,14 +63,14 @@ def _batch_view(teacher: Callable[..., Any]) -> Callable[[list], list]:
 
 
 def load_harvested(path: str) -> tuple[list, list]:
-    """Read the ``harvested.jsonl`` a serving endpoint accumulates into ``(inputs, answers)``.
+    """Read harvested serving feedback into ``(inputs, answers)``.
 
-    Two line formats are understood: ``{"input": ..., "label": ...}`` (the mixle-mlops
-    ``/v1/tasks/{name}/feedback`` classification format — labels are str-coerced) and
-    ``{"input": ..., "answer": ...}`` (the ``/v1/solutions/{name}/feedback`` format for every solve
-    shape — the answer keeps its shape: a number for regression, a list of labels for multilabel, a
-    dict for structured). Input JSON lists coerce back to tuples — the record shape the solve
-    trained on — so the pairs feed straight into ``solve*(..., prelabeled=load_harvested(p))``."""
+    Two JSONL formats are supported: ``{"input": ..., "label": ...}`` for
+    classification feedback and ``{"input": ..., "answer": ...}`` for solution
+    feedback. Classification labels are string-coerced; solution answers keep
+    their JSON shape. Input JSON lists are restored as tuples so record-shaped
+    examples can be passed back into solve/distillation workflows.
+    """
     inputs: list = []
     answers: list = []
     with open(path) as f:
@@ -87,7 +86,7 @@ def load_harvested(path: str) -> tuple[list, list]:
 
 
 def _input_kind(x: Any) -> str:
-    """Sniff the student path from one input: text or a (tuple/dict) record."""
+    """Infer whether one input should use the text or record student path."""
     if isinstance(x, str):
         return "text"
     if isinstance(x, (dict, tuple, list)):
@@ -185,7 +184,7 @@ class Solution:
     """A deployed task: a calibrated student in front of the teacher, plus the loop to improve it.
 
     Call it like the original function. ``promoted`` says whether the student passed verification --
-    when False the callable simply runs the teacher (an honest failure, never a silently bad model).
+    when False the callable simply runs the teacher instead of deploying an unverified student.
     """
 
     cascade: Cascade
@@ -203,7 +202,7 @@ class Solution:
     ood: float | None = None  # OOD-floor quantile the gate was fit with (None = no gate)
     seed: int = 0
     synthesized: int = 0  # synthetic (generative-sampled, teacher-labeled) inputs in the training set
-    gate_inputs: list = field(default_factory=list)  # REAL inputs only — what the p(x) gate is fit on
+    gate_inputs: list = field(default_factory=list)  # real inputs only -- what the p(x) gate is fit on
     edge: Any = None  # EdgeDistillResult when solve() ran under a DeviceSpec (footprint, pareto, design)
 
     def __call__(self, x: Any) -> Any:
@@ -237,7 +236,7 @@ class Solution:
         """Re-distill with the harvested (escalated) labels; promote only if it verifies at least as well.
 
         Returns True when a better student was promoted. The calibration slice is never trained on, so the
-        conformal guarantee and the agreement comparison stay honest across rounds.
+        conformal guarantee and the agreement comparison remain valid across rounds.
         """
         if not self.cal_inputs:
             raise RuntimeError(
@@ -272,17 +271,20 @@ class Solution:
         return self.target_agreement is None or agree >= self.target_agreement
 
     def health(self, recent_inputs: Any = None, *, p_threshold: float = 0.01) -> dict[str, Any]:
-        """Is the calibration still holding on live traffic? The guarantee-watcher.
+        """Check whether live escalation behavior has drifted from calibration.
 
-        The conformal escalate-or-answer rate was calibrated under exchangeability; when the input
-        distribution drifts, the live escalation rate moves away from the verified baseline — which is
-        exactly the observable to alarm on. This compares the live rate against the baseline with an
-        exact binomial test, and (when ``recent_inputs`` are supplied and an OOD gate exists) also
-        checks the gate's out-of-distribution hit-rate against its design quantile.
+        The conformal answer-or-escalate rule is calibrated under an
+        exchangeability assumption. When the input distribution shifts, the live
+        escalation rate may move away from the verified baseline. This method
+        compares the live rate with the baseline using an exact binomial test
+        and, when ``recent_inputs`` and an OOD gate are available, compares the
+        gate hit rate with its design quantile.
 
-        Returns a dict with ``drifted`` (bool), the rates, and p-values. Honest caveat: a drift alarm
-        means "the world changed, escalations (and cost) will rise, re-solve soon" — the SYSTEM stays
-        correct throughout because unsure inputs still go to the teacher."""
+        Returns a dictionary with ``drifted``, live and baseline rates, and
+        p-values where enough observations are available. A drift alarm means
+        traffic has changed and retraining or review may be needed; abstained
+        inputs still route to the teacher.
+        """
         from scipy.stats import binomtest
 
         stats = self.cascade.stats
@@ -387,7 +389,7 @@ def solve(
 
     Args:
         teacher: The callable performing the task today (per-item or batched). It labels the dataset and
-            remains the fallback for inputs the student is not sure about.
+            remains the fallback for inputs the student does not handle confidently.
         inputs: Example inputs (text, or tuple/dict records) covering the task. The teacher labels them.
         alpha: Escalation honesty -- answer locally only when a single label is conformally covered at
             ``>= 1 - alpha``; otherwise fall back to the teacher.
@@ -415,7 +417,7 @@ def solve(
             precision x recipe search under the device's hard byte/ops/torch-free budget (reusing the
             already-computed labels; the teacher is not re-called) — and the result's footprint,
             Pareto front, and design ledger land on ``Solution.edge``. If nothing fits the budget the
-            Solution is demoted (everything routes to the teacher — an honest failure). Incompatible
+            Solution is demoted (everything routes to the teacher). Incompatible
             with ``propose="auto"`` (the device search subsumes it). A plain string (e.g. ``"cpu"``)
             keeps its old meaning: the torch training device.
         device_space: Optional :class:`~mixle.task.edge.EdgeSpace` constraining the device search

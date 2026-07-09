@@ -1,0 +1,43 @@
+name: Security
+
+# Scan the resolved dependency set for known vulnerabilities. Runs weekly (dependencies can go stale
+# between pushes) and on any change that could affect what gets resolved, plus manual dispatch.
+# Advisory only for now (continue-on-error) -- flip that off once the initial findings, if any, are
+# triaged and the base install is clean.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - ".github/workflows/security.yml"
+  pull_request:
+    paths:
+      - "pyproject.toml"
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pip-audit:
+    name: pip-audit (base install)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install package (base extras only)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pip-audit
+      - name: Audit resolved dependencies
+        continue-on-error: true
+        run: pip-audit

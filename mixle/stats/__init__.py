@@ -1,6 +1,9 @@
-"""Load SequenceEncodableProbabilityDistribution, DistributionSampler, ParameterEstimator,
-and DataSequenceEncoder objects for the distributions in pyps.stats. This module also loads functions used to
-estimate Distributions from data sets.
+"""Public statistical modeling surface for Mixle.
+
+This package re-exports the core distribution, sampler, estimator, accumulator,
+encoder, compute, and serialization APIs used by higher-level inference
+surfaces. Prefer these imports for release-facing examples unless a narrative
+guide points to a narrower implementation module.
 """
 
 from __future__ import annotations
@@ -289,6 +292,13 @@ __all__ = [
     "WeibullSampler",
     "WeibullEstimator",
     "WeibullDataEncoder",
+    "GatedMixtureDistribution",
+    "GatedMixtureSampler",
+    "GatedMixtureEstimator",
+    "GatedMixtureAccumulator",
+    "GatedMixtureAccumulatorFactory",
+    "GatedMixtureDataEncoder",
+    "SoftmaxGate",
     "HeterogeneousMixtureDistribution",
     "HeterogeneousMixtureSampler",
     "HeterogeneousMixtureEstimator",
@@ -640,6 +650,12 @@ __all__ = [
     "CensoredAccumulator",
     "CensoredAccumulatorFactory",
     "CensoredDataEncoder",
+    "CopulaDistribution",
+    "CopulaSampler",
+    "CopulaEstimator",
+    "CopulaAccumulator",
+    "CopulaAccumulatorFactory",
+    "CopulaDataEncoder",
     "ExponentiallyModifiedGaussianDistribution",
     "ExponentiallyModifiedGaussianSampler",
     "ExponentiallyModifiedGaussianEstimator",
@@ -701,6 +717,33 @@ __all__ = [
     "GaussianCopulaSampler",
     "GaussianCopulaEstimator",
     "GaussianCopulaDataEncoder",
+    "ClaytonCopulaDistribution",
+    "ClaytonCopulaSampler",
+    "ClaytonCopulaEstimator",
+    "FrankCopulaDistribution",
+    "FrankCopulaSampler",
+    "FrankCopulaEstimator",
+    "StudentTCopulaDistribution",
+    "StudentTCopulaSampler",
+    "StudentTCopulaEstimator",
+    "GumbelCopulaDistribution",
+    "GumbelCopulaSampler",
+    "GumbelCopulaEstimator",
+    "CVineCopulaDistribution",
+    "CVineCopulaSampler",
+    "CVineCopulaEstimator",
+    "DVineCopulaDistribution",
+    "DVineCopulaSampler",
+    "DVineCopulaEstimator",
+    "RVineCopulaDistribution",
+    "RVineCopulaSampler",
+    "RVineCopulaEstimator",
+    "GaussianPairCopula",
+    "ClaytonPairCopula",
+    "FrankPairCopula",
+    "GumbelPairCopula",
+    "StudentTPairCopula",
+    "IndependencePairCopula",
     "MatrixNormalDistribution",
     "MatrixNormalSampler",
     "MatrixNormalEstimator",
@@ -865,6 +908,14 @@ from mixle.stats.combinator.conditional import (
     ConditionalDistributionSampler,
     ConditionalEnumerator,
     ConditionalEstimator,
+)
+from mixle.stats.combinator.copula import (
+    CopulaAccumulator,
+    CopulaAccumulatorFactory,
+    CopulaDataEncoder,
+    CopulaDistribution,
+    CopulaEstimator,
+    CopulaSampler,
 )
 from mixle.stats.combinator.exponential_tilt import (
     ExponentialTiltedDataEncoder,
@@ -1176,6 +1227,15 @@ from mixle.stats.latent.dirac_length import (
     DiracLengthMixtureEstimator,
     DiracLengthMixtureSampler,
 )
+from mixle.stats.latent.gated_mixture import (
+    GatedMixtureAccumulator,
+    GatedMixtureAccumulatorFactory,
+    GatedMixtureDataEncoder,
+    GatedMixtureDistribution,
+    GatedMixtureEstimator,
+    GatedMixtureSampler,
+    SoftmaxGate,
+)
 from mixle.stats.latent.heterogeneous_mixture import (
     HeterogeneousMixtureDataEncoder,
     HeterogeneousMixtureDistribution,
@@ -1334,6 +1394,11 @@ from mixle.stats.multivariate.categorical_multinomial import (
     MultinomialEstimator,
     MultinomialSampler,
 )
+from mixle.stats.multivariate.clayton_copula import (
+    ClaytonCopulaDistribution,
+    ClaytonCopulaEstimator,
+    ClaytonCopulaSampler,
+)
 from mixle.stats.multivariate.diagonal_gaussian import (
     DiagonalGaussianDataEncoder,
     DiagonalGaussianDistribution,
@@ -1346,11 +1411,21 @@ from mixle.stats.multivariate.dirichlet_multinomial import (
     DirichletMultinomialEstimator,
     DirichletMultinomialSampler,
 )
+from mixle.stats.multivariate.frank_copula import (
+    FrankCopulaDistribution,
+    FrankCopulaEstimator,
+    FrankCopulaSampler,
+)
 from mixle.stats.multivariate.gaussian_copula import (
     GaussianCopulaDataEncoder,
     GaussianCopulaDistribution,
     GaussianCopulaEstimator,
     GaussianCopulaSampler,
+)
+from mixle.stats.multivariate.gumbel_copula import (
+    GumbelCopulaDistribution,
+    GumbelCopulaEstimator,
+    GumbelCopulaSampler,
 )
 from mixle.stats.multivariate.integer_multinomial import (
     IntegerMultinomialDataEncoder,
@@ -1370,6 +1445,30 @@ from mixle.stats.multivariate.multivariate_student_t import (
     MultivariateStudentTDistribution,
     MultivariateStudentTEstimator,
     MultivariateStudentTSampler,
+)
+from mixle.stats.multivariate.rvine_copula import (
+    RVineCopulaDistribution,
+    RVineCopulaEstimator,
+    RVineCopulaSampler,
+)
+from mixle.stats.multivariate.student_t_copula import (
+    StudentTCopulaDistribution,
+    StudentTCopulaEstimator,
+    StudentTCopulaSampler,
+)
+from mixle.stats.multivariate.vine_copula import (
+    ClaytonPairCopula,
+    CVineCopulaDistribution,
+    CVineCopulaEstimator,
+    CVineCopulaSampler,
+    DVineCopulaDistribution,
+    DVineCopulaEstimator,
+    DVineCopulaSampler,
+    FrankPairCopula,
+    GaussianPairCopula,
+    GumbelPairCopula,
+    IndependencePairCopula,
+    StudentTPairCopula,
 )
 from mixle.stats.processes.birth_death import (
     BirthDeathSamplingDataEncoder,

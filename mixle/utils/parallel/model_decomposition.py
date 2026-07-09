@@ -1,4 +1,4 @@
-"""Structural model-decomposition planner (component C2 of the model-parallel design).
+"""Structural model-decomposition planner for model-parallel execution.
 
 Turns *any* mixle model into a model-parallel placement by walking the opt-in decomposition
 contract (:mod:`mixle.stats.compute.decomposition`) instead of a blind reflective ``__dict__`` walk:
@@ -13,7 +13,7 @@ contract (:mod:`mixle.stats.compute.decomposition`) instead of a blind reflectiv
     only ever understood mixture components and had no consumer).
 
 It works for every family: nodes that do not opt into the contract report ``Decomposition.atomic()`` and
-are simply replicated (data-parallel, already optimal). See ``~/codex/notes/model-parallel-design.md``.
+are simply replicated, preserving the ordinary data-parallel path.
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ def subtree_work(model: Any, _seen: dict[int, bool] | None = None) -> float:
     """Total compute weight of a model subtree -- own emission cost plus ALL descendants (counted once).
 
     Recurses over :func:`cost_children` (every nested distribution), so a unit's cost includes heavy
-    subtrees the executor can't split (a nested HMM, a GP leaf), making the balance honest about where the
+    subtrees the executor can't split (a nested HMM, a GP leaf), making the balance explicit about where the
     FLOPs actually are -- not just where the model happens to be shardable.
     """
     seen = _seen if _seen is not None else {}
@@ -186,6 +186,7 @@ class AxisCandidate:
 
     @property
     def total_work(self) -> float:
+        """Total compute-weight proxy across all units in this candidate axis."""
         return float(sum(self.unit_works))
 
 
@@ -228,7 +229,7 @@ def best_parallel_axis(model: Any, max_workers: int | None = None) -> AxisCandid
     def benefit(c: AxisCandidate) -> float:
         # serial-time removed by cutting this axis with P workers under greedy scheduling: the parallel
         # time is bounded BELOW by the heaviest single unit (a fat unit can't be split here), so an
-        # imbalanced axis -- e.g. a composite whose two factors are [heavy mixture, tiny leaf] -- scores
+        # imbalanced axis -- e.g. a composite whose two factors are [heavy mixture, light leaf] -- scores
         # near zero even though its total_work (which includes the child) is large. This stops a thin
         # parent from masking the real, balanced axis nested inside it.
         p = c.num_units if max_workers is None else min(max_workers, c.num_units)
@@ -262,6 +263,7 @@ class ModelDecomposition:
 
     @property
     def is_model_parallel(self) -> bool:
+        """Whether this decomposition uses more than one model shard."""
         return self.axis is not DecompAxis.NONE and len(self.cuts) > 1
 
 

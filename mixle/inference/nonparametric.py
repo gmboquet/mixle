@@ -38,6 +38,8 @@ def _tie_term(a: np.ndarray) -> float:
 # --- two independent samples ------------------------------------------------
 @dataclass
 class MannWhitneyResult:
+    """Result of a two-sample Mann-Whitney U test."""
+
     statistic: float  # the U statistic for the first sample
     statistic2: float  # the U statistic for the second sample (= n1*n2 - statistic)
     zscore: float
@@ -108,7 +110,7 @@ class TestResult:
 
 
 def brunner_munzel(x: Any, y: Any, *, alternative: str = "two-sided", distribution: str = "t") -> TestResult:
-    """Brunner-Munzel test: the generalized Wilcoxon test that does NOT assume equal variances/shapes.
+    """Brunner-Munzel test: the generalized Wilcoxon test that does not assume equal variances/shapes.
 
     Tests the stochastic-equality null ``P(x < y) + 0.5 P(x = y) = 1/2``. ``distribution='t'`` uses a
     Satterthwaite t reference (recommended for small samples); ``'normal'`` the normal approximation.
@@ -298,6 +300,8 @@ def dunn_test(*samples: Any, p_adjust: str = "holm") -> DunnResult:
 # --- paired / one sample ----------------------------------------------------
 @dataclass
 class WilcoxonResult:
+    """Result of a paired or one-sample Wilcoxon signed-rank test."""
+
     statistic: float  # the smaller of W+ / W- (test statistic)
     zscore: float
     pvalue: float

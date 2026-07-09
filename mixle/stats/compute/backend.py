@@ -1,4 +1,9 @@
-"""Generic backend scoring dispatch over distribution-owned math hooks."""
+"""Backend scoring dispatch over distribution-owned math hooks.
+
+These helpers route encoded data through engine-aware distribution methods or
+generated declarations while preserving the legacy accumulator path when a child
+distribution cannot stay resident on the active engine.
+"""
 
 from __future__ import annotations
 

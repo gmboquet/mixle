@@ -1,7 +1,4 @@
-"""Evaluate, estimate, and sample from a Tweedie distribution (compound Poisson-Gamma, 1 < p < 2).
-
-Defines TweedieDistribution, TweedieSampler, TweedieAccumulatorFactory, TweedieAccumulator,
-TweedieEstimator, and TweedieDataEncoder for use with mixle.
+"""Tweedie compound Poisson-Gamma distributions for ``1 < p < 2``.
 
 Data type (float >= 0): the Tweedie exponential-dispersion model with mean ``mu``, dispersion
 ``phi``, and **fixed** power ``p`` in ``(1, 2)`` is the compound Poisson-Gamma law
@@ -115,7 +112,7 @@ class TweedieDistribution(SequenceEncodableProbabilityDistribution):
         self.lam, self.gamma_shape, self.gamma_scale = _tweedie_params(self.mu, self.phi, self.p)
 
     def __str__(self) -> str:
-        """Returns string representation of TweedieDistribution object."""
+        """Return a constructor-style representation of the Tweedie distribution."""
         return "TweedieDistribution(%s, %s, %s, name=%s, keys=%s)" % (
             repr(self.mu),
             repr(self.phi),
@@ -159,6 +156,7 @@ class TweedieDistribution(SequenceEncodableProbabilityDistribution):
     # series so no ``-inf - (-inf)`` NaN can form, then ``where`` restores the point mass / -inf. ---
     @classmethod
     def compute_capabilities(cls):
+        """Return compute-backend metadata for Tweedie scoring."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
@@ -199,7 +197,7 @@ class TweedieDistribution(SequenceEncodableProbabilityDistribution):
         return TweedieEstimator(p=self.p, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "TweedieDataEncoder":
-        """Returns a TweedieDataEncoder object."""
+        """Return the encoder for Tweedie observations."""
         return TweedieDataEncoder()
 
 
@@ -236,6 +234,7 @@ class TweedieAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: TweedieDistribution | None) -> None:
+        """Accumulate weighted count, sum, and second moment for one observation."""
         xx = float(x)
         if not np.isfinite(xx) or xx < 0.0:
             raise ValueError("TweedieDistribution requires non-negative observations.")
@@ -245,9 +244,11 @@ class TweedieAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 += xx * xw
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics with one weighted observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: TweedieDistribution | None) -> None:
+        """Accumulate weighted count, sum, and second moment from encoded observations."""
         xx = np.asarray(x, dtype=np.float64)
         ww = np.asarray(weights, dtype=np.float64)
         self.count += ww.sum()
@@ -255,28 +256,34 @@ class TweedieAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 += np.dot(xx * xx, ww)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "TweedieAccumulator":
+        """Merge serialized moment statistics into this accumulator."""
         self.count += suff_stat[0]
         self.sum += suff_stat[1]
         self.sum2 += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return the total weight, weighted sum, and weighted second moment."""
         return self.count, self.sum, self.sum2
 
     def from_value(self, x: tuple[float, float, float]) -> "TweedieAccumulator":
+        """Restore the accumulator from serialized moment statistics."""
         self.count, self.sum, self.sum2 = x
         return self
 
     def scale(self, c: float) -> "TweedieAccumulator":
+        """Scale accumulated moment statistics by a constant."""
         self.count *= c
         self.sum *= c
         self.sum2 *= c
         return self
 
     def acc_to_encoder(self) -> "TweedieDataEncoder":
+        """Return an encoder for non-negative Tweedie observations."""
         return TweedieDataEncoder()
 
 
@@ -288,6 +295,7 @@ class TweedieAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> "TweedieAccumulator":
+        """Create an empty Tweedie accumulator."""
         return TweedieAccumulator(name=self.name, keys=self.keys)
 
 
@@ -307,6 +315,7 @@ class TweedieEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> "TweedieAccumulatorFactory":
+        """Return a factory for Tweedie moment accumulators."""
         return TweedieAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> "TweedieDistribution":
@@ -332,6 +341,7 @@ class TweedieDataEncoder(DataSequenceEncoder):
         return isinstance(other, TweedieDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
+        """Validate and encode observations as a non-negative float array."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and (np.any(np.isnan(rv)) or np.any(np.isinf(rv)) or np.any(rv < 0.0)):
             raise ValueError("TweedieDistribution requires finite non-negative observations.")

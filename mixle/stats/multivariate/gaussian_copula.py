@@ -96,6 +96,7 @@ class GaussianCopulaSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> np.ndarray:
+        """Draw one copula sample or a batch of independent copula samples."""
         n = 1 if size is None else int(size)
         z = self.rng.multivariate_normal(np.zeros(self.dist.dim), self.dist.corr, size=n)
         u = norm.cdf(z)
@@ -114,15 +115,18 @@ class GaussianCopulaAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: np.ndarray, weight: float, estimate: GaussianCopulaDistribution | None) -> None:
+        """Accumulate weighted normal-score moments for one copula observation."""
         z = norm.ppf(np.clip(np.asarray(x, dtype=np.float64), _CLIP, 1.0 - _CLIP))
         self.sum_z += weight * z
         self.sum_zz += weight * np.outer(z, z)
         self.count += weight
 
     def initialize(self, x: np.ndarray, weight: float, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics with one weighted observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: GaussianCopulaDistribution | None) -> None:
+        """Accumulate weighted moments from encoded normal-score observations."""
         z = np.asarray(x, dtype=np.float64)  # already normal-scored by the encoder
         w = np.asarray(weights, dtype=np.float64)
         self.sum_z += z.T @ w
@@ -130,18 +134,22 @@ class GaussianCopulaAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += float(w.sum())
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, float]) -> "GaussianCopulaAccumulator":
+        """Merge serialized normal-score moments into this accumulator."""
         self.sum_z += suff_stat[0]
         self.sum_zz += suff_stat[1]
         self.count += suff_stat[2]
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, float]:
+        """Return the weighted first moments, second moments, and total weight."""
         return self.sum_z.copy(), self.sum_zz.copy(), self.count
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray, float]) -> "GaussianCopulaAccumulator":
+        """Restore the accumulator from serialized normal-score moments."""
         self.sum_z = np.asarray(x[0], dtype=np.float64).copy()
         self.sum_zz = np.asarray(x[1], dtype=np.float64).copy()
         self.count = float(x[2])
@@ -149,6 +157,7 @@ class GaussianCopulaAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into a keyed statistics dictionary."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -156,10 +165,12 @@ class GaussianCopulaAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from a keyed statistics dictionary."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "GaussianCopulaDataEncoder":
+        """Return an encoder that produces normal-score observations."""
         return GaussianCopulaDataEncoder()
 
 
@@ -172,6 +183,7 @@ class GaussianCopulaAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> GaussianCopulaAccumulator:
+        """Create an empty Gaussian copula accumulator."""
         return GaussianCopulaAccumulator(self.dim, name=self.name, keys=self.keys)
 
 
@@ -185,11 +197,13 @@ class GaussianCopulaEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> GaussianCopulaAccumulatorFactory:
+        """Return a factory for Gaussian copula sufficient-statistic accumulators."""
         return GaussianCopulaAccumulatorFactory(self.dim, name=self.name, keys=self.keys)
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, float]
     ) -> GaussianCopulaDistribution:
+        """Estimate the copula correlation matrix from normal-score moments."""
         sum_z, sum_zz, count = suff_stat
         if count <= 0.0:
             return GaussianCopulaDistribution(np.eye(self.dim), name=self.name, keys=self.keys)
@@ -219,5 +233,6 @@ class GaussianCopulaDataEncoder(DataSequenceEncoder):
         return isinstance(other, GaussianCopulaDataEncoder)
 
     def seq_encode(self, x: Sequence[np.ndarray]) -> np.ndarray:
+        """Encode copula observations by clipping and applying the normal quantile."""
         u = np.asarray(x, dtype=np.float64)
         return norm.ppf(np.clip(u, _CLIP, 1.0 - _CLIP))

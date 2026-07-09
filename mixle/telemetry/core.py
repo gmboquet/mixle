@@ -26,6 +26,7 @@ EVENT_KINDS = (
     "reason",  # a reasoning action (retrieve/compute/simulate/create/delegate/escalate) + its gain
     "pool_job",  # a PoolJob lifecycle event: submit/start/finish, cost, duration
     "drift",  # a drift alarm on a served artifact
+    "em_round",  # one worker-rank's E/M-step timing+bytes+accumulator size for one distributed EM round
 )
 
 _TIME_KEY = "_wall_time"  # tests inject a deterministic clock via record(when=...)
@@ -47,6 +48,7 @@ class Event:
             raise ValueError(f"unknown event kind {self.kind!r}; expected one of {EVENT_KINDS}")
 
     def as_row(self) -> dict[str, Any]:
+        """Return this event as a JSON-serializable row."""
         return asdict(self)
 
 
@@ -96,6 +98,7 @@ class Telemetry:
         return ev
 
     def events(self, *, kind: str | None = None) -> Iterator[Event]:
+        """Yield recorded events, optionally filtered by kind."""
         for ev in list(self._buffer):
             if kind is None or ev.kind == kind:
                 yield ev
@@ -108,6 +111,7 @@ class Telemetry:
         return len(self._buffer)
 
     def flush(self) -> None:
+        """Flush any buffered events to the configured JSONL log."""
         with self._lock:
             self._flush_locked()
 

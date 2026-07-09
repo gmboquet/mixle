@@ -103,8 +103,14 @@ class ConstrainedDecodeTest(unittest.TestCase):
         from mixle.task.sft_plan import _plans_match
 
         tools = [TS("lookup_order", ["order_id"]), TS("notify", ["user"])]
-        free = sft_planner(_teacher, _requests(160), tools, seed=0, epochs=10, d_model=64, n_layer=2, constrained=False)
-        con = sft_planner(_teacher, _requests(160), tools, seed=0, epochs=10, d_model=64, n_layer=2, constrained=True)
+        # block=128 comfortably covers every serialized prompt+completion pair in this fixture (max 96
+        # chars, verified empirically) while cutting the O(block^2) attention cost vs. the 192 default.
+        free = sft_planner(
+            _teacher, _requests(160), tools, seed=0, epochs=10, d_model=64, n_layer=2, constrained=False, block=128
+        )
+        con = sft_planner(
+            _teacher, _requests(160), tools, seed=0, epochs=10, d_model=64, n_layer=2, constrained=True, block=128
+        )
         self.assertGreater(con.plan_agreement, free.plan_agreement)  # the lift where compute is scarce
 
         specs = {t.name: t for t in tools}

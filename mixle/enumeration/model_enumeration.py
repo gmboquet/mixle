@@ -202,8 +202,10 @@ def top_k_scored(
 
 
 def _prune_step(items: Iterable[tuple[Any, float]], top_k: int | None, top_p: float | None) -> list[tuple[Any, float]]:
-    """Restrict a step's (token, log_prob) continuations to the top-k / top-p (nucleus) -- the structural
-    pruning that makes peaked neural distributions cheap to enumerate."""
+    """Restrict a step's (token, log_prob) continuations to the top-k / top-p (nucleus).
+
+    This structural pruning keeps peaked neural distributions tractable to enumerate.
+    """
     ranked = sorted(items, key=lambda u: -u[1])
     if top_k is not None:
         ranked = ranked[:top_k]

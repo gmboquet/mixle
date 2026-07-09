@@ -20,6 +20,7 @@ from mixle.stats.compute.pdist import (
 
 from .factories import (
     AMBIGUOUS_SCORE_GAP_BITS,
+    EMBEDDING_MIN_DIM,
     ID_DISTINCT_FRACTION,
     ID_MIN_COUNT,
     INT_ID_RANGE_MULTIPLIER,
@@ -30,6 +31,7 @@ from .factories import (
     VALIDATION_ALPHA,
     VALIDATION_VARIANCE_FLOOR,
     _dense_integer_support,
+    _has_torch,
     _integer_range,
     get_categorical_estimator,
     get_composite_estimator,
@@ -37,6 +39,8 @@ from .factories import (
     get_gamma_estimator,
     get_gaussian_estimator,
     get_gaussian_mixture_estimator,
+    get_hybrid_embedding_estimator,
+    get_hybrid_image_estimator,
     get_ignored_estimator,
     get_integer_categorical_estimator,
     get_lognormal_estimator,
@@ -84,6 +88,25 @@ class MarginalFieldProfile:
     gof_pvalue: float | None = None
     notes: list[str] = field(default_factory=list)
 
+    def robust_recommendation(self) -> str:
+        """The model choice to actually trust, combining the in-sample (BIC) pick with the held-out
+        validation check rather than leaving their disagreement as a note for a human to notice.
+
+        Held-out generalization is stronger evidence than an in-sample penalized-likelihood score:
+        a flexible family (a 3-parameter shape family, a 2-component mixture) can win BIC by fitting
+        noise/outliers in the training data that do not repeat in held-out data, which is exactly the
+        failure mode BIC's asymptotic parameter-count penalty does not always catch at small-to-moderate
+        n. So: agree with ``recommendation`` whenever there is no held-out evidence, or the two already
+        agree; defer to ``validation_recommendation`` only when it disagrees by a DECISIVE margin (the
+        same ``AMBIGUOUS_SCORE_GAP_BITS`` threshold already used to flag a close call elsewhere in this
+        module) -- a marginal, ambiguous validation preference is not enough evidence to overturn BIC.
+        """
+        if self.validation_recommendation is None or self.validation_recommendation == self.recommendation:
+            return self.recommendation
+        if self.validation_score_gap_bits is None or self.validation_score_gap_bits < AMBIGUOUS_SCORE_GAP_BITS:
+            return self.recommendation
+        return self.validation_recommendation
+
     def model_weights(self) -> dict[str, float]:
         """Return Schwarz (BIC) model weights over the scored candidates, summing to 1.
 
@@ -95,6 +118,7 @@ class MarginalFieldProfile:
         return _bic_weights(self.model_scores_bits, self.observed_count)
 
     def summary(self) -> dict[str, Any]:
+        """Return a JSON-serializable summary of the marginal field evidence."""
         return {
             "path": format_path(self.path),
             "role": self.role,
@@ -104,6 +128,7 @@ class MarginalFieldProfile:
             "observed_count": self.observed_count,
             "kind": self.kind,
             "recommendation": self.recommendation,
+            "robust_recommendation": self.robust_recommendation(),
             "bits_per_obs": self.bits_per_obs,
             "entropy_bits": self.entropy_bits,
             "cardinality": self.cardinality,
@@ -148,6 +173,7 @@ class PairwiseDependencyHint:
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
+        """Return a JSON-serializable summary of the dependency hint."""
         return {
             "left": format_path(self.left),
             "right": format_path(self.right),
@@ -184,9 +210,11 @@ class StructureProfile:
     pairwise_pair_strategy: str = "none"
 
     def recommend(self) -> ParameterEstimator:
+        """Return the estimator selected by the structure-analysis pass."""
         return self.estimator
 
     def summary(self) -> dict[str, Any]:
+        """Return a JSON-serializable summary of the structure profile."""
         return {
             "total_rows": self.total_rows,
             "sampled_rows": self.sampled_rows,
@@ -205,12 +233,18 @@ class StructureProfile:
         }
 
     def explain(self) -> list[str]:
+        """Render human-readable explanation lines for field and dependency choices."""
         lines = []
         for field_profile in self.fields:
             bits = "" if field_profile.bits_per_obs is None else " (~%.3f bits/obs)" % field_profile.bits_per_obs
+            robust = field_profile.robust_recommendation()
+            overridden = (
+                " (validation-overridden from %s)" % field_profile.recommendation
+                if robust != field_profile.recommendation
+                else ""
+            )
             lines.append(
-                "%s: %s -> %s%s"
-                % (format_path(field_profile.path), field_profile.kind, field_profile.recommendation, bits)
+                "%s: %s -> %s%s%s" % (format_path(field_profile.path), field_profile.kind, robust, overridden, bits)
             )
             for note in field_profile.notes:
                 lines.append("  - %s" % note)
@@ -261,6 +295,7 @@ class StructureProfile:
 
 
 def format_path(path: tuple[Any, ...]) -> str:
+    """Format a tuple path as a compact JSONPath-like field reference."""
     if len(path) == 0:
         return "$"
     rv = "$"
@@ -371,6 +406,14 @@ def _lognormal_bits(values: Sequence[float]) -> float | None:
     """
     arr = np.asarray(values, dtype=float)
     if arr.size == 0 or not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
+        return None
+    if arr.var() <= 0.0:
+        # Raw-space variance is exactly zero (numerically constant data) -- unlike the Gaussian/
+        # Student-t/Gamma candidates, which all reject this directly, log-space variance of a
+        # constant array is NOT exactly zero: np.log(c) computed independently per repeated element
+        # rounds slightly differently each time, leaving a ~1e-32-scale floating-point artifact that
+        # _gaussian_bits would otherwise treat as a real (absurdly tight, winning) signal. Reject here
+        # too, on the same raw-space test the other candidates already use.
         return None
     logs = np.log(arr)
     gauss = _gaussian_bits(float(logs.var()))
@@ -977,6 +1020,10 @@ def _validate_marginal_profile(
         profile.validation_notes.append(
             "validation prefers %s over marginal recommendation %s" % (recommendation, profile.recommendation)
         )
+        if profile.robust_recommendation() == recommendation:
+            profile.validation_notes.append(
+                "gap is decisive -- robust_recommendation() overrides to %s" % recommendation
+            )
     return profile
 
 
@@ -1421,15 +1468,16 @@ def analyze_structure(
 
     Integer marginals are compared by BIC-style average code length. Pairwise
     hints report plug-in MI, finite-sample adjusted MI, and BIC edge gain.
-    Pairwise hints are deliberately unconditional and encoded through cheap
+    Pairwise hints are deliberately unconditional and encoded through low-overhead
     empirical/quantile codes. They are useful evidence, not proof of topology:
     latent classes or states can explain the same bit gains.
     Marginal validation is a bounded deterministic train/validation split over
-    scalar fields, meant as a cheap predictive sanity check on the BIC choice.
+    scalar fields, meant as a low-overhead predictive sanity check on the BIC choice.
     """
     rows = list(normalize_input(data))  # accept a DataFrame / RDD / DataSource, not only a bare list
     total_rows = len(rows)
-    estimator = get_estimator(rows, pseudo_count=pseudo_count, emp_suff_stat=emp_suff_stat, use_bstats=use_bstats)
+    root = DatumNode(data=rows)  # built directly (not via get_estimator) so its modality checks are inspectable
+    estimator = root.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats)
     field_series = _extract_field_series(rows)
     fields = [
         _profile_series(path, role, values)
@@ -1443,6 +1491,30 @@ def analyze_structure(
             )
 
     warnings = ["pairwise hints are unconditional; latent mixture/state/topic structure can explain or hide them"]
+    vec_dim = root._fixed_numeric_vector_dim()
+    mat_shape = root._fixed_numeric_matrix_shape()
+    if vec_dim is not None and vec_dim >= EMBEDDING_MIN_DIM:
+        if _has_torch():
+            warnings.append(
+                "modality fingerprint: embedding (dim=%d >= %d) -> routed to a hybrid neural density "
+                "(an exact coupling flow) instead of a bare multivariate Gaussian" % (vec_dim, EMBEDDING_MIN_DIM)
+            )
+        else:
+            warnings.append(
+                "modality fingerprint: embedding (dim=%d >= %d) would route to a hybrid neural density, "
+                "but torch is not installed -- fell back to a multivariate Gaussian" % (vec_dim, EMBEDDING_MIN_DIM)
+            )
+    elif mat_shape is not None:
+        if _has_torch():
+            warnings.append(
+                "modality fingerprint: image (shape=%s) -> routed through a frozen image_features extractor "
+                "into a hybrid neural density instead of a per-row sequence model" % (mat_shape,)
+            )
+        else:
+            warnings.append(
+                "modality fingerprint: image (shape=%s) would route to a hybrid neural density, but torch "
+                "is not installed -- fell back to the per-row sequence model" % (mat_shape,)
+            )
     observed_rows = [u for u in rows if u is not None]
     if use_bstats and observed_rows and all(isinstance(u, dict) for u in observed_rows):
         warnings.append(
@@ -1593,7 +1665,8 @@ class DatumNode:
         self.count = 0
         self.none_count = 0
         self.nan_count = 0
-        self.inf_count = 0
+        self.pos_inf_count = 0
+        self.neg_inf_count = 0
         self.str_count = 0
         self.float_count = 0
         self.int_count = 0
@@ -1610,10 +1683,12 @@ class DatumNode:
             self.add_data(data)
 
     def add_data(self, x):
+        """Add an iterable of observations to the node profile."""
         for xx in x:
             self.add_datum(xx)
 
     def add_datum(self, x):
+        """Add one observation and update scalar/container child profiles."""
         self.count += 1
 
         if x is None:
@@ -1654,7 +1729,8 @@ class DatumNode:
         "count",
         "none_count",
         "nan_count",
-        "inf_count",
+        "pos_inf_count",
+        "neg_inf_count",
         "str_count",
         "float_count",
         "int_count",
@@ -1669,6 +1745,7 @@ class DatumNode:
     )
 
     def copy(self):
+        """Return a deep copy of this profiling node and its children."""
         rv = DatumNode(self.parent)
         rv.children = [u.copy() for u in self.children]
         rv.dict_children = {k: v.copy() for k, v in self.dict_children.items()}
@@ -1680,6 +1757,7 @@ class DatumNode:
         return rv
 
     def merge(self, x):
+        """Merge another compatible profiling node into this node."""
         old_dict_count = self.dict_count
         for c in self._COUNTERS:
             setattr(self, c, getattr(self, c) + getattr(x, c))
@@ -1714,7 +1792,10 @@ class DatumNode:
             if math.isnan(x):
                 self.nan_count += v
             elif math.isinf(x):
-                self.inf_count += v
+                if x > 0:
+                    self.pos_inf_count += v
+                else:
+                    self.neg_inf_count += v
             else:
                 # Python floats carry continuous-measurement semantics even
                 # when a realized value happens to be integral, e.g. a
@@ -1828,12 +1909,19 @@ class DatumNode:
         return POISSON_DISPERSION_MIN <= dispersion <= POISSON_DISPERSION_MAX
 
     def _merged_child(self):
+        if not self.children:
+            # every observed sequence was empty (e.g. data = [[], [], []]) -- no element was ever
+            # added, so there is no element type to merge. An empty DatumNode's own get_estimator()
+            # already resolves to "ignored" (typed == 0), the correct answer: the length model (built
+            # separately from self.len_dict, e.g. {0: n}) still captures "always empty" correctly.
+            return DatumNode()
         child = self.children[0].copy()
         for u in self.children[1:]:
             child = child.merge(u)
         return child
 
     def get_estimator(self, pseudo_count: float | None = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
+        """Infer and return an estimator for the profiled observations."""
         structured = self.tuple_count + self.seq_count + self.set_count + self.dict_count
         typed = self.count - self.none_count
         container_kinds = sum(u > 0 for u in (self.tuple_count, self.seq_count, self.set_count, self.dict_count))
@@ -1870,7 +1958,18 @@ class DatumNode:
                     use_bstats=use_bstats,
                 )
             elif self._fixed_numeric_vector_dim() is not None:
-                rv = get_multivariate_gaussian_estimator(self._fixed_numeric_vector_dim(), use_bstats=use_bstats)
+                vec_dim = self._fixed_numeric_vector_dim()
+                if vec_dim >= EMBEDDING_MIN_DIM and _has_torch():
+                    # modality fingerprint: "embedding" -- a high-dim numeric vector is far more often a
+                    # frozen encoder's output than a handful of jointly-Gaussian measurements, so a bare
+                    # multivariate Gaussian is the wrong default here (see EMBEDDING_MIN_DIM in factories.py).
+                    rv = get_hybrid_embedding_estimator(vec_dim)
+                else:
+                    rv = get_multivariate_gaussian_estimator(vec_dim, use_bstats=use_bstats)
+            elif self._fixed_numeric_matrix_shape() is not None and _has_torch():
+                # modality fingerprint: "image" -- a homogeneous 2-D numeric array field, routed through a
+                # frozen deterministic feature extractor into the same hybrid neural density.
+                rv = get_hybrid_image_estimator()
             elif fixed_arity and self.tuple_count == 0 and not self._children_homogeneous():
                 # fixed-length lists/vectors with positionally distinct types
                 rv = get_composite_estimator(
@@ -1897,10 +1996,28 @@ class DatumNode:
         if self.nan_count > 0:
             rv = get_optional_estimator(rv, math.nan, use_bstats=use_bstats)
 
+        # +-inf is tracked (pos_inf_count/neg_inf_count) but, unlike None/NaN, was never wrapped here --
+        # the base estimator built above (e.g. GaussianEstimator, whose distribution requires finite
+        # support) never sees these values (add_datum excludes them from vdict), so get_estimator()
+        # returned successfully while optimize() on the SAME unfiltered data crashed. Wrap each sign
+        # present the same way None/NaN already are, so a field containing infinities gets a genuinely
+        # fittable estimator instead of one that silently can't handle the data it was inferred from.
+        if self.pos_inf_count > 0:
+            rv = get_optional_estimator(rv, math.inf, use_bstats=use_bstats)
+
+        if self.neg_inf_count > 0:
+            rv = get_optional_estimator(rv, -math.inf, use_bstats=use_bstats)
+
         return rv
 
     def _fixed_numeric_vector_dim(self):
-        if self.tuple_count > 0 or self.seq_count == 0 or self.set_count > 0 or len(self.len_dict) != 1:
+        if (
+            self.tuple_count > 0
+            or self.seq_count == 0
+            or self.set_count > 0
+            or self.dict_count > 0
+            or len(self.len_dict) != 1
+        ):
             return None
         dim = next(iter(self.len_dict))
         if dim <= 1 or len(self.children) != dim:
@@ -1908,7 +2025,7 @@ class DatumNode:
         for child in self.children:
             if child.count != self.seq_count:
                 return None
-            if child.none_count > 0 or child.nan_count > 0 or child.inf_count > 0:
+            if child.none_count > 0 or child.nan_count > 0 or child.pos_inf_count > 0 or child.neg_inf_count > 0:
                 return None
             if child.str_count > 0 or child.bool_count > 0 or child.obj_count > 0:
                 return None
@@ -1917,6 +2034,35 @@ class DatumNode:
             if child.int_count + child.float_count == 0:
                 return None
         return dim
+
+    def _fixed_numeric_matrix_shape(self):
+        """Detect a homogeneous 2-D numeric array field (an "image"-shaped field): a fixed-length outer
+        sequence whose every row is itself a fixed-length numeric vector of the same width. A 2-D/3-D
+        numpy array iterates row-by-row into nested Iterables, so this is what an image datum looks like
+        by the time it reaches DatumNode."""
+        if (
+            self.tuple_count > 0
+            or self.seq_count == 0
+            or self.set_count > 0
+            or self.dict_count > 0
+            or len(self.len_dict) != 1
+        ):
+            return None
+        rows = next(iter(self.len_dict))
+        if rows <= 1 or len(self.children) != rows:
+            return None
+        width = None
+        for child in self.children:
+            if child.count != self.seq_count:
+                return None
+            w = child._fixed_numeric_vector_dim()
+            if w is None:
+                return None
+            if width is None:
+                width = w
+            elif w != width:
+                return None
+        return (rows, width)
 
     def _children_homogeneous(self):
         """True when all positional children carry the same scalar type profile,
@@ -1997,6 +2143,7 @@ def normalize_input(data, *, rdd_cap: int = 200000):
 
 
 def get_estimator(data, pseudo_count: float | None = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
+    """Profile ``data`` and return the automatically selected estimator."""
     return DatumNode(data=normalize_input(data)).get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
 
@@ -2009,18 +2156,19 @@ def get_prototype(
     emp_suff_stat: bool = True,
     use_bstats: bool = False,
 ):
-    """Infer the model structure from raw ``data`` and return a prototype *distribution*.
+    """Infer a model structure and return an initialized prototype distribution.
 
-    Where :func:`get_estimator` returns the estimator (the thing you fit *with*), this returns a concrete,
-    *initialized-but-unfitted* distribution whose tree mirrors the detected families -- the thing you fit.
-    It is the "I just have data, show me the model" front door: inspect which families were chosen, tweak
-    them if you like, then ``optimize(data, prototype)`` (or ``prototype`` straight into ``fit``).
+    Where :func:`get_estimator` returns the estimator used for fitting, this
+    returns a concrete unfitted distribution whose tree mirrors the detected
+    families. Use it when the inferred model shape should be inspected,
+    customized, or passed to ``optimize(data, prototype)`` as a prototype.
 
         proto = get_prototype(records)     # see the inferred composite structure
         model = optimize(records, proto)   # fit it (or pass proto to fit(...))
 
-    ``seed`` makes the (lightly randomized) initialization reproducible; ``p`` is the per-observation
-    keep-probability of the vectorized initializer. Remaining kwargs mirror :func:`get_estimator`.
+    ``seed`` makes the randomized initialization reproducible; ``p`` is the
+    per-observation keep-probability of the vectorized initializer. Remaining
+    arguments mirror :func:`get_estimator`.
     """
     import numpy as np
 

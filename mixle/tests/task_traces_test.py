@@ -135,6 +135,45 @@ class TraceHarvestTest(unittest.TestCase):
         )
         self.assertGreater(tc.selection_agreement, 0.8)  # the agent's own history taught the tiny model
 
+    @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+    def test_harvested_traces_feed_the_plan_writer(self):
+        """workstream C: harvest_agent_traces -> sft_planner, exactly the module docstring's own example."""
+        import numpy as np
+
+        from mixle.task import harvest_agent_traces, sft_planner
+
+        rng = np.random.RandomState(1)
+        cities = ["tokyo", "oslo", "paris", "lima"]
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(120):
+                city = cities[rng.randint(0, 4)]
+                doc = _convo(
+                    f"w{i}",
+                    [
+                        ("user", f"check the weather in {city} please, ref {rng.randint(10, 99)}", []),
+                        ("assistant", "", [("get_weather", {"city": city})]),
+                        ("assistant", "ok", []),
+                    ],
+                )
+                (Path(tmp) / f"{doc['id']}.json").write_text(json.dumps(doc))
+            traces = harvest_agent_traces(tmp)
+
+        # block=96 comfortably covers every serialized prompt+completion pair here (max 69 chars, verified
+        # empirically), cutting the default block=192's O(block^2) attention cost; epochs=25 keeps the same
+        # plan_agreement (0.9167) as the original epochs=40 (verified the epochs=18->20 boundary is where it
+        # drops off), so 25 keeps a solid margin while training ~3.5x faster overall.
+        planner = sft_planner(
+            traces.plan_teacher(),
+            traces.requests(min_steps=1),
+            traces.tool_specs(),
+            seed=0,
+            epochs=25,
+            d_model=64,
+            n_layer=2,
+            block=96,
+        )
+        self.assertGreater(planner.plan_agreement, 0.8)  # the agent's own history taught the plan writer
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,15 +1,16 @@
-"""Create, estimate, and sample from a mixture distribution with homogenous components.
+"""Homogeneous finite mixtures with stable scoring and EM accumulation.
 
-Defines the MixtureDistribution, MixtureSampler, MixtureAccumulatorFactory, MixtureAccumulator,
-MixtureEstimator, and the MixtureDataEncoder classes for use with mixle.
+This module defines ``MixtureDistribution``, ``MixtureEstimator`` and the
+sampler, accumulator, factory, and encoder types used by the standard Mixle
+estimation loop.
 
-MixtureDistribution is defined by the density of the form,
+A ``MixtureDistribution`` has density
 
-P(Y) = sum_{k=1}^{K} P(Y|Z=k)*P(Z=k),
+``p(y) = sum_k p(y | z=k) p(z=k)``.
 
-where P(Z=k) is a mixture weight for component k, and P(Y|Z=k) is defined as a the k^{th} component distribution.
-
-If component distribution P(Y|Z=k) has data type (T), then the Mixture distribution has data type (T) as well.
+All components are expected to model the same observation type. Scoring uses
+log-sum-exp over component log densities and log weights; impossible rows are
+represented as ``-inf`` scores rather than ``NaN``.
 
 """
 
@@ -35,6 +36,7 @@ from mixle.inference.fisher import Path
 from mixle.stats.bayes.dirichlet import DirichletDistribution
 from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 from mixle.stats.compute.pdist import (
+    ContractError,
     DataSequenceEncoder,
     DistributionEnumerator,
     DistributionSampler,
@@ -44,6 +46,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
     child_enumerator,
+    prefix_contract_error,
 )
 from mixle.stats.compute.posterior import CategoricalLatentPosterior
 from mixle.utils.aliasing import MISSING, coalesce_alias
@@ -153,6 +156,15 @@ def _dirichlet_expectations(prior: Any, num_components: int) -> tuple[np.ndarray
     """
     if isinstance(prior, DirichletDistribution):
         alpha = np.asarray(prior.get_parameters(), dtype=float)
+        if alpha.shape[0] != num_components:
+            # unlike SymmetricDirichletDistribution (broadcasts a scalar to num_components by
+            # construction), a full DirichletDistribution's alpha is taken as-is -- a mismatched
+            # length would otherwise pass silently here and only fail later, deep inside a numpy
+            # broadcast in expected_log_density or mid-optimize() in the M-step, far from the
+            # actual mistake (the prior's own arity, not a mixture internals bug).
+            raise ValueError(
+                "mixture weight prior has %d components but the mixture has %d." % (alpha.shape[0], num_components)
+            )
         return alpha, digamma(alpha) - digamma(np.sum(alpha))
     if isinstance(prior, SymmetricDirichletDistribution):
         alpha = np.ones(num_components) * prior.get_parameters()
@@ -161,30 +173,33 @@ def _dirichlet_expectations(prior: Any, num_components: int) -> tuple[np.ndarray
 
 
 class MixtureDistribution(SequenceEncodableProbabilityDistribution):
-    """MixtureDistribution object defined by component distributions and weights.
+    """Finite mixture over homogeneous component distributions.
 
-    The args components (Sequence[SequenceEncodableProbabilityDistribution]) define the component distributions
-    of the mixture distribution as well as the data type. The data type of the MixtureDistribution object is taken
-    to be the data type (T) of the component distributions (all must be the same subclass of
-    SequenceEncodableProbabilityDistribution super class).
+    ``components`` define both the conditional families ``p(x | z=k)`` and the
+    observation type accepted by the mixture. ``w`` contains the component
+    probabilities and is cached as ``log_w`` for stable scalar and vectorized
+    scoring. Zero-weight components are retained for structural compatibility
+    but contribute ``-inf`` to log-density calculations.
 
     Args:
-        components (Sequence[SequenceEncodableProbabilityDistribution]): Set component distributions.
-            Must be same subclass of SequenceEncodableProbabilityDistribution super class with type T.
-        w (ndarray[float]): Mixture weights, must sum to 1.0.
-        name (Optional[str]): Assign string name to MixtureDistribution object.
+        components: Component distributions. Each component should support the
+            same raw observation shape and sequence-encoding contract.
+        w: Component weights. The values are interpreted as simplex weights and
+            should sum to one.
+        name: Optional display name for diagnostics and generated artifacts.
+        weights: Alias for ``w``.
+        prior: Optional joint mixture prior or weight prior.
 
     Attributes:
-        components (List[SequenceEncodableProbabilityDistribution]): List of component distributions (data type T).
-        w (ndarray[float]): Mixture weights assigned from args (w).
-        name (Optional[str]): String name to MixtureDistribution object.
-        zw (ndarray[bool]): True if a weight is 0.0, else False.
-        log_w (ndarray[float]): Log of weights (w). set to -np.inf, where zw is True.
-        num_components (int): Number of components in MixtureDistribution instance.
-
+        components: Component distribution objects.
+        w: Component weights as a NumPy array.
+        zw: Boolean mask for zero-weight components.
+        log_w: Log weights, with zero-weight entries represented as ``-inf``.
+        num_components: Number of mixture components.
     """
 
     def compute_capabilities(self):
+        """Return compute-backend metadata shared by all mixture components."""
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
         return DistributionCapabilities(
@@ -214,6 +229,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         self.set_prior(prior)
 
     def compute_declaration(self):
+        """Return the symbolic declaration for mixture weights and component statistics."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ParameterSpec,
@@ -238,7 +254,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def __str__(self) -> str:
-        """Return string representation of MixtureDistribution object instance."""
+        """Return a constructor-style representation of the distribution."""
         s1 = ",".join([str(u) for u in self.components])
         s2 = repr(list(self.w))
         s3 = repr(self.name)
@@ -300,40 +316,36 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         return np.log(np.sum(np.exp(ll - ml), axis=1)) + ml.flatten()
 
     def density(self, x: T) -> float:
-        """Evaluate density of Mixture distribution at observation x.
-
-        See log_density() for details.
+        """Return the mixture density at one raw observation.
 
         Args:
-            x: (T): Single observation from mixture distribution. T is data type of components.
+            x: Observation accepted by every component family.
 
         Returns:
-            Density at x.
-
+            ``exp(log_density(x))``.
         """
         return np.exp(self.log_density(x))
 
     def density_semantics(self):
+        """Return joined density semantics over all mixture components."""
         from mixle.stats.compute.pdist import join_density_semantics
 
         return join_density_semantics(c.density_semantics() for c in self.components)
 
     def log_density(self, x: T) -> float:
-        """Evaluate log-density of Mixture distribution at observation x.
+        """Return the mixture log-density at one raw observation.
 
-        A K-component Mixture has log-density,
-
-            log(P(x)) = log(sum_{z=k}^{K} P(x|z=k)*P(z=k)),
-
-        where P(x|z=k) is component-k log-density at x, and P(z=k) = w[k]. A log-sum-exp is used to evaluate the
-        sum inside the log of the right-hand side above. (See mixle.utils.vector.log_sum() for details).
+        The calculation is ``logsumexp_k(log p_k(x) + log w_k)``. Component
+        families are responsible for returning ``-inf`` for observations outside
+        support; the mixture combines those values without converting them to
+        ``NaN``.
 
         Args:
-            x: (T): Single observation from mixture distribution. T is data type of components.
+            x: Observation accepted by every component family.
 
         Returns:
-            Log-density at x.
-
+            Finite log-density when at least one positive-weight component can
+            score the observation, otherwise ``-inf``.
         """
         return vec.log_sum(np.asarray([u.log_density(x) for u in self.components]) + self.log_w)
 
@@ -371,39 +383,29 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         return MixtureDistribution(new_components, np.exp(log_post))
 
     def component_log_density(self, x: T) -> np.ndarray:
-        """Evaluate component-wise log-density of Mixture distribution at observation x.
-
-        A K-component Mixture has log-density, log(P(x|z=k)) for the K-th component.
+        """Return component-wise log densities for one raw observation.
 
         Args:
-            x: (T): Single observation from mixture distribution. T is data type of components.
+            x: Observation accepted by every component family.
 
         Returns:
-            Numpy array of floats containing component-wise log-density at x.
-
+            One log-density per component, before mixture weights are applied.
         """
         return np.asarray([m.log_density(x) for m in self.components], dtype=np.float64)
 
     def posterior(self, x: T) -> np.ndarray:
-        """Obtain the posterior distribution for each mixture component at observation x.
+        """Return component responsibilities for one raw observation.
 
-        The posterior distribution of component 'k' at observation x is given by,
-
-            (1) p_mat(Z=k|x) = p_mat(x|Z=k)*p_mat(z=k) / p_mat(x),
-
-        where
-
-            (2) p_mat(x) = sum_{k=1}^{K} p_mat(x|Z=k)*p_mat(z=k) = sum_{k=1}^{K} p_mat(x|Z=k)*w[k].
-
-
-        This function returns an ndarray[float] of length K, containing p_mat(Z=k|x) as its k^{th} entry.
+        Responsibilities are proportional to ``w[k] * p_k(x)``. If every
+        positive-weight component reports an impossible observation, the method
+        returns a copy of the prior mixture weights so callers receive a finite
+        responsibility vector rather than ``NaN``.
 
         Args:
-            x: (T): Single observation from mixture distribution. T is data type of components.
+            x: Observation accepted by every component family.
 
         Returns:
-            Numpy array of floats containing posterior distribution at observation x.
-
+            Probability vector over component labels.
         """
         comp_log_density = np.asarray([m.log_density(x) for m in self.components])
         comp_log_density += self.log_w
@@ -421,25 +423,18 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             return comp_log_density
 
     def seq_component_log_density(self, x: T1) -> np.ndarray:
-        """Vectorized evaluation of component-wise log-density for encoded sequence x.
+        """Return vectorized component log densities for encoded observations.
 
-        Arg x must be a sequence encoded from MixtureDataEncoder.seq_encode(data) with data type Sequence[T] for data,
-        or results from an equivalent encoding from a DataSequenceEncoder object for the components. The resulting
-        encoded sequence is assumed to be data type T1.
-
-        Creates a 2-d numpy array of floats with vectorized evaluations of component_log_density() stored in the rows
-        corresponding to an observation in encoded sequence x.
-
-        The returned value is an ndarray[float] with shape (sz,K), where K is the number of mixture components, and
-        sz is the number of iid observations in the encoded sequence x.
+        ``x`` must be produced by ``MixtureDataEncoder.seq_encode`` or by an
+        equivalent component encoder. The output has shape ``(n, k)`` where
+        ``n`` is the number of encoded observations and ``k`` is the number of
+        mixture components.
 
         Args:
-            x (T1): See above for details.
+            x: Encoded observation batch.
 
         Returns:
-            2-d numpy array of floats having shape (sz,K), where sz is the number of iid obs in encoded sequence x, and
-            K is the number of mixture components.
-
+            Component log-density matrix before mixture weights are applied.
         """
         enc_data = x
         ll_mat_init = False
@@ -456,26 +451,17 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         return ll_mat
 
     def seq_log_density(self, x: T1) -> np.ndarray:
-        """Vectorized evaluation of log-density for encoded sequence x.
+        """Return vectorized mixture log densities for encoded observations.
 
-        Arg x must be a sequence encoded from MixtureDataEncoder.seq_encode(data) with data type Sequence[T] for data,
-        or results from an equivalent encoding from a DataSequenceEncoder object for the components. The resulting
-        encoded sequence is assumed to be data type T1.
-
-        Evaluates the log-density of each observation in the encoded sequence x (see log_density() for details).
-
-        The returned value is an ndarray[float] with shape (sz,K), where K is the number of mixture components, and
-        sz is the number of iid observations in the encoded sequence x.
-
-        Note: A row-wise log-sum-exp is performed for numerical stability. If a row contains a log-density value of,
-         -np.inf is returned for the corresponding observation value in the encoded sequence x.
+        Each row is evaluated with a row-wise log-sum-exp over component scores
+        plus log weights. Rows for which every positive-weight component is
+        impossible return ``-inf``.
 
         Args:
-            x (T1): See above for details.
+            x: Encoded observation batch.
 
         Returns:
-            Numpy array of floats containing the log_density of each observation in encoded sequence.
-
+            One log-density per encoded observation.
         """
         enc_data = x
         ll_mat_init = False
@@ -547,27 +533,18 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         return MixtureGradientFitState(self, components, w_logits)
 
     def seq_posterior(self, x: T1) -> np.ndarray:
-        """Vectorized evaluation of posterior of MixtureDistribution for encoded sequence x.
+        """Return vectorized component responsibilities for encoded observations.
 
-        Arg x must be a sequence encoded from MixtureDataEncoder.seq_encode(data) with data type Sequence[T] for data,
-        or results from an equivalent encoding from a DataSequenceEncoder object for the components. The resulting
-        encoded sequence is assumed to be data type T1.
-
-        Vectorized evaluation the posterior of each observation in the encoded sequence x (see posterior() for details).
-
-        The returned value is an ndarray[float] with shape (sz,K), where K is the number of mixture components, and
-        sz is the number of iid observations in the encoded sequence x. Each row contains the posterior of the
-        corresponding encoded observation.
-
-        Note: A row-wise log-sum-exp is performed for numerical stability. If a row contains a log-density value of,
-         -np.inf is returned for the corresponding observation value in the encoded sequence x.
+        Each row is proportional to ``w[k] * p_k(x_i)``. Rows where all
+        positive-weight components are impossible fall back to the prior mixture
+        weights, matching :meth:`posterior` and avoiding ``NaN`` responsibility
+        rows during EM accumulation.
 
         Args:
-            x (T1): See above for details.
+            x: Encoded observation batch.
 
         Returns:
-            Numpy array of floats containing the posterior of each observation in encoded sequence.
-
+            ``(n, k)`` probability matrix whose rows sum to one.
         """
         enc_data = x
         ll_mat_init = False
@@ -686,26 +663,26 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         return super().to_fisher(**kwargs)
 
     def sampler(self, seed: int | None = None) -> MixtureSampler:
-        """Create MixtureSampler for sampling from MixtureDistribution instance.
+        """Return a sampler that draws from the mixture distribution.
 
         Args:
-            seed (Optional[int]): Seed to set for sampling with RandomState.
+            seed: Optional ``RandomState`` seed for reproducible draws.
 
         Returns:
-            MixtureSampler object.
-
+            ``MixtureSampler`` bound to this distribution.
         """
         return MixtureSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> MixtureEstimator:
-        """Create MixtureEstimator for estimating MixtureDistribution.
+        """Return an estimator with matching component structure.
 
         Args:
-            pseudo_count (Optional[float]): Used to inflate sufficient statistics in estimation.
+            pseudo_count: Optional smoothing mass applied through the estimator
+                path.
 
         Returns:
-            MixtureEstimator object.
-
+            ``MixtureEstimator`` suitable for fitting observations of the same
+            type as this distribution.
         """
         if pseudo_count is not None:
             return MixtureEstimator(
@@ -734,13 +711,12 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def dist_to_encoder(self) -> MixtureDataEncoder:
-        """Returns a MixtureDataEncoder object for encoding sequences of iid observations from MixtureDistribution."""
+        """Return an encoder that delegates observation encoding to components."""
         dist_encoders = [c.dist_to_encoder() for c in self.components]
         return MixtureDataEncoder(encoder=dist_encoders)
 
     def enumerator(self) -> MixtureEnumerator:
-        """Returns a MixtureEnumerator iterating the union of component supports in descending
-        mixture probability order."""
+        """Return an enumerator over the union of component supports."""
         return MixtureEnumerator(self)
 
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
@@ -908,6 +884,8 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class MixtureEnumerator(DistributionEnumerator):
+    """Enumerator over the deduplicated union of weighted component supports."""
+
     def __init__(self, dist: MixtureDistribution) -> None:
         """Enumerates the union of component supports in descending mixture probability order.
 
@@ -945,6 +923,8 @@ class MixtureEnumerator(DistributionEnumerator):
 
 
 class MixtureSampler(DistributionSampler):
+    """Sampler that draws a latent component and then samples from that component."""
+
     def __init__(self, dist: MixtureDistribution, seed: int | None = None) -> None:
         """MixtureSampler used to generate samples from instance of MixtureDistribution.
 
@@ -1015,6 +995,8 @@ class MixtureSampler(DistributionSampler):
 
 
 class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
+    """EM accumulator for mixture weights and component sufficient statistics."""
+
     def __init__(
         self,
         accumulators: Sequence[SequenceEncodableStatisticAccumulator],
@@ -1022,26 +1004,21 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         name: str | None = None,
         init: str = "dirichlet",
     ) -> None:
-        """MixtureAccumulator object used to aggregate the sufficient statistics of observed data.
+        """Create an EM accumulator for mixture responsibilities.
 
         Args:
-            accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Sequence of
-                SequenceEncodableStatisticAccumulator objects for the components of the mixture.
-            keys (Tuple[Optional[str], Optional[str]]): Set keys for weights and mixture components.
-            init (str): Initialization strategy: ``"dirichlet"`` (legacy random responsibilities) or
-                ``"kmeans++"`` (k-means++ seeding when the encoded data is a numeric matrix).
+            accumulators: Component sufficient-statistic accumulators.
+            keys: Optional shared-statistic keys for mixture weights and
+                component payloads.
+            name: Optional diagnostic name.
+            init: Initialization strategy. ``"dirichlet"`` draws random
+                responsibilities; ``"kmeans++"`` uses numeric encoded features
+                when possible and falls back to ``"dirichlet"`` otherwise.
 
         Attributes:
-            accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Sequence of
-                SequenceEncodableStatisticAccumulator objects for the components of the mixture.
-            num_components (int): Total number of mixture components (length of accumulators).
-            comp_counts (np.ndarray[float]): Numpy array of floats for accumulating component weights.
-            weight_key (Optional[str]): Key for weights of mixture.
-            comp_key (Optional[str]): Key for components of mixture.
-            _init_rng (bool): False if rng for accumulators has not been set.
-            _w_rng (Optional[RandomState]): RandomState for generating weights in init.
-            _acc_rng (Optional[List[RandomState]]): List of RandomState obejcts for setting seed on accumulator
-                initialization.
+            comp_counts: Accumulated expected component counts.
+            accumulators: Component accumulators receiving responsibility-
+                weighted observations.
         """
         self.accumulators = accumulators
         self.num_components = len(accumulators)
@@ -1062,26 +1039,18 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self._acc_rng: list[RandomState] | None = None
 
     def seq_update(self, x: T1, weights: np.ndarray, estimate: MixtureDistribution) -> None:
-        """Vectorized update of sufficient statistics from encoded sequence of observations x.
+        """Accumulate a vectorized EM E-step from encoded observations.
 
-        Args value x is a sequence encoded sequence of mixture observations. The data type for each mixture observation
-        is data type T. T1 is the data type produced by MixtureDataEncoder.seq_encode() function used to encode the
-        sequence of type T observations.
-
-        Note: Requires a previous estimate of MixtureDistribution be passed. This may require seq_initialize() to be
-        invoked prior to performing seq_update() calls.
-
-        Seq_update is similar to MixtureDistribution.seq_posterior(). Results are aggregated to comp_counts
-        and accumulators.
+        Responsibilities are computed from ``estimate`` using the same
+        log-sum-exp normalization as ``MixtureDistribution.seq_posterior``.
+        Rows where every component is impossible fall back to the estimate's
+        mixture weights, so the accumulator receives finite responsibility
+        weights rather than ``NaN``.
 
         Args:
-            x (T1): See above for details.
-            weights (np.ndarray): Numpy array of positive floats.
-            estimate (MixtureDistribution): MixtureDistribution object representing previous estimate from EM.
-
-        Returns:
-            None.
-
+            x: Encoded observation batch.
+            weights: Non-negative observation weights.
+            estimate: Previous EM iterate used to compute responsibilities.
         """
         enc_data = x
         ll_mat_init = False
@@ -1131,21 +1100,15 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[i].seq_update(_component_enc(enc_data, i), w_loc, estimate.components[i])
 
     def update(self, x: T, weight: float, estimate: MixtureDistribution) -> None:
-        """Update sufficient statistics of MixtureAccumulator with weighted observation.
+        """Accumulate one weighted raw observation under an EM estimate.
 
-        Requires previous estimate of MixtureDistribution.
-
-        Weights posterior of 'estimate' at x. Adds sum to comp_counts, then passes posterior[i] as weight for x
-        into update() call of accumulator[i].
+        The observation is routed to each component accumulator with
+        ``weight * estimate.posterior(x)[k]``.
 
         Args:
-            x (T): Observation of mixture distribution.
-            weight (float): Weight for observation.
-            estimate (MixtureDistribution): Previous iteration of EM estimate for MixtureDistribution.
-
-        Returns:
-            None.
-
+            x: Raw observation.
+            weight: Observation weight.
+            estimate: Previous EM iterate used to compute responsibilities.
         """
         posterior = estimate.posterior(x)
         posterior *= weight
@@ -1155,16 +1118,10 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[i].update(x, posterior[i], estimate.components[i])
 
     def _rng_initialize(self, rng: RandomState) -> None:
-        """Initialize RandomState objects for accumulators from rng.
-
-        This function exists to ensure consistency between initialize() and seq_initialize() functions.
+        """Seed per-component initializer RNGs from a caller-provided RNG.
 
         Args:
-            rng (RandomState): Used to generate seed value for _rng_acc member variable.
-
-        Returns:
-            None.
-
+            rng: Source random state for reproducible mixture initialization.
         """
         seeds = rng.randint(2**31, size=self.num_components)
         self._acc_rng = [RandomState(seed=seed) for seed in seeds]
@@ -1172,22 +1129,16 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self._init_rng = True
 
     def initialize(self, x: T, weight: float, rng: np.random.RandomState) -> None:
-        """Initialize MixtureAccumulator object with weighted observation x.
+        """Initialize component sufficient statistics from one observation.
 
-        If _init_rng is False, _acc_rng is set with rng. This is done for consistency in initialize and seq_initialize
-        functions.
-
-        Initialize mixture weights with a sample from Dirichlet distribution. Each SequenceEncodableStatisticAccumulator
-        is for the mixture components is initialized with a call to accumulator[i].initialize.
+        The default initialization draws a responsibility vector from a
+        Dirichlet distribution and delegates responsibility-weighted
+        initialization to every component accumulator.
 
         Args:
-            x (T): Observation of mixture distribution.
-            weight (float): Weight for observation.
-            rng (RandomState): Used to set _acc_rng if not previously set.
-
-        Returns:
-            None.
-
+            x: Raw observation.
+            weight: Observation weight.
+            rng: Random state used to seed component initializers.
         """
         if not self._init_rng:
             self._rng_initialize(rng)
@@ -1203,21 +1154,17 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             self.comp_counts[i] += w
 
     def seq_initialize(self, x: T1, weights: np.ndarray, rng: np.random.RandomState) -> None:
-        """Vectorized initialization of MixtureAccumulator object for sequence encoded observations x.
+        """Initialize component sufficient statistics from encoded observations.
 
-        If _init_rng is False, _acc_rng is set with rng. This is done for consistency in initialize and seq_initialize
-        functions.
-
-        Vectorized implementation of initialize(), for sequence encoded x.
+        With ``init="kmeans++"`` the method uses a numeric feature matrix when
+        one can be extracted from the encoded data. Ragged, object, hetero, or
+        non-finite encodings fall back to Dirichlet responsibilities rather than
+        mutating input data or forcing an invalid numeric representation.
 
         Args:
-            x (T1): Sequence encoded observations of mixture distribution.
-            weights (ndarray[float]): Numpy array of positive valued floats.
-            rng (RandomState): Used to set _acc_rng if not previously set.
-
-        Returns:
-            None.
-
+            x: Encoded observation batch.
+            weights: Non-negative observation weights.
+            rng: Random state used to seed component initializers.
         """
         if not self._init_rng:
             self._rng_initialize(rng)
@@ -1313,20 +1260,13 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         return ww
 
     def combine(self, suff_stat: tuple[np.ndarray, tuple[T2, ...]]) -> MixtureAccumulator:
-        """Merge the sufficient statistics of suff_stat with MixtureAccumulator instance.
-
-        Arg suff_stat is a Tuple of length two containing,
-            suff_stat[0] (ndarray[float]): Aggregated component counts,
-            suff_stat[1] (Tuple[T2,...]): Tuple of K sufficient statistics for the mixture components.
-
-        Note: The components of the mixture are assumed to have sufficient statistics of type T2.
+        """Merge serialized mixture sufficient statistics into this accumulator.
 
         Args:
-            suff_stat: See above for details.
+            suff_stat: ``(component_counts, component_suff_stats)`` tuple.
 
         Returns:
-            MixtureAccumulator object.
-
+            ``self`` for accumulator chaining.
         """
         self.comp_counts += suff_stat[0]
         for i in range(self.num_components):
@@ -1335,35 +1275,22 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[np.ndarray, tuple[Any, ...]]:
-        """Returns sufficient statistics of MixtureAccumulator instance.
-
-        The sufficient statistics value returned (suff_stat) is a Tuple of length two containing,
-            suff_stat[0] (ndarray[float]): Aggregated component counts,
-            suff_stat[1] (Tuple[T2,...]): Tuple of K sufficient statistics for the mixture components.
-
-        Note: The components of the mixture are assumed to have sufficient statistics of type T2.
+        """Return serialized mixture sufficient statistics.
 
         Returns:
-            Tuple[np.ndarray[float], Tuple[T2,...,]] described above.
-
+            ``(component_counts, component_suff_stats)`` where the second item
+            contains one serialized child accumulator value per component.
         """
         return self.comp_counts, tuple([u.value() for u in self.accumulators])
 
     def from_value(self, x: tuple[np.ndarray, tuple[T2, ...]]) -> MixtureAccumulator:
-        """Set sufficient statistics of MixtureAccumulator instance to x.
-
-        The sufficient statistics value 'x' is a Tuple of length two containing,
-            x[0] (ndarray[float]): Aggregated component counts,
-            x[1] (Tuple[T2,...]): Tuple of K sufficient statistics for the mixture components.
-
-        Note: The components of the mixture are assumed to have sufficient statistics of type T2.
+        """Restore this accumulator from serialized sufficient statistics.
 
         Args:
-            x: See above for details.
+            x: ``(component_counts, component_suff_stats)`` tuple.
 
         Returns:
-            MixtureAccumulator object.
-
+            ``self`` after restoring child accumulator state.
         """
         self.comp_counts = x[0]
         for i in range(self.num_components):
@@ -1378,19 +1305,11 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Combine the sufficient statistics of MixtureAccumulator instance with other MixtureAccumulator that have
-            matching weight or component keys.
-
-        Arg passed stats_dict is Dict[str, Union[np.ndarray, Tuple[T2,...]]. If the key is weight key, stats_dict
-        value is a numpy array of floats containing component counts for a Mixture. If the key is a component key,
-        the value is a list of SequenceEncodableStatisticAccumulator objects corresponding to the Mixture components.
+        """Merge keyed mixture statistics into a shared statistics dictionary.
 
         Args:
-            stats_dict: See above for details.
-
-        Returns:
-            None.
-
+            stats_dict: Mutable shared sufficient-statistics mapping keyed by
+                estimator key names.
         """
         if self.weight_key is not None:
             if self.weight_key in stats_dict:
@@ -1410,19 +1329,11 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             u.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace the sufficient statistics of MixtureAccumulator instance with sufficient statistics of matching
-            weight and/or component keys found in stats_dict.
-
-        Arg passed stats_dict is Dict[str, Union[np.ndarray, Tuple[T2,...]]. If the key is weight key, stats_dict
-        value is a numpy array of floats containing component counts for a Mixture. If the key is a component key,
-        the value is a list of SequenceEncodableStatisticAccumulator objects corresponding to the Mixture components.
+        """Replace local keyed statistics from a shared statistics dictionary.
 
         Args:
-            stats_dict: See above for details.
-
-        Returns:
-            None.
-
+            stats_dict: Shared sufficient-statistics mapping keyed by estimator
+                key names.
         """
         if self.weight_key is not None:
             if self.weight_key in stats_dict:
@@ -1437,12 +1348,14 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             u.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> MixtureDataEncoder:
-        """Returns a MixtureDataEncoder object for encoding sequences of iid observations from MixtureDistribution."""
+        """Return an encoder assembled from the component accumulators."""
         acc_encoders = [a.acc_to_encoder() for a in self.accumulators]
         return MixtureDataEncoder(encoder=acc_encoders)
 
 
 class MixtureAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for mixture accumulators built from component accumulator factories."""
+
     def __init__(
         self,
         factories: Sequence[StatisticAccumulatorFactory],
@@ -1450,21 +1363,13 @@ class MixtureAccumulatorFactory(StatisticAccumulatorFactory):
         name: str | None = None,
         init: str = "dirichlet",
     ) -> None:
-        """MixtureAccumulatorFactory object for creating MixtureAccumulator objects.
+        """Create a factory for mixture EM accumulators.
 
         Args:
-            factories (Sequence[StatisticAccumulatorFactory]): Sequence of StatisticAccumulatorFactory for the mixture
-                components.
-            dim (int): Number of mixture components.
-            keys (Tuple[Optional[str], Optional[str]]): Assign keys for weights and component aggregations.
-            init (str): Initialization strategy passed to the accumulator (``"dirichlet"`` or ``"kmeans++"``).
-
-        Attributes:
-            factories (Sequence[StatisticAccumulatorFactory]): Sequence of StatisticAccumulatorFactory for the mixture
-                components.
-            dim (int): Number of mixture components. Must equal length of factories.
-            keys (Tuple[Optional[str], Optional[str]]): Keys for weights and components.
-
+            factories: Component accumulator factories.
+            keys: Optional shared-statistic keys for weights and components.
+            name: Optional diagnostic name.
+            init: Initialization strategy passed to ``MixtureAccumulator``.
         """
         self.factories = factories
         self.keys = keys
@@ -1472,14 +1377,15 @@ class MixtureAccumulatorFactory(StatisticAccumulatorFactory):
         self.init = init
 
     def make(self) -> MixtureAccumulator:
-        """Return MixtureAccumulator object with SequenceEncodableStatisticAccumulator objects for the components
-        and keys passed."""
+        """Return a fresh mixture accumulator with fresh component accumulators."""
         return MixtureAccumulator(
             [factory.make() for factory in self.factories], keys=self.keys, name=self.name, init=self.init
         )
 
 
 class MixtureEstimator(ParameterEstimator):
+    """Estimator for mixture weights and component distributions from EM sufficient statistics."""
+
     def __init__(
         self,
         estimators: Sequence[ParameterEstimator],
@@ -1493,35 +1399,25 @@ class MixtureEstimator(ParameterEstimator):
         robust: bool = False,
         init: str | None = None,
     ) -> None:
-        """MixtureEstimator object used to estimate MixtureDistribution from aggregated sufficient statistics.
+        """Create an EM estimator for a homogeneous finite mixture.
 
         Args:
-            estimators (Sequence[ParameterEstimator]): Sequence of ParameterEstimator objects for the mixture
-                components.
-            fixed_weights (Optional[Union[List[float], np.ndarray]]): Set fixed values for mixture weights.
-            suff_stat (Optional[np.ndarray]): Numpy array of floats with length equal to length of estimators.
-            pseudo_count (Optional[float]): Used to re-weight the member variable sufficient statistics in estimation.
-            name (Optional[str]): Set a name to the MixtureEstimator object.
-            keys (Tuple[Optional[str], Optional[str]]): Set keys for the weights and component distributions.
-            w_min (float): MLE weight floor (P3). Component weights are clamped at ``>= w_min`` and the
-                weight vector is renormalized, so a collapsing component cannot reach exactly zero
-                weight (which would freeze it out of all subsequent EM iterations). ``0.0`` (default)
-                disables the floor and preserves byte-identical behaviour.
-            robust (bool): Enable the bundled robust path (P1 component floors are always on; this
-                additionally turns on k-means++ initialization and a small ``w_min`` weight floor).
-            init (Optional[str]): Initialization strategy for the accumulator. ``"kmeans++"`` seeds
-                responsibilities from k-means++ centers; ``"dirichlet"`` (default unless ``robust``)
-                keeps the legacy random-Dirichlet path. ``None`` defers to ``robust``.
-
-        Attributes:
-            estimators (Sequence[ParameterEstimator]): Sequence of ParameterEstimator objects for the mixture
-                components.
-            fixed_weights (Optional[np.ndarray]): Treat mixture weights as fixed values. Must sum to 1.0.
-            suff_stat (Optional[np.ndarray]): Weights of the mixture. Must sum to 1.0.
-            pseudo_count (Optional[float]): Used to re-weight the member variable sufficient statistics in estimation.
-            name (Optional[str]): Name for MixtureEstimator object.
-            keys (Tuple[Optional[str], Optional[str]]): Keys for the weights and component distributions.
-
+            estimators: Component estimators.
+            fixed_weights: Optional fixed simplex weights. When supplied, EM
+                updates only the component parameters.
+            suff_stat: Optional prior component-count vector used with
+                ``pseudo_count``.
+            pseudo_count: Smoothing mass for mixture weights.
+            name: Optional diagnostic name.
+            keys: Optional shared-statistic keys for weights and components.
+            prior: Optional Dirichlet weight prior or joint mixture prior.
+            w_min: Plain-MLE weight floor. When positive, fitted weights are
+                clamped and renormalized so a component cannot be frozen at
+                exact zero in later EM iterations.
+            robust: Enable the robust default path: k-means++ initialization
+                where applicable plus a small data-independent weight floor.
+            init: Initialization strategy for the accumulator. ``None`` selects
+                ``"kmeans++"`` in robust mode and ``"dirichlet"`` otherwise.
         """
         self.num_components = len(estimators)
         self.estimators = estimators
@@ -1543,7 +1439,7 @@ class MixtureEstimator(ParameterEstimator):
         self.set_prior(prior)
 
     def accumulator_factory(self) -> MixtureAccumulatorFactory:
-        """Returns MixtureAccumulatorFactory object passing component StatisticAccumulatorFactory objects and keys."""
+        """Return a mixture accumulator factory matching the component estimators."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         return MixtureAccumulatorFactory(est_factories, keys=self.keys, name=self.name, init=self.init)
 
@@ -1591,33 +1487,51 @@ class MixtureEstimator(ParameterEstimator):
         return rv
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, tuple[Any, ...]]) -> MixtureDistribution:
-        """Estimate MixtureDistribution from aggregated sufficient statistics.
+        """Estimate a mixture distribution from EM sufficient statistics.
 
-        Args suff_stat is a Tuple length two containing:
-            suff_stat[0] (np.ndarray): Sufficient statistic for the weights of the mixture components.
-            suff_stat[1] (Tuple[T2, ...]): A tuple of length K (number of mixture components), containing the
-                sufficient statistics of each mixture component of data type T2.
-
-        If fixed_weights is not None, suff_stat[0] is not used and the weights of the MixtureDistribution are set to
-            fixed_weights.
-
-        If pseudo_count is passed, arg suff_stat[0] is aggregated with re-weighted member variable suff_stat. If member
-        variable suff_stat is None, then the arg suff_stat[0] is re-weighted with pseudo_count to estimate the weights.
-
-        If pseudo_count is None, ar suff_stat[0] is used to estimate the wieghts.
+        ``suff_stat`` is ``(component_counts, component_suff_stats)``. Component
+        parameters are delegated to the child estimators. Mixture weights follow
+        the fixed-weight, conjugate-prior, pseudo-count, or plain-MLE path
+        selected by the estimator configuration. Plain-MLE weights may be
+        floored by ``w_min`` and are always renormalized.
 
         Args:
-            nobs (Optional[float]): Not used. Kept for consistency with ParameterEstimator super class.
-            suff_stat: See above for details.
+            nobs: Unused compatibility argument from ``ParameterEstimator``.
+            suff_stat: Serialized mixture sufficient statistics.
 
         Returns:
-            MixtureDistribution object.
-
+            Fitted ``MixtureDistribution``.
         """
         num_components = self.num_components
+        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 2:
+            raise ContractError(
+                "MixtureEstimator.estimate(suff_stat)",
+                "a 2-tuple (component_weight_counts, component_suff_stats)",
+                "%s%s"
+                % (
+                    type(suff_stat).__name__,
+                    " of length %d" % len(suff_stat) if isinstance(suff_stat, (tuple, list)) else "",
+                ),
+                "pass the 2-tuple produced by MixtureAccumulator.value(), not a bare component sufficient statistic.",
+            )
         counts, comp_suff_stats = suff_stat
+        if len(counts) != num_components or len(comp_suff_stats) != num_components:
+            raise ContractError(
+                "MixtureEstimator.estimate(suff_stat)",
+                "%d component weight counts and %d component sufficient statistics" % (num_components, num_components),
+                "%d component weight counts and %d component sufficient statistics"
+                % (len(counts), len(comp_suff_stats)),
+                "suff_stat must carry exactly %d entries per side, matching MixtureEstimator's %d "
+                "component estimators -- a mismatched MixtureAccumulator/MixtureEstimator component "
+                "count is the usual cause." % (num_components, num_components),
+            )
 
-        components = [self.estimators[i].estimate(counts[i], comp_suff_stats[i]) for i in range(num_components)]
+        components = []
+        for i in range(num_components):
+            try:
+                components.append(self.estimators[i].estimate(counts[i], comp_suff_stats[i]))
+            except ContractError as e:
+                raise prefix_contract_error("MixtureDistribution.components[%d]" % i, e) from None
 
         if self.has_conj_prior and self.fixed_weights is None:
             # Conjugate Dirichlet weight update: MAP weights w_k proportional to
@@ -1698,10 +1612,12 @@ def _component_enc(enc_data: Any, i: int) -> Any:
 
 
 class MixtureDataEncoder(DataSequenceEncoder):
-    def __init__(self, encoder: DataSequenceEncoder | Sequence[DataSequenceEncoder]) -> None:
-        """MixtureDataEncoder used for sequence encoding data for use with vectorized 'seq_' functions.
+    """Encoder for homogeneous or heterogeneous mixture component encodings."""
 
-        Data type: Data must be type T, that matches the data type of each Mixture component.
+    def __init__(self, encoder: DataSequenceEncoder | Sequence[DataSequenceEncoder]) -> None:
+        """Create an encoder for data scored by all mixture components.
+
+        Observations must be valid for every component distribution in the mixture.
 
         Components may belong to different distribution families. When the per-component encoders
         are all equal the mixture encodes the data once and shares it (bit-identical to the legacy
@@ -1727,13 +1643,13 @@ class MixtureDataEncoder(DataSequenceEncoder):
         self.homogeneous = all(e == encoders[0] for e in encoders)
 
     def __str__(self) -> str:
-        """Returns string representation of MixtureDataEncoder object."""
+        """Return a constructor-style representation of the encoder."""
         if self.homogeneous:
             return "MixtureDataEncoder(" + str(self.encoder) + ")"
         return "MixtureDataEncoder([" + ", ".join(str(e) for e in self.encoders) + "])"
 
     def __eq__(self, other: object) -> bool:
-        """Checks if an object is equivalent to a MixtureDataEncoder instance.
+        """Return true when ``other`` is an equivalent mixture data encoder.
 
         If 'other' object is a MixtureDataEncoder, the two must carry equivalent per-component
         encoders. If 'other' is not a MixtureDataEncoder, it is compared against the (single) shared
@@ -1767,8 +1683,26 @@ class MixtureDataEncoder(DataSequenceEncoder):
             Encoded sequence (single shared encoding, or a per-component wrapper).
 
         """
+        if not isinstance(x, (list, tuple, np.ndarray)):
+            raise ContractError(
+                "MixtureDistribution.seq_encode",
+                "a sequence of observations (all components share the same observation type)",
+                "%s" % type(x).__name__,
+                "pass a list/tuple of observations, e.g. [x0, x1, ...].",
+            )
         if self.homogeneous:
-            return self.encoder.seq_encode(x)
+            try:
+                return self.encoder.seq_encode(x)
+            except ContractError as e:
+                raise prefix_contract_error("MixtureDistribution.components", e) from None
+            except (TypeError, ValueError, IndexError, KeyError) as e:
+                raise ContractError(
+                    "MixtureDistribution.components",
+                    "every observation compatible with the shared component data type",
+                    "data that raised %s: %s" % (type(e).__name__, e),
+                    "check that every observation matches the data type expected by the mixture's "
+                    "components (%s)." % self.encoder,
+                ) from e
         try:
             return _HeteroMixtureEncoded(tuple(e.seq_encode(x) for e in self.encoders))
         except (TypeError, ValueError) as e:
@@ -1840,6 +1774,7 @@ class MixtureFisherView(FixedFisherView):
         return self._join_stats(z, mats)
 
     def structured_statistics(self, x: Any, estimate: Any | None = None, weight: float = 1.0) -> Any:
+        """Return mixture responsibility statistics and weighted component statistics for one observation."""
         z = self.dist.posterior(x) if estimate is None else estimate.posterior(x)
         child_values = tuple(z[k] * self.child_views[k].sufficient_statistics(x) for k in range(len(self.child_views)))
         return weight * z, child_values

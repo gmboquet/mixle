@@ -2,15 +2,17 @@
 
 Dense cross-attention fuses N tokens in O(N^2). When the tokens are (conditionally) independent evidence about
 a shared latent -- the common case for aggregating many partial observations (image patches, sensors, views) --
-precision-weighted product-of-experts fuses them in O(N) with almost no parameters: the fusion inductive bias
-is built in, not learned. Each expert is a diagonal Gaussian ``N(mu_i, diag(1/prec_i))`` over the latent, and
+precision-weighted product-of-experts fuses them in O(N) with few parameters:
+the fusion inductive bias is built in, not learned. Each expert is a diagonal
+Gaussian ``N(mu_i, diag(1/prec_i))`` over the latent, and
 the posterior is their normalized product::
 
     prec_fused = sum_i prec_i + prec_prior          # precisions add
     mu_fused   = (sum_i prec_i * mu_i) / prec_fused  # precision-weighted mean
 
-Measured from scratch on a laptop (examples/structured_fusion_vlm.py): PoE fusion matches a cross-attention
-block's accuracy at ~2.6x fewer parameters and ~7x faster training on exchangeable-evidence tasks.
+The reference benchmark in ``examples/structured_fusion_vlm.py`` reports that
+PoE fusion matches a cross-attention block's accuracy with fewer parameters and
+faster training on exchangeable-evidence tasks.
 
 Boundary condition: PoE fusion is permutation-invariant and assumes conditional independence, so it cannot
 model token order or pairwise interactions. On a task that depends on a specific pair or position, attention
@@ -28,7 +30,10 @@ from typing import Any
 
 
 def fusion_flops(n_tokens: int, latent_dim: int, *, attention: bool = False) -> int:
-    """Rough multiply-adds to fuse ``n_tokens`` into one latent. PoE is O(N*M); attention is O(N^2*M)."""
+    """Approximate multiply-adds to fuse ``n_tokens`` into one latent.
+
+    Product-of-experts fusion is O(N*M); attention is O(N^2*M).
+    """
     if attention:
         return n_tokens * n_tokens * latent_dim  # the QK^T score matrix dominates
     return n_tokens * latent_dim  # one precision-weighted accumulate per token
@@ -80,10 +85,10 @@ def _build():
         """Attention for the relations, structured PoE for the aggregation -- the accuracy/compute sweet spot.
 
         Pure PoE fusion is permutation-invariant and misses token interactions; a full ViT models them but pays
-        O(N^2) per layer and pools with a CLS token. This runs a small number of cheap attention layers to inject the
+        O(N^2) per layer and pools with a CLS token. This runs a small number of attention layers to inject the
         relational structure PoE lacks, then aggregates with the parameter-free precision-weighted readout.
-        Measured from scratch on CIFAR patches: one attention layer + PoE readout beats a same-budget ViT
-        (the structured aggregate outperforms attention's CLS pooling) at less compute than a deeper ViT.
+        In the CIFAR patch benchmark, one attention layer plus PoE readout outperforms a same-budget ViT while
+        using less compute than a deeper ViT.
 
         ``n_tokens`` is required (positional embeddings); ``attn_layers`` trades cost for relational capacity.
         """

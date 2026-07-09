@@ -584,7 +584,7 @@ class _LocalShard:
 class EncodedDataHandle:
     """Duck-typed orchestrator contract consumed by ``mixle.stats``.
 
-    Local, multiprocessing, MPI, Spark, dask, or future worker handles can
+    Local, multiprocessing, MPI, Spark, dask, or additional worker handles can
     implement these methods without sharing inheritance.  The base class exists
     to document the contract and to give local code a common type to return.
     """
@@ -622,18 +622,26 @@ class EncodedFold(Protocol):
 
     This formalizes the duck-typed orchestrator contract that the concrete
     :class:`EncodedDataHandle` base class documents.  Local, multiprocessing,
-    MPI, Spark, dask, Ray, Lightning, or future worker handles satisfy this
+    MPI, Spark, dask, Ray, Lightning, or additional worker handles satisfy this
     Protocol structurally without sharing inheritance.  Membership is decided by
     :func:`isinstance` against the four ``pysp_seq_*``/``pysp_stream_*`` methods.
     """
 
-    def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]: ...
+    def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
+        """Return total observation count and summed log-density for the encoded data."""
+        ...
 
-    def pysp_seq_estimate(self, estimator: Any, prev_estimate: Any) -> Any: ...
+    def pysp_seq_estimate(self, estimator: Any, prev_estimate: Any) -> Any:
+        """Estimate a model from encoded data and a previous estimate."""
+        ...
 
-    def pysp_seq_initialize(self, estimator: Any, rng: np.random.RandomState, p: float) -> Any: ...
+    def pysp_seq_initialize(self, estimator: Any, rng: np.random.RandomState, p: float) -> Any:
+        """Initialize an estimate from encoded data using Bernoulli subsampling."""
+        ...
 
-    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]: ...
+    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
+        """Accumulate streaming sufficient statistics for encoded data."""
+        ...
 
 
 def is_encoded_data_handle(obj: Any) -> bool:
@@ -705,16 +713,32 @@ def encoded_data(
 _ENCODED_DATA_BACKENDS: dict[str, Any] = {}
 
 
-def register_encoded_data_backend(name: str, factory: Any, aliases: tuple[str, ...] = ()) -> None:
+def register_encoded_data_backend(
+    name: str, factory: Any, aliases: tuple[str, ...] = (), *, override: bool = False
+) -> None:
     """Register an encoded-data backend factory under ``name`` (and any ``aliases``).
 
     ``factory`` is called as ``factory(data, **params)`` with the keyword arguments of
     :func:`encoded_data`; it should accept ``**_`` for the parameters it ignores and return
     an :class:`EncodedDataHandle`. This is the extension point for new parallel/distributed
     frameworks -- registering is all that is needed, no core edits.
+
+    Raises ``ValueError`` if ``name`` or any ``alias`` is already registered to a DIFFERENT
+    factory, rather than silently shadowing it -- a third-party package registering under a
+    name that collides with a built-in (e.g. ``'local'``) or another package's backend would
+    otherwise hijack every subsequent ``backend=name`` call with no error, no warning, at
+    whatever time that package happened to import. Pass ``override=True`` to replace an
+    existing registration deliberately (e.g. hot-swapping a backend in a test).
     """
     if not callable(factory):
         raise TypeError("backend factory must be callable.")
+    for key in (name, *aliases):
+        existing = _ENCODED_DATA_BACKENDS.get(key.lower())
+        if existing is not None and existing is not factory and not override:
+            raise ValueError(
+                f"encoded-data backend {key.lower()!r} is already registered to {existing!r}; "
+                "pass override=True to replace it deliberately."
+            )
     _ENCODED_DATA_BACKENDS[name.lower()] = factory
     for alias in aliases:
         _ENCODED_DATA_BACKENDS[alias.lower()] = factory

@@ -1,4 +1,4 @@
-"""Edge-preserving and discrete-composition priors for latent fields (phase 4).
+"""Edge-preserving and discrete-composition priors for latent fields.
 
 The Gaussian-Markov / GP field prior is smooth -- it blurs sharp material boundaries and cannot express a
 field that takes a few discrete values (a composition of distinct materials). These priors fix that, and

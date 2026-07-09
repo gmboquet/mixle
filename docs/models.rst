@@ -1,10 +1,10 @@
 Model Families
 ==============
 
-``mixle.models`` is an incubating namespace for applied model helpers that sit
-above the core distribution families. Use it when a specialized model family is
-genuinely part of the problem: a neural likelihood leaf, a Gaussian-process
-surrogate, a random-forest conditional, a graph model, an induced grammar, a
+``mixle.models`` is the applied-model namespace above the core distribution
+families. Use it when a specialized model family is genuinely part of the
+problem: a neural likelihood leaf, a Gaussian-process surrogate, a
+random-forest conditional, a graph model, an induced grammar, a
 knowledge-graph embedding, a POMDP, a truncated DPM helper, or a training-loop
 utility.
 
@@ -18,6 +18,11 @@ same estimator, distribution, sampler, scoring, or fit-result conventions used
 by the rest of Mixle. That makes it possible for a Gaussian process, a random
 forest conditional, a Transformer leaf, or a learned grammar to participate in
 a larger heterogeneous model instead of living in a separate terminal pipeline.
+
+Because this namespace is deliberately broader than ``mixle.stats``, promotion
+requires explicit evidence. Record optional dependencies, device placement,
+random seeds, training settings, and held-out behavior for every applied model
+that will be served or reused by another package.
 
 Maturity Summary
 ----------------
@@ -54,17 +59,17 @@ Maturity Summary
    * - DPMs, grammars, knowledge graphs, POMDPs
      - ``fit_truncated_dpm``, ``fit_induced_pcfg``,
        ``TransEKnowledgeGraphModel``, ``PartiallyObservableMarkovDecisionProcessModel``
-     - Research/prototype
+     - Specialized, validation required
      - You need a specialized family and are prepared to validate the result
        against held-out data or task loss.
    * - Dependence discovery and training search
      - ``learn_pc_skeleton``, ``orient_v_structures``, ``TrainingSpace``,
        ``tune_training``, ``ewc``
-     - Research/prototype
-     - You want proposals, diagnostics, or experiment scaffolding rather than
+     - Specialized, validation required
+     - You want proposals, diagnostics, or experiment support rather than
        a final model contract.
 
-Choosing A Family
+Choosing a Family
 -----------------
 
 .. list-table::
@@ -78,7 +83,7 @@ Choosing A Family
      - Incubating neural likelihood leaf inside a hybrid model.
    * - Preference triples
      - ``DPOModel``
-     - Experimental preference-optimized leaf over chosen/rejected responses.
+     - Preference-optimized leaf over chosen/rejected responses.
    * - Smooth regression with uncertainty
      - ``GaussianProcessRegressor``
      - Smooth surrogate or uncertainty-aware response surface.
@@ -110,16 +115,16 @@ Choosing A Family
      - Hidden state filtering with action-conditioned transitions.
    * - Hyperparameter and training policy
      - ``TrainingSpace``, ``tune_training``, ``ewc``
-     - Experiment scaffolding for neural components.
+     - Experiment support for neural components.
 
-Neural And Language Leaves
+Neural and Language Leaves
 --------------------------
 
 For Transformer and LLM-centered modeling, start with :doc:`neural-llm`.
-Treat these objects as experimental adapters around Torch-backed models. They
-are useful when a neural likelihood has to compose with classical fields, but
-they carry more dependency, reproducibility, and training-state risk than the
-core stats families.
+Treat these objects as optional adapters around Torch-backed models. They are
+useful when a neural likelihood has to compose with classical fields, but they
+carry more dependency, reproducibility, and training-state risk than the core
+stats families.
 
 That guide covers:
 
@@ -148,7 +153,7 @@ Neural Builder Inventory
    * - Import
      - Role
    * - ``make_mlp``
-     - Build a small MLP body for neural helpers and experiments.
+     - Build a compact MLP body for neural helpers and experiments.
    * - ``CategoricalClassificationNeuralNetwork``
      - Categorical classifier helper.
    * - ``GaussianRegressionNeuralNetwork``
@@ -173,6 +178,26 @@ Serialization support has been broadened for neural leaves, direct LMs,
 streaming Transformer leaves, DPO leaves, and neural-density leaves. Prefer the
 documented ``save``/``load`` or ``to_dict``/``to_json`` routes for artifacts,
 and still keep a held-out behavioral check around restored neural models.
+
+Artifact Standard
+-----------------
+
+Applied model artifacts should be treated as reproducible assets, not only as
+fitted Python objects. A release-quality artifact includes:
+
+* the public class and constructor settings;
+* the training data fingerprint or dataset version;
+* optional dependency versions and device choice;
+* a validation score on held-out examples;
+* calibration or uncertainty evidence when the model exposes probabilities;
+* a reload check that rescored or predicted on at least one representative
+  example;
+* a note about unsupported capabilities, such as unconditional sampling for
+  purely conditional leaves.
+
+This standard matters most for optional or rapidly evolving helpers. A model
+family may require additional validation for a particular domain, but that
+status must be visible in the artifact and in the promotion record.
 
 Gaussian Processes
 ------------------
@@ -287,7 +312,7 @@ then guide a record model, graphical model, or PPL specification.
 For production use, treat discovered structure as a proposal. Hold out data,
 compare alternatives with proper scores, and keep a record of rejected edges.
 
-Grammars And Structured Sequences
+Grammars and Structured Sequences
 ---------------------------------
 
 ``fit_induced_pcfg`` learns a heterogeneous probabilistic context-free grammar
@@ -355,11 +380,12 @@ Use POMDPs when sequences include interventions, decisions, or controls:
 support tickets with actions, robot trajectories, treatment histories, or
 interactive agents.
 
-The current surface is appropriate for experiments and small controlled
-models. Larger decision systems still need explicit simulator, policy, and
-evaluation infrastructure around it.
+The current surface is appropriate for scoped modeling studies where the
+sequence, action, and observation spaces are well controlled. Larger decision
+systems still need explicit simulator, policy, and evaluation infrastructure
+around the fitted POMDP.
 
-Training Search And Continual Learning
+Training Search and Continual Learning
 --------------------------------------
 
 The neural training utilities are deliberately small:
@@ -381,17 +407,16 @@ For broader model-level search and anti-regression gates, use :doc:`evolution`.
 For task-level local model selection and LLM teachers, use
 :doc:`task-distillation`.
 
-Treat these as helpers for experiments. They are intentionally not a complete
-training platform.
+Treat these as focused helpers for model development and regression checks.
+They are intentionally not a complete training platform.
 
 Compositional Practice
 ----------------------
 
-The healthiest way to use ``mixle.models`` is to keep each family honest about
-its role:
+The safest way to use ``mixle.models`` is to keep each family's role explicit:
 
-* Use neural leaves for high-dimensional context, not as a place to hide every
-  modeling assumption.
+* Use neural leaves for high-dimensional context, and document the modeling
+  assumptions that are not visible from the fitted weights.
 * Use GP and forest conditionals when a target is conditional on observed
   features.
 * Use dependence discovery to propose structure, then verify the structure

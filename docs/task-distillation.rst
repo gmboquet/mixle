@@ -63,6 +63,22 @@ generator to a label set.
 For hosted or local servers with an OpenAI-compatible API, use
 ``OpenAICompatLLM``.
 
+Teacher Contract
+----------------
+
+The teacher is part of the dataset, not an interchangeable implementation detail. For
+every distillation run, record:
+
+* the teacher function, endpoint, or human-review process;
+* the prompt or instruction used to constrain the teacher;
+* the allowed label set, schema, tool list, or numeric output contract;
+* retry and parsing behavior for malformed teacher responses;
+* the date or model version when a hosted teacher is used;
+* examples rejected by validation before they reached the student.
+
+This is the provenance that lets a future run distinguish model improvement
+from a silent change in what the teacher meant.
+
 Numeric Teachers
 ----------------
 
@@ -175,9 +191,9 @@ Torch Representation Distillation
 ---------------------------------
 
 The label-distillation path above asks a teacher for outputs and trains a
-small task artifact. Version 0.6.2 also adds ``mixle.task.distill_methods`` for
-classic Torch-to-Torch knowledge distillation when you already have a trained
-teacher module and an untrained student module.
+small task artifact. ``mixle.task.distill_methods`` covers classic
+Torch-to-Torch knowledge distillation when you already have a trained teacher
+module and an untrained student module.
 
 .. code-block:: python
 
@@ -253,8 +269,8 @@ training core when labels have already been collected.
 Tune the Recipe
 ---------------
 
-``tune_recipe`` uses ``mixle.doe`` to search for cheaper student settings that
-still match the teacher well.
+``tune_recipe`` uses ``mixle.doe`` to search for lower-cost student settings
+that still match the teacher well.
 
 .. code-block:: python
 
@@ -273,6 +289,46 @@ still match the teacher well.
 
 Use this when local training cost matters or when you want a principled small
 model before deployment.
+
+DOE-Guided Label Batches
+------------------------
+
+``mixle.doe`` can choose which examples deserve teacher calls before a
+distillation round. This is useful when a pool spans several tasks, modalities,
+or acquisition costs.
+
+.. code-block:: python
+
+   from mixle.doe import distillation_design
+
+   design = distillation_design(
+       embeddings,
+       n=40,
+       task_labels=task_names,
+       modalities=modalities,
+       uncertainty=student_uncertainty,
+       cost=teacher_cost,
+       seed=0,
+   )
+
+   selected = [unlabeled_pool[i] for i in design.indices]
+   labels = [teacher(x) for x in selected]
+
+Use :doc:`doe` for multi-task and cross-modal selectors. Use this page for the
+teacher wrapper, student artifact, calibration, cascade, and harvest/retrain
+loop after the design has chosen the batch.
+
+For a multi-task pool, keep the design record next to the label record. A
+release artifact should be able to answer three questions: which rows were
+eligible, which rows were selected, and which task or modality coverage target
+caused the selection. ``DistillationDesign.indices`` gives the chosen rows,
+``task_counts`` and ``modality_counts`` describe the selected batch, and
+``metadata`` records the requested targets and scoring weights.
+
+Do not collapse missing modalities into ordinary numeric values. The
+cross-modal selector treats a non-finite row in one modality as "this view is
+missing" for eligibility, while finite ranking vectors such as uncertainty and
+cost remain required. Preserve that distinction in notebooks and manifests.
 
 Active Labeling
 ---------------
@@ -296,6 +352,11 @@ needs.
 
 Compare ``acquisition="margin"`` with ``"random"`` to quantify how much active
 labeling helped on your pool.
+
+Active labeling should keep its acquisition trace. Store the selected example
+ids, acquisition scores, round number, teacher output, and student version that
+requested each label. Those records explain why the labeled set is not an iid
+sample and make later calibration or audit work much easier.
 
 Calibrate Answer Sets
 ---------------------
@@ -332,9 +393,8 @@ exchangeable data.
 Add an OOD Density Gate
 -----------------------
 
-A classifier cannot know that an input is far from the training distribution
-just because its softmax is peaked. ``DensityGate`` adds a generative check over
-features.
+A peaked softmax does not prove that an input is near the training
+distribution. ``DensityGate`` adds a generative check over features.
 
 .. code-block:: python
 
@@ -377,14 +437,81 @@ Harvest and Retrain
 -------------------
 
 Every escalation is an example the local model could not safely answer, and the
-teacher just labeled it. Harvest those labels:
+teacher has supplied the answer. Harvest those labels:
 
 .. code-block:: python
 
    hard_texts, hard_labels = cascade.harvested()
 
 Add them to the next distillation run. This closes the loop: the cascade should
-get cheaper as it sees the cases it previously escalated.
+reduce escalation cost as it sees the cases it previously escalated.
+
+Promotion Gates
+---------------
+
+Do not promote a newly distilled student only because it trained successfully.
+Use a held-out or traffic-shadow scorecard and require:
+
+* no regression in agreement with the teacher on representative traffic;
+* acceptable calibration-set coverage at the chosen ``alpha``;
+* escalation behavior that is explainable by ambiguity or OOD gates;
+* segment checks for rare labels, expensive teachers, and high-risk request
+  classes;
+* a reload check for the saved ``TaskModel`` or ``Solution`` artifact.
+
+If a new student improves average agreement but loses a rare label, keep the
+older route or escalate that segment until enough labels have been collected.
+
+Capability Profiles and Regression Guards
+-----------------------------------------
+
+Agreement with the teacher is necessary but not sufficient. A student can
+match a clean holdout set while failing under typos, harmless whitespace
+changes, missing fields, or rare task tags. Use capability profiles to record
+that behavior explicitly.
+
+.. code-block:: python
+
+   from mixle.task import (
+       CapabilitySuite,
+       capture_profile,
+       case_jitter_invariance,
+       keyboard_typo_corruption,
+       whitespace_invariance,
+   )
+
+   suite = CapabilitySuite(
+       corruptions={"typo_05": keyboard_typo_corruption(0.05, seed=0)},
+       invariances={
+           "case": case_jitter_invariance,
+           "space": whitespace_invariance,
+       },
+       probes=["", "refund order A-102", "unseen jargon"],
+   )
+   profile = capture_profile(student, teacher, heldout_texts, suite)
+
+The profile reports clean agreement, corruption agreement, invariance
+violation rates for both student and teacher, fixed-probe predictions, and
+abstention rates when the model exposes ``decide`` or ``batch_decide``. It
+does not return a single aggregate score; the release gate should state which
+profile fields matter for the task.
+
+For extraction students, use ``extractive_capture_profile``. It measures
+field-level F1 against fixed teacher extractions and records schema validity
+instead of treating an entire dict as one exact-match label.
+
+Use disagreement and collapse checks when iterating:
+
+* ``fit_disagreement_gate`` models where the current student differs from the
+  teacher, which is useful for targeted labeling and routing;
+* ``collapse_monitor`` tracks whether iterative improvement lost score or
+  diversity;
+* segment scorecards should cover rare labels, high-cost teachers, and
+  examples selected by DOE because they were uncertain or under-covered.
+
+These reports should travel with the artifact. They explain what changed
+between training rounds and prevent a better average score from hiding a
+weaker operational behavior.
 
 Extraction Tasks
 ----------------
@@ -412,6 +539,9 @@ When the teacher emits tool calls or multi-step plans rather than labels, use
 
 Run the Examples
 ----------------
+
+These scripts are examples, not release certification. Treat a passing example
+as a smoke check and keep task-specific scorecards for any real deployment.
 
 .. code-block:: sh
 
@@ -486,6 +616,11 @@ Detailed Task Inventory
    * - Active learning internals
      - ``ActiveResult``, ``acquisition_scores``
      - Inspect active-labeling rounds and scoring.
+   * - Capability profiles and disagreement
+     - ``CapabilitySuite``, ``capture_profile``, ``extractive_capture_profile``,
+       ``fit_disagreement_gate``, ``collapse_monitor``
+     - Behavioral checks for corruptions, invariances, schema validity,
+       disagreement, and iterative collapse.
    * - Recipe tuning
      - ``RecipeSpace``, ``TuneResult``
      - DOE-backed search over student settings.

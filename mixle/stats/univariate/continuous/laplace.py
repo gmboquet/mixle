@@ -1,4 +1,4 @@
-"""Create, estimate, and sample from a Laplace distribution.
+"""Laplace distributions over real values.
 
 Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
@@ -33,12 +33,14 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated Laplace kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for Laplace distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -182,6 +184,7 @@ class LaplaceSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one sample or an array of iid samples."""
         return self.rng.laplace(loc=self.dist.mu, scale=self.dist.b, size=size)
 
 
@@ -195,14 +198,17 @@ class LaplaceAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: LaplaceDistribution | None) -> None:
+        """Store one positively weighted observation for the weighted-median M-step."""
         if weight > 0.0:
             self.values.append(float(x))
             self.weights.append(float(weight))
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: LaplaceDistribution | None) -> None:
+        """Store positively weighted encoded observations for estimation."""
         mask = weights > 0.0
         if np.any(mask):
             self.values.append(np.asarray(x[mask], dtype=np.float64))
@@ -220,6 +226,7 @@ class LaplaceAccumulator(SequenceEncodableStatisticAccumulator):
             self.weights.append(weights_np[mask])
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     @staticmethod
@@ -229,15 +236,18 @@ class LaplaceAccumulator(SequenceEncodableStatisticAccumulator):
         return np.concatenate([np.asarray(u, dtype=np.float64).reshape(-1) for u in items])
 
     def combine(self, suff_stat: tuple[np.ndarray, np.ndarray]) -> "LaplaceAccumulator":
+        """Merge raw weighted observations from another accumulator."""
         if len(suff_stat[0]):
             self.values.append(suff_stat[0])
             self.weights.append(suff_stat[1])
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return flattened observations and weights."""
         return self._flatten(self.values), self._flatten(self.weights)
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray]) -> "LaplaceAccumulator":
+        """Replace accumulator contents from raw observations and weights."""
         self.values = [np.asarray(x[0], dtype=np.float64)]
         self.weights = [np.asarray(x[1], dtype=np.float64)]
         return self
@@ -248,6 +258,7 @@ class LaplaceAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -255,10 +266,12 @@ class LaplaceAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "LaplaceDataEncoder":
+        """Return the encoder used by this accumulator."""
         return LaplaceDataEncoder()
 
 
@@ -270,6 +283,7 @@ class LaplaceAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> LaplaceAccumulator:
+        """Create a fresh Laplace accumulator."""
         return LaplaceAccumulator(name=self.name, keys=self.keys)
 
 
@@ -291,9 +305,11 @@ class LaplaceEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> LaplaceAccumulatorFactory:
+        """Return an accumulator factory for Laplace raw-observation statistics."""
         return LaplaceAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray]) -> LaplaceDistribution:
+        """Estimate location and scale by the exact weighted MLE."""
         values, weights = suff_stat
         if self.pseudo_count is not None and self.suff_stat is not None:
             mu0, _ = self.suff_stat
@@ -319,6 +335,7 @@ class LaplaceDataEncoder(DataSequenceEncoder):
         return isinstance(other, LaplaceDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
+        """Encode observations as a floating-point array."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and np.any(np.isnan(rv)):
             raise ValueError("LaplaceDistribution requires finite or infinite real-valued observations.")

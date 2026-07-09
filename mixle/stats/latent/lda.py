@@ -1,10 +1,6 @@
-"""Create, estimate, and sample from an integer latent Dirichlet allocation model (LDA).
+"""Latent Dirichlet allocation for grouped-count documents.
 
-
-Defines the LDADistribution, LDASampler, LDAAccumulatorFactory, LDAEstimatorAccumulator, LDAEstimator, and the
-LDADataEncoder classes for use with mixle.
-
-LDA is a generative model for producing draws from multinomial distribution. The process for generating a document of
+LDA is a generative model for producing draws from multinomial topic mixtures. The process for generating a document of
 length N from an LDA with L topics is given as follows:
 
     (1) Draw theta ~ Dirichlet(alpha) (alpha is L dimensional)
@@ -12,7 +8,7 @@ length N from an LDA with L topics is given as follows:
     (3) From each topic l = 1,2,...,L draw z_l words w_{i,l}, w_{i+1,l},...,w_{z_l,l} ~ Categorical(beta_l),
         where each topic has its own Categorical distribution parameterized by beta_l.
 
-A document is then given by the bag of words produced from this sampling process. Note that a length distribtion is
+A document is then given by the bag of words produced from this sampling process. Note that a length distribution is
 used to sample the number of words in a given document.
 
 """
@@ -69,11 +65,11 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         gamma_threshold: float = 1.0e-8,
         max_gamma_iter: int = 100,
     ) -> None:
-        """LDADistribution object for defining a Latent Dirichlet allocation model.
+        """Create a latent Dirichlet allocation distribution.
 
         Args:
             topics (Sequence[SequenceEncodableProbabilityDistribution]): Topic distributions for the LDA.
-            alpha (Union[Sequence[float], np.ndarray]): Parameter to the prior Dirichlet for which topics are drawn.
+            alpha (Union[Sequence[float], np.ndarray]): Dirichlet prior concentration for document-topic proportions.
             len_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for length of documents.
                 Must be set to non-negative support distribution for sampling.
             gamma_threshold (float): Convergence threshold for the per-document variational gamma fixed point.
@@ -83,7 +79,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
 
         Attributes:
             topics (Sequence[SequenceEncodableProbabilityDistribution]): Topic distributions for the LDA.
-            alpha (np.ndarray): Parameter to the prior Dirichlet for which topics are drawn.
+            alpha (np.ndarray): Dirichlet prior concentration for document-topic proportions.
             len_dist (SequenceEncodableProbabilityDistribution): Distribution for length of documents.
                 Must be set to non-negative support distribution for sampling. Default to NullDistribution.
             gamma_threshold (float): Convergence threshold for the per-document variational gamma fixed point.
@@ -107,6 +103,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         return DistributionCapabilities(engine_ready=intersect_engine_ready(children), kernel_status="generic_latent")
 
     def compute_declaration(self):
+        """Return the generated-compute declaration for latent Dirichlet allocation."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ParameterSpec,
@@ -144,7 +141,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def __str__(self) -> str:
-        """Return string representation of LDADistribution object."""
+        """Return a constructor-style representation of the distribution."""
         return "LDADistribution([%s], [%s])" % (",".join([str(u) for u in self.topics]), ",".join(map(str, self.alpha)))
 
     def density(self, x: Sequence[tuple[int, float]]) -> float:
@@ -162,6 +159,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         return np.exp(self.log_density(x))
 
     def density_semantics(self):
+        """Return density semantics for the variational LDA document bound."""
         from mixle.stats.compute.pdist import DensitySemantics
 
         return DensitySemantics.LOWER_BOUND  # per-document variational ELBO, not the exact marginal
@@ -428,26 +426,26 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
         return [topic_samplers[k].sample() for k in topics]
 
     def sampler(self, seed: int | None = None) -> "LDASampler":
-        """Create an LDASampler object for sampling documents from this distribution.
+        """Create a sampler for documents from this distribution.
 
         Args:
             seed (Optional[int]): Seed for the random number generator used in sampling.
 
         Returns:
-            LDASampler object.
+            LDASampler: Sampler bound to this distribution.
 
         """
         return LDASampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "LDAEstimator":
-        """Create an LDAEstimator object from the topics of this distribution.
+        """Create an estimator initialized from this distribution's topics.
 
         Args:
             pseudo_count (Optional[float]): If passed, used to re-weight sufficient statistics
                 during estimation.
 
         Returns:
-            LDAEstimator object.
+            LDAEstimator: Estimator configured with matching topic and length estimators.
 
         """
         len_est = None if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
@@ -467,7 +465,7 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
             )
 
     def dist_to_encoder(self) -> "LDADataEncoder":
-        """Return an LDADataEncoder object for encoding sequences of iid LDA documents."""
+        """Return a data encoder for iid LDA documents."""
         return LDADataEncoder(encoder=self.topics[0].dist_to_encoder())
 
     def enumerator(self) -> "DistributionEnumerator":  # noqa: F821  -- forward ref; LDA raises on enumerate
@@ -490,17 +488,17 @@ class LDADistribution(SequenceEncodableProbabilityDistribution):
 
 
 class LDASampler(DistributionSampler):
-    """LDASampler object for sampling documents from an LDADistribution."""
+    """Sample documents from an LDA distribution."""
 
     def __init__(self, dist: LDADistribution, seed: int | None = None) -> None:
-        """LDASampler object.
+        """Create a sampler for an LDA distribution.
 
         Args:
             dist (LDADistribution): LDADistribution instance to sample from.
             seed (Optional[int]): Seed for the random number generator used in sampling.
 
         Attributes:
-            rng (RandomState): RandomState object with seed set if passed as arg.
+            rng (RandomState): Random number generator initialized from ``seed``.
             dist (LDADistribution): LDADistribution instance to sample from.
             n_topics (int): Number of topics in dist.
             comp_samplers (List[DistributionSampler]): Samplers for each topic distribution.
@@ -579,7 +577,7 @@ class LDASampler(DistributionSampler):
 
 
 class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
-    """LDAEstimatorAccumulator object for aggregating sufficient statistics of observed LDA documents."""
+    """Accumulator for sufficient statistics from observed LDA documents."""
 
     def __init__(
         self,
@@ -588,7 +586,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         keys: tuple[str | None, str | None] | None = (None, None),
         prev_alpha: np.ndarray | None = None,
     ) -> None:
-        """LDAEstimatorAccumulator object.
+        """Create an accumulator for LDA sufficient statistics.
 
         Args:
             accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Accumulators for the topic
@@ -653,10 +651,10 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.seq_update(enc_x, np.asarray([weight]), estimate)
 
     def _rng_initialize(self, rng: RandomState) -> None:
-        """Set member RandomState objects from rng for initialize()/seq_initialize() consistency.
+        """Initialize member random states for ``initialize`` and ``seq_initialize`` consistency.
 
         Args:
-            rng (RandomState): Used to generate seeds for member RandomState objects.
+            rng (RandomState): Random state used to generate member seeds.
 
         Returns:
             None.
@@ -686,7 +684,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         Args:
             x: Encoded corpus of LDA documents (see LDADataEncoder.seq_encode()).
             weights (np.ndarray): Weights for each document.
-            rng (np.random.RandomState): RandomState object used to seed member RandomState objects.
+            rng (np.random.RandomState): Random state used to seed the accumulator initialization streams.
 
         Returns:
             None.
@@ -732,7 +730,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         Args:
             x (Sequence[Tuple[Any, float]]): A document given as (value, count) pairs.
             weight (float): Weight for the observation.
-            rng (np.random.RandomState): RandomState object used to seed member RandomState objects.
+            rng (np.random.RandomState): Random state used to seed the accumulator initialization streams.
 
         Returns:
             None.
@@ -960,10 +958,9 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge sufficient statistics of object instance with matching keys in stats_dict.
+        """Merge this accumulator into keyed sufficient statistics.
 
-        Merges alpha sufficient statistics if alpha_key is set, and topic accumulators if
-        topics_key is set.
+        Merges alpha sufficient statistics when ``alpha_key`` is set, and topic accumulators when ``topics_key`` is set.
 
         Args:
             stats_dict (Dict[str, Any]): Dictionary mapping keys to corresponding sufficient statistics.
@@ -996,7 +993,7 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.len_accumulator.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace sufficient statistics of object instance with those of matching keys in stats_dict.
+        """Replace this accumulator's statistics from matching keyed values.
 
         Args:
             stats_dict (Dict[str, Any]): Dictionary mapping keys to corresponding sufficient statistics.
@@ -1023,12 +1020,12 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.len_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "LDADataEncoder":
-        """Return an LDADataEncoder object for encoding sequences of iid LDA documents."""
+        """Return a data encoder built from the topic accumulators."""
         return LDADataEncoder(encoder=self.accumulators[0].acc_to_encoder())
 
 
 class LDAEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
-    """LDAEstimatorAccumulatorFactory object for creating LDAEstimatorAccumulator objects."""
+    """Factory for LDA estimator accumulators."""
 
     def __init__(
         self,
@@ -1038,7 +1035,7 @@ class LDAEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
         keys: tuple[str | None, str | None] | None = (None, None),
         prev_alpha: np.ndarray | None = None,
     ) -> None:
-        """LDAEstimatorAccumulatorFactory object.
+        """Create a factory for LDA estimator accumulators.
 
         Args:
             factories (Sequence[StatisticAccumulatorFactory]): Factories for the topic accumulators.
@@ -1064,7 +1061,7 @@ class LDAEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
         self.prev_alpha = prev_alpha
 
     def make(self) -> "LDAEstimatorAccumulator":
-        """Returns an LDAEstimatorAccumulator object from attribute variables."""
+        """Return a new LDA estimator accumulator."""
         len_acc = self.len_factory.make() if self.len_factory is not None else None
         return LDAEstimatorAccumulator(
             [self.factories[i].make() for i in range(self.dim)], len_acc, self.keys, self.prev_alpha
@@ -1072,7 +1069,7 @@ class LDAEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class LDAEstimator(ParameterEstimator):
-    """LDAEstimator object for estimating an LDADistribution from aggregated sufficient statistics."""
+    """Estimate LDA distributions from aggregated variational sufficient statistics."""
 
     def __init__(
         self,
@@ -1086,15 +1083,13 @@ class LDAEstimator(ParameterEstimator):
         alpha_threshold: float = 1.0e-8,
         max_gamma_iter: int = 100,
     ) -> None:
-        """LDAEstimator object.
+        """Create an estimator for LDA distributions.
 
         Args:
-            estimators (Sequence[ParameterEstimator]): ParameterEstimator objects for the topics.
-            len_estimator (Optional[ParameterEstimator]): ParameterEstimator object for the
-                document-length distribution.
+            estimators (Sequence[ParameterEstimator]): Estimators for the topic distributions.
+            len_estimator (Optional[ParameterEstimator]): Estimator for the document-length distribution.
             suff_stat (Optional[Any]): Kept for consistency with ParameterEstimator interface.
-            pseudo_count (Optional[Tuple[float, float]]): Used to re-weight the alpha sufficient
-                statistics in estimation.
+            pseudo_count (Optional[Tuple[float, float]]): Prior mass used to smooth the alpha sufficient statistics.
             keys (Optional[Tuple[Optional[str], Optional[str]]]): Keys for the alpha sufficient
                 statistics and the topic accumulators.
             fixed_alpha (Optional[np.ndarray]): If passed, alpha is fixed to this value in estimation.
@@ -1103,11 +1098,9 @@ class LDAEstimator(ParameterEstimator):
 
         Attributes:
             num_topics (int): Number of topics.
-            estimators (Sequence[ParameterEstimator]): ParameterEstimator objects for the topics.
-            len_estimator (ParameterEstimator): ParameterEstimator object for the document-length
-                distribution. Set to NullEstimator if None is passed.
-            pseudo_count (Optional[Tuple[float, float]]): Used to re-weight the alpha sufficient
-                statistics in estimation.
+            estimators (Sequence[ParameterEstimator]): Estimators for the topic distributions.
+            len_estimator (ParameterEstimator): Estimator for the document-length distribution.
+            pseudo_count (Optional[Tuple[float, float]]): Prior mass used to smooth alpha sufficient statistics.
             suff_stat (Optional[Any]): Kept for consistency with ParameterEstimator interface.
             keys (Tuple[Optional[str], Optional[str]]): Keys for the alpha sufficient statistics and
                 the topic accumulators.
@@ -1128,15 +1121,15 @@ class LDAEstimator(ParameterEstimator):
         self.max_gamma_iter = int(max_gamma_iter)
 
     def accumulator_factory(self) -> "LDAEstimatorAccumulatorFactory":
-        """Returns an LDAEstimatorAccumulatorFactory object from attribute variables."""
+        """Return an accumulator factory configured from this estimator."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         len_factory = self.len_estimator.accumulator_factory()
         return LDAEstimatorAccumulatorFactory(est_factories, self.num_topics, len_factory, self.keys, self.fixed_alpha)
 
     def estimate(self, nobs: float | None, suff_stat) -> "LDADistribution":
-        """Estimate an LDADistribution from aggregated sufficient statistics.
+        """Estimate an LDA distribution from aggregated sufficient statistics.
 
-        Arg suff_stat is a Tuple of length 6 containing:
+        ``suff_stat`` is a six-item tuple containing:
             suff_stat[0] (Optional[np.ndarray]): Previous Dirichlet parameter estimate.
             suff_stat[1] (np.ndarray): Aggregated expected log topic proportions.
             suff_stat[2] (float): Aggregated weighted document count.
@@ -1149,7 +1142,7 @@ class LDAEstimator(ParameterEstimator):
             suff_stat: See above for details.
 
         Returns:
-            LDADistribution object.
+            LDADistribution: Estimated distribution.
 
         """
         prev_alpha, sum_of_logs, doc_counts, topic_counts, topic_suff_stats, len_suff_stat = suff_stat
@@ -1189,29 +1182,29 @@ class LDAEstimator(ParameterEstimator):
 
 
 class LDADataEncoder(DataSequenceEncoder):
-    """LDADataEncoder object for encoding sequences of iid LDA documents."""
+    """Encode iid LDA documents for vectorized scoring."""
 
     def __init__(self, encoder: DataSequenceEncoder):
-        """LDADataEncoder object.
+        """Create an encoder for LDA documents.
 
         Args:
-            encoder (DataSequenceEncoder): DataSequenceEncoder for the topic distributions.
+            encoder (DataSequenceEncoder): Encoder for topic-distribution observations.
 
         Attributes:
-            encoder (DataSequenceEncoder): DataSequenceEncoder for the topic distributions.
+            encoder (DataSequenceEncoder): Encoder for topic-distribution observations.
 
         """
         self.encoder = encoder
 
     def __str__(self) -> str:
-        """Return string representation of LDADataEncoder object."""
+        """Return a constructor-style representation of the encoder."""
         return "LDADataEncoder(encoder=" + str(self.encoder) + ")"
 
     def __eq__(self, other) -> bool:
         """Check if other is an equivalent LDADataEncoder (topic encoders must match).
 
         Args:
-            other (object): Object to compare to object instance.
+            other (object): Object to compare.
 
         Returns:
             True if other is equivalent.
@@ -1723,6 +1716,6 @@ def _register_lda_engine_kernel():
 _register_lda_engine_kernel()
 
 
-# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+# --- Backward-compatible API naming aliases ---
 LDAAccumulator = LDAEstimatorAccumulator
 LDAAccumulatorFactory = LDAEstimatorAccumulatorFactory

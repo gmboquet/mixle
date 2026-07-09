@@ -245,6 +245,7 @@ class TorchRunEncodedData(EncodedDataHandle):
         return int(self.size)
 
     def close(self) -> None:
+        """Destroy the owned torch distributed process group, if any."""
         if self._owns_process_group and self.dist.is_initialized():
             self.dist.destroy_process_group(self.group)
             self._owns_process_group = False

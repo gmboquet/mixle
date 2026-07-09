@@ -25,33 +25,46 @@ from mixle.ppl.core import (
 
 # --- constructors: conventional parameterizations, return symbolic RandomVariables ---
 def Normal(mean: Any, sd: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Normal with mean and standard deviation (lowers to GaussianDistribution(mu, sd**2))."""
+    """Symbolic normal distribution parameterized by mean and standard deviation.
+
+    The user-facing scale is ``sd``. Lowering converts it to the variance
+    parameter used by ``GaussianDistribution`` while fitted artifacts should
+    remain interpretable in the constructor's scale parameterization.
+    """
     return RandomVariable._sample("Normal", (mean, sd), name=name, keys=keys)
 
 
 def Poisson(rate: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Symbolic Poisson count distribution parameterized by non-negative rate."""
     return RandomVariable._sample("Poisson", (rate,), name=name, keys=keys)
 
 
 def Gamma(shape: Any, rate: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Gamma with shape and rate (lowers to GammaDistribution(k=shape, theta=1/rate))."""
+    """Symbolic Gamma distribution parameterized by shape and rate.
+
+    The underlying stats family uses scale ``theta``; lowering maps
+    ``rate`` to ``theta = 1 / rate``.
+    """
     return RandomVariable._sample("Gamma", (shape, rate), name=name, keys=keys)
 
 
 def Exponential(rate: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Exponential with rate (mean 1/rate; lowers to ExponentialDistribution(beta=1/rate))."""
+    """Symbolic exponential distribution parameterized by event rate."""
     return RandomVariable._sample("Exponential", (rate,), name=name, keys=keys)
 
 
 def Bernoulli(p: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Bernoulli distribution for binary outcomes with success probability ``p``."""
     return RandomVariable._sample("Bernoulli", (p,), name=name, keys=keys)
 
 
 def Geometric(p: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Symbolic geometric count distribution with success probability ``p``."""
     return RandomVariable._sample("Geometric", (p,), name=name, keys=keys)
 
 
 def Beta(a: Any, b: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
+    """Beta distribution over probabilities with concentration parameters ``a`` and ``b``."""
     return RandomVariable._sample("Beta", (a, b), name=name, keys=keys)
 
 
@@ -77,12 +90,12 @@ def Graph():
 
 
 def StudentT(df: Any, loc: Any, scale: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Student-t with degrees of freedom, location, scale (heavy-tailed Normal)."""
+    """Symbolic Student-t distribution with degrees of freedom, location, and scale."""
     return RandomVariable._sample("StudentT", (df, loc, scale), name=name, keys=keys)
 
 
 def LogNormal(mu: Any, sigma: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Log-normal: log(X) ~ Normal(mu, sigma)."""
+    """Symbolic log-normal distribution where ``log(X)`` is normal."""
     return RandomVariable._sample("LogNormal", (mu, sigma), name=name, keys=keys)
 
 
@@ -96,7 +109,7 @@ def EMG(mu: Any, sigma: Any, rate: Any, *, name: str | None = None, keys: str | 
 
 
 def NegativeBinomial(r: Any, p: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Negative binomial with r failures and success probability p."""
+    """Symbolic negative-binomial distribution with shape ``r`` and success probability ``p``."""
     return RandomVariable._sample("NegativeBinomial", (r, p), name=name, keys=keys)
 
 
@@ -201,37 +214,37 @@ def Categorical(
 
 
 def Weibull(shape: Any, scale: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Weibull with shape (k) and scale (lambda)."""
+    """Symbolic Weibull distribution with positive shape and scale parameters."""
     return RandomVariable._sample("Weibull", (shape, scale), name=name, keys=keys)
 
 
 def Laplace(loc: Any, scale: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Laplace (double-exponential) with location and scale (b)."""
+    """Symbolic Laplace distribution with location and positive scale."""
     return RandomVariable._sample("Laplace", (loc, scale), name=name, keys=keys)
 
 
 def Logistic(loc: Any, scale: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Logistic with location and scale."""
+    """Symbolic logistic distribution with location and positive scale."""
     return RandomVariable._sample("Logistic", (loc, scale), name=name, keys=keys)
 
 
 def Uniform(low: Any, high: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Continuous uniform on [low, high]."""
+    """Symbolic continuous uniform distribution on the closed interval ``[low, high]``."""
     return RandomVariable._sample("Uniform", (low, high), name=name, keys=keys)
 
 
 def Rayleigh(sigma: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Rayleigh with scale sigma."""
+    """Symbolic Rayleigh distribution with positive scale ``sigma``."""
     return RandomVariable._sample("Rayleigh", (sigma,), name=name, keys=keys)
 
 
 def Pareto(scale: Any, shape: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Pareto with minimum value xm (scale) and tail index alpha (shape)."""
+    """Symbolic Pareto distribution with minimum value ``scale`` and tail index ``shape``."""
     return RandomVariable._sample("Pareto", (scale, shape), name=name, keys=keys)
 
 
 def Binomial(n: Any, p: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Binomial with n trials and success probability p (n is fixed/known)."""
+    """Symbolic binomial distribution with ``n`` trials and success probability ``p``."""
     return RandomVariable._sample("Binomial", (n, p), name=name, keys=keys)
 
 
@@ -242,10 +255,12 @@ def _as_rv(c: Any) -> RandomVariable:
 
 
 def Mix(components, weights=None, *, name: str | None = None) -> RandomVariable:
-    """Finite mixture over component RandomVariables (or concrete distributions).
+    """Symbolic finite mixture over PPL variables or concrete distributions.
 
     ``Mix([Normal(free, free), Normal(free, free)]).fit(data)`` fits a 2-component
-    Gaussian mixture; ``.posterior(data)`` returns the responsibilities.
+    Gaussian mixture. The fitted object exposes mixture responsibilities through
+    posterior helpers and inherits the numeric stability contract of the stats
+    mixture implementation.
     """
     comps = tuple(_as_rv(c) for c in components)
     return RandomVariable._sample("Mixture", (comps, weights), name=name)
@@ -265,7 +280,7 @@ def SemiMix(components, weights=None, *, name: str | None = None) -> RandomVaria
 
 
 def Seq(element, *, name: str | None = None) -> RandomVariable:
-    """IID sequence of ``element``. Fit on a list of sequences (each a list/array)."""
+    """Symbolic iid sequence whose observations are lists or arrays of ``element``."""
     return RandomVariable._sample("Sequence", (_as_rv(element),), name=name)
 
 

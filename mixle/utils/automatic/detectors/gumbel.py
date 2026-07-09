@@ -1,4 +1,10 @@
-"""Gumbel (extreme value type I, maxima) continuous candidate -- right-skewed real-valued extremes."""
+"""Automatic detector for the Gumbel maximum extreme-value family.
+
+The Gumbel candidate is intended for real-valued samples with a moderate, stable right skew that is
+consistent with maxima or upper-tail exceedance summaries. The detector keeps the support gate broad
+because the family is defined on the full real line, then relies on the skewness window, finite-fit checks,
+and BIC penalty to prevent it from displacing Gaussian, exponential, or heavier-tailed alternatives.
+"""
 
 import math
 
@@ -6,9 +12,9 @@ import numpy as np
 
 from mixle.utils.automatic.detectors import Detector, register
 
-# Gumbel has a FIXED right skewness of 12*sqrt(6)*zeta(3)/pi**3 ~= 1.1395. Only fire when the data is
-# clearly right-skewed in that neighbourhood: this keeps the family off symmetric (Gaussian) data and
-# off heavier-skewed shapes (exponential, skew ~2) where an honest Gumbel fit would be wrong.
+# Gumbel has a fixed right skewness of 12*sqrt(6)*zeta(3)/pi**3 ~= 1.1395. The gate accepts a
+# deliberately broad neighbourhood around that value, enough for finite-sample variation but narrow
+# enough to avoid symmetric data and strongly skewed exponential-like data.
 _GUMBEL_SKEW = 1.1395470994046486
 _SKEW_LO = 0.4
 _SKEW_HI = 1.9
@@ -63,8 +69,11 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
 
 def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
     from mixle.stats import GumbelDistribution
+    from mixle.utils.automatic.profiling import _value_array_from_vdict
 
-    return GumbelDistribution(0.0, 1.0).estimator()
+    fit = _fit(_value_array_from_vdict(vdict))
+    loc, scale = fit if fit is not None else (0.0, 1.0)
+    return GumbelDistribution(loc, scale).estimator(pseudo_count=pseudo_count)
 
 
 def _cdf(arr: np.ndarray):

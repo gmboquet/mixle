@@ -207,6 +207,7 @@ class FiniteStochasticTransformAccumulator(SingleChildAccumulator):
                 self.source_accumulator.update(x, c, source_estimate)
 
     def update(self, x: Any, weight: float, estimate: FiniteStochasticTransformDistribution | None) -> None:
+        """Accumulate one observed output by dispersing its weight to source states."""
         xi = int(x)
         if xi < 0 or xi >= self.num_output:
             return
@@ -221,6 +222,7 @@ class FiniteStochasticTransformAccumulator(SingleChildAccumulator):
         weights: np.ndarray,
         estimate: FiniteStochasticTransformDistribution | None,
     ) -> None:
+        """Accumulate encoded outputs through one aggregated channel E-step."""
         y, valid = x
         # Collapse the N observations to the length-n output-count vector (the sufficient statistic),
         # then run a single E-step on it -- the per-iteration cost is O(n*m), independent of N.
@@ -229,12 +231,15 @@ class FiniteStochasticTransformAccumulator(SingleChildAccumulator):
         self._disperse(n_y, src, self._source_log_px(estimate))
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize source sufficient statistics from one observed output."""
         self.update(x, weight, None)
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize source sufficient statistics from encoded outputs."""
         self.seq_update(x, weights, None)
 
     def acc_to_encoder(self) -> "FiniteStochasticTransformDataEncoder":
+        """Return an encoder for finite integer outputs."""
         return FiniteStochasticTransformDataEncoder(self.num_output)
 
 
@@ -249,6 +254,7 @@ class FiniteStochasticTransformAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> FiniteStochasticTransformAccumulator:
+        """Create an empty finite-stochastic-transform accumulator."""
         return FiniteStochasticTransformAccumulator(self.source_factory.make(), self.kernel, keys=self.keys)
 
 
@@ -268,11 +274,13 @@ class FiniteStochasticTransformEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> FiniteStochasticTransformAccumulatorFactory:
+        """Return a factory for finite-transform sufficient-statistic accumulators."""
         return FiniteStochasticTransformAccumulatorFactory(
             self.source_estimator.accumulator_factory(), self.kernel, keys=self.keys
         )
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> FiniteStochasticTransformDistribution:
+        """Estimate the source distribution and re-wrap it with the fixed kernel."""
         source = self.source_estimator.estimate(nobs, suff_stat)
         return FiniteStochasticTransformDistribution(source, self.kernel, name=self.name, keys=self.keys)
 
@@ -290,6 +298,7 @@ class FiniteStochasticTransformDataEncoder(DataSequenceEncoder):
         return isinstance(other, FiniteStochasticTransformDataEncoder) and other.num_output == self.num_output
 
     def seq_encode(self, x: Sequence[Any]) -> tuple[np.ndarray, np.ndarray]:
+        """Encode integer outputs with a validity mask for the finite output range."""
         y = np.asarray(x).astype(np.int64, copy=False)
         valid = (y >= 0) & (y < self.num_output)
         safe = np.where(valid, y, 0)

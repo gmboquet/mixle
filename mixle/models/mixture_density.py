@@ -14,6 +14,11 @@ are neither: an inverse problem has *several* valid ``y`` for one ``x``; measure
 sigma_k(x)^2)`` -- whose entire mixture (weights, means, variances) is a function of ``x``, so it is multimodal
 and heteroscedastic. Any other conditional density (a conditional flow, an autoregressive head) plugs in the same
 way: give it ``log_density(x, y)`` and ``sample_given(x)``.
+
+:func:`build_projection_leaf` is a different kind of ready instance -- a **contrastive** ``p(y | x)`` (an InfoNCE
+projection between two, typically frozen, embedding spaces) whose ``log_density`` is not a calibrated density at
+all but still trains and composes through the exact same adapter: the stage-1 "frozen encoder -> projection ->
+frozen encoder" pattern, generalized to a family with no domain nouns.
 """
 
 from __future__ import annotations
@@ -93,10 +98,12 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
         return f"NeuralConditionalDensity({type(self.module).__name__})"
 
     def log_density(self, xy: Any) -> float:
+        """Return ``log p(y | x)`` for one observation pair ``(x, y)``."""
         x, y = xy
         return float(self.seq_log_density(([np.atleast_1d(x)], [np.atleast_1d(y)]))[0])
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
+        """Return per-row conditional log densities for encoded ``(x, y)`` arrays."""
         torch = _torch()
         xs, ys = enc
         xx = check_finite(np.atleast_2d(np.asarray(xs, dtype=float)), "NeuralConditionalDensity.seq_log_density (x)")
@@ -108,14 +115,17 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
             return self.module.log_density(xt, yt).cpu().numpy().reshape(-1)
 
     def sampler(self, seed: int | None = None) -> NeuralConditionalDensitySampler:
+        """Return a conditional sampler for drawing ``y`` given ``x``."""
         return NeuralConditionalDensitySampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> NeuralConditionalDensityEstimator:
+        """Return the generalized-EM estimator for weighted conditional-density training."""
         return NeuralConditionalDensityEstimator(
             self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name
         )
 
     def dist_to_encoder(self) -> NeuralConditionalDensityEncoder:
+        """Return the encoder for ``(x, y)`` observation pairs."""
         return NeuralConditionalDensityEncoder()
 
     # --- serialization: persist hparams + the module (as portable bytes); registered below so a mixture holding
@@ -130,6 +140,7 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
         self.module = decode_module(state["module"])
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize hyperparameters and module bytes for registry-based round trips."""
         return {
             "m_steps": self.m_steps,
             "lr": self.lr,
@@ -140,6 +151,7 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> NeuralConditionalDensity:
+        """Rebuild a :class:`NeuralConditionalDensity` from :meth:`to_dict` output."""
         return cls(
             decode_module(payload["module"]),
             m_steps=payload["m_steps"],
@@ -150,14 +162,18 @@ class NeuralConditionalDensity(SequenceEncodableProbabilityDistribution):
 
 
 class NeuralConditionalDensitySampler(DistributionSampler):
+    """Conditional sampler for modules exposing ``sample_given(x)``."""
+
     def __init__(self, dist: NeuralConditionalDensity, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Raise because the leaf defines ``p(y | x)`` and has no marginal ``p(x)``."""
         raise NotImplementedError("NeuralConditionalDensity is conditional p(y|x); use sampler().sample_given(x).")
 
     def sample_given(self, x: Any) -> np.ndarray:
+        """Draw one response from ``p(y | x)`` using the wrapped module."""
         torch = _torch()
         self.dist.module.to(self.dist.device).eval()
         torch.manual_seed(int(self.rng.randint(0, 2**31 - 1)))
@@ -165,8 +181,28 @@ class NeuralConditionalDensitySampler(DistributionSampler):
         with torch.no_grad():
             return self.dist.module.sample_given(xt).cpu().numpy()[0]
 
+    def sample_given_batch(self, x_batch: Any) -> np.ndarray:
+        """One draw of ``y ~ p(y | x)`` for every row of ``x_batch`` (shape ``(n, x_dim)``), in one
+        batched forward pass -- statistically identical to calling :meth:`sample_given` once per row
+        (same model, same per-draw sampling procedure), just without paying framework/dispatch
+        overhead per row. That per-call overhead dominates a Python loop of hundreds of individual
+        ``sample_given`` calls, which is exactly the shape both a particle-walk step (many different
+        x's, one draw each) and a per-point coverage check (repeat one x, many draws) reduce to --
+        both call sites use this to speed up the same check/walk rather than shrink it. Repeat a row
+        of ``x_batch`` to draw more than once from the same ``x``."""
+        torch = _torch()
+        self.dist.module.to(self.dist.device).eval()
+        torch.manual_seed(int(self.rng.randint(0, 2**31 - 1)))
+        xt = torch.as_tensor(
+            np.atleast_2d(np.asarray(x_batch, dtype=float)), dtype=torch.float32, device=self.dist.device
+        )
+        with torch.no_grad():
+            return self.dist.module.sample_given(xt).cpu().numpy()  # (n, y_dim)
+
 
 class NeuralConditionalDensityEncoder(DataSequenceEncoder):
+    """Encode ``(x, y)`` pairs for vectorized conditional-density scoring and fitting."""
+
     def __str__(self) -> str:
         return "NeuralConditionalDensityEncoder"
 
@@ -174,6 +210,7 @@ class NeuralConditionalDensityEncoder(DataSequenceEncoder):
         return isinstance(other, NeuralConditionalDensityEncoder)
 
     def seq_encode(self, data: list) -> tuple[np.ndarray, np.ndarray]:
+        """Convert a list of ``(x, y)`` pairs into batched feature and target arrays."""
         x = np.array([np.atleast_1d(np.asarray(xy[0], dtype=float)) for xy in data])
         y = np.array([np.atleast_1d(np.asarray(xy[1], dtype=float)) for xy in data])
         return (x, y)
@@ -189,11 +226,13 @@ class NeuralConditionalDensityAccumulator(SequenceEncodableStatisticAccumulator)
 
     # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
     def update(self, xy: Any, weight: float, estimate: Any) -> None:
+        """Add one weighted observation pair to the accumulator."""
         self.x.append(np.atleast_1d(np.asarray(xy[0], dtype=float))[None, ...])
         self.y.append(np.atleast_1d(np.asarray(xy[1], dtype=float))[None, ...])
         self.w.append(np.asarray([float(weight)], dtype=float))
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
+        """Add a batch of encoded observation pairs and responsibility weights."""
         x, y = enc
         xb = np.asarray(x, dtype=float)
         yb = np.asarray(y, dtype=float)
@@ -202,12 +241,15 @@ class NeuralConditionalDensityAccumulator(SequenceEncodableStatisticAccumulator)
         self.w.append(np.asarray(weights, dtype=float).ravel())
 
     def initialize(self, xy: Any, weight: float, rng: Any) -> None:
+        """Initialize from one observation using the ordinary update path."""
         self.update(xy, weight, None)
 
     def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
+        """Initialize from an encoded batch using the ordinary batch update path."""
         self.seq_update(enc, weights, None)
 
     def combine(self, other: Any) -> NeuralConditionalDensityAccumulator:
+        """Merge the value tuple from another conditional-density accumulator."""
         xo, yo, wo = other
         if len(xo):
             self.x.append(np.asarray(xo, dtype=float))
@@ -216,12 +258,14 @@ class NeuralConditionalDensityAccumulator(SequenceEncodableStatisticAccumulator)
         return self
 
     def value(self) -> tuple:
+        """Return contiguous ``(x, y, weights)`` arrays for the M-step."""
         x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
         y = np.concatenate(self.y, axis=0) if self.y else np.zeros((0, 0))
         w = np.concatenate(self.w) if self.w else np.zeros((0,))
         return (x, y, w)
 
     def from_value(self, value: tuple) -> NeuralConditionalDensityAccumulator:
+        """Restore accumulator buffers from a value tuple."""
         x, y, w = value
         self.x = [np.asarray(x, dtype=float)] if len(x) else []
         self.y = [np.asarray(y, dtype=float)] if len(y) else []
@@ -229,11 +273,15 @@ class NeuralConditionalDensityAccumulator(SequenceEncodableStatisticAccumulator)
         return self
 
     def acc_to_encoder(self) -> NeuralConditionalDensityEncoder:
+        """Return the encoder expected by this accumulator."""
         return NeuralConditionalDensityEncoder()
 
 
 class NeuralConditionalDensityAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for conditional-density accumulators."""
+
     def make(self) -> NeuralConditionalDensityAccumulator:
+        """Create a fresh accumulator."""
         return NeuralConditionalDensityAccumulator()
 
 
@@ -250,6 +298,7 @@ class NeuralConditionalDensityEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self) -> NeuralConditionalDensityAccumulatorFactory:
+        """Return an accumulator factory for weighted conditional-density batches."""
         return NeuralConditionalDensityAccumulatorFactory()
 
     def _make(self) -> NeuralConditionalDensity:
@@ -258,6 +307,7 @@ class NeuralConditionalDensityEstimator(ParameterEstimator):
         )
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralConditionalDensity:
+        """Run the weighted conditional log-likelihood M-step and return the updated leaf."""
         torch = _torch()
         xs, ys, ws = suff_stat
         if len(xs) == 0:
@@ -347,8 +397,8 @@ def build_conditional_flow(x_dim: int, y_dim: int, *, hidden: int = 32, layers: 
     The exact-density counterpart to :func:`build_mdn`. Each affine-coupling layer's shift/scale networks take
     both the passed-through ``y`` coordinates *and* ``x``, so the whole invertible ``y``-transform bends with the
     input -- capturing *within-``y``* dependence (e.g. ``y2`` a nonlinear function of ``y1``) that a single-Gaussian
-    :class:`~mixle.models.neural_leaf.NeuralGaussian` (isotropic mean-only) cannot, while keeping an exact log-density
-    (so it composes honestly, unlike a bound). Needs ``y_dim >= 2`` for the coupling to be non-trivial. Exposes
+    :class:`~mixle.models.neural_leaf.NeuralGaussian` (isotropic mean-only) cannot, while keeping an exact
+    log-density rather than a bound. Needs ``y_dim >= 2`` for the coupling to be non-trivial. Exposes
     ``log_density(x, y)`` and ``sample_given(x)`` -- the contract a :class:`NeuralConditionalDensity` adapts.
     """
     return _module_class("ConditionalFlow")(x_dim, y_dim, hidden, layers)
@@ -410,6 +460,131 @@ def _build_conditional_flow_class(torch: Any, nn: Any) -> Any:
 _register_module_class("ConditionalFlow", _build_conditional_flow_class)
 
 
+# --- the contrastive instance: a projection between two (typically frozen) embedding spaces --------------------
+
+
+def build_projection_leaf(
+    d_x: int,
+    d_y: int,
+    *,
+    encoder_x: Any = None,
+    encoder_y: Any = None,
+    proj_dim: int | None = None,
+    hidden: int = 64,
+    freeze_encoders: bool = True,
+    temperature: float = 0.07,
+) -> Any:
+    """A contrastive (InfoNCE / CLIP-style) conditional ``p(y | x)`` between two embedding spaces -- ready to wrap.
+
+    This is the stage-1 multimodal pattern -- frozen encoder -> trainable projection -> frozen encoder -- stated
+    with no domain nouns. ``encoder_x``/``encoder_y`` are any torch module mapping a raw item to a ``d_x``/``d_y``
+    embedding; both default to ``nn.Identity()``, so ``x``/``y`` may already BE the embeddings (pass precomputed
+    vectors straight in, no backbone required). Encoders are frozen by default (``freeze_encoders=True``): their
+    parameters get ``requires_grad_(False)`` and the module is pinned in ``eval()`` regardless of the outer
+    ``train()``/``eval()`` calls the M-step makes, so no dropout/batchnorm noise leaks into a "frozen" backbone
+    and no gradient ever reaches it. The only trainable piece is a small projection head per side (``d_x`` /
+    ``d_y`` -> ``hidden`` -> ``proj_dim``, default ``proj_dim = min(d_x, d_y)``) mapping BOTH embeddings into one
+    shared, L2-normalized space -- the CLIP design (two projections into a shared space), not a single asymmetric
+    ``x -> y`` regression -- so the same leaf answers "which y matches this x" and "which x matches this y".
+
+    ``log_density(x, y)`` returns, per row, the (negative) SYMMETRIC INFONCE loss for a batch of ``n`` paired
+    embeddings: every row's projected pair is scored against every OTHER row in the batch as a negative, in both
+    directions (``x -> y`` and ``y -> x``), log-softmax-normalized over the batch dimension, then averaged. That
+    is exactly what the shared :class:`NeuralConditionalDensity` M-step already does with ``log_density`` --
+    weight it and sum it -- so no separate loss path is needed: the M-step's responsibility-weighted-NLL gradient
+    ascent on ``log_density`` **is** InfoNCE training, "for free" from the adapter's existing contract. As with
+    :func:`~mixle.models.neural_density.build_vae`'s ELBO, this is an honest score against itself (or another
+    leaf scored the same batch-relative way) rather than a calibrated ``log p(y | x)`` -- there is no way to
+    integrate a softmax-over-the-current-batch score to 1 over all ``y``. A batch of a single row has no
+    negatives to contrast against, so ``log_density`` returns ``0`` for it rather than raising.
+
+    ``sample_given`` is not defined -- a contrastive leaf is discriminative (it scores/ranks pairs); it has no
+    generative ``p(y | x)`` to draw from. Retrieve a matching ``y`` by comparing ``module.embed_x(x)`` against
+    ``module.embed_y(candidates)`` (cosine similarity in the shared space) instead.
+    """
+    return _module_class("ProjectionLeaf")(
+        d_x, d_y, encoder_x, encoder_y, proj_dim, hidden, freeze_encoders, temperature
+    )
+
+
+def _build_projection_leaf_class(torch: Any, nn: Any) -> Any:
+    class ProjectionLeaf(nn.Module):
+        def __init__(
+            self,
+            d_x: int,
+            d_y: int,
+            encoder_x: Any = None,
+            encoder_y: Any = None,
+            proj_dim: int | None = None,
+            hidden: int = 64,
+            freeze_encoders: bool = True,
+            temperature: float = 0.07,
+        ) -> None:
+            super().__init__()
+            self.d_x = int(d_x)
+            self.d_y = int(d_y)
+            self.proj_dim = int(proj_dim) if proj_dim is not None else max(1, min(self.d_x, self.d_y))
+            self.hidden = int(hidden)
+            self._freeze_encoders = bool(freeze_encoders)
+            self.encoder_x = encoder_x if encoder_x is not None else nn.Identity()
+            self.encoder_y = encoder_y if encoder_y is not None else nn.Identity()
+            if self._freeze_encoders:
+                for p in self.encoder_x.parameters():
+                    p.requires_grad_(False)
+                for p in self.encoder_y.parameters():
+                    p.requires_grad_(False)
+                self.encoder_x.eval()
+                self.encoder_y.eval()
+            # the ONLY trainable pieces: two small projection heads into a shared space, plus a learned
+            # (CLIP-style) log-temperature -- clamped at use so training cannot blow the softmax up/flat.
+            self.proj_x = nn.Sequential(
+                nn.Linear(self.d_x, self.hidden), nn.Tanh(), nn.Linear(self.hidden, self.proj_dim)
+            )
+            self.proj_y = nn.Sequential(
+                nn.Linear(self.d_y, self.hidden), nn.Tanh(), nn.Linear(self.hidden, self.proj_dim)
+            )
+            self.log_tau = nn.Parameter(torch.log(torch.tensor(float(temperature))))
+
+        def train(self, mode: bool = True) -> ProjectionLeaf:
+            super().train(mode)
+            if self._freeze_encoders:  # a frozen backbone stays in eval() no matter what the M-step requests
+                self.encoder_x.eval()
+                self.encoder_y.eval()
+            return self
+
+        def embed_x(self, x: Any) -> Any:
+            """``x`` (raw item or precomputed embedding) through the frozen encoder then the trainable
+            projection, L2-normalized -- the vector to compare against ``embed_y`` in the shared space."""
+            return nn.functional.normalize(self.proj_x(self.encoder_x(x)), dim=-1)
+
+        def embed_y(self, y: Any) -> Any:
+            return nn.functional.normalize(self.proj_y(self.encoder_y(y)), dim=-1)
+
+        def log_density(self, x: Any, y: Any) -> Any:
+            px, py = self.embed_x(x), self.embed_y(y)
+            n = px.shape[0]
+            if n <= 1:  # no negatives in the batch to contrast against
+                return torch.zeros(n, device=px.device, dtype=px.dtype)
+            tau = self.log_tau.exp().clamp(min=1e-2, max=100.0)
+            logits = (px @ py.t()) / tau  # (n, n): logits[i, j] = similarity(x_i, y_j)
+            idx = torch.arange(n, device=px.device)
+            log_x2y = torch.log_softmax(logits, dim=1)[idx, idx]  # x_i's correct y among the batch's y's
+            log_y2x = torch.log_softmax(logits, dim=0)[idx, idx]  # y_i's correct x among the batch's x's
+            return 0.5 * (log_x2y + log_y2x)  # symmetric InfoNCE, per row
+
+        def sample_given(self, x: Any) -> Any:
+            raise NotImplementedError(
+                "ProjectionLeaf is a discriminative/contrastive leaf (it scores how well x and y "
+                "embeddings match); it has no generative p(y | x) to sample from. Retrieve a y by "
+                "comparing embed_x(x) against embed_y(candidates) in the shared space instead."
+            )
+
+    return ProjectionLeaf
+
+
+_register_module_class("ProjectionLeaf", _build_projection_leaf_class)
+
+
 # --- the discrete conditional: an autoregressive categorical conditioned on x -- exact p(y|x) over discrete y ----
 
 
@@ -420,7 +595,7 @@ def build_conditional_autoregressive_categorical(x_dim: int, y_dim: int, n_categ
     counterpart to :func:`build_conditional_flow`. It factorizes ``p(y | x) = prod_i p(y_i | y_{<i}, x)`` with a
     MADE-masked net over ``y`` into which ``x`` is injected *unmasked* (degree 0, so every coordinate may depend on
     ``x``). Each per-coordinate softmax is exactly a conditional, so the density is **exactly normalized** and
-    composes honestly. Exposes ``log_density(x, y)`` and ``sample_given(x)`` -- the contract a
+    comparable to other exact discrete conditional leaves. Exposes ``log_density(x, y)`` and ``sample_given(x)`` -- the contract a
     :class:`NeuralConditionalDensity` adapts.
     """
     return _module_class("ConditionalAutoregressiveCategorical")(x_dim, y_dim, n_categories, hidden)

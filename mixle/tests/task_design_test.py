@@ -1,7 +1,7 @@
 """LLM-designed models (mixle.task.design): the LLM proposes a spec, mixle builds + fits it, fallback grounds it.
 
-A stub LLM returns specs (good and bad) so the build/fit/validate gate and the heuristic fallback are tested
-without a network or a real model.
+A deterministic local LLM stand-in returns specs, good and bad, so the build/fit/validate gate and the heuristic
+fallback are tested without a network service.
 """
 
 import unittest

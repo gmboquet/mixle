@@ -1,14 +1,14 @@
-"""``Cascade`` -- the serving object where the savings are actually realized (and the loop that compounds them).
+"""Cascade serving with realized cost tracking and targeted retraining data.
 
-This ties the spine together into one callable that makes money. Each request is answered locally when the
-:class:`~mixle.task.calibrate.CalibratedTaskModel` is confident and in-distribution, and only escalated to the
-expensive ``teacher`` when it is not. The cascade tracks *actual* spend against a :class:`~mixle.task.economics.CostModel`,
-so ``report()`` is realized dollars saved versus frontier-only -- not a projection.
+Each request is answered locally when the
+:class:`~mixle.task.calibrate.CalibratedTaskModel` is confident and
+in-distribution, and escalated to the teacher otherwise. The cascade tracks
+actual spend against a :class:`~mixle.task.economics.CostModel`, so
+``report()`` returns observed cost and savings relative to a teacher-only route.
 
-The compounding part: every escalated request is a place the cheap model was unsure, and the teacher just
-answered it -- a free, perfectly-targeted training label. ``harvested()`` returns those ``(text, label)`` pairs;
-feeding them back into distillation (see :func:`mixle.task.distill.distill`) shrinks the next model's escalation
-rate, which lowers per-request cost, which widens the margin. The cascade gets cheaper the more it is used.
+Every escalated request marks a case where the local model deferred and the
+teacher supplied a targeted label. ``harvested()`` returns those
+``(text, label)`` pairs for the next distillation run.
 """
 
 from __future__ import annotations
@@ -32,11 +32,12 @@ class CascadeStats:
 
     @property
     def realized_escalation_rate(self) -> float:
+        """Return the observed fraction of requests escalated to the teacher."""
         return self.n_escalated / self.n_requests if self.n_requests else 0.0
 
 
 class Cascade:
-    """Serve ``text -> label`` cheaply: local model when confident, teacher otherwise; track spend, harvest labels."""
+    """Serve ``text -> label`` through a confident local model, escalating to the teacher when needed."""
 
     def __init__(
         self, model: CalibratedTaskModel, teacher: Callable[..., Any], *, cost: CostModel | None = None
@@ -63,10 +64,11 @@ class Cascade:
         return label
 
     def serve(self, texts: Sequence[Any]) -> list[Any]:
+        """Serve a batch of requests through the cascade."""
         return [self(t) for t in texts]
 
     def harvested(self) -> tuple[list[Any], list[Any]]:
-        """The escalated ``(texts, teacher_labels)`` -- targeted training data to re-distill a cheaper model."""
+        """Return escalated ``(texts, teacher_labels)`` as targeted retraining data."""
         return list(self.stats.escalated_texts), list(self.stats.escalated_labels)
 
     def realized_cost(self) -> float:
@@ -91,7 +93,7 @@ class Cascade:
         return out
 
     def plan(self, *, volume: int, n_label: int, max_escalation: float | None = None) -> RoutePlan:
-        """Project the cheapest route at ``volume`` using the realized escalation rate (needs a CostModel)."""
+        """Project the lowest-cost route at ``volume`` using the realized escalation rate."""
         if self.cost is None:
             raise RuntimeError("Cascade needs a CostModel to plan a route")
         return recommend_route(

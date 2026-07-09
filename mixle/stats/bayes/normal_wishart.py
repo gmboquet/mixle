@@ -47,7 +47,7 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         prior: Optional["SequenceEncodableProbabilityDistribution"] = None,
     ) -> None:
-        """NormalWishartDistribution object.
+        """Create a normal-Wishart prior over Gaussian mean and precision matrix.
 
         Args:
             mu: Length-d prior mean m.
@@ -180,7 +180,7 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
         raise NotImplementedError("NormalWishartDistribution is a parameter prior; it has no data estimator.")
 
     def dist_to_encoder(self) -> "NormalWishartDataEncoder":
-        """Returns a NormalWishartDataEncoder object for encoding (mu, Lambda) pairs."""
+        """Return the encoder for ``(mu, Lambda)`` normal-Wishart observations."""
         return NormalWishartDataEncoder()
 
 
@@ -229,4 +229,5 @@ class NormalWishartDataEncoder(DataSequenceEncoder):
         return isinstance(other, NormalWishartDataEncoder)
 
     def seq_encode(self, x: Any) -> Any:
+        """Encode Normal-Wishart observations as a list payload."""
         return list(x)

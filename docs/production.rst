@@ -16,7 +16,7 @@ Production concerns are grouped into five areas:
 * verifiable training lineage;
 * registry and alias promotion;
 * scoring services with activity logs;
-* drift detection and retrain/swap monitoring.
+* drift detection and retrain/swap monitoring;
 * reproducibility receipts and local telemetry where the broader runtime layer
   is used.
 
@@ -52,6 +52,10 @@ The header records:
 * training settings and convergence trace;
 * timing, resource usage, environment, and git commit when available.
 
+Treat missing header fields as explicit limitations. A header without a data
+hash, environment record, or source commit can still be useful locally, but it
+should not be described as complete release evidence.
+
 Build Headers Explicitly
 ------------------------
 
@@ -70,6 +74,10 @@ provenance record.
    )
 
 Headers are plain serializable records through ``Header.to_dict()``.
+
+When building a header around an externally fitted model, record the external
+training command or system as precisely as possible. Otherwise the header only
+documents storage, not lineage.
 
 Registry
 --------
@@ -96,6 +104,10 @@ single path components. An unsafe name such as ``"../model"`` raises
 ``ValueError``, and unknown names or versions raise clear ``KeyError``
 messages rather than leaking store paths.
 
+Registration and promotion are separate actions. Registering a model records a
+version; promoting an alias should happen only after the validation and review
+gate has passed.
+
 Reproducibility Receipts
 ------------------------
 
@@ -115,6 +127,10 @@ The receipt records a data fingerprint, seed, estimator type, and parameter
 fingerprint. It complements provenance headers: the header describes the
 training run, while the reproducibility receipt checks whether the same fit can
 be recovered.
+
+Use receipts for deterministic or near-deterministic recovery checks, not as a
+substitute for quality validation. A reproducible low-quality model is still a
+low-quality model.
 
 Checkpointing Long Fits
 -----------------------
@@ -140,6 +156,10 @@ Registry checkpointers can snapshot a model during optimization:
 Each checkpoint can carry lineage metadata, making interruption and audit
 workflows explicit.
 
+Checkpoint chains are development or long-run evidence. Promote only a final
+validated model, not an intermediate checkpoint, unless the application has an
+explicit rollback or resume policy for that checkpoint.
+
 Service
 -------
 
@@ -157,6 +177,10 @@ Activity logs include record count, wall time, mean log likelihood, and the
 number of unscorable records. A JSONL log path can be supplied for persistent
 activity records.
 
+Unscorable records should remain visible. ``NaN``, ``-inf``, missing fields,
+and impossible observations are operational signals, not values to coerce into
+ordinary low scores.
+
 For application-level route, placement, context, pool, and reasoning events,
 use :mod:`mixle.telemetry` and the workflow in :doc:`reasoning-ecosystem`.
 
@@ -170,6 +194,10 @@ Load from a Registry Alias
 
 This is the handoff point for deployment systems: promote a version in the
 registry, and serving code reads the alias.
+
+The deployment system should record which alias it loaded and when. Serving
+from an alias without recording the resolved version makes rollback and
+incident review much harder.
 
 Drift Detection
 ---------------
@@ -198,6 +226,10 @@ Score drift looks at the model's log-density distribution. Feature drift uses
 population stability index, Kolmogorov-Smirnov, and related summary statistics
 where applicable.
 
+Drift thresholds should be tied to an action policy: alert, collect labels,
+shadow a challenger, retrain, rollback, or escalate for review. A drift report
+without an action policy is a diagnostic, not an operational gate.
+
 Task Artifacts and Cascades
 ---------------------------
 
@@ -218,6 +250,19 @@ Practical Deployment Shape
 5. Log scoring activity.
 6. Run drift checks against a reference sample.
 7. Retrain and promote a new version when drift or quality thresholds fail.
+
+Release Evidence
+----------------
+
+For production-facing documentation or artifacts, preserve:
+
+* fitted model and provenance header;
+* registry name, version, alias, and promotion decision;
+* clean-wheel load and scoring smoke result;
+* unscorable-record behavior;
+* activity-log and drift-threshold configuration;
+* rollback or alias-resolution policy; and
+* receipts or lineage checks when reproducibility is claimed.
 
 API Map
 -------

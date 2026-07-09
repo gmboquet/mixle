@@ -1,19 +1,11 @@
-"""Create, estimate, and sample from a Poisson distribution with rate lam > 0.0.
+"""Poisson distributions, estimators, accumulators, samplers, and encoders.
 
-Defines the PoissonDistribution, PoissonSampler, PoissonAccumulatorFactory, PoissonAccumulator,
-PoissonEstimator, and the PoissonDataEncoder classes for use with mixle.
-
-Data type (int): The Poisson distribution with rate lam, has log-density
+For nonnegative integer counts, ``PoissonDistribution(lam)`` has rate
+``lam > 0`` and log-density:
 
     log(p_mat(x_mat=x; lam)) = x*log(lam) - log(x!) - lam,
 
-for x in {0,1,2,...}, and
-
-    log(p_mat(x_mat=x)) = -np.inf,
-
-else.
-
-
+Values outside ``{0, 1, 2, ...}`` score ``-inf``.
 
 Reference: Johnson, Kemp & Kotz, *Univariate Discrete Distributions* (3rd ed., Wiley, 2005).
 """
@@ -55,12 +47,14 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare backend support for generated Poisson density kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch", "jax"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the generated-compute declaration for the Poisson distribution."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -120,20 +114,20 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
-        """PoissonDistribution object defining Poisson distribution with mean lam > 0.0.
+        """Create a Poisson distribution.
 
         Args:
-            lam (float): Positive real-valued number.
-            name (Optional[str]): String name for object instance.
+            lam: Positive finite rate and mean.
+            name: Optional diagnostic name.
             prior (Optional): Conjugate parameter prior over the rate ``lam``. A
                 :class:`~mixle.stats.univariate.continuous.gamma.GammaDistribution` enables the
                 Bayesian/variational machinery (``expected_log_density`` and the
                 conjugate posterior update); ``None`` (default) is a plain point model.
 
         Attributes:
-            lam (float): Mean of Poisson distribution.
-            name (Optional[str]): String name for object instance.
-            log_lambda (float): Log of attribute lam.
+            lam: Rate and mean of the Poisson distribution.
+            name: Optional diagnostic name.
+            log_lambda: Log rate used by scoring.
         """
         if lam <= 0.0 or not np.isfinite(lam):
             raise ValueError("PoissonDistribution requires lam > 0.")
@@ -143,7 +137,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         self.set_prior(prior)
 
     def __str__(self) -> str:
-        """Returns string representation of PoissonDistribution object."""
+        """Return a readable distribution summary."""
         return "PoissonDistribution(%s, name=%s)" % (repr(self.lam), repr(self.name))
 
     def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
@@ -326,26 +320,25 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         return float(math.floor(self.lam))
 
     def sampler(self, seed: int | None = None) -> "PoissonSampler":
-        """Create PoissonSampler object with PoissonDistribution instance and seed (Optional[int]) passed.
+        """Return a sampler for iid draws from this distribution.
 
         Args:
-            seed (Optional[int]): Optional seed for random number generator used in sampling.
+            seed: Optional seed for the sampler's random state.
 
         Returns:
-            PoissonSampler object.
+            A configured ``PoissonSampler``.
 
         """
         return PoissonSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "PoissonEstimator":
-        """Creates PoissonEstimator object.
+        """Return an estimator initialized from this distribution's shape.
 
         Args:
-            pseudo_count (Optional[float]): If passed, used to re-weight summary statistic lam from
-                PoissonDistribution instance.
+            pseudo_count: Optional smoothing count applied to the current rate.
 
         Returns:
-            PoissonEstimator object.
+            A ``PoissonEstimator``.
 
         """
         if pseudo_count is None:
@@ -354,11 +347,11 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
             return PoissonEstimator(pseudo_count=pseudo_count, suff_stat=self.lam, name=self.name, prior=self.prior)
 
     def dist_to_encoder(self) -> "PoissonDataEncoder":
-        """Return PoissonDataEncoder object."""
+        """Return an encoder for iid Poisson observations."""
         return PoissonDataEncoder()
 
     def enumerator(self) -> "PoissonEnumerator":
-        """Returns PoissonEnumerator iterating the support {0, 1, ...} in descending probability order."""
+        """Return an enumerator over nonnegative counts in descending probability order."""
         return PoissonEnumerator(self)
 
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
@@ -422,6 +415,8 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class PoissonEnumerator(DistributionEnumerator):
+    """Enumerate Poisson support values in descending probability order."""
+
     def __init__(self, dist: PoissonDistribution) -> None:
         """Enumerates the support {0, 1, 2, ...} of a PoissonDistribution.
 
@@ -458,48 +453,49 @@ class PoissonEnumerator(DistributionEnumerator):
 
 
 class PoissonSampler(DistributionSampler):
+    """Draw independent samples from a :class:`PoissonDistribution`."""
+
     def __init__(self, dist: "PoissonDistribution", seed: int | None = None) -> None:
-        """PoissonSampler object used to draw samples from PoissonDistribution.
+        """Create a sampler for a Poisson distribution.
 
         Args:
-            dist (PoissonDistribution): Set PoissonDistribution to sample from.
-            seed (Optional[int]): Used to set seed on random number generator used in sampling.
+            dist: Distribution to sample from.
+            seed: Optional random seed.
 
         Attributes:
-            rng (RandomState): RandomState with seed set for sampling.
-            dist (GeometricDistribution): PoissonDistribution to sample from.
+            rng: Random state used for sampling.
+            dist: Distribution to sample from.
 
         """
         self.rng = RandomState(seed)
         self.dist = dist
 
     def sample(self, size: int | None = None) -> int | np.ndarray:
-        """Generate iid samples from Poisson distribution.
-
-        Generates a single Poisson sample (int) if size is None, else a numpy array of integers of length size
-        containing iid samples, from the Poisson distribution.
+        """Draw iid samples from the Poisson distribution.
 
         Args:
-            size (Optional[int]): Number of iid samples to draw. If None, assumed to be 1.
+            size: Number of iid samples to draw. ``None`` returns a scalar sample.
 
         Returns:
-            If size is None, int, else size length numpy array of ints.
+            A scalar draw when ``size`` is ``None``; otherwise an array of draws.
 
         """
         return self.rng.poisson(lam=self.dist.lam, size=size)
 
 
 class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulate weighted count and sum statistics for Poisson estimation."""
+
     def __init__(self, keys: str | None = None) -> None:
-        """PoissonAccumulator object used to accumulate sufficient statistics from observed data.
+        """Create an accumulator for Poisson sufficient statistics.
 
         Args:
-            keys (Optional[str]): Assign a string valued to key to object instance.
+            keys: Optional key for merging sufficient statistics.
 
         Attributes:
-             sum (float): Aggregate sum of weighted observations.
-             count (float): Aggregate sum of observation weights.
-             key (Optional[str]): Key for combining sufficient statistics with object instance containing the same key.
+            sum: Weighted sum of observations.
+            count: Sum of observation weights.
+            keys: Optional sufficient-statistic key.
 
         """
         self.sum = 0.0
@@ -507,17 +503,14 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def initialize(self, x: int, weight: float, rng: np.random.RandomState | None = None) -> None:
-        """Initialize PoissonAccumulator object with weighted observation.
+        """Initialize sufficient statistics with one weighted observation.
 
-        Note: Just calls update().
+        This method delegates to ``update``.
 
         Args:
-            x (int): Observation from Poisson distribution.
-            weight (float): Weight for observation.
-            rng (Optional[RandomState]): Kept for consistency with SequenceEncodableStatisticAccumulator.
-
-        Returns:
-            None.
+            x: Observation from a Poisson distribution.
+            weight: Observation weight.
+            rng: Unused; accepted for the accumulator interface.
 
         """
         self.update(x, weight, None)
@@ -527,7 +520,7 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> None:
         """Vectorized initialization of PoissonAccumulator sufficient statistics with weighted observations.
 
-        Note: Just calls seq_update().
+        This delegates to :meth:`seq_update`.
 
         Arg value x (Tuple[np.ndarray[int], np.ndarray[float]]) is seq_encoded Poisson data from
         PoissonDataEncoder.seq_encode(), containing
@@ -584,17 +577,15 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += weights.sum()
 
     def combine(self, suff_stat: tuple[float, float]) -> "PoissonAccumulator":
-        """Combine aggregated sufficient statistics with sufficient statistics of PoissonAccumulator instance.
+        """Merge aggregated Poisson sufficient statistics into this accumulator.
 
-        Input suff_stat is Tuple[float, float] with:
-            suff_stat[0] (float): sum of observation weights,
-            suff_stat[1] (float): weighted sum of observations.
+        The tuple is interpreted as ``(count, sum)``.
 
         Args:
-            suff_stat (Tuple[float, float]): See above for details.
+            suff_stat: Aggregated Poisson sufficient statistics.
 
         Returns:
-            PoissonAccumulator object.
+            This accumulator.
 
         """
         self.sum += suff_stat[1]
@@ -603,17 +594,17 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, float]:
-        """Returns sufficient statistics Tuple[float, float] of PoissonAccumulator instance."""
+        """Return sufficient statistics as ``(count, sum)``."""
         return self.count, self.sum
 
     def from_value(self, x: tuple[float, float]) -> "PoissonAccumulator":
-        """Sets PoissonAccumulator instance sufficient statistic member variables to x.
+        """Replace this accumulator's sufficient statistics.
 
         Args:
-            x (Tuple[float, float]): Sum of observations weights and sum of weighted observations.
+            x: Aggregated Poisson sufficient statistics as ``(count, sum)``.
 
         Returns:
-            PoissonAccumulator object.
+            This accumulator.
 
         """
         self.count = x[0]
@@ -622,15 +613,10 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merges PoissonAccumulator sufficient statistics with sufficient statistics contained in suff_stat dict
-        that share the same key.
+        """Merge this accumulator into ``stats_dict`` under its configured key.
 
         Args:
-            stats_dict (Dict[str, Any]): Dict containing 'key' string for PoissonAccumulator
-                objects to combine sufficient statistics.
-
-        Returns:
-            None.
+            stats_dict: Mapping from merge keys to Poisson accumulators.
 
         """
         if self.keys is not None:
@@ -640,15 +626,10 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Set the sufficient statistics of PoissonAccumulator to stats_key sufficient statistics if key is in
-            stats_dict.
+        """Replace sufficient statistics from ``stats_dict`` when this accumulator's key is present.
 
         Args:
-            stats_dict (Dict[str, Any]): Dictionary mapping keys string ids to sufficient statistics.
-                objects.
-
-        Returns:
-            None.
+            stats_dict: Mapping from keys to compatible sufficient statistics.
 
         """
         if self.keys is not None:
@@ -656,30 +637,33 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
                 self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "PoissonDataEncoder":
-        """Return PoissonDataEncoder object."""
+        """Return an encoder compatible with Poisson observations."""
         return PoissonDataEncoder()
 
 
 class PoissonAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create Poisson accumulators with a shared optional merge key."""
+
     def __init__(self, keys: str | None = None) -> None:
-        """PoissonAccumulatorFactory object used for constructing PoissonAccumulator objects.
+        """Create an accumulator factory.
 
         Args:
-            keys (Optional[str]): Assign keys to PoissonAccumulatorFactory object.
+            keys: Optional key for merging sufficient statistics.
 
         Attributes:
-             keys (Optional[str]): Tag for combining sufficient statistics of PoissonAccumulator objects when
-                constructed.
+             keys: Optional sufficient-statistic key.
 
         """
         self.keys = keys
 
     def make(self) -> "PoissonAccumulator":
-        """Returns PoissonAccumulator object with keys passed."""
+        """Return a fresh Poisson accumulator."""
         return PoissonAccumulator(keys=self.keys)
 
 
 class PoissonEstimator(ParameterEstimator):
+    """Estimate Poisson rate parameters from accumulated sufficient statistics."""
+
     def __init__(
         self,
         pseudo_count: float | None = None,
@@ -688,23 +672,23 @@ class PoissonEstimator(ParameterEstimator):
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
-        """PoissonEstimator object for estimating PoissonDistribution object from aggregated sufficient statistics.
+        """Create an estimator for Poisson sufficient statistics.
 
         Args:
-            pseudo_count (Optional[float]): Optional non-negative float.
-            suff_stat (Optional[float]): Optional non-negative float.
-            name (Optional[str]): Assign a name to PoissonEstimator.
-            keys (Optional[str]): Assign keys to PoissonEstimator for combining sufficient statistics.
+            pseudo_count: Optional nonnegative smoothing count.
+            suff_stat: Optional prior rate used for smoothing.
+            name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate Gamma prior over the rate ``lam``. When present,
                 ``estimate`` performs the closed-form conjugate posterior update (returning the
                 Gamma posterior mode and carrying the posterior forward as the fitted model's
                 prior) instead of the maximum-likelihood / pseudo-count update.
 
         Attributes:
-            pseudo_count (Optional[float]): Re-weight suff_stat.
-            suff_stat (Optional[float]): Mean of Poisson if not None.
-            name (Optional[str]): String name of PoissonEstimator instance.
-            keys (Optional[str]): String keys of PoissonEstimator instance for combining sufficient statistics.
+            pseudo_count: Smoothing count.
+            suff_stat: Prior rate used for smoothing.
+            name: Optional diagnostic name.
+            keys: Optional sufficient-statistic key.
 
         """
         self.pseudo_count = pseudo_count
@@ -715,7 +699,7 @@ class PoissonEstimator(ParameterEstimator):
         self.has_conj_prior = isinstance(prior, GammaDistribution)
 
     def accumulator_factory(self) -> "PoissonAccumulatorFactory":
-        """Return PoissonAccumulatorFactory object with name and keys passed."""
+        """Return an accumulator factory matching this estimator."""
         return PoissonAccumulatorFactory(self.keys)
 
     def model_log_density(self, model: "PoissonDistribution") -> float:
@@ -744,18 +728,16 @@ class PoissonEstimator(ParameterEstimator):
         return PoissonDistribution(posterior_mode, name=self.name, prior=GammaDistribution(new_k, new_theta))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> "PoissonDistribution":
-        """Estimate lambda of PoissonDistribution from aggregated sufficient statistcs suff_stat.
+        """Estimate a Poisson distribution from aggregated sufficient statistics.
 
-        Arg passed suff_stat is a Tuple of two floats containing:
-            suff_stat[0] (float): Aggregated sum of observation weights,
-            suff_stat[1] (float): Aggregated sum of weighted observations.
+        The tuple is interpreted as ``(count, sum)``.
 
         Args:
-            nobs (Optional[float]): Not used. Kept for consistency with ParameterEstimator.
-            suff_stat: See above for details.
+            nobs: Unused; accepted for the ``ParameterEstimator`` interface.
+            suff_stat: Aggregated Poisson sufficient statistics.
 
         Returns:
-            PoissonDistribution object.
+            A fitted Poisson distribution.
 
         """
         if self.has_conj_prior:
@@ -776,17 +758,17 @@ class PoissonDataEncoder(DataSequenceEncoder):
     """Encode iid non-negative integer Poisson observations with log-factorials."""
 
     def __str__(self) -> str:
-        """Returns string representation of PoissonDataEncoder object."""
+        """Return a readable encoder summary."""
         return "PoissonDataEncoder"
 
     def __eq__(self, other) -> bool:
-        """Checks if object is equivalent to PoissonDataEncoder instance.
+        """Return whether ``other`` is a Poisson data encoder.
 
         Args:
-            other (object): Object to be compared to self.
+            other: Object to compare.
 
         Returns:
-            True if other is GeometricDataEncoder instance, else False.
+            ``True`` when ``other`` is also a ``PoissonDataEncoder``.
 
         """
         return isinstance(other, PoissonDataEncoder)
@@ -795,7 +777,7 @@ class PoissonDataEncoder(DataSequenceEncoder):
         """Encode iid sequence of Poisson observations for vectorized "seq_" function calls.
 
         Data type must be int. Values must be non-negative integers.
-        Returns Tuple of np.ndarray[int] of x, and np.log(Gamma(x+1.0)), where Gamma is the Gamma function.
+        Returns the integer observations and ``log(Gamma(x + 1))`` values used by the vectorized scorer.
 
         Args:
             x (Union[np.ndarray, Sequence[int]]): Sequence of iid non-negative integers valued Poisson observations.

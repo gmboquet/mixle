@@ -75,12 +75,14 @@ class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
     # --- compute-engine backend (numpy + torch/GPU): scoring + sufficient statistics in engine ops ---
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated Nakagami kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for Nakagami distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -172,6 +174,7 @@ class NakagamiSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one sample or an array of iid samples."""
         d = self.dist
         n = 1 if size is None else int(size)
         x = np.sqrt(self.rng.gamma(d.m, d.omega / d.m, size=n))
@@ -189,15 +192,18 @@ class NakagamiAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: NakagamiDistribution | None) -> None:
+        """Accumulate weighted second and fourth power sums for one observation."""
         x2 = float(x) ** 2
         self.count += weight
         self.s2 += weight * x2
         self.s4 += weight * x2 * x2
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
+        """Accumulate weighted second and fourth power sums from encoded data."""
         x2 = np.asarray(x, dtype=np.float64) ** 2
         w = np.asarray(weights, dtype=np.float64)
         self.count += float(w.sum())
@@ -205,22 +211,27 @@ class NakagamiAccumulator(SequenceEncodableStatisticAccumulator):
         self.s4 += float(np.dot(w, x2 * x2))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "NakagamiAccumulator":
+        """Merge another Nakagami sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.s2 += suff_stat[1]
         self.s4 += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return count, second power sum, and fourth power sum."""
         return self.count, self.s2, self.s4
 
     def from_value(self, x: tuple[float, float, float]) -> "NakagamiAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.count, self.s2, self.s4 = float(x[0]), float(x[1]), float(x[2])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -228,10 +239,12 @@ class NakagamiAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "NakagamiDataEncoder":
+        """Return the encoder used by this accumulator."""
         return NakagamiDataEncoder()
 
 
@@ -243,6 +256,7 @@ class NakagamiAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> NakagamiAccumulator:
+        """Create a fresh Nakagami accumulator."""
         return NakagamiAccumulator(name=self.name, keys=self.keys)
 
 
@@ -255,9 +269,11 @@ class NakagamiEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> NakagamiAccumulatorFactory:
+        """Return an accumulator factory for Nakagami power-sum statistics."""
         return NakagamiAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> NakagamiDistribution:
+        """Estimate shape and spread from weighted second and fourth moments."""
         count, s2, s4 = suff_stat
         if count <= 0.0:
             return NakagamiDistribution(1.0, 1.0, name=self.name, keys=self.keys)
@@ -278,4 +294,5 @@ class NakagamiDataEncoder(DataSequenceEncoder):
         return isinstance(other, NakagamiDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
+        """Encode observations as a floating-point array."""
         return np.asarray(x, dtype=np.float64)

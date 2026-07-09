@@ -3,7 +3,7 @@
 Given input uncertainty (a Gaussian or a sampler) and a model ``f``, report the induced uncertainty on
 the output -- mean, standard deviation, and quantiles. Monte Carlo is general; the unscented transform
 propagates the first two moments with ``2d+1`` deterministic sigma points (exact for a linear model, a
-good cheap approximation for mild nonlinearity). The back half of the UQ loop, after sensitivity.
+useful low-cost approximation for mild nonlinearity). The back half of the UQ loop, after sensitivity.
 """
 
 from __future__ import annotations
@@ -14,6 +14,32 @@ from typing import Any
 import numpy as np
 
 __all__ = ["propagate", "register_propagator", "unscented_transform"]
+
+
+def _safe_cholesky(sigma: np.ndarray) -> np.ndarray:
+    """Cholesky of a covariance, falling back to escalating jitter only if the plain decomposition
+    fails; diagonal fallback if jitter alone can't rescue it.
+
+    Tries the UNPERTURBED matrix first: this callsite's covariance can be at any scale (the unscented
+    transform's own `(d + lambda) * cov` factor can shrink it to ~1e-6 for small `alpha`), so an
+    always-on jitter sized relative to a `max(1.0, ...)` floor would be a large RELATIVE perturbation
+    on a small-scale matrix -- degrading precision on the common (already positive-definite) case
+    instead of only kicking in for the genuinely singular/near-singular case (a fixed/zero-variance
+    input dimension, perfectly correlated inputs) this exists to rescue.
+    """
+    try:
+        return np.linalg.cholesky(sigma)
+    except np.linalg.LinAlgError:
+        pass
+    d = sigma.shape[0]
+    jit = 1e-10 * max(1e-12, float(np.trace(sigma)) / d)
+    for _ in range(7):
+        try:
+            return np.linalg.cholesky(sigma + jit * np.eye(d))
+        except np.linalg.LinAlgError:
+            jit *= 10.0
+    return np.diag(np.sqrt(np.maximum(np.diag(sigma), 0.0)))
+
 
 #: Registry of forward-propagation methods, keyed by ``method`` name. Each entry is a callable
 #: ``f(func, mean, cov, *, n, quantiles, seed) -> dict`` -- the "register, don't branch" pattern
@@ -131,7 +157,7 @@ def unscented_transform(
             f"unscented_transform requires d + lambda > 0, got {d + lam:.6g}; "
             f"choose kappa > -d (here d={d}) so the sigma-point spread is positive."
         )
-    chol = np.linalg.cholesky((d + lam) * cov)
+    chol = _safe_cholesky((d + lam) * cov)
     sigma = np.vstack([mean, mean + chol.T, mean - chol.T])  # 2d+1 sigma points
     wm = np.full(2 * d + 1, 1.0 / (2.0 * (d + lam)))
     wc = wm.copy()

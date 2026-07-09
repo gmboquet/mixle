@@ -9,6 +9,11 @@ that math.
 Use engines when you need GPU execution, JAX arrays, symbolic export, generated
 kernels, explicit precision control, or safe conversion between array backends.
 
+The model semantics should not change when the engine changes. Treat a new
+engine route as an execution change that needs parity evidence against the
+NumPy baseline before it is used in release notes, benchmarks, or production
+artifacts.
+
 Built-in Engines
 ----------------
 
@@ -51,12 +56,17 @@ Move data folding to a backend separately:
 ``engine=`` controls array math. ``backend=`` controls where encoded data are
 processed.
 
+Validate those concerns separately. If a distributed backend fails, reproduce
+the same estimator locally first. If an engine route changes scores, compare
+encoded payloads, dtype choices, and precision settings before changing the
+model.
+
 Torch DTensor Sharding
 ----------------------
 
 ``TorchEngine`` can represent component-sharded work through Torch DTensor when
-the installed Torch version supports the operations Mixle needs. In 0.6.2 the
-fully sharded component path is explicitly gated to Torch 2.5 or newer. Older
+the installed Torch version supports the operations Mixle needs. The fully
+sharded component path is explicitly gated to Torch 2.5 or newer. Older
 Torch versions expose partial DTensor APIs but lack sharding strategies for
 operations used by mixture E-steps, which can otherwise fail deep inside Torch.
 
@@ -71,6 +81,10 @@ The native model-parallel backend is the portable choice across Torch versions
 and devices. Use DTensor sharding only when the Torch runtime is new enough and
 you have a specific reason to keep component tensors resident in a distributed
 Torch mesh.
+
+Record the Torch version, device type, mesh shape, and fallback route when
+DTensor behavior is part of release evidence. A CPU-only smoke check does not
+prove the distributed mesh path.
 
 Engine Detection
 ----------------
@@ -88,6 +102,10 @@ the explicit boundary for returning to NumPy.
 Mixing incompatible array engines inside one payload raises an error instead of
 silently moving data across devices.
 
+Use this error as a boundary check. Hidden device transfers can make timing,
+memory, and reproducibility evidence misleading, so conversions should be
+explicit and visible in the workflow.
+
 Precision
 ---------
 
@@ -103,6 +121,10 @@ Precision helpers route computations explicitly:
 ``optimize`` also accepts ``precision="auto"`` and ``precision="minimal"``.
 Use ``auto`` for device-aware defaults and ``minimal`` for data-aware reduced
 precision when verified safe.
+
+Reduced precision is a release claim only after score parity, convergence, and
+non-finite behavior have been checked on representative data. Keep the chosen
+precision policy with the fitted artifact when it differs from the default.
 
 The precision spectrum includes:
 
@@ -126,8 +148,12 @@ Symbolic engines make density expressions inspectable:
    expr = to_sympy(symbolic)
    latex = to_latex(symbolic)
 
-Use this for reports, audits, or checking closed-form expressions. It is not
-intended to replace numeric fitting.
+Use this for reports, audits, or checking closed-form expressions. It is a
+symbolic inspection tool, not a replacement for numeric fitting.
+
+Symbolic export should be compared with a numeric evaluation on small inputs
+when it is used as evidence. The exported expression explains the form; it does
+not prove the numerical route is stable.
 
 Registering Array Types
 -----------------------
@@ -155,6 +181,21 @@ Practical Guidance
 * Keep host/device boundaries explicit with ``to_numpy``.
 * Use ``mixle.describe(model)`` to check whether a model supports backend
   scoring before assuming an engine will accelerate it.
+
+Release Evidence
+----------------
+
+For engine-backed workflows, keep:
+
+* the baseline NumPy score or fit result used for comparison;
+* engine name, dtype, device, precision policy, and backend settings;
+* optional dependency versions such as Torch, JAX, Spark, Dask, MPI, or SymPy;
+* score-parity or convergence evidence on representative data;
+* explicit host/device conversion points; and
+* fallback behavior when an optional engine is unavailable.
+
+This evidence prevents acceleration work from being mistaken for a change in
+the statistical model.
 
 API Map
 -------

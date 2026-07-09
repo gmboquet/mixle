@@ -82,66 +82,93 @@ class CapabilityError(TypeError):
 class Conditionable(Protocol):
     """Supports conditioning on a subset of coordinates: ``condition(observed) -> distribution``."""
 
-    def condition(self, observed: dict[int, float]) -> Any: ...
+    def condition(self, observed: dict[int, float]) -> Any:
+        """Return the conditional distribution after fixing the indexed coordinates in ``observed``."""
+        ...
 
 
 @runtime_checkable
 class Marginalizable(Protocol):
     """Supports marginalising to a subset of coordinates: ``marginal(keep) -> distribution``."""
 
-    def marginal(self, keep: Any) -> Any: ...
+    def marginal(self, keep: Any) -> Any:
+        """Return the distribution over the coordinates or fields identified by ``keep``."""
+        ...
 
 
 @runtime_checkable
 class LatentStructured(Protocol):
     """Exposes an explicit latent posterior q(z|x): ``latent_posterior(x) -> LatentPosterior``."""
 
-    def latent_posterior(self, x: Any) -> Any: ...
+    def latent_posterior(self, x: Any) -> Any:
+        """Return the inferred latent-state posterior for observation ``x``."""
+        ...
 
 
 @runtime_checkable
 class PosteriorPredictive(Protocol):
     """Can draw/score new data conditioned on an observation's inferred latent state."""
 
-    def posterior_predictive(self, *args: Any, **kwargs: Any) -> Any: ...
+    def posterior_predictive(self, *args: Any, **kwargs: Any) -> Any:
+        """Return the posterior-predictive distribution or sample representation for the supplied context."""
+        ...
 
 
 @runtime_checkable
 class EngineResidentEStep(Protocol):
     """An accumulator that can run its E-step on the active compute engine without leaving it."""
 
-    def seq_update_engine(self, enc: Any, weights: Any, estimate: Any, engine: Any) -> None: ...
+    def seq_update_engine(self, enc: Any, weights: Any, estimate: Any, engine: Any) -> None:
+        """Update sufficient statistics from encoded data resident on ``engine``."""
+        ...
 
 
 @runtime_checkable
 class Transform(Protocol):
     """An invertible change of variables with a tractable Jacobian (combinator/transform.py)."""
 
-    def forward(self, x: Any) -> Any: ...
-    def inverse(self, y: Any) -> Any: ...
-    def log_abs_det_inverse_jacobian(self, y: Any) -> float: ...
+    def forward(self, x: Any) -> Any:
+        """Map values from the base space into the transformed space."""
+        ...
+
+    def inverse(self, y: Any) -> Any:
+        """Map values from the transformed space back into the base space."""
+        ...
+
+    def log_abs_det_inverse_jacobian(self, y: Any) -> float:
+        """Return ``log |det d inverse(y) / dy|`` for density correction."""
+        ...
 
 
 @runtime_checkable
 class SupportsBackendScoring(Protocol):
     """A distribution that can score a batch directly on the active engine (``backend_seq_log_density``)."""
 
-    def backend_seq_log_density(self, x: Any, engine: Any) -> Any: ...
+    def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
+        """Return per-row log densities for encoded data already resident on ``engine``."""
+        ...
 
 
 @runtime_checkable
 class SupportsBackendComponentScoring(Protocol):
     """A distribution that exposes per-component engine scoring (``backend_seq_component_log_density``)."""
 
-    def backend_seq_component_log_density(self, x: Any, engine: Any) -> Any: ...
+    def backend_seq_component_log_density(self, x: Any, engine: Any) -> Any:
+        """Return per-row, per-component log densities on ``engine``."""
+        ...
 
 
 @runtime_checkable
 class SupportsStackedBackend(Protocol):
     """A component type that can score/parameterise a homogeneous stack on the engine."""
 
-    def backend_stacked_params(self, dists: Any, engine: Any) -> Any: ...
-    def backend_stacked_log_density(self, x: Any, params: Any, engine: Any) -> Any: ...
+    def backend_stacked_params(self, dists: Any, engine: Any) -> Any:
+        """Pack homogeneous component parameters into an engine-native stacked representation."""
+        ...
+
+    def backend_stacked_log_density(self, x: Any, params: Any, engine: Any) -> Any:
+        """Score encoded data against a stacked parameter representation on ``engine``."""
+        ...
 
 
 @runtime_checkable
@@ -155,8 +182,13 @@ class TemporalPointProcess(Protocol):
     process, and is intentionally excluded.)
     """
 
-    def intensity(self, t: float, times: Any, marks: Any = None) -> Any: ...
-    def expected_count(self, t_start: float, t_end: float, times: Any, marks: Any = None) -> Any: ...
+    def intensity(self, t: float, times: Any, marks: Any = None) -> Any:
+        """Return the conditional event intensity at time ``t`` given the observed history."""
+        ...
+
+    def expected_count(self, t_start: float, t_end: float, times: Any, marks: Any = None) -> Any:
+        """Return the integrated intensity over ``[t_start, t_end]`` given the observed history."""
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +199,7 @@ class PredicateCapability:
 
     @classmethod
     def check(cls, obj: Any) -> bool:  # pragma: no cover - overridden
+        """Return whether ``obj`` satisfies this capability predicate."""
         raise NotImplementedError
 
 
@@ -175,6 +208,7 @@ class Enumerable(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` exposes a supported enumerator."""
         from mixle.enumeration.algorithms import supports_enumeration
 
         try:
@@ -188,6 +222,7 @@ class FiniteSupport(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` reports a finite, non-negative support size."""
         fn = getattr(obj, "support_size", None)
         if not callable(fn):
             return False
@@ -209,18 +244,20 @@ class RankableByIndex(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` can be unranked by finite support index."""
         return Enumerable.check(obj) and FiniteSupport.check(obj)
 
 
 class Shardable(PredicateCapability):
     """Declares a non-atomic model-parallel decomposition axis (``decomposition().is_shardable``).
 
-    The cheap string predicate gates planning; the rich :class:`~mixle.stats.compute.decomposition.Decomposition`
-    is built only when a node is actually sharded. See ``~/codex/notes/model-parallel-design.md``.
+    The low-cost string predicate gates planning; the rich :class:`~mixle.stats.compute.decomposition.Decomposition`
+    is built only when a node is actually sharded.
     """
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` declares a shardable decomposition axis."""
         from mixle.stats.compute.decomposition import decomposition_for
 
         try:
@@ -234,6 +271,7 @@ class ExponentialFamily(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` declares an exponential-family form."""
         from mixle.stats.compute.declarations import declaration_for
 
         decl = declaration_for(obj)
@@ -250,6 +288,7 @@ class ConjugateUpdatable(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` has a registered closed-form conjugate update."""
         from mixle.stats.bayes.conjugate import is_conjugate_family
 
         try:
@@ -269,6 +308,7 @@ class ExactDensity(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` reports exact density semantics."""
         from mixle.stats.compute.pdist import DensitySemantics
 
         fn = getattr(obj, "density_semantics", None)
@@ -285,6 +325,7 @@ class Neutral(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` is a recognized null or identity value."""
         from mixle.stats.combinator.null_dist import (
             NullAccumulator,
             NullDataEncoder,
@@ -299,6 +340,7 @@ class SetValued(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` exposes set-valued membership metadata."""
         return hasattr(obj, "num_required") and hasattr(obj, "required")
 
 
@@ -311,6 +353,7 @@ class HasCDF(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` provides both CDF and quantile operations."""
         return callable(getattr(obj, "cdf", None)) and callable(getattr(obj, "quantile", None))
 
 
@@ -319,6 +362,7 @@ class HasMoments(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` provides at least mean and variance methods."""
         return callable(getattr(obj, "mean", None)) and callable(getattr(obj, "variance", None))
 
 
@@ -327,6 +371,7 @@ class HasEntropy(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` exposes an entropy method."""
         return callable(getattr(obj, "entropy", None))
 
 
@@ -335,6 +380,7 @@ class Discrete(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` has countable or explicitly finite support."""
         return FiniteSupport.check(obj) or Enumerable.check(obj)
 
 
@@ -343,6 +389,7 @@ class Continuous(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` looks continuous by capability predicates."""
         return HasCDF.check(obj) and not Enumerable.check(obj)
 
 
@@ -351,6 +398,7 @@ class Fittable(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` can provide an estimator."""
         return callable(getattr(obj, "estimator", None))
 
 
@@ -364,6 +412,7 @@ class Optimizable(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
+        """Return whether ``obj`` exposes solve and top-k optimization methods."""
         return callable(getattr(obj, "solve", None)) and callable(getattr(obj, "top", None))
 
 
@@ -713,6 +762,13 @@ CAPABILITY_CATALOG: tuple[CapabilitySpec, ...] = (
         "Acquisition protocol + register_acquisition",
         "mixle.doe._contracts",
     ),
+    CapabilitySpec(
+        "BeliefTrackable",
+        "a weighted hypothesis portfolio with open-world mass, reweighted by evidence",
+        "subsystem role",
+        "HypothesisPortfolio.reweight()",
+        "mixle.epistemic",
+    ),
 )
 
 _CATALOG_BY_NAME = {spec.name: spec for spec in CAPABILITY_CATALOG}
@@ -763,8 +819,8 @@ def describe(obj: Any) -> str:
     if not is_dist:
         have = sorted(s.name for s in CAPABILITY_CATALOG if _safe_supports(obj, s.name))
         base = "%s — %s" % (name, ("supports: " + " · ".join(have)) if have else "no catalogued capability detected")
-        # A mixle.ppl model knows how it will be fit -- surface the auto-selected inference route and its
-        # honest caveats (duck-typed on explain_fit, so the kernel needs no dependency on mixle.ppl).
+        # A mixle.ppl model knows how it will be fit; surface the auto-selected inference route and caveats
+        # without introducing a dependency on mixle.ppl.
         explain = getattr(obj, "explain_fit", None)
         if callable(explain):
             try:
@@ -843,7 +899,7 @@ def _safe_supports(obj: Any, cap_name: str) -> bool:
 
 
 def what_supports(capability: type, among: Any) -> list[str]:
-    """Return the names of the objects in ``among`` that provide ``capability``.
+    """Return the names of entries in ``among`` that provide ``capability``.
 
     ``among`` is an iterable of instances (or classes for method-presence protocols) — e.g.
     ``what_supports(Conditionable, [mvn, gaussian, mixture])``.

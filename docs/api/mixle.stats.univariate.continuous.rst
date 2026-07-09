@@ -4,7 +4,6 @@ mixle.stats.univariate.continuous package
 .. automodule:: mixle.stats.univariate.continuous
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

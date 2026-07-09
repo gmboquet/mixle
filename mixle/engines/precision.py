@@ -1,4 +1,8 @@
-"""Floating-point precision helpers for compute engines."""
+"""Floating-point precision normalization helpers for compute engines.
+
+The functions convert user-facing precision names into NumPy or Torch dtypes and
+reject storage-only quantization formats that are not valid compute precisions.
+"""
 
 from __future__ import annotations
 
@@ -25,10 +29,10 @@ _ALIASES = {
 }
 
 
-# Real quantization / sub-byte format names that are NOT a supported COMPUTE precision on the
-# NumPy/numba path: numba cannot compile below float32 and sub-byte formats have no native CPU
-# arithmetic, so they would need packed storage + GPU dequant kernels (see the quantization design).
-# We reject them with an actionable message instead of a cryptic ``np.dtype`` TypeError.
+# Quantization and sub-byte format names that are not supported compute precisions on the
+# NumPy/numba path. Numba cannot compile below float32 and sub-byte formats have no native CPU
+# arithmetic, so they require packed storage plus specialized dequantization kernels.
+# Reject them with an actionable message instead of a cryptic ``np.dtype`` TypeError.
 _UNSUPPORTED_LOW_PRECISION = frozenset(
     {
         "fp8", "float8", "e4m3", "e5m2",
@@ -119,20 +123,32 @@ def _is_gpu_engine(engine: Any) -> bool:
 
 
 def _numeric_data_sample(data: Any, sample_size: int = 512) -> np.ndarray | None:
-    """Flatten the first ``sample_size`` observations to a float array, or None if not numeric.
+    """Flatten an evenly-spaced sample of ``sample_size`` observations to a float array, or None if
+    not numeric.
 
     Handles scalars, sequences/arrays of scalars, and (nested) tuples of those -- enough to read the
     magnitude/dynamic-range of continuous data. Structured/categorical/None observations yield None,
     in which case the caller stays at the safe default precision.
+
+    Strided across the full dataset rather than the leading ``sample_size`` rows: naturally-ordered
+    data (sorted, appended-to over time, grouped by source) can concentrate extreme-magnitude values
+    later in the sequence, which a plain prefix would never see -- silently recommending float32 for
+    data that is not actually well-conditioned for it. ``list(data)`` already materializes every row
+    to index into, so striding costs nothing extra over slicing a prefix.
     """
     if data is None:
         return None
     try:
-        head = list(data)[:sample_size]
+        rows = list(data)
     except TypeError:
         return None
-    if not head:
+    if not rows:
         return None
+    if len(rows) > sample_size:
+        step = len(rows) / sample_size
+        head = [rows[int(i * step)] for i in range(sample_size)]
+    else:
+        head = rows
     out: list[float] = []
 
     def _collect(obj: Any) -> bool:

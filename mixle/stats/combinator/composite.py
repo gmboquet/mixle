@@ -1,12 +1,8 @@
-"""Create, estimate, and sample from a Composite distribution.
-
-Defines the CompositeDistribution, CompositeSampler, CompositeAccumulatorFactory, CompositeAccumulator,
-CompositeEstimator, and the CompositeDataEncoder classes for use with mixle.
+"""Independent product distributions over tuple-valued observations.
 
 Data type: (Tuple[T_0, ... T_{n-1}]): The CompositeDistribution of size 'n' is a joint distribution for
 independent observations of 'n'-tupled data. Each component 'k' of the CompositeDistribution has data type T_k that
 must be compatible with data type T_k.
-
 """
 
 from __future__ import annotations
@@ -28,6 +24,7 @@ from mixle.enumeration.algorithms import (
 )
 from mixle.inference.fisher import Path
 from mixle.stats.compute.pdist import (
+    ContractError,
     DataSequenceEncoder,
     DistributionEnumerator,
     DistributionSampler,
@@ -37,6 +34,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
     child_enumerator,
+    prefix_contract_error,
 )
 
 T = tuple[Any, ...]
@@ -68,6 +66,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
     """Product distribution over heterogeneous component variables."""
 
     def compute_capabilities(self):
+        """Return compute-backend metadata shared by all component distributions."""
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
         return DistributionCapabilities(
@@ -126,6 +125,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
     def expected_log_density(self, x: tuple[Any, ...]) -> float:
         """Prior-expected log-density: sum of the component ``expected_log_density`` values at ``x``."""
+        self._check_arity(x)
         rv = self.dists[0].expected_log_density(x[0])
         for i in range(1, self.count):
             rv += self.dists[i].expected_log_density(x[i])
@@ -139,6 +139,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def compute_declaration(self):
+        """Return the symbolic declaration for the product of component distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
 
         children = tuple(declaration_for(d) for d in self.dists)
@@ -178,6 +179,18 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         obs = set(observed)
         return CompositeDistribution([self.dists[i] for i in range(self.count) if i not in obs])
 
+    def _check_arity(self, x: tuple[Any, ...]) -> None:
+        """A too-short ``x`` would otherwise crash with a bare ``IndexError`` deep in the per-field
+        loop below, with no indication of which field or how many were expected; a too-long ``x``
+        would otherwise be silently accepted with the extra fields never read at all. Both are real
+        caller mistakes (e.g. an extra/missing column) that should surface immediately, at the call
+        site, not as a wrong log-likelihood with no signal anything was off."""
+        if len(x) != self.count:
+            raise ValueError(
+                "CompositeDistribution observation has %d fields but this composite has %d components."
+                % (len(x), self.count)
+            )
+
     def density(self, x: tuple[Any, ...]) -> float:
         """Evaluates density of CompositeDistribution for single observation tuple x.
 
@@ -192,6 +205,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             Density as float.
 
         """
+        self._check_arity(x)
         rv = self.dists[0].density(x[0])
 
         for i in range(1, self.count):
@@ -200,6 +214,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def density_semantics(self):
+        """Return joined density semantics over all component distributions."""
         from mixle.stats.compute.pdist import join_density_semantics
 
         return join_density_semantics(c.density_semantics() for c in self.dists)
@@ -218,6 +233,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             Log-density as float.
 
         """
+        self._check_arity(x)
         rv = self.dists[0].log_density(x[0])
 
         for i in range(1, self.count):
@@ -355,7 +371,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def sampler(self, seed: int | None = None) -> CompositeSampler:
-        """Create CompositeSampler for sampling from CompositeDistribution instance.
+        """Return a sampler that samples each component independently.
 
         Args:
             seed (Optional[int]): Seed to set for sampling with RandomState.
@@ -367,7 +383,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         return CompositeSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> CompositeEstimator:
-        """Create CompositeEstimator for estimating CompositeDistribution.
+        """Return a composite estimator built from the component estimators.
 
         Args:
             pseudo_count (Optional[float]): Used to inflate sufficient statistics in estimation.
@@ -391,7 +407,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def dist_to_encoder(self) -> CompositeDataEncoder:
-        """Creates CompositeDataEncoder for encoding sequence of tuple data.
+        """Return a tuple encoder assembled from the component encoders.
 
         Passes 'encoders', which is a list of DataSequenceEncoders for each component of the CompositeDistribution.
 
@@ -614,6 +630,8 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class CompositeEnumerator(DistributionEnumerator):
+    """Best-first enumerator over the Cartesian product of component supports."""
+
     def __init__(self, dist: CompositeDistribution) -> None:
         """Enumerates tuples of the component supports in descending joint probability order.
 
@@ -636,6 +654,8 @@ class CompositeEnumerator(DistributionEnumerator):
 
 
 class CompositeConditionalEnumerator(DistributionEnumerator):
+    """Best-first enumerator for complete tuples consistent with fixed component values."""
+
     def __init__(self, dist: CompositeDistribution, given: dict[int, Any]) -> None:
         """Enumerate complete tuples consistent with the fixed positions ``given``, best-first.
 
@@ -670,6 +690,8 @@ class CompositeConditionalEnumerator(DistributionEnumerator):
 
 
 class CompositeSampler(DistributionSampler):
+    """Sampler that draws each component independently from its own sampler."""
+
     def __init__(self, dist: CompositeDistribution, seed: int | None = None) -> None:
         """CompositeSampler used to generate samples from CompositeDistribution.
 
@@ -708,9 +730,10 @@ class CompositeSampler(DistributionSampler):
 
 
 class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulator that delegates sufficient-statistic updates to component accumulators."""
+
     def __init__(self, accumulators: Sequence[SequenceEncodableStatisticAccumulator], keys: str | None = None) -> None:
-        """CompositeAccumulator object used for aggregating suffcient statistics of each component of the
-            CompositeDistribution.
+        """Create an accumulator for the component sufficient statistics of a CompositeDistribution.
 
         Args:
             accumulators (List[SequenceEncodableStatisticAccumulator]):
@@ -722,7 +745,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             count (int): Length of accumulators.
             keys (Optional[str]): All CompositeAccumulators with same keys will have suff-stats merged.
             _init_rng (bool): Is True if _acc_rng has been set by a single function call to initialize.
-            _acc_rng (List[RandomState]): List of RandomState objects generated from seeds set by rng in initialize.
+            _acc_rng (List[RandomState]): Random states generated from seeds set by ``rng`` in ``initialize``.
 
         """
         self.accumulators = accumulators
@@ -806,6 +829,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[i].seq_initialize(x[i], weights, self._acc_rng[i])
 
     def get_seq_lambda(self) -> list[Any]:
+        """Return low-level sequence kernels from all component accumulators."""
         rv = []
         for i in range(self.count):
             rv.extend(self.accumulators[i].get_seq_lambda())
@@ -858,8 +882,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[Any, ...]:
-        """Returns Tuple of length equal to member variable count, containing sufficient statistics for each
-        component."""
+        """Return one sufficient-statistic value per component accumulator."""
         return tuple([x.value() for x in self.accumulators])
 
     def from_value(self, x: SS) -> CompositeAccumulator:
@@ -924,7 +947,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             u.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> CompositeDataEncoder:
-        """Creates CompositeDataEncoder for encoding sequence of tuple data.
+        """Return a tuple encoder assembled from the child accumulator encoders.
 
         encoders is a list of DataSequenceEncoders for each component of the CompositeDistribution.
 
@@ -938,6 +961,8 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class CompositeAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for composite accumulators built from component accumulator factories."""
+
     def __init__(self, factories: Sequence[StatisticAccumulatorFactory], keys: str | None = None) -> None:
         """CompositeAccumulatorFactory used for lightweight creation of CompositeAccumulator.
 
@@ -955,7 +980,7 @@ class CompositeAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> CompositeAccumulator:
-        """Create a CompositeAccumulator object from list of StatisticAccumulatorFactory objects.
+        """Create a composite accumulator from the component factories.
 
         Returns:
             CompositeAccumulator
@@ -965,14 +990,15 @@ class CompositeAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class CompositeEstimator(ParameterEstimator):
+    """Estimator that fits each independent component distribution from its own statistics."""
+
     def __init__(
         self,
         estimators: Sequence[ParameterEstimator],
         keys: str | None = None,
         prior: Sequence[Any] | None = None,
     ) -> None:
-        """CompositeEstimator object used to estimate CompositeDistribution from sufficient statistics of each
-            component.
+        """Create an estimator for a composite distribution from component sufficient statistics.
 
         Args:
             estimators (List[ParameterEstimator]): List of ParameterEstimator objects for each component of
@@ -1020,12 +1046,7 @@ class CompositeEstimator(ParameterEstimator):
         return rv
 
     def accumulator_factory(self) -> CompositeAccumulatorFactory:
-        """Creates CompositeAccumulatorFactory from each ParameterEstimator in estimators.
-
-        Returns:
-            CompositeAccumulatorFactory.
-
-        """
+        """Return an accumulator factory assembled from the child estimators."""
         return CompositeAccumulatorFactory([u.accumulator_factory() for u in self.estimators], self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: SS) -> CompositeDistribution:
@@ -1041,10 +1062,35 @@ class CompositeEstimator(ParameterEstimator):
                 number of observation (nobs).
 
         """
-        return CompositeDistribution(tuple([est.estimate(nobs, ss) for est, ss in zip(self.estimators, suff_stat)]))
+        if not isinstance(suff_stat, (tuple, list)):
+            raise ContractError(
+                "CompositeEstimator.estimate(suff_stat)",
+                "a tuple of %d component sufficient statistics" % self.count,
+                "%s" % type(suff_stat).__name__,
+                "pass the tuple produced by CompositeAccumulator.value(), not a single component's "
+                "sufficient statistic.",
+            )
+        if len(suff_stat) != self.count:
+            raise ContractError(
+                "CompositeEstimator.estimate(suff_stat)",
+                "a tuple of length %d (one sufficient statistic per component)" % self.count,
+                "a tuple of length %d" % len(suff_stat),
+                "the suff_stat tuple must have exactly %d entries, matching CompositeEstimator's "
+                "%d component estimators -- a mismatched CompositeAccumulator/CompositeEstimator "
+                "pairing is the usual cause." % (self.count, self.count),
+            )
+        components = []
+        for i, (est, ss) in enumerate(zip(self.estimators, suff_stat)):
+            try:
+                components.append(est.estimate(nobs, ss))
+            except ContractError as e:
+                raise prefix_contract_error("CompositeEstimator.estimators[%d]" % i, e) from None
+        return CompositeDistribution(tuple(components))
 
 
 class CompositeDataEncoder(DataSequenceEncoder):
+    """Encoder that applies each component encoder to the corresponding tuple field."""
+
     def __init__(self, encoders: Sequence[DataSequenceEncoder]) -> None:
         """CompositeDataEncoder used for encoding data.
 
@@ -1063,9 +1109,9 @@ class CompositeDataEncoder(DataSequenceEncoder):
         self.encoders = encoders
 
     def __eq__(self, other: object) -> bool:
-        """Check if an object is an equivalent to instance of CompositeDataEncoder.
+        """Return true when ``other`` is an equivalent composite data encoder.
 
-        If other is CompositeDataEncoder, it must also have equivalent DataSequenceEncoder object for each
+        If other is CompositeDataEncoder, it must also have an equivalent encoder for each
         component of encoder member variable.
 
         Args:
@@ -1086,9 +1132,7 @@ class CompositeDataEncoder(DataSequenceEncoder):
         return True
 
     def __str__(self) -> str:
-        """Returns string representation of CompositeDataEncoder and DataSequenceEncoder instance
-        for each component.
-        """
+        """Return a constructor-style representation of the component encoders."""
 
         s = "CompositeDataEncoder(["
 
@@ -1100,7 +1144,7 @@ class CompositeDataEncoder(DataSequenceEncoder):
         return s
 
     def seq_encode(self, x: Sequence[tuple[Any, ...]]) -> tuple[Any, ...]:
-        """Encode Sequence of tuples of data for use with vectorized "seq_" functions.
+        """Encode tuple-valued observations for vectorized ``seq_*`` methods.
 
         The input x must be a Sequence of Tuples of length equal to the length of encoders. Each component tuple
         observation of x, say x[i], must be component-wise compatible with encoders.
@@ -1113,16 +1157,55 @@ class CompositeDataEncoder(DataSequenceEncoder):
             for all observations of component i from x.
 
         """
+        count = len(self.encoders)
+        if not isinstance(x, (list, tuple, np.ndarray)):
+            raise ContractError(
+                "CompositeDistribution.seq_encode",
+                "a sequence of %d-tuples" % count,
+                "%s" % type(x).__name__,
+                "pass a list/tuple of observations, e.g. [(x0, x1, ...), ...].",
+            )
+        for row_idx, u in enumerate(x):
+            if not isinstance(u, (tuple, list, np.ndarray)):
+                raise ContractError(
+                    "CompositeDistribution.dists (row %d)" % row_idx,
+                    "a tuple of %d fields (one per component distribution)" % count,
+                    "%s" % type(u).__name__,
+                    "wrap the observation in a %d-tuple matching the component distributions." % count,
+                )
+            if len(u) != count:
+                raise ContractError(
+                    "CompositeDistribution.dists (row %d)" % row_idx,
+                    "a tuple of length %d" % count,
+                    "a tuple of length %d" % len(u),
+                    "check row %d for a missing or extra field -- every row must have exactly %d "
+                    "entries, one per component distribution." % (row_idx, count),
+                )
+
         enc_data = []
 
         for i, encoder in enumerate(self.encoders):
-            enc_data.append(encoder.seq_encode([u[i] for u in x]))
+            field_path = "CompositeDistribution.dists[%d]" % i
+            try:
+                enc_data.append(encoder.seq_encode([u[i] for u in x]))
+            except ContractError as e:
+                raise prefix_contract_error(field_path, e) from None
+            except (TypeError, ValueError, IndexError, KeyError) as e:
+                raise ContractError(
+                    field_path,
+                    "data compatible with component %d's data type" % i,
+                    "data that raised %s: %s" % (type(e).__name__, e),
+                    "check that field %d of every row matches the data type expected by component %d "
+                    "(%s)." % (i, i, encoder),
+                ) from e
 
         return tuple(enc_data)
 
 
 # --- Fisher view(s) co-located with this family ---
 class CompositeFisherView(FixedFisherView):
+    """Fisher view that concatenates component sufficient-statistic vectors."""
+
     def __init__(self, dist: Any) -> None:
         self.child_views = [to_fisher(d) for d in dist.dists]
         labels: list[Path] = []

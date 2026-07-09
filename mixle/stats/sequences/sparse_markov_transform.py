@@ -1,8 +1,4 @@
-"""Create, estimate, and sample from an integer sparse Markov hidden association model.
-
-Defines the SparseMarkovAssociationDistribution, SparseMarkovAssociationSampler,
-SparseMarkovAssociationAccumulatorFactory, SparseMarkovAssociationAccumulator, SparseMarkovAssociationEstimator, and
-the SparseMarkovAssociationDataEncoder classes for use with mixle.
+"""Sparse Markov hidden-association models over integer word-count bags.
 
 Data type:  Tuple[List[Tuple[int, float]], List[Tuple[int, float]]].
 
@@ -52,7 +48,7 @@ SS1 = TypeVar("SS1")
 
 
 class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistribution):
-    """SparseMarkovAssociationDistribution object modeling a count-set S2 generated from a count-set S1."""
+    """Distribution for a sparse count set ``S2`` generated from a count set ``S1``."""
 
     def __init__(
         self,
@@ -62,7 +58,7 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         low_memory: bool = False,
     ) -> None:
-        """SparseMarkovAssociationDistribution object for creating a sparse Markov association model.
+        """Create a sparse Markov-association distribution.
 
         Args:
             init_prob_vec (Union[Sequence[float], np.ndarray]): Probabilities for the first set of words S1.
@@ -91,7 +87,7 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
         self.low_memory = low_memory
 
     def __str__(self) -> str:
-        """Returns string representation of SparseMarkovAssociationDistribution object."""
+        """Return a constructor-style representation of the distribution."""
         s1 = ",".join(map(str, self.init_prob_vec))
         temp = self.cond_prob_mat.nonzero()
         tt = np.asarray(self.cond_prob_mat[temp[0], temp[1]]).flatten()
@@ -253,25 +249,25 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
         return rv
 
     def sampler(self, seed: int | None = None) -> "SparseMarkovAssociationSampler":
-        """Create a SparseMarkovAssociationSampler object from this instance.
+        """Create a sampler for this sparse Markov association distribution.
 
         Args:
             seed (Optional[int]): Used to set seed in random sampler.
 
         Returns:
-            SparseMarkovAssociationSampler object.
+            SparseMarkovAssociationSampler: Sampler bound to this distribution.
 
         """
         return SparseMarkovAssociationSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "SparseMarkovAssociationEstimator":
-        """Create a SparseMarkovAssociationEstimator object from this instance.
+        """Create an estimator initialized from this sparse Markov association distribution.
 
         Args:
             pseudo_count (Optional[float]): Kept for protocol compatibility (unused).
 
         Returns:
-            SparseMarkovAssociationEstimator object.
+            SparseMarkovAssociationEstimator: Estimator configured with matching size and sparsity settings.
 
         """
         return SparseMarkovAssociationEstimator(
@@ -282,17 +278,17 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
         )
 
     def dist_to_encoder(self) -> "SparseMarkovAssociationDataEncoder":
-        """Returns a SparseMarkovAssociationDataEncoder object for encoding sequences of data."""
+        """Return a data encoder for sparse Markov association observations."""
         return SparseMarkovAssociationDataEncoder(
             len_encoder=self.len_dist.dist_to_encoder(), low_memory=self.low_memory
         )
 
 
 class SparseMarkovAssociationSampler(DistributionSampler):
-    """SparseMarkovAssociationSampler object for sampling from a SparseMarkovAssociationDistribution."""
+    """Sampler for a sparse Markov-association distribution."""
 
     def __init__(self, dist: SparseMarkovAssociationDistribution, seed: int | None = None) -> None:
-        """SparseMarkovAssociationSampler object.
+        """Create a sparse Markov-association sampler.
 
         Args:
             dist (SparseMarkovAssociationDistribution): Distribution to sample from. Its len_dist must support
@@ -346,7 +342,7 @@ class SparseMarkovAssociationSampler(DistributionSampler):
 
 
 class SparseMarkovAssociationAccumulator(InitTransKeyedAccumulator, SequenceEncodableStatisticAccumulator):
-    """SparseMarkovAssociationAccumulator object for accumulating sufficient statistics of the model."""
+    """Accumulator for sparse Markov-association sufficient statistics."""
 
     def __init__(
         self,
@@ -355,7 +351,7 @@ class SparseMarkovAssociationAccumulator(InitTransKeyedAccumulator, SequenceEnco
         keys: tuple[str | None, str | None] = (None, None),
         low_memory: bool = True,
     ) -> None:
-        """SparseMarkovAssociationAccumulator object.
+        """Create an accumulator for sparse Markov-association sufficient statistics.
 
         Args:
             num_vals (int): Number of possible values W.
@@ -668,14 +664,14 @@ class SparseMarkovAssociationAccumulator(InitTransKeyedAccumulator, SequenceEnco
     # ``is not None`` guard delegates to it identically to the prior inline implementation.
 
     def acc_to_encoder(self) -> "SparseMarkovAssociationDataEncoder":
-        """Returns a SparseMarkovAssociationDataEncoder object for encoding sequences of data."""
+        """Return a data encoder built from the size accumulator."""
         return SparseMarkovAssociationDataEncoder(
             len_encoder=self.size_accumulator.acc_to_encoder(), low_memory=self.low_memory
         )
 
 
 class SparseMarkovAssociationAccumulatorFactory(StatisticAccumulatorFactory):
-    """SparseMarkovAssociationAccumulatorFactory object for creating SparseMarkovAssociationAccumulator objects."""
+    """Factory for sparse Markov association accumulators."""
 
     def __init__(
         self,
@@ -684,7 +680,7 @@ class SparseMarkovAssociationAccumulatorFactory(StatisticAccumulatorFactory):
         low_memory: bool = True,
         keys: tuple[str | None, str | None] = (None, None),
     ) -> None:
-        """SparseMarkovAssociationAccumulatorFactory object.
+        """Create a factory for sparse Markov association accumulators.
 
         Args:
             num_vals (int): Number of possible values W.
@@ -705,14 +701,14 @@ class SparseMarkovAssociationAccumulatorFactory(StatisticAccumulatorFactory):
         self.num_vals = num_vals
 
     def make(self) -> "SparseMarkovAssociationAccumulator":
-        """Returns a new SparseMarkovAssociationAccumulator object."""
+        """Return a new sparse Markov association accumulator."""
         return SparseMarkovAssociationAccumulator(
             self.num_vals, size_acc=self.len_factory.make(), keys=self.keys, low_memory=self.low_memory
         )
 
 
 class SparseMarkovAssociationEstimator(ParameterEstimator):
-    """SparseMarkovAssociationEstimator object for estimating SparseMarkovAssociationDistribution objects."""
+    """Estimate sparse Markov association distributions from sufficient statistics."""
 
     def __init__(
         self,
@@ -725,13 +721,12 @@ class SparseMarkovAssociationEstimator(ParameterEstimator):
         keys: tuple[str | None, str | None] = (None, None),
         num_values: int = MISSING,
     ) -> None:
-        """SparseMarkovAssociationEstimator object for estimating SparseMarkovAssociationModel objects from aggregated
-            sufficient statistics.
+        """Create an estimator for a sparse Markov-association distribution from aggregated sufficient statistics.
 
         Args:
             num_vals (int): Number of values in S1.
             alpha (float): Regularization parameter (should be between 0 and 1).
-            len_estimator (Optional[ParameterEstimator]): ParameterEstimator object for the length of observations.
+            len_estimator (Optional[ParameterEstimator]): Estimator for observation lengths.
             suff_stat (Optional[Any]): Kept for consistency with estimate function.
             pseudo_count (Optional[float]): Regularize sufficient statistics.
             low_memory (bool): If True, use low_memory options.
@@ -740,7 +735,7 @@ class SparseMarkovAssociationEstimator(ParameterEstimator):
         Attributes:
             num_vals (int): Number of values in S1.
             alpha (float): Regularization parameter (should be between 0 and 1).
-            len_estimator (ParameterEstimator): ParameterEstimator object for the length of observations.
+            len_estimator (ParameterEstimator): Estimator for observation lengths.
             suff_stat (Optional[Any]): Kept for consistency with estimate function.
             pseudo_count (Optional[float]): Regularize sufficient statistics.
             low_memory (bool): If True, use low_memory options.
@@ -756,7 +751,7 @@ class SparseMarkovAssociationEstimator(ParameterEstimator):
         self.low_memory = low_memory
 
     def accumulator_factory(self) -> "SparseMarkovAssociationAccumulatorFactory":
-        """Returns a SparseMarkovAssociationAccumulatorFactory object for this estimator."""
+        """Return an accumulator factory configured from this estimator."""
         return SparseMarkovAssociationAccumulatorFactory(
             self.num_vals, self.len_estimator.accumulator_factory(), self.low_memory, self.keys
         )
@@ -764,7 +759,7 @@ class SparseMarkovAssociationEstimator(ParameterEstimator):
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, lil_matrix | csr_matrix | None, SS1]
     ) -> "SparseMarkovAssociationDistribution":
-        """Estimate SparseMarkovAssociationDistribution objects from aggregated sufficient statistics.
+        """Estimate a sparse Markov association distribution from aggregated sufficient statistics.
 
         Arg suff_stat is a Tuple of length 3 containing:
             suff_stat[0] (np.ndarray): Weighted counts for the initial states P(S1).
@@ -795,10 +790,10 @@ class SparseMarkovAssociationEstimator(ParameterEstimator):
 
 
 class SparseMarkovAssociationDataEncoder(DataSequenceEncoder):
-    """SparseMarkovAssociationDataEncoder object for encoding sequences of (S1, S2) count-set observations."""
+    """Encode sparse Markov association observations for vectorized scoring."""
 
     def __init__(self, len_encoder: DataSequenceEncoder, low_memory: bool) -> None:
-        """SparseMarkovAssociationDataEncoder object.
+        """Create an encoder for sparse Markov association observations.
 
         Args:
             len_encoder (DataSequenceEncoder): Encoder for the total counts [n1, n2].
@@ -828,7 +823,7 @@ class SparseMarkovAssociationDataEncoder(DataSequenceEncoder):
             return False
 
     def __str__(self) -> str:
-        """Returns string representation of SparseMarkovAssociationDataEncoder object."""
+        """Return a constructor-style representation of the encoder."""
         return (
             "SparseMarkovAssociationDataEncoder(len_encoder="
             + str(self.len_encoder)

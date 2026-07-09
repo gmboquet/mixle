@@ -316,11 +316,16 @@ class MultiChainDiagnosticsTestCase(unittest.TestCase):
     def test_process_parallel_matches_sequential(self):
         rng = np.random.RandomState(0)
         data = list(rng.normal(-1.0, 1.5, 1200))
+        # Correctness here is exact seq==par reproducibility (asserted below), not parameter
+        # recovery precision, so draws/burn can be cut hard -- verified bit-for-bit identical
+        # across 5 seeds at this smaller budget. Most of the wall time is the fixed per-process
+        # import cost paid by parallel=True's subprocess pool (unavoidable without touching
+        # library code), so this mainly shrinks the parallel=False portion.
         seq = Normal(free, free).fit(
-            data, how="hmc", draws=800, burn=300, chains=3, parallel=False, rng=np.random.RandomState(7)
+            data, how="hmc", draws=250, burn=150, chains=3, parallel=False, rng=np.random.RandomState(7)
         )
         par = Normal(free, free).fit(
-            data, how="hmc", draws=800, burn=300, chains=3, parallel=True, rng=np.random.RandomState(7)
+            data, how="hmc", draws=250, burn=150, chains=3, parallel=True, rng=np.random.RandomState(7)
         )
         # identical seeds + deterministic chains -> identical posterior means
         self.assertAlmostEqual(seq.result.mean("arg0"), par.result.mean("arg0"), places=6)

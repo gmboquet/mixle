@@ -1,13 +1,13 @@
-"""``solve_regression`` -- replace rigid code that returns NUMBERS, with coverage-guaranteed honesty.
+"""``solve_regression`` for calibrated replacement of numeric task functions.
 
 The regression shape of the solve loop. ``teacher(x) -> float`` is the scorer/pricer/estimator being
-replaced; a small student learns it, and calibration is **split conformal for regression**: on a held-out
+replaced; a small student learns it, and calibration is split conformal for regression: on a held-out
 slice the absolute-residual quantile ``qhat`` is set so the interval ``[yhat - qhat, yhat + qhat]`` covers
 the teacher's answer with probability ``>= 1 - alpha`` (finite-sample, distribution-free, exchangeable
 inputs). The escalate-or-answer rule becomes a *precision* rule: answer locally only when the guaranteed
 interval is tight enough for the caller's purpose (``qhat <= tol``); otherwise run the real code. So a
-locally-answered value is never silently worse than ``±tol`` at the calibrated confidence — and if the
-student simply cannot achieve that precision, EVERY request escalates (an honest failure, priced as such).
+locally answered value is covered by the calibrated interval; if the student cannot achieve that
+precision, every request escalates.
 
     def price(item): ...                                   # the rigid pricing routine
     sol = solve_regression(price, items, tol=5.0)          # dataset <- price(i); train; calibrate
@@ -15,7 +15,7 @@ student simply cannot achieve that precision, EVERY request escalates (an honest
     sol.interval(item)                                     # (yhat, lo, hi) with 1 - alpha coverage
     sol.improve(); sol.report()                            # the same compounding loop
 
-Note ``qhat`` is one global width (standard split conformal); locally-adaptive widths are a later rung.
+``qhat`` is one global width, as in standard split conformal regression.
 """
 
 from __future__ import annotations
@@ -31,11 +31,11 @@ from mixle.task.solve import _input_kind, _label_with
 
 
 class RecordRegressionFeaturizer:
-    """Records for REGRESSION: numeric fields pass through standardized, categoricals hash.
+    """Record featurizer for regression tasks.
 
     ``HashedRecord`` (built for classification) squashes numerics through ``tanh``, which saturates and
     erases the magnitude signal a regressor needs. Here numeric keys (learned from the fit sample) map to
-    dedicated standardized columns; everything else uses the hashing trick."""
+    dedicated standardized columns; everything else uses hashing."""
 
     def __init__(self, dim: int = 256, seed: int = 0) -> None:
         self.dim = int(dim)
@@ -54,6 +54,7 @@ class RecordRegressionFeaturizer:
         return [("0", record)]
 
     def fit(self, records: list[Any]) -> RecordRegressionFeaturizer:
+        """Learn numeric-key normalization statistics from sample records."""
         cols: dict[str, list[float]] = {}
         for r in records:
             for k, v in self._items(r):
@@ -67,6 +68,7 @@ class RecordRegressionFeaturizer:
         return self
 
     def transform(self, records: list[Any]) -> np.ndarray:
+        """Transform records into standardized numeric columns plus hashed categorical features."""
         cat_rows = []
         num = np.zeros((len(records), len(self.num_keys)), dtype=np.float32)
         for i, r in enumerate(records):
@@ -81,6 +83,7 @@ class RecordRegressionFeaturizer:
         return np.concatenate([num, hashed], axis=1)
 
     def to_spec(self) -> dict[str, Any]:
+        """Serialize numeric-key statistics and hashing settings."""
         return {
             "dim": self.dim,
             "seed": self.seed,
@@ -91,6 +94,7 @@ class RecordRegressionFeaturizer:
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> RecordRegressionFeaturizer:
+        """Reconstruct a regression featurizer from an artifact spec."""
         f = cls(dim=int(spec["dim"]), seed=int(spec["seed"]))
         f.num_keys = list(spec["num_keys"])
         f.num_mean = {k: float(v) for k, v in spec["num_mean"].items()}
@@ -105,6 +109,7 @@ def featurizer_spec(f: Any) -> dict[str, Any]:
 
 
 def featurizer_from_spec(spec: dict[str, Any]) -> Any:
+    """Reconstruct a task featurizer from a tagged artifact spec."""
     body = {k: v for k, v in spec.items() if k != "kind"}
     if spec.get("kind") == "record_regression":
         return RecordRegressionFeaturizer.from_spec(body)
@@ -169,7 +174,7 @@ class RegressionSolution:
         return out * self.y_scale + self.y_mean
 
     def interval(self, x: Any) -> tuple[float, float, float]:
-        """``(yhat, lo, hi)`` with calibrated ``>= 1 - alpha`` coverage of the teacher's answer."""
+        """Return ``(yhat, lo, hi)`` with calibrated teacher-answer coverage."""
         yhat = float(self._predict([x])[0])
         return yhat, yhat - self.qhat, yhat + self.qhat
 
@@ -177,6 +182,17 @@ class RegressionSolution:
     def answers_locally(self) -> bool:
         """Whether the calibrated precision meets the tolerance at all (else everything escalates)."""
         return bool(np.isfinite(self.qhat) and self.qhat <= self.tol)
+
+    def decide(self, x: Any) -> float | None:
+        """Return the calibrated point estimate when local precision is sufficient.
+
+        If ``answers_locally`` is false, return ``None`` to signal escalation. Unlike ``__call__``, this
+        method never falls through to the teacher itself, so a :class:`~mixle.task.router.Router` tier
+        can decide whether to escalate to the next tier.
+        """
+        if self.answers_locally:
+            return float(self._predict([x])[0])
+        return None
 
     def __call__(self, x: Any) -> float:
         self.n_requests += 1
@@ -189,6 +205,7 @@ class RegressionSolution:
         return y
 
     def report(self) -> dict[str, Any]:
+        """Return calibration, precision, request, and harvest metrics."""
         return {
             "answers_locally": self.answers_locally,
             "qhat": round(float(self.qhat), 6),
@@ -201,7 +218,7 @@ class RegressionSolution:
         }
 
     def save(self, path: str) -> str:
-        """Persist net (safetensors via the mixle.mlp builder) + featurizer + calibration; :meth:`load` restores."""
+        """Persist the network, featurizer, and calibration metadata."""
         from mixle.task.artifact import save_module
 
         first = next(m for m in self.net.modules() if hasattr(m, "in_features"))

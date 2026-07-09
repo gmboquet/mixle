@@ -107,13 +107,16 @@ class ChainedAttentionDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def density(self, x: tuple[Any, Any, int, int]) -> float:
+        """Return the probability of one chained-attention observation."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: tuple[Any, Any, int, int]) -> float:
+        """Return the log-probability of one context/query/target observation."""
         enc = self.dist_to_encoder().seq_encode([x])
         return float(self.seq_log_density(enc)[0])
 
     def seq_log_density(self, x) -> np.ndarray:
+        """Return vectorized log-probabilities for encoded chained-attention observations."""
         p, _, _, _ = _forward_backward(self.key_tables, self.emission, self.sigma2, x, self._eye)
         return np.log(p)
 
@@ -133,9 +136,11 @@ class ChainedAttentionDistribution(SequenceEncodableProbabilityDistribution):
         return pred[0] if single else pred
 
     def sampler(self, seed: int | None = None) -> ChainedAttentionSampler:
+        """Return a sampler for synthetic chained-attention observations."""
         return ChainedAttentionSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> ChainedAttentionEstimator:
+        """Return a closed-form EM estimator for this attention chain."""
         return ChainedAttentionEstimator(
             n_hops=self.n_hops,
             num_symbols=self.num_symbols,
@@ -145,6 +150,7 @@ class ChainedAttentionDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def dist_to_encoder(self) -> ChainedAttentionDataEncoder:
+        """Return the encoder for context keys, values, query symbols, and targets."""
         return ChainedAttentionDataEncoder()
 
 
@@ -156,6 +162,7 @@ class ChainedAttentionSampler(DistributionSampler):
         self.rng = RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Draw one observation or ``size`` iid synthetic observations."""
         n = 1 if size is None else size
         d = self.dist
         N = 6
@@ -211,6 +218,7 @@ class ChainedAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         np.add.at(self.emission_count, (vals.reshape(-1), np.repeat(t, N)), gL.reshape(-1))
 
     def seq_update(self, x, weights, estimate: ChainedAttentionDistribution) -> None:
+        """Update forward-backward sufficient statistics from encoded observations."""
         w = np.asarray(weights, dtype=float)
         p, gamma, xi, _ = _forward_backward(estimate.key_tables, estimate.emission, estimate.sigma2, x, estimate._eye)
         self._accumulate(x, gamma, xi, w)
@@ -218,6 +226,7 @@ class ChainedAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         self.n += float(w.sum())
 
     def seq_initialize(self, x, weights, rng: RandomState) -> None:
+        """Initialize sufficient statistics with random hop responsibilities."""
         keys, vals, q, t = x
         n, N = keys.shape
         w = np.asarray(weights, dtype=float)
@@ -227,14 +236,17 @@ class ChainedAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         self.n += float(w.sum())
 
     def update(self, x, weight: float, estimate) -> None:
+        """Update from one weighted chained-attention observation."""
         enc = ChainedAttentionDataEncoder().seq_encode([x])
         self.seq_update(enc, np.array([weight], dtype=float), estimate)
 
     def initialize(self, x, weight: float, rng: RandomState) -> None:
+        """Initialize from one weighted chained-attention observation."""
         enc = ChainedAttentionDataEncoder().seq_encode([x])
         self.seq_initialize(enc, np.array([weight], dtype=float), rng)
 
     def combine(self, suff_stat) -> ChainedAttentionAccumulator:
+        """Merge key-table, emission, likelihood, and weight statistics."""
         kn, km, ec, ll, n = suff_stat
         self.key_num += kn
         self.key_mass += km
@@ -244,15 +256,18 @@ class ChainedAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self):
+        """Return key statistics, emission counts, log-likelihood, and total weight."""
         return (self.key_num.copy(), self.key_mass.copy(), self.emission_count.copy(), self.ll, self.n)
 
     def from_value(self, x) -> ChainedAttentionAccumulator:
+        """Restore accumulator state from ``value`` output."""
         self.key_num, self.key_mass, self.emission_count = (np.asarray(v, dtype=float) for v in x[:3])
         self.ll = float(x[3])
         self.n = float(x[4])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 self.combine(stats_dict[self.keys])
@@ -260,14 +275,18 @@ class ChainedAttentionAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self.value()
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys])
 
     def acc_to_encoder(self) -> ChainedAttentionDataEncoder:
+        """Return the encoder compatible with this accumulator."""
         return ChainedAttentionDataEncoder()
 
 
 class ChainedAttentionAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create accumulators for chained-attention EM statistics."""
+
     def __init__(self, n_hops, num_symbols, num_targets, keys=None, name=None) -> None:
         self.n_hops = n_hops
         self.num_symbols = num_symbols
@@ -276,6 +295,7 @@ class ChainedAttentionAccumulatorFactory(StatisticAccumulatorFactory):
         self.name = name
 
     def make(self) -> ChainedAttentionAccumulator:
+        """Create an empty chained-attention accumulator."""
         return ChainedAttentionAccumulator(
             self.n_hops, self.num_symbols, self.num_targets, keys=self.keys, name=self.name
         )
@@ -312,11 +332,13 @@ class ChainedAttentionEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> ChainedAttentionAccumulatorFactory:
+        """Return a factory for chained-attention sufficient-statistic accumulators."""
         return ChainedAttentionAccumulatorFactory(
             self.n_hops, self.num_symbols, self.num_targets, keys=self.keys, name=self.name
         )
 
     def estimate(self, nobs: float | None, suff_stat) -> ChainedAttentionDistribution:
+        """Estimate key tables and emissions from accumulated forward-backward statistics."""
         key_num, key_mass, emission_count, _ll, _n = suff_stat
         key_tables = key_num / np.clip(key_mass, 1e-9, None)[:, :, None]
         em = emission_count + self.emission_smoothing
@@ -336,6 +358,7 @@ class ChainedAttentionDataEncoder(DataSequenceEncoder):
     def seq_encode(
         self, x: Sequence[tuple[Any, Any, int, int]]
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Encode ``(context_keys, context_values, query, target)`` observations."""
         keys = np.asarray([np.asarray(xi[0], dtype=int) for xi in x], dtype=int)
         vals = np.asarray([np.asarray(xi[1], dtype=int) for xi in x], dtype=int)
         q = np.asarray([int(xi[2]) for xi in x], dtype=int)

@@ -40,6 +40,7 @@ class RandomForestConditionalSampler(DistributionSampler):
     use sample_y(X) to draw targets given features."""
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Raise because the conditional forest has no marginal model for ``x``."""
         raise NotImplementedError(
             "RandomForestConditional models p(y | x) and cannot generate x. Use sample_y(X) to draw y given x."
         )
@@ -85,13 +86,16 @@ class RandomForestConditional(SequenceEncodableProbabilityDistribution):
         )
 
     def density(self, x: tuple[Any, Any]) -> float:
+        """Return ``p(y | x)`` for one feature/target pair."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: tuple[Any, Any]) -> float:
+        """Return ``log p(y | x)`` for one feature/target pair."""
         feat, target = x
         return float(self.seq_log_density((np.asarray([np.asarray(feat, dtype=float)]), np.asarray([target])))[0])
 
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+        """Return per-row conditional log densities for encoded ``(X, y)`` data."""
         X, y = x
         if len(y) == 0:
             return np.zeros(0)
@@ -110,6 +114,7 @@ class RandomForestConditional(SequenceEncodableProbabilityDistribution):
         return -0.5 * LOG_2PI - 0.5 * np.log(self.sigma2) - 0.5 * resid * resid / self.sigma2
 
     def sample_y(self, x: Any, rng: np.random.RandomState) -> np.ndarray:
+        """Draw target values from the fitted conditional forest at feature rows ``x``."""
         X = np.asarray(x, dtype=float)
         if self.task == "classification":
             proba = np.asarray(self.forest.predict_proba(X))
@@ -119,12 +124,15 @@ class RandomForestConditional(SequenceEncodableProbabilityDistribution):
         return mu + rng.normal(0.0, self.sigma, size=mu.shape)
 
     def sampler(self, seed: int | None = None) -> RandomForestConditionalSampler:
+        """Return a conditional sampler for drawing targets given features."""
         return RandomForestConditionalSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> RandomForestEstimator:
+        """Return a fresh estimator with the same task, name, and keyed-accumulation settings."""
         return RandomForestEstimator(task=self.task, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> RandomForestEncoder:
+        """Return the encoder for feature/target observation pairs."""
         return RandomForestEncoder()
 
 
@@ -140,17 +148,20 @@ class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
         self._w: list[np.ndarray] = []
 
     def update(self, x: tuple[Any, Any], weight: float, estimate: RandomForestConditional | None) -> None:
+        """Add one weighted feature/target observation to the training buffer."""
         feat, target = x
         self._X.append(np.asarray([np.asarray(feat, dtype=float)]))
         self._y.append(np.asarray([target]))
         self._w.append(np.asarray([weight], dtype=float))
 
     def initialize(self, x: tuple[Any, Any], weight: float, rng: np.random.RandomState | None) -> None:
+        """Initialize from one observation using the ordinary update path."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: RandomForestConditional | None
     ) -> None:
+        """Add an encoded batch and weights to the training buffer."""
         X, y = x
         if len(y) == 0:
             return
@@ -159,9 +170,11 @@ class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
         self._w.append(np.asarray(weights, dtype=float))
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: Any) -> None:
+        """Initialize from an encoded batch using the ordinary batch update path."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray] | None) -> RandomForestAccumulator:
+        """Merge a buffered ``(X, y, weights)`` tuple from another accumulator."""
         if suff_stat is not None:
             X, y, w = suff_stat
             if len(y) > 0:
@@ -171,11 +184,13 @@ class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Return the buffered design matrix, targets, and weights, or ``None`` if empty."""
         if not self._y:
             return None
         return (np.concatenate(self._X, axis=0), np.concatenate(self._y), np.concatenate(self._w))
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray, np.ndarray] | None) -> RandomForestAccumulator:
+        """Restore the accumulator from a buffered value tuple."""
         if x is None:
             self._X, self._y, self._w = [], [], []
         else:
@@ -184,25 +199,31 @@ class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into ``stats_dict`` under ``keys`` when keyed accumulation is enabled."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 self.combine(stats_dict[self.keys])
             stats_dict[self.keys] = self.value()
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from ``stats_dict`` under ``keys`` when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys])
 
     def acc_to_encoder(self) -> RandomForestEncoder:
+        """Return the encoder expected by this accumulator."""
         return RandomForestEncoder()
 
 
 class RandomForestAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for random-forest accumulators."""
+
     def __init__(self, name: str | None = None, keys: str | None = None) -> None:
         self.name = name
         self.keys = keys
 
     def make(self) -> RandomForestAccumulator:
+        """Create a fresh random-forest accumulator."""
         return RandomForestAccumulator(name=self.name, keys=self.keys)
 
 
@@ -240,6 +261,7 @@ class RandomForestEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> RandomForestAccumulatorFactory:
+        """Return an accumulator factory for weighted feature/target buffers."""
         return RandomForestAccumulatorFactory(self.name, self.keys)
 
     def _resolve_task(self, y: np.ndarray) -> str:
@@ -261,6 +283,7 @@ class RandomForestEstimator(ParameterEstimator):
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray] | None
     ) -> RandomForestConditional:
+        """Fit the native forest from buffered data and return it as a conditional leaf."""
         if suff_stat is None or len(suff_stat[1]) == 0:
             raise ValueError("RandomForestEstimator.estimate requires at least one (x, y) observation.")
         X, y, w = suff_stat
@@ -294,6 +317,7 @@ class RandomForestEncoder(DataSequenceEncoder):
         return isinstance(other, RandomForestEncoder)
 
     def seq_encode(self, x: list[tuple[Any, Any]]) -> tuple[np.ndarray, np.ndarray]:
+        """Convert feature/target pairs into a design matrix and target vector."""
         if len(x) == 0:
             return (np.zeros((0, 0)), np.zeros(0))
         X = np.asarray([np.asarray(feat, dtype=float) for feat, _ in x], dtype=float)

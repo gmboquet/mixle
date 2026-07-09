@@ -24,6 +24,7 @@ class Segmenter:
     discrete: bool = False
 
     def segment(self, raw: Any) -> np.ndarray:  # pragma: no cover - overridden
+        """Segment raw input into model units."""
         raise NotImplementedError
 
 
@@ -34,6 +35,7 @@ class ByteSegmenter(Segmenter):
     num_categories = 256
 
     def segment(self, raw: Any) -> np.ndarray:
+        """Return UTF-8 byte ids for a string or bytes-like object."""
         data = raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
         return np.frombuffer(data, dtype=np.uint8).astype(np.int64)
 
@@ -53,6 +55,7 @@ class ElementSegmenter(Segmenter):
         self.num_categories = len(self.alphabet)
 
     def segment(self, raw: Any) -> np.ndarray:
+        """Map sequence elements through the fixed alphabet index."""
         return np.asarray([self.index.get(s, 0) for s in raw], dtype=np.int64)
 
 
@@ -65,6 +68,7 @@ class PatchSegmenter(Segmenter):
         self.patch = int(patch)
 
     def segment(self, raw: Any) -> np.ndarray:
+        """Split an image tensor into flattened non-overlapping patches."""
         img = np.asarray(raw, dtype=np.float32)
         if img.ndim == 2:
             img = img[None, :, :]
@@ -76,6 +80,7 @@ class PatchSegmenter(Segmenter):
         return patches.astype(np.float32)
 
     def unit_features(self, channels: int = 1) -> int:
+        """Return feature width of one flattened patch."""
         return channels * self.patch * self.patch
 
 
@@ -89,6 +94,7 @@ class WindowSegmenter(Segmenter):
         self.hop = int(hop) if hop is not None else int(window)
 
     def segment(self, raw: Any) -> np.ndarray:
+        """Split a one-dimensional signal into fixed windows."""
         x = np.asarray(raw, dtype=np.float32).ravel()
         n = max(0, (len(x) - self.window) // self.hop + 1)
         if n == 0:
@@ -102,6 +108,7 @@ class WholeSegmenter(Segmenter):
     discrete = False
 
     def segment(self, raw: Any) -> np.ndarray:
+        """Treat the whole input as one feature-vector segment."""
         v = np.asarray(raw, dtype=np.float32).ravel()
         return v[None, :]
 
@@ -116,5 +123,6 @@ class SetSegmenter(Segmenter):
     discrete = False
 
     def segment(self, raw: Any) -> np.ndarray:
+        """Return set elements as rows of a feature matrix."""
         arr = np.asarray(raw, dtype=np.float32)
         return arr if arr.ndim == 2 else arr[None, :]

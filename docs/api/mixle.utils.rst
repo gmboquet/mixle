@@ -4,7 +4,6 @@ mixle.utils package
 .. automodule:: mixle.utils
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Subpackages
 -----------

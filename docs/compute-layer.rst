@@ -39,6 +39,10 @@ encoded payloads, and mergeable statistics. That is what lets ordinary
 distributions, latent models, neural leaves, and distributed backends share the
 same outer inference loop.
 
+The reference scalar path remains the semantic anchor. Encoded, generated, or
+backend paths should be treated as accelerators until parity evidence proves
+they preserve the same scores and updates.
+
 Encoded Data
 ------------
 
@@ -64,6 +68,10 @@ Encoded Data
 Encoded data is the boundary between Python-shaped observations and vectorized
 work. A distribution family should be explicit about what its encoder emits and
 what its ``seq_log_density`` expects.
+
+Document encoded payload shapes for new families. Shape ambiguity is one of the
+fastest ways for a backend implementation to pass small tests while failing on
+real heterogeneous records.
 
 Sequence Drivers
 ----------------
@@ -92,6 +100,10 @@ inference:
 The same functions accept local lists, Spark RDDs, data-source objects, and
 parallel encoded-data handles when the relevant backend is available.
 
+Sequence drivers should agree with scalar calls on counts, score sums, and
+non-finite behavior. Test ordinary rows, impossible rows, and any supported
+missing-data representation.
+
 Declarations
 ------------
 
@@ -118,6 +130,10 @@ engines and generated kernels:
 Declarations are how a family becomes visible to symbolic backends, generated
 Numba kernels, stacked mixture paths, Fisher views, and capability predicates
 without adding special cases to central inference code.
+
+A declaration is release-ready only when validation checks both metadata and
+behavior. Parameter shapes, support constraints, sufficient statistics, and
+generated score parity should all be tested.
 
 Generated Kernels
 -----------------
@@ -146,6 +162,10 @@ The kernel layer should preserve scalar semantics. Faster code is only useful
 when it returns the same density and sufficient statistics as the reference
 path.
 
+Benchmark results should be recorded after correctness evidence, not before.
+Performance numbers without parity evidence can make an invalid path look more
+mature than it is.
+
 Backend Scoring
 ---------------
 
@@ -167,7 +187,10 @@ Backends should fail loudly when they cannot preserve semantics. Silent
 fallbacks are only acceptable when the caller explicitly requested an automatic
 route and the reported result still records what happened.
 
-Stacked And Fused Mixtures
+Backend errors are part of the public contract. Test missing optional
+dependencies, unsupported engine/model combinations, and fallback reporting.
+
+Stacked and Fused Mixtures
 --------------------------
 
 Mixtures are a common performance bottleneck. The compute layer includes
@@ -188,7 +211,11 @@ These paths are implementation details of a public goal: a composed mixture
 should still look like a distribution, while the runtime avoids doing expensive
 per-component Python work when it can.
 
-Posterior, Gradient, And Decomposition Metadata
+Stacked and fused paths need stress checks for component weights,
+near-impossible observations, and responsibility normalization. They should not
+produce ``NaN`` where the reference path returns a finite value or ``-inf``.
+
+Posterior, Gradient, and Decomposition Metadata
 -----------------------------------------------
 
 Additional compute modules support specialized inference:
@@ -225,6 +252,19 @@ When adding or changing compute behavior:
 * preserve estimator accumulator merge behavior;
 * benchmark only after the reference path is correct.
 
+Release Evidence
+----------------
+
+For compute-layer changes, preserve:
+
+* scalar versus encoded score parity;
+* accumulator merge parity and sufficient-statistic shape checks;
+* declaration validation output for generated routes;
+* backend success and backend failure behavior;
+* non-finite and impossible-observation parity;
+* optional dependency guard behavior; and
+* benchmark context only after correctness gates pass.
+
 API Reference
 -------------
 
@@ -237,4 +277,3 @@ API Reference
 * :doc:`api/mixle.stats.compute.stacked`
 * :doc:`api/mixle.stats.compute.gradient`
 * :doc:`api/mixle.stats.compute.decomposition`
-

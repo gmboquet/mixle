@@ -536,7 +536,7 @@ def min_arborescence(weight: Any, root: int = 0) -> tuple[float, list[int]] | No
 
     ``weight`` is an ``n x n`` matrix of directed arc costs with ``inf`` for absent arcs. Returns
     ``(total, parent)`` where ``parent[v]`` is the chosen in-arc tail for each non-root ``v`` (and
-    ``parent[root] = -1``), forming the cheapest arborescence in which every node is reachable from
+    ``parent[root] = -1``), forming the minimum-cost arborescence in which every node is reachable from
     ``root``; returns ``None`` if no such arborescence exists.
     """
     w = np.asarray(weight, dtype=np.float64)
@@ -819,7 +819,7 @@ class RelationSampler:
     """Draws members of a :class:`Relation` under a Gibbs measure ``exp(-objective / temperature)``.
 
     Constructed via :meth:`Relation.sampler`. It enumerates the relation's members once (lazily, on the
-    first draw) and caches the resulting categorical, so repeated ``sample`` calls are cheap. ``size=None``
+    first draw) and caches the resulting categorical, so repeated ``sample`` calls are low-overhead. ``size=None``
     returns one member value; ``size=int`` returns a list of that many draws.
     """
 
@@ -900,6 +900,7 @@ class ShortestPath(Relation):
         self.heuristic = heuristic
 
     def enumerator(self, k: int | None = None) -> Iterator[Solution]:
+        """Yield up to ``k`` shortest or highest-scoring paths."""
         for path, cost in best_first_paths(
             self.start, self.successors, self.is_goal, sense=self.sense, heuristic=self.heuristic, max_results=k
         ):
@@ -923,6 +924,7 @@ class Assignment(Relation):
         self.sense = "max" if maximize else "min"
 
     def enumerator(self, k: int | None = None) -> Iterator[Solution]:
+        """Yield up to ``k`` assignments ordered by total assignment cost."""
         for total, _rows, cols in k_best_assignments(self.cost, k=k, maximize=self.maximize):
             yield Solution(cols, float(total))
 
@@ -944,6 +946,7 @@ class SpanningTree(Relation):
             raise ValueError("weights must be a square matrix")
 
     def enumerator(self, k: int | None = None) -> Iterator[Solution]:
+        """Yield up to ``k`` spanning trees ordered by total edge weight."""
         for total, edges in k_best_spanning_trees(self.weights, k=k):
             yield Solution(edges, float(total))
 
@@ -1010,6 +1013,7 @@ class EditDistance(Relation):
         return "".join(state) if self._as_str else state
 
     def enumerator(self, k: int | None = None) -> Iterator[Solution]:
+        """Yield edit-distance neighbors ordered outward from the center."""
         for state, dist in nearest_first(self.center, self._neighbors, max_distance=self.max_distance, max_results=k):
             yield Solution(self._format(state), float(dist))
 
@@ -1040,6 +1044,7 @@ class ViterbiPath(Relation):
         self.n_steps = len(self.log_obs)
 
     def enumerator(self, k: int | None = None) -> Iterator[Solution]:
+        """Yield up to ``k`` hidden-state paths ordered by joint log probability."""
         if self.n_steps == 0:
             return
         t_last, s = self.n_steps - 1, self.n_states
@@ -1117,6 +1122,7 @@ class BestSubsetRegression(Relation):
         return float(ll_term + penalty)
 
     def enumerator(self, k: int | None = None) -> Iterator[Solution]:
+        """Yield up to ``k`` feature subsets ordered by the configured criterion."""
         scored = []
         for size in range(0, self.max_size + 1):
             for subset in itertools.combinations(range(self.p), size):

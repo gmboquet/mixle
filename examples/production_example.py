@@ -30,7 +30,9 @@ if __name__ == "__main__":
     print("  data hash   :", header.dataset_hash[:16], "...")
     print("  model hash  :", header.model_hash[:16], "...")
     print("  iterations  :", header.training["iterations"], "| final loglik %.1f" % header.final_loglik)
-    print("  git / mixle  :", header.environment["git_commit"], "/", header.environment["pysp_version"])
+    env = header.environment
+    mixle_version = env.get("mixle_version") or env.get("pysp_version") or "unknown"
+    print("  git / mixle  :", env.get("git_commit") or "unknown", "/", mixle_version)
 
     # 2. the per-iteration lineage is a verifiable hash chain.
     print("# lineage verified:", verify_lineage(header))

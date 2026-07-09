@@ -4,7 +4,6 @@ mixle.stats.directional package
 .. automodule:: mixle.stats.directional
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

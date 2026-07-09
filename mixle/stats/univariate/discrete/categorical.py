@@ -1,13 +1,8 @@
-"""Create, estimate, and sample from a Categorical distribution.
-
-Defines the CategoricalDistribution, CategoricalSampler, CategoricalAccumulatorFactory, CategoricalAccumulator,
-CategoricalEstimator, and the CategoricalDataEncoder classes for use with mixle.
+"""Categorical distributions over arbitrary hashable labels.
 
 Data type: Any. The data type is taken as the categorical object and a probability is estimated.
 
 If Data type is int, consider using mixle.stats.univariate.discrete.integer_categorical (IntegerCategoricalDistribution) instead.
-
-
 
 Reference: Johnson, Kemp & Kotz, *Univariate Discrete Distributions* (3rd ed., Wiley, 2005).
 """
@@ -38,6 +33,8 @@ T = TypeVar("T")
 
 
 class CategoricalFisherView(FixedFisherView):
+    """Fisher view for categorical one-hot sufficient statistics."""
+
     def __init__(self, dist: Any, keys: Sequence[Any], probs: Sequence[float]) -> None:
         self.keys = list(keys)
         self.key_index: dict[Any, int] = {k: i for i, k in enumerate(self.keys)}
@@ -76,12 +73,14 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Return compute-backend metadata for categorical scoring."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the symbolic declaration for categorical probability maps."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -180,33 +179,29 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         prob_map: dict[Any, float] = MISSING,
         prior: Optional["SequenceEncodableProbabilityDistribution"] = None,
     ) -> None:
-        """Defines a CategoricalDistribution object for data type T.
+        """Create a categorical distribution over an explicit support map.
 
-        Density: For n observations of any data type, with support {x_0,x_1,....,x_{n-1}} the probability of a
-            categorical observation is given by,
-                Prob(x_mat) = p_i, if x_mat = x_i,
-                Prob(x_mat) = default_value, if x_mat != x_i for any i.
-            Note: default_value is set to 0.0 by default.
+        Labels in ``pmap`` receive their configured probabilities. Labels outside
+        the support receive ``default_value``; the default of ``0.0`` gives finite
+        support and ``-inf`` log-density for unknown labels.
 
         Args:
-            pmap (Dict[Any, float]): Keys (x_i) are the support of the categorical, the value is the probability of
-                the key (p_i).
-            default_value float: Value for prob of observation outside support of CategorialDistribution.
-            name (str): Assigns a name to the CategoricalDistribution object.
+            pmap: Mapping from labels to probabilities.
+            default_value: Probability assigned to labels outside ``pmap``.
+            name: Optional diagnostic name.
+            prob_map: Alias for ``pmap``.
             prior (Optional): Conjugate parameter prior over the category-probability simplex. A
                 :class:`~mixle.stats.bayes.dict_dirichlet.DictDirichletDistribution` enables the Bayesian /
                 variational machinery (``expected_log_density`` and the conjugate posterior update);
                 ``None`` (default) is a plain point model.
 
         Attributes:
-            name (str): Assigns a name to the CategoricalDistribution object.
-            pmap (Dict[Any, float]): Keys (x_i) are the support of the categorical, the value is the probability of
-                the key (p_i).
-            default_value (float): Value for prob of observation outside support of CategorialDistribution, default to
-                0.0.
-            no_default (bool): True if a non-zero default value is given.
-            log_default_value (float): log(default_value).
-            log1p_default_value (float): log(1+default_value).
+            name: Optional diagnostic name.
+            pmap: Mapping from labels to probabilities.
+            default_value: Probability assigned to labels outside ``pmap``.
+            no_default: ``True`` when outside-support labels have nonzero mass.
+            log_default_value: Log of ``default_value``.
+            log1p_default_value: Log normalizer for ``1 + default_value``.
 
         """
         pmap = coalesce_alias("pmap", pmap, "prob_map", prob_map, default=MISSING)
@@ -219,12 +214,7 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         self.set_prior(prior)
 
     def __str__(self) -> str:
-        """Object string with member variables for CategoricalDistribution.
-
-        Returns:
-            String with pmap, defualt_value, and name printed.
-
-        """
+        """Return a readable distribution summary."""
         s1 = ", ".join(["%s: %s" % (repr(k), repr(v)) for k, v in sorted(self.pmap.items(), key=lambda u: u[0])])
         s2 = repr(self.default_value)
         s3 = repr(self.name)
@@ -438,25 +428,25 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         return super().to_fisher(**kwargs)
 
     def sampler(self, seed: int | None = None) -> "CategoricalSampler":
-        """Creates CategoricalSampler for sampling from CategoricalDistribution.
+        """Return a sampler for iid draws from this distribution.
 
         Args:
-            seed (Optional[int]): Seed for setting random number generator used to sample.
+            seed: Optional random seed.
 
         Returns:
-            CategoricalSampler object.
+            A configured ``CategoricalSampler``.
 
         """
         return CategoricalSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "CategoricalEstimator":
-        """Creates a CategoricalEstimator for estimating parameters of CategoricalDistribution.
+        """Return an estimator initialized from this distribution's support.
 
         Args:
-            pseudo_count (Optional[float]): If set, inflates counts for currently set sufficient statistic (pmap).
+            pseudo_count: Optional smoothing count applied to current probabilities.
 
         Returns:
-            CategoricalEstimator object.
+            A ``CategoricalEstimator``.
         """
         if pseudo_count is None:
             return CategoricalEstimator(name=self.name, prior=self.prior)
@@ -467,21 +457,11 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             )
 
     def dist_to_encoder(self) -> "CategoricalDataEncoder":
-        """Creates a CategoricalDataEncoder object for sequence encoding data.
-
-        Returns:
-            CategoricalDataEncoder object.
-
-        """
+        """Return an encoder for categorical observations."""
         return CategoricalDataEncoder()
 
     def enumerator(self) -> "CategoricalEnumerator":
-        """Creates a CategoricalEnumerator iterating the support in descending probability order.
-
-        Returns:
-            CategoricalEnumerator object.
-
-        """
+        """Return an enumerator over support labels in descending probability order."""
         return CategoricalEnumerator(self)
 
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
@@ -517,18 +497,20 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class CategoricalSampler(DistributionSampler):
+    """Sampler for categorical labels according to the configured probability map."""
+
     def __init__(self, dist: CategoricalDistribution, seed: int | None = None) -> None:
-        """CategoricalSampler object used to generate samples from CategoricalDistribution.
+        """Create a sampler for a categorical distribution.
 
         Args:
-            dist (CategoricalDistribution): CategoricalDistribution used to draw samples from.
-            seed (Optional[int]): Seed for setting random number generator used to sample.
+            dist: Distribution to sample from.
+            seed: Optional random seed.
 
         Attributes:
-             rng (RandomState): RandomState with seed set to seed if provided. Else just RandomState().
-             levels (List[Any]): Category labels for the CategoricalDistribution.
-             probs (List[float]): Probabilities for each category in CategoricalDistribution.
-             num_levels (int): Total number of categories. I.e. len(levels).
+            rng: Random state used for sampling.
+            levels: Category labels.
+            probs: Category probabilities in ``levels`` order.
+            num_levels: Number of categories.
 
         """
         self.rng = RandomState(seed)
@@ -538,15 +520,13 @@ class CategoricalSampler(DistributionSampler):
         self.num_levels = len(self.levels)
 
     def sample(self, size: int | None = None) -> Any | list[Any]:
-        """Draw size-number of samples from CategoricalSampler object.
-
-        If size is not provided, size is assumed = 1. If size > 1, a list is returned.
+        """Draw iid samples from the categorical distribution.
 
         Args:
-            size (Optional[int]): Number of samples to be draw. If size is None, size = 1.
+            size: Number of iid samples to draw. ``None`` returns a scalar label.
 
         Returns:
-            List of levels if size > 1, else a single sample from levels with prob probs.
+            A scalar label when ``size`` is ``None``; otherwise a list of labels.
 
         """
         if size is None:
@@ -561,6 +541,8 @@ class CategoricalSampler(DistributionSampler):
 
 
 class CategoricalEnumerator(DistributionEnumerator):
+    """Enumerator over finite categorical support in descending probability order."""
+
     def __init__(self, dist: CategoricalDistribution) -> None:
         """Enumerates the support of a CategoricalDistribution in descending probability order.
 
@@ -588,17 +570,20 @@ class CategoricalEnumerator(DistributionEnumerator):
 
 
 class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
-    def __init__(self, keys: str | None = None) -> None:
-        """CategoricalAccumulator object used for aggregating sufficient statistics of CategoricalDistribution.
+    """Accumulator for weighted categorical label counts."""
 
-        Sufficient statistics: count_map: Dict[category, category_count]
+    def __init__(self, keys: str | None = None) -> None:
+        """Create an accumulator for categorical sufficient statistics.
+
+        The sufficient statistic is ``count_map``, a mapping from category label
+        to weighted count.
 
         Args:
-            keys (Optional[str]): All CategoricalAccumulators with same keys will have suff-stats merged.
+            keys: Optional key for merging sufficient statistics.
 
         Attributes:
-            count_map (Dict[Any,float]): Keys (x_i) are the support of the categorical, the value is the weighted count
-                of category obersvations.
+            count_map: Weighted counts by category label.
+            keys: Optional sufficient-statistic key.
 
         """
         self.count_map = dict()
@@ -624,7 +609,7 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
     def initialize(self, x: Any, weight: float, rng: RandomState) -> None:
         """Initializes the CategoricalAccumulator sufficient statistics one observation at a time.
 
-        Note: this is just a call to update, since there is no randomness in initialization.
+        This delegates to :meth:`update`, since initialization has no random component.
 
         Args:
             x (Any): Category label.
@@ -639,6 +624,7 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         self.update(x, weight, None)
 
     def get_seq_lambda(self):
+        """Return the sequence-update kernel used by generated accumulation code."""
         return [self.seq_update]
 
     def seq_update(
@@ -673,7 +659,7 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         """Vectorized initialization of Categorical sufficient statistics from encoded sequence of data.
 
         Requires data as encoded sequence from CategoricalDataEncoder.seq_encode(data).
-        Note: this is just a call to seq_update, since there is no randomness in initialization.
+        This delegates to :meth:`seq_update`, since initialization has no random component.
 
         Args:
             x (Tuple[np.ndarray,np.ndarray]): Tuple of numpy indices for unique categories, and numpy array unique
@@ -750,15 +736,10 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Set CategoricalAccumulator sufficient statistic member variables to the value of stats_dict
-            accumualator with same stats_dict key as member variable key.
+        """Replace sufficient statistics from another accumulator with the same key.
 
         Args:
-            stats_dict (Dict[str, Any]): Maps member variable key to CategoricalAccumulator with
-                same key.
-
-        Returns:
-            None
+            stats_dict: Mapping from merge keys to categorical accumulators.
 
         """
         if self.keys is not None:
@@ -766,35 +747,30 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
                 self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "CategoricalDataEncoder":
-        """Creates a CategoricalDataEncoder object for sequence encoding data.
-
-        Returns:
-            CategoricalDataEncoder object.
-
-        """
+        """Return an encoder compatible with categorical observations."""
         return CategoricalDataEncoder()
 
 
 class CategoricalAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for categorical count accumulators."""
+
     def __init__(self, keys: str | None = None) -> None:
-        """CategoricalAccumulatorFactory object used for lightweight construction of Accumulators.
+        """Create an accumulator factory.
 
         Args:
-            keys (Optional[str]): Declare keys for merging sufficient statistics of CategoricalAccumulators.
+            keys: Optional key for merging sufficient statistics.
 
         """
         self.keys = keys
 
     def make(self) -> "CategoricalAccumulator":
-        """Return a CategoricalAccumulator with keys passed.
-
-        Returns:
-            CategoricalAccumulator
-        """
+        """Return a fresh categorical accumulator."""
         return CategoricalAccumulator(keys=self.keys)
 
 
 class CategoricalEstimator(ParameterEstimator):
+    """Estimator for categorical probability maps from weighted label counts."""
+
     def __init__(
         self,
         pseudo_count: float | None = None,
@@ -804,24 +780,22 @@ class CategoricalEstimator(ParameterEstimator):
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
-        """CategoricalEstimator used to estimate CategoricalDistribution from sufficient statistics and create
-        AccumulatorFactory objects.
+        """Create an estimator for categorical sufficient statistics.
 
         Args:
-            pseudo_count (Optional[float]): Inflate sufficient statistic counts by pseudo_count.
-            suff_stat (Optional[Dict[Any, float]]): Dictionary with category labels and probabilities as values.
-            default_value (bool): True is default value should be set.
-            name (Optional[str]): Assign name to be passed to Distribution, Accumulator, ect.
-            keys (Optional[str]): Assign key to Estimator designating all same key estimators to later be combined,
-                in accumulation.
+            pseudo_count: Optional smoothing count applied to existing probabilities.
+            suff_stat: Optional prior probability map used with ``pseudo_count``.
+            default_value: Whether to estimate an outside-support default probability.
+            name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
+            prior: Optional conjugate prior over the probability map.
 
         Attributes:
-            pseudo_count (Optional[float]): Inflate sufficient statistic counts by pseudo_count.
-            suff_stat (Optional[Dict[Any, float]]): Dictionary with category labels and probabilities as values.
-            default_value (bool): True is default value should be set.
-            name (Optional[str]): Assign name to be passed to Distribution, Accumulator, ect.
-            keys (Optional[str]): Assign key to Estimator designating all same key estimators to later be combined,
-                in accumulation.
+            pseudo_count: Smoothing count.
+            suff_stat: Prior probability map.
+            default_value: Whether to estimate an outside-support default probability.
+            name: Optional diagnostic name.
+            keys: Optional sufficient-statistic key.
 
         """
         self.pseudo_count = pseudo_count
@@ -852,12 +826,7 @@ class CategoricalEstimator(ParameterEstimator):
         return 0.0
 
     def accumulator_factory(self) -> "CategoricalAccumulatorFactory":
-        """Create CategoricalAccumulatorFactory with keys passed is set.
-
-        Returns:
-            CategoricalAccumulatorFactory
-
-        """
+        """Return an accumulator factory matching this estimator."""
         return CategoricalAccumulatorFactory(self.keys)
 
     def _estimate_conjugate(self, suff_stat: dict[Any, float]) -> "CategoricalDistribution":
@@ -955,7 +924,7 @@ class CategoricalEstimator(ParameterEstimator):
 
 
 class CategoricalDataEncoder(DataSequenceEncoder):
-    """CategoricalDataEncoder for encoding Categorical data for use with vectorized "seq_" functions."""
+    """Sequence encoder for categorical observations used by vectorized ``seq_*`` methods."""
 
     def __str__(self) -> str:
         """Print out name of DataSequenceEncoder.
@@ -967,25 +936,25 @@ class CategoricalDataEncoder(DataSequenceEncoder):
         return "CategoricalDataEncoder"
 
     def __eq__(self, other) -> bool:
-        """Define equivilence for CategoricalDataEncoder.
+        """Return whether ``other`` is an equivalent categorical encoder.
 
         Args:
-            other (object): Check if object is CategoricalDataEncoder.
+            other (object): Object to compare.
 
         Returns:
-            True if object is CategoricalDataEncoder, else False.
+            True if ``other`` is a categorical encoder, else False.
 
         """
         return isinstance(other, CategoricalDataEncoder)
 
     def seq_encode(self, x: list[Any]) -> tuple[np.ndarray, np.ndarray]:
-        """Sequence encode list of categories for use with vectorized "seq_" functions.
+        """Encode a list of category labels for vectorized ``seq_*`` methods.
 
         Args:
             x (List[Any]): List of category labels.
 
         Returns:
-            Tuple of numpy indicies for unique categories in x, and numpy array unique objects that index xs maps to.
+            Tuple of integer category indices and the object array mapping those indices back to labels.
 
         """
         val_map_inv, uidx, xs = np.unique(x, return_index=True, return_inverse=True)

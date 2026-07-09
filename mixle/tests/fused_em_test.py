@@ -171,6 +171,31 @@ class FusedEMTestCase(unittest.TestCase):
         self.assertFalse(acc._track_ll)
         self.assertTrue(np.isclose(sum(m.w), 1.0))
 
+    def test_on_step_reports_the_model_paired_with_its_own_log_density(self):
+        # Regression: the fused loop's on_step used to report EMStep(i+1, nxt, ll_model, dll) where
+        # ll_model is the log-likelihood of the OLD model (this iteration's input, per the loop's own
+        # docstring), not of nxt -- a caller that checkpoints (model, log_density) pairs together (as
+        # the EMStep docstring recommends) would persist a mismatched pair. Every reported step's
+        # model.log_density(x) summed over the data must equal the step's own reported log_density.
+        g = GaussianDistribution(0.0, 1.0)
+        data = list(np.random.RandomState(0).randn(200))
+        est = GaussianEstimator()
+        steps = []
+        optimize(
+            data,
+            est,
+            max_its=8,
+            delta=1.0e-9,
+            on_step=steps.append,
+            reuse_estep_ll=True,
+            out=None,
+        )
+        self.assertGreater(len(steps), 0)
+        for s in steps:
+            direct_ll = sum(s.model.log_density(x) for x in data)
+            with self.subTest(iter=s.iter):
+                self.assertAlmostEqual(direct_ll, s.log_density, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

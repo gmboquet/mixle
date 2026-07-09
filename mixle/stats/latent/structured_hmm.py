@@ -33,22 +33,26 @@ class TransitionOperator:
 
     Subclasses provide the two linear maps the recursions need plus an M-step from expected transition
     mass. ``forward``/``backward`` must be consistent with ``as_matrix`` (``forward(a) == a @ A``,
-    ``backward(v) == A @ v``); the cheap operators never materialize ``A``.
+    ``backward(v) == A @ v``); the low-overhead operators never materialize ``A``.
     """
 
     n_states: int
 
     def forward(self, alpha: np.ndarray) -> np.ndarray:  # alpha @ A
+        """Push a state-belief row vector one transition forward."""
         raise NotImplementedError
 
     def backward(self, v: np.ndarray) -> np.ndarray:  # A @ v
+        """Pull an emission-weighted belief vector one transition backward."""
         raise NotImplementedError
 
     def as_matrix(self) -> np.ndarray:
+        """Materialize the transition matrix when an explicit matrix is needed."""
         raise NotImplementedError
 
     # --- M-step: accumulate expected transition mass over a sequence, then re-estimate ---
     def new_accumulator(self) -> Any:
+        """Create an empty transition sufficient-statistic accumulator."""
         raise NotImplementedError
 
     def accumulate(self, acc: Any, alpha_t: np.ndarray, w_next: np.ndarray, scale: float) -> None:
@@ -58,6 +62,7 @@ class TransitionOperator:
         raise NotImplementedError
 
     def estimate(self, acc: Any) -> TransitionOperator:
+        """Estimate a transition operator of the same structural family from accumulated statistics."""
         raise NotImplementedError
 
     def random_accumulator(self, rng) -> Any:
@@ -91,21 +96,27 @@ class DenseTransition(TransitionOperator):
         self.prior = None if prior is None else np.asarray(prior, dtype=float)
 
     def forward(self, alpha):
+        """Push a state-belief row vector forward with the dense matrix."""
         return alpha @ self.a
 
     def backward(self, v):
+        """Pull a vector backward with the dense matrix."""
         return self.a @ v
 
     def as_matrix(self):
+        """Return the dense row-stochastic transition matrix."""
         return self.a
 
     def new_accumulator(self):
+        """Create dense expected-transition-count storage."""
         return np.zeros_like(self.a)
 
     def accumulate(self, acc, alpha_t, w_next, scale):
+        """Accumulate one dense expected-transition-count contribution."""
         acc += np.outer(alpha_t, w_next) * (self.a / max(scale, 1e-300))
 
     def estimate(self, acc):
+        """Estimate a row-normalized dense transition from expected counts."""
         return DenseTransition(_row_normalize(acc if self.prior is None else acc + self.prior), self.prior)
 
 
@@ -144,18 +155,23 @@ class LowRankTransition(TransitionOperator):
         self.rank = self.g.shape[1]
 
     def forward(self, alpha):
+        """Push a state-belief row vector through the low-rank transition."""
         return (alpha @ self.g) @ self.phi  # (alpha^T A)
 
     def backward(self, v):
+        """Pull a vector backward through the low-rank transition."""
         return self.g @ (self.phi @ v)  # (A v)
 
     def as_matrix(self):
+        """Materialize the implied dense transition matrix."""
         return self.g @ self.phi
 
     def new_accumulator(self):
+        """Create state-profile and profile-next sufficient-statistic storage."""
         return [np.zeros_like(self.g), np.zeros_like(self.phi)]  # [n (K,r), m (r,K)]
 
     def accumulate(self, acc, alpha_t, w_next, scale):
+        """Accumulate one exact low-rank transition contribution."""
         # exact expected mass of the latent profile r on this transition, in O(K r) (no K x K matrix):
         #   u[r]   = sum_i alpha_t[i] G[i,r]            (alpha into profiles)
         #   v[r]   = sum_j Phi[r,j] w_next[j]           (profiles' emission-weighted reach)
@@ -168,6 +184,7 @@ class LowRankTransition(TransitionOperator):
         acc[1] += (u[:, None] * self.phi) * w_next[None, :] * inv
 
     def estimate(self, acc):
+        """Estimate low-rank transition factors from accumulated statistics."""
         return LowRankTransition(_row_normalize(acc[0]), _row_normalize(acc[1]))
 
 
@@ -192,21 +209,27 @@ class SparseTransition(TransitionOperator):
         self._edge_vals = np.asarray(self.a[self.rows, self.cols]).ravel()
 
     def forward(self, alpha):
+        """Push a state-belief row vector through the sparse transition."""
         return alpha @ self.a
 
     def backward(self, v):
+        """Pull a vector backward through the sparse transition."""
         return self.a @ v
 
     def as_matrix(self):
+        """Materialize the sparse transition as a dense matrix."""
         return np.asarray(self.a.todense())
 
     def new_accumulator(self):
+        """Create one expected-count slot per allowed edge."""
         return np.zeros(len(self.rows))  # one expected count per allowed edge
 
     def accumulate(self, acc, alpha_t, w_next, scale):
+        """Accumulate one sparse expected-transition contribution."""
         acc += alpha_t[self.rows] * w_next[self.cols] * self._edge_vals / max(scale, 1e-300)
 
     def estimate(self, acc):
+        """Estimate a sparse transition over the same allowed edge set."""
         return SparseTransition(self.n_states, list(zip(self.rows.tolist(), self.cols.tolist())), acc)
 
 
@@ -298,6 +321,7 @@ class FinalStateEnumeration:
         self._hmm, self._len_dist = hmm, len_dist
 
     def top_k(self, k):
+        """Return the top ``k`` final-state-constrained sequences."""
         return _final_state_enumerate(self._hmm, self._len_dist, max_results=int(k))
 
 
@@ -569,6 +593,7 @@ class StructuredHMM:
         return dense.enumerator()
 
     def dist_to_enumerator(self):
+        """Return the sequence enumerator for this HMM."""
         return self.enumerator()
 
     def state_posteriors(self, seq):
@@ -576,9 +601,11 @@ class StructuredHMM:
         return self._forward_backward(self._log_b(seq))[4]
 
     def seq_log_density(self, seqs) -> np.ndarray:
+        """Score a batch of observation sequences."""
         return np.array([self._forward_backward(self._log_b(s))[5] for s in seqs])
 
     def sampler(self, seed=None):
+        """Return a sampler for observation sequences."""
         return _StructuredHMMSampler(self, seed)
 
     def _can_fast_fb(self):
@@ -668,30 +695,36 @@ class BlockDiagonalTransition(TransitionOperator):
         return [slice(int(self.offsets[i]), int(self.offsets[i + 1])) for i in range(len(self.blocks))]
 
     def forward(self, alpha):
+        """Push each block's belief mass forward independently."""
         out = np.zeros(self.n_states)
         for b, sl in zip(self.blocks, self._slices()):
             out[sl] = b.forward(alpha[sl])
         return out
 
     def backward(self, v):
+        """Pull each block's vector backward independently."""
         out = np.zeros(self.n_states)
         for b, sl in zip(self.blocks, self._slices()):
             out[sl] = b.backward(v[sl])
         return out
 
     def as_matrix(self):
+        """Materialize the block-diagonal transition matrix."""
         from scipy.linalg import block_diag
 
         return block_diag(*[b.as_matrix() for b in self.blocks])
 
     def new_accumulator(self):
+        """Create one transition accumulator per block."""
         return [b.new_accumulator() for b in self.blocks]
 
     def accumulate(self, acc, alpha_t, w_next, scale):
+        """Accumulate block-local expected transition mass."""
         for b, a, sl in zip(self.blocks, acc, self._slices()):
             b.accumulate(a, alpha_t[sl], w_next[sl], scale)
 
     def estimate(self, acc):
+        """Estimate each block and return a new block-diagonal transition."""
         return BlockDiagonalTransition([b.estimate(a) for b, a in zip(self.blocks, acc)])
 
 
@@ -717,20 +750,25 @@ class KroneckerTransition(TransitionOperator):
         return self.op2.as_matrix()
 
     def forward(self, alpha):
+        """Push a joint belief through the Kronecker-factorized transition."""
         m = alpha.reshape(self.k1, self.k2)
         return (self._a1().T @ m @ self._a2()).reshape(-1)  # alpha @ (A1 (x) A2)
 
     def backward(self, v):
+        """Pull a joint vector backward through the Kronecker transition."""
         m = v.reshape(self.k1, self.k2)
         return (self._a1() @ m @ self._a2().T).reshape(-1)  # (A1 (x) A2) @ v
 
     def as_matrix(self):
+        """Materialize the dense Kronecker transition matrix."""
         return np.kron(self._a1(), self._a2())
 
     def new_accumulator(self):
+        """Create marginal transition-count accumulators for both factors."""
         return [np.zeros((self.k1, self.k1)), np.zeros((self.k2, self.k2))]  # marginal factor counts
 
     def accumulate(self, acc, alpha_t, w_next, scale):
+        """Accumulate exact marginalized factor transition statistics."""
         a1, a2 = self._a1(), self._a2()
         am = alpha_t.reshape(self.k1, self.k2)
         wm = w_next.reshape(self.k1, self.k2)
@@ -739,6 +777,7 @@ class KroneckerTransition(TransitionOperator):
         acc[1] += a2 * (am.T @ (a1 @ wm)) * inv  # n2[i2,j2] = A2[i2,j2] * sum_{i1,j1} xi
 
     def estimate(self, acc):
+        """Estimate both Kronecker factors from marginalized expected counts."""
         return KroneckerTransition(DenseTransition(_row_normalize(acc[0])), DenseTransition(_row_normalize(acc[1])))
 
 
@@ -860,6 +899,7 @@ class StructuredHMMDataEncoder(DataSequenceEncoder):
     the per-state emission ``log_density`` (no flattened columnar encoding; composability over raw speed)."""
 
     def seq_encode(self, x):
+        """Encode sequences as lists without changing their observations."""
         return [list(s) for s in x]
 
     def __eq__(self, other):
@@ -883,9 +923,11 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
         self.init_key, self.trans_key = keys
 
     def update(self, x, weight, estimate):
+        """Accumulate sufficient statistics from one weighted sequence."""
         self.seq_update([x], np.array([weight], dtype=float), estimate)
 
     def seq_update(self, x, weights, estimate):
+        """Run forward-backward and accumulate weighted sufficient statistics for a batch."""
         for seq, w in zip(x, np.asarray(weights, dtype=float)):
             if not seq:
                 continue
@@ -901,6 +943,7 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
                 self.nk[k] += float(wk.sum())
 
     def seq_initialize(self, x, weights, rng):
+        """Initialize sufficient statistics with random soft state responsibilities."""
         # no model yet: seed with random soft responsibilities + a random transition accumulator
         self.trans_acc = _add_nested(self.trans_acc, self.transition_proto.random_accumulator(rng))
         for seq, w in zip(x, np.asarray(weights, dtype=float)):
@@ -915,6 +958,7 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
                 self.nk[k] += float(wk.sum())
 
     def combine(self, suff_stat):
+        """Merge serialized HMM sufficient statistics."""
         pi_acc, trans_acc, emit_vals, nk = suff_stat
         self.pi_acc += pi_acc
         self.trans_acc = _add_nested(self.trans_acc, trans_acc)
@@ -924,9 +968,11 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self):
+        """Return serialized HMM sufficient statistics."""
         return (self.pi_acc.copy(), self.trans_acc, [e.value() for e in self.emit], self.nk.copy())
 
     def from_value(self, x):
+        """Restore accumulator state from serialized sufficient statistics."""
         self.pi_acc, self.trans_acc, emit_vals, self.nk = x[0].copy(), x[1], x[2], x[3].copy()
         for k in range(self.K):
             self.emit[k].from_value(emit_vals[k])
@@ -945,10 +991,12 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def acc_to_encoder(self):
+        """Return the encoder associated with this accumulator."""
         return StructuredHMMDataEncoder()
 
     # parameter tying: pool initial / transition counts across accumulators sharing a key
     def key_merge(self, store):
+        """Merge tied initial or transition sufficient statistics into ``store``."""
         if self.init_key is not None:
             store[self.init_key] = self.pi_acc + store[self.init_key] if self.init_key in store else self.pi_acc
         if self.trans_key is not None:
@@ -960,6 +1008,7 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
                 e.key_merge(store)
 
     def key_replace(self, store):
+        """Replace tied initial or transition statistics from ``store``."""
         if self.init_key is not None and self.init_key in store:
             self.pi_acc = store[self.init_key]
         if self.trans_key is not None and self.trans_key in store:
@@ -970,12 +1019,15 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class StructuredHMMAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for structured HMM accumulators."""
+
     def __init__(self, emission_estimators, transition_proto, keys):
         self.emission_estimators = emission_estimators
         self.transition_proto = transition_proto
         self.keys = keys
 
     def make(self):
+        """Create a fresh structured HMM accumulator."""
         emit = [est.accumulator_factory().make() for est in self.emission_estimators]
         return StructuredHMMAccumulator(emit, self.transition_proto, self.keys)
 
@@ -996,9 +1048,11 @@ class StructuredHMMEstimator(ParameterEstimator):
         self.terminal_states = terminal_states
 
     def accumulator_factory(self):
+        """Return the accumulator factory used by this estimator."""
         return StructuredHMMAccumulatorFactory(self.emission_estimators, self.transition_proto, self.keys)
 
     def estimate(self, nobs, suff_stat):
+        """Estimate an HMM from Baum-Welch sufficient statistics."""
         pi_acc, trans_acc, emit_vals, nk = suff_stat
         pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else np.ones(len(pi_acc)) / len(pi_acc)
         transition = self.transition_proto.estimate(trans_acc)
@@ -1130,6 +1184,7 @@ class InputOutputHMM:
         return np.array([self._forward_backward(self._log_b(o), list(u))[5] for o, u in zip(x, input_seqs)])
 
     def fit(self, obs_seqs, input_seqs, *, max_its: int = 50, tol: float = 1e-6):
+        """Fit the IOHMM with Baum-Welch using the supplied observation and input sequences."""
         obs_seqs = [list(o) for o in obs_seqs]
         input_seqs = [list(u) for u in input_seqs]
         ll_trace = []
@@ -1163,14 +1218,17 @@ class InputOutputHMM:
 
     # --- 5-part contract: a record is one (obs, input) sequence = a list of (observation, input) pairs ---
     def log_density(self, seq):
+        """Return the log likelihood of one ``(observation, input)`` sequence."""
         obs = [p[0] for p in seq]
         inputs = [int(p[1]) for p in seq]
         return self._forward_backward(self._log_b(obs), inputs)[5]
 
     def dist_to_encoder(self):
+        """Return the pass-through IOHMM sequence encoder."""
         return IOHMMDataEncoder()
 
     def estimator(self, pseudo_count=None):
+        """Return the estimator for this IOHMM structure."""
         return IOHMMEstimator(self._emit_est, list(self.transitions), self.name)
 
 
@@ -1178,6 +1236,7 @@ class IOHMMDataEncoder(DataSequenceEncoder):
     """An IOHMM record is one ``(obs, input)`` sequence -- a list of ``(observation, input_symbol)`` pairs."""
 
     def seq_encode(self, x):
+        """Encode IOHMM records as lists of ``(observation, input)`` pairs."""
         return [list(s) for s in x]
 
     def __eq__(self, other):
@@ -1188,6 +1247,8 @@ class IOHMMDataEncoder(DataSequenceEncoder):
 
 
 class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulator for IOHMM Baum-Welch sufficient statistics."""
+
     def __init__(self, emission_accumulators, transition_protos):
         self.emit = list(emission_accumulators)
         self.K = len(self.emit)
@@ -1198,9 +1259,11 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
         self.nk = np.zeros(self.K)
 
     def update(self, x, weight, estimate):
+        """Accumulate sufficient statistics from one weighted IOHMM record."""
         self.seq_update([x], np.array([weight], dtype=float), estimate)
 
     def seq_update(self, x, weights, estimate):
+        """Accumulate weighted sufficient statistics from a batch of IOHMM records."""
         for seq, w in zip(x, np.asarray(weights, dtype=float)):
             if not seq:
                 continue
@@ -1219,6 +1282,7 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
                 self.nk[k] += float(wk.sum())
 
     def seq_initialize(self, x, weights, rng):
+        """Initialize IOHMM sufficient statistics with random soft responsibilities."""
         for m in range(self.M):
             self.trans_accs[m] = _add_nested(self.trans_accs[m], self.transition_protos[m].random_accumulator(rng))
         for seq, w in zip(x, np.asarray(weights, dtype=float)):
@@ -1234,6 +1298,7 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
                 self.nk[k] += float(wk.sum())
 
     def combine(self, suff_stat):
+        """Merge serialized IOHMM sufficient statistics."""
         pi_acc, trans_accs, emit_vals, nk = suff_stat
         self.pi_acc += pi_acc
         self.trans_accs = [_add_nested(a, b) for a, b in zip(self.trans_accs, trans_accs)]
@@ -1243,24 +1308,30 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self):
+        """Return serialized IOHMM sufficient statistics."""
         return (self.pi_acc.copy(), self.trans_accs, [e.value() for e in self.emit], self.nk.copy())
 
     def from_value(self, x):
+        """Restore accumulator state from serialized IOHMM statistics."""
         self.pi_acc, self.trans_accs, emit_vals, self.nk = x[0].copy(), x[1], x[2], x[3].copy()
         for k in range(self.K):
             self.emit[k].from_value(emit_vals[k])
         return self
 
     def acc_to_encoder(self):
+        """Return the encoder associated with this accumulator."""
         return IOHMMDataEncoder()
 
 
 class IOHMMAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for IOHMM accumulators."""
+
     def __init__(self, emission_estimators, transition_protos):
         self.emission_estimators = emission_estimators
         self.transition_protos = transition_protos
 
     def make(self):
+        """Create a fresh IOHMM accumulator."""
         emit = [est.accumulator_factory().make() for est in self.emission_estimators]
         return IOHMMAccumulator(emit, self.transition_protos)
 
@@ -1275,9 +1346,11 @@ class IOHMMEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self):
+        """Return the accumulator factory used by this estimator."""
         return IOHMMAccumulatorFactory(self.emission_estimators, self.transition_protos)
 
     def estimate(self, nobs, suff_stat):
+        """Estimate an IOHMM from Baum-Welch sufficient statistics."""
         pi_acc, trans_accs, emit_vals, nk = suff_stat
         pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else np.ones(len(pi_acc)) / len(pi_acc)
         transitions = [self.transition_protos[m].estimate(trans_accs[m]) for m in range(len(trans_accs))]
@@ -1431,15 +1504,19 @@ class ExplicitDurationHMM:
 
     # --- 5-part contract: a record is one observation sequence ---
     def log_density(self, seq):
+        """Return the explicit-duration HMM log likelihood for one sequence."""
         return self.forward_loglik(seq)
 
     def seq_log_density(self, x):
+        """Score a batch of observation sequences."""
         return np.array([self.forward_loglik(list(seq)) for seq in x])
 
     def dist_to_encoder(self):
+        """Return the pass-through explicit-duration sequence encoder."""
         return EDHMMDataEncoder()
 
     def estimator(self, pseudo_count=None):
+        """Return the estimator for this explicit-duration HMM structure."""
         return EDHMMEstimator(self._emit_est, self.K, self.D, self.name)
 
     def to_structured_hmm(self, len_dist=None):
@@ -1541,6 +1618,7 @@ class ExplicitDurationHMM:
         return segments
 
     def sampler(self, seed=None):
+        """Return a sampler for explicit-duration HMM sequences."""
         return _EDHMMSampler(self, seed)
 
 
@@ -1575,6 +1653,7 @@ class EDHMMDataEncoder(DataSequenceEncoder):
     """An ExplicitDurationHMM record is one observation sequence (the durations are latent)."""
 
     def seq_encode(self, x):
+        """Encode EDHMM records as observation-sequence lists."""
         return [list(s) for s in x]
 
     def __eq__(self, other):
@@ -1597,9 +1676,11 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
         self.nk = np.zeros(self.K)
 
     def update(self, x, weight, estimate):
+        """Accumulate sufficient statistics from one weighted sequence."""
         self.seq_update([x], np.array([weight], dtype=float), estimate)
 
     def seq_update(self, x, weights, estimate):
+        """Accumulate weighted explicit-duration HMM statistics from a batch."""
         for seq, w in zip(x, np.asarray(weights, dtype=float)):
             if not seq:
                 continue
@@ -1614,6 +1695,7 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
                 self.nk[k] += float(wk.sum())
 
     def seq_initialize(self, x, weights, rng):
+        """Initialize explicit-duration HMM statistics with random soft responsibilities."""
         self.trans_acc += rng.random((self.K, self.K))
         np.fill_diagonal(self.trans_acc, 0.0)
         self.dur_acc += rng.random((self.K, self.D))
@@ -1629,6 +1711,7 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
                 self.nk[k] += float(wk.sum())
 
     def combine(self, suff_stat):
+        """Merge serialized explicit-duration HMM sufficient statistics."""
         pi_acc, trans_acc, dur_acc, emit_vals, nk = suff_stat
         self.pi_acc += pi_acc
         self.trans_acc += trans_acc
@@ -1639,6 +1722,7 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self):
+        """Return serialized explicit-duration HMM sufficient statistics."""
         return (
             self.pi_acc.copy(),
             self.trans_acc.copy(),
@@ -1648,6 +1732,7 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
         )
 
     def from_value(self, x):
+        """Restore accumulator state from serialized EDHMM statistics."""
         self.pi_acc, self.trans_acc, self.dur_acc, emit_vals, self.nk = (
             x[0].copy(),
             x[1].copy(),
@@ -1660,15 +1745,19 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def acc_to_encoder(self):
+        """Return the encoder associated with this accumulator."""
         return EDHMMDataEncoder()
 
 
 class EDHMMAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for explicit-duration HMM accumulators."""
+
     def __init__(self, emission_estimators, k, d):
         self.emission_estimators = emission_estimators
         self.k, self.d = k, d
 
     def make(self):
+        """Create a fresh explicit-duration HMM accumulator."""
         emit = [est.accumulator_factory().make() for est in self.emission_estimators]
         return EDHMMAccumulator(emit, self.k, self.d)
 
@@ -1683,9 +1772,11 @@ class EDHMMEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self):
+        """Return the accumulator factory used by this estimator."""
         return EDHMMAccumulatorFactory(self.emission_estimators, self.k, self.d)
 
     def estimate(self, nobs, suff_stat):
+        """Estimate an explicit-duration HMM from segment posterior statistics."""
         pi_acc, trans_acc, dur_acc, emit_vals, nk = suff_stat
         pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else np.ones(self.k) / self.k
         a = trans_acc.copy()

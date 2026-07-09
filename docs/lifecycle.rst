@@ -39,6 +39,10 @@ Basic Flow
 Fitting delegates to ``mixle.inference.optimize``. Scoring, sampling,
 enumeration, and posterior calls delegate to the fitted distribution.
 
+The facade should not hide the fitted object. When a workflow depends on a
+specific capability, inspect ``model.fitted`` with ``mixle.describe`` and store
+the fitted distribution type in the artifact notes.
+
 Certified Creation Alternative
 ------------------------------
 
@@ -55,6 +59,10 @@ post-conditions rather than a convenience lifecycle facade.
 ``CreatedModel`` carries the fitted model, an estimation certificate, optional
 calibration and UQ objects, and provenance. ``Model`` is still the shorter
 interactive facade; ``create`` is the stronger artifact boundary.
+
+Use ``create`` for release-like evidence when the certificate, calibration, or
+provenance will be reviewed independently from the notebook that produced the
+fit.
 
 Proposal Frontier
 -----------------
@@ -85,6 +93,10 @@ failures are reported in the frontier instead of being silently ignored. The
 winning estimator becomes the model spec, while field-level recommendation
 notes and dependency hints are stored in ``Model.notes``.
 
+Keep the full frontier when model selection matters. The rejected candidates
+and their failure notes explain why the chosen spec was accepted and prevent
+the proposal step from becoming an opaque recommendation.
+
 Automatic Restart Guard
 -----------------------
 
@@ -104,6 +116,10 @@ kept. Notes record whether the automatic restart changed the result.
 
 Pass an integer to force a number of restarts, or ``restarts=None`` to keep the
 raw single fit.
+
+For latent models, record whether the restart guard changed the result. A
+model that needed symmetry-breaking restarts should carry that fact into
+provenance.
 
 Query Verbs
 -----------
@@ -125,6 +141,10 @@ Bayesian network can answer interventions when the necessary graph structure is
 available. Use ``mixle.describe(model.fitted)`` when you need to know what the
 object supports.
 
+Query verbs should preserve capability failures. If a fitted object cannot
+enumerate, condition, forecast, or answer an intervention, the lifecycle layer
+should report that limitation rather than inventing an unsupported answer.
+
 Distillation
 ------------
 
@@ -143,6 +163,10 @@ The returned object is a task ``Solution``. It answers locally when calibrated
 and escalates to the teacher when it should not guess. See
 :doc:`task-distillation` and :doc:`task-serving`.
 
+When latent posteriors become task labels, document that the labels are
+model-derived. They are useful for distillation, but they are not external
+ground truth unless a separate review validates them.
+
 Deployment
 ----------
 
@@ -157,6 +181,9 @@ The artifact contains the fitted model and a manifest with family, creation
 time, fit metadata, notes, and artifact schema name. This is a lightweight
 lifecycle artifact, not a full model registry. For production registry,
 provenance, drift, and serving concepts, see :doc:`production`.
+
+Load the artifact in a fresh process before relying on it. A deploy directory
+that only works from the source checkout is not durable.
 
 Reusable Skills
 ---------------
@@ -183,7 +210,7 @@ Use skills when the fitted artifact becomes an application verb. Use
 ``Model.deploy`` or ``Registry`` when the artifact is primarily a model
 version.
 
-When To Use Lower-Level APIs
+When to Use Lower-Level APIs
 ----------------------------
 
 Use the facade when:
@@ -199,6 +226,18 @@ Use lower-level APIs when:
 * you are controlling initialization, streaming updates, or restarts manually;
 * you are testing a new distribution family, capability, or backend;
 * you need explicit access to encoded data, accumulators, kernels, or engines.
+
+Release Evidence
+----------------
+
+For lifecycle workflows, preserve:
+
+* fitted distribution type and capability report;
+* proposal frontier and rejected candidates when automatic proposal is used;
+* restart policy and whether it changed a latent fit;
+* held-out evaluation output;
+* artifact load smoke test from a fresh process; and
+* escalation or calibration evidence for distilled task solutions.
 
 API Reference
 -------------

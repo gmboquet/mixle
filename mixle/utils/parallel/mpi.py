@@ -35,8 +35,8 @@ from collections.abc import Sequence
 from typing import Any, Optional
 
 import numpy as np
-from mpi4py import MPI
 
+from mixle.utils.optional_deps import HAS_MPI4PY, MPI, require
 from mixle.utils.parallel.planner import EncodedDataHandle
 
 __all__ = ["MPIEncodedData", "mpi_out"]
@@ -46,6 +46,8 @@ _PROTO = pickle.HIGHEST_PROTOCOL
 
 def mpi_out(comm: Optional["MPI.Comm"] = None, root: int = 0):
     """sys.stdout on the root rank, a discarded buffer elsewhere."""
+    if not HAS_MPI4PY:
+        require("mpi4py", "mpi")
     comm = MPI.COMM_WORLD if comm is None else comm
     return sys.stdout if comm.Get_rank() == root else io.StringIO()
 
@@ -81,6 +83,8 @@ class MPIEncodedData(EncodedDataHandle):
         root: int = 0,
         root_only: bool = False,
     ):
+        if not HAS_MPI4PY:
+            require("mpi4py", "mpi")
         self.comm = MPI.COMM_WORLD if comm is None else comm
         self.root = root
         self.rank = self.comm.Get_rank()

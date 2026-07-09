@@ -30,7 +30,11 @@ routes.
 The data has two clear modes. A one-Gaussian model would blur the structure;
 a mixture can represent the latent group.
 
-2. Declare The Model
+For an applied workflow, keep a held-out slice before fitting. PPL syntax makes the
+model declaration compact, but it does not remove the need to compare against a
+simpler baseline or repeat a mixture fit with more than one seed.
+
+2. Declare the Model
 --------------------
 
 .. code-block:: python
@@ -43,7 +47,12 @@ a mixture can represent the latent group.
 adds a latent component assignment, so ``fit`` routes to the same EM machinery
 used by :class:`mixle.stats.MixtureEstimator`.
 
-3. Fit The Expression
+The ``free`` markers are part of the public model contract. If a parameter is
+fixed, document the fixed value and why it is not estimated. If every parameter
+is free, record the initialization and fitting route in provenance so the same
+expression can be explained later.
+
+3. Fit the Expression
 ---------------------
 
 .. code-block:: python
@@ -57,7 +66,20 @@ used by :class:`mixle.stats.MixtureEstimator`.
 The returned object keeps the PPL-facing wrapper, while ``model.dist`` is the
 underlying fitted distribution.
 
-4. Inspect The Bound Distribution
+If fitting fails, inspect the selected route before changing the model formula.
+A symbolic expression can lower to different concrete machinery depending on
+free parameters, observed fields, custom potentials, and missing-data settings.
+
+Use route inspection as a debugging tool, not as a release guarantee by itself.
+The lowered route still needs the same numerical checks as the estimator API:
+finite objective values, stable component responsibilities, and predictable
+handling of impossible or missing observations.
+
+For release-facing notebooks, save the route explanation next to the fitted
+object. It is the compact record of whether the example produced an EM point
+estimate, a MAP result, or posterior draws.
+
+4. Inspect the Bound Distribution
 ---------------------------------
 
 .. code-block:: python
@@ -72,6 +94,15 @@ underlying fitted distribution.
 After fitting, use ordinary distribution methods for scoring, sampling, and
 capability inspection.
 
+Keep ``model.dist`` visible in notebooks and reports. It is the object that
+answers distribution-level questions such as scoring, sampling, support, and
+posterior responsibilities, and it is the object most reviewers will need to
+compare with an estimator-built model.
+
+When the PPL wrapper is serialized or passed between packages, keep a small
+score check against ``model.dist`` in the receipt. That makes the symbolic
+expression and the concrete fitted object auditable as one artifact.
+
 5. Ask Posterior Questions
 --------------------------
 
@@ -82,6 +113,15 @@ capability inspection.
 
 For a mixture, the posterior is responsibility mass over components. For an
 HMM, the same idea becomes state posterior mass through time.
+
+Responsibilities are not labels. Treat them as evidence from the fitted model
+and check whether ambiguous points, such as values near zero in this example,
+behave consistently across seeds and validation splits.
+
+For label-sensitive downstream work, record how component ordering was chosen.
+Sorting components by mean is reasonable for this simple one-dimensional
+example; richer mixtures need a domain-specific alignment rule or a
+label-invariant evaluation metric.
 
 6. Add Observed Covariates
 --------------------------
@@ -100,6 +140,11 @@ Use the PPL layer when it clarifies the model declaration. Use the estimator
 API directly when you need exact control over every child estimator,
 initialization, or backend detail.
 
+For missing data, make the policy explicit. A PPL route may reject missing
+values, marginalize them, or require an inference method that can represent
+latent missing fields. Do not rely on ``NaN`` cleanup outside the model unless
+that transformation is part of the documented data pipeline.
+
 Validation Checklist
 --------------------
 
@@ -107,10 +152,16 @@ For mixture-style PPL models:
 
 * run more than one random seed or use a restart strategy for difficult data;
 * inspect the lowered distribution, not only the wrapper;
+* record the selected fitting route and unsupported route combinations;
 * compare against a simpler baseline on held-out log score;
-* check whether component labels are identifiable enough for the intended
+* check whether component labels are identifiable enough for the target
   interpretation;
-* record the lowered model structure in provenance.
+* keep route-specific diagnostics with the artifact, such as objective traces
+  or posterior convergence checks;
+* record the missing-data policy and any unsupported route/feature combination;
+* record the lowered model structure in provenance; and
+* preserve non-finite score behavior in diagnostics instead of rewriting it
+  during data preparation.
 
 Read :doc:`/ppl` for the full expression language and :doc:`/inference` for
 the lower-level fitting controls.

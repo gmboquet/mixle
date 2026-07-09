@@ -1,4 +1,4 @@
-"""Create, estimate, and sample from a stochastic block graph distribution.
+"""Stochastic block graph distributions with observed or fixed block assignments.
 
 This module handles Bernoulli edges conditional on observed or fixed node block
 assignments. It does not marginalize over unknown block assignments.
@@ -45,6 +45,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
 
     @classmethod
     def compute_capabilities(cls):
+        """Return backend capabilities for block-structured Bernoulli graph scoring."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic_object")
@@ -91,6 +92,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
     def from_model(
         cls, model: Any, block_prior: Any | None = None, include_assignment_prior: bool = False
     ) -> "StochasticBlockGraphDistribution":
+        """Create a distribution wrapper from a random-graph SBM model."""
         return cls(
             model.block_probs,
             block_assignments=model.block_assignments,
@@ -102,6 +104,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         )
 
     def to_model(self) -> Any:
+        """Convert this distribution to the corresponding random-graph model."""
         if self.block_assignments is None:
             raise ValueError("fixed block_assignments are required to convert to StochasticBlockGraphModel.")
         from mixle.models.random_graph import StochasticBlockGraphModel
@@ -118,9 +121,11 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         return obs
 
     def density(self, x: Any) -> float:
+        """Return the probability mass of one graph observation."""
         return math.exp(self.log_density(x))
 
     def log_density(self, x: Any) -> float:
+        """Return the conditional block-model log probability of one graph."""
         obs = self._obs_with_assignments(x)
         adj = obs.adjacency
         assignments = obs.block_assignments
@@ -133,6 +138,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         return float(ll)
 
     def seq_log_density(self, x: Sequence[GraphObservation]) -> np.ndarray:
+        """Score a batch of graph observations."""
         return np.asarray([self.log_density(obs) for obs in x], dtype=np.float64)
 
     def backend_seq_log_density(self, x: Sequence[GraphObservation], engine: Any) -> Any:
@@ -173,6 +179,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         return float(self.block_prior @ self.block_probs @ self.block_prior)
 
     def link_probability(self, i: int, j: int, block_assignments: Any | None = None) -> float:
+        """Return the marginal or assignment-conditional edge probability for node pair ``(i, j)``."""
         if i == j and not self.self_loops:
             return 0.0
         assignments = (
@@ -184,6 +191,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         return float(self.block_probs[int(assignments[i]), int(assignments[j])])
 
     def edge_marginals(self, block_assignments: Any | None = None, num_nodes: int | None = None) -> np.ndarray:
+        """Return the matrix of edge probabilities under fixed or prior-predictive assignments."""
         if block_assignments is None:
             if self.block_assignments is None:
                 if num_nodes is None:
@@ -211,6 +219,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         return mat
 
     def block_marginals(self, x: Any = None) -> np.ndarray:
+        """Return empirical block proportions for ``x`` or the model block prior."""
         if x is not None:
             obs = self._obs_with_assignments(x)
             counts = np.bincount(obs.block_assignments, minlength=self.num_blocks).astype(np.float64)
@@ -218,6 +227,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         return self.block_prior.copy()
 
     def posterior(self, x: Any) -> dict[str, Any]:
+        """Return block counts, block proportions, and edge marginals for an observed graph."""
         obs = self._obs_with_assignments(x)
         counts = np.bincount(obs.block_assignments, minlength=self.num_blocks).astype(np.float64)
         return {
@@ -227,6 +237,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         }
 
     def sampler(self, seed: int | None = None) -> "StochasticBlockGraphSampler":
+        """Return a sampler for SBM graph observations."""
         return StochasticBlockGraphSampler(self, seed)
 
     def enumerator(self) -> DistributionEnumerator:
@@ -251,6 +262,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         return StochasticBlockGraphEnumerator(self)
 
     def estimator(self, pseudo_count: float | None = None) -> "StochasticBlockGraphEstimator":
+        """Return an estimator for observed-assignment SBM fitting."""
         return StochasticBlockGraphEstimator(
             num_blocks=self.num_blocks,
             block_assignments=self.block_assignments,
@@ -265,10 +277,13 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         )
 
     def dist_to_encoder(self) -> GraphDataEncoder:
+        """Return the graph encoder used by vectorized scoring and fitting."""
         return GraphDataEncoder(directed=self.directed, fallback_assignments=self.block_assignments)
 
 
 class StochasticBlockGraphEnumerator(DistributionEnumerator):
+    """Enumerator over binary graphs with fixed block assignments."""
+
     def __init__(self, dist: StochasticBlockGraphDistribution) -> None:
         """Best-first enumeration of binary graphs over independent block-dependent edge factors.
 
@@ -302,6 +317,7 @@ class StochasticBlockGraphEnumerator(DistributionEnumerator):
         self._product = ProductEnumerator(streams, combine=combine, offset=offset)
 
     def __next__(self) -> tuple[np.ndarray, float]:
+        """Return the next adjacency matrix and its log probability."""
         return next(self._product)
 
 
@@ -313,6 +329,7 @@ class StochasticBlockGraphSampler(DistributionSampler):
         self.rng = RandomState(seed)
 
     def sample_assignments(self, num_nodes: int) -> np.ndarray:
+        """Draw node block assignments from the block prior."""
         n = int(num_nodes)
         if n < 0:
             raise ValueError("num_nodes must be non-negative.")
@@ -321,6 +338,7 @@ class StochasticBlockGraphSampler(DistributionSampler):
     def sample_graph(
         self, num_nodes: int | None = None, block_assignments: Any | None = None, return_assignments: bool = False
     ) -> Any:
+        """Draw one graph, optionally returning the assignments used."""
         if block_assignments is None:
             if self.dist.block_assignments is not None and num_nodes is None:
                 assignments = self.dist.block_assignments
@@ -349,6 +367,7 @@ class StochasticBlockGraphSampler(DistributionSampler):
         block_assignments: Any | None = None,
         return_assignments: bool = False,
     ) -> Any:
+        """Draw one graph or a list of graphs from the SBM."""
         if size is None:
             return self.sample_graph(
                 num_nodes=num_nodes, block_assignments=block_assignments, return_assignments=return_assignments
@@ -407,6 +426,7 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self.num_blocks = new
 
     def update(self, x: Any, weight: float, estimate: StochasticBlockGraphDistribution | None) -> None:
+        """Accumulate weighted block-pair edge counts from one graph."""
         fallback = self.block_assignments
         if fallback is None and estimate is not None:
             fallback = estimate.block_assignments
@@ -430,20 +450,24 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
                 self.totals[b, a] += w
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize sufficient statistics from one weighted graph."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: Sequence[GraphObservation], weights: np.ndarray, estimate: StochasticBlockGraphDistribution | None
     ) -> None:
+        """Accumulate weighted block-pair edge counts from a batch."""
         for obs, weight in zip(x, weights):
             self.update(obs, float(weight), estimate)
 
     def seq_initialize(self, x: Sequence[GraphObservation], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize sufficient statistics from a weighted graph batch."""
         self.seq_update(x, weights, None)
 
     def combine(
         self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]
     ) -> "StochasticBlockGraphAccumulator":
+        """Merge serialized SBM sufficient statistics."""
         successes, totals, block_counts, total_nodes, num_graphs = suff_stat
         self._ensure_capacity(successes.shape[0])
         k = successes.shape[0]
@@ -455,11 +479,13 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+        """Return serialized SBM sufficient statistics."""
         return (self.successes.copy(), self.totals.copy(), self.block_counts.copy(), self.total_nodes, self.num_graphs)
 
     def from_value(
         self, x: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]
     ) -> "StochasticBlockGraphAccumulator":
+        """Restore accumulator state from serialized SBM sufficient statistics."""
         successes, totals, block_counts, total_nodes, num_graphs = x
         self.successes = np.asarray(successes, dtype=np.float64).copy()
         self.totals = np.asarray(totals, dtype=np.float64).copy()
@@ -470,6 +496,7 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge tied SBM sufficient statistics into ``stats_dict``."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -477,10 +504,12 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace tied SBM sufficient statistics from ``stats_dict``."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> GraphDataEncoder:
+        """Return the encoder associated with this accumulator."""
         return GraphDataEncoder(directed=self.directed, fallback_assignments=self.block_assignments)
 
 
@@ -504,6 +533,7 @@ class StochasticBlockGraphAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> StochasticBlockGraphAccumulator:
+        """Create a fresh SBM accumulator."""
         return StochasticBlockGraphAccumulator(
             num_blocks=self.num_blocks,
             block_assignments=self.block_assignments,
@@ -548,6 +578,7 @@ class StochasticBlockGraphEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> StochasticBlockGraphAccumulatorFactory:
+        """Return the accumulator factory used by this estimator."""
         return StochasticBlockGraphAccumulatorFactory(
             num_blocks=self.num_blocks,
             block_assignments=self.block_assignments,
@@ -560,6 +591,7 @@ class StochasticBlockGraphEstimator(ParameterEstimator):
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]
     ) -> StochasticBlockGraphDistribution:
+        """Estimate block probabilities and the block prior from sufficient statistics."""
         successes, totals, block_counts, total_nodes, num_graphs = suff_stat
         successes = np.asarray(successes, dtype=np.float64).copy()
         totals = np.asarray(totals, dtype=np.float64).copy()

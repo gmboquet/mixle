@@ -1,4 +1,4 @@
-"""Create, estimate, and sample from a location-scale logistic distribution.
+"""Location-scale logistic distributions over real values.
 
 Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
@@ -25,12 +25,14 @@ class LogisticDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated logistic kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for logistic distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -173,6 +175,7 @@ class LogisticSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one sample or an array of iid samples."""
         return self.rng.logistic(loc=self.dist.loc, scale=self.dist.scale, size=size)
 
 
@@ -187,37 +190,45 @@ class LogisticAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: LogisticDistribution | None) -> None:
+        """Accumulate weighted first and second moments for one observation."""
         self.sum += x * weight
         self.sum2 += x * x * weight
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: LogisticDistribution | None) -> None:
+        """Accumulate weighted first and second moments from encoded data."""
         self.sum += np.dot(x, weights)
         self.sum2 += np.dot(x * x, weights)
         self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "LogisticAccumulator":
+        """Merge another logistic sufficient-statistic tuple."""
         self.sum += suff_stat[0]
         self.sum2 += suff_stat[1]
         self.count += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return accumulated sum, second moment sum, and count."""
         return self.sum, self.sum2, self.count
 
     def from_value(self, x: tuple[float, float, float]) -> "LogisticAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.sum = x[0]
         self.sum2 = x[1]
         self.count = x[2]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -225,10 +236,12 @@ class LogisticAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "LogisticDataEncoder":
+        """Return the encoder used by this accumulator."""
         return LogisticDataEncoder()
 
 
@@ -240,6 +253,7 @@ class LogisticAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> LogisticAccumulator:
+        """Create a fresh logistic accumulator."""
         return LogisticAccumulator(name=self.name, keys=self.keys)
 
 
@@ -266,9 +280,11 @@ class LogisticEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> LogisticAccumulatorFactory:
+        """Return an accumulator factory for logistic moment statistics."""
         return LogisticAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> LogisticDistribution:
+        """Estimate location and scale from weighted moments."""
         sum_x, sum_x2, count = suff_stat
         if self.pseudo_count is not None and self.suff_stat is not None:
             loc0, scale0 = self.suff_stat
@@ -296,6 +312,7 @@ class LogisticDataEncoder(DataSequenceEncoder):
         return isinstance(other, LogisticDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
+        """Encode observations as a floating-point array."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and np.any(np.isnan(rv)):
             raise ValueError("LogisticDistribution requires finite or infinite real-valued observations.")

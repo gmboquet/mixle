@@ -86,7 +86,7 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
         self.branching_ratio = self.alpha / self.beta
 
     def __str__(self) -> str:
-        """Returns string representation of HawkesProcessDistribution object."""
+        """Return a constructor-style representation of the Hawkes process distribution."""
         return "HawkesProcessDistribution(%s, %s, %s, %s, name=%s, keys=%s)" % (
             repr(self.mu),
             repr(self.alpha),
@@ -262,6 +262,7 @@ class HawkesProcessAccumulator(SequenceEncodableStatisticAccumulator):
         self.total_window += weight * self.window
 
     def update(self, x: Any, weight: float, estimate: HawkesProcessDistribution | None) -> None:
+        """Accumulate EM branching statistics for one event-time realization."""
         t = np.asarray(x, dtype=np.float64).reshape(-1)
         if estimate is None:
             self._initialize_seq(t, weight)
@@ -279,11 +280,13 @@ class HawkesProcessAccumulator(SequenceEncodableStatisticAccumulator):
         self.total_window += weight * self.window
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize branching statistics with one weighted realization."""
         self._initialize_seq(np.asarray(x, dtype=np.float64).reshape(-1), weight)
 
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray, float], weights: np.ndarray, estimate: HawkesProcessDistribution
     ) -> None:
+        """Accumulate EM branching statistics from encoded realizations."""
         # Vectorized across sequences: one loop over event index (<= max_len), each step updating the
         # R_i / S_i recursion and the (s0, g, w) responsibility sums for all sequences at once -- the
         # same scheme as seq_log_density. Bit-identical to summing _accumulate_seq per sequence.
@@ -320,12 +323,14 @@ class HawkesProcessAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(
         self, x: tuple[np.ndarray, np.ndarray, float], weights: np.ndarray, rng: RandomState | None
     ) -> None:
+        """Initialize branching statistics from encoded realizations."""
         times, lengths, _ = x
         for k in range(len(lengths)):
             n = int(lengths[k])
             self._initialize_seq(times[k, :n], float(weights[k]))
 
     def combine(self, suff_stat: tuple[float, float, float, float, float]) -> "HawkesProcessAccumulator":
+        """Merge serialized Hawkes EM sufficient statistics into this accumulator."""
         s0, g, w, ne, tw = suff_stat
         self.s0 += s0
         self.g += g
@@ -335,13 +340,16 @@ class HawkesProcessAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, float, float, float, float]:
+        """Return the EM branching statistics and exposure totals."""
         return self.s0, self.g, self.w, self.n_events, self.total_window
 
     def from_value(self, x: tuple[float, float, float, float, float]) -> "HawkesProcessAccumulator":
+        """Restore the accumulator from serialized Hawkes EM statistics."""
         self.s0, self.g, self.w, self.n_events, self.total_window = (float(v) for v in x)
         return self
 
     def scale(self, c: float) -> "HawkesProcessAccumulator":
+        """Scale accumulated sufficient statistics by a constant."""
         self.s0 *= c
         self.g *= c
         self.w *= c
@@ -350,6 +358,7 @@ class HawkesProcessAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into a keyed statistics dictionary."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys] = tuple(a + b for a, b in zip(stats_dict[self.keys], self.value()))
@@ -357,10 +366,12 @@ class HawkesProcessAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self.value()
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from a keyed statistics dictionary."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys])
 
     def acc_to_encoder(self) -> "HawkesProcessDataEncoder":
+        """Return an encoder that pads event-time realizations for this window."""
         return HawkesProcessDataEncoder(self.window)
 
 
@@ -373,6 +384,7 @@ class HawkesProcessAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> "HawkesProcessAccumulator":
+        """Create an empty Hawkes process accumulator."""
         return HawkesProcessAccumulator(self.window, name=self.name, keys=self.keys)
 
 
@@ -385,6 +397,7 @@ class HawkesProcessEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> "HawkesProcessAccumulatorFactory":
+        """Return a factory for Hawkes EM sufficient-statistic accumulators."""
         return HawkesProcessAccumulatorFactory(self.window, name=self.name, keys=self.keys)
 
     def estimate(
@@ -415,6 +428,7 @@ class HawkesProcessDataEncoder(DataSequenceEncoder):
         return isinstance(other, HawkesProcessDataEncoder) and self.window == other.window
 
     def seq_encode(self, x: Sequence[Any]) -> tuple[np.ndarray, np.ndarray, float]:
+        """Encode event-time realizations as padded times, lengths, and window."""
         seqs = []
         for events in x:
             t = np.asarray(events, dtype=np.float64).reshape(-1)

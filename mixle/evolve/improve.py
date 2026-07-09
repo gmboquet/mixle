@@ -3,10 +3,10 @@
 ``improve`` is the minimal closed loop. It splits the data once into a train and a held-out verify
 split, proposes a challenger from every applicable operator on the train split, gates each challenger
 against the champion on the verify split, and returns the verified challenger with the largest delta
-(ties broken toward the cheaper operator). If nothing verifies it returns the *unchanged* champion with
+(ties broken toward the lower-cost operator). If nothing verifies it returns the *unchanged* champion with
 ``verified=False`` -- the anti-regression guarantee: ``improve`` can never hand back a worse model.
 
-Every attempt is recorded to the ledger, so the run leaves an honest, serializable trail of what was
+Every attempt is recorded to the ledger, so the run leaves a serializable trail of what was
 tried and why it won or lost.
 """
 
@@ -84,7 +84,7 @@ def improve(
         alpha: significance level for the verify gate.
         min_effect: practical effect-size floor passed to the gate.
         budget: optional cost ceiling -- operators whose ``cost_hint`` exceeds the remaining budget are
-            skipped (cheapest-first).
+            skipped after ascending-cost ordering.
         seed: RNG seed for the split and the sampled objectives.
         ledger: optional :class:`~mixle.evolve.ledger.EvolutionLedger` to record every attempt into.
         parent_hash: optional lineage hash for the champion (carried onto candidates and ledger rows).
@@ -98,7 +98,7 @@ def improve(
     train, verify = _split(data, holdout, seed)
     ctx = {"parent_hash": parent_hash, "seed": seed, "objective": objective}
 
-    # cost-aware ordering: cheapest operators first so a budget cuts the expensive tail.
+    # Cost-aware ordering: lower-cost operators first so a budget cuts the expensive tail.
     ops = sorted(ops, key=lambda op: getattr(op, "cost_hint", 1.0))
 
     best: ImprovementResult | None = None

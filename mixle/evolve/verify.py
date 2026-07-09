@@ -54,6 +54,7 @@ class Verdict:
         return self.favored == "challenger" and self.calibrated
 
     def as_dict(self) -> dict[str, Any]:
+        """Serialize the verdict into JSON-compatible primitive fields."""
         return {
             "favored": self.favored,
             "delta": self.delta,

@@ -1,8 +1,4 @@
-"""Create, estimate, and sample from a Spearman ranking distribution.
-
-Defines the SpearmanRankingDistribution, SpearmanRankingSampler, SpearmanRankingAccumulatorFactory,
-SpearmanRankingAccumulator, SpearmanRankingEstimator, and the SpearmanRankingDataEncoder
-classes for use with mixle.
+"""Spearman ranking distributions over full permutations.
 
 Data type: List[int] (Component-wise rank of K dimensional observation vector)
 
@@ -101,12 +97,14 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare backend support for Spearman-ranking generated kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the generated-compute declaration for the Spearman ranking distribution."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -146,20 +144,20 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """SpearmanRankingDistribution object for defining a Spearman ranking distribution.
+        """Create a Spearman ranking distribution.
 
         Args:
             sigma (Union[Sequence[float], np.ndarray]): Numpy array of means for the rank variables.
             rho (float): Decay rate on variance of ranks.
-            name (Optional[str]): Set name for object instance.
-            keys (Optional[str]): Set keys for object instance.
+            name (Optional[str]): Optional distribution name.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
             sigma (np.ndarray]): Numpy array of means for the rank variables.
             rho (float): Decay rate on variance of ranks.
-            name (Optional[str]): Name for object instance.
+            name (Optional[str]): Optional distribution name.
             dim (int): Dimension of the rank variable.
-            keys (Optional[str]): Set keys for object instance.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
         self.sigma = np.asarray(sigma, dtype=np.float64)
@@ -171,7 +169,7 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         self.log_const = _log_partition(self.sigma, self.rho)
 
     def __str__(self) -> str:
-        """Returns string representation of SpearmanRankingDistribution object."""
+        """Return a constructor-style representation of the Spearman ranking distribution."""
         return "SpearmanRankingDistribution(sigma=%s, rho=%s, name=%s, keys=%s)" % (
             repr(self.sigma),
             repr(self.rho),
@@ -267,13 +265,13 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         return engine.sum(ww, axis=0), engine.matmul(ww.T, xx)
 
     def sampler(self, seed: int | None = None) -> "SpearmanRankingSampler":
-        """Create a SpearmanRankingSampler object from parameters of SpearmanRankingDistribution instance.
+        """Create a sampler from this Spearman ranking distribution.
 
         Args:
             seed (Optional[int]): Used to set seed in random sampler.
 
         Returns:
-            SpearmanRankingSampler object.
+            SpearmanRankingSampler configured from this distribution.
 
         """
         return SpearmanRankingSampler(self, seed)
@@ -291,7 +289,7 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         return SpearmanRankingEstimator(self.dim, rho=None, pseudo_count=pseudo_count, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "SpearmanRankingDataEncoder":
-        """Returns a SpearmanRankingDataEncoder object for encoding sequences of data."""
+        """Return the encoder for Spearman ranking observations."""
         return SpearmanRankingDataEncoder()
 
     def enumerator(self) -> "SpearmanRankingEnumerator":
@@ -329,7 +327,7 @@ class SpearmanRankingSampler(DistributionSampler):
     """Sampler for the SpearmanRankingDistribution. Draws permutations of 0,...,K-1."""
 
     def __init__(self, dist: SpearmanRankingDistribution, seed: int | None = None) -> None:
-        """SpearmanRankingSampler object.
+        """Create a sampler for Spearman ranking observations.
 
         Args:
             dist (SpearmanRankingDistribution): Distribution to sample from.
@@ -371,18 +369,18 @@ class SpearmanRankingAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulator for the SpearmanRankingDistribution. Tracks the weighted sum of ranks and total weight."""
 
     def __init__(self, dim: int, name: str | None = None, keys: str | None = None) -> None:
-        """SpearmanRankingAccumulator object.
+        """Create an accumulator for Spearman ranking sufficient statistics.
 
         Args:
             dim (int): Dimension K of the rank vectors.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional accumulator name.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
             sum (np.ndarray): Weighted component-wise sum of observed rank vectors.
             count (float): Sum of observation weights.
             key (Optional[str]): Optional key for merging sufficient statistics.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional accumulator name.
 
         """
         self.sum = np.zeros(dim, dtype=np.float64)
@@ -471,7 +469,7 @@ class SpearmanRankingAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge sufficient statistics of object instance with suff stats containing matching keys.
+        """Merge sufficient statistics from ``stats_dict`` when this accumulator's key is present.
 
         Args:
             stats_dict (Dict[str, Any]): Dict mapping keys to shared sufficient statistics.
@@ -488,7 +486,7 @@ class SpearmanRankingAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = (self.count, self.sum)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Set sufficient statistics of object instance to suff stats with matching keys.
+        """Replace sufficient statistics from ``stats_dict`` when this accumulator's key is present.
 
         Args:
             stats_dict (Dict[str, Any]): Dict mapping keys to shared sufficient statistics.
@@ -504,19 +502,19 @@ class SpearmanRankingAccumulator(SequenceEncodableStatisticAccumulator):
                 self.sum = vals[1]
 
     def acc_to_encoder(self) -> "SpearmanRankingDataEncoder":
-        """Returns a SpearmanRankingDataEncoder object for encoding sequences of data."""
+        """Return the encoder associated with this accumulator."""
         return SpearmanRankingDataEncoder()
 
 
 class SpearmanRankingAccumulatorFactory(StatisticAccumulatorFactory):
-    """Factory for creating SpearmanRankingAccumulator objects."""
+    """Factory for Spearman ranking accumulators."""
 
     def __init__(self, dim: int, name: str | None = None, keys: str | None = None) -> None:
-        """SpearmanRankingAccumulatorFactory object.
+        """Create a factory for Spearman ranking accumulators.
 
         Args:
             dim (int): Dimension K of the rank vectors.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional name assigned to created accumulators.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
@@ -525,7 +523,7 @@ class SpearmanRankingAccumulatorFactory(StatisticAccumulatorFactory):
         self.dim = dim
 
     def make(self) -> "SpearmanRankingAccumulator":
-        """Returns a new SpearmanRankingAccumulator object."""
+        """Return a fresh Spearman ranking accumulator."""
         return SpearmanRankingAccumulator(dim=self.dim, name=self.name, keys=self.keys)
 
 
@@ -546,14 +544,14 @@ class SpearmanRankingEstimator(ParameterEstimator):
         keys: str | None = None,
         max_rho: float = 1.0e6,
     ) -> None:
-        """SpearmanRankingEstimator object.
+        """Create an estimator for Spearman ranking parameters.
 
         Args:
             dim (int): Dimension K of the rank vectors.
             rho (Optional[float]): Fixed concentration for the estimated distribution. If None, estimate rho by MLE.
             pseudo_count (Optional[float]): Used to inflate sufficient statistics.
             suff_stat (Optional[Tuple[float, np.ndarray]]): Tuple of count and component-wise rank sums.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional name assigned to the estimated distribution.
             keys (Optional[str]): Optional key for merging sufficient statistics.
             max_rho (float): Finite cap used when the MLE is at rho = infinity.
 
@@ -572,7 +570,7 @@ class SpearmanRankingEstimator(ParameterEstimator):
         self.max_rho = float(max_rho)
 
     def accumulator_factory(self) -> "SpearmanRankingAccumulatorFactory":
-        """Returns a SpearmanRankingAccumulatorFactory for creating SpearmanRankingAccumulator objects."""
+        """Return a factory for Spearman ranking accumulators."""
         return SpearmanRankingAccumulatorFactory(self.dim, self.name, self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray]) -> "SpearmanRankingDistribution":
@@ -624,11 +622,11 @@ class SpearmanRankingDataEncoder(DataSequenceEncoder):
     """Data encoder for sequences of rank vector (permutation) observations."""
 
     def __str__(self) -> str:
-        """Returns string representation of SpearmanRankingDataEncoder object."""
+        """Return the Spearman ranking encoder's display name."""
         return "SpearmanRankingDataEncoder"
 
     def __eq__(self, other: object) -> bool:
-        """Checks if other object is an instance of a SpearmanRankingDataEncoder.
+        """Return true when ``other`` is a Spearman ranking data encoder.
 
         Args:
             other (object): Object to compare against.

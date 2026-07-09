@@ -1,8 +1,4 @@
-"""Create, estimate, and sample from a select distribution.
-
-Defines the SelectDistribution, SelectSampler, SelectEstimatorAccumulator,
-SelectEstimatorAccumulatorFactory, SelectEstimator, SelectDataEncoder, and SelectEnumerator
-classes for use with mixle.
+"""Select distributions that route observations to child models.
 
 Data type: T (any type accepted by every child distribution). The SelectDistribution routes an
 observation x to one of its child distributions through a user-supplied choice function
@@ -12,7 +8,6 @@ c(x) -> {0, ..., len(dists)-1}, and evaluates the density of the selected child,
 
 The choice function partitions the data space, so each child distribution is estimated only from
 the observations routed to it.
-
 """
 
 from __future__ import annotations
@@ -175,7 +170,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         choice_function: Callable[[T], int],
         weights: Sequence[float] | None = None,
     ) -> None:
-        """SelectDistribution object for observations routed to child distributions.
+        """Create a distribution that routes observations to child distributions.
 
         Args:
             dists (Sequence[SequenceEncodableProbabilityDistribution]): Child distributions, each
@@ -251,11 +246,13 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         return cls(dists, router, weights=weights)
 
     def compute_capabilities(self):
+        """Declare generated-compute support inherited from all selectable children."""
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
         return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(self.dists)), kernel_status="generic")
 
     def compute_declaration(self):
+        """Return the generated-compute declaration for the select distribution."""
         from mixle.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
 
         children = tuple(declaration_for(d) for d in self.dists)
@@ -272,7 +269,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def __str__(self) -> str:
-        """Returns string representation of SelectDistribution object."""
+        """Return a constructor-style representation of the selected child distributions."""
         body = ",".join([str(u) for u in self.dists])
         if self.weights is None:
             return "SelectDistribution(" + body + ")"
@@ -456,13 +453,13 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         return super().to_fisher(**kwargs)
 
     def sampler(self, seed: int | None = None) -> SelectSampler:
-        """Creates a SelectSampler object for sampling from the child distributions.
+        """Create a sampler that dispatches to the child distributions.
 
         Args:
             seed (Optional[int]): Seed for the random number generator used in sampling.
 
         Returns:
-            SelectSampler object.
+            SelectSampler configured with this distribution's routing function.
 
         """
         return SelectSampler(self, seed)
@@ -489,10 +486,10 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def dist_to_encoder(self) -> SelectDataEncoder:
-        """Creates a SelectDataEncoder object for encoding sequences of SelectDistribution data.
+        """Create an encoder for routed observations.
 
         Returns:
-            SelectDataEncoder object.
+            SelectDataEncoder configured with the child encoders.
 
         """
         encoders = [d.dist_to_encoder() for d in self.dists]
@@ -545,7 +542,7 @@ class SelectSampler(DistributionSampler):
     """SelectSampler draws samples from each child distribution of a SelectDistribution."""
 
     def __init__(self, dist: SelectDistribution, seed: int | None = None) -> None:
-        """SelectSampler object used to generate samples from the children of a SelectDistribution.
+        """Create a sampler for the children of a SelectDistribution.
 
         Args:
             dist (SelectDistribution): SelectDistribution to draw samples from.
@@ -600,7 +597,7 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
     def __init__(
         self, accumulators: Sequence[SequenceEncodableStatisticAccumulator], choice_function: Callable[[T], int]
     ) -> None:
-        """SelectEstimatorAccumulator object for aggregating sufficient statistics.
+        """Create an accumulator that routes sufficient statistics to child accumulators.
 
         Args:
             accumulators (Sequence[SequenceEncodableStatisticAccumulator]): One accumulator per
@@ -783,6 +780,7 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def scale(self, c: float) -> SelectEstimatorAccumulator:
+        """Scale all branch weights and child accumulator statistics in place."""
         for i in range(self.count):
             self.weights[i] *= c
             self.accumulators[i].scale(c)
@@ -815,10 +813,10 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             acc.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> SelectDataEncoder:
-        """Creates a SelectDataEncoder object for encoding sequences of SelectDistribution data.
+        """Create an encoder from the child accumulator encoders.
 
         Returns:
-            SelectDataEncoder object.
+            SelectDataEncoder configured with the child accumulator encoders.
 
         """
         encoders = [acc.acc_to_encoder() for acc in self.accumulators]
@@ -830,7 +828,7 @@ class SelectEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
     child estimators."""
 
     def __init__(self, estimators: Sequence[ParameterEstimator], choice_function: Callable[[T], int]) -> None:
-        """SelectEstimatorAccumulatorFactory object.
+        """Create a factory for select accumulators.
 
         Args:
             estimators (Sequence[ParameterEstimator]): One estimator per child distribution.
@@ -865,7 +863,7 @@ class SelectEstimator(ParameterEstimator):
         choice_function: Callable[[T], int],
         estimate_weights: bool = False,
     ) -> None:
-        """SelectEstimator object.
+        """Create an estimator for a select distribution.
 
         Args:
             estimators (Sequence[ParameterEstimator]): One estimator per child distribution.
@@ -923,7 +921,7 @@ class SelectDataEncoder(DataSequenceEncoder):
     their choice index and delegating each group to the matching child encoder."""
 
     def __init__(self, encoders: Sequence[DataSequenceEncoder], choice_function: Callable[[T], int]) -> None:
-        """SelectDataEncoder object.
+        """Create an encoder for select-distribution observations.
 
         Args:
             encoders (Sequence[DataSequenceEncoder]): One encoder per child distribution.
@@ -938,11 +936,11 @@ class SelectDataEncoder(DataSequenceEncoder):
         self.choice_function = choice_function
 
     def __str__(self) -> str:
-        """Returns string representation of SelectDataEncoder with its child encoders."""
+        """Return a constructor-style representation of the select encoder."""
         return "SelectDataEncoder(" + ",".join([str(encoder) for encoder in self.encoders]) + ")"
 
     def __eq__(self, other: object) -> bool:
-        """Checks if an object is an equivalent SelectDataEncoder.
+        """Return true when ``other`` is an equivalent select data encoder.
 
         Note: assumes that the choice functions of the two encoders are equal; only the child
         encoders are compared.
@@ -1007,13 +1005,15 @@ class SelectDataEncoder(DataSequenceEncoder):
         return tuple(idx_xi), tuple(idx_keys), tuple(idx_enc_vals)
 
 
-# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+# --- Backward-compatible API naming aliases ---
 SelectAccumulator = SelectEstimatorAccumulator
 SelectAccumulatorFactory = SelectEstimatorAccumulatorFactory
 
 
 # --- Fisher view(s) co-located with this family ---
 class SelectFisherView(EmpiricalMetricFixedFisherView):
+    """Empirical Fisher view over routed child sufficient statistics."""
+
     def __init__(self, dist: Any) -> None:
         self.child_views = [to_fisher(d) for d in dist.dists]
         labels: list[Path] = []

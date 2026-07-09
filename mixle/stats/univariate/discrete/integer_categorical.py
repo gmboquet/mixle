@@ -1,18 +1,9 @@
-"""Create, estimate, and sample from a Categorical distribution defined on a range of integers starting a user
-defined minimum value.
+"""Integer-categorical distributions over consecutive bounded supports.
 
-Defines the IntegerCategoricalDistribution, IntegerCategoricalSampler, IntegerCategoricalAccumulatorFactory,
-IntegerCategoricalAccumulator, IntegerCategoricalEstimator, and the IntegerCategoricalDataEncoder classes for use
-with mixle.
-
-Data type (int): The integer categorical distribution is defined through summary statistics min_val (int)
-and vector of probabilities p_vec (np.ndarray[float]) that sum to 1.0. The range of values is given by
-[min_val, min_val + len(p_vec) - ). The density is then,
-
-    P(x_mat=i) = p_vec[i]
-
-for x in {min_val,min_val+1, ..., min_val + length(p_vec) - 1}, else 0.0.
-
+The observation type is ``int``. A distribution is parameterized by ``min_val``
+and a probability vector ``p_vec`` whose entries correspond to values
+``min_val, min_val + 1, ..., min_val + len(p_vec) - 1``. Values outside that
+range have zero probability.
 """
 
 from collections.abc import Sequence
@@ -39,6 +30,8 @@ from mixle.utils.special import digamma
 
 
 class IntegerCategoricalFisherView(CategoricalFisherView):
+    """Fisher view for bounded integer-categorical one-hot statistics."""
+
     # Marker for fisher._structured_values_matrix's int-categorical fast path (decoupled from import).
     _fisher_integer_categorical = True
 
@@ -65,12 +58,14 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Return compute-backend metadata for integer-categorical scoring."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the symbolic declaration for bounded integer-categorical probabilities."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -153,13 +148,13 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         prob_vec: list[float] | np.ndarray = MISSING,
         prior: Optional["SequenceEncodableProbabilityDistribution"] = None,
     ) -> None:
-        """IntegerCategoricalDistribution object defining an integer categorical distribution.
+        """Create a categorical distribution over consecutive integers.
 
         Args:
-            min_val (int): Minimum value of the integer categorical support.
-            p_vec (Union[List[float], np.ndarray]): Probability vector containing probability of each integer in the
-                support range.
-            name (Optional[str]): Assign name to IntegerCategoricalDistribution object.
+            min_val: Minimum value of the integer categorical support.
+            p_vec: Probability vector for values ``min_val`` through
+                ``min_val + len(p_vec) - 1``.
+            name: Optional distribution name.
             prior (Optional): Conjugate parameter prior over the probability vector. A
                 :class:`~mixle.stats.bayes.dirichlet.DirichletDistribution` or
                 :class:`~mixle.stats.bayes.symmetric_dirichlet.SymmetricDirichletDistribution` enables the Bayesian /
@@ -167,12 +162,11 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 ``None`` (default) is a plain point model.
 
         Attributes:
-            p_vec (np.ndarray[float]): Must sum to 1.0. First probability is probability for p_mat(x_mat=min_val).
-            min_val (int): Minimum value in support of integer categorical
-            max_val (int): Maximum value in support of integer categorical set to min_val + length(p_vec) - 1.
-            log_p_vec (np.ndarray[float]): Log of p_vec.
-            num_vals (int): Total number of values in support of IntegerCategoricalDistribution instance.
-
+            p_vec: Probability vector, normalized by the constructor.
+            min_val: Minimum supported integer value.
+            max_val: Maximum supported integer value.
+            log_p_vec: Elementwise log probabilities.
+            num_vals: Number of integer values in the support.
         """
         p_vec = coalesce_alias("p_vec", p_vec, "prob_vec", prob_vec, default=MISSING)
         with np.errstate(divide="ignore"):
@@ -185,7 +179,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         self.set_prior(prior)
 
     def __str__(self) -> str:
-        """Return a string representation of IntegerCategoricalDistribution object."""
+        """Return a constructor-style representation of the integer categorical distribution."""
         s1 = str(self.min_val)
         s2 = repr(list(self.p_vec))
         s3 = repr(self.name)
@@ -384,29 +378,22 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         return super().to_fisher(**kwargs)
 
     def sampler(self, seed: int | None = None) -> "IntegerCategoricalSampler":
-        """IntegerCategoricalSampler object for sampling from IntegerCategoricalDistribution instance.
+        """Return a sampler for iid draws from this distribution.
 
         Args:
-            seed (Optional[int]): Set seed for drawing random samples.
-
-        Returns:
-            IntegerCategoricalSampler object.
-
+            seed: Optional random seed.
         """
         return IntegerCategoricalSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "IntegerCategoricalEstimator":
-        """IntegerCategoricalEstimator object from instance of IntegerCategoricalDistribution object.
+        """Return an estimator initialized from this distribution.
 
-        If pseudo_count is not None, pass min_val and p_vec as sufficient statistics for aggregated estimaton.
+        When ``pseudo_count`` is provided, the distribution's probabilities are
+        used as prior sufficient statistics during estimation.
 
         Args:
-            pseudo_count (Optional[float]): Used to re-weight sufficient statistics of IntegerCategoricalDistribution
-                instance in estimation.
-
-        Returns:
-            IntegerCategoricalEstimator object.
-
+            pseudo_count: Weight assigned to the distribution's current
+                probability vector during estimation.
         """
         if pseudo_count is None:
             return IntegerCategoricalEstimator(name=self.name, prior=self.prior)
@@ -417,8 +404,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             )
 
     def dist_to_encoder(self) -> "IntegerCategoricalDataEncoder":
-        """Return IntegerCategoricalDataEncoder object for encoding sequences of iid integer categorical
-        observations."""
+        """Return the encoder for iid integer categorical observations."""
         return IntegerCategoricalDataEncoder()
 
     def enumerator(self) -> "IntegerCategoricalEnumerator":
@@ -449,6 +435,8 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class IntegerCategoricalEnumerator(DistributionEnumerator):
+    """Enumerator over bounded integer support in descending probability order."""
+
     def __init__(self, dist: IntegerCategoricalDistribution) -> None:
         """Enumerates the support [min_val, max_val] in descending probability order.
 
@@ -472,33 +460,28 @@ class IntegerCategoricalEnumerator(DistributionEnumerator):
 
 
 class IntegerCategoricalSampler(DistributionSampler):
+    """Sampler for bounded integer-categorical values."""
+
     def __init__(self, dist: "IntegerCategoricalDistribution", seed: int | None = None) -> None:
-        """IntegerCategoricalSampler object for sampling from IntegerCategoricalDistribution.
+        """Create a sampler for an integer-categorical distribution.
 
         Args:
-            dist (IntegerCategoricalDistribution): Set IntegerCategoricalDistribution instance to sample from.
-            seed (Optional[int]): Set the seed for random number generator used to sample.
+            dist: Distribution to sample from.
+            seed: Optional random seed.
 
         Attributes:
-            dist (IntegerCategoricalDistribution): IntegerCategoricalDistribution instance to sample from.
-            rng (RandomState): RandomState object with seed set if passed.
-
+            dist: Distribution sampled by this object.
+            rng: Random state used for reproducible draws.
         """
         self.rng = RandomState(seed)
         self.dist = dist
 
     def sample(self, size: int | None = None) -> int | list[int]:
-        """Draw iid samples from IntegerCategoricalSampler object.
-
-        Note: If size is None, a single sample is returned as an integer. If size > 0, a List of integers with
-        length equal to size is returned.
+        """Draw iid samples from the integer-categorical distribution.
 
         Args:
-            size (Optional[int]): Number of iid samples to draw.
-
-        Returns:
-            Integer or List[int] of iid samples from IntegerCategoricalSampler instance.
-
+            size: Number of samples. ``None`` returns one integer; a positive
+                value returns a list of that length.
         """
         if size is None:
             return self.rng.choice(range(self.dist.min_val, self.dist.max_val + 1), p=self.dist.p_vec)
@@ -508,25 +491,24 @@ class IntegerCategoricalSampler(DistributionSampler):
 
 
 class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
-    def __init__(self, min_val: int | None = None, max_val: int | None = None, keys: str | None = None) -> None:
-        """IntegerCategoricalAccumulator object for accumulating sufficient statistics from observed data.
+    """Accumulator for weighted counts over a bounded integer support."""
 
-        If min_val and max_val are not provided, they are obtained from the data in accumulation step.
+    def __init__(self, min_val: int | None = None, max_val: int | None = None, keys: str | None = None) -> None:
+        """Create an accumulator for weighted integer-category counts.
+
+        If ``min_val`` and ``max_val`` are not provided, the observed data define
+        the support as accumulation proceeds.
 
         Args:
-            min_val (Optional[int]): Sets the minimum value of integer categorical range.
-            max_val (Optional[int]): Sets the maximum value of integer categorical range.
-            keys (Optional[str]): Set key for merging sufficient statistics of integer IntegerCategoricalAccumulator
-                objects.
+            min_val: Optional minimum support value.
+            max_val: Optional maximum support value.
+            keys: Optional merge key for sufficient-statistic aggregation.
 
         Attributes:
-            min_val (Optional[int]): Minimum value of integer categorical range.
-            max_val (Optional[int]): Maximum value of integer categorical range.
-            count_vec (Optional[np.ndarray]): Numpy array of floats for tracking probability weights for each integer
-                value in support. Set to None if min_val and max_val are both not None.
-            keys (Optional[str]): Key for merging sufficient statistics of integer IntegerCategoricalAccumulator
-                objects.
-
+            min_val: Minimum support value seen or configured.
+            max_val: Maximum support value seen or configured.
+            count_vec: Weighted counts aligned to ``[min_val, max_val]``.
+            keys: Optional merge key.
         """
         self.min_val = min_val
         self.max_val = max_val
@@ -540,20 +522,15 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: int, weight: float, estimate: Optional["IntegerCategoricalDistribution"]) -> None:
-        """Update sufficient statistics for IntegerCategoricalAccumulator with one weighted observation.
+        """Update sufficient statistics with one weighted observation.
 
-        If min_val and max_val are not set, count_vec is created. If x is larger than max_val of x is less than min_val
-        a new value for max_val/min_val is set, and count_vec is increased to account for the new support range.
+        If the observed value falls outside the current support, the count
+        vector is expanded and existing counts are realigned.
 
         Args:
-            x (int): Observation from integer categorical distribution.
-            weight (float): Weight for observation.
-            estimate (Optional[ntegerCategoricalDistribution]): Kept for consistency with
-                SequenceEncodableStatisticAccumulator.
-
-        Returns:
-            None.
-
+            x: Integer observation.
+            weight: Observation weight.
+            estimate: Accepted for accumulator API consistency.
         """
 
         if self.count_vec is None:
@@ -580,14 +557,12 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
             self.count_vec[x - self.min_val] += weight
 
     def initialize(self, x: int, weight: float, rng: RandomState) -> None:
-        """Initialize IntegerCategoricalAccumulator object with weighted observation
-
-        Note: Just calls update().
+        """Initialize sufficient statistics with one weighted observation.
 
         Args:
-            x (int): Observation from integer categorical distribution.
-            weight (float): Weight for observation.
-            rng (Optional[RandomState]): Kept for consistency with SequenceEncodableStatisticAccumulator.
+            x: Integer observation.
+            weight: Observation weight.
+            rng: Accepted for accumulator API consistency.
 
         Returns:
             None.
@@ -598,7 +573,7 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState) -> None:
         """Vectorized initialization of IntegerCategoricalAccumulator sufficient statistics with weighted observations.
 
-        Note: Just calls seq_update().
+        This delegates to :meth:`seq_update`.
 
         Args:
             x (np.ndarray[int]): Sequence encoded iid observations of integer categorical distribution.
@@ -685,23 +660,10 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         self.count_vec[min_diff : (min_diff + len(loc_cnt))] += loc_cnt
 
     def combine(self, suff_stat: tuple[int | None, np.ndarray | None]) -> "IntegerCategoricalAccumulator":
-        """Combine aggregated sufficient statistics with sufficient statistics of IntegerCategoricalAccumulator
-            instance.
+        """Merge another ``(min_val, count_vec)`` sufficient statistic.
 
-        Arg passed suff_stat is sufficient statistics a Tuple of length two containing:
-            suff_stat[0] (int): Minimum value of the integer categorical,
-            suff_stat[1] (np.ndarray[float]): Numpy array containing probabilities for each integer value. This also
-                sets the support of integer categorical to have a maximum value of suff_stat[0] + len(suff_stat[0]) - 1.
-
-        Member variables min_val, max_val, and count_vec are set from suff_stat arg if count_vec is None. Else,
-        suff_stat is combined with the values of min_val, max_val, and count_vec.
-
-        Args:
-            suff_stat: See above for details.
-
-        Returns:
-            IntegerCategoricalAccumulator object.
-
+        Supports are aligned before counts are added, so accumulators built on
+        different observed ranges can be combined safely.
         """
         if self.count_vec is None and suff_stat[1] is not None:
             self.min_val = suff_stat[0]
@@ -733,30 +695,11 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[int, np.ndarray]:
-        """Returns member sufficient statistics Tuple[int, np.ndarray[float]] of IntegerCategoricalAccumulator
-            instance.
-
-        Entry 0 of returned value is the minimum value, and entry 1 is the probability weights for each integer value
-        in the support.
-
-        """
+        """Return ``(min_val, count_vec)`` sufficient statistics."""
         return self.min_val, self.count_vec
 
     def from_value(self, x: tuple[int, np.ndarray]) -> "IntegerCategoricalAccumulator":
-        """Sets IntegerCategoricalAccumulator instance sufficient statistic member variables to x.
-
-        Arg passed x is sufficient statistics a Tuple of length two containing:
-            x[0] (int): Minimum value of the integer categorical,
-            x[1] (np.ndarray[float]): Numpy array containing probabilities for each integer value. This also sets the
-                support of integer categorical to have a maximum value of x[0] + len(x[0]) - 1.
-
-        Args:
-            x (Tuple[int, np.ndarray[float]]): See above for details.
-
-        Returns:
-            IntegerCategoricalAccumulator object.
-
-        """
+        """Replace accumulator state from a ``(min_val, count_vec)`` statistic."""
         self.min_val = x[0]
         self.max_val = x[0] + len(x[1]) - 1
         self.count_vec = x[1]
@@ -801,24 +744,25 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
                 self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "IntegerCategoricalDataEncoder":
-        """Return IntegerCategoricalDataEncoder object for encoding sequences of iid integer categorical
-        observations."""
+        """Return the encoder associated with this accumulator."""
         return IntegerCategoricalDataEncoder()
 
 
 class IntegerCategoricalAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for integer-categorical count accumulators."""
+
     def __init__(self, min_val: int | None = None, max_val: int | None = None, keys: str | None = None) -> None:
-        """IntegerCategoricalAccumulatorFactory object for creating IntegerCategoricalAccumulator object.
+        """Factory for integer-categorical accumulators.
 
         Args:
             min_val (Optional[int]): Set minimum value of integer categorical.
             max_val (Optional[int]): Set maximum value of integer categorical.
-            keys (Optional[str]): Set keys for accumulating merging statistics of IntegerCategoricalAccumulator objects.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
             min_val (Optional[int]): Minimum value of integer categorical, if None estimated from data.
             max_val (Optional[int]): Maximum value of integer categorical, if None estimated from data.
-            keys (Optional[str]): Key used for accumulating merging statistics of IntegerCategoricalAccumulator objects.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
         self.min_val = min_val
@@ -826,11 +770,13 @@ class IntegerCategoricalAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> "IntegerCategoricalAccumulator":
-        """Returns IntegerCategoricalAccumulator object with min_val, max_val, and keys passed."""
+        """Return a fresh integer categorical accumulator with this factory's bounds and keys."""
         return IntegerCategoricalAccumulator(self.min_val, self.max_val, self.keys)
 
 
 class IntegerCategoricalEstimator(ParameterEstimator):
+    """Estimator for bounded integer-categorical probability vectors."""
+
     def __init__(
         self,
         min_val: int | None = None,
@@ -841,33 +787,28 @@ class IntegerCategoricalEstimator(ParameterEstimator):
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
-        """IntegerCategoricalEstimator object for estimating IntegerCategoricalDistribution from aggregated sufficient
-            statistics.
+        """Create an estimator for bounded integer-categorical distributions.
 
-            Note: Must set either min_val and max_val, or suff_stat must be passed as arg.
-
-            Sufficient statistics stored in estimator 'suff_stat' is a Tuple of int and np.ndarray[float],
-                suff_stat[0] (int): Minimum value of the integer categorical distribution,
-                suff_stat[1] (ndarray[float]): Probabilities for each integer observation in range
-                    [suff_stat[0], suff_stat[0] + len(suff_stat[1])-1).
+        Provide either explicit ``min_val``/``max_val`` bounds or prior
+        sufficient statistics. Prior sufficient statistics are ``(min_val,
+        prob_vec)``, where ``prob_vec`` is aligned to consecutive integer values
+        beginning at ``min_val``.
 
         Args:
-            min_val (Optional[int]): Set minimum value of integer categorical.
-            max_val (Optional[int]): Set maximum value of integer categorical.
-            pseudo_count (Optional[float]): Used to re-weight suff_stat member variables in merging of sufficient
-                statistics
-            suff_stat: Set sufficient statistics. See above for details.
-            name (Optional[str]): Assign a name to IntegerCategoricalEstimator object.
-            keys (Optional[str]): Set keys for accumulating merging statistics of IntegerCategoricalAccumulator objects.
+            min_val: Optional minimum support value.
+            max_val: Optional maximum support value.
+            pseudo_count: Optional weight for prior sufficient statistics.
+            suff_stat: Optional prior statistic ``(min_val, prob_vec)``.
+            name: Optional estimator and fitted-distribution name.
+            keys: Optional merge key for accumulator statistics.
 
         Attributes:
-            min_val (Optional[int]): Minimum value of integer categorical.
-            max_val (Optional[int]): Maximum value of integer categorical.
-            pseudo_count (Optional[float]): Used to re-weight suff_stat when merged with new aggregated data.
-            suff_stat: See above for details.
-            name (Optional[str]): Name to IntegerCategoricalEstimator object.
-            keys (Optional[str]): Keys for accumulating merging statistics of IntegerCategoricalAccumulator objects.
-
+            min_val: Minimum support value, when fixed.
+            max_val: Maximum support value, when fixed.
+            pseudo_count: Weight for prior sufficient statistics.
+            suff_stat: Optional prior statistic.
+            name: Optional estimator name.
+            keys: Optional merge key.
         """
         self.pseudo_count = pseudo_count
         self.min_val = min_val
@@ -900,8 +841,7 @@ class IntegerCategoricalEstimator(ParameterEstimator):
         return 0.0
 
     def accumulator_factory(self) -> "IntegerCategoricalAccumulatorFactory":
-        """Returns IntegerCategoricalAccumulatorFactory object from member sufficient statistics of
-            IntegerCategoricalEstimator.
+        """Return an accumulator factory configured from this estimator's support and keys.
 
         Note: If min_val and max_val are BOTH not None, these values are passed to IntegerCategoricalAccumulatorFactory.
         Else, they are obtained from member variable suff_stat. One of these conditions must be satisfied.
@@ -952,24 +892,12 @@ class IntegerCategoricalEstimator(ParameterEstimator):
     def estimate(
         self, nobs: float | None, suff_stat: tuple[int, np.ndarray] | None
     ) -> "IntegerCategoricalDistribution":
-        """Estimate an IntegerCategoricalDistribution object from aggregating sufficient statistics.
+        """Estimate an integer-categorical distribution from weighted counts.
 
-        Arg 'suff_stat' is a Tuple of int and np.ndarray[float],
-            suff_stat[0] (int): Minimum value of the integer categorical distribution,
-            suff_stat[1] (ndarray[float]): Probabilities for each integer observation in range
-            [suff_stat[0], suff_stat[0] + len(suff_stat[1])-1).
-
-        Arg suff_stat is aggregated sufficient statistics obtained from observations of integer categorical data, that
-        is used to estimate the integer categorical distribution. If pseudo_count is not None, the integer categorical
-        is estimated by a combing arg suff_stat and a re-weighted member variable 'suff_stat'.
-
-        Args:
-            nobs (Optional[float]): Not used. Kept for consistency with ParameterEstimator.
-            suff_stat:
-
-        Returns:
-            IntegerCategoricalDistribution object.
-
+        ``nobs`` is accepted for estimator API consistency but is not used.
+        ``suff_stat`` is ``(min_val, count_vec)``. When ``pseudo_count`` and a
+        prior statistic are present, the estimate combines observed counts with
+        the weighted prior probability vector.
         """
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
@@ -1023,10 +951,10 @@ class IntegerCategoricalEstimator(ParameterEstimator):
 
 
 class IntegerCategoricalDataEncoder(DataSequenceEncoder):
-    """IntegerCategoricalDataEncoder object for encoding sequences of iid integer categorical observations."""
+    """Data encoder for iid integer-categorical observations."""
 
     def __str__(self) -> str:
-        """Returns IntegerCategoricalDataEncoder object for encoding data sequences."""
+        """Return the integer categorical encoder's display name."""
         return "IntegerCategoricalDataEncoder"
 
     def __eq__(self, other: object) -> bool:

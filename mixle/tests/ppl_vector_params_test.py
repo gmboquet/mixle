@@ -147,8 +147,12 @@ class MVNParameterInferenceTestCase(unittest.TestCase):
         rng = np.random.RandomState(1)
         mu = np.array([-1.0, 0.5, 2.0])  # genuinely ordered
         X = [list(x) for x in (mu + rng.standard_normal((3000, 3)))]
+        # walkers=30 is kept (the ordered+Cholesky reparameterization needs the full ensemble
+        # width to mix reliably -- fewer walkers caused sporadic failures on some seeds even
+        # with draws/burn unchanged); draws/burn alone are trimmed, verified stable (increasing
+        # and within atol=0.3 of the true mean) across 7 seeds at this smaller budget.
         m = MVN(3, mean=ordered, cov=free).fit(
-            X, how="ensemble", draws=1000, burn=400, walkers=30, rng=np.random.RandomState(2)
+            X, how="ensemble", draws=700, burn=300, walkers=30, rng=np.random.RandomState(2)
         )
         mm = np.asarray(m.params["mean"])
         self.assertTrue(np.all(np.diff(mm) > 0))  # increasing by construction

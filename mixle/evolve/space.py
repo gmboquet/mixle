@@ -36,15 +36,19 @@ class Real:
             raise ValueError(f"Real bounds must satisfy lo < hi (got {self.lo}, {self.hi}).")
 
     def bounds(self) -> tuple[float, float]:
+        """Return the numeric bounds used by continuous optimizers."""
         return (float(self.lo), float(self.hi))
 
     def sample(self, rng: np.random.RandomState) -> float:
+        """Draw a uniformly distributed value from the interval."""
         return float(rng.uniform(self.lo, self.hi))
 
     def encode(self, value: Any) -> float:
+        """Clip and encode ``value`` as a floating-point coordinate."""
         return float(np.clip(float(value), self.lo, self.hi))
 
     def decode(self, x: float) -> float:
+        """Clip a numeric optimizer coordinate back into the interval."""
         return float(np.clip(float(x), self.lo, self.hi))
 
     def neighbors(self, value: Any) -> list[float]:
@@ -67,19 +71,24 @@ class Integer:
             raise ValueError(f"Integer bounds must satisfy lo < hi (got {self.lo}, {self.hi}).")
 
     def bounds(self) -> tuple[float, float]:
+        """Return widened numeric bounds so rounding covers each integer level."""
         # widen by 0.5 each side so a uniform round lands on each integer with equal width.
         return (float(self.lo) - 0.5, float(self.hi) + 0.5)
 
     def sample(self, rng: np.random.RandomState) -> int:
+        """Draw an integer uniformly from the inclusive range."""
         return int(rng.randint(int(self.lo), int(self.hi) + 1))
 
     def encode(self, value: Any) -> float:
+        """Round, clip, and encode ``value`` as a numeric coordinate."""
         return float(int(np.clip(round(float(value)), self.lo, self.hi)))
 
     def decode(self, x: float) -> int:
+        """Round and clip a numeric optimizer coordinate to an integer value."""
         return int(np.clip(int(round(float(x))), self.lo, self.hi))
 
     def neighbors(self, value: Any) -> list[int]:
+        """Return adjacent integer values within the range."""
         v = int(value)
         out = []
         if v - 1 >= self.lo:
@@ -102,10 +111,12 @@ class Categorical:
         object.__setattr__(self, "choices", choices)
 
     def bounds(self) -> tuple[float, float]:
+        """Return widened index bounds so rounding covers each categorical choice."""
         # encode as an index in [0, k-1]; widen by 0.5 each side for equal-width rounding.
         return (-0.5, float(len(self.choices)) - 0.5)
 
     def sample(self, rng: np.random.RandomState) -> Any:
+        """Draw one choice uniformly at random."""
         return self.choices[int(rng.randint(0, len(self.choices)))]
 
     def _index_of(self, value: Any) -> int:
@@ -115,13 +126,16 @@ class Categorical:
         raise ValueError(f"{value!r} is not a choice of {self.choices!r}.")
 
     def encode(self, value: Any) -> float:
+        """Encode a choice as its floating-point index."""
         return float(self._index_of(value))
 
     def decode(self, x: float) -> Any:
+        """Round and clip an optimizer coordinate back to a choice."""
         idx = int(np.clip(int(round(float(x))), 0, len(self.choices) - 1))
         return self.choices[idx]
 
     def neighbors(self, value: Any) -> list[Any]:
+        """Return all choices except ``value``."""
         idx = self._index_of(value)
         return [c for i, c in enumerate(self.choices) if i != idx]
 
@@ -151,6 +165,7 @@ class Space:
 
     @property
     def ndim(self) -> int:
+        """Number of dimensions in the fixed search-space order."""
         return len(self.names)
 
     def to_bounds(self) -> list[tuple[float, float]]:

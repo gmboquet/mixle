@@ -759,6 +759,7 @@ class HeterogeneousPCFGSampler(DistributionSampler):
         return self._sample_nt(left, depth + 1, budget) + self._sample_nt(right, depth + 1, budget)
 
     def sample(self, size: int | None = None) -> list[Any] | list[list[Any]]:
+        """Draw one sequence, or ``size`` independent sequences, from the grammar."""
         if size is not None:
             return [self.sample() for _ in range(size)]
         return self._sample_nt(self.dist.start_idx, 0, [self.max_steps])
@@ -792,15 +793,18 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
         self._init_rng = True
 
     def update(self, x: Sequence[Any], weight: float, estimate: HeterogeneousPCFGDistribution) -> None:
+        """Update sufficient statistics for one observed sequence."""
         self.seq_update(estimate.dist_to_encoder().seq_encode([x]), np.asarray([weight]), estimate)
 
     def initialize(self, x: Sequence[Any], weight: float, rng: RandomState) -> None:
+        """Randomly initialize sufficient statistics for one observed sequence."""
         if not self._init_rng:
             self._rng_initialize(rng)
         enc = self.acc_to_encoder().seq_encode([x])
         self.seq_initialize(enc, np.asarray([weight]), rng)
 
     def seq_initialize(self, x: EncodedPCFGData, weights: np.ndarray, rng: RandomState) -> None:
+        """Randomly initialize rule and emission statistics for encoded sequences."""
         if not self._init_rng:
             self._rng_initialize(rng)
         lengths, enc_by_rule = x
@@ -824,6 +828,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
             acc.seq_initialize(enc_by_rule[r], terminal_weights[:, r], self._acc_rng[r])
 
     def seq_update(self, x: EncodedPCFGData, weights: np.ndarray, estimate: HeterogeneousPCFGDistribution) -> None:
+        """Update encoded-sequence statistics with inside-outside posteriors."""
         lengths, enc_by_rule = x
         total = int(lengths.sum())
         terminal_ld = np.empty((total, estimate.num_terminal_rules), dtype=np.float64)
@@ -846,6 +851,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
             acc.seq_update(enc_by_rule[r], terminal_weights[:, r], estimate.emissions[r])
 
     def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, Sequence[Any]]) -> HeterogeneousPCFGAccumulator:
+        """Merge another accumulator value into this accumulator."""
         terminal_counts, binary_counts, emission_values = suff_stat
         self.terminal_counts += terminal_counts
         self.binary_counts += binary_counts
@@ -854,9 +860,11 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, tuple[Any, ...]]:
+        """Return rule counts and emission sufficient statistics."""
         return self.terminal_counts, self.binary_counts, tuple(a.value() for a in self.emission_accumulators)
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray, Sequence[Any]]) -> HeterogeneousPCFGAccumulator:
+        """Replace this accumulator from a serialized sufficient-statistic value."""
         terminal_counts, binary_counts, emission_values = x
         self.terminal_counts = terminal_counts
         self.binary_counts = binary_counts
@@ -865,6 +873,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed rule and emission statistics into ``stats_dict``."""
         if self.rule_key is not None:
             if self.rule_key in stats_dict:
                 t, b = stats_dict[self.rule_key]
@@ -881,6 +890,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
             acc.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace keyed rule and emission statistics from ``stats_dict``."""
         if self.rule_key is not None and self.rule_key in stats_dict:
             self.terminal_counts, self.binary_counts = stats_dict[self.rule_key]
         if self.emission_key is not None and self.emission_key in stats_dict:
@@ -889,6 +899,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
             acc.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> HeterogeneousPCFGDataEncoder:
+        """Return an encoder compatible with this accumulator's emissions."""
         return HeterogeneousPCFGDataEncoder([a.acc_to_encoder() for a in self.emission_accumulators])
 
 
@@ -910,6 +921,7 @@ class HeterogeneousPCFGAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> HeterogeneousPCFGAccumulator:
+        """Create a fresh heterogeneous PCFG accumulator."""
         return HeterogeneousPCFGAccumulator(
             [f.make() for f in self.factories],
             self.num_binary_rules,
@@ -948,6 +960,7 @@ class HeterogeneousPCFGEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> HeterogeneousPCFGAccumulatorFactory:
+        """Return an accumulator factory for this fixed grammar topology."""
         return HeterogeneousPCFGAccumulatorFactory(
             [e.accumulator_factory() for e in self.terminal_estimators],
             self._prior.num_binary_rules,
@@ -959,6 +972,7 @@ class HeterogeneousPCFGEstimator(ParameterEstimator):
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, Sequence[Any]]
     ) -> HeterogeneousPCFGDistribution:
+        """Estimate rule probabilities and terminal emissions from statistics."""
         terminal_counts, binary_counts, emission_values = suff_stat
         emissions = [
             self.terminal_estimators[r].estimate(float(terminal_counts[r]), emission_values[r])
@@ -1089,6 +1103,7 @@ class InducedHeterogeneousPCFGEstimator(ParameterEstimator):
         return [(parent, terminal, prob) for parent in self.nonterminals for terminal in terminals]
 
     def accumulator_factory(self) -> HeterogeneousPCFGAccumulatorFactory:
+        """Return an accumulator factory for the induced grammar skeleton."""
         return HeterogeneousPCFGAccumulatorFactory(
             [e.accumulator_factory() for e in self.terminal_estimators],
             self._prior.num_binary_rules,
@@ -1197,6 +1212,7 @@ class InducedHeterogeneousPCFGEstimator(ParameterEstimator):
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, Sequence[Any]]
     ) -> HeterogeneousPCFGDistribution:
+        """Estimate a sparse grammar from rule counts and emission statistics."""
         terminal_counts, binary_counts, emission_values = suff_stat
         emissions = [
             self.terminal_estimators[r].estimate(float(terminal_counts[r]), emission_values[r])
@@ -1254,6 +1270,7 @@ class HeterogeneousPCFGDataEncoder(DataSequenceEncoder):
         return isinstance(other, HeterogeneousPCFGDataEncoder) and self.terminal_encoders == other.terminal_encoders
 
     def seq_encode(self, x: Sequence[Sequence[Any]]) -> EncodedPCFGData:
+        """Flatten token sequences and encode them for every terminal family."""
         lengths = np.asarray([len(seq) for seq in x], dtype=np.int32)
         flat: list[Any] = []
         for seq in x:
@@ -1411,6 +1428,7 @@ class HeterogeneousPCFGFisherView(FixedFisherView):
     def fisher_information(
         self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
     ) -> np.ndarray:
+        """Return model Fisher information, falling back to observed statistics."""
         try:
             return FixedFisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
         except NotImplementedError:
@@ -1427,6 +1445,7 @@ class HeterogeneousPCFGFisherView(FixedFisherView):
         ridge: float = 1.0e-8,
         **kwargs: Any,
     ) -> np.ndarray:
+        """Whiten PCFG statistics under the requested Fisher metric."""
         try:
             return FixedFisherView.fisher_vectors(
                 self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge, **kwargs

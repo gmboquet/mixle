@@ -1,4 +1,4 @@
-"""Model-parallel estimation: distribute a model's shardable axis across workers (component C3).
+"""Model-parallel estimation: distribute a model's shardable axis across workers.
 
 The inversion of the data-parallel backends: there the *model* is replicated and the *data* sharded.
 Here the model's shardable axis is distributed. Two entry points share one recursive fold:
@@ -12,20 +12,20 @@ Here the model's shardable axis is distributed. Two entry points share one recur
 
 The fold (:func:`model_parallel_fold`) is **recursive**: it walks the whole model tree and threads the
 axes that a per-node **compute-cost** model says save the most wall-time (``_parallel_ids``, consistent
-with the C2 planner -- a narrow batch of heavy MVGaussians beats a wider batch of cheap leaves),
+with the structural planner -- a narrow batch of heavy MVGaussians beats a wider batch of low-cost leaves),
 recursing serially below any threaded node so no two pools ever nest. Each recursive case reproduces the
 corresponding accumulator's ``seq_update`` exactly:
 
 * **FACTOR** (Composite/Record) -- the per-factor accumulators are independent, so the per-factor
   ``seq_update`` calls are distributed (bit-identical).
-* **COMPONENT** (mixtures) -- the responsibility ``logsumexp`` couples the components, so the cheap
+* **COMPONENT** (mixtures) -- the responsibility ``logsumexp`` couples the components, so the low-cost
   normalization runs centrally on the gathered score matrix while the expensive per-component scoring and
   accumulation are distributed -- a bit-identical mirror of ``MixtureAccumulator.seq_update``.
 * atomic / unknown -- the replicated base case ``acc.seq_update(enc, weights, model)``.
 
 So the whole fold is bit-identical to the single-node path (the data-axis reduce across partitions is the
 usual additive ``combine``, exact up to float reassociation like every data-parallel backend). Correct
-for *every* family; never worse than ``backend="local"``. See ``~/codex/notes/model-parallel-design.md``.
+for *every* family; never worse than ``backend="local"``.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def _run(parallel: bool, fn: Any, items: Any, num_workers: int | None) -> None:
 def _parallel_ids(model: Any, num_workers: int | None) -> frozenset[int]:
     """The set of tree nodes to thread, chosen by COMPUTE COST (not unit count), consistent with the C2
     planner -- so the executor parallelizes the genuinely heaviest axes, e.g. a narrow batch of D*D
-    MVGaussians over a wider batch of cheap categoricals.
+    MVGaussians over a wider batch of low-cost categoricals.
 
     Every shardable node is scored with the planner's benefit = total_work - max(max_unit_work,
     total_work / P) (greedy-schedule time saved; a fat bottleneck unit caps it). We thread every node tied
@@ -252,10 +252,12 @@ class ModelParallelEncodedData(EncodedDataHandle):
         return acc
 
     def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
+        """Return the encoded-data size and total log likelihood under ``estimate``."""
         ll = np.asarray(estimate.seq_log_density(self.enc), dtype=np.float64)
         return float(self.size), float(ll.sum())
 
     def pysp_seq_estimate(self, estimator: Any, prev_estimate: Any) -> Any:
+        """Run one model-parallel E/M update from ``prev_estimate``."""
         from mixle.stats import validate_estimator_keys
 
         validate_estimator_keys(estimator)
@@ -264,6 +266,7 @@ class ModelParallelEncodedData(EncodedDataHandle):
         return estimator.estimate(float(self.size), acc.value())
 
     def pysp_seq_initialize(self, estimator: Any, rng: np.random.RandomState, p: float) -> Any:
+        """Initialize a model by randomly selecting observations with probability ``p``."""
         from mixle.stats import validate_estimator_keys
 
         validate_estimator_keys(estimator)
@@ -276,6 +279,7 @@ class ModelParallelEncodedData(EncodedDataHandle):
         return estimator.estimate(float(weights.sum()), acc.value())
 
     def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
+        """Accumulate model-parallel sufficient statistics for streaming backends."""
         from mixle.stats import validate_estimator_keys
 
         validate_estimator_keys(estimator)
@@ -312,44 +316,57 @@ class ModelParallelAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = getattr(inner, "keys", None)
 
     def update(self, x: Any, weight: float, estimate: Any) -> None:
+        """Delegate scalar accumulation to the wrapped accumulator."""
         self.inner.update(x, weight, estimate)
 
     def initialize(self, x: Any, weight: float, rng: Any) -> None:
+        """Delegate scalar initialization to the wrapped accumulator."""
         self.inner.initialize(x, weight, rng)
 
     def seq_update(self, x: Any, weights: np.ndarray, estimate: Any) -> None:
+        """Run the wrapped accumulator's sequence update through the model-parallel fold."""
         model_parallel_fold(self.inner, estimate, x, weights, self.num_workers)
 
     def seq_initialize(self, x: Any, weights: np.ndarray, rng: Any) -> None:
+        """Delegate encoded initialization to the wrapped accumulator."""
         self.inner.seq_initialize(x, weights, rng)
 
     def combine(self, suff_stat: Any) -> ModelParallelAccumulator:
+        """Merge sufficient statistics into the wrapped accumulator."""
         self.inner.combine(suff_stat)
         return self
 
     def value(self) -> Any:
+        """Return the wrapped accumulator's sufficient-statistic value."""
         return self.inner.value()
 
     def from_value(self, x: Any) -> ModelParallelAccumulator:
+        """Replace the wrapped accumulator from a sufficient-statistic value."""
         self.inner.from_value(x)
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Delegate keyed statistic merging to the wrapped accumulator."""
         self.inner.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Delegate keyed statistic replacement to the wrapped accumulator."""
         self.inner.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> Any:
+        """Return the wrapped accumulator's compatible data encoder."""
         return self.inner.acc_to_encoder()
 
 
 class ModelParallelAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory that wraps another accumulator factory with model-parallel updates."""
+
     def __init__(self, inner_factory: Any, num_workers: int | None = None) -> None:
         self.inner_factory = inner_factory
         self.num_workers = num_workers
 
     def make(self) -> ModelParallelAccumulator:
+        """Create a fresh model-parallel accumulator wrapper."""
         return ModelParallelAccumulator(self.inner_factory.make(), self.num_workers)
 
 
@@ -367,9 +384,11 @@ class ModelParallelEstimator(ParameterEstimator):
         self.keys = getattr(inner, "keys", None)
 
     def accumulator_factory(self) -> ModelParallelAccumulatorFactory:
+        """Return a factory that wraps the inner estimator's accumulator factory."""
         return ModelParallelAccumulatorFactory(self.inner.accumulator_factory(), self.num_workers)
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> Any:
+        """Delegate the M-step to the wrapped estimator."""
         return self.inner.estimate(nobs, suff_stat)
 
 

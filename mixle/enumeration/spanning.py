@@ -1,7 +1,7 @@
 """k-best spanning tree enumeration (Gabow's partition algorithm).
 
 Enumerate the spanning trees of an undirected weighted graph in increasing total edge cost -- the minimum
-spanning tree first, then the next-cheapest, and so on -- without materializing the (often exponential) set of
+spanning tree first, then the next-lowest-cost tree, and so on -- without materializing the (often exponential) set of
 trees. This is the spanning-tree analogue of Murty's k-best assignment: pop the best tree from a priority queue,
 then partition the remaining trees into subproblems (each forcing some tree edges in and one tree edge out) and
 solve each with one constrained-MST call.

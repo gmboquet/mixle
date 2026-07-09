@@ -35,9 +35,11 @@ class ExchangeabilityReport:
 
     @property
     def exchangeable(self) -> bool:
+        """Return ``True`` when no tested order signal was detected."""
         return self.label == "exchangeable"
 
     def as_dict(self) -> dict[str, Any]:
+        """Serialize the report to a JSON-compatible dictionary."""
         return {"label": self.label, "exchangeable": self.exchangeable, "fields": self.fields}
 
 

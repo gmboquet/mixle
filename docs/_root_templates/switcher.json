@@ -1,0 +1,5 @@
+[
+{%- for rev in revisions | sort(attribute="date", reverse=True) %}
+  {"name": "{{ rev.name }}", "type": "{{ rev.type_.name }}", "date": "{{ rev.date.isoformat() }}"}{% if not loop.last %},{% endif %}
+{%- endfor %}
+]

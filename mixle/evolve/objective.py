@@ -1,7 +1,7 @@
 """The *measure* contract for self-improvement: a model-agnostic fitness.
 
 An :class:`Objective` turns ``(model, data)`` into a single comparable scalar **and**, when it can, an
-honest per-observation paired vector. The paired vector is what lets the verify gate
+per-observation paired vector. The paired vector is what lets the verify gate
 (:mod:`mixle.evolve.verify`) run a *paired* significance test instead of comparing two bare score
 totals. Objectives that cannot produce a paired vector (a pure summary like a calibration-error
 scalar) set ``pointwise`` to return ``None``; the gate then falls back to a CI-exclusion check on the
@@ -165,7 +165,7 @@ def calibration_objective(*, ensemble: int = 256, seed: int = 0, bins: int = 10)
 
     Uses the rank-based Probability Integral Transform of a sampled ensemble: under a calibrated
     continuous forecast the PIT values are Uniform(0, 1), and ``pit_calibration_error`` measures the
-    histogram's mean absolute deviation from uniform. There is no honest per-observation paired vector
+    histogram's mean absolute deviation from uniform. There is no per-observation paired vector
     for a histogram statistic, so ``pointwise`` returns ``None`` and the verify gate scores this on the
     bootstrapped scalar.
 

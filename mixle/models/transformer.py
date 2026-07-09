@@ -6,8 +6,8 @@ and returns next-token logits ``(batch, vocab)`` from the last position. So
 ``Categorical(logits=Transformer(out=V))`` is *exactly* next-token prediction ``p(token | context)``, fit by the
 standard ``estimate()`` loop whose cross-entropy is ``-log p`` -- no new training machinery.
 
-Attention is ``F.scaled_dot_product_attention`` (the FlashAttention dispatch on CUDA). At frontier scale the
-same module is what a vendored TorchTitan/Megatron trainer shards (FSDP2/TP/PP); here it runs single-process.
+Attention is ``F.scaled_dot_product_attention`` with CUDA FlashAttention dispatch when available. This module runs
+single-process here, while larger training stacks can shard the same architecture externally.
 
 The ``nn.Module`` subclasses are defined at MODULE level (not nested inside ``build_causal_lm``) so a trained
 LM pickles/saves: a function-local class has no importable qualname and ``torch.save``/``pickle`` cannot find it.
@@ -34,11 +34,21 @@ if _HAS_TORCH:
             self.h = n_head
             self.qkv = nn.Linear(d_model, 3 * d_model)
             self.proj = nn.Linear(d_model, d_model)
+            # muP attention scaling (see mixle.models.mup): standard attention scales QK^T by
+            # 1/sqrt(head_dim); muP (Tensor Programs V, Table 3) instead requires 1/head_dim so the
+            # pre-softmax logit scale stays width-independent under the "hidden" role's init/lr rules.
+            # Off by default (the standard 1/sqrt(head_dim) scaling); mixle.models.mup.apply_mup_init
+            # turns it on for a model being run under muP.
+            self.mup_attention = False
 
         def forward(self, x: Any) -> Any:
             b, t, d = x.shape
-            qkv = self.qkv(x).reshape(b, t, 3, self.h, d // self.h).permute(2, 0, 3, 1, 4)
-            o = F.scaled_dot_product_attention(qkv[0], qkv[1], qkv[2], is_causal=True)  # FlashAttention path (CUDA)
+            head_dim = d // self.h
+            qkv = self.qkv(x).reshape(b, t, 3, self.h, head_dim).permute(2, 0, 3, 1, 4)
+            scale = 1.0 / head_dim if self.mup_attention else None
+            o = F.scaled_dot_product_attention(
+                qkv[0], qkv[1], qkv[2], is_causal=True, scale=scale
+            )  # FlashAttention path (CUDA)
             return self.proj(o.transpose(1, 2).reshape(b, t, d))
 
     class Block(nn.Module):
@@ -70,27 +80,58 @@ if _HAS_TORCH:
             self.ln = nn.LayerNorm(d_model)
             self.head = nn.Linear(d_model, vocab, bias=False)
             self.head.weight = self.tok.weight  # weight tying
+            # activation (gradient) checkpointing: recompute block activations in backward instead of
+            # storing them -- the standard memory/compute trade for long blocks or deep stacks. A plain
+            # attribute (not a ctor arg) so modules saved before the flag existed rebuild unchanged.
+            # Either a single bool (all-or-nothing, the original behavior) or a per-block list/tuple of
+            # bools of length n_layer (F6's selective per-block policy -- see
+            # mixle.models.memory_efficient_training.SelectiveRecomputePolicy.apply_to_model, which sets
+            # exactly this attribute from a real memory-vs-recompute-FLOPs cost model).
+            self.gradient_checkpointing = False
+
+        def _checkpoint_block(self, i: int) -> bool:
+            gc = getattr(self, "gradient_checkpointing", False)
+            if isinstance(gc, bool):
+                return gc
+            return bool(gc[i])  # per-block list/tuple, one entry per self.blocks
 
         def forward(self, x: Any) -> Any:
             x = x.long()
             t = x.shape[1]
             pos = torch.arange(t, device=x.device)
             h = self.tok(x) + self.pos(pos)[None, :, :]
-            for blk in self.blocks:
-                h = blk(h)
+            for i, blk in enumerate(self.blocks):
+                if self._checkpoint_block(i) and self.training and torch.is_grad_enabled():
+                    h = torch.utils.checkpoint.checkpoint(blk, h, use_reentrant=False)
+                else:
+                    h = blk(h)
             return self.head(self.ln(h))[:, -1]  # next-token logits from the last position -> (batch, vocab)
 
 
 def build_causal_lm(
-    vocab: int, d_model: int = 128, n_layer: int = 3, n_head: int = 4, block: int = 64, embedding: Any = None
+    vocab: int,
+    d_model: int = 128,
+    n_layer: int = 3,
+    n_head: int = 4,
+    block: int = 64,
+    embedding: Any = None,
+    gradient_checkpointing: bool = False,
 ) -> Any:
     """Build a causal decoder-only Transformer LM (token+pos embeddings, pre-norm blocks, weight-tied head).
 
     ``embedding`` optionally injects a *shared* token ``nn.Embedding`` (``vocab x d_model``) to use in place of a
     fresh one -- so several language models can tie the same word embedding and train it jointly (the weight-tied
     head follows it). Its shape must match ``(vocab, d_model)``.
+
+    ``gradient_checkpointing=True`` recomputes block activations during backward instead of storing them --
+    identical gradients (pinned by test) for a large activation-memory cut on deep stacks or long blocks.
+    The flag is a plain module attribute, so it can also be toggled on an existing model -- including to a
+    per-block list/tuple of bools (one per ``n_layer``) rather than a single all-or-nothing bool, for F6's
+    cost-model-driven selective policy (``mixle.models.memory_efficient_training.SelectiveRecomputePolicy``).
     """
     from mixle.models.embedding import resolve_embedding
 
     embedding = resolve_embedding(embedding, vocab, d_model)  # CategoricalEmbedding | nn.Embedding | None -> module
-    return CausalLM(vocab, d_model, n_layer, n_head, block, embedding=embedding)
+    lm = CausalLM(vocab, d_model, n_layer, n_head, block, embedding=embedding)
+    lm.gradient_checkpointing = bool(gradient_checkpointing)
+    return lm

@@ -1,6 +1,6 @@
 """Continual / multi-stage fine-tuning helpers: parameter snapshot + diagonal Fisher + EWC for neural leaves.
 
-Continued pretraining (CPT) without catastrophic forgetting = continue the SAME module on new data plus an EWC
+Continued pretraining (CPT) without catastrophic forgetting = continue the same module on new data plus an EWC
 penalty ``lambda * sum_i F_i (theta_i - theta*_i)^2`` anchoring to the pretrained params ``theta*`` weighted by
 the diagonal Fisher ``F`` (how much each parameter mattered for the old task). The Fisher is the same curvature
 mixle uses for posterior approximation; here it is per-parameter importance for anti-forgetting. Use it as a

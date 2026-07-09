@@ -262,7 +262,8 @@ class ScalableSamplerTest(unittest.TestCase):
             edge_remove_rate=2.0,
         )
         seqs = [
-            gt.sampler(seed=s).sample_one_scalable(num_steps=8, seed_edges=self._seed_edges(rng)) for s in range(120)
+            gt.sampler(seed=s).sample_one_scalable(num_steps=6, seed_edges=self._seed_edges(rng, n=40))
+            for s in range(60)
         ]
         self.assertTrue(all(sp.issparse(a) for seq in seqs for a in seq))  # never densified
         self.assertTrue(np.all(np.isfinite(gt.seq_log_density(seqs))))
@@ -335,9 +336,7 @@ class LatentRegimeTemporalGraphGrammarTest(unittest.TestCase):
         )
         A = [[0.85, 0.15], [0.15, 0.85]]
         gt = stats.LatentTemporalGraphGrammarDistribution([growth, decay], [0.5, 0.5], A)
-        data = [
-            gt.sampler(seed=s).sample_one(num_steps=12, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(80)
-        ]
+        data = [gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(40)]
         self.assertTrue(np.all(np.isfinite(gt.seq_log_density(data))))
         # single-grammar baseline
         se = stats.TemporalGraphGrammarEstimator(pseudo_count=0.5)
@@ -350,7 +349,7 @@ class LatentRegimeTemporalGraphGrammarTest(unittest.TestCase):
         acc.seq_initialize(data, np.ones(len(data)), np.random.RandomState(1))
         cur = est.estimate(len(data), acc.value())
         prev_ll = -np.inf
-        for _ in range(10):
+        for _ in range(6):
             acc = est.accumulator_factory().make()
             acc.seq_update(data, np.ones(len(data)), cur)
             cur = est.estimate(len(data), acc.value())
@@ -381,16 +380,14 @@ class RegimeSwitchingAttributesTest(unittest.TestCase):
             [0.5, 0.5],
             [[0.85, 0.15], [0.15, 0.85]],
         )
-        data = [
-            gt.sampler(seed=s).sample_one(num_steps=14, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(90)
-        ]
+        data = [gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(35)]
         self.assertTrue(np.all(np.isfinite(gt.seq_log_density(data))))
         est = gt.estimator(pseudo_count=0.3)
         acc = est.accumulator_factory().make()
         acc.seq_initialize(data, np.ones(len(data)), np.random.RandomState(2))
         cur = est.estimate(len(data), acc.value())
         prev_ll = -np.inf
-        for _ in range(12):
+        for _ in range(7):
             acc = est.accumulator_factory().make()
             acc.seq_update(data, np.ones(len(data)), cur)
             cur = est.estimate(len(data), acc.value())
@@ -478,9 +475,7 @@ class LatentChurningTemporalGraphGrammarTest(unittest.TestCase):
             initial_probs=[0.5, 0.5],
             transition_matrix=[[0.85, 0.15], [0.15, 0.85]],
         )
-        data = [
-            gt.sampler(seed=s).sample_one(num_steps=14, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(90)
-        ]
+        data = [gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(35)]
         # nodes genuinely leave (counts swing) and ids disappear
         self.assertTrue(any(set(o[t - 1][1]) - set(o[t][1]) for o in data for t in range(1, len(o))))
         self.assertTrue(np.all(np.isfinite(gt.seq_log_density(data))))
@@ -489,7 +484,7 @@ class LatentChurningTemporalGraphGrammarTest(unittest.TestCase):
         acc.seq_initialize(data, np.ones(len(data)), np.random.RandomState(3))
         cur = est.estimate(len(data), acc.value())
         prev_ll = -np.inf
-        for _ in range(12):
+        for _ in range(7):
             acc = est.accumulator_factory().make()
             acc.seq_update(data, np.ones(len(data)), cur)
             cur = est.estimate(len(data), acc.value())

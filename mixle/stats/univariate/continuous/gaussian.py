@@ -1,12 +1,9 @@
-"""Evaluate, estimate, and sample from a gaussian distribution with mean mu and variance sigma2.
+"""Gaussian distributions, estimators, accumulators, samplers, and encoders.
 
-Defines the GaussianDistribution, GaussianSampler, GaussianAccumulatorFactory, GaussianAccumulator,
-GaussianEstimator, and the GaussianDataEncoder classes for use with mixle.
+For real-valued observations, ``GaussianDistribution(mu, sigma2)`` has
+``sigma2 > 0`` and log-density:
 
-Data type: (float): The GaussianDistribution with mean mu and variance sigma2 > 0.0, has log-density
     log(f(x;mu, sigma2)) = -0.5*log(2*pi*sigma2) - 0.5*(x-mu)^2/sigma2, for real-valued x.
-
-
 
 Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
@@ -20,6 +17,7 @@ from numpy.random import RandomState
 from mixle.engines.arithmetic import *
 from mixle.inference.fisher import FixedFisherView
 from mixle.stats.bayes.normal_gamma import NormalGammaDistribution
+from mixle.stats.compute.error_receipts import CompensatedAccumulator
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -74,12 +72,14 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare backend support for generated Gaussian density kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch", "jax"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the generated-compute declaration for the Gaussian distribution."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -139,23 +139,23 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
-        """GaussianDistribution object defines Gaussian distribution with mean mu and variance sigma2.
+        """Create a univariate Gaussian distribution.
 
         Args:
-            mu (float): Real-valued number.
-            sigma2 (float): Positive real-valued number.
-            name (Optional[str]): String for name of object.
+            mu: Mean of the Gaussian.
+            sigma2: Positive finite variance.
+            name: Optional diagnostic name.
             prior (Optional): Conjugate parameter prior over (mu, tau=1/sigma2). A
                 :class:`~mixle.stats.bayes.normal_gamma.NormalGammaDistribution` enables the
                 Bayesian/variational machinery (``expected_log_density`` and the
                 conjugate posterior update); ``None`` (default) is a plain point model.
 
         Attributes:
-            mu (float): Mean of gaussian distribution.
-            sigma2 (float): Variance of Gaussian distribution.
-            name (Optional[str]): String for name of object.
-            cont (float): Normalizing constant of Gaussian (depends on sigma2).
-            log_const (float): Log of above.
+            mu: Mean of the Gaussian.
+            sigma2: Variance of the Gaussian.
+            name: Optional diagnostic name.
+            const: Density normalizing constant.
+            log_const: Log normalizing constant.
 
         """
         if not np.isfinite(mu):
@@ -170,7 +170,7 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         self.set_prior(prior)
 
     def __str__(self) -> str:
-        """Returns string representation of GaussianDistribution object."""
+        """Return a readable distribution summary."""
         return "GaussianDistribution(%s, %s, name=%s)" % (repr(self.mu), repr(self.sigma2), repr(self.name))
 
     def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
@@ -357,28 +357,26 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.mu)
 
     def sampler(self, seed: int | None = None) -> "GaussianSampler":
-        """Create an GaussianSampler object from parameters of GaussianDistribution instance.
+        """Return a sampler for iid draws from this distribution.
 
         Args:
-            seed (Optional[int]): Used to set seed in random sampler.
+            seed: Optional seed for the sampler's random state.
 
         Returns:
-            GaussianSampler object.
+            A configured ``GaussianSampler``.
 
         """
         return GaussianSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "GaussianEstimator":
-        """Create GaussianEstimator with mu and sigma2 passed if pseudo_count is not None.
-
-        Arg variable pseudo_count is used to pass and re-weight mu and sigma2 of GaussianDistribution instance. Simply
-        creates a GaussianEstimator with name passed if pseudo_count is None.
+        """Return an estimator initialized from this distribution's shape.
 
         Args:
-            pseudo_count (Optional[float]): Used to inflate sufficient statistics.
+            pseudo_count: Optional smoothing count applied to the current mean
+                and variance.
 
         Returns:
-            GaussianEstimator object.
+            A ``GaussianEstimator``.
 
         """
         if pseudo_count is not None:
@@ -390,58 +388,79 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
             return GaussianEstimator(name=self.name, prior=self.prior)
 
     def dist_to_encoder(self) -> "GaussianDataEncoder":
-        """Returns a GaussianDataEncoder object for encoding sequences of data."""
+        """Return an encoder for iid scalar Gaussian observations."""
         return GaussianDataEncoder()
 
 
 class GaussianSampler(DistributionSampler):
+    """Draw independent samples from a :class:`GaussianDistribution`."""
+
     def __init__(self, dist: GaussianDistribution, seed: int | None = None) -> None:
-        """GaussianSampler for drawing samples from GaussianSampler instance.
+        """Create a sampler bound to ``dist``.
 
         Args:
-            dist (GaussianDistribution): GaussianDistribution instance to sample from.
-            seed (Optional[int]): Used to set seed in random sampler.
+            dist: Distribution to sample from.
+            seed: Optional seed for the sampler's random state.
 
         Attributes:
-            dist (GaussianDistribution): GaussianDistribution instance to sample from.
-            rng (RandomState): RandomState with seed set to seed if passed in args.
+            dist: Distribution being sampled.
+            rng: Random state used for draws.
 
         """
         self.rng = RandomState(seed)
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
-        """Draw 'size' iid samples from GaussianSampler object.
-
-        Numpy array of length 'size' from Gaussian distribution with mean mu and scale sigma2 if size not None.
-        Else a single sample is returned as float.
+        """Draw iid samples from the Gaussian distribution.
 
         Args:
-            size (Optional[int]): Treated as 1 if None is passed.
+            size: Number of iid samples to draw. ``None`` returns a scalar sample.
 
         Returns:
-            'size' iid samples from Gaussian distribution.
+            A scalar draw when ``size`` is ``None``; otherwise an array of draws.
 
         """
         return self.rng.normal(loc=self.dist.mu, scale=sqrt(self.dist.sigma2), size=size)
 
 
+class GaussianSuffStat(tuple):
+    """A ``(sum, sum2, count, count2)`` sufficient statistic that also carries a numerics receipt.
+
+    Behaves exactly like the plain 4-tuple everywhere it is indexed, unpacked, or iterated (it *is*
+    one); ``receipt`` is extra payload that :meth:`GaussianAccumulator.combine` reads to fold the
+    Kahan error-bound bookkeeping (``abs_total``, ``n`` for ``sum`` and ``sum2``) into the receiving
+    accumulator when both sides are ``compensated``. Code that doesn't know about ``compensated``
+    accumulation (serialization, generic ``scale_suff_stat``, ...) sees an ordinary tuple.
+    """
+
+    def __new__(cls, sum_: float, sum2_: float, count_: float, count2_: float, receipt: dict | None = None):
+        obj = super().__new__(cls, (sum_, sum2_, count_, count2_))
+        obj.receipt = receipt
+        return obj
+
+
 class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
-    def __init__(self, keys: str | None = None, name: str | None = None) -> None:
-        """GaussianAccumulator object used to accumulate sufficient statistics from observed data.
+    """Accumulate weighted first and second moments for Gaussian estimation."""
+
+    def __init__(self, keys: str | None = None, name: str | None = None, compensated: bool = False) -> None:
+        """Create an accumulator for weighted Gaussian moments.
 
         Args:
-            keys (Optional[str]): Set key for GaussianAccumulator object.
-            name (Optional[str]): Set name for GaussianAccumulator object.
+            keys: Optional key for merging sufficient statistics.
+            name: Optional diagnostic name.
+            compensated: Opt-in Kahan-compensated accumulation of ``sum``/``sum2`` with a
+                running numerics-error bound (see :mod:`mixle.stats.compute.error_receipts`), read
+                back via :meth:`error_bound`. ``False`` (the default) is the plain float64
+                accumulation this class always used -- that code path is untouched, so it carries no
+                measurable overhead over the pre-existing behavior.
 
         Attributes:
-            sum (float): Sum of weighted observations (sum_i w_i*X_i).
-            sum2 (float): Sum of weighted squared observations (sum_i w_i*X_i^2)
-            count (float): Sum of weights for observations (sum_i w_i).
-            count2 (float): Sum of weights for squared observations (sum_i w_i).
-            count (float): Tracks the sum of weighted observations used to form sum.
-            key (Optional[str]): Key string used to aggregate all sufficient statistics with same keys values.
-            name (Optional[str]): Name for GaussianAccumulator object.
+            sum: Weighted sum of observations.
+            sum2: Weighted sum of squared observations.
+            count: Sum of weights for the first moment.
+            count2: Sum of weights for the second moment.
+            keys: Optional sufficient-statistic key.
+            name: Optional diagnostic name.
 
         """
         self.sum = 0.0
@@ -450,6 +469,9 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.count2 = 0.0
         self.keys = keys
         self.name = name
+        self.compensated = compensated
+        self._sum_acc = CompensatedAccumulator(compensated=True) if compensated else None
+        self._sum2_acc = CompensatedAccumulator(compensated=True) if compensated else None
 
     def update(self, x: float, weight: float, estimate: Optional["GaussianDistribution"]) -> None:
         """Update sufficient statistics for GaussianAccumulator with one weighted observation.
@@ -465,15 +487,19 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         x_weight = x * weight
-        self.sum += x_weight
-        self.sum2 += x * x_weight
+        if self.compensated:
+            self._sum_acc.add(x_weight)
+            self._sum2_acc.add(x * x_weight)
+            self.sum = self._sum_acc.total
+            self.sum2 = self._sum2_acc.total
+        else:
+            self.sum += x_weight
+            self.sum2 += x * x_weight
         self.count += weight
         self.count2 += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
-        """Initialize GaussianAccumulator object with weighted observation
-
-        Note: Just calls update().
+        """Initialize with a weighted observation.
 
         Args:
             x (float): Observation from Gaussian distribution.
@@ -487,9 +513,7 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.update(x, weight, None)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
-        """Vectorized initialization of GaussianAccumulator sufficient statistics with weighted observations.
-
-        Note: Just calls seq_update().
+        """Vectorized initialization from encoded weighted observations.
 
         Args:
             x (ndarray): Numpy array of floats.
@@ -515,14 +539,23 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        self.sum += np.dot(x, weights)
-        self.sum2 += np.dot(x * x, weights)
-        w_sum = weights.sum()
+        if self.compensated:
+            for xi, wi in zip(x, weights):
+                xw = float(xi) * float(wi)
+                self._sum_acc.add(xw)
+                self._sum2_acc.add(float(xi) * xw)
+            self.sum = self._sum_acc.total
+            self.sum2 = self._sum2_acc.total
+            w_sum = float(np.sum(weights))
+        else:
+            self.sum += np.dot(x, weights)
+            self.sum2 += np.dot(x * x, weights)
+            w_sum = weights.sum()
         self.count += w_sum
         self.count2 += w_sum
 
     def combine(self, suff_stat: tuple[float, float, float, float]) -> "GaussianAccumulator":
-        """Aggregates sufficient statistics with GaussianAccumulator member sufficient statistics.
+        """Merge sufficient statistics into this accumulator.
 
         Arg passed suff_stat is tuple of four floats:
             suff_stat[0] (float): Sum of weighted observations (sum_i w_i*X_i),
@@ -530,11 +563,16 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             suff_stat[2] (float): Sum of weighted observations (sum_i w_i),
             suff_stat[3] (float): Sum of weighted observations (sum_i w_i).
 
+        When this accumulator is ``compensated`` and ``suff_stat`` carries a numerics-error
+        receipt (see :meth:`value` / :class:`GaussianSuffStat`), the receipt is folded in too --
+        its ``(abs_total, n)`` fields add exactly, just like ``sum``/``count`` above, so
+        :meth:`error_bound` composes correctly across combined partitions.
+
         Args:
             suff_stat (Tuple[float, float, float, float]): See above for details.
 
         Returns:
-            GaussianAccumulator object.
+            This accumulator.
 
         """
         self.sum += suff_stat[0]
@@ -542,14 +580,48 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += suff_stat[2]
         self.count2 += suff_stat[3]
 
+        if self.compensated:
+            receipt = getattr(suff_stat, "receipt", None)
+            if receipt is not None:
+                abs_s, n_s = receipt["sum"]
+                abs_s2, n_s2 = receipt["sum2"]
+                self._sum_acc.abs_total += abs_s
+                self._sum_acc.n += n_s
+                self._sum2_acc.abs_total += abs_s2
+                self._sum2_acc.n += n_s2
+            # keep the running Kahan total (and its compensation) in sync with the merged sum
+            self._sum_acc.total = self.sum
+            self._sum2_acc.total = self.sum2
+
         return self
 
+    def error_bound(self) -> dict[str, float] | None:
+        """Return the running numerics-error bound receipt for ``sum``/``sum2``.
+
+        ``None`` when this accumulator was not constructed with ``compensated=True`` -- the
+        disabled default carries no receipt to report.
+        """
+        if not self.compensated:
+            return None
+        return {"sum": self._sum_acc.bound(), "sum2": self._sum2_acc.bound()}
+
     def value(self) -> tuple[float, float, float, float]:
-        """Returns sufficient statistics of GaussianAccumulator object (Tuple[float, float, float, float])."""
+        """Returns sufficient statistics of GaussianAccumulator object (Tuple[float, float, float, float]).
+
+        When ``compensated``, the returned value is a :class:`GaussianSuffStat` -- a drop-in 4-tuple
+        (indexing/unpacking/iteration all behave identically) that additionally carries the
+        numerics-error receipt in its ``.receipt`` attribute, so :meth:`combine` can fold it in.
+        """
+        if self.compensated:
+            receipt = {
+                "sum": (self._sum_acc.abs_total, self._sum_acc.n),
+                "sum2": (self._sum2_acc.abs_total, self._sum2_acc.n),
+            }
+            return GaussianSuffStat(self.sum, self.sum2, self.count, self.count2, receipt=receipt)
         return self.sum, self.sum2, self.count, self.count2
 
     def from_value(self, x: tuple[float, float, float, float]) -> "GaussianAccumulator":
-        """Assigns sufficient statistics of GaussianAccumulator instance to x.
+        """Replace this accumulator's sufficient statistics.
 
         Arg passed x is tuple of four floats:
             x[0] (float): Sum of weighted observations (sum_i w_i*X_i),
@@ -558,10 +630,10 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             x[3] (float): Sum of weighted observations (sum_i w_i).
 
         Args:
-            x: See above for deatils.
+            x: Tuple of ``(sum, sum2, count, count2)``.
 
         Returns:
-            GaussianAccumulator object.
+            This accumulator.
 
         """
         self.sum = x[0]
@@ -569,10 +641,21 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = x[2]
         self.count2 = x[3]
 
+        if self.compensated:
+            receipt = getattr(x, "receipt", None)
+            if receipt is not None:
+                abs_s, n_s = receipt["sum"]
+                abs_s2, n_s2 = receipt["sum2"]
+                self._sum_acc = CompensatedAccumulator(total=self.sum, abs_total=abs_s, n=n_s, compensated=True)
+                self._sum2_acc = CompensatedAccumulator(total=self.sum2, abs_total=abs_s2, n=n_s2, compensated=True)
+            else:
+                self._sum_acc = CompensatedAccumulator(total=self.sum, compensated=True)
+                self._sum2_acc = CompensatedAccumulator(total=self.sum2, compensated=True)
+
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge sufficient statistics of object instance with suff stats containing matching keys.
+        """Merge sufficient statistics from ``stats_dict`` when this accumulator's key is present.
 
         Args:
             stats_dict (Dict[str, Any]): Dict mapping keys to sufficient statistics.
@@ -593,7 +676,7 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = (self.sum, self.sum2, self.count, self.count2)
 
     def key_replace(self, stats_dict: dict[str, "GaussianAccumulator"]) -> None:
-        """Set sufficient statistics of object instance to suff_stats with matching keys.
+        """Replace sufficient statistics from ``suff_stats`` when this accumulator's key is present.
 
         Args:
             stats_dict (Dict[str, Any]): Dict mapping keys to sufficient statistics.
@@ -607,32 +690,36 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
                 self.sum, self.sum2, self.count, self.count2 = stats_dict[self.keys]
 
     def acc_to_encoder(self) -> "GaussianDataEncoder":
-        """Returns a GaussianDataEncoder object for encoding sequences of data."""
+        """Return an encoder compatible with Gaussian scalar observations."""
         return GaussianDataEncoder()
 
 
 class GaussianAccumulatorFactory(StatisticAccumulatorFactory):
-    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(self, name: str | None = None, keys: str | None = None, compensated: bool = False) -> None:
         """GaussianAccumulatorFactory object for creating GaussianAccumulator.
 
         Args:
             name (Optional[str]): Assign a name to GaussianAccumulatorFactory object.
             keys (Optional[str]): Assign keys member for GaussianAccumulators.
+            compensated (bool): Passed through to each made :class:`GaussianAccumulator`; see there.
 
         Attributes:
-            name (Optional[str]): Name of the GaussianAccumulatorFactory obejct.
-            keys (Optional[str]): String id for merging sufficient statistics of GaussianAccumulator.
+            name: Optional diagnostic name.
+            keys: Optional sufficient-statistic key.
 
         """
         self.keys = keys
         self.name = name
+        self.compensated = compensated
 
     def make(self) -> "GaussianAccumulator":
         """Return a GaussianAccumulator object with name and keys passed."""
-        return GaussianAccumulator(name=self.name, keys=self.keys)
+        return GaussianAccumulator(name=self.name, keys=self.keys, compensated=self.compensated)
 
 
 class GaussianEstimator(ParameterEstimator):
+    """Estimate Gaussian mean and variance from accumulated sufficient statistics."""
+
     def __init__(
         self,
         pseudo_count: tuple[float | None, float | None] = (None, None),
@@ -641,14 +728,15 @@ class GaussianEstimator(ParameterEstimator):
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
         min_covar: float | None = None,
+        compensated: bool = False,
     ):
-        """GaussianEstimator object used to estimate GaussianDistribution from aggregated sufficient statistics.
+        """Create an estimator for Gaussian sufficient statistics.
 
         Args:
-            pseudo_count (Tuple[Optional[float], Optional[float]]): Tuple of two positive floats.
-            suff_stat (Tuple[Optional[float], Optional[float]]): Tuple of float and positive float.
-            name (Optional[str]): Assign a name to GaussianEstimator.
-            keys (Optional[str]): Assign keys to GaussianEstimator for combining sufficient statistics.
+            pseudo_count: Optional smoothing weights for the prior mean and variance statistics.
+            suff_stat: Optional prior mean and variance statistics used with ``pseudo_count``.
+            name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate NormalGamma prior over (mu, tau=1/sigma2). When present,
                 ``estimate`` performs the closed-form conjugate posterior update (returning the joint
                 MAP estimate and carrying the posterior forward as the fitted model's prior) instead
@@ -657,12 +745,15 @@ class GaussianEstimator(ParameterEstimator):
                 (default) uses a tiny ``1e-8`` floor; the estimated variance is also floored at a
                 relative ``1e-6 * sigma2`` to keep the safeguard data-scaled. Set explicitly to widen
                 the floor for hard / high-dimensional cases. Bias is negligible at the default.
+            compensated (bool): Opt-in Kahan-compensated accumulation with a running numerics-error
+                bound for the accumulators this estimator makes; see
+                :class:`GaussianAccumulator`. ``False`` by default (no overhead).
 
         Attributes:
-            pseudo_count (Tuple[Optional[float], Optional[float]]): Weights for suff_stat.
-            suff_stat (Tuple[Optional[float], Optional[float]]): Tuple of mean (mu) and variance (sigma2).
-            name (Optional[str]): String name of GaussianEstimator instance.
-            keys (Optional[str]): String keys of GaussianEstimator instance for combining sufficient statistics.
+            pseudo_count: Smoothing weights for ``suff_stat``.
+            suff_stat: Prior mean and variance statistics.
+            name: Optional diagnostic name.
+            keys: Optional sufficient-statistic key.
 
         """
         self.pseudo_count = pseudo_count
@@ -672,10 +763,11 @@ class GaussianEstimator(ParameterEstimator):
         self.prior = prior
         self.has_conj_prior = isinstance(prior, NormalGammaDistribution)
         self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
+        self.compensated = compensated
 
     def accumulator_factory(self) -> "GaussianAccumulatorFactory":
         """Return GaussianAccumulatorFactory with name and keys passed."""
-        return GaussianAccumulatorFactory(self.name, self.keys)
+        return GaussianAccumulatorFactory(self.name, self.keys, compensated=self.compensated)
 
     def model_log_density(self, model: "GaussianDistribution") -> float:
         """Log-density of the model parameters under the NormalGamma prior (ELBO global term).
@@ -715,26 +807,18 @@ class GaussianEstimator(ParameterEstimator):
         return GaussianDistribution(new_mu, new_sigma2, name=self.name, prior=new_prior)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float]) -> "GaussianDistribution":
-        """Estimate a GaussianDistribution object from sufficient statistics aggregated from data.
+        """Estimate a Gaussian distribution from aggregated sufficient statistics.
 
-        Arg passed suff_stat is tuple of four floats:
-            suff_stat[0] (float): Sum of weighted observations (sum_i w_i*X_i),
-            suff_stat[1] (float): Sum of weighted observations (sum_i w_i*X_i^2),
-            suff_stat[2] (float): Sum of weighted observations (sum_i w_i),
-            suff_stat[3] (float): Sum of weighted observations (sum_i w_i),\
-
-        obtained from aggregation of observations.
-
-        If member variable pseudo_count is not None, suff_stat is combined with re-weighted member instance variables
-        suff_stat. If pseudo_count is None, arg suff_stat is used to form maximum likelihood estimates for mu and
-        sigma2 of GaussianDistribution object.
+        The tuple is interpreted as ``(sum_x, sum_x2, count_for_mean,
+        count_for_variance)``. Optional pseudo-counts smooth the corresponding
+        mean and variance estimates.
 
         Args:
-            nobs (Optional[float]): Not used. Kept for consistency with ParameterEstimator.
-            suff_stat: See above for details.
+            nobs: Unused; accepted for the ``ParameterEstimator`` interface.
+            suff_stat: Aggregated Gaussian sufficient statistics.
 
         Returns:
-            GaussianDistribution object.
+            A fitted Gaussian distribution.
 
         """
         if self.has_conj_prior:
@@ -778,17 +862,17 @@ class GaussianEstimator(ParameterEstimator):
 
 
 class GaussianDataEncoder(DataSequenceEncoder):
-    """GaussianDataEncoder object for encoding sequences of iid Gaussian observations with data type float."""
+    """Encoder for iid scalar Gaussian observations."""
 
     def __str__(self) -> str:
-        """Returns string representation of GaussianDataEncoder object."""
+        """Return a readable encoder summary."""
         return "GaussianDataEncoder"
 
     def __eq__(self, other) -> bool:
-        """Checks if other object is an instance of a GaussianDataEncoder.
+        """Return whether ``other`` is a Gaussian data encoder.
 
         Args:
-            other (object): Obejct to compare.
+            other: Object to compare.
 
         Returns:
             True if other is an instance of a GaussianDataEncoder, else False.

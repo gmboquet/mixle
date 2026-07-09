@@ -69,6 +69,7 @@ class Schema:
         return tuple(record[n] for n in self.names)
 
     def from_tuple(self, values: tuple[Any, ...]) -> dict[str, Any]:
+        """Convert positional composite values back to a named record."""
         return dict(zip(self.names, values))
 
     def log_density(self, record: dict[str, Any]) -> float:
@@ -76,6 +77,7 @@ class Schema:
         return self.composite.log_density(self.to_tuple(record))
 
     def density(self, record: dict[str, Any]) -> float:
+        """Validated, named density delegated to the backing composite."""
         return self.composite.density(self.to_tuple(record))
 
     def sample(self, seed: int | None = None, size: int | None = None) -> Any:
@@ -91,6 +93,7 @@ class Schema:
         return Schema(sub)
 
     def field_distribution(self, name: str) -> Any:
+        """Return the distribution associated with a named schema field."""
         return self.fields[self._index(name)].dist
 
     def __str__(self) -> str:

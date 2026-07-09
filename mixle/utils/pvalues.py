@@ -1,3 +1,10 @@
+"""Approximate p-value and rank utilities for composite Bernoulli evidence.
+
+The main helper builds a discretized log-likelihood histogram for products of
+binomial terms so callers can estimate tail ranks without enumerating every
+binary outcome.
+"""
+
 import itertools
 
 import numpy as np

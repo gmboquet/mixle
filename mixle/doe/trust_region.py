@@ -48,6 +48,7 @@ class TrustRegion:
 
     @property
     def collapsed(self) -> bool:
+        """Return whether the trust-region length has shrunk below its usable minimum."""
         return self.length < self.length_min
 
     def update(self, improved: bool) -> None:
@@ -86,6 +87,11 @@ def _tr_candidates(center: np.ndarray, length: float, n: int, rng: RandomState) 
 
 def _thompson_batch(gp: Any, xn: np.ndarray, yn: np.ndarray, cand: np.ndarray, q: int, rng: RandomState) -> np.ndarray:
     """Pick ``q`` distinct trust-region candidates by Thompson sampling (joint GP posterior draws)."""
+    if q > cand.shape[0]:
+        # once every candidate index is chosen, the inner loop finds nothing left to pick and that
+        # round silently contributes NOTHING to `picks` -- the caller would get fewer than q points
+        # back with no error. Name the actual constraint instead.
+        raise ValueError(f"_thompson_batch requires q <= cand.shape[0] (q={q}, candidates={cand.shape[0]}).")
     mean, cov = gp.predict(xn, yn, cand, return_cov=True)
     mean = np.asarray(mean, dtype=np.float64).ravel()
     chol = _safe_cholesky(np.atleast_2d(np.asarray(cov, dtype=np.float64)))
@@ -126,6 +132,12 @@ def turbo_minimize(
     rng = _as_rng(seed)
     span = b[:, 1] - b[:, 0]
     n_init = int(n_init) if n_init else 2 * d
+    if max_evals < n_init:
+        # the initial Latin-hypercube design alone needs n_init real objective calls before any
+        # GP-based step can even begin -- max_evals < n_init can't be honored (the function's own
+        # contract is "runs until max_evals objective calls"), and evaluating the design anyway
+        # would silently overshoot the caller's budget rather than raise.
+        raise ValueError(f"turbo_minimize requires max_evals >= n_init (n_init={n_init}, max_evals={max_evals}).")
     n_cand = int(n_candidates) if n_candidates else min(2000, 100 * d)
     sign = -1.0 if maximize else 1.0  # always minimize sign*objective
 
@@ -144,7 +156,11 @@ def turbo_minimize(
     while y_all.shape[0] < max_evals:
         if tr.collapsed:
             restarts += 1
-            xr = latin_hypercube(b, n_init, rng)
+            # clamp the restart design to the REMAINING budget -- an unclamped n_init-point design
+            # can overshoot max_evals by up to n_init real objective calls if the trust region
+            # collapses near the end of the run (a real, common occurrence on hard landscapes).
+            n_restart = min(n_init, max_evals - y_all.shape[0])
+            xr = latin_hypercube(b, n_restart, rng)
             yr = np.array([evaluate(p) for p in xr], dtype=np.float64)
             x_all = np.vstack([x_all, xr])
             y_all = np.append(y_all, yr)

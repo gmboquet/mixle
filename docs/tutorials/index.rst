@@ -5,7 +5,23 @@ These tutorials are task-oriented walkthroughs. Each one names the model shape,
 the inference route, and the point where the result should be inspected or
 validated.
 
-Choose By Problem
+How to Use These Tutorials
+--------------------------
+
+Each tutorial is written as a workflow, not as a benchmark claim. The code
+blocks show the smallest useful path through the API; the surrounding text
+names the checks that make the result credible in a real project.
+
+For exploratory work, start with the model shape and verify that fitting,
+scoring, and sampling run without warnings. For production-facing work, keep a
+separate validation split, record the estimator or program configuration, and
+save the diagnostic output that would explain a later promotion decision.
+
+The tutorials intentionally point back to the reference guides. Use the
+walkthroughs to assemble a workflow, then use the guides to check edge cases,
+capability contracts, optional dependencies, and release-readiness expectations.
+
+Choose by Problem
 -----------------
 
 .. list-table::

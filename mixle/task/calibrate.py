@@ -1,18 +1,19 @@
-"""``CalibratedTaskModel`` -- wrap a task model in conformal sets so its escalate-or-answer decision is honest.
+"""``CalibratedTaskModel`` wraps a task model in conformal answer sets.
 
-A distilled student classifies by argmax over a softmax that is *not* a describable random process: the numbers
-sum to 1, but a confident-looking 0.97 carries no guarantee. Gating a cost-aware cascade on that number is
-fiction. Conformal prediction fixes it without pretending the softmax is generative: on a held-out calibration
-set it learns a score threshold (:func:`mixle.inference.conformal.conformal_label_threshold`) such that the
-prediction *set* covers the true label with probability ``>= 1 - alpha``.
+A distilled student classifies by argmax over a softmax, but the softmax value
+alone is not a coverage guarantee. Conformal prediction adds the serving
+contract: on a held-out calibration set it learns a score threshold
+(:func:`mixle.inference.conformal.conformal_label_threshold`) such that the
+prediction *set* covers the true label with probability ``>= 1 - alpha`` under
+the usual exchangeability assumption.
 
 The decision rule the cascade and the cost model consume:
 
   * **singleton set** -> answer locally (covered at ``1 - alpha``);
   * **empty or multi-label set** -> escalate to the expensive teacher/frontier (genuinely ambiguous).
 
-``escalation_rate`` is the empirical ``p_escalate`` -- the number that makes "expected \\$/request" real rather
-than a vibe. Conformal coverage is *marginal*, and a softmax still can't see true OOD; a generative-density gate
+``escalation_rate`` is the empirical ``p_escalate`` used by the cost model.
+Conformal coverage is *marginal*, and a softmax still cannot see true OOD; a generative-density gate
 (:mod:`mixle.task.density`) covers that residual. Calibration persists in the artifact, so a loaded model decides
 identically in a fresh process.
 """
@@ -64,6 +65,7 @@ class CalibratedTaskModel:
 
     @property
     def labels(self) -> list[str]:
+        """Return labels in the probability-vector order used by the adapter."""
         return self.task.adapter.labels
 
     def _proba(self, raw_inputs: list[Any]) -> np.ndarray:
@@ -86,6 +88,7 @@ class CalibratedTaskModel:
         return [[self.labels[i] for i in np.flatnonzero(row)] for row in sets]
 
     def predict_set(self, text: Any) -> list[str]:
+        """Return the conformal label set for one input."""
         return self.predict_sets([text])[0]
 
     def _escalate_flags(self, texts: Sequence[Any], sets: list[list[str]]) -> np.ndarray:
@@ -100,6 +103,7 @@ class CalibratedTaskModel:
         return self.batch_decide([text])[0]
 
     def batch_decide(self, texts: Sequence[Any]) -> list[Any]:
+        """Return local labels or ``ESCALATE`` for a batch of inputs."""
         sets = self.predict_sets(texts)
         esc = self._escalate_flags(texts, sets)
         return [ESCALATE if e else s[0] for s, e in zip(sets, esc)]

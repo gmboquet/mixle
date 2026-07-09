@@ -119,6 +119,7 @@ class SurvivalSampler(DistributionSampler):
         self.base_sampler = dist.base.sampler(seed=self.rng.randint(0, 2**31 - 1))
 
     def sample(self, size: int | None = None):
+        """Draw one uncensored event-time pair or a list of pairs."""
         if size is None:
             return (self.base_sampler.sample(), 1)
         return [(t, 1) for t in self.base_sampler.sample(size=int(size))]
@@ -178,28 +179,34 @@ class SurvivalAccumulator(SingleChildAccumulator):
             self.base_accumulator.seq_update(enc, aug_w_arr, base_est)
 
     def update(self, x: tuple[float, int], weight: float, estimate: SurvivalDistribution | None) -> None:
+        """Accumulate one observed or right-censored event-time record."""
         t, event = x
         enc = (None, np.array([t], dtype=np.float64), np.array([bool(event)]))
         self._accumulate(enc, np.array([weight]), estimate, initialize=False, rng=None)
 
     def initialize(self, x: tuple[float, int], weight: float, rng: RandomState | None) -> None:
+        """Initialize the base sufficient statistics from one survival record."""
         t, event = x
         enc = (None, np.array([t], dtype=np.float64), np.array([bool(event)]))
         self._accumulate(enc, np.array([weight]), None, initialize=True, rng=rng)
 
     def seq_update(self, x, weights: np.ndarray, estimate: SurvivalDistribution) -> None:
+        """Accumulate encoded survival records using conditional-tail imputation."""
         self._accumulate(x, weights, estimate, initialize=False, rng=None)
 
     def seq_initialize(self, x, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize from encoded survival records without a current estimate."""
         self._accumulate(x, weights, None, initialize=True, rng=rng)
 
     def scale(self, c: float) -> "SurvivalAccumulator":
+        """Scale the delegated base sufficient statistics by a constant."""
         # Structural default over the bare child value (this accumulator carries no scalable
         # statistics of its own; n_impute / _qgrid are configuration, not sufficient statistics).
         self.from_value(scale_suff_stat(self.value(), c))
         return self
 
     def acc_to_encoder(self) -> "SurvivalDataEncoder":
+        """Return an encoder that records event times and censoring indicators."""
         return SurvivalDataEncoder(self.base_accumulator.acc_to_encoder())
 
 
@@ -219,6 +226,7 @@ class SurvivalAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> SurvivalAccumulator:
+        """Create an empty survival accumulator."""
         return SurvivalAccumulator(self.base_factory.make(), self.base_encoder, self.n_impute, keys=self.keys)
 
 
@@ -238,6 +246,7 @@ class SurvivalEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> SurvivalAccumulatorFactory:
+        """Return a factory for right-censored survival sufficient-statistic accumulators."""
         # the base encoder is needed to encode the imputed times; get it from a throwaway base estimate
         base_enc = self.base_estimator.estimate(None, self.base_estimator.accumulator_factory().make().value())
         return SurvivalAccumulatorFactory(
@@ -245,6 +254,7 @@ class SurvivalEstimator(ParameterEstimator):
         )
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> SurvivalDistribution:
+        """Estimate the base event-time distribution from imputed survival statistics."""
         return SurvivalDistribution(self.base_estimator.estimate(nobs, suff_stat), name=self.name, keys=self.keys)
 
 
@@ -252,6 +262,7 @@ class SurvivalDataEncoder(MaskedBaseEncoder):
     """Encode ``(t, event)`` data as the base encoding of the times plus the boolean event mask."""
 
     def seq_encode(self, x: Sequence[tuple[float, int]]) -> tuple[Any, np.ndarray, np.ndarray]:
+        """Encode survival records as base times plus a boolean event mask."""
         times = np.asarray([t for t, _ in x], dtype=np.float64)
         event_mask = np.asarray([bool(e) for _, e in x], dtype=bool)
         return self.base_encoder.seq_encode(list(times)), times, event_mask

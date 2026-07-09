@@ -6,7 +6,7 @@ finite set of candidate actions, :func:`bayes_action` returns the action that mi
 expected loss* and a tail-risk profile (CVaR + loss quantiles) of the chosen action.
 
 This is the decision half of the platform's differentiator: a point predictor returns a number; a
-mixle model returns the action that is optimal under the user's own loss *and* honest about its tail
+mixle model returns the action that is optimal under the user's own loss *and* explicit about its tail
 risk.
 
 It depends only on the public ``Posterior.samples(n, rng)`` contract
@@ -39,6 +39,7 @@ class RiskProfile:
     std: float
 
     def as_dict(self) -> dict[str, Any]:
+        """Return risk metrics and quantiles as JSON-compatible data."""
         return {
             "expected_loss": self.expected_loss,
             "cvar": self.cvar,

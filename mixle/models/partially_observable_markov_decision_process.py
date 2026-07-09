@@ -1,4 +1,9 @@
-"""Partially observable Markov decision process helpers."""
+"""Finite-state POMDP filtering, simulation, and fitting helpers.
+
+The model represents action-conditioned transitions and observations, supports
+belief updates and sequence likelihoods, and includes a Baum-Welch style fitting
+path for known-action observation sequences.
+"""
 
 from __future__ import annotations
 

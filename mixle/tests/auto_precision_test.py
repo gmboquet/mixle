@@ -42,6 +42,17 @@ class AutoPrecisionTestCase(unittest.TestCase):
         self.assertEqual(auto_precision(docs, engine=_FakeGPUEngine()), "float64")
         self.assertEqual(auto_precision(None, engine=_FakeGPUEngine()), "float64")
 
+    def test_gpu_tail_concentrated_extreme_values_are_caught(self):
+        # Regression: the data sample used to be a plain leading prefix (data[:sample_size]) -- a
+        # naturally-ordered dataset (sorted, appended-to over time, grouped by source) that stashes
+        # extreme values later in the sequence was invisible to the magnitude guard, and float32 got
+        # recommended for data that is not actually well-conditioned for it. Must stride the full
+        # dataset instead.
+        well_conditioned = list(np.random.RandomState(4).randn(600) * 2.0)
+        extreme_tail = [1.0e9] * 50  # only appears after the default sample_size=512 prefix
+        data = well_conditioned + extreme_tail
+        self.assertEqual(auto_precision(data, engine=_FakeGPUEngine()), "float64")
+
     def test_optimize_precision_auto_matches_default_on_cpu(self):
         # 'auto' on CPU resolves to float64 (keeps the default host path) -> identical fit.
         import io
@@ -82,6 +93,12 @@ class AutoPrecisionTestCase(unittest.TestCase):
         # vector observations
         s = _numeric_data_sample([np.array([1.0, 2.0]), np.array([3.0, 4.0])])
         self.assertEqual(s.size, 4)
+
+    def test_numeric_sample_strides_across_the_whole_dataset(self):
+        well_conditioned = list(np.random.RandomState(5).randn(600))
+        extreme_tail = [1.0e9] * 50
+        s = _numeric_data_sample(well_conditioned + extreme_tail, sample_size=512)
+        self.assertTrue(np.any(np.abs(s) > 1.0e6))  # the tail must show up in the sample
 
 
 class PrecisionNameHygieneTestCase(unittest.TestCase):

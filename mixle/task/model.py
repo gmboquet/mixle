@@ -1,16 +1,16 @@
-"""``TaskModel`` -- a fitted small model wrapped as a plain callable: ``task(raw_input) -> result``.
+"""Callable task-model wrapper for serialized local models.
 
-The artifact contract (:mod:`mixle.task.artifact`) makes a model *durable*; this makes it *usable*. A task model
-pairs a fitted model (a torch module or a mixle distribution) with an **I/O adapter** that turns raw input
-(a string, a record) into the model's input and the model's output into a result (a label, a number). The
-adapter is serialized into the manifest's ``io`` block, so ``TaskModel.load(path)`` reconstructs the whole
-``raw -> result`` function in a fresh process -- the point of the package: a regular program loads a small
-local model and just calls it.
+The artifact contract (:mod:`mixle.task.artifact`) makes a model durable.
+``TaskModel`` makes it directly usable by pairing a fitted model with an I/O
+adapter that converts raw application inputs into model features and converts
+model outputs into application results. The adapter is serialized in the
+artifact manifest, so ``TaskModel.load(path)`` reconstructs the full
+``raw_input -> result`` callable in a fresh process.
 
-Adapters self-describe and self-rebuild through a registry (``register_adapter`` / ``IOAdapter.from_spec``). The
-built-in :class:`TextClassifierIO` is the workhorse for the distillation path: a dependency-free hashed
-character n-gram featurizer feeds a small classifier whose argmax indexes a stored label list -- the shape of a
-"scrape this field" / "classify this line" model you distill from a big teacher and run locally.
+Adapters self-describe and rebuild through a registry
+(``register_adapter`` / ``IOAdapter.from_spec``). The built-in
+:class:`TextClassifierIO` supports the distillation path with a dependency-free
+hashed character n-gram featurizer, a small classifier, and a stored label map.
 """
 
 from __future__ import annotations
@@ -29,8 +29,9 @@ from mixle.task import artifact as _artifact
 class HashedNGram:
     """Map a string to a fixed-width float vector by hashing its character n-grams into ``dim`` buckets.
 
-    Deterministic and dependency-free (stdlib ``hashlib``), so it serializes as three numbers and rebuilds
-    identically anywhere -- no fitted vocabulary, no external tokenizer. Counts are L2-normalized per row.
+    The featurizer is deterministic and dependency-free. It serializes as three
+    scalar settings and rebuilds without a fitted vocabulary or external
+    tokenizer. Counts are L2-normalized per row.
     """
 
     def __init__(self, n: int = 3, dim: int = 256, seed: int = 0) -> None:
@@ -43,6 +44,7 @@ class HashedNGram:
         return int.from_bytes(h, "little") % self.dim
 
     def transform(self, texts: list[str]) -> np.ndarray:
+        """Return L2-normalized hashed n-gram feature rows for ``texts``."""
         out = np.zeros((len(texts), self.dim), dtype=np.float32)
         for i, t in enumerate(texts):
             s = f" {t} "
@@ -54,20 +56,23 @@ class HashedNGram:
         return out / np.where(norms > 0, norms, 1.0)
 
     def to_spec(self) -> dict[str, Any]:
+        """Return the serializable featurizer configuration."""
         return {"n": self.n, "dim": self.dim, "seed": self.seed}
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> HashedNGram:
+        """Rebuild a featurizer from :meth:`to_spec` output."""
         return cls(n=spec["n"], dim=spec["dim"], seed=spec["seed"])
 
 
 class HashedRecord:
-    """Map a heterogeneous record (tuple or dict) to a fixed vector by the hashing trick -- tabular tasks.
+    """Map a heterogeneous record to a fixed-width hashed feature vector.
 
-    Each field is hashed by ``key``: a categorical/string/bool value contributes a 1 at ``hash("key=value")``; a
-    numeric value contributes a bounded ``tanh(value)`` at ``hash("num:key")`` (and its presence at a second
-    bucket). Stateless and deterministic -- no fitted encoder or vocabulary -- so it serializes as two numbers and
-    rebuilds identically. The shape of a "classify this record / route this ticket / flag this transaction" model.
+    Each tuple position or dictionary key owns a hashed namespace. Categorical,
+    string, and boolean values contribute an indicator feature; numeric values
+    contribute a bounded value feature and a presence feature. The transform is
+    stateless and deterministic, so it serializes as two scalar settings and
+    rebuilds without a fitted encoder or vocabulary.
     """
 
     def __init__(self, dim: int = 256, seed: int = 0) -> None:
@@ -86,6 +91,7 @@ class HashedRecord:
         return [("0", record)]  # a bare scalar/string record
 
     def transform(self, records: list[Any]) -> np.ndarray:
+        """Return L2-normalized hashed feature rows for heterogeneous records."""
         out = np.zeros((len(records), self.dim), dtype=np.float32)
         for i, record in enumerate(records):
             for key, value in self._items(record):
@@ -100,10 +106,12 @@ class HashedRecord:
         return out / np.where(norms > 0, norms, 1.0)
 
     def to_spec(self) -> dict[str, Any]:
+        """Return the serializable record-featurizer configuration."""
         return {"dim": self.dim, "seed": self.seed}
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> HashedRecord:
+        """Rebuild a record featurizer from :meth:`to_spec` output."""
         return cls(dim=spec["dim"], seed=spec["seed"])
 
 
@@ -183,17 +191,21 @@ class _ClassifierIO:
         return e / e.sum(axis=1, keepdims=True)
 
     def predict_batch(self, module: Any, raw_inputs: list[Any]) -> list[str]:
+        """Predict the most likely label for each raw input."""
         idx = self.logits_batch(module, raw_inputs).argmax(axis=1)
         return [self.labels[i] for i in idx]
 
     def predict(self, module: Any, raw_input: Any) -> str:
+        """Predict the most likely label for one raw input."""
         return self.predict_batch(module, [raw_input])[0]
 
     def to_spec(self) -> dict[str, Any]:
+        """Return a serializable adapter specification for artifacts."""
         return {"kind": self.kind, "featurizer": self.featurizer.to_spec(), "labels": self.labels}
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> Any:
+        """Rebuild an adapter from its artifact ``io`` specification."""
         return cls(cls._featurizer_cls.from_spec(spec["featurizer"]), spec["labels"])
 
 
@@ -280,13 +292,16 @@ class StructuredClassifierIO:
         return e / e.sum(axis=1, keepdims=True)
 
     def predict_batch(self, model: Any, raw_inputs: list[Any]) -> list[str]:
+        """Predict labels for raw inputs by maximizing the per-label joint score."""
         idx = self.logits_batch(model, raw_inputs).argmax(axis=1)
         return [self.labels[i] for i in idx]
 
     def predict(self, model: Any, raw_input: Any) -> str:
+        """Predict the label for one raw input."""
         return self.predict_batch(model, [raw_input])[0]
 
     def to_spec(self) -> dict[str, Any]:
+        """Return the serializable structured-classifier adapter specification."""
         return {
             "kind": self.kind,
             "field_keys": self.field_keys,
@@ -296,6 +311,7 @@ class StructuredClassifierIO:
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> StructuredClassifierIO:
+        """Rebuild a structured-classifier adapter from its artifact ``io`` specification."""
         return cls(spec.get("field_keys"), spec["label_index"], spec["labels"])
 
 
@@ -325,9 +341,11 @@ class TaskModel:
         self.meta = dict(meta or {})
 
     def __call__(self, raw_input: Any) -> Any:
+        """Run the wrapped model on one raw input through its adapter."""
         return self.adapter.predict(self.model, raw_input)
 
     def batch(self, raw_inputs: list[Any]) -> list[Any]:
+        """Run the wrapped model on a batch of raw inputs through its adapter."""
         if hasattr(self.adapter, "predict_batch"):
             return self.adapter.predict_batch(self.model, raw_inputs)
         return [self.adapter.predict(self.model, x) for x in raw_inputs]

@@ -81,7 +81,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
         name: str | None = None,
         len_dist: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
-        """HierarchicalDirichletProcessMixtureDistribution object.
+        """Create a finite hierarchical Dirichlet-process mixture approximation.
 
         Args:
             components: List of K shared atom distributions (each carrying its
@@ -92,7 +92,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
             group_weights (Optional[np.ndarray]): (J, K) fitted weights of the
                 training groups (used by seq_local_elbo); None scores all groups
                 with beta.
-            name (Optional[str]): Name of object.
+            name (Optional[str]): Optional distribution name.
             len_dist (Optional): Distribution of group sizes; a NullDistribution
                 (the default) treats sizes as exogenous.
 
@@ -159,6 +159,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
         return np.exp(self.log_density(x))
 
     def density_semantics(self):
+        """Return density semantics for the expected-weight HDP mixture approximation."""
         from mixle.stats.compute.pdist import DensitySemantics
 
         return DensitySemantics.ESTIMATE  # plug-in with expected global weights (expected-table-count approx.)
@@ -179,7 +180,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
             x (Sequence[Sequence]): Iterable of groups (sequences of observations).
 
         Returns:
-            Tuple (lengths, offsets, flat_enc, len_enc) for use with seq_ methods.
+            Tuple ``(lengths, offsets, flat_enc, len_enc)`` consumed by vectorized ``seq_*`` methods.
 
         """
         lengths = np.asarray([len(u) for u in x], dtype=int)
@@ -295,7 +296,7 @@ class HierarchicalDirichletProcessMixtureSampler(DistributionSampler):
     (per-group weights drawn from Dirichlet(alpha*beta))."""
 
     def __init__(self, dist: HierarchicalDirichletProcessMixtureDistribution, seed: int | None = None) -> None:
-        """HierarchicalDirichletProcessMixtureSampler object."""
+        """Create a sampler for the finite HDP-mixture approximation."""
         rng = RandomState(seed)
         self.rng = RandomState(rng.randint(0, maxrandint))
         self.dist = dist
@@ -338,7 +339,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """HierarchicalDirichletProcessMixtureAccumulator object."""
+        """Create an accumulator for HDP-mixture sufficient statistics."""
         self.accumulators = list(accumulators)
         self.num_components = len(accumulators)
         self.name = name
@@ -447,6 +448,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
         return self
 
     def scale(self, c: float) -> "HierarchicalDirichletProcessMixtureAccumulator":
+        """Scale linear HDP mixture sufficient statistics while preserving metadata."""
         # Scale only the linear count statistics (per-group counts, atom accumulators, len accumulator).
         # ``prev_beta`` and ``prev_alpha`` are non-linear scalar/vector metadata carried for the
         # estimator's global-weight update; the inherited default would multiply and corrupt them.
@@ -505,7 +507,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
 
 
 class HierarchicalDirichletProcessMixtureAccumulatorFactory(StatisticAccumulatorFactory):
-    """Factory that creates HierarchicalDirichletProcessMixtureAccumulator objects."""
+    """Factory for HDP-mixture sufficient-statistic accumulators."""
 
     def __init__(
         self,
@@ -514,7 +516,7 @@ class HierarchicalDirichletProcessMixtureAccumulatorFactory(StatisticAccumulator
         name: str | None,
         keys: str | None,
     ) -> None:
-        """HierarchicalDirichletProcessMixtureAccumulatorFactory object."""
+        """Create an HDP-mixture accumulator factory."""
         self.factories = list(factories)
         self.len_factory = len_factory
         self.name = name
@@ -541,7 +543,7 @@ class HierarchicalDirichletProcessMixtureEstimator(ParameterEstimator):
         keys: str | None = None,
         len_estimator: ParameterEstimator | None = None,
     ) -> None:
-        """HierarchicalDirichletProcessMixtureEstimator object."""
+        """Create an estimator for the finite HDP-mixture approximation."""
         self.estimators = list(estimators)
         self.num_components = len(estimators)
         self.gamma = float(gamma)
@@ -606,7 +608,7 @@ class HierarchicalDirichletProcessMixtureEstimator(ParameterEstimator):
                 ``HierarchicalDirichletProcessMixtureAccumulator.value()``.
 
         Returns:
-            HierarchicalDirichletProcessMixtureDistribution object.
+            Fitted hierarchical Dirichlet-process mixture approximation.
 
         """
         group_counts, prev_beta, prev_alpha, comp_stats, len_val = suff_stat
@@ -653,7 +655,7 @@ class HierarchicalDirichletProcessMixtureDataEncoder(DataSequenceEncoder):
     """Encodes groups into a flat component encoding with per-group offsets."""
 
     def __init__(self, encoder: DataSequenceEncoder, len_encoder: DataSequenceEncoder | None = None) -> None:
-        """HierarchicalDirichletProcessMixtureDataEncoder object.
+        """Data encoder for grouped HDP-mixture observations.
 
         Args:
             encoder (DataSequenceEncoder): Encoder for the atom (component)

@@ -4,7 +4,6 @@ mixle.data package
 .. automodule:: mixle.data
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Subpackages
 -----------
@@ -27,5 +26,6 @@ Submodules
    mixle.data.partition
    mixle.data.schema
    mixle.data.stream_token_source
+   mixle.data.streaming_corpus
    mixle.data.structure
    mixle.data.validate

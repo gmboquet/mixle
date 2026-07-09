@@ -96,12 +96,14 @@ def morris_screening(
     seed: int = 0,
     names: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Morris elementary-effects screening -- a cheap first factor ranking.
+    """Morris elementary-effects screening -- a low-cost first factor ranking.
 
     Walks ``trajectories`` one-factor-at-a-time paths on a ``levels``-grid; the mean absolute elementary
     effect ``mu_star[i]`` ranks influence and the spread ``sigma[i]`` flags nonlinearity/interactions.
     Cost: ``trajectories * (d + 1)`` evaluations -- far fewer than Sobol, for an initial screen.
     """
+    if levels < 2:
+        raise ValueError(f"morris_screening requires levels >= 2 (a single-level grid has no step), got {levels}")
     bounds = np.asarray(bounds, dtype=float)
     d = len(bounds)
     rng = np.random.RandomState(seed)
@@ -164,6 +166,15 @@ def fast_indices(
     if var <= 0:
         return {"S1": s1, "names": out_names, "var": 0.0}
     m = int(harmonics)
+    if 2.0 * m >= int(n) - 1:
+        # the Tarantola correction's denominator (1 - 2m/(n-1)) must stay strictly positive; once
+        # 2m/(n-1) reaches or exceeds 1, the correction denominator hits zero or goes negative,
+        # flipping the sign of a subsequent nonsensical S1 rather than raising. clip(0, 1) at the
+        # end would otherwise silently mask this as an ordinary "no sensitivity" result.
+        raise ValueError(
+            f"fast_indices requires 2*harmonics < n-1 for a well-posed Tarantola correction "
+            f"(harmonics={m}, n={n}); increase n or lower harmonics."
+        )
     for i in range(d):
         yi = y[np.argsort(perms[i])]  # reorder output along input i's search-curve coordinate
         spectrum = np.abs(np.fft.rfft(yi - yi.mean())) ** 2
@@ -187,7 +198,7 @@ def dgsm(
 
     ``nu[i] = E[(df/dx_i)^2]`` over the input box, estimated by central finite differences at ``n``
     low-discrepancy points. Unlike the first-order Sobol index, a DGSM is nonzero whenever an input
-    matters *anywhere* -- including purely through interactions -- so it is a cheap, robust screen that
+    matters *anywhere* -- including purely through interactions -- so it is a low-cost, robust screen that
     upper-bounds the total Sobol index (Sobol & Kucherenko, via the Poincare inequality:
     ``ST[i] <= (L_i / pi)^2 * nu[i] / Var(y)`` for a uniform input of width ``L_i``). The reported
     ``importance`` is ``L_i^2 * nu[i]`` normalized to sum to one -- a dimensionless influence ranking.

@@ -1,4 +1,9 @@
-"""Compute engines for backend-neutral mixle kernels."""
+"""Public compute-engine registry and precision front door for Mixle kernels.
+
+This namespace exposes the NumPy, Torch, JAX, symbolic, and precision-aware
+engine utilities used by backend-neutral scoring, estimation, and data-transfer
+paths.
+"""
 
 from __future__ import annotations
 

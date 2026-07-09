@@ -3,8 +3,7 @@
 mixle imports and runs fine WITHOUT any compiled extension (``mixle.engines.extended`` falls back to the
 pure-numpy double-double path). Calling :func:`compile_dd_kernels` builds the optional accelerator in
 place; afterwards ``dd_dot`` automatically uses it (~3x via hardware FMA). Requires Cython + a C compiler.
-A future ``pyproject`` build-system hook can build this on ``pip install``; keeping it on-demand avoids a
-hard compiler dependency.
+Keeping the build on demand avoids making a C compiler a hard installation dependency.
 """
 
 from __future__ import annotations

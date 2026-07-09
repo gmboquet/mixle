@@ -1,6 +1,6 @@
 """Bootstrap and permutation inference for arbitrary statistics.
 
-Honest uncertainty without distributional assumptions, by resampling the data itself:
+Distribution-free uncertainty estimates by resampling the data itself:
 
   * :func:`bootstrap` -- a confidence interval for *any* statistic ``T(data)``, with the resampling
     scheme matched to the data's dependence structure: plain i.i.d., **stratified** (resample within

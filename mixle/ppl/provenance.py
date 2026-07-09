@@ -2,8 +2,8 @@
 
 The estimator path has :func:`mixle.inference.fit_with_provenance`; this is its PPL counterpart. It times a
 ``rv.fit(...)`` (any ``how`` -- EM / MAP / MCMC / VI / ...), then builds a :class:`~mixle.inference.
-provenance.Header` from the fitted model's *lowered* distribution (``rv.dist``), so the header gets a
-real schema and final log-likelihood alongside the data hash, training settings, timing, resources, and
+provenance.Header` from the fitted model's *lowered* distribution (``rv.dist``), so the header gets the
+concrete schema and final log-likelihood alongside the data hash, training settings, timing, resources, and
 environment. The header is returned (and attached as ``rv.header`` when the RV permits attribute setting).
 """
 
@@ -30,7 +30,7 @@ def fit_with_provenance(rv: Any, data: Any, *, seed: int | None = None, **fit_kw
     if cpu0 is not None and usage.get("cpu_time_s") is not None:
         usage = {"cpu_time_s": round(usage["cpu_time_s"] - cpu0, 3), "peak_rss_mb": usage.get("peak_rss_mb")}
 
-    model = getattr(fitted, "dist", fitted)  # lowered concrete distribution -> real schema + scoring
+    model = getattr(fitted, "dist", fitted)  # lowered concrete distribution -> schema + scoring
     training = {
         "method": fit_kw.get("how", "auto"),
         "max_its": fit_kw.get("max_its"),

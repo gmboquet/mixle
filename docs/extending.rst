@@ -35,6 +35,10 @@ Use a nearby family as the template. For example, start from another continuous
 univariate family when adding a scalar density, or from an existing combinator
 when the new object delegates to child distributions.
 
+Keep the public docstring and guide text in the same pass as the code. A new
+family is not complete until its observation shape, fitted parameters,
+capabilities, missing-data behavior, and optional dependencies are documented.
+
 Minimum Family Checklist
 ------------------------
 
@@ -45,6 +49,9 @@ Minimum Family Checklist
 * encoder accepts the public observation shape;
 * ``str``/serialization behavior is tested when the family supports it;
 * optional capability methods are present only when they are correct.
+* non-finite observations reject, marginalize, or model missingness explicitly;
+* impossible observations score as ``-inf`` or raise a documented error, not
+  ``NaN``.
 
 Capabilities
 ------------
@@ -75,6 +82,10 @@ the behavior:
 Use ``mixle.describe`` during development to confirm the object advertises the
 expected behavior.
 
+Capability claims should be exact. If a method is approximate, conditional on
+optional dependencies, or valid only for a subset of parameters, document that
+restriction in the docstring and guide page.
+
 For the full list of behavior contracts and predicates, see
 :doc:`capabilities-contracts`.
 
@@ -86,7 +97,7 @@ composite can enumerate when its children can enumerate; a transform can expose
 density only when the change of variables is valid; a latent wrapper can expose
 posterior queries only when it can compute them.
 
-Keep the observation shape obvious. A user should be able to look at one raw
+Keep the observation shape inspectable. A user should be able to look at one raw
 record and understand which child handles each part.
 
 Add a Neural Leaf
@@ -152,6 +163,8 @@ Public extensions should update:
 * :doc:`api-overview` if a new public namespace or common import is added;
 * examples or tutorials when the behavior is user-facing;
 * generated API reference pages via ``make -C docs apidoc``.
+* :doc:`stability-and-missing-data` when the extension changes non-finite or
+  missing-data behavior.
 
 Testing Requirements
 --------------------
@@ -164,6 +177,7 @@ Add tests at the same level as the extension:
 * capability-specific tests;
 * optional-dependency skip markers where needed;
 * integration tests when the extension participates in ``optimize``.
+* artifact reload tests when the extension can be saved or registered.
 
 Design Rule
 -----------

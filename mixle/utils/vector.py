@@ -1,4 +1,8 @@
-"""Vector contains functions useful for estimation and evaluation of mixle classes."""
+"""Vector and sorted-array utilities used by Mixle estimators.
+
+The helpers cover special functions, sorted merges, count aggregation, and
+linear-algebra conveniences shared by legacy estimation and evaluation code.
+"""
 
 from collections.abc import Iterable, Sequence
 from typing import SupportsIndex, overload
@@ -11,11 +15,15 @@ from mixle.engines.arithmetic import *
 
 
 @overload
-def gammaln(x: np.ndarray) -> np.ndarray: ...
+def gammaln(x: np.ndarray) -> np.ndarray:
+    """Return log-gamma values for an ndarray input."""
+    ...
 
 
 @overload
-def gammaln(x: float) -> float: ...
+def gammaln(x: float) -> float:
+    """Return the scalar log-gamma value for a float input."""
+    ...
 
 
 def gammaln(x: np.ndarray | float | int) -> np.ndarray | float:

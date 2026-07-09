@@ -4,7 +4,6 @@ mixle.stats.combinator package
 .. automodule:: mixle.stats.combinator
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------
@@ -12,9 +11,11 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.stats.combinator._base
    mixle.stats.combinator.censored
    mixle.stats.combinator.composite
    mixle.stats.combinator.conditional
+   mixle.stats.combinator.copula
    mixle.stats.combinator.exponential_tilt
    mixle.stats.combinator.finite_stochastic_transform
    mixle.stats.combinator.hurdle

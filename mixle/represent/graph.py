@@ -31,6 +31,7 @@ class GraphEmbedding:
         self._module: Any = None
 
     def module(self) -> Any:
+        """Build or return the Torch graph-embedding module."""
         if self._module is None:
             import torch
             import torch.nn as nn
@@ -70,6 +71,7 @@ class GraphEncoder(ModalityEncoder):
         self.dim = int(embedding.dim)
 
     def encode(self, raw: Any) -> Any:
+        """Encode graph nodes and adjacency into Torch embeddings."""
         import torch
 
         nodes, adj = raw
@@ -78,6 +80,7 @@ class GraphEncoder(ModalityEncoder):
         return self.embedding.module()(x, a)  # (n_nodes, dim)
 
     def encode_numpy(self, raw: Any) -> np.ndarray:
+        """Encode a graph and return NumPy embeddings."""
         import torch
 
         with torch.no_grad():

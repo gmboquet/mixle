@@ -13,7 +13,7 @@ chosen and extension authors can improve it deliberately.
 Entry Points
 ------------
 
-The main automatic-modeling functions live in ``mixle.utils.automatic``:
+The low-level automatic-modeling functions live in ``mixle.utils.automatic``:
 
 ``get_estimator(data, ...)``
     Infer a first estimator from a sequence of observations.
@@ -29,14 +29,30 @@ The main automatic-modeling functions live in ``mixle.utils.automatic``:
 ``get_dpm_mixture(data, ...)``
     Build a Dirichlet-process mixture path over automatically typed data.
 
+The task-layer wrapper lives in ``mixle.task``:
+
 ``recommend_model(data, ...)``
-    Task-layer wrapper that turns the structure profile into a user-facing
-    recommendation object with field choices, confidence gaps, dependencies,
-    warnings, and fit helpers.
+    Turn the structure profile into a user-facing recommendation object with
+    field choices, confidence gaps, dependencies, warnings, and fit helpers.
 
 Use ``analyze_structure`` when you want to inspect the automatic choice. Use
 ``get_estimator`` when you want a quick baseline. Use ``recommend_model`` when
 the result must be explained to a human or stored in a report.
+
+.. code-block:: python
+
+   from mixle.inference import optimize
+   from mixle.task import recommend_model
+   from mixle.utils.automatic import analyze_structure, get_estimator
+
+   profile = analyze_structure(rows, pairwise=True, validate_marginals=True)
+   estimator = profile.recommend()
+   model = optimize(rows, estimator, max_its=50, out=None)
+
+   baseline = get_estimator(rows)
+   recommendation = recommend_model(rows, pairwise=True)
+   low_confidence = recommendation.low_confidence_fields()
+   explanation = recommendation.explain()
 
 Factory Functions
 -----------------
@@ -109,6 +125,28 @@ These objects are part of the audit trail. They let automatic modeling explain
 where it was confident, where it was ambiguous, and which dependencies look
 worth modeling jointly.
 
+Persist the profile when automatic modeling influences a production model. The
+profile is the evidence behind the estimator tree, including low-confidence
+fields, ignored fields, warnings, and dependency hints that may be hidden by
+the fitted parameters alone.
+
+Audit Fields
+------------
+
+For each automatic run, keep enough profile metadata to reconstruct why a model
+shape was chosen:
+
+* field path and observed kind;
+* missing-value rate and unsupported-value notes;
+* recommended family and runner-up family;
+* score gap between the best candidate and the runner-up;
+* validation score or goodness-of-fit warning when available;
+* dependency hints that changed the recommended structure; and
+* warnings for ignored, identifier-like, sparse, or low-sample fields.
+
+The estimator tree is the executable artifact. The profile is the audit record
+that explains the estimator tree.
+
 Scoring Logic
 -------------
 
@@ -174,6 +212,25 @@ Default priors are deliberately conservative and generic. They are useful for
 small samples and smoothing, but domain priors should be specified explicitly
 when they matter.
 
+Missing and Non-Finite Values
+-----------------------------
+
+Automatic modeling should not silently convert data quality issues into model
+assumptions. Missingness appears in field profiles and, where supported,
+factory functions choose optional or marginalizing wrappers. Non-finite numeric
+values are not ordinary observations; they should either be rejected by the
+chosen family or handled through an explicit missing-data contract.
+
+When ``NaN`` carries semantic meaning in the upstream data, preserve that
+meaning outside automatic modeling or define a visible field transformation.
+Do not rely on the automatic path to impute, coerce, or erase it.
+
+The automatic path owns the estimator choice, not the caller's data buffer. If
+the caller passes a list, array, or record object containing ``NaN`` or
+``inf``, automatic modeling should either route the value through an explicit
+missing/non-finite contract or surface a warning or rejection. It should not
+rewrite the original object as a side effect of type detection.
+
 Dependency Hints
 ----------------
 
@@ -206,6 +263,15 @@ For production modeling, do not leave the important choice hidden in automatic
 typing. Persist the estimator or a model specification, store profile summaries,
 and record why ambiguous fields were accepted or overridden.
 
+What It Does Not Decide
+-----------------------
+
+Automatic modeling does not decide whether the dataset is exchangeable, whether
+an identifier is safe to use, whether a dependency is causal, or whether a
+metric is acceptable for the application. Those decisions belong in the model
+card or artifact review. The automatic report supplies evidence; the caller
+owns the final modeling judgment.
+
 Failure Modes
 -------------
 
@@ -216,14 +282,14 @@ Failure Modes
      - Response
    * - Identifier field is modeled as categorical
      - Mark it ignored or remove it before fitting.
-   * - Winner and runner-up have tiny score gap
+   * - Winner and runner-up have a small score gap
      - Use domain knowledge or collect more data.
    * - Positive skewed data is split between Gamma and log-normal
      - Compare held-out likelihood and tail behavior.
    * - Count data is overdispersed
      - Consider negative binomial, mixture, or latent structure.
    * - Pairwise hints are dense
-     - Prefer a latent model or graphical structure over many ad hoc joints.
+     - Prefer a latent model or graphical structure over many one-off joints.
    * - LLM-designed model disagrees with profile
      - Fit-validate both and keep the frontier report.
 

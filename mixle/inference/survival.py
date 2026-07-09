@@ -126,12 +126,15 @@ class CoxResult:
     n_iter: int
 
     def hazard_ratios(self) -> np.ndarray:
+        """Return exponentiated Cox coefficients."""
         return np.exp(self.coef)
 
     def z_values(self) -> np.ndarray:
+        """Return Wald z statistics for Cox coefficients."""
         return self.coef / self.se
 
     def p_values(self) -> np.ndarray:
+        """Return two-sided normal-approximation p-values for Cox coefficients."""
         return 2.0 * stats.norm.sf(np.abs(self.z_values()))
 
 

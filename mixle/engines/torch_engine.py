@@ -1,4 +1,8 @@
-"""Torch implementation of the ComputeEngine protocol."""
+"""Torch implementation of the ``ComputeEngine`` protocol.
+
+The engine handles tensor placement, dtype policy, autograd support, optional
+compilation, and component sharding for resident scoring and estimation paths.
+"""
 
 from __future__ import annotations
 
@@ -192,11 +196,19 @@ class TorchEngine(ComputeEngine):
     isnan = staticmethod(lambda x: torch.isnan(x))
     isinf = staticmethod(lambda x: torch.isinf(x))
 
-    @staticmethod
-    def sum(x, *args, **kwargs):
-        """Return ``torch.sum`` accepting either ``axis`` or ``dim``."""
+    def sum(self, x, *args, **kwargs):
+        """Return ``torch.sum`` accepting either ``axis`` or ``dim``.
+
+        Promotes a floating input to :attr:`accumulator_dtype` when the caller doesn't pass an explicit
+        ``dtype=`` -- mirroring :meth:`NumpyEngine.sum`. Without this, ``torch.sum`` accumulates in the
+        input tensor's own dtype by default, so a float32-precision fit on this engine would silently
+        drift on large N (the exact catastrophic-cancellation risk ``accumulator_dtype`` exists to
+        guard against) while the numpy engine, which already promotes, stayed accurate.
+        """
         if "axis" in kwargs and "dim" not in kwargs:
             kwargs["dim"] = kwargs.pop("axis")
+        if kwargs.get("dtype") is None and torch.is_tensor(x) and x.dtype.is_floating_point:
+            kwargs["dtype"] = self.accumulator_dtype
         return torch.sum(x, *args, **kwargs)
 
     @staticmethod
@@ -392,8 +404,9 @@ def _dtensor_ops_supported() -> bool:
     """Whether this torch registers DTensor sharding strategies for the mixture E-step's ops.
 
     torch >= 2.5 does (logsumexp / isinf / ... verified bit-identical on 2.12); torch 2.0-2.4 do not,
-    so a component-sharded fit dies deep in the kernel. A version check (not a runtime probe, which
-    would need a live process group at engine construction) keeps the gate cheap and side-effect-free."""
+    so a component-sharded fit dies deep in the kernel. A version check (rather than a runtime probe,
+    which would need a live process group at engine construction) keeps the gate low-overhead and
+    side-effect-free."""
     try:
         major, minor = (int(p) for p in torch.__version__.split(".")[:2])
     except (ValueError, AttributeError):

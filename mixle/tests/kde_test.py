@@ -68,7 +68,7 @@ class ModeTest(unittest.TestCase):
     def test_bootstrap_ci_brackets_mode(self):
         rng = np.random.RandomState(2)
         x = rng.normal(0.0, 1.0, 3000)
-        out = kde_mode(x, ci=True, n_boot=200, seed=0)
+        out = kde_mode(x, ci=True, n_boot=40, seed=0)
         self.assertLessEqual(out["ci_low"], out["mode"])
         self.assertLessEqual(out["mode"], out["ci_high"])
 

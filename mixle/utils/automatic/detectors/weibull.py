@@ -1,4 +1,9 @@
-"""Weibull continuous candidate -- positive-support lifetime/strength family (shape != 1 signature)."""
+"""Automatic detector for positive Weibull lifetime or strength data.
+
+The detector fits a two-parameter Weibull with fixed zero location, rejects
+near-exponential shapes, and supplies scoring and factory hooks for automatic
+distribution selection.
+"""
 
 import math
 
@@ -51,8 +56,11 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
 
 def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
     from mixle.stats import WeibullDistribution
+    from mixle.utils.automatic.profiling import _value_array_from_vdict
 
-    return WeibullDistribution(1.0, 1.0).estimator()
+    fit = _fit(_value_array_from_vdict(vdict))
+    shape, scale = fit if fit is not None else (1.0, 1.0)
+    return WeibullDistribution(shape, scale).estimator(pseudo_count=pseudo_count)
 
 
 def _cdf(arr: np.ndarray):

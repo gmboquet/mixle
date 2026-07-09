@@ -66,6 +66,7 @@ class GeneralizedGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for generalized Gaussian distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         # declaring the engine-neutral density lets the symbolic->numba lowering compile a scalar kernel
@@ -159,6 +160,7 @@ class GeneralizedGaussianSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one sample or an array of iid samples."""
         d = self.dist
         n = 1 if size is None else int(size)
         g = self.rng.gamma(1.0 / d.beta, 1.0, size=n)
@@ -180,6 +182,7 @@ class GeneralizedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: GeneralizedGaussianDistribution | None) -> None:
+        """Accumulate weighted raw moments up to order four for one observation."""
         xv = float(x)
         self.count += weight
         self.s1 += weight * xv
@@ -188,9 +191,11 @@ class GeneralizedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.s4 += weight * xv**4
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
+        """Accumulate weighted raw moments up to order four from encoded data."""
         xv = np.asarray(x, dtype=np.float64)
         w = np.asarray(weights, dtype=np.float64)
         self.count += float(w.sum())
@@ -200,9 +205,11 @@ class GeneralizedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.s4 += float(np.dot(w, xv**4))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float, float, float]) -> "GeneralizedGaussianAccumulator":
+        """Merge another generalized-Gaussian sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.s1 += suff_stat[1]
         self.s2 += suff_stat[2]
@@ -211,13 +218,16 @@ class GeneralizedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, float, float, float, float]:
+        """Return count and raw moment sums through order four."""
         return self.count, self.s1, self.s2, self.s3, self.s4
 
     def from_value(self, x: tuple[float, float, float, float, float]) -> "GeneralizedGaussianAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.count, self.s1, self.s2, self.s3, self.s4 = (float(v) for v in x)
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -225,10 +235,12 @@ class GeneralizedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "GeneralizedGaussianDataEncoder":
+        """Return the encoder used by this accumulator."""
         return GeneralizedGaussianDataEncoder()
 
 
@@ -240,6 +252,7 @@ class GeneralizedGaussianAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> GeneralizedGaussianAccumulator:
+        """Create a fresh generalized-Gaussian accumulator."""
         return GeneralizedGaussianAccumulator(name=self.name, keys=self.keys)
 
 
@@ -254,11 +267,13 @@ class GeneralizedGaussianEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> GeneralizedGaussianAccumulatorFactory:
+        """Return an accumulator factory for generalized-Gaussian raw moments."""
         return GeneralizedGaussianAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[float, float, float, float, float]
     ) -> GeneralizedGaussianDistribution:
+        """Estimate location, scale, and shape from weighted raw moments."""
         from scipy.optimize import brentq
 
         count, s1, s2, s3, s4 = suff_stat
@@ -292,4 +307,5 @@ class GeneralizedGaussianDataEncoder(DataSequenceEncoder):
         return isinstance(other, GeneralizedGaussianDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
+        """Encode observations as a floating-point array."""
         return np.asarray(x, dtype=np.float64)

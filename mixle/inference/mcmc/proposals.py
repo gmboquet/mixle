@@ -1,4 +1,9 @@
-"""Proposal kernels for Metropolis-Hastings samplers."""
+"""Proposal kernels and adaptation helpers for Metropolis-Hastings samplers.
+
+The module collects random-walk, adaptive covariance, mixture, and discrete
+proposal objects with explicit transition-density methods for Hastings
+corrections.
+"""
 
 from __future__ import annotations
 

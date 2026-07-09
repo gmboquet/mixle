@@ -12,13 +12,14 @@ so you can answer the questions that do *not* require listing:
 * **unrank(i)** -- the i-th most probable sequence, by random access (one model query per step), and
 * **mass_above(min_log_prob)** -- a bracket on the cumulative probability of that head.
 
-The trick (see ``notes/enumerating-a-language-model.md``): the number of model forward passes is bounded by
-the number of distinct *prefixes* (<= V^(L-1)), **not** by the rank k. We build a count histogram per prefix
-and compose them up the prefix tree -- but because each step ``p(x_t | prefix)`` is a *distinct* function of
-the prefix, the children are **not** independent, so this is a tree recursion (sum of per-token *shifted*
-child histograms), not the independent-factor convolution that :func:`convolve_indices` does for ``Composite``.
+The key accounting fact is that the number of model forward passes is bounded by the number of
+distinct *prefixes* (<= V^(L-1)), **not** by the rank k. We build a count histogram per prefix and
+compose them up the prefix tree -- but because each step ``p(x_t | prefix)`` is a *distinct* function
+of the prefix, the children are **not** independent, so this is a tree recursion (sum of per-token
+*shifted* child histograms), not the independent-factor convolution that :func:`convolve_indices` does
+for ``Composite``.
 
-The bridge is a thin adapter, :class:`AutoregressiveEnumerable`, that implements just enough of the
+The bridge is a thin adapter, :class:`AutoregressiveEnumerable`, that implements the parts of the
 distribution count-index contract (:meth:`~AutoregressiveEnumerable.quantized_count_index`,
 :meth:`~AutoregressiveEnumerable.log_density`, :meth:`~AutoregressiveEnumerable.structural_fine_bucket`) that
 the existing drivers -- :func:`~mixle.enumeration.quantization.core.count_budget_index` and the
@@ -555,9 +556,11 @@ class AutoregressiveEnumerable:
                 self._cache[prefix] = self._parse_steps(raw)
 
     def structural_fine_bucket(self, sequence: Iterable[Any], quantizer: Quantizer) -> int:
+        """Return the quantized fine bucket for a sequence log density."""
         return quantizer.fine_bucket(self.log_density(tuple(sequence)))
 
     def sampler(self, seed: int | None = None) -> _ARSampler:
+        """Return an autoregressive sampler."""
         return _ARSampler(self, seed)
 
     def enumerator(self):

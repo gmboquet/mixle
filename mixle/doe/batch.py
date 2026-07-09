@@ -1,7 +1,7 @@
 """Rigorous batch (multi-point) Bayesian optimization for parallel experiment campaigns.
 
 The kriging-believer batch in :mod:`mixle.doe.bayesopt` fantasizes the posterior *mean* at each pick --
-cheap, but it discards the correlation between the batch points and the posterior uncertainty they
+low-cost, but it discards the correlation between the batch points and the posterior uncertainty they
 share, so it can place near-duplicate points. This module proposes batches under the *true joint* GP
 posterior:
 
@@ -131,6 +131,11 @@ def propose_local_penalization(
 
     if int(q) <= 0:
         raise ValueError("q must be positive.")
+    if int(q) > int(n_candidates):
+        # once every candidate's merit is set to -inf (line 174), np.argmax deterministically returns
+        # index 0 again (ties broken by first occurrence) -- the batch would silently contain
+        # duplicate points instead of raising. Name the actual constraint instead.
+        raise ValueError(f"propose_local_penalization requires q <= n_candidates (q={q}, n_candidates={n_candidates}).")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     xs, ys = _validate_xy(x, y)

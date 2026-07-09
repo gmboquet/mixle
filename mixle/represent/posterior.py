@@ -1,21 +1,23 @@
-"""Posterior retrieval -- nearest neighbours by what the MODEL believes, not by raw-feature cosine.
+"""Posterior retrieval by fitted-model affinity rather than raw-feature cosine.
 
-The differentiated half of model-based RAG: fit a mixture to heterogeneous records
-(:func:`mixle.propose` will happily do it), and retrieval similarity becomes *posterior affinity* --
-two records are close when the model's field-restricted latent posteriors agree (per-field
-Bhattacharyya, the ``balanced`` affinity from :mod:`mixle.utils.hvis`), with the 1-nat **evidence cap**
-so a single wildly-different field can testify "these differ" but can never single-handedly veto a
-pair that every other field matches. Raw-feature cosine has neither property: it weights fields by
-their numeric scale, and one hot field dominates the dot product::
+Fit a mixture to heterogeneous records and retrieval similarity becomes
+*posterior affinity*: two records are close when the model's
+field-restricted latent posteriors agree. The implementation uses the per-field
+Bhattacharyya-style ``balanced`` affinity from :mod:`mixle.utils.hvis`, with an
+evidence cap so one inconsistent field can contribute negative evidence without
+dominating every other field. Raw-feature cosine has neither property: it
+weights fields by numeric scale, and one high-variance field can dominate the
+dot product::
 
     m = mixle.propose(records, fit=True)
     r = PosteriorRetriever(m.fitted, records)          # any mixture over the records works
     r.retrieve(query, k=5)                             # [(corpus index, log-affinity), ...]
 
-Honest cost note: affinities are computed jointly over ``corpus + queries`` through the model's
-per-field likelihoods -- linear in rows for the model passes but quadratic for the affinity block, so
-this is built for corpora in the thousands, not millions. For big-corpus first-stage recall use
-:func:`mixle.represent.fit_embedder` and re-rank the shortlist here.
+Cost note: affinities are computed jointly over ``corpus + queries`` through
+the model's per-field likelihoods. Model passes are linear in rows, while the
+affinity block is quadratic, so this is intended for moderate corpora. For
+large-corpus first-stage recall, use :func:`mixle.represent.fit_embedder` and
+rerank the shortlist here.
 """
 
 from __future__ import annotations
@@ -49,7 +51,7 @@ class PosteriorRetriever:
 
     def _log_affinity(self, rows: list) -> np.ndarray:
         factors = balanced_factors(self.model, rows, field_weights=self.field_weights)
-        # pre-built per-field factors ride through the affinity= slot (posterior_mat is unused then)
+        # Pre-built per-field factors use the affinity slot; posterior_mat is unused in that path.
         return model_log_affinity(None, None, affinity=factors, evidence_cap=self.evidence_cap)
 
     def affinity_matrix(self) -> np.ndarray:

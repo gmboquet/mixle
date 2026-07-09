@@ -1,14 +1,15 @@
-"""A tiny provider-agnostic LLM surface -- so a regular program can reach a small LM, and an LM can be a teacher.
+"""Provider-agnostic LLM adapters for task teachers and local model calls.
 
 mixle has no LLM client of its own; this is the minimal adapter. An :class:`LLM` is anything with ``complete(prompt)
 -> str``. :class:`CallableLLM` wraps a local function (a llama.cpp/transformers call, or a test double);
 :class:`OpenAICompatLLM` posts to any OpenAI-compatible ``/v1/chat/completions`` endpoint (Ollama, vLLM, TGI,
 llama.cpp server, a hosted API) using only the standard library -- no ``openai``/``requests`` dependency.
 
-The point of having it here: :func:`llm_labeler` turns an LLM into the *teacher* the rest of ``mixle.task``
-distills from. ``teacher = llm_labeler(OpenAICompatLLM(...), ["spam", "ham"])`` plugs a frontier model straight
-into :func:`mixle.task.distill.distill` / :func:`mixle.task.active.active_distill` -- the expensive LM labels a
-little, the tiny local student serves the rest. The same adapter lets an LLM *design* a model (:mod:`mixle.task.design`).
+:func:`llm_labeler` turns an LLM into the teacher the rest of ``mixle.task``
+distills from. ``teacher = llm_labeler(OpenAICompatLLM(...), ["spam", "ham"])`` plugs a hosted or local model
+into :func:`mixle.task.distill.distill` / :func:`mixle.task.active.active_distill`: the LLM labels selected
+examples and the calibrated local student serves requests that it can answer. The same adapter lets an LLM
+propose a model specification (:mod:`mixle.task.design`).
 """
 
 from __future__ import annotations
@@ -23,7 +24,9 @@ from typing import Any, Protocol, runtime_checkable
 class LLM(Protocol):
     """Anything that can turn a prompt into text. The whole contract the rest of the package depends on."""
 
-    def complete(self, prompt: str, *, system: str | None = None, **kwargs: Any) -> str: ...
+    def complete(self, prompt: str, *, system: str | None = None, **kwargs: Any) -> str:
+        """Return model text for a prompt and optional system instruction."""
+        ...
 
 
 class CallableLLM:
@@ -33,6 +36,7 @@ class CallableLLM:
         self.fn = fn
 
     def complete(self, prompt: str, *, system: str | None = None, **kwargs: Any) -> str:
+        """Call the wrapped Python function and return its text output."""
         try:
             return self.fn(prompt, system)  # type: ignore[call-arg]
         except TypeError:
@@ -68,6 +72,7 @@ class OpenAICompatLLM:
         self.timeout = timeout
 
     def complete(self, prompt: str, *, system: str | None = None, **kwargs: Any) -> str:
+        """Call an OpenAI-compatible chat-completions endpoint and return message text."""
         messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
         payload = {
             "model": self.model,

@@ -209,8 +209,14 @@ def design_diagnostics(design, model, *, ref=None) -> dict:
         a_eff = g_eff = 0.0
         cond = float("inf")
     cols = f[:, 1:] if p > 1 and np.allclose(f[:, 0], 1.0) else f
-    if cols.shape[1] >= 2:
-        corr = np.corrcoef(cols, rowvar=False)
+    # A zero-variance column (a factor that never varies in this design, or a one-level dimension
+    # passed through `model`) makes np.corrcoef produce 0/0 = NaN entries for that column, which then
+    # silently propagates through max() into the returned diagnostic -- "is my design good" answered
+    # with NaN instead of a meaningful score. Exclude degenerate columns from the correlation check;
+    # a constant column has no correlation to report, not an undefined one.
+    varying = cols[:, np.var(cols, axis=0) > 0] if cols.shape[1] else cols
+    if varying.shape[1] >= 2:
+        corr = np.corrcoef(varying, rowvar=False)
         max_corr = float(np.max(np.abs(corr - np.eye(corr.shape[0]))))
     else:
         max_corr = 0.0

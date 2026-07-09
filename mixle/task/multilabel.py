@@ -1,16 +1,16 @@
-"""``solve_multilabel`` -- replace rigid code that returns a SET of labels, with per-label honesty.
+"""``solve_multilabel`` -- replace rigid code that returns a set of labels, with per-label honesty.
 
 The multi-label shape of the solve loop: ``teacher(x) -> list[str]`` (tags, flags, categories -- any
 subset of a label universe). The student is one shared-feature net with a sigmoid head per label; the
 calibration is per-label conformal thresholds from the held-out slice:
 
   * ``A_l`` -- the ``1 - alpha`` quantile of label ``l``'s scores among calibration inputs where ``l``
-    is ABSENT: a score above it is confidently-present (at most ``~alpha`` of absents score that high);
-  * ``P_l`` -- the ``alpha`` quantile among inputs where ``l`` is PRESENT: a score below it is
+    is absent: a score above it is confidently-present (at most ``~alpha`` of absents score that high);
+  * ``P_l`` -- the ``alpha`` quantile among inputs where ``l`` is present: a score below it is
     confidently-absent.
 
 A label is *decided* when its score clears one of those bars; anything in between is ambiguous. The
-input is answered locally ONLY when every label is decided -- one ambiguous tag escalates the whole
+input is answered locally only when every label is decided -- one ambiguous tag escalates the whole
 request to the teacher (whose answer is harvested), so a locally-returned set never contains a guess.
 Labels with too few calibration examples on either side are never decided locally (their bars are
 ``inf``/``-inf``): under-calibrated is treated as ambiguous, not as confident.
@@ -102,6 +102,10 @@ class MultiLabelSolution:
             return [lab for lab, p in zip(self.labels, present) if p]
         return None
 
+    def decide(self, x: Any) -> list[str] | None:
+        """Return the local multilabel decision, or ``None`` when the example should escalate."""
+        return self.try_local(x)
+
     def __call__(self, x: Any) -> list[str]:
         self.n_requests += 1
         local = self.try_local(x)
@@ -115,6 +119,7 @@ class MultiLabelSolution:
         return tags
 
     def report(self) -> dict[str, Any]:
+        """Return multi-label agreement, escalation, and harvest metrics."""
         return {
             "labels": len(self.labels),
             "holdout_set_agreement": round(self.holdout_set_agreement, 4),

@@ -2,11 +2,11 @@
 
 The ex-Gaussian ``X = N(mu, sigma^2) + Exp(rate=lam)`` is a flexible 3-parameter right-skewed family that
 DEGENERATES into a Gaussian (as ``lam -> inf``, the exponential component vanishes) and into a pure
-exponential (as ``sigma -> 0``). That overlap is exactly what makes it dangerous in automatic selection: an
-honest 3-parameter fit can shadow the simpler builtins on their own data. So the support gate is deliberately
+exponential (as ``sigma -> 0``). That overlap is exactly what makes it dangerous in automatic selection: a
+full 3-parameter fit can shadow the simpler builtins on their own data. So the support gate is deliberately
 TIGHT -- it fires only on data whose sample skewness sits strictly inside the ex-Gaussian's own range
 ``(0, 2)``, away from the symmetric (Gaussian, skew ~ 0) and pure-exponential (skew ~ 2) boundaries -- and the
-BIC carries the full 3-parameter penalty so it never wins by a hair.
+BIC carries the full 3-parameter penalty so it does not win on a marginal difference.
 """
 
 import math
@@ -17,7 +17,7 @@ from mixle.utils.automatic.detectors import Detector, register
 
 # The ex-Gaussian skewness is 2 / (1 + (lam*sigma)^2)^1.5, which lives strictly in (0, 2). Fire only on a
 # clearly-skewed-but-not-exponential interior band: this keeps the family off symmetric Gaussian data
-# (skew ~ 0) and off the pure-exponential boundary (skew ~ 2), where a simpler builtin is the honest answer.
+# (skew ~ 0) and off the pure-exponential boundary (skew ~ 2), where a simpler builtin is the appropriate answer.
 _SKEW_LO = 0.35
 _SKEW_HI = 1.75
 
@@ -84,8 +84,11 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
 
 def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
     from mixle.stats import ExponentiallyModifiedGaussianDistribution
+    from mixle.utils.automatic.profiling import _value_array_from_vdict
 
-    return ExponentiallyModifiedGaussianDistribution(0.0, 1.0, 1.0).estimator()
+    fit = _fit(_value_array_from_vdict(vdict))
+    mu, sigma2, lam = fit if fit is not None else (0.0, 1.0, 1.0)
+    return ExponentiallyModifiedGaussianDistribution(mu, sigma2, lam).estimator(pseudo_count=pseudo_count)
 
 
 def _cdf(arr: np.ndarray):

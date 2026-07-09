@@ -1,27 +1,30 @@
-"""The cost arithmetic that decides whether to spend the GPU: distill-and-serve-local vs. cascade vs. frontier.
+"""Cost comparisons for local distillation, cascades, and teacher-only serving.
 
-GPU time is not free, so every routing choice is an economic one. This module turns the conformal escalation
-rate (:meth:`mixle.task.calibrate.CalibratedTaskModel.escalation_rate`, the empirical ``p_escalate``) and a few
-unit costs into dollars:
+Every routing choice has a cost model. This module combines a conformal
+escalation rate (:meth:`mixle.task.calibrate.CalibratedTaskModel.escalation_rate`,
+the empirical ``p_escalate``) with unit costs:
 
   * **frontier-only** -- pay ``c_frontier`` for every request, forever.
   * **local-only** -- distill once (``n_label`` teacher calls + training), then pay ``c_local`` per request.
-  * **cascade** -- run the cheap local model first, escalate only the ambiguous fraction: per request
+  * **cascade** -- run the low-cost local model first, escalate only the ambiguous fraction: per request
     ``c_local + p_escalate * c_frontier``, with the singletons covered at ``1 - alpha``.
 
-:func:`break_even_volume` is the request count at which a distilled route pays back its one-time setup;
-:func:`recommend_route` picks the cheapest route at a given volume (optionally constrained to a maximum tolerated
-escalation rate) and reports the savings. This is the "is it worth it?" question answered with a number.
+:func:`break_even_volume` is the request count at which a distilled route
+recovers its one-time setup cost. :func:`recommend_route` picks the lowest-cost
+route at a given volume, optionally constrained by a maximum tolerated
+escalation rate, and reports the savings.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
 class CostModel:
-    """Unit costs (any consistent currency). ``c_local`` is the amortized local per-request cost (~0 on CPU)."""
+    """Unit costs in any consistent currency."""
 
     c_frontier: float  # cost of one request served by the expensive teacher/frontier model
     c_local: float = 0.0  # cost of one request served by the local distilled model
@@ -29,7 +32,7 @@ class CostModel:
     train_cost: float = 0.0  # one-time cost to train/tune the student (compute)
 
     def setup_cost(self, n_label: int) -> float:
-        """One-time cost to stand up a local model: label ``n_label`` examples + train."""
+        """Return the one-time label and training cost for a local model."""
         return n_label * self.c_label + self.train_cost
 
 
@@ -53,7 +56,7 @@ def break_even_volume(cost: CostModel, n_label: int, *, p_escalate: float = 0.0)
 
 @dataclass(frozen=True)
 class RoutePlan:
-    """The costed comparison of routes at a given volume, with the recommended choice and its savings."""
+    """Costed route comparison for a fixed request volume."""
 
     route: str  # "frontier_only" | "local_only" | "cascade"
     volume: int
@@ -73,12 +76,12 @@ def recommend_route(
     p_escalate: float,
     max_escalation: float | None = None,
 ) -> RoutePlan:
-    """Pick the cheapest route over ``volume`` requests; honor an optional cap on tolerated escalation.
+    """Pick the lowest-cost route over ``volume`` requests.
 
-    ``local_only`` is treated as a cascade with no escalation *only when* its quality is acceptable to the
-    caller -- here it is offered whenever ``max_escalation`` is not exceeded by ``p_escalate`` (the cascade
-    already answers the easy cases locally and escalates the rest, so it dominates pure local-only on accuracy;
-    local-only is kept as the floor cost when escalation is disallowed entirely, ``max_escalation == 0``).
+    ``local_only`` is offered only when the caller explicitly disallows
+    escalation by setting ``max_escalation == 0``. Otherwise the cascade route
+    keeps local answers for calibrated inputs and escalates the remaining
+    traffic to the teacher.
     """
     frontier_total = volume * cost.c_frontier
     cascade_total = cost.setup_cost(n_label) + volume * cascade_cost_per_request(cost, p_escalate)
@@ -103,3 +106,44 @@ def recommend_route(
         break_even=break_even_volume(cost, n_label, p_escalate=p_escalate),
         options=options,
     )
+
+
+def select_alpha_for_cost(
+    model: Any,
+    cal_texts: Sequence[Any],
+    cal_labels: Sequence[Any],
+    probe_texts: Sequence[Any],
+    cost: CostModel,
+    *,
+    volume: int,
+    n_label: int,
+    alphas: Sequence[float] = (0.01, 0.05, 0.1, 0.15, 0.2, 0.3),
+) -> tuple[float, RoutePlan, dict[float, RoutePlan]]:
+    """Select ``alpha`` from a :class:`CostModel` target.
+
+    The sweep connects :func:`recommend_route` to the calibration step so threshold selection reflects
+    both model behavior and the caller's cost assumptions.
+
+    ``model`` is anything with the
+    :class:`~mixle.task.calibrate.CalibratedTaskModel` shape: a mutable
+    ``alpha`` attribute, ``calibrate(texts, labels)``, and
+    ``escalation_rate(texts)``. For each candidate in ``alphas``, this
+    recalibrates ``model`` and measures its realized escalation rate on
+    ``probe_texts`` (a held-out slice disjoint from ``cal_texts``), then scores
+    that escalation rate with :func:`recommend_route` over ``volume`` requests.
+    The winner is the alpha whose recommended route is lowest-cost overall;
+    ``model`` is left calibrated at that winning alpha. Returns
+    ``(best_alpha, best_plan, plan_by_alpha)`` so the full sweep remains
+    auditable.
+    """
+    plans: dict[float, RoutePlan] = {}
+    for a in alphas:
+        model.alpha = float(a)
+        model.calibrate(cal_texts, cal_labels)
+        p_escalate = model.escalation_rate(probe_texts)
+        plans[a] = recommend_route(cost, volume=volume, n_label=n_label, p_escalate=p_escalate)
+
+    best_alpha = min(plans, key=lambda a: plans[a].total)
+    model.alpha = float(best_alpha)
+    model.calibrate(cal_texts, cal_labels)
+    return best_alpha, plans[best_alpha], plans

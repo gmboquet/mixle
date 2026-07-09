@@ -1,15 +1,13 @@
-"""Create, estimate, and sample from a null distribution.
+"""Neutral null distribution used for optional structural slots.
 
-Defines the NullDistribution, NullSampler, NullAccumulatorFactory, NullAccumulator,
-NullEstimator, and the NullDataEncoder classes for use with mixle.
-
-The NullDistribution object and its related classes are space filling objects meant for consistency in type hints.
+The null distribution and its related classes fill optional model slots while
+preserving the standard distribution, sampler, accumulator, estimator, and
+encoder interfaces.
 
 Notes:
     The density evaluates to 1.0 for any value (Any data type).
     The sampler generates None for any size input.
     Sequence encodings return None for any input.
-
 """
 
 from typing import Any, Optional
@@ -34,12 +32,14 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare backend support for the zero-cost null distribution."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the generated-compute declaration for the null distribution."""
         from mixle.stats.compute.declarations import DistributionDeclaration
 
         return DistributionDeclaration(
@@ -52,19 +52,19 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def __init__(self, name: str | None = None) -> None:
-        """NullDistribution object.
+        """Create a distribution that assigns unit density to every value.
 
         Args:
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional distribution name.
 
         Attributes:
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional distribution name.
 
         """
         self.name = name
 
     def __str__(self) -> str:
-        """Returns string representation of NullDistribution object."""
+        """Return a constructor-style representation of the null distribution."""
         return "NullDistribution(name=%s)" % repr(self.name)
 
     def density(self, x: Any | None) -> float:
@@ -130,25 +130,25 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         return tuple(None for _ in range(int(params["num_components"])))
 
     def sampler(self, seed: int | None = None) -> "NullSampler":
-        """Create a NullSampler object.
+        """Create a sampler for the null distribution.
 
         Args:
             seed (Optional[int]): Seed for random number generator (unused).
 
         Returns:
-            NullSampler object.
+            NullSampler that always samples ``None``.
 
         """
         return NullSampler(dist=self, seed=seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "NullEstimator":
-        """Create a NullEstimator object.
+        """Create an estimator for the null distribution.
 
         Args:
             pseudo_count (Optional[float]): Kept for interface consistency (has no effect on estimation).
 
         Returns:
-            NullEstimator object.
+            NullEstimator configured with this distribution's name.
 
         """
         if pseudo_count is None:
@@ -158,11 +158,11 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
             return NullEstimator(pseudo_count=pseudo_count, name=self.name)
 
     def dist_to_encoder(self) -> "NullDataEncoder":
-        """Returns a NullDataEncoder object for encoding sequences of data."""
+        """Return the encoder used for null-distribution observations."""
         return NullDataEncoder()
 
     def enumerator(self) -> "NullEnumerator":
-        """Returns a NullEnumerator object enumerating the support of the NullDistribution."""
+        """Return an enumerator for the singleton null support."""
         return NullEnumerator(self)
 
     def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
@@ -189,7 +189,7 @@ class NullEnumerator(DistributionEnumerator):
     """Yields the single value None with probability one, matching NullSampler.sample()."""
 
     def __init__(self, dist: "NullDistribution") -> None:
-        """NullEnumerator object.
+        """Create an enumerator for the null distribution's empty support.
 
         Args:
             dist (NullDistribution): NullDistribution instance to enumerate.
@@ -210,7 +210,7 @@ class NullSampler(DistributionSampler):
     """Sampler for the NullDistribution. Always returns None."""
 
     def __init__(self, dist: "NullDistribution", seed: int | None = None) -> None:
-        """NullSampler object.
+        """Create a sampler for the null distribution.
 
         Args:
             dist (NullDistribution): NullDistribution instance to sample from.
@@ -237,7 +237,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulator for NullDistribution. Accumulates no sufficient statistics."""
 
     def __init__(self, keys: str | None = None) -> None:
-        """NullAccumulator object.
+        """Create a null accumulator.
 
         Args:
             keys (Optional[str]): Optional key for merging sufficient statistics.
@@ -271,6 +271,7 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
         pass
 
     def seq_update_engine(self, x, weights, estimate, engine) -> None:
+        """Engine-neutral no-op accumulation for null statistics."""
         # NullDistribution has no parameters: accumulation is a no-op on every engine.
         pass
 
@@ -353,15 +354,15 @@ class NullAccumulator(SequenceEncodableStatisticAccumulator):
         pass
 
     def acc_to_encoder(self) -> "NullDataEncoder":
-        """Returns a NullDataEncoder object for encoding sequences of data."""
+        """Return the encoder associated with this accumulator."""
         return NullDataEncoder()
 
 
 class NullAccumulatorFactory(StatisticAccumulatorFactory):
-    """Factory for creating NullAccumulator objects."""
+    """Factory for null accumulators."""
 
     def __init__(self, keys: str | None = None) -> None:
-        """NullAccumulatorFactory object.
+        """Create a factory for null accumulators.
 
         Args:
             keys (Optional[str]): Optional key passed to created accumulators.
@@ -373,7 +374,7 @@ class NullAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> "NullAccumulator":
-        """Returns a new NullAccumulator object."""
+        """Return a fresh null accumulator."""
         return NullAccumulator(keys=self.keys)
 
 
@@ -387,18 +388,18 @@ class NullEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """NullEstimator object.
+        """Create an estimator for the null distribution.
 
         Args:
             pseudo_count (Optional[float]): Kept for interface consistency (has no effect on estimation).
             suff_stat (Optional[Any]): Kept for interface consistency (has no effect on estimation).
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional estimator name.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
             pseudo_count (Optional[float]): Kept for interface consistency.
             suff_stat (Optional[Any]): Kept for interface consistency.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional estimator name.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
@@ -408,7 +409,7 @@ class NullEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self) -> "NullAccumulatorFactory":
-        """Returns a NullAccumulatorFactory for creating NullAccumulator objects."""
+        """Return a factory for null accumulators."""
         return NullAccumulatorFactory(self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: Any | None = None) -> "NullDistribution":
@@ -419,7 +420,7 @@ class NullEstimator(ParameterEstimator):
             suff_stat (Optional[Any]): Sufficient statistics (ignored).
 
         Returns:
-            NullDistribution object.
+            NullDistribution carrying this estimator's name.
 
         """
         return NullDistribution(name=self.name)
@@ -429,11 +430,11 @@ class NullDataEncoder(DataSequenceEncoder):
     """Data encoder for the NullDistribution. Encodes any sequence as its length."""
 
     def __str__(self) -> str:
-        """Returns string representation of NullDataEncoder object."""
+        """Return the null encoder's display name."""
         return "NullDataEncoder"
 
     def __eq__(self, other) -> bool:
-        """Checks if other object is an instance of a NullDataEncoder.
+        """Return true when ``other`` is a null data encoder.
 
         Args:
             other (object): Object to compare against.

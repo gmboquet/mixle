@@ -32,8 +32,8 @@ def conformal_quantile(scores: Any, alpha: float) -> float:
 
     Returns the ``ceil((n + 1)(1 - alpha))`` smallest score (the finite-sample-corrected
     empirical ``1 - alpha`` quantile).  When ``alpha`` is too small for the calibration
-    size — ``(n + 1)(1 - alpha) > n`` — no finite threshold gives the requested coverage
-    and ``inf`` is returned, the honest "the set is everything" answer.
+    size -- ``(n + 1)(1 - alpha) > n`` -- no finite threshold gives the requested coverage
+    and ``inf`` is returned, representing an unconstrained prediction set.
     """
     s = np.sort(np.asarray(scores, dtype=float))
     n = s.size

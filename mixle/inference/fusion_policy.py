@@ -7,7 +7,7 @@ allowed to know about fusion, so it owns the fusibility query and the workload t
 
 Below ``_FUSION_MIN_WORKLOAD`` (observations x iterations) the fused kernel's one-time numba compile
 (~0.1s, then disk-cached per model structure) is not amortized, so the fit stays on the host path.
-Measured crossover: fusion only breaks even on a cold compile around 2-6e6 obs-iters, and wins (~1.7x)
+Measured crossover: fusion only breaks even on a cold compile around 2-6e6 obs-iters, and is faster (~1.7x)
 once warm/cached -- so this conservative gate never slows a small/medium fit while auto-using fusion for
 large or repeated workloads. Parity (fused == host) is guaranteed by the fused_codegen / fused_em tests.
 """

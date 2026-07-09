@@ -41,6 +41,7 @@ class FactualityReceipt:
 
     @property
     def grounded_fraction(self) -> float:
+        """Fraction of extracted claims supported by substrate evidence."""
         if not self.verdicts:
             return 1.0
         return round(sum(v.supported for v in self.verdicts) / len(self.verdicts), 4)
@@ -54,6 +55,7 @@ class FactualityReceipt:
         return self.grounded_fraction >= threshold
 
     def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable factuality receipt."""
         return {
             "grounded_fraction": self.grounded_fraction,
             "n_claims": len(self.verdicts),
@@ -87,7 +89,7 @@ def check_factuality(
         extract: ``answer -> [claim, ...]`` (default :func:`mixle.reason.llm.sentence_claims`).
         corroborates: ``(evidence_text, claim) -> bool`` deciding if retrieved evidence supports a claim
             (default content-overlap; pass an NLI/entailment check for stronger grounding).
-        min_score: retrieval-score floor; evidence below it doesn't count (guards tiny-embedder noise).
+        min_score: retrieval-score floor; evidence below it doesn't count (guards low-signal embedder noise).
         k: evidence items retrieved per claim.
         scope: restrict retrieval to a team/access scope.
     """

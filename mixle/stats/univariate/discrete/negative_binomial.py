@@ -1,4 +1,4 @@
-"""Create, estimate, enumerate, and sample from a negative binomial distribution.
+"""Negative binomial distributions over non-negative integer counts.
 
 The parameterization is the number of failures X before r successes, with
 success probability p:
@@ -54,12 +54,14 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated negative-binomial kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for negative binomial distributions."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -305,6 +307,7 @@ class NegativeBinomialSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> int | np.ndarray:
+        """Draw one sample or an array of iid samples."""
         scale = (1.0 - self.dist.p) / self.dist.p
         lam = self.rng.gamma(shape=self.dist.r, scale=scale, size=size)
         rv = self.rng.poisson(lam=lam)
@@ -328,6 +331,7 @@ class NegativeBinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: int, weight: float, estimate: NegativeBinomialDistribution | None) -> None:
+        """Accumulate weighted statistics for one non-negative integer count."""
         if not valid_integer(x, nonneg=True):
             raise ValueError("NegativeBinomialDistribution requires non-negative integer observations.")
         xi = int(x)
@@ -336,11 +340,13 @@ class NegativeBinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.histogram[xi] = self.histogram.get(xi, 0.0) + weight
 
     def initialize(self, x: int, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: NegativeBinomialDistribution | None
     ) -> None:
+        """Accumulate weighted statistics from encoded observations."""
         weights = np.asarray(weights, dtype=np.float64)
         self.count += np.sum(weights, dtype=np.float64)
         self.sum += np.dot(x[0], weights)
@@ -353,9 +359,11 @@ class NegativeBinomialAccumulator(SequenceEncodableStatisticAccumulator):
                 self.histogram[k] = self.histogram.get(k, 0.0) + w
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, dict[int, float]]) -> "NegativeBinomialAccumulator":
+        """Merge another negative-binomial sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.sum += suff_stat[1]
         if len(suff_stat) > 2 and suff_stat[2]:
@@ -364,15 +372,18 @@ class NegativeBinomialAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, float, dict[int, float]]:
+        """Return count, sum, and histogram statistics."""
         return self.count, self.sum, self.histogram
 
     def from_value(self, x: tuple[float, float, dict[int, float]]) -> "NegativeBinomialAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.count = x[0]
         self.sum = x[1]
         self.histogram = {int(k): float(w) for k, w in x[2].items()} if len(x) > 2 and x[2] else {}
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -380,10 +391,12 @@ class NegativeBinomialAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "NegativeBinomialDataEncoder":
+        """Return the encoder used by this accumulator."""
         return NegativeBinomialDataEncoder()
 
 
@@ -395,6 +408,7 @@ class NegativeBinomialAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> NegativeBinomialAccumulator:
+        """Create a fresh negative-binomial accumulator."""
         return NegativeBinomialAccumulator(name=self.name, keys=self.keys)
 
 
@@ -429,6 +443,7 @@ class NegativeBinomialEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> NegativeBinomialAccumulatorFactory:
+        """Return an accumulator factory for negative-binomial statistics."""
         return NegativeBinomialAccumulatorFactory(name=self.name, keys=self.keys)
 
     def resident_accumulation_supported(self) -> bool:
@@ -489,6 +504,7 @@ class NegativeBinomialEstimator(ParameterEstimator):
     def estimate(
         self, nobs: float | None, suff_stat: tuple[float, float, dict[int, float]]
     ) -> NegativeBinomialDistribution:
+        """Estimate ``r`` and ``p`` from weighted count statistics."""
         count, xsum = suff_stat[0], suff_stat[1]
         histogram = suff_stat[2] if len(suff_stat) > 2 else None
 
@@ -516,6 +532,7 @@ class NegativeBinomialDataEncoder(DataSequenceEncoder):
         return isinstance(other, NegativeBinomialDataEncoder)
 
     def seq_encode(self, x: Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
+        """Encode counts with precomputed ``log(x!)`` values."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and (np.any(rv < 0) or np.any(np.isnan(rv)) or np.any(np.floor(rv) != rv)):
             raise ValueError("NegativeBinomialDistribution requires non-negative integer observations.")

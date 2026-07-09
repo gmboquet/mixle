@@ -31,6 +31,13 @@ class LKJTest(unittest.TestCase):
 
             return mp.quad(lambda a: mp.quad(lambda b: inner(a, b), [-1, 1]), [-1, 1])
 
+        # This triple-nested quadrature dominates the test's runtime. Its assertion tolerance
+        # (1e-8) is far looser than the d=2 check above (1e-12), so it doesn't need the same
+        # working precision: at dps=10 the true numerical error is ~7e-12 (verified against a
+        # correct formula), a >1000x margin below the 1e-8 tolerance, and an injected 0.1%
+        # normalization bug is still caught cleanly (fails almosteq) at this precision -- while
+        # cutting this quadrature's runtime by roughly 4x versus dps=16.
+        mp.mp.dps = 10
         self.assertTrue(mp.almosteq(mp.e ** mp.mpf(LKJ(3, 2.0)._log_c) * z3(2.0), 1, 1e-8))
 
     def test_sampler_valid_and_marginal_beta(self):

@@ -103,16 +103,19 @@ class PeriodicTimeDistribution(SequenceEncodableProbabilityDistribution):
 
     @property
     def loc(self) -> float:
+        """Return the peak phase location in radians."""
         return float(self.von_mises.mu)
 
     @property
     def conc(self) -> float:
+        """Return the von Mises concentration for the recurring phase."""
         return float(self.von_mises.kappa)
 
     def __str__(self) -> str:
         return "PeriodicTimeDistribution(%r, loc=%r, conc=%r)" % (self.period, self.loc, self.conc)
 
     def density(self, t: Any) -> float:
+        """Return the time density at one timestamp."""
         return float(np.exp(self.log_density(t)))
 
     def log_density(self, t: Any) -> float:
@@ -120,6 +123,7 @@ class PeriodicTimeDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.von_mises.log_density(float(cyclic_phase(t, self.period)[0])) + self._jac)
 
     def seq_log_density(self, x) -> np.ndarray:
+        """Return vectorized log-densities for phase-encoded timestamps."""
         return self.von_mises.seq_log_density(x) + self._jac  # x is phase-encoded by the PeriodicTime encoder
 
     def peak_phase_fraction(self) -> float:
@@ -127,16 +131,21 @@ class PeriodicTimeDistribution(SequenceEncodableProbabilityDistribution):
         return float(np.mod(self.loc, 2.0 * np.pi) / (2.0 * np.pi))
 
     def sampler(self, seed: int | None = None) -> PeriodicTimeSampler:
+        """Return a sampler for recurring cycle positions."""
         return PeriodicTimeSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> PeriodicTimeEstimator:
+        """Return an estimator for the recurring timestamp phase."""
         return PeriodicTimeEstimator(self.period, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> PeriodicTimeDataEncoder:
+        """Return the timestamp-to-phase encoder used by vectorized methods."""
         return PeriodicTimeDataEncoder(self.period, self.von_mises.dist_to_encoder())
 
 
 class PeriodicTimeSampler(DistributionSampler):
+    """Sample timestamps as positions within one recurring period."""
+
     def __init__(self, dist: PeriodicTimeDistribution, seed: int | None = None):
         self.dist = dist
         self.von_mises_sampler = dist.von_mises.sampler(seed)
@@ -166,6 +175,7 @@ class PeriodicTimeDataEncoder(DataSequenceEncoder):
         )
 
     def seq_encode(self, x):
+        """Encode raw timestamps as von Mises phase observations."""
         return self.von_mises_encoder.seq_encode(cyclic_phase(x, self.period))
 
 
@@ -179,17 +189,20 @@ class PeriodicTimeEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> StatisticAccumulatorFactory:
+        """Return an accumulator factory that converts timestamps to cycle phases."""
         period = self.period
         keys = self.keys
         von_mises_factory = self.von_mises_estimator.accumulator_factory()
 
         class _Factory(StatisticAccumulatorFactory):
             def make(self):
+                """Create a periodic-time accumulator."""
                 return PeriodicTimeAccumulator(period, von_mises_factory.make(), keys=keys)
 
         return _Factory()
 
     def estimate(self, nobs, suff_stat) -> PeriodicTimeDistribution:
+        """Estimate a periodic-time distribution from von Mises phase statistics."""
         vm = self.von_mises_estimator.estimate(nobs, suff_stat)
         return PeriodicTimeDistribution(self.period, vm.mu, vm.kappa, name=self.name, keys=self.keys)
 
@@ -203,35 +216,44 @@ class PeriodicTimeAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, t, weight, estimate):
+        """Update delegated von Mises statistics from one raw timestamp."""
         self.von_mises_acc.update(
             float(cyclic_phase(t, self.period)[0]), weight, None if estimate is None else estimate.von_mises
         )
 
     def initialize(self, t, weight, rng):
+        """Initialize delegated von Mises statistics from one raw timestamp."""
         self.von_mises_acc.initialize(float(cyclic_phase(t, self.period)[0]), weight, rng)
 
     def seq_update(self, x, weights, estimate):
+        """Update delegated von Mises statistics from phase-encoded timestamps."""
         self.von_mises_acc.seq_update(x, weights, None if estimate is None else estimate.von_mises)
 
     def seq_initialize(self, x, weights, rng):
+        """Initialize delegated von Mises statistics from phase-encoded timestamps."""
         self.von_mises_acc.seq_initialize(x, weights, rng)
 
     def combine(self, suff_stat):
+        """Merge delegated von Mises sufficient statistics."""
         self.von_mises_acc.combine(suff_stat)
         return self
 
     def value(self):
+        """Return delegated von Mises sufficient statistics."""
         return self.von_mises_acc.value()
 
     def from_value(self, x):
+        """Restore delegated von Mises sufficient statistics."""
         self.von_mises_acc.from_value(x)
         return self
 
     def scale(self, c):
+        """Scale delegated von Mises sufficient statistics."""
         self.von_mises_acc.scale(c)
         return self
 
     def key_merge(self, stats_dict):
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -239,10 +261,12 @@ class PeriodicTimeAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict):
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self):
+        """Return the timestamp encoder compatible with this accumulator."""
         return PeriodicTimeDataEncoder(self.period, self.von_mises_acc.acc_to_encoder())
 
 
@@ -279,6 +303,7 @@ class SeasonalTimeSeries:
         return np.column_stack(cols)
 
     def fit(self, times: Any, values: Any) -> SeasonalTimeSeries:
+        """Fit trend, seasonal coefficients, noise variance, and predictive covariance terms."""
         secs = to_unix_seconds(times)
         y = np.asarray(values, dtype=float).ravel()
         order = np.argsort(secs)
@@ -304,7 +329,7 @@ class SeasonalTimeSeries:
 
     def conditional(self, time: Any):
         """The conditional distribution ``p(value | time)`` -- a :class:`GaussianDistribution` (or a list,
-        for an array of times). This is how you 'predict' the mixle way: you get a distribution to sample,
+        for an array of times). Prediction returns a distribution to sample,
         score, or read ``.mu`` / ``.sigma2`` from, not a bare point estimate."""
         from mixle.stats import GaussianDistribution
 
@@ -321,6 +346,7 @@ class SeasonalTimeSeries:
         return float(ld[0]) if np.ndim(values) == 0 else ld
 
     def sampler(self, seed: int | None = None) -> SeasonalTimeSeriesSampler:
+        """Return a sampler for conditional values at requested timestamps."""
         return SeasonalTimeSeriesSampler(self, seed)
 
     def decompose(self, times: Any) -> dict[str, np.ndarray]:

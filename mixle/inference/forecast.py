@@ -1,4 +1,4 @@
-"""``forecast`` -- horizon predictions with honest intervals from a fitted sequence model.
+"""``forecast`` -- horizon predictions with calibrated intervals from a fitted sequence model.
 
 The forecasting front door for state-space families. For a fitted HMM: filter the history to the
 current state posterior (the forward-backward's final step), propagate it through the transition
@@ -11,7 +11,7 @@ emission family with a sampler (Gaussian, Gamma, categorical, wrapped, neural, .
     f.state_probs               # (H, S): where the chain is expected to be at each step
 
 Sampling-based on purpose: exact for the state marginals (``p_T A^h``), Monte Carlo only for the
-emission quantiles, so the intervals are honest for arbitrary (skewed / multimodal / discrete)
+emission quantiles, so the intervals reflect arbitrary (skewed / multimodal / discrete)
 emission families rather than pretending everything is Gaussian.
 """
 

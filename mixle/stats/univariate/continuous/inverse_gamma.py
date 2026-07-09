@@ -1,11 +1,7 @@
-"""Create, estimate, and sample from an inverse-gamma distribution.
+"""Inverse-gamma distributions over positive real values.
 
-Defines the InverseGammaDistribution, InverseGammaSampler, InverseGammaAccumulatorFactory,
-InverseGammaAccumulator, InverseGammaEstimator, and the InverseGammaDataEncoder classes for use with
-mixle.
-
-Data type: (float): The InverseGammaDistribution with shape alpha > 0 and rate (scale) beta > 0 has
-log-density
+Observations are floats ``x > 0``. An inverse-gamma distribution with shape ``alpha > 0`` and
+rate ``beta > 0`` has log-density
 
         log(f(x; alpha, beta)) = alpha*log(beta) - lgamma(alpha) - (alpha + 1)*log(x) - beta / x,
 
@@ -48,12 +44,14 @@ class InverseGammaDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated inverse-gamma kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for inverse-gamma distributions."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -144,7 +142,7 @@ class InverseGammaDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of InverseGammaDistribution object."""
+        """Return a constructor-style representation of the inverse-gamma distribution."""
         return "InverseGammaDistribution(%s, %s, name=%s, keys=%s)" % (
             repr(self.alpha),
             repr(self.beta),
@@ -288,6 +286,7 @@ class InverseGammaAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: InverseGammaDistribution | None) -> None:
+        """Accumulate reciprocal and negative-log statistics for one observation."""
         if x <= 0.0 or not np.isfinite(x):
             raise ValueError("InverseGammaDistribution has support x > 0.")
         self.count += weight
@@ -295,33 +294,40 @@ class InverseGammaAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum_neg_log += -math.log(x) * weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: InverseGammaDistribution | None
     ) -> None:
+        """Accumulate transformed sufficient statistics from encoded data."""
         log_x, inv_x = x
         self.count += np.sum(weights, dtype=np.float64)
         self.sum_inv += np.dot(inv_x, weights)
         self.sum_neg_log += np.dot(-log_x, weights)
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "InverseGammaAccumulator":
+        """Merge another inverse-gamma sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.sum_inv += suff_stat[1]
         self.sum_neg_log += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return count, reciprocal sum, and negative-log sum."""
         return self.count, self.sum_inv, self.sum_neg_log
 
     def from_value(self, x: tuple[float, float, float]) -> "InverseGammaAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.count, self.sum_inv, self.sum_neg_log = x
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -329,10 +335,12 @@ class InverseGammaAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "InverseGammaDataEncoder":
+        """Return the encoder used by this accumulator."""
         return InverseGammaDataEncoder()
 
 
@@ -343,6 +351,7 @@ class InverseGammaAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> InverseGammaAccumulator:
+        """Create a fresh inverse-gamma accumulator."""
         return InverseGammaAccumulator(keys=self.keys)
 
 
@@ -368,6 +377,7 @@ class InverseGammaEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> InverseGammaAccumulatorFactory:
+        """Return an accumulator factory for inverse-gamma statistics."""
         return InverseGammaAccumulatorFactory(keys=self.keys)
 
     @staticmethod
@@ -392,6 +402,7 @@ class InverseGammaEstimator(ParameterEstimator):
         return float(min(max(k, _MIN_PARAM), _MAX_SHAPE))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> InverseGammaDistribution:
+        """Estimate shape and rate from reciprocal and log-reciprocal statistics."""
         count, sum_inv, sum_neg_log = suff_stat
         if self.pseudo_count is not None and self.suff_stat is not None:
             inv0, neglog0 = self.suff_stat
@@ -418,6 +429,7 @@ class InverseGammaDataEncoder(DataSequenceEncoder):
         return isinstance(other, InverseGammaDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+        """Encode observations as log-values and reciprocal values."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and (np.any(rv <= 0.0) or np.any(~np.isfinite(rv))):
             raise ValueError("InverseGammaDistribution has support x > 0.")

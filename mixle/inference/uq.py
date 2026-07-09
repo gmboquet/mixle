@@ -87,6 +87,7 @@ class UQResult:
         return self.semantic_entropy(prompt, n=n) <= thr
 
     def report(self) -> dict[str, Any]:
+        """Return uncertainty-quantification metadata and scalar payload fields."""
         r = {"kind": self.kind, "method": self.method}
         r.update({k: v for k, v in self.payload.items() if isinstance(v, (int, float, str, bool))})
         return r

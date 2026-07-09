@@ -1,3 +1,10 @@
+"""Small collection and grouping utilities shared by legacy Mixle helpers.
+
+These functions provide deterministic mapping, inverse mapping, grouping,
+counting, and reduce-by-key operations for examples and older estimator code
+that work over plain Python sequences.
+"""
+
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from typing import TypeVar
@@ -173,6 +180,7 @@ def flat_map(f: Callable[[T], Sequence[T1]], x: Sequence[T]) -> list[T1]:
 
 
 def least_occurring(x: Sequence[T], count: int | None = None, percent: float | None = None, keep_freq: bool = True):
+    """Return the least frequent values by count or percentile cutoff."""
     cnt_map = list(count_by_value(x).items())
     s_idx = np.argsort([u[1] for u in cnt_map])
 

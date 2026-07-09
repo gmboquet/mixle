@@ -151,7 +151,7 @@ Inspect Capabilities
 
 This habit matters. Not every fitted object can enumerate, condition,
 marginalize, expose exact densities, run on every backend, or produce latent
-posteriors. Capability inspection is the honest way to find out.
+posteriors. Capability inspection is the supported way to find out.
 
 Use a Prototype Distribution
 ----------------------------
@@ -191,6 +191,25 @@ Treat the inferred shape as a starting point. Inspect it, compare it on
 held-out data, and replace pieces when the automatic guess does not match the
 domain.
 
+Validate Before Interpreting
+----------------------------
+
+The quickstart model is intentionally small, but the validation habit should be
+the same as a larger workflow:
+
+* split data before comparing model families;
+* use several random starts for mixtures or other latent models;
+* inspect posterior responsibilities before naming clusters;
+* preserve ``NaN`` or missing-input semantics defined by the data pipeline
+  instead of silently rewriting inputs during fitting;
+* check capabilities before relying on enumeration, conditioning,
+  marginalization, or posterior queries; and
+* record the estimator shape, initialization policy, seed, and held-out score
+  when the fitted object leaves the notebook.
+
+These checks prevent a convenient example from turning into an unsupported
+claim about the fitted latent structure.
+
 Create a Certified Artifact
 ---------------------------
 
@@ -210,7 +229,7 @@ use ``create`` after the core workflow is clear:
 boundary: estimation certificate, optional calibration, optional UQ, and
 provenance including row counts and exchangeability diagnostics.
 
-Optional: Neural And Task Layers
+Optional: Neural and Task Layers
 --------------------------------
 
 Use the neural and LLM-facing layers when the task genuinely calls for them:

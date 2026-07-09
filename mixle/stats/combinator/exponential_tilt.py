@@ -353,6 +353,7 @@ class ExponentialTiltedAccumulator(SingleChildAccumulator):
         self.count = 0.0
 
     def update(self, x: Any, weight: float, estimate: ExponentialTiltedDistribution | None) -> None:
+        """Accumulate one observation's tilt statistic and child sufficient statistics."""
         t = np.atleast_1d(np.asarray(estimate._statistic(x) if estimate is not None else x, dtype=float))
         self.sum_t += weight * t
         self.count += weight
@@ -361,6 +362,7 @@ class ExponentialTiltedAccumulator(SingleChildAccumulator):
     def seq_update(
         self, x: tuple[Any, np.ndarray], weights: np.ndarray, estimate: ExponentialTiltedDistribution | None
     ) -> None:
+        """Accumulate encoded tilt statistics and child sufficient statistics."""
         base_enc, tvals = x
         w = np.asarray(weights, dtype=float)
         tv = np.asarray(tvals, dtype=float)
@@ -370,13 +372,16 @@ class ExponentialTiltedAccumulator(SingleChildAccumulator):
         self.base_accumulator.seq_update(base_enc, w, None if estimate is None else estimate.base)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize the child sufficient statistics for one weighted observation."""
         self.base_accumulator.initialize(x, weight, rng)
 
     def seq_initialize(self, x: tuple[Any, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize child sufficient statistics from encoded observations."""
         base_enc, _ = x
         self.base_accumulator.seq_initialize(base_enc, np.asarray(weights, dtype=float), rng)
 
     def combine(self, suff_stat: Any) -> "ExponentialTiltedAccumulator":
+        """Merge serialized tilt and child sufficient statistics into this accumulator."""
         sum_t, count, base_ss = suff_stat
         self.sum_t += np.asarray(sum_t, dtype=float)
         self.count += float(count)
@@ -384,9 +389,11 @@ class ExponentialTiltedAccumulator(SingleChildAccumulator):
         return self
 
     def value(self) -> Any:
+        """Return tilt statistic totals, total weight, and child sufficient statistics."""
         return (self.sum_t.copy(), self.count, self.base_accumulator.value())
 
     def from_value(self, x: Any) -> "ExponentialTiltedAccumulator":
+        """Restore the accumulator from serialized exponential-tilt statistics."""
         sum_t, count, base_ss = x
         self.sum_t = np.asarray(sum_t, dtype=float).copy()
         self.count = float(count)
@@ -394,12 +401,14 @@ class ExponentialTiltedAccumulator(SingleChildAccumulator):
         return self
 
     def scale(self, c: float) -> "ExponentialTiltedAccumulator":
+        """Scale tilt statistic totals and child sufficient statistics by a constant."""
         self.sum_t *= c
         self.count *= c
         self.base_accumulator.scale(c)
         return self
 
     def acc_to_encoder(self) -> "DataSequenceEncoder":
+        """Return the child encoder used by the delegated base accumulator."""
         return self.base_accumulator.acc_to_encoder()
 
 
@@ -412,6 +421,7 @@ class ExponentialTiltedAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> ExponentialTiltedAccumulator:
+        """Create an empty exponential-tilt accumulator."""
         return ExponentialTiltedAccumulator(self.dim, self.base_factory.make(), keys=self.keys)
 
 
@@ -436,6 +446,7 @@ class ExponentialTiltedEstimator(ParameterEstimator):
         self.tol = tol
 
     def accumulator_factory(self) -> ExponentialTiltedAccumulatorFactory:
+        """Return a factory for exponential-tilt sufficient-statistic accumulators."""
         return ExponentialTiltedAccumulatorFactory(
             self.dim,
             self.base.estimator(pseudo_count=self.pseudo_count).accumulator_factory(),
@@ -493,6 +504,7 @@ class ExponentialTiltedEstimator(ParameterEstimator):
         return 0.5 * (lo + hi)
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> ExponentialTiltedDistribution:
+        """Estimate either the tilt parameter or the tilted base distribution."""
         sum_t, count, base_ss = suff_stat
         base = self.base.estimator(pseudo_count=self.pseudo_count).estimate(count if nobs is None else nobs, base_ss)
         if self.fit == "base":

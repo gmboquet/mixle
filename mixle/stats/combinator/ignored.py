@@ -1,10 +1,8 @@
-"""Create, estimate, and sample from an IgnoredDistribution.
+"""Distribution wrapper that keeps a child model fixed during estimation.
 
-Defines the IgnoredDistribution, IgnoredSampler, IgnoredAccumulatorFactory, IgnoredAccumulator, IgnoredEstimator,
-and the IgnoredDataEncoder classes for use with mixle.
-
-Ignored distribution is simply a distribution that is ignored in estimation and treated as fixed.
-
+``IgnoredDistribution`` preserves the child distribution's sampling and
+encoding hooks where appropriate while contributing no fitted sufficient
+statistics of its own.
 """
 
 from collections.abc import Sequence
@@ -32,6 +30,7 @@ class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
     """Distribution wrapper that assigns zero log-density while preserving an estimator interface."""
 
     def compute_capabilities(self):
+        """Return the compute capabilities delegated from the wrapped distribution."""
         from dataclasses import replace
 
         from mixle.stats.compute.capabilities import capabilities_for, delegated_engine_ready
@@ -41,6 +40,7 @@ class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
         return replace(child, engine_ready=delegated_engine_ready(child.engine_ready))
 
     def compute_declaration(self):
+        """Return a declaration that marks this wrapper as carrying no estimable statistics."""
         from mixle.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
 
         child = declaration_for(self.dist)
@@ -57,11 +57,11 @@ class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def __init__(self, dist: SequenceEncodableProbabilityDistribution | None, name: str | None = None):
-        """IgnoredDistribution object for using IgnoredDistributions in estimation.
+        """Create a distribution wrapper whose child is ignored during estimation.
 
         Args:
             dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution to be ignored.
-            name (Optional[str]): Set name for object instance.
+            name (Optional[str]): Optional distribution name.
         """
         self.dist = dist if dist is not None else NullDistribution()
         self.name = name
@@ -163,11 +163,14 @@ class IgnoredDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class IgnoredSampler(DistributionSampler):
+    """Sampler that delegates to the wrapped distribution or emits ``None`` for null children."""
+
     def __init__(self, dist: IgnoredDistribution, seed: int | None = None) -> None:
         self.dist_sampler = dist.dist.sampler(seed)
         self.null_sampler = isinstance(self.dist_sampler, NullSampler)
 
     def sample(self, size: int | None = None):
+        """Draw from the wrapped sampler, preserving null-distribution ``None`` samples."""
         if self.null_sampler:
             if size is None:
                 return None
@@ -178,55 +181,73 @@ class IgnoredSampler(DistributionSampler):
 
 
 class IgnoredAccumulator(SequenceEncodableStatisticAccumulator):
+    """No-op accumulator used when a wrapped distribution should not update during estimation."""
+
     def __init__(self, encoder: DataSequenceEncoder | None = NullDataEncoder(), name: str | None = None) -> None:
         self.encoder = encoder if encoder is not None else NullDataEncoder()
         self.name = name
 
     def update(self, x: T, weight: float, estimate: IgnoredDistribution | None) -> None:
+        """Ignore a single weighted observation."""
         pass
 
     def seq_update(self, x: E, weights: np.ndarray, estimate: IgnoredDistribution | None) -> None:
+        """Ignore a batch of encoded observations."""
         pass
 
     def seq_update_engine(self, x, weights, estimate, engine) -> None:
+        """Ignore a batch of engine-resident observations."""
         # IgnoredDistribution accumulates nothing: no-op on every engine.
         pass
 
     def initialize(self, x: T, weight: float, rng: RandomState | None) -> None:
+        """Ignore a single initialization observation."""
         pass
 
     def seq_initialize(self, x: E, weight: np.ndarray, rng: RandomState | None) -> None:
+        """Ignore a batch of initialization observations."""
         pass
 
     def combine(self, suff_stat: Any) -> "IgnoredAccumulator":
+        """Return this accumulator because ignored statistics have no state."""
         return self
 
     def value(self) -> None:
+        """Return ``None`` because ignored statistics are intentionally empty."""
         return None
 
     def from_value(self, x: Any) -> "IgnoredAccumulator":
+        """Return this accumulator because there is no state to restore."""
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Perform no keyed merge because ignored statistics have no state."""
         pass
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Perform no keyed replacement because ignored statistics have no state."""
         pass
 
     def acc_to_encoder(self) -> "IgnoredDataEncoder":
+        """Return the encoder associated with the wrapped distribution."""
         return IgnoredDataEncoder(encoder=self.encoder)
 
 
 class IgnoredAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create no-op accumulators for ignored distributions."""
+
     def __init__(self, encoder: DataSequenceEncoder | None = NullDataEncoder(), name: str | None = None):
         self.encoder = encoder if encoder is not None else NullDataEncoder()
         self.name = name
 
     def make(self) -> "IgnoredAccumulator":
+        """Create an ignored-distribution accumulator."""
         return IgnoredAccumulator(encoder=self.encoder, name=self.name)
 
 
 class IgnoredEstimator(ParameterEstimator):
+    """Estimator that returns the wrapped distribution unchanged inside an ignored wrapper."""
+
     def __init__(
         self,
         dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
@@ -235,21 +256,14 @@ class IgnoredEstimator(ParameterEstimator):
         keys: str | None = None,
         name: str | None = None,
     ) -> None:
-        """IgnoredEstimator object for consistency in estimation step.
+        """Create an estimator that returns the ignored distribution unchanged.
 
         Args:
             dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution to be ignored.
-            pseudo_count (Optional[float]): Place holder for consistency.
-            suff_stat (Optional[Any]): Place holder for consistency.
-            keys (Optional[str]): Place holder for consistency.
-            name (Optional[str]): Set name for object instance.
-
-        Args:
-            dist (SequenceEncodableProbabilityDistribution): Distribution to be ignored.
-            pseudo_count (Optional[float]): Place holder for consistency.
-            suff_stat (Optional[Any]): Place holder for consistency.
-            keys (Optional[str]): Place holder for consistency.
-            name (Optional[str]): Set name for object instance.
+            pseudo_count (Optional[float]): Accepted for estimator API consistency.
+            suff_stat (Optional[Any]): Accepted for estimator API consistency.
+            keys (Optional[str]): Accepted for keyed-statistics API consistency.
+            name (Optional[str]): Optional name assigned to the estimated distribution.
 
         """
         self.dist = dist if dist is not None else NullDistribution
@@ -259,6 +273,7 @@ class IgnoredEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self):
+        """Return a factory that creates no-op ignored accumulators."""
         return IgnoredAccumulatorFactory(self.dist.dist_to_encoder(), name=self.name)
 
     def get_prior(self) -> Any:
@@ -270,10 +285,13 @@ class IgnoredEstimator(ParameterEstimator):
         self.dist.set_prior(prior)
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> IgnoredDistribution:
+        """Return the wrapped distribution unchanged inside ``IgnoredDistribution``."""
         return IgnoredDistribution(self.dist, name=self.name)
 
 
 class IgnoredDataEncoder(DataSequenceEncoder):
+    """Encoder that delegates to the wrapped distribution's encoder."""
+
     def __init__(self, encoder: DataSequenceEncoder | None = NullDataEncoder()) -> None:
         self.encoder = encoder if encoder is not None else NullDataEncoder()
         self.null = supports(self.encoder, Neutral)
@@ -288,5 +306,6 @@ class IgnoredDataEncoder(DataSequenceEncoder):
             return False
 
     def seq_encode(self, x: Sequence[T]) -> Any:
+        """Encode observations with the wrapped distribution's encoder."""
         enc_data = self.encoder.seq_encode(x)
         return enc_data

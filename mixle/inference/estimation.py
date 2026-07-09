@@ -38,6 +38,9 @@ def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
     *shape* need not be written twice:
 
       * a :class:`ParameterEstimator` -- used as-is (the historical contract);
+      * a bare **torch module** with ``log_density(batch)`` -- wrapped as a
+        :class:`~mixle.models.grad_leaf.GradLeaf`, so ``optimize(x, module)`` needs no contract
+        code at all;
       * a distribution **prototype** (any :class:`ProbabilityDistribution`) -- its matching
         estimator tree is taken from ``proto.estimator()``, so you build the structure once and fit
         it directly;
@@ -46,6 +49,13 @@ def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
     """
     if isinstance(estimator, ProbabilityDistribution):
         return estimator.estimator()
+    if hasattr(estimator, "log_density") and callable(getattr(estimator, "state_dict", None)):
+        # a bare torch density module (scores batches, carries parameters): fit it as a gradient
+        # leaf -- the module owns forward and objective, the manufactured contract owns the loop.
+        from mixle.models.grad_leaf import GradLeaf, looks_like_torch_module
+
+        if looks_like_torch_module(estimator):
+            return GradLeaf(estimator).estimator()
     if estimator is None:
         if data is None:
             raise ValueError(
@@ -59,13 +69,13 @@ def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
     return estimator
 
 
-def _maybe_structured_model(data: Any, max_its: int, out: Any) -> Any:
+def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState | None) -> Any:
     """The automatic-structure front door for ``optimize(data)`` / ``fit(data)`` with no estimator.
 
     For flat tuple records the independent :class:`CompositeDistribution` the automatic detector
     produces is a Naive-Bayes assumption — the one heterogeneous data most often violates. This
     discovers the cross-field dependency graph (:func:`mixle.inference.learn_bayesian_network`) and
-    returns it ONLY when it beats the independent composite by BIC on the same data; anything else —
+    returns it only when it beats the independent composite by BIC on the same data; anything else —
     no edges found, non-record data, too few rows, or any failure at all — returns ``None`` and the
     historical composite path proceeds untouched, so the default is never worse.
     """
@@ -86,23 +96,46 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any) -> Any:
         from mixle.inference.structure import _num_free_params
         from mixle.utils.automatic import get_estimator
 
+        # all-continuous records get a second dependence candidate below (a copula), which models
+        # heterogeneous marginals + dependence a linear-Gaussian network cannot; other records only try the BN.
+        all_continuous = all(isinstance(v, (float, np.floating)) for v in first)
         net = learn_bayesian_network(rows)
-        if not net.edges():
+        if not net.edges() and not all_continuous:
             return None  # independence is what the composite already models; keep the automatic families
 
-        composite = optimize(rows, get_estimator(rows), max_its=max_its, out=None)
+        composite = optimize(rows, get_estimator(rows), max_its=max_its, rng=rng, out=None)
         enc = composite.dist_to_encoder().seq_encode(rows)
         comp_ll = float(np.sum(composite.seq_log_density(enc)))
-        comp_bic = -2.0 * comp_ll + _num_free_params(composite) * float(np.log(max(len(rows), 2)))
-        net_bic = bayesian_network_bic(net, rows)
-        if net_bic >= comp_bic:
+        n_log = float(np.log(max(len(rows), 2)))
+        comp_params = _num_free_params(composite)
+        comp_bic = -2.0 * comp_ll + comp_params * n_log
+
+        # candidate dependence models, each scored by BIC on the same data; the independent composite is the
+        # baseline and wins ties, so this never returns a worse model than the historical default.
+        candidates: list[tuple[float, Any, str]] = []
+        if net.edges():
+            candidates.append((bayesian_network_bic(net, rows), net, "bayesian-network"))
+        if all_continuous:
+            from mixle.inference.copula_structure import copula_candidates
+
+            candidates.extend(copula_candidates(rows, composite, comp_params, comp_bic, n_log, max_its, rng))
+        if not candidates:
+            return None
+        # a later, more complex candidate (e.g. a vine) only displaces an earlier, simpler one (e.g. the
+        # plain Gaussian copula core it can degenerate to exactly on low-dimensional data) when it wins by
+        # more than floating-point noise -- otherwise a sub-ulp BIC difference from platform/BLAS variance
+        # would nondeterministically pick the more complex, mathematically-equivalent model.
+        best_bic, best_model, desc = candidates[0]
+        for bic, model, name in candidates[1:]:
+            if bic < best_bic - 1e-6 * max(1.0, abs(best_bic)):
+                best_bic, best_model, desc = bic, model, name
+        if best_bic >= comp_bic:
             return None
         if out is not None:
-            edges = ", ".join(f"{p}->{c}" for p, c in net.edges())
             out.write(
-                f"structure: discovered cross-field dependencies [{edges}] (BIC {net_bic:.1f} < {comp_bic:.1f})\n"
+                "structure: %s dependence beats independent fields (BIC %.1f < %.1f)\n" % (desc, best_bic, comp_bic)
             )
-        return net
+        return best_model
     except Exception:  # noqa: BLE001 - the structure default must never break the historical path
         return None
 
@@ -392,7 +425,12 @@ def _em_loop(
         nxt = step_fn(enc_data, estimator, model)
         _, ll = ll_fn(enc_data, nxt)
         vll = ll_fn(enc_vdata, nxt)[1] if has_v else ll
-        dll = ll - old_ll
+        # ll and old_ll can both be -inf (e.g. two successive collapsed/singular-covariance steps);
+        # -inf - -inf is nan by IEEE 754, which is the semantics every downstream nan-comparison below
+        # already relies on (nan >= 0 and nan < delta are both False, so a nan dll is inert) -- silence
+        # the resulting RuntimeWarning rather than changing behavior.
+        with np.errstate(invalid="ignore"):
+            dll = ll - old_ll
 
         # A non-finite step (e.g. a collapsed/singular covariance producing a NaN/-inf
         # log-likelihood) is never an improvement: never accept it, and do not let it
@@ -470,7 +508,13 @@ def _fused_em_loop(
         if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
             _write_em_iter(out, i + 1, ll_model, dll, score, has_v, obj_label)
         if on_step is not None:
-            on_step(EMStep(i + 1, nxt, float(ll_model), float(dll)))
+            # ll_model is the log-likelihood of `model` (the fused step's INPUT, computed for free
+            # as the E-step normalizer), not of `nxt` (this iteration's freshly-computed, not-yet-
+            # scored output) -- report them paired correctly, matching every other use of ll_model
+            # in this loop (`best_model = model` above, `score = ll_fn(enc_vdata, model)`), so an
+            # on_step consumer that checkpoints model alongside log_density (as the EMStep docstring
+            # explicitly recommends) doesn't persist a mismatched pair.
+            on_step(EMStep(i + 1, model, float(ll_model), float(dll)))
         if converged:
             break
 
@@ -600,9 +644,17 @@ def optimize(
     objective: str = "auto",
     on_step: Any | None = None,
     structure: str = "auto",
+    schedule: str = "full",
 ) -> SequenceEncodableProbabilityDistribution:
-    """Estimation of 'estimator' via EM algorithm for max_its iterations or until
-        new_loglikelihood - old_loglikelihood < delta.
+    """Fit ``estimator`` to ``data`` by a generalized-EM loop, for ``max_its`` iterations or until the
+        objective improves by less than ``delta``.
+
+    Each iteration re-estimates every part of the model by whatever its structure calls for -- closed-form
+    for conjugate / exponential-family leaves, gradient descent for neural leaves, coordinate descent for
+    GLMs, responsibility-weighted EM for latent structure (mixtures, HMMs) -- so a single call fits a
+    heterogeneous tree without the caller choosing an algorithm. (The convergence objective is MLE by
+    default; a parameter prior switches it to penalized-LL / MAP, and a variational model to the ELBO -- see
+    ``objective``.)
 
     Args:
         data (Optional[List[T]]): List of data type T containing observed data. Must be compatible with data type of
@@ -617,7 +669,9 @@ def optimize(
         init_estimator (Optional[ParameterEstimator]): ParameterEstimator to used to initialize EM algorithm parameters.
             If None, estimator is used. Must be consistent with estimator.
         init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
-        rng (RandomState): RandomState used to set seed for initializing EM algorithm.
+        rng (RandomState): RandomState used to set seed for initializing EM algorithm. ``None`` resolves to
+            a FIXED seed, so an un-seeded ``optimize``/``fit`` is deterministic by default; pass your own
+            RandomState when you WANT different initializations across calls (e.g. hand-rolled restarts).
         vdata (Optional[Sequence[T]]): Optional validation set.
         prev_estimate (Optional[SeqeuenceEncodableProbabilityDistribution]): Optional model estimate used from prior
             fitting. Must be consistent with estimator.
@@ -682,11 +736,24 @@ def optimize(
             resume with ``prev_estimate=``. Called on every iteration regardless of ``print_iter``.
         structure (str): ``'auto'`` (default) makes the tagline literal for flat tuple records fit
             with no estimator: the cross-field dependency graph is discovered
-            (:func:`mixle.inference.learn_bayesian_network`) and returned WHEN it beats the
+            (:func:`mixle.inference.learn_bayesian_network`) and returned when it beats the
             independent composite by BIC — otherwise (no edges, non-record data, or any failure)
             the historical automatic-composite path proceeds untouched. ``'off'`` restores the
             unconditional historical behavior. Only consulted when ``estimator`` is ``None`` and no
             ``prev_estimate``/``init_estimator``/``strategy``/``enc_data`` is supplied.
+        schedule (str): ``'full'`` (default) -- unchanged vanilla full-tree EM, every round scores
+            and re-estimates every component. ``'auto'`` engages the D3 block-coordinate-ascent
+            scheduler (:mod:`mixle.inference.block_em`): each round, D1 node reports rank the
+            components NOT already D2-frozen by gain-per-cost, and only the highest-value ones
+            (within a per-round cost budget) are actually re-estimated -- composing with D2's
+            freeze/roll-up cache rather than duplicating it. This is a SPEED-only scheduling
+            choice: F (the Neal-Hinton free energy) is still gated non-decreasing every round, and
+            when there is no useful ranking to do (e.g. every component looks equally worth
+            updating) the scheduler degenerates to doing exactly what ``'full'`` does. Only
+            engaged when the model is a plain local-backend ``MixtureDistribution``/
+            ``MixtureEstimator`` MLE fit with no explicit ``strategy``/``engine``/``resources``/
+            ``placement`` -- anything else silently falls back to ``'full'`` (never an error, never
+            a behavior change beyond scheduling).
 
     Returns:
         SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm
@@ -702,13 +769,13 @@ def optimize(
         and init_estimator is None
         and strategy is None
     ):
-        structured = _maybe_structured_model(data, max_its, out)
+        structured = _maybe_structured_model(data, max_its, out, rng)
         if structured is not None:
             return structured
     estimator = _coerce_estimator(estimator, data)
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
-    rng = RandomState() if rng is None else rng
+    rng = RandomState(0) if rng is None else rng  # fixed default: an un-seeded fit is deterministic
     if precision == "minimal":
         # Data-aware allocation: inspect the data + model and run the reduced-precision fused kernel only
         # where it is verified safe; else stay float64. The accumulation is float64 either way.
@@ -796,6 +863,38 @@ def optimize(
         # the plain log-likelihood otherwise. So a Bayesian estimator converges/selects on the right
         # objective whether the caller reaches for optimize() or fit().
         resolved_objective = _resolve_objective(objective, estimator, mm)
+
+        # D3 block-EM scheduler: 'auto' dispatches to mixle.inference.block_em's greedy
+        # gain-per-cost scheduler when the fit is a plain local MLE MixtureDistribution/
+        # MixtureEstimator fit with none of the other execution knobs engaged (those all need
+        # the standard _em_loop path); everything else silently keeps the 'full' behavior below
+        # -- schedule='auto' never errors or changes what is computed, only how it is scheduled.
+        if schedule == "auto":
+            from mixle.inference.block_em import is_block_em_eligible
+
+            if (
+                is_block_em_eligible(mm, estimator)
+                and strategy is None
+                and resolved_objective == "mle"
+                and engine is None
+                and resources is None
+                and placement is None
+                and backend_name == "local"
+            ):
+                from mixle.inference.block_em import run_block_em
+
+                best_model, block_history = run_block_em(enc_data, estimator, mm, max_its=max_its, delta=delta)
+                if out is not None and block_history:
+                    last = block_history[-1]
+                    out.write(
+                        "block-em: %d rounds, final F=%.6f, mean active fraction=%.3f\n"
+                        % (
+                            len(block_history),
+                            last.objective,
+                            float(np.mean([h.active_fraction for h in block_history])),
+                        )
+                    )
+                return best_model
 
         # Cost-model auto-fusion: with no explicit engine, switch a large-enough local MLE fit of a
         # fusible model onto the single-pass fused numba kernel (parity-identical, ~1.7x once warm).
@@ -894,7 +993,7 @@ def fit(
         and kwargs.get("prev_estimate") is None
         and kwargs.get("strategy") is None
     ):
-        structured = _maybe_structured_model(data, max_its, kwargs.get("out", sys.stdout))
+        structured = _maybe_structured_model(data, max_its, kwargs.get("out", sys.stdout), kwargs.get("rng"))
         if structured is not None:
             return structured
     estimator = _coerce_estimator(estimator, data)
@@ -1124,7 +1223,7 @@ class BayesianStreamingEstimator:
             raise ValueError("mode must be 'posterior_carry' or 'forgetting'.")
         self.model = model
         self.init_p = init_p
-        self.rng = RandomState() if rng is None else rng
+        self.rng = RandomState(0) if rng is None else rng  # fixed default: an un-seeded fit is deterministic
         self.num_chunks = num_chunks
         self.step = 0
         self.nobs = 0.0

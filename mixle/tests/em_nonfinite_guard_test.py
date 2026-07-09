@@ -4,7 +4,7 @@ A collapsed/singular covariance can make an EM step's data log-likelihood NaN or
 The shared EM loops (:func:`mixle.inference.estimation._em_loop` and ``_fused_em_loop``) must
 never *accept* such a step and must not let the non-finite value poison the convergence
 reference (which would stall every subsequent iteration on NaN comparisons). These tests
-pin that behavior with deterministic stub steps, and a high-dimensional diagonal Gaussian
+pin that behavior with deterministic stand-in steps, and a high-dimensional diagonal Gaussian
 mixture smoke test exercises the bundled ``robust=True`` path end-to-end (the reported
 "mixture of Gaussians on digits is unstable" scenario).
 """
@@ -18,7 +18,7 @@ from mixle.stats import DiagonalGaussianEstimator, MixtureEstimator
 
 
 class _Model:
-    """Opaque stand-in model carrying a tag and its (stubbed) log-likelihood."""
+    """Opaque stand-in model carrying a tag and controlled log-likelihood."""
 
     def __init__(self, tag: str, ll: float) -> None:
         self.tag = tag
