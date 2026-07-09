@@ -46,12 +46,15 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install sphinx-polyversion
-        # Only the driver itself needs to be importable here -- it builds each matched revision (tags
-        # + main) into its own isolated venv (see docs/poly.py), installing that revision's own
-        # mixle[docs] + CPU torch there, so the top-level job env doesn't need them.
+        # The driver itself builds each matched revision (tags + main) into its own isolated venv
+        # (see docs/poly.py), installing that revision's own mixle[docs] + CPU torch there, so the
+        # top-level job env doesn't need them. It does need jinja2 directly, though: root-level
+        # artifacts (docs/_root_templates/*) are rendered by build_root() in this top-level process,
+        # not inside a per-revision venv, and sphinx-polyversion doesn't declare jinja2 as a hard
+        # dependency (only needed when template_dir/static_dir are set, as ours are).
         run: |
           python -m pip install --upgrade pip
-          pip install sphinx-polyversion
+          pip install sphinx-polyversion jinja2
       - name: Build all versions
         run: |
           sphinx-polyversion docs/poly.py
