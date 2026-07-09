@@ -15,6 +15,7 @@ Submodules
    mixle.reason.anchor_harness
    mixle.reason.belief_walk
    mixle.reason.core
+   mixle.reason.cross_modal
    mixle.reason.cycle_consistency
    mixle.reason.design
    mixle.reason.discrete
@@ -22,6 +23,8 @@ Submodules
    mixle.reason.encoder
    mixle.reason.fusion
    mixle.reason.graph_llm
+   mixle.reason.inference_program
+   mixle.reason.language_bridge
    mixle.reason.llm
    mixle.reason.modality
    mixle.reason.model
@@ -29,3 +32,4 @@ Submodules
    mixle.reason.store
    mixle.reason.task_projection
    mixle.reason.transport_edge
+   mixle.reason.zero_shot_bootstrap

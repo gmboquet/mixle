@@ -29,6 +29,7 @@ Submodules
    mixle.ppl.provenance
    mixle.ppl.regression
    mixle.ppl.rough_paths
+   mixle.ppl.scaling_laws
    mixle.ppl.statespace
    mixle.ppl.summarize
    mixle.ppl.survival

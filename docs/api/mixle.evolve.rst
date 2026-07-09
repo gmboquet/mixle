@@ -11,6 +11,8 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.evolve.closed_loop
+   mixle.evolve.concept_discovery
    mixle.evolve.improve
    mixle.evolve.ledger
    mixle.evolve.objective

@@ -17,6 +17,7 @@ Submodules
    mixle.stats.compute.declarations
    mixle.stats.compute.decomposition
    mixle.stats.compute.encoded
+   mixle.stats.compute.error_receipts
    mixle.stats.compute.exp_family
    mixle.stats.compute.fused_codegen
    mixle.stats.compute.fused_kernels
