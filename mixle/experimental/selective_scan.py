@@ -42,7 +42,6 @@ class SelectiveScanState:
 
 
 if _HAS_TORCH:
-
     # dt_proj bias init: choose the bias so softplus(bias) is log-uniform in [_DT_MIN, _DT_MAX], then invert
     # softplus -- exactly Mamba's `Mamba.__init__` dt-bias init (verified directly against the mamba-ssm
     # 2.3.2.post1 sdist source, mamba_ssm/modules/mamba_simple.py, not from memory -- see notes/designs/E5.md
@@ -118,7 +117,9 @@ if _HAS_TORCH:
         bookkeeping needed since the state is already fixed-size.
         """
 
-        def __init__(self, vocab: int, *, d_model: int = 32, d_state: int = 16, n_layer: int = 2, expand: int = 2) -> None:
+        def __init__(
+            self, vocab: int, *, d_model: int = 32, d_state: int = 16, n_layer: int = 2, expand: int = 2
+        ) -> None:
             super().__init__()
             self.vocab = int(vocab)
             self.d_model = int(d_model)
@@ -146,7 +147,9 @@ if _HAS_TORCH:
             self.head.weight = self.tok.weight  # weight tying, matching SlidingWindowSpine's convention
 
             # S4D-real init (see _s4d_real_a_log_init) -- one A_log per (layer, d_inner, d_state).
-            self.A_log = nn.Parameter(torch.stack([_s4d_real_a_log_init(self.d_inner, d_state) for _ in range(n_layer)]))
+            self.A_log = nn.Parameter(
+                torch.stack([_s4d_real_a_log_init(self.d_inner, d_state) for _ in range(n_layer)])
+            )
             self.A_log._no_weight_decay = True
             self.D = nn.Parameter(torch.ones(n_layer, self.d_inner))
             self.D._no_weight_decay = True
@@ -175,7 +178,13 @@ if _HAS_TORCH:
                 hn = self.ln1[layer](h)
                 u = self.in_proj[layer](hn)
                 h_last, y_out = _scan_layer(
-                    u, self.A_log[layer], self.W_delta[layer], self.W_B[layer], self.W_C[layer], self.D[layer], state.h[layer]
+                    u,
+                    self.A_log[layer],
+                    self.W_delta[layer],
+                    self.W_B[layer],
+                    self.W_C[layer],
+                    self.D[layer],
+                    state.h[layer],
                 )
                 h = h + self.out_proj[layer](y_out)
                 h = h + self.mlp[layer](self.ln2[layer](h))
