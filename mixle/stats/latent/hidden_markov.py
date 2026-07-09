@@ -27,6 +27,7 @@ from __future__ import annotations
 import heapq
 import itertools
 import math
+import warnings
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
@@ -264,6 +265,104 @@ def terminal_forward_backward(
     return log_p, gamma, xi
 
 
+# A hidden Markov model encodes every hidden state's emission through ONE encoder -- the first
+# emission's (``topics[0].dist_to_encoder()`` for a distribution, ``accumulators[0].acc_to_encoder()``
+# for the accumulator). If states carry emissions of different families, the others are scored through
+# the first's encoder: usually a finite but WRONG log-likelihood (silent), occasionally a confusing
+# deep error. The helpers below let the estimator/distribution reject that at construction time.
+_EMISSION_ENCODER_PROBE = [1.0, 2.0, 3.0, 4.0, 5.0]
+"""Fixed probe for comparing the *structure* of emission encodings. Five positive non-integer floats
+encode cleanly for continuous and most discrete families; the length (5) differs from the small
+constant dimensions those encoders introduce, so a batch axis stays recognizable."""
+
+
+def _encoding_structure(obj):
+    """Hashable layout of an encoded probe. Axes whose length equals the probe size are normalized to
+    ``"N"`` so only the fixed (non-batch) structure is compared; nested tuples/lists recurse."""
+    n = len(_EMISSION_ENCODER_PROBE)
+    if isinstance(obj, np.ndarray):
+        return ("ndarray", obj.dtype.kind, tuple("N" if int(s) == n else int(s) for s in obj.shape))
+    if isinstance(obj, (tuple, list)):
+        return (type(obj).__name__, tuple(_encoding_structure(v) for v in obj))
+    return ("other", type(obj).__name__)
+
+
+def _emission_encoding_signature(encoder):
+    """Structure of ``encoder.seq_encode(probe)``, or ``None`` when the probe cannot be encoded.
+
+    Comparing the encoded *structure* (not the encoder's class) accepts different families that
+    encode identically -- Gaussian and Exponential both yield a plain ``(N,)`` float array, so an HMM
+    can mix them -- while rejecting families that encode differently, e.g. a neural ``GradLeaf``
+    ``(N, 1)``, a Gamma ``(2, N)``, or a Categorical tuple. ``None`` means "cannot compare"; callers
+    fail open on it rather than risk a false positive."""
+    try:
+        with warnings.catch_warnings(), np.errstate(all="ignore"):
+            warnings.simplefilter("ignore")
+            encoded = encoder.seq_encode(list(_EMISSION_ENCODER_PROBE))
+    except Exception:
+        return None
+    return _encoding_structure(encoded)
+
+
+def _emissions_share_encoder(reference, other):
+    """Whether ``other`` produces an encoding interchangeable with ``reference``. Fast path: the
+    encoders' own (possibly asymmetric) equality tried both directions -- covers the common
+    homogeneous case without touching the probe and honors ``MixtureDataEncoder``'s homogeneous
+    delegation. Fallback: compare encoded structure on the probe (fail open if either is unencodable)."""
+    if reference == other or other == reference:
+        return True
+    reference_sig = _emission_encoding_signature(reference)
+    other_sig = _emission_encoding_signature(other)
+    if reference_sig is None or other_sig is None:
+        return True
+    return reference_sig == other_sig
+
+
+def _require_shared_emission_encoders(encoders, owner):
+    """Raise ``ValueError`` naming the first emission whose encoder is not interchangeable with
+    ``encoders[0]`` (the single encoder an HMM uses for every state). ``None`` entries are skipped;
+    a no-op for fewer than two comparable emissions."""
+    if len(encoders) <= 1 or encoders[0] is None:
+        return
+    reference = encoders[0]
+    for i in range(1, len(encoders)):
+        other = encoders[i]
+        if other is None or _emissions_share_encoder(reference, other):
+            continue
+        raise ValueError(
+            f"{owner}: emission {i} ({type(other).__name__}) does not share an observation encoder "
+            f"with emission 0 ({type(reference).__name__}). A hidden Markov model scores every hidden "
+            f"state through emission 0's encoder, so mixing emission families across states is "
+            f"silently mis-scored (a finite but wrong log-likelihood). To combine different families, "
+            f"model them as fields of a CompositeEstimator (a joint observation) or link them with a "
+            f"JointMixtureEstimator, and use that single composite/joint emission for every state."
+        )
+
+
+def _emission_encoders_from_dists(topics):
+    """Best-effort emission encoders for a sequence of emission *distributions* (``None`` per topic
+    whose encoder cannot be built, so validation fails open on it)."""
+    encoders = []
+    for topic in topics:
+        try:
+            encoders.append(topic.dist_to_encoder())
+        except Exception:
+            encoders.append(None)
+    return encoders
+
+
+def _emission_encoders_from_estimators(estimators):
+    """Best-effort emission encoders for a sequence of emission *estimators*, via a throwaway
+    accumulator (``None`` per estimator whose encoder cannot be built)."""
+    encoders = []
+    for estimator in estimators:
+        try:
+            encoders.append(estimator.accumulator_factory().make().acc_to_encoder())
+        except Exception:
+            encoders.append(None)
+    return encoders
+
+
 class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
     """Hidden Markov model distribution for variable-length observation sequences."""
 
@@ -362,6 +461,12 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             self.has_topics = False
 
         self.set_prior(prior)
+
+        # All hidden states are scored through topics[0]'s encoder; reject heterogeneous emission
+        # families here so a mis-scored HMM fails loudly at construction instead of silently.
+        _require_shared_emission_encoders(
+            _emission_encoders_from_dists(self.topics), "HiddenMarkovModelDistribution"
+        )
 
     def get_prior(self):
         """Returns the chain conjugate prior in ``(init_prior, row_priors)`` form (or None).
@@ -3120,6 +3225,12 @@ class HiddenMarkovEstimator(ParameterEstimator):
             # terminal seq_log_density / seq_update cannot read it.
             self.use_numba = False
         self.set_prior(prior)
+
+        # Fail loudly at the construction site if emissions do not share one encoder: an HMM scores
+        # every state through emission 0's, so heterogeneous families are otherwise silently mis-scored.
+        _require_shared_emission_encoders(
+            _emission_encoders_from_estimators(self.estimators), "HiddenMarkovEstimator"
+        )
 
     def accumulator_factory(self):
         """Return a factory that accumulates Baum-Welch statistics for this estimator."""
