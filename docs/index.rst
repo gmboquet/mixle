@@ -206,7 +206,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
    stability-and-missing-data
    family-release
    release-notes
-   previous-releases
+   example-execution-manifest
    changelog
 
 .. toctree::
