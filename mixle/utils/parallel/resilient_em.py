@@ -264,6 +264,13 @@ class ResilientMPEncodedData(EncodedDataHandle):
         self._ctx = mp.get_context("spawn")
         self._encoder_b = pickle.dumps(encoder, protocol=_PROTO)
 
+        # The final driver-side fold of per-shard payloads (see _resilient_update_round below)
+        # is always exactly checkpointed_fold -- UNLESS a subclass swaps this hook out. K5's
+        # AuditedMPEncodedData replaces it with a fold that wraps every combine() call with a
+        # NaN/Inf watchdog; this class's own retry/blacklist/elastic-repartition logic (the
+        # thing K5 reuses rather than reimplements) is otherwise untouched.
+        self._fold_fn: Callable[[Any, Sequence[bytes]], tuple[float, Any]] = checkpointed_fold
+
         self._shard_raw: dict[int, bytes] = {}
         self._worker_shards: dict[int, set[int]] = {}
         self._conns: dict[int, Any] = {}
@@ -462,7 +469,7 @@ class ResilientMPEncodedData(EncodedDataHandle):
         self.last_round_failed_workers = set(failed)
         self.last_round_blacklisted_workers = blacklisted_now
 
-        return checkpointed_fold(estimator, payloads)
+        return self._fold_fn(estimator, payloads)
 
     # -- protocol recognized by mixle.stats dispatch -------------------------
 
