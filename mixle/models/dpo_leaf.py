@@ -68,6 +68,7 @@ class DPOModel(SequenceEncodableProbabilityDistribution):
             return module(torch.as_tensor(np.atleast_2d(x), dtype=torch.float32).to(self.device)).cpu().numpy()
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
+        """Return per-row DPO preference log likelihoods for encoded triples."""
         x, ch, rj = enc
         ch = np.asarray(ch, dtype=int)
         rj = np.asarray(rj, dtype=int)
@@ -77,6 +78,7 @@ class DPOModel(SequenceEncodableProbabilityDistribution):
         return -np.logaddexp(0.0, -self.beta * margin)  # log sigmoid(beta * margin)
 
     def log_density(self, xcr: Any) -> float:
+        """Return the DPO log likelihood for one ``(x, chosen, rejected)`` triple."""
         x, ch, rj = xcr
         return float(self.seq_log_density((np.atleast_2d(x), [int(ch)], [int(rj)]))[0])
 
@@ -85,12 +87,15 @@ class DPOModel(SequenceEncodableProbabilityDistribution):
         return self._logits(self.policy, x).argmax(axis=1)
 
     def sampler(self, seed: int | None = None) -> DPOModelSampler:
+        """Return the sampler for the preference-scoring leaf."""
         return DPOModelSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> DPOModelEstimator:
+        """Return the DPO estimator that trains the policy while keeping the reference fixed."""
         return DPOModelEstimator(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
 
     def dist_to_encoder(self) -> DPOEncoder:
+        """Return the encoder for preference triples."""
         return DPOEncoder()
 
     # --- serialization: persist hparams + both modules (as portable bytes); registered below so a mixture
@@ -107,6 +112,7 @@ class DPOModel(SequenceEncodableProbabilityDistribution):
         self.ref = decode_module(state["ref"])
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize policy/reference modules and DPO hyperparameters."""
         return {
             "policy": encode_module(self.policy),
             "ref": encode_module(self.ref),
@@ -118,6 +124,7 @@ class DPOModel(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> DPOModel:
+        """Rebuild a :class:`DPOModel` from :meth:`to_dict` output."""
         return cls(
             decode_module(payload["policy"]),
             decode_module(payload["ref"]),
@@ -129,15 +136,20 @@ class DPOModel(SequenceEncodableProbabilityDistribution):
 
 
 class DPOModelSampler(DistributionSampler):
+    """Sampler facade for DPO leaves, which score preference pairs rather than generating."""
+
     def __init__(self, dist: DPOModel, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Raise because DPO is a preference-scoring likelihood, not a generator."""
         raise NotImplementedError("DPOModel scores preference pairs; it does not generate.")
 
 
 class DPOEncoder(DataSequenceEncoder):
+    """Encode ``(context, chosen, rejected)`` preference triples for DPO."""
+
     def __str__(self) -> str:
         return "DPOEncoder"
 
@@ -145,6 +157,7 @@ class DPOEncoder(DataSequenceEncoder):
         return isinstance(other, DPOEncoder)
 
     def seq_encode(self, data: list) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Convert preference triples into batched contexts and integer action arrays."""
         x = np.array([np.atleast_1d(np.asarray(d[0], dtype=float)) for d in data])
         ch = np.array([int(d[1]) for d in data], dtype=int)
         rj = np.array([int(d[2]) for d in data], dtype=int)
@@ -152,6 +165,8 @@ class DPOEncoder(DataSequenceEncoder):
 
 
 class DPOAccumulator(SequenceEncodableStatisticAccumulator):
+    """Buffer weighted preference triples for the DPO M-step."""
+
     def __init__(self) -> None:
         self.x: list = []
         self.ch: list = []
@@ -159,12 +174,14 @@ class DPOAccumulator(SequenceEncodableStatisticAccumulator):
         self.w: list = []  # per-pair weight (EM responsibility / streaming decay / sample weight)
 
     def update(self, xcr: Any, weight: float, estimate: Any) -> None:
+        """Add one weighted preference triple to the accumulator."""
         self.x.append(np.atleast_1d(np.asarray(xcr[0], dtype=float)))
         self.ch.append(int(xcr[1]))
         self.rj.append(int(xcr[2]))
         self.w.append(float(weight))
 
     def seq_update(self, enc: Any, weights: Any, estimate: Any) -> None:
+        """Add an encoded batch of preference triples and optional weights."""
         x, ch, rj = enc
         ws = np.asarray(weights, dtype=float).ravel() if weights is not None else np.ones(len(x))
         for i in range(len(x)):
@@ -174,12 +191,15 @@ class DPOAccumulator(SequenceEncodableStatisticAccumulator):
             self.w.append(float(ws[i]))
 
     def initialize(self, xcr: Any, weight: float, rng: Any) -> None:
+        """Initialize from one preference triple using the ordinary update path."""
         self.update(xcr, weight, None)
 
     def seq_initialize(self, enc: Any, weights: Any, rng: Any) -> None:
+        """Initialize from an encoded batch using the ordinary batch update path."""
         self.seq_update(enc, weights, None)
 
     def combine(self, other: Any) -> DPOAccumulator:
+        """Merge the value tuple from another DPO accumulator."""
         xo, co, ro, wo = other
         self.x.extend(xo)
         self.ch.extend(co)
@@ -188,18 +208,24 @@ class DPOAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple:
-        return (list(self.x), list(self.ch), list(self.rj), list(self.w))
+        """Return buffered contexts, chosen actions, rejected actions, and weights."""
+        return (list(self.x), list(self.ch), list(self.rj), np.asarray(self.w, dtype=float))
 
     def from_value(self, v: tuple) -> DPOAccumulator:
+        """Restore accumulator buffers from a value tuple."""
         self.x, self.ch, self.rj, self.w = list(v[0]), list(v[1]), list(v[2]), list(v[3])
         return self
 
     def acc_to_encoder(self) -> DPOEncoder:
+        """Return the encoder expected by this accumulator."""
         return DPOEncoder()
 
 
 class DPOAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for DPO accumulators."""
+
     def make(self) -> DPOAccumulator:
+        """Create a fresh accumulator."""
         return DPOAccumulator()
 
 
@@ -215,9 +241,11 @@ class DPOModelEstimator(ParameterEstimator):
         self.device = device
 
     def accumulator_factory(self) -> DPOAccumulatorFactory:
+        """Return an accumulator factory for weighted preference triples."""
         return DPOAccumulatorFactory()
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> DPOModel:
+        """Run the weighted DPO M-step and return the updated policy leaf."""
         torch = _torch()
         xs, chs, rjs, ws = suff_stat
         out = DPOModel(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
@@ -228,9 +256,10 @@ class DPOModelEstimator(ParameterEstimator):
         self.ref.to(dev)
         for p in self.ref.parameters():
             p.requires_grad_(False)  # frozen reference
-        xt = torch.as_tensor(np.array(xs), dtype=torch.float32).to(dev)
-        ct = torch.as_tensor(np.array(chs), dtype=torch.long).to(dev)
-        rt = torch.as_tensor(np.array(rjs), dtype=torch.long).to(dev)
+        # the generic buffer stores every field as float batch arrays; restore shapes/dtypes at tensor prep
+        xt = torch.as_tensor(np.asarray(xs, dtype=float).reshape(len(xs), -1), dtype=torch.float32).to(dev)
+        ct = torch.as_tensor(np.asarray(chs).ravel().astype(int), dtype=torch.long).to(dev)
+        rt = torch.as_tensor(np.asarray(rjs).ravel().astype(int), dtype=torch.long).to(dev)
         wt = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32).to(dev)  # per-pair weight
         wsum = wt.sum().clamp(min=1e-8)
         ar = torch.arange(len(ct), device=dev)

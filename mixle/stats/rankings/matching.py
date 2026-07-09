@@ -1,7 +1,4 @@
-"""Create, estimate, sample, and enumerate a weighted bipartite perfect-matching distribution.
-
-Defines the MatchingDistribution, MatchingEnumerator, MatchingSampler, MatchingAccumulatorFactory,
-MatchingAccumulator, MatchingEstimator, and the MatchingDataEncoder classes for use with mixle.
+"""Weighted bipartite perfect-matching distributions.
 
 Data type: a perfect matching of the complete bipartite graph K_{n,n} given as a permutation ``x`` of
 0,...,n-1, where left node i is matched to right node ``x[i]``.
@@ -81,6 +78,7 @@ class MatchingDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Return compute-backend metadata for the matching distribution."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(
@@ -96,13 +94,13 @@ class MatchingDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """MatchingDistribution object.
+        """Create a distribution over bipartite perfect matchings.
 
         Args:
             weights (Union[Sequence[Sequence[float]], np.ndarray]): n-by-n matrix of positive edge
                 weights; ``weights[i, j]`` is the worth of matching left node i to right node j.
             max_nodes (int): Guard on n for the exponential-time permanent (raises above this).
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional distribution name.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
@@ -131,7 +129,7 @@ class MatchingDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of MatchingDistribution object."""
+        """Return a constructor-style representation of the matching distribution."""
         return "MatchingDistribution(%s, max_nodes=%s, name=%s, keys=%s)" % (
             repr([[float(v) for v in row] for row in self.weights]),
             repr(self.max_nodes),
@@ -234,36 +232,44 @@ class MatchingAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: Sequence[int], weight: float, estimate: MatchingDistribution | None) -> None:
+        """Accumulate weighted assignment counts for one matching."""
         sigma = np.asarray(x, dtype=int)
         self.assign_counts[np.arange(self.dim), sigma] += weight
         self.count += weight
 
     def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics with one weighted matching."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: MatchingDistribution | None) -> None:
+        """Accumulate weighted assignment counts for encoded matchings."""
         rows = np.arange(self.dim)
         for sigma, w in zip(x, weights):
             self.assign_counts[rows, sigma] += w
         self.count += float(np.sum(weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics from encoded matchings."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, np.ndarray]) -> "MatchingAccumulator":
+        """Merge serialized assignment-count statistics into this accumulator."""
         self.count += suff_stat[0]
         self.assign_counts += suff_stat[1]
         return self
 
     def value(self) -> tuple[float, np.ndarray]:
+        """Return the accumulated weight and assignment-count matrix."""
         return self.count, self.assign_counts
 
     def from_value(self, x: tuple[float, np.ndarray]) -> "MatchingAccumulator":
+        """Restore the accumulator from serialized assignment-count statistics."""
         self.count, self.assign_counts = x[0], np.asarray(x[1])
         self.dim = self.assign_counts.shape[0]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into a keyed statistics dictionary."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -271,10 +277,12 @@ class MatchingAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from a keyed statistics dictionary."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "MatchingDataEncoder":
+        """Return an encoder compatible with the accumulated matching dimension."""
         return MatchingDataEncoder(dim=self.dim)
 
 
@@ -286,6 +294,7 @@ class MatchingAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> MatchingAccumulator:
+        """Create an empty matching accumulator."""
         return MatchingAccumulator(dim=self.dim, keys=self.keys)
 
 
@@ -317,9 +326,11 @@ class MatchingEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> MatchingAccumulatorFactory:
+        """Return a factory for matching sufficient-statistic accumulators."""
         return MatchingAccumulatorFactory(dim=self.dim, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray]) -> MatchingDistribution:
+        """Estimate a permanent-normalized matching distribution from assignment counts."""
         count, assign_counts = suff_stat
         n = self.dim
         if count <= 0.0:
@@ -359,6 +370,7 @@ class MatchingDataEncoder(DataSequenceEncoder):
         return isinstance(other, MatchingDataEncoder)
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray:
+        """Validate and encode matchings as a two-dimensional integer array."""
         rv = np.asarray([list(row) for row in x], dtype=int)
         if rv.ndim != 2 or rv.shape[0] == 0:
             raise ValueError("MatchingDistribution requires a non-empty sequence of matchings.")

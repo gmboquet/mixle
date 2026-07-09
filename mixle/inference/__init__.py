@@ -13,8 +13,7 @@ One home for turning data into a fitted/posterior model. Every entry point is th
 Everything physically lives in this package: the estimation / EM / fit / objectives / Fisher machinery
 (``mixle.inference.{estimation,em,fit,objectives,fisher}``), the MCMC samplers (``mixle.inference.mcmc``),
 the engine-agnostic NUTS/ADVI target facade (``mixle.inference.target`` + ``.backends`` + ``.diagnostics``).
-Conjugate Bayes is re-exported from its canonical home ``mixle.stats.bayes``. ``mixle.infer`` remains as
-a deprecated shim onto this package.
+Conjugate Bayes is re-exported from its canonical home ``mixle.stats.bayes``.
 
 These imports are eager and cycle-free: the machinery's only ``mixle.stats`` dependency is the compute
 layer (``mixle.stats.compute.{pdist,sequence}``), never the ``mixle.stats`` package surface — the
@@ -55,7 +54,44 @@ from mixle.inference.calibration import (
     reliability_curve,
     top_label_confidence,
 )
-from mixle.inference.causal import InterventionalNetwork, average_causal_effect, counterfactual, do
+from mixle.inference.causal import InterventionalNetwork, average_causal_effect, counterfactual
+from mixle.inference.causal import do as bn_do
+
+# M0's generic do() -- works over any fitted composed model (composite / mixture / HMM /
+# dependency-tree / Bayesian network / conditional / sequence / optional), unlike causal.do (aliased
+# above as bn_do), which only ever handled HeterogeneousBayesianNetwork. This is the package-level
+# `do` name; reach for `bn_do` explicitly when you specifically want the older BN-only path.
+#
+# Imported lazily (see __getattr__ at the bottom of this module, same pattern mixle.stats uses), for
+# two independent reasons:
+#   1. mixle.inference.condition eagerly imports mixle.stats.latent.mixture, and importing it at
+#      THIS module's own top level created a circular import through mixle.stats.bayes.dirichlet,
+#      which is sometimes still mid-init when mixle.inference is first reached from within
+#      mixle.stats' own chain.
+#   2. `condition` (the FUNCTION in mixle.inference.condition) is deliberately NOT re-exported at
+#      this package level at all, lazily or otherwise -- Python's import machinery always binds a
+#      submodule onto its parent package's namespace on first import, and `mixle.inference.condition`
+#      is ALSO this submodule's own dotted name; any attempt to shadow that with the function loses
+#      to the module every time a second name from the same submodule is imported in the same
+#      `from mixle.inference import ...` statement (confirmed: causes __getattr__ to be skipped for
+#      "condition" entirely once the submodule is bound). Every existing caller already reaches the
+#      function the unambiguous way -- `from mixle.inference.condition import condition` or
+#      `mixle.inference.condition.condition(...)` -- so nothing regresses by leaving it that way.
+_CONDITION_LAZY_NAMES = frozenset({"do", "Posterior", "ConditionReceipt", "FieldPath"})
+
+# M2's scenario simulators (mixle.inference.scenario) sit on top of condition.py and eagerly import
+# mixle.stats.latent.hidden_markov -- the same circular-import hazard condition.py's own lazy export
+# above exists to avoid. Lazily exported for the same reason, under aliases (this package's names
+# differ from scenario.py's own, to avoid colliding with mixle.task.solve's own "Scenario" name
+# elsewhere in the codebase) via the _SCENARIO_LAZY_NAMES map below (exported name -> attribute name
+# on the scenario submodule).
+_SCENARIO_LAZY_NAMES = {
+    "simulate_scenario": "simulate",
+    "ScenarioSpec": "Scenario",
+    "ScenarioSimulator": "Simulator",
+    "ScenarioSimulationReceipt": "SimulationReceipt",
+    "ScenarioFieldPosterior": "FieldPosterior",
+}
 from mixle.inference.conformal import (
     conformal_label_sets,
     conformal_label_threshold,
@@ -94,7 +130,7 @@ from mixle.inference.event_study import (
     poisson_lograte_effect,
     tipping_drift,
 )
-from mixle.inference.explain import Explanation, explain
+from mixle.inference.explain import Explanation, FaultReport, diagnose, explain, explain_margin, explain_margin_mixture
 from mixle.inference.fisher import FisherView, FixedFisherView, to_fisher
 from mixle.inference.forecast import Forecast, forecast
 
@@ -188,6 +224,16 @@ from mixle.inference.posterior import ParameterPosterior, PredictivePosterior, p
 
 # closed-form variational projections — compress a structured teacher onto a smaller student exactly
 from mixle.inference.project import collapse_mixture, fisher_merge, gaussian_kl, moment_project, reduce_mixture
+
+# receipts: bind ledger + trace + calibration + provenance into one offline-re-verifiable artifact (H3)
+from mixle.inference.receipt import Receipt, VerificationReport, verify_receipt
+from mixle.inference.refine import (
+    TrialsToTarget,
+    apply_add_edge_fix,
+    blind_search_trials_to_target,
+    directed_correction,
+    held_out_log_likelihood,
+)
 from mixle.inference.reproduce import (
     ReproReceipt,
     data_fingerprint,
@@ -206,7 +252,7 @@ from mixle.inference.resampling import (
     wild_bootstrap,
 )
 
-# robust / sandwich covariance for M-estimators and regression (honest SEs under misspecification)
+# robust / sandwich covariance for M-estimators and regression (misspecification-robust SEs)
 from mixle.inference.robust import (
     cluster_robust_covariance,
     newey_west_covariance,
@@ -214,6 +260,20 @@ from mixle.inference.robust import (
     robust_standard_errors,
     sandwich_covariance,
 )
+
+# M2's scenario simulators (mixle.inference.scenario) eagerly import
+# mixle.stats.latent.hidden_markov -- importing that at THIS module's own top level creates a real
+# circular import through mixle.stats.bayes.dirichlet (mixle.stats -> ... -> mixle.inference ->
+# scenario -> mixle.stats.latent.hidden_markov -> mixle.stats.latent.mixture ->
+# mixle.stats.bayes.dirichlet, still mid-init). Exported lazily instead (see __getattr__ at the
+# bottom of this module), under aliases since these names differ from scenario.py's own.
+_SCENARIO_LAZY_NAMES = {
+    "simulate_scenario": "simulate",
+    "ScenarioSpec": "Scenario",
+    "ScenarioSimulator": "Simulator",
+    "ScenarioSimulationReceipt": "SimulationReceipt",
+    "ScenarioFieldPosterior": "FieldPosterior",
+}
 
 # proper scoring rules — fair currency for comparing probabilistic forecasts / interval methods
 from mixle.inference.scoring import (
@@ -242,6 +302,7 @@ from mixle.inference.structure import (
     dependency_gain,
     learn_mixture_structure,
     learn_structure,
+    mixture_structure_health,
 )
 from mixle.inference.structure_embedded import EmbeddedStructureModel, learn_structure_embedded
 
@@ -281,6 +342,13 @@ from mixle.inference.target import (
     rhat_max,
     split_rhat,
 )
+from mixle.inference.torsion import (
+    CyclicGroup,
+    TwistedMixtureResult,
+    fit_independent_mixtures,
+    fit_twisted_mixture,
+    independent_log_density,
+)
 
 # epistemic / aleatoric uncertainty decomposition for any predictive (generalizes KG BALD)
 from mixle.inference.uncertainty import (
@@ -311,10 +379,20 @@ from mixle.stats.compute.sequence import estimate, initialize, seq_estimate, seq
 __all__ = [
     "Explanation",
     "explain",
+    "explain_margin",
+    "explain_margin_mixture",
+    "FaultReport",
+    "diagnose",
     "InterventionalNetwork",
     "average_causal_effect",
     "counterfactual",
     "do",
+    "bn_do",
+    # NOT "condition" -- reach the M0 condition() function via mixle.inference.condition.condition
+    # or `from mixle.inference.condition import condition`; see the module-level comment above.
+    "Posterior",
+    "ConditionReceipt",
+    "FieldPath",
     "Forecast",
     "forecast",
     # the estimator contract + MLE/EM/MAP drivers
@@ -333,6 +411,11 @@ __all__ = [
     "reduce_mixture",
     "moment_project",
     "gaussian_kl",
+    "TrialsToTarget",
+    "apply_add_edge_fix",
+    "blind_search_trials_to_target",
+    "directed_correction",
+    "held_out_log_likelihood",
     "fisher_merge",
     "fit",
     "EMStep",
@@ -361,7 +444,7 @@ __all__ = [
     # uq() -- one verb, method auto-selected (Laplace / conformal / semantic entropy)
     "uq",
     "UQResult",
-    # calibration as a post-condition of fitting (is the model's uncertainty honest on holdout?)
+    # calibration as a post-condition of fitting (is the model's uncertainty calibrated on holdout?)
     "calibration_report",
     "CalibrationReport",
     # placement planning -- the local-vs-pool axis of the estimation plan
@@ -380,9 +463,23 @@ __all__ = [
     "simulate",
     "Simulator",
     "Scenario",
+    # simulate_scenario() (M2) -- on-the-fly conditional simulators: evidence + interventions + horizon,
+    # via M0's condition()/do(), with a plausibility receipt. Aliased (not `simulate`/`Scenario`/
+    # `Simulator`) to avoid colliding with the names above -- see notes/designs/M2.md.
+    "simulate_scenario",
+    "ScenarioSpec",
+    "ScenarioSimulator",
+    "ScenarioSimulationReceipt",
+    "ScenarioFieldPosterior",
     # synthesize() -- a dataset factory: sample, label, keep only what verifies
     "synthesize",
     "Dataset",
+    # torsion (A4) -- twisted composition: mixture components sharing one base density modulo a group element
+    "CyclicGroup",
+    "TwistedMixtureResult",
+    "fit_twisted_mixture",
+    "fit_independent_mixtures",
+    "independent_log_density",
     # create() -- data (+ budget/device) to a certified model artifact
     "create",
     "CreatedModel",
@@ -395,6 +492,16 @@ __all__ = [
     "posterior",
     "ParameterPosterior",
     "PredictivePosterior",
+    # answer receipts -- bind ledger + trace + calibration + provenance, re-verifiable offline (H3)
+    "Receipt",
+    "VerificationReport",
+    "verify_receipt",
+    # diagnosis-directed correction vs blind structure search
+    "TrialsToTarget",
+    "apply_add_edge_fix",
+    "blind_search_trials_to_target",
+    "directed_correction",
+    "held_out_log_likelihood",
     # reproducibility receipts -- record a fit, replay it, check it comes out bit-for-bit
     "record_fit",
     "verify_reproducible",
@@ -523,6 +630,7 @@ __all__ = [
     # automatic dependency-structure learning for heterogeneous records
     "learn_structure",
     "learn_mixture_structure",
+    "mixture_structure_health",
     "learn_bayesian_network",
     "learn_mixture_bayesian_network",
     "select_mixture_components",
@@ -597,3 +705,25 @@ __all__ = [
     "hierarchical_event_study",
     "tipping_drift",
 ]
+
+
+def __getattr__(name: str):
+    if name in _CONDITION_LAZY_NAMES:
+        import importlib
+
+        # importlib.import_module (not `from mixle.inference import condition`) -- the latter
+        # resolves the submodule name via THIS package's own attribute lookup, which re-enters
+        # __getattr__("condition") (the lazy-exported FUNCTION shares its name with the submodule)
+        # and recurses forever.
+        _condition_module = importlib.import_module("mixle.inference.condition")
+        value = getattr(_condition_module, name)
+        globals()[name] = value  # subsequent accesses skip __getattr__ entirely
+        return value
+    if name in _SCENARIO_LAZY_NAMES:
+        import importlib
+
+        _scenario_module = importlib.import_module("mixle.inference.scenario")
+        value = getattr(_scenario_module, _SCENARIO_LAZY_NAMES[name])
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

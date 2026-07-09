@@ -1,15 +1,10 @@
-"""Create, estimate, and sample from a geometric distribution with probability of success p.
+"""Geometric distributions, estimators, samplers, accumulators, and encoders.
 
-Defines the GeometricDistribution, GeometricSampler, GeometricAccumulatorFactory, GeometricAccumulator,
-GeometricEstimator, and the GeometricDataEncoder classes for use with mixle.
+The observation type is ``int`` on support ``{1, 2, ...}``. The log-density is
+``(k - 1) * log(1 - p) + log(p)`` for ``k >= 1``.
 
-Data type (int): The geometric distribution with probability of success p, has density
-
-    P(x=k) = (k-1)*log(1-p) + log(p), for k = 1,2,...
-
-
-
-Reference: Johnson, Kemp & Kotz, *Univariate Discrete Distributions* (3rd ed., Wiley, 2005).
+Reference: Johnson, Kemp & Kotz, *Univariate Discrete Distributions*
+(3rd ed., Wiley, 2005).
 """
 
 import math
@@ -44,12 +39,14 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare backend support for generated Geometric density kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch", "jax"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the generated-compute declaration for the Geometric distribution."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -106,24 +103,23 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
-        """GeometricDistribution object defining geometric distribution with probability of success p.
+        """Create a geometric distribution with success probability ``p``.
 
-        Mean: 1/p, Variance: (1-p)/p^2.
+        The mean is ``1 / p`` and the variance is ``(1 - p) / p**2``.
 
         Args:
-            p (float): Must between (0,1).
-            name (Optional[str]): Assign name to GeometricDistribution object.
+            p: Success probability in ``(0, 1]``.
+            name: Optional distribution name.
             prior (Optional): Conjugate Beta prior on the success probability ``p``. A
                 :class:`~mixle.stats.univariate.continuous.beta.BetaDistribution` enables the Bayesian/variational
                 machinery (``expected_log_density`` and the conjugate posterior update);
                 ``None`` (default) is a plain point model.
 
         Attributes:
-            p (float): Probability of success, must between (0,1).
-            log_p (float): Log of probability of success p.
-            log_1p (float): Log of 1-p (prob of failure).
-            name (Optional[str]): Assign name to GeometricDistribution object.
-
+            p: Success probability.
+            log_p: ``log(p)``.
+            log_1p: ``log(1 - p)``.
+            name: Optional distribution name.
         """
         if p <= 0.0 or p > 1.0 or not np.isfinite(p):
             raise ValueError("GeometricDistribution requires p in (0, 1].")
@@ -134,7 +130,7 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         self.set_prior(prior)
 
     def __str__(self) -> str:
-        """Return string representation of GeometricDistribution instance."""
+        """Return a constructor-style representation of the geometric distribution."""
         return "GeometricDistribution(%s, name=%s)" % (repr(self.p), repr(self.name))
 
     def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
@@ -302,25 +298,25 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         return 1.0
 
     def sampler(self, seed: int | None = None) -> "GeometricSampler":
-        """Creates GeometricSampler object from GeometricDistribution instance.
+        """Create a sampler from this geometric distribution.
 
         Args:
             seed (Optional[int]): Used to set seed on random number generator.
 
         Returns:
-            GeometricSampler object.
+            GeometricSampler configured from this distribution.
 
         """
         return GeometricSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "GeometricEstimator":
-        """Creates GeometricEstimator object.
+        """Create an estimator for a geometric distribution.
 
         Args:
-            pseudo_count (Optional[float]): Regularize summary statistics from object instance.
+            pseudo_count (Optional[float]): Regularize empirical summary statistics.
 
         Returns:
-            GeometricEstimator object.
+            GeometricEstimator configured with this distribution's prior and name.
 
         """
         if pseudo_count is None:
@@ -329,7 +325,7 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
             return GeometricEstimator(pseudo_count=pseudo_count, suff_stat=self.p, name=self.name, prior=self.prior)
 
     def dist_to_encoder(self) -> "GeometricDataEncoder":
-        """Returns GeometricDataEncoder object for encoding sequence of GeometricDistribution observations."""
+        """Return the encoder for geometric observations."""
         return GeometricDataEncoder()
 
     def enumerator(self) -> "GeometricEnumerator":
@@ -403,6 +399,8 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class GeometricEnumerator(DistributionEnumerator):
+    """Enumerate geometric support values in descending probability order."""
+
     def __init__(self, dist: GeometricDistribution) -> None:
         """Enumerates the support {1, 2, 3, ...} of a GeometricDistribution.
 
@@ -426,12 +424,14 @@ class GeometricEnumerator(DistributionEnumerator):
 
 
 class GeometricSampler(DistributionSampler):
+    """Draw independent samples from a :class:`GeometricDistribution`."""
+
     def __init__(self, dist: GeometricDistribution, seed: int | None = None) -> None:
-        """GeometricSampler object used to draw samples from GeometricDistribution.
+        """Create a sampler for a geometric distribution.
 
         Args:
-            dist (GeometricDistribution): GeometricDistribution to sample from.
-            seed (Optional[int]): Used to set seed on random number generator used in sampling.
+            dist: Distribution to sample from.
+            seed: Optional random seed.
 
         Attributes:
             rng (RandomState): RandomState with seed set for sampling.
@@ -458,12 +458,14 @@ class GeometricSampler(DistributionSampler):
 
 
 class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulate weighted count and sum statistics for Geometric estimation."""
+
     def __init__(self, name: str | None = None, keys: str | None = None):
-        """GeometricAccumulator object used to accumulate sufficient statistics from observations.
+        """Create an accumulator for geometric sufficient statistics.
 
         Args:
-            name (Optional[str]): Assign a name to the object instance.
-            keys (Optional[str]): GeometricAccumulator objects with same key merge sufficient statistics.
+            name (Optional[str]): Optional accumulator name.
+            keys (Optional[str]): Accumulators with the same key merge sufficient statistics.
 
         Attributes:
             sum (float): Aggregate weighted sum of observations.
@@ -514,7 +516,7 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
     def initialize(self, x: int, weight: float, rng: RandomState | None) -> None:
         """Initialize sufficient statistics of GeometricAccumulator with weighted observation.
 
-        Note: Just calls update.
+        This delegates to :meth:`update`.
 
         Args:
             x (int): Positive integer observation of geometric distribution.
@@ -530,7 +532,7 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Vectorized initialization of GeometricAccumulator sufficient statistics with weighted observations.
 
-        Note: Just calls seq_update().
+        This delegates to :meth:`seq_update`.
 
         Args:
             x (ndarray): Numpy array of positive integers.
@@ -582,7 +584,7 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge sufficient statistics of object instance with suff stats containing matching keys.
+        """Merge sufficient statistics from ``stats_dict`` when this accumulator's key is present.
 
         Args:
             stats_dict (Dict[str, Any]): Dict mapping keys to sufficient statistics.
@@ -601,7 +603,7 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = (self.count, self.sum)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Set sufficient statistics of object instance to suff_stats with matching keys.
+        """Replace sufficient statistics from ``stats_dict`` when this accumulator's key is present.
 
         Args:
             stats_dict (Dict[str, Any]): Dict mapping keys to sufficient statistics.
@@ -615,16 +617,18 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
                 self.count, self.sum = stats_dict[self.keys]
 
     def acc_to_encoder(self) -> "GeometricDataEncoder":
-        """Returns GeometricDataEncoder object for encoding sequence of GeometricDistribution observations."""
+        """Return the encoder associated with this accumulator."""
         return GeometricDataEncoder()
 
 
 class GeometricAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create Geometric accumulators with shared name and merge-key metadata."""
+
     def __init__(self, name: str | None = None, keys: str | None = None) -> None:
-        """GeometricAccumulatorFactory object used to create GeometricAccumulator objects.
+        """Create a factory for geometric accumulators.
 
         Args:
-            name (Optional[str]): Assign a name to the object instance.
+            name (Optional[str]): Optional name assigned to created accumulators.
             keys (Optional[str]): GeometricAccumulator objects with same key merge sufficient statistics.
 
         Attributes:
@@ -641,6 +645,8 @@ class GeometricAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class GeometricEstimator(ParameterEstimator):
+    """Estimate Geometric success probabilities from accumulated sufficient statistics."""
+
     def __init__(
         self,
         pseudo_count: float | None = None,
@@ -649,12 +655,12 @@ class GeometricEstimator(ParameterEstimator):
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
-        """GeometricEstimator object for estimating GeometricDistribution object from aggregated sufficient statistics.
+        """Estimator for a geometric distribution from aggregated sufficient statistics.
 
         Args:
             pseudo_count (Optional[float]): Float value for re-weighting suff_stat member variable.
             suff_stat (Optional[float]): Probability of success (value between (0,1)).
-            name (Optional[str]): Assign a name to the object instance.
+            name (Optional[str]): Optional name assigned to the estimated distribution.
             keys (Optional[str]): GeometricAccumulator objects with same key merge sufficient statistics.
             prior (Optional): Conjugate Beta prior on the success probability ``p``. When present,
                 ``estimate`` performs the closed-form conjugate posterior update (returning the
@@ -676,7 +682,7 @@ class GeometricEstimator(ParameterEstimator):
         self.has_conj_prior = isinstance(prior, BetaDistribution)
 
     def accumulator_factory(self) -> "GeometricAccumulatorFactory":
-        """Create GeometricAccumulatorFactory object with name and keys passed."""
+        """Create a geometric accumulator factory with this estimator's name and keys."""
         return GeometricAccumulatorFactory(name=self.name, keys=self.keys)
 
     def model_log_density(self, model: "GeometricDistribution") -> float:
@@ -708,27 +714,12 @@ class GeometricEstimator(ParameterEstimator):
         return GeometricDistribution(p, name=self.name, prior=BetaDistribution(a, b))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> "GeometricDistribution":
-        """Estimate geometric distribution from aggregated sufficient statistics (suff_stat).
+        """Estimate a geometric distribution from weighted count and sum statistics.
 
-        Uses suff_stat (Tuple[float, float]):
-            suff_stat[0] (float): sum of weights of the observations (count),
-            suff_stat[1] (float): weighted sum of observations (sum).
-
-        If member variable pseudo_count is not None, then suff_stat arg is combined with pseudo_count weighted member
-        variable of sufficient statistics.
-
-        If member variable pseudo_count is not None, and member variable sufficient statistic is None, suff_stat arg
-        is reweighted by pseudo_count alone.
-
-        If no pseudo_count is set, p = suff_stat[0]/suff_stat[1] is passed to GeometricDistribution.
-
-        Args:
-            nobs (Optional[float]): Not used. Kept for consistency with ParameterEstimator.
-            suff_stat (Tuple[float, float]): See above.
-
-        Returns:
-            GeometricDistribution object.
-
+        ``nobs`` is accepted for estimator API consistency but is not used.
+        ``suff_stat`` is ``(count, sum)``. Without a pseudo-count, the estimate is
+        ``p = count / sum``; with a pseudo-count, the empirical statistic is
+        shrunk toward the estimator's prior statistic when available.
         """
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
@@ -747,14 +738,14 @@ class GeometricEstimator(ParameterEstimator):
 
 
 class GeometricDataEncoder(DataSequenceEncoder):
-    """GeometricDataEncoder object for encoding sequences of iid geometric observations with data type int."""
+    """Data encoder for iid positive-integer geometric observations."""
 
     def __str__(self) -> str:
-        """Returns string representation of GeometricDataEncoder object."""
+        """Return the geometric encoder's display name."""
         return "GeometricDataEncoder"
 
     def __eq__(self, other) -> bool:
-        """Checks if object is equivalent to GeometricDataEncoder instance.
+        """Return true when ``other`` is an equivalent geometric data encoder.
 
         Args:
             other (object): Object to be compared to self.

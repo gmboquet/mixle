@@ -82,6 +82,40 @@ class KeyValidationError(ValueError):
     pass
 
 
+class ContractError(ValueError):
+    """Raised when malformed data trips a combinator's ``seq_encode``/``estimate`` contract boundary.
+
+    Mirrors :class:`EnumerationError`'s path-composition convention: ``path`` names the full field
+    path through nested combinators (composed with ``" -> "``, outermost first), e.g.
+    ``"CompositeDistribution.dists[2] -> SequenceDistribution.entries"``. Every ``ContractError``
+    also carries what was expected, what actually arrived, and (when there is one) a concrete,
+    non-generic suggestion for the likely fix -- so a caller reading only the message, not the
+    traceback, knows what to change.
+    """
+
+    def __init__(self, path: str, expected: str, actual: str, fix: str = "") -> None:
+        self.path = path
+        self.expected = expected
+        self.actual = actual
+        self.fix = fix
+        msg = "%s: expected %s, got %s." % (path, expected, actual)
+        if fix:
+            msg += " Fix: %s" % fix
+        super().__init__(msg)
+
+
+def prefix_contract_error(prefix: str, err: "ContractError") -> "ContractError":
+    """Return a new ContractError with ``prefix`` prepended to ``err``'s field path.
+
+    Used by a combinator to annotate a ``ContractError`` raised deep inside a child's
+    ``seq_encode``/``estimate`` with the outer field position, so the final message names the
+    FULL path down to where the failure actually occurred (e.g. a mixture-of-composites-of-
+    sequences error names every level, not just the outermost combinator).
+    """
+    new_path = "%s -> %s" % (prefix, err.path) if err.path else prefix
+    return ContractError(new_path, err.expected, err.actual, err.fix)
+
+
 def child_enumerator(child: "ProbabilityDistribution", path: str) -> "DistributionEnumerator":
     """Construct child.enumerator(), annotating EnumerationError with the child's path.
 
@@ -390,7 +424,7 @@ class ProbabilityDistribution(ABC):
         This is the count-semiring counterpart of ``quantized_index``: it returns per-fine-bucket
         *counts* of the complete model probability together with a structural unranker, so the
         support can be indexed without being enumerated. The default builds a leaf index from the
-        exact ``enumerator()`` truncated at ``max_fine_bucket`` (cheap for closed-form/small-support
+        exact ``enumerator()`` truncated at ``max_fine_bucket`` (efficient for closed-form/small-support
         families); exponential-support composers (Composite/Sequence/MarkovChain) override this with
         a dynamic program over the model's likelihood recursion.
 
@@ -772,7 +806,7 @@ class DistributionEnumerator(ABC):
         :class:`~mixle.enumeration.density_rank.MarginalSeekResult` ``[true_rank_lower, true_rank_upper]``
         provably contains ``#{u : log p(u) > log p(value)}``. It pins the rank exactly (``.exact``) for
         decomposable / provably-disjoint families and for shallow indices, and otherwise returns the
-        honest provable envelope. For a decomposable family it agrees with :meth:`seek`.
+        certified provable envelope. For a decomposable family it agrees with :meth:`seek`.
         """
         from mixle.enumeration.density_rank import marginal_seek
 
@@ -810,7 +844,9 @@ class ConditionalSampler(ABC):
     """Sampler mixin for conditional draws: sample_given(x) draws from P(. | x)."""
 
     @abstractmethod
-    def sample_given(self, x): ...
+    def sample_given(self, x):
+        """Draw a sample from the conditional distribution given ``x``."""
+        ...
 
 
 class StatisticAccumulator(ABC, Generic[SS]):
@@ -823,19 +859,28 @@ class StatisticAccumulator(ABC, Generic[SS]):
     a stats_dict keyed by the accumulator's key.
     """
 
-    def update(self, x: Any, weight: float, estimate) -> None: ...
+    def update(self, x: Any, weight: float, estimate) -> None:
+        """Accumulate one weighted observation under an optional current estimate."""
+        ...
 
     def initialize(self, x: Any, weight: float, rng: np.random.RandomState) -> None:
+        """Initialize sufficient statistics from one weighted observation."""
         self.update(x, weight, estimate=None)
 
     @abstractmethod
-    def combine(self, suff_stat: SS) -> "StatisticAccumulator": ...
+    def combine(self, suff_stat: SS) -> "StatisticAccumulator":
+        """Merge serialized sufficient statistics into this accumulator."""
+        ...
 
     @abstractmethod
-    def value(self) -> SS: ...
+    def value(self) -> SS:
+        """Return this accumulator's serialized sufficient statistics."""
+        ...
 
     @abstractmethod
-    def from_value(self, x: SS) -> "SequenceEncodableStatisticAccumulator": ...
+    def from_value(self, x: SS) -> "SequenceEncodableStatisticAccumulator":
+        """Restore this accumulator from serialized sufficient statistics."""
+        ...
 
     def scale(self, c: float) -> "StatisticAccumulator":
         """Scale linear sufficient statistics in-place by ``c``.
@@ -878,16 +923,23 @@ class SequenceEncodableStatisticAccumulator(StatisticAccumulator[SS]):
     """
 
     def get_seq_lambda(self):
+        """Return optional low-level sequence-update kernels used by generated code."""
         pass
 
     @abstractmethod
-    def seq_update(self, x, weights: np.ndarray, estimate) -> None: ...
+    def seq_update(self, x, weights: np.ndarray, estimate) -> None:
+        """Accumulate weighted sufficient statistics from sequence-encoded observations."""
+        ...
 
     @abstractmethod
-    def seq_initialize(self, x, weights: np.ndarray, rng: np.random.RandomState) -> None: ...
+    def seq_initialize(self, x, weights: np.ndarray, rng: np.random.RandomState) -> None:
+        """Initialize sufficient statistics from sequence-encoded observations."""
+        ...
 
     @abstractmethod
-    def acc_to_encoder(self) -> "DataSequenceEncoder": ...
+    def acc_to_encoder(self) -> "DataSequenceEncoder":
+        """Return a sequence encoder compatible with this accumulator."""
+        ...
 
 
 def scale_suff_stat(x: Any, c: float) -> Any:
@@ -917,7 +969,9 @@ class StatisticAccumulatorFactory(ABC):
     """Factory whose make() returns a fresh, zeroed accumulator for one estimator."""
 
     @abstractmethod
-    def make(self) -> "SequenceEncodableStatisticAccumulator": ...
+    def make(self) -> "SequenceEncodableStatisticAccumulator":
+        """Create a fresh accumulator instance."""
+        ...
 
 
 class ParameterEstimator(ABC, Generic[SS]):
@@ -961,10 +1015,14 @@ class ParameterEstimator(ABC, Generic[SS]):
         return rv
 
     @abstractmethod
-    def estimate(self, nobs: float | None, suff_stat: SS) -> "SequenceEncodableProbabilityDistribution": ...
+    def estimate(self, nobs: float | None, suff_stat: SS) -> "SequenceEncodableProbabilityDistribution":
+        """Estimate a distribution from accumulated sufficient statistics."""
+        ...
 
     @abstractmethod
-    def accumulator_factory(self) -> "StatisticAccumulatorFactory": ...
+    def accumulator_factory(self) -> "StatisticAccumulatorFactory":
+        """Return the accumulator factory used to collect this estimator's sufficient statistics."""
+        ...
 
     def resident_accumulation_supported(self) -> bool:
         """Return whether engine-resident (fixed-width) sufficient statistics suffice for ``estimate``.

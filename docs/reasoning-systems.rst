@@ -39,12 +39,16 @@ observation under one model per hypothesis.
 ``DiscreteAnswer.decide`` computes the Bayes-optimal action under a loss matrix
 and can include an explicit abstain cost.
 
+Record the hypothesis set, priors, evidence sources, and loss matrix when a
+discrete answer drives a decision. Changing any one of those inputs changes the
+meaning of the posterior and the recommended action.
+
 Cross-Modal Store
 -----------------
 
-``CrossModalStore`` treats retrieval as evidence selection, not as a vector
-stuffing step. A cheap embedding key retrieves candidates; each candidate can
-then contribute coarse embedding evidence or fine raw-payload evidence.
+``CrossModalStore`` treats retrieval as evidence selection. A low-cost
+embedding key retrieves candidates; each candidate can then contribute coarse
+embedding evidence or fine raw-payload evidence.
 
 .. code-block:: python
 
@@ -63,6 +67,10 @@ then contribute coarse embedding evidence or fine raw-payload evidence.
 Each ``RetrievalStep`` records the item index, fidelity, and information gain.
 Use ``next_evidence`` for active retrieval: the next item whose evidence most
 reduces query entropy.
+
+Retrieval evidence should remain auditable. Store candidate identifiers,
+fidelity choices, and skipped high-cost evidence when the reasoning result is
+used outside exploration.
 
 Acquisition Planning
 --------------------
@@ -87,6 +95,10 @@ fidelities.
 
 The planner greedily re-scores candidates after each selected item, so the
 batch avoids paying twice for redundant evidence.
+
+Budget settings are part of the result. A lower budget can change not only the
+amount of evidence collected but also which modalities or fidelities are
+trusted by the final belief.
 
 Graph-Producing LLMs
 --------------------
@@ -116,7 +128,11 @@ graphs rather than strings.
 This is useful when generated text needs fact-level reliability rather than a
 single answer confidence.
 
-Ontologies And Typed Graphs
+Graph extraction should keep parse failures and invalid graphs visible. A
+graph distribution built only from successfully parsed outputs can overstate
+reliability if many generations failed the schema.
+
+Ontologies and Typed Graphs
 ---------------------------
 
 ``Ontology`` provides symbolic constraints over graph facts: classes,
@@ -145,6 +161,10 @@ completion is accepted.
 ``OntologyConstrainedKG`` wraps a fitted knowledge-graph distribution and masks
 tail completions to range-conforming entities. This makes the schema part of
 the probability query rather than an after-the-fact filter.
+
+Ontology checks are validation evidence, not proof that the source facts are
+true. Keep type violations, masked completions, and disjointness conflicts with
+the graph artifact.
 
 Amortized Encoders
 ------------------
@@ -186,7 +206,11 @@ any subset of modalities.
 Use ``calibrate`` and ``predict_interval`` when cross-modal prediction needs
 finite-sample coverage for a target modality.
 
-Relationship To LLM UQ
+Cross-modal predictions should be evaluated per modality and per missing-view
+pattern. A model that works with all modalities present can fail when only text
+or only sensor evidence is available.
+
+Relationship to LLM UQ
 ----------------------
 
 LLM uncertainty in :doc:`uncertainty` asks whether a language model's sampled
@@ -205,6 +229,18 @@ Use:
   fetching;
 * ``CrossModalModel`` when the shared latent itself should be learned from
   multimodal data.
+
+Validation Evidence
+-------------------
+
+For reasoning workflows, preserve:
+
+* hypothesis sets, priors, evidence source identifiers, and loss matrices;
+* retrieval candidates, selected fidelities, and information-gain records;
+* graph parser failures, ontology violations, and fact-calibration reports;
+* cross-modal calibration by modality and missing-view pattern;
+* abstention or escalation thresholds; and
+* the action policy that consumes the belief.
 
 API Reference
 -------------

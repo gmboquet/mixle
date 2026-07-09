@@ -48,7 +48,7 @@ class MultivariateNormalGammaDistribution(SequenceEncodableProbabilityDistributi
         name: str | None = None,
         prior: Optional["SequenceEncodableProbabilityDistribution"] = None,
     ) -> None:
-        """MultivariateNormalGammaDistribution object.
+        """Create independent normal-gamma priors for vector-valued Gaussian coordinates.
 
         Args:
             mu (np.ndarray): Length-d vector of prior means mu0_i.
@@ -208,4 +208,5 @@ class MultivariateNormalGammaDataEncoder(DataSequenceEncoder):
         return isinstance(other, MultivariateNormalGammaDataEncoder)
 
     def seq_encode(self, x: Any) -> Any:
+        """Encode multivariate Normal-Gamma observations as a list payload."""
         return list(x)

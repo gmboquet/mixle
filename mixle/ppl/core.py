@@ -3,10 +3,11 @@
 One immutable wrapper type, :class:`RandomVariable`, sits over mixle's existing
 distribution / estimator / sampler objects. It adds *no* inference engine: every call
 lowers (one routing site, :func:`lower`) to machinery that already exists and then
-dispatches. See notes/ppl-syntax-spec.md for the design charter and invariants.
+dispatches.
 
-Slice 1-2 of the build order: the wrapper + ``free`` holes + ``fit`` (EM core).
-Algebra, conditioning, latent-arg Compound, and MCMC routing land in later slices.
+The core surface covers immutable random variables, ``free`` parameter holes,
+fitting, and lowering into existing Mixle estimators and distributions. Unsupported
+combinations should fail explicitly rather than returning a partially lowered model.
 """
 
 from __future__ import annotations
@@ -315,6 +316,7 @@ class Net(_NeuralPredictor):
         self.out = int(out)
 
     def build(self, in_shape: Any) -> Any:
+        """Build a Torch MLP module for the inferred covariate shape."""
         import torch.nn as nn
 
         in_dim = int(in_shape if isinstance(in_shape, int) else int(np.prod(in_shape)))
@@ -343,6 +345,7 @@ class Conv(_NeuralPredictor):
         self.out = int(out)
 
     def build(self, in_shape: Any) -> Any:
+        """Build a Torch convolutional module for image-shaped covariates."""
         import torch.nn as nn
 
         c = int(in_shape[0])  # (C, H, W)
@@ -397,6 +400,7 @@ class Transformer(_NeuralPredictor):
         self.embedding = embedding
 
     def build(self, in_shape: Any) -> Any:
+        """Build a causal language-model module for the inferred token context width."""
         from mixle.models.transformer import build_causal_lm
 
         block = int(in_shape[0] if not isinstance(in_shape, int) else in_shape)
@@ -514,6 +518,7 @@ class Constraint:
         return self.leaves[0]
 
     def eval(self, env):
+        """Evaluate the constraint predicate against an environment of RV values."""
         return self.pred(env)
 
     def contains(self, x):
@@ -599,9 +604,8 @@ def _expr_has_gather(rv) -> bool:
     return False
 
 
-# Honest, per-route caveats surfaced by RandomVariable.explain_fit -- the "what are the limits of this
-# automatic choice?" half of the teaching surface. Kept here so the auto-selector and its explanation
-# share one vocabulary.
+# Per-route caveats surfaced by RandomVariable.explain_fit. Kept here so the auto-selector and its explanation
+# share one vocabulary about result type, diagnostics, and limitations.
 _ROUTE_CAVEATS = {
     "conjugate": ["exact closed-form posterior; returns a ConjugatePosterior you can sample / mean / interval"],
     "conjugate_mixture": ["exact closed-form posterior over a mixture of conjugate priors"],
@@ -611,7 +615,7 @@ _ROUTE_CAVEATS = {
         "uses analytic-gradient L-BFGS when torch is available, else a slower derivative-free optimizer",
         "for a posterior, pass how='laplace' (quick Gaussian approx) or how='mcmc'/'nuts'/'hmc'",
     ],
-    "laplace": ["Gaussian posterior approximation at the MAP (inverse-Hessian covariance); cheap but local"],
+    "laplace": ["Gaussian posterior approximation at the MAP (inverse-Hessian covariance); local approximation"],
     "hierarchical": [
         "random-effects fit; non-Normal pairs use PQL, which is mildly biased for sparse/low-count groups"
     ],
@@ -963,16 +967,18 @@ class Family:
         # MLE is sensitive to initialization (e.g. negative-binomial dispersion).
         self.init_fit = init_fit
         # read(dist) -> {conventional param name: value}: the inverse of construction, so
-        # fitted params come back in the *same* parameterization the user wrote (sd, not sigma2).
+        # fitted params return in the *same* parameterization the user wrote (sd, not sigma2).
         self.read = read
 
     def make_dist(self, args: tuple[Any, ...], name: str | None):
+        """Construct the concrete distribution for conventional PPL arguments."""
         kwargs = self.to_dist(*args)
         if name is not None:
             kwargs.setdefault("name", name)
         return self.dist_cls(**kwargs)
 
     def make_estimator(self, name: str | None, keys: str | None):
+        """Construct the estimator associated with this family."""
         kwargs: dict[str, Any] = {}
         if name is not None:
             kwargs["name"] = name
@@ -1020,6 +1026,7 @@ _DIST_TO_COMPOSITE_READ: dict[type, Any] = {}  # composite dist type -> read(dis
 def register_family(
     name, dist_cls, est_cls, to_dist, arity, seed_at=None, positive=None, init_fit=None, read=None, support=None
 ) -> Family:
+    """Register a flat PPL family and its distribution/estimator lowering rules."""
     fam = Family(
         name,
         dist_cls,
@@ -1038,6 +1045,7 @@ def register_family(
 
 
 def register_composite(name, dist_fn, est_fn, seed_fn=None, dist_cls=None, read=None, fit_fn=None) -> CompositeFamily:
+    """Register a composite PPL family with custom lowering or fitting hooks."""
     fam = CompositeFamily(name, dist_fn, est_fn, seed_fn=seed_fn, read=read, fit_fn=fit_fn)
     _FAMILIES[name] = fam
     if dist_cls is not None and read is not None:
@@ -1132,7 +1140,7 @@ class RandomVariable:
 
     Two states: ``sample`` (a symbolic draw: a family + argument expressions, some of
     which may be ``free``) and ``bound`` (wraps a concrete fitted distribution). The
-    verb surface is fixed and state-independent (invariant I3); validity depends on
+    verb surface is fixed and state-independent; validity depends on
     state. Construct via the family functions in :mod:`mixle.ppl` or ``fit``.
     """
 
@@ -1140,7 +1148,11 @@ class RandomVariable:
 
     @property
     def certificate(self):
-        """The estimation certificate, when a fit attached one (penalized fits downgrade honestly; E2)."""
+        """The estimation certificate, when a fit attached one.
+
+        Penalized fits downgrade the certificate because the optimum is for a surrogate objective, not
+        an unpenalized likelihood.
+        """
         return self._cache.get("certificate")
 
     def __init__(
@@ -1168,7 +1180,7 @@ class RandomVariable:
         object.__setattr__(self, "_scope", scope)  # 'shared' | 'grouped'
         object.__setattr__(self, "_reparam", reparam)  # None | 'loc_scale' (non-centered prior)
 
-    def __setattr__(self, *a):  # enforce immutability (I2)
+    def __setattr__(self, *a):  # enforce immutability
         raise AttributeError("RandomVariable is immutable")
 
     def __reduce__(self):
@@ -1232,6 +1244,7 @@ class RandomVariable:
 
     @property
     def scope(self) -> str:
+        """Return the variable scope, such as scalar, grouped, or global."""
         return self._scope
 
     @classmethod
@@ -1329,11 +1342,13 @@ class RandomVariable:
         return self._affine(0.0, -1.0)
 
     def exp(self) -> RandomVariable:
+        """Return the deterministic exponential transform of this random variable."""
         from mixle.stats.combinator.transform import ExpTransform
 
         return RandomVariable._apply(self, ExpTransform())
 
     def log(self) -> RandomVariable:
+        """Return the deterministic logarithm transform of this random variable."""
         from mixle.stats.combinator.transform import LogTransform
 
         return RandomVariable._apply(self, LogTransform())
@@ -1353,9 +1368,11 @@ class RandomVariable:
 
     # ``==`` / ``!=`` stay identity-based (RVs are dict keys), so equalities use explicit methods.
     def eq(self, other):
+        """Build an equality constraint against a value or another expression."""
         return _make_constraint(self, "==", other)
 
     def ne(self, other):
+        """Build an inequality constraint against a value or another expression."""
         return _make_constraint(self, "!=", other)
 
     def given(self, constraint) -> RandomVariable:
@@ -1375,14 +1392,17 @@ class RandomVariable:
     # -- introspection ------------------------------------------------------
     @property
     def is_bound(self) -> bool:
+        """Whether this variable has already been lowered to a fitted concrete object."""
         return self._kind == "bound"
 
     @property
     def has_free(self) -> bool:
+        """Whether this sample expression contains one or more free parameters."""
         return self._kind == "sample" and any(_is_free(a) for a in self._args)
 
     @property
     def name(self) -> str | None:
+        """Return the optional user-visible variable name."""
         return self._name
 
     @property
@@ -1439,6 +1459,7 @@ class RandomVariable:
 
     # -- query verbs (valid once concrete) ----------------------------------
     def sample(self, n: int | None = None, seed: int | None = None):
+        """Draw samples from the represented distribution or derived expression."""
         if self._kind == "joint":  # joint rejection sampling under a relation
             leaves, constraint = self._args
             rng = np.random.RandomState(seed)
@@ -1503,6 +1524,7 @@ class RandomVariable:
         return kde
 
     def log_prob(self, x):
+        """Evaluate the log probability or log density at ``x``."""
         if self._kind == "joint":  # joint density of independent leaves / Z
             leaves, constraint = self._args
             widths = [int(np.asarray(lv.sample(1, seed=0)).reshape(1, -1).shape[1]) for lv in leaves]
@@ -1735,11 +1757,11 @@ class RandomVariable:
         return "em", "all-free parameters, no priors -> maximum-likelihood EM"
 
     def _resolve_posterior_ladder(self):
-        """Cheapest route that returns a *posterior* (uncertainty), not a point estimate -- the
+        """Lowest-cost route that returns a *posterior* (uncertainty), not a point estimate -- the
         ``how='posterior'`` escalation ladder: conjugate (exact) -> Laplace (Gaussian at the MAP) -> MCMC.
 
         Unlike ``how='auto'`` (which stops at MAP for a non-conjugate prior and returns a point estimate),
-        this always climbs to the cheapest rung that yields posterior uncertainty, and reports which rung.
+        this always climbs to the lowest-cost route that yields posterior uncertainty, and reports which route.
         """
         from mixle.ppl import inference as _inf
 
@@ -1750,7 +1772,7 @@ class RandomVariable:
             or _inf._is_all_free_normal(self)
         )
         if closed_form:
-            return "conjugate", "exact closed-form (conjugate) posterior -- the cheapest rung"
+            return "conjugate", "exact closed-form (conjugate) posterior -- the lowest-cost posterior route"
         flat = (
             self._kind == "sample"
             and not isinstance(self._family, CompositeFamily)
@@ -1761,13 +1783,30 @@ class RandomVariable:
         return "mcmc", "structured/composite model -> MCMC for the posterior -- the general rung"
 
     def explain_fit(self, *, how="auto", constraints=None, potentials=None, **_) -> dict:
-        """Report which inference route ``.fit(how=...)`` will take, and why -- *without* fitting.
+        """Report which inference route ``.fit(how=...)`` took (or would take, before fitting).
 
-        Returns ``{'route', 'reason', 'caveats'}``. This is the teaching surface for mixle's automatic
-        cross-family inference selection: ``rv.explain_fit()`` answers "how will this be fit, and what
-        are the honest limits of that choice?". The route mirrors :meth:`fit` exactly (it shares
-        :meth:`_resolve_auto` for the flat tree and re-checks the same structural short-circuits).
+        Returns ``{'route', 'reason', 'caveats'}``. This is the inspection
+        surface for Mixle's automatic cross-family inference selection:
+        ``rv.explain_fit()`` answers how the expression will be fit, what result
+        type it returns, and which diagnostics or limitations apply. The route
+        mirrors :meth:`fit` exactly by sharing :meth:`_resolve_auto` for the flat
+        tree and re-checking the same structural short-circuits.
+
+        Called on a **bound** RV (the result of ``.fit(...)``), this reports what that fit actually
+        did -- ``fit()`` stashes its own answer to this question, computed while the pre-fit expression
+        still carried its priors, since a bound RV's ``_args`` is always empty and cannot be re-derived
+        from. Raises if that record is unavailable (e.g. the model was reloaded from a saved artifact,
+        which does not round-trip it) -- call ``explain_fit()`` on the pre-fit expression instead.
         """
+        if self._kind == "bound":
+            cached = self._cache.get("_fit_explanation")
+            if cached is not None:
+                return dict(cached)
+            raise RuntimeError(
+                "explain_fit() has no record of how this bound model was fit (e.g. it was reloaded "
+                "from a saved artifact, or built directly rather than through .fit()). Call "
+                "explain_fit() on the pre-fit expression instead, or re-fit for a fresh explanation."
+            )
         if how == "posterior":
             route, reason = self._resolve_posterior_ladder()
         elif how != "auto":
@@ -1857,18 +1896,34 @@ class RandomVariable:
         if hasattr(data, "__len__") and len(data) == 0:
             raise ValueError("fit() received empty data.")
 
+        # ``self`` (the pre-fit expression) still has its priors/args intact here, no matter which
+        # branch below returns -- unlike the bound RV that comes back, whose _args is always empty. Stash
+        # explain_fit()'s answer for the *originally requested* how onto the result so a bound RV's own
+        # .explain_fit() reports what actually happened, instead of re-deriving from a structure that no
+        # longer carries it (see the "bound" branch in explain_fit()).
+        _original_how = how
+
+        def _stash_explanation(rv):
+            try:
+                rv._cache["_fit_explanation"] = self.explain_fit(
+                    how=_original_how, constraints=kw.get("constraints"), potentials=kw.get("potentials")
+                )
+            except Exception:  # noqa: BLE001 - best-effort; must never block a fit
+                pass
+            return rv
+
         if self._kind == "sample" and any(_expr_has_gather(a) for a in self._args):
             # A data-indexed latent (theta[Field("g")]) makes the parameter per-observation -> the
             # per-observation (indexed) target.
             from mixle.ppl import inference as _inf
 
-            return _inf.indexed_fit(self, data, how=how, **kw)
+            return _stash_explanation(_inf.indexed_fit(self, data, how=how, **kw))
 
         # regression / GLM: a linear predictor (covariates) in a parameter slot
         if self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
             from mixle.ppl import regression as _reg
 
-            return _reg.regression_fit(self, data, **kw)
+            return _stash_explanation(_reg.regression_fit(self, data, **kw))
 
         # neural conditional: a Net/Conv (nonlinear predictor) in a parameter slot -> a neural-headed leaf
         if self._kind == "sample" and any(isinstance(a, _NeuralPredictor) for a in self._args):
@@ -1880,7 +1935,7 @@ class RandomVariable:
         # own their fit through the registered fit_fn hook -- no per-family branch in core. State-space
         # is registered in mixle.ppl.statespace; PDEStateSpace by the mixle-pde plugin.
         if self._kind == "sample" and isinstance(self._family, CompositeFamily) and self._family.fit_fn is not None:
-            return self._family.fit_fn(self, data, **kw)
+            return _stash_explanation(self._family.fit_fn(self, data, **kw))
 
         # Indexed-flat hierarchical: Normal(Normal(m, t).each(by="g"), s).fit(y, given={"g": labels}).
         # Reshape the flat observation array into per-group lists (sorted unique labels) so the existing
@@ -1933,7 +1988,7 @@ class RandomVariable:
                 "or 'ensemble' (or how='auto')."
             )
         if how == "posterior":
-            # the escalation ladder: cheapest route that yields posterior uncertainty (conjugate ->
+            # the escalation ladder: lowest-cost route that yields posterior uncertainty (conjugate ->
             # Laplace -> MCMC). Unlike 'auto', never returns a bare point estimate.
             how, _ = self._resolve_posterior_ladder()
         if how == "auto":
@@ -1945,14 +2000,14 @@ class RandomVariable:
                 struct_param=struct_param,
             )
             if how == "map" and "no registered closed form" in _auto_reason:
-                # Honest fallback: a prior is present but there is no closed-form posterior for this
-                # model, so auto returns a *point estimate*. Don't let the user mistake it for a posterior.
+                # A prior is present but there is no closed-form posterior for this model, so auto returns a point
+                # estimate. Warn so callers do not mistake it for posterior uncertainty.
                 import warnings as _warnings
 
                 _warnings.warn(
                     "how='auto' selected MAP -- a point estimate, not a posterior: a prior is present but "
                     "this model has no registered closed-form (conjugate) posterior. For posterior "
-                    "uncertainty pass how='laplace' (cheap Gaussian at the MAP), 'vi', or 'mcmc'.",
+                    "uncertainty pass how='laplace' (local Gaussian at the MAP), 'vi', or 'mcmc'.",
                     RuntimeWarning,
                     stacklevel=2,
                 )
@@ -1975,8 +2030,8 @@ class RandomVariable:
         if fitter is not None:
             result = fitter(self, data, **kw)
             if has_constraints or has_potentials:
-                # E2: a penalized objective (soft constraints / residual factors / potentials) means the
-                # optimum is of the surrogate, not the likelihood -- the certificate downgrades honestly.
+                # A penalized objective (soft constraints / residual factors / potentials) means the
+                # optimum is for the surrogate, not the likelihood, so downgrade the certificate.
                 try:
                     from mixle.inference.planning import certify as _certify
 
@@ -1985,7 +2040,7 @@ class RandomVariable:
                     result._cache["certificate"] = _certify(target, penalized=why)
                 except Exception:  # noqa: BLE001 - certification must never break a fit
                     pass
-            return result
+            return _stash_explanation(result)
         # EM / MLE path
         est = lower(self, target="estimator")
         if missing == "marginalize":
@@ -2016,7 +2071,7 @@ class RandomVariable:
         ):
             import numpy as _np
 
-            rng = kw.get("rng") or _np.random.RandomState()
+            rng = kw.get("rng") or _np.random.RandomState(0)  # fixed default: an un-seeded fit is deterministic
             seed = self._family.seed_fn(self._args, data, rng, seed_child)
             if seed is not None:
                 kw["prev_estimate"] = seed
@@ -2044,7 +2099,7 @@ class RandomVariable:
             from mixle.stats.missing import unwrap_marginalized
 
             fitted = unwrap_marginalized(fitted)  # strip the Optional wrappers; recover the base model
-        return RandomVariable._bound(fitted, name=self._name)
+        return _stash_explanation(RandomVariable._bound(fitted, name=self._name))
 
     def __repr__(self) -> str:
         if self._kind == "bound":
@@ -2119,7 +2174,7 @@ def lower(rv: RandomVariable, *, target: str = "dist"):
     """The one routing site: symbolic RandomVariable -> existing mixle object.
 
     ``target='dist'`` returns a concrete ``*Distribution`` (needs no ``free`` holes);
-    ``target='estimator'`` returns a ``*Estimator``. Results are cached per RV (I7).
+    ``target='estimator'`` returns a ``*Estimator``. Results are cached per random variable.
     """
     cache = rv._cache
     if target in cache:

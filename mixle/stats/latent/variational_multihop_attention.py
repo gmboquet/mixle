@@ -15,7 +15,7 @@ spreads the embeddings first. Observation: ``(context_keys, context_values, quer
 
 References: multi-hop attention = Memory Networks (Sukhbaatar et al. 2015); attention as a variational
 latent variable = Deng et al. 2018. The annealing is the practical face of Deterministic Annealing EM
-(Ueda & Nakano 1998) -- tempering the objective to escape the bad (collapsed) fixed point and reach an
+(Ueda & Nakano 1998) -- tempering the objective to escape the collapsed fixed point and reach an
 initialization-independent solution. (We checked: principled DAEM tempering does not improve the
 *closed-form* chained head, which is already at its initialization-independent global optimum; the
 annealing is only load-bearing here, where the latent-embedding prior creates the collapse basin.)
@@ -95,13 +95,16 @@ class VariationalMultiHopAttentionDistribution(SequenceEncodableProbabilityDistr
         )
 
     def density(self, x) -> float:
+        """Return the probability of one context/query/target observation."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x) -> float:
+        """Return the log-probability of one context/query/target observation."""
         enc = self.dist_to_encoder().seq_encode([x])
         return float(self.seq_log_density(enc)[0])
 
     def seq_log_density(self, x) -> np.ndarray:
+        """Return vectorized log-probabilities for encoded two-hop attention observations."""
         keys, vals, q, t = x
         p, _, _ = _two_hop(self.mean, keys, vals, q, t, self.emission, self.sigma2)
         return np.log(p)
@@ -121,12 +124,15 @@ class VariationalMultiHopAttentionDistribution(SequenceEncodableProbabilityDistr
         return pred[0] if single else pred
 
     def embeddings(self) -> np.ndarray:
+        """Return posterior mean embeddings for the tied latent symbols."""
         return self.mean
 
     def sampler(self, seed: int | None = None) -> VariationalMultiHopAttentionSampler:
+        """Return a sampler for synthetic two-hop attention observations."""
         return VariationalMultiHopAttentionSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> VariationalMultiHopAttentionEstimator:
+        """Return a variational EM estimator initialized with this model's dimensions."""
         return VariationalMultiHopAttentionEstimator(
             num_symbols=self.num_symbols,
             embed_dim=self.embed_dim,
@@ -136,15 +142,19 @@ class VariationalMultiHopAttentionDistribution(SequenceEncodableProbabilityDistr
         )
 
     def dist_to_encoder(self) -> VariationalMultiHopAttentionDataEncoder:
+        """Return the encoder for context keys, values, query symbols, and targets."""
         return VariationalMultiHopAttentionDataEncoder()
 
 
 class VariationalMultiHopAttentionSampler(DistributionSampler):
+    """Sample two-hop attention observations from posterior-mean embeddings plus embedding noise."""
+
     def __init__(self, dist, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Draw one observation or ``size`` iid synthetic observations."""
         n = 1 if size is None else size
         d = self.dist
         N = 6
@@ -164,6 +174,8 @@ class VariationalMultiHopAttentionSampler(DistributionSampler):
 
 
 class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulate Monte-Carlo ELBO gradients and emission responsibilities for variational EM."""
+
     def __init__(self, num_symbols, embed_dim, num_targets, mc, seed, keys=None, name=None) -> None:
         self.num_symbols = num_symbols
         self.embed_dim = embed_dim
@@ -179,6 +191,7 @@ class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumula
         self.name = name
 
     def seq_update(self, x, weights, estimate) -> None:
+        """Update ELBO gradients and emission counts from encoded observations."""
         keys, vals, q, t = x
         w = np.asarray(weights, dtype=float)
         m, log_v, sig = estimate.mean, estimate.log_var, estimate.sigma2
@@ -198,6 +211,7 @@ class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumula
         self.n += float(w.sum())
 
     def seq_initialize(self, x, weights, rng: RandomState) -> None:
+        """Initialize emission counts with random final-hop responsibilities."""
         keys, vals, q, t = x
         n, N = keys.shape
         w = np.asarray(weights, dtype=float)
@@ -206,14 +220,17 @@ class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumula
         self.n += float(w.sum())
 
     def update(self, x, weight, estimate) -> None:
+        """Update from one weighted two-hop attention observation."""
         enc = VariationalMultiHopAttentionDataEncoder().seq_encode([x])
         self.seq_update(enc, np.array([weight], dtype=float), estimate)
 
     def initialize(self, x, weight, rng) -> None:
+        """Initialize from one weighted two-hop attention observation."""
         enc = VariationalMultiHopAttentionDataEncoder().seq_encode([x])
         self.seq_initialize(enc, np.array([weight], dtype=float), rng)
 
     def combine(self, suff_stat):
+        """Merge variational gradients, emission counts, log-likelihood, and weight totals."""
         gm, glv, ec, ll, n = suff_stat
         self.grad_m += gm
         self.grad_logv += glv
@@ -223,15 +240,18 @@ class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumula
         return self
 
     def value(self):
+        """Return accumulated gradients, emission counts, log-likelihood, and total weight."""
         return (self.grad_m.copy(), self.grad_logv.copy(), self.emission_count.copy(), self.ll, self.n)
 
     def from_value(self, x):
+        """Restore accumulator state from ``value`` output."""
         self.grad_m, self.grad_logv, self.emission_count = (np.asarray(v, dtype=float) for v in x[:3])
         self.ll = float(x[3])
         self.n = float(x[4])
         return self
 
     def key_merge(self, stats_dict) -> None:
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 self.combine(stats_dict[self.keys])
@@ -239,20 +259,25 @@ class VariationalMultiHopAttentionAccumulator(SequenceEncodableStatisticAccumula
                 stats_dict[self.keys] = self.value()
 
     def key_replace(self, stats_dict) -> None:
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys])
 
     def acc_to_encoder(self):
+        """Return the encoder compatible with this attention accumulator."""
         return VariationalMultiHopAttentionDataEncoder()
 
 
 class VariationalMultiHopAttentionAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create accumulators for variational multi-hop attention EM steps."""
+
     def __init__(self, estimator, keys=None, name=None) -> None:
         self.est = estimator
         self.keys = keys
         self.name = name
 
     def make(self):
+        """Create an accumulator with a deterministic per-iteration Monte-Carlo seed."""
         e = self.est
         seed = (e.seed * 1_000_003 + e._t) % (2**31)
         return VariationalMultiHopAttentionAccumulator(
@@ -306,6 +331,7 @@ class VariationalMultiHopAttentionEstimator(ParameterEstimator):
         self._t = 0
 
     def accumulator_factory(self):
+        """Return a factory for variational multi-hop attention accumulators."""
         return VariationalMultiHopAttentionAccumulatorFactory(self, keys=self.keys, name=self.name)
 
     def _adam(self, param, grad, m1, m2):
@@ -315,6 +341,7 @@ class VariationalMultiHopAttentionEstimator(ParameterEstimator):
         return param + self.lr * (m1 / (1 - b1**self._t)) / (np.sqrt(m2 / (1 - b2**self._t)) + eps), m1, m2
 
     def estimate(self, nobs, suff_stat):
+        """Apply one variational EM update and return the updated attention distribution."""
         grad_m, grad_logv, emission_count, _ll, _n = suff_stat
         if self.mean is None:
             rng = RandomState(self.seed)
@@ -341,6 +368,8 @@ class VariationalMultiHopAttentionEstimator(ParameterEstimator):
 
 
 class VariationalMultiHopAttentionDataEncoder(DataSequenceEncoder):
+    """Encode context keys, context values, query symbols, and targets as integer arrays."""
+
     def __str__(self) -> str:
         return "VariationalMultiHopAttentionDataEncoder"
 
@@ -348,6 +377,7 @@ class VariationalMultiHopAttentionDataEncoder(DataSequenceEncoder):
         return isinstance(other, VariationalMultiHopAttentionDataEncoder)
 
     def seq_encode(self, x: Sequence[tuple[Any, Any, int, int]]):
+        """Encode ``(context_keys, context_values, query, target)`` observations."""
         keys = np.asarray([np.asarray(xi[0], dtype=int) for xi in x], dtype=int)
         vals = np.asarray([np.asarray(xi[1], dtype=int) for xi in x], dtype=int)
         q = np.asarray([int(xi[2]) for xi in x], dtype=int)

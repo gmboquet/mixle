@@ -45,7 +45,7 @@ def htsne(
     mix_model=None,
     enc_data=None,
     method: str = "auto",
-    early_exaggeration: float = 12.0,
+    early_exaggeration: float | None = None,
     tol: float = 1.0e-7,
     dpm_max_its: int = 200,
     affinity="auto",
@@ -65,8 +65,26 @@ def htsne(
     candidate_multiplier: int = 8,
     repulsion_method: str = "auto",
     exact_repulsion_threshold: int = 5000,
+    goals=None,
 ):
     """Embed heterogeneous data with model-based t-SNE.
+
+    goals: optional sequence of embedding goals (mixle.utils.hvis.goals) -- Anchor pins for
+    anchoring, LabelCohesion for partial labeling, AxisAlign for layout objectives. Goal gradients
+    join the data gradient every iteration on BOTH engines; hard anchors are re-projected exactly
+    after every step.
+
+    Y='barycentric' initializes every observation at its posterior-weighted combination of
+    component vertices laid out by overlap geometry (see affinity.barycentric_init): the layout's
+    global arrangement comes from the model instead of the random seed, so runs are globally
+    consistent and mixed-membership points start (and tend to stay) between their clusters.
+
+    early_exaggeration=None (the default) resolves to 12.0 for a random init and 1.0 for an
+    informative one (Y='barycentric' or a supplied array): exaggeration exists to FORM global
+    structure from randomness, and given a meaningful init it does the opposite -- crushes
+    confusable clusters together before the refine phase can save them (measured: 0.71-0.89
+    purity and seed-dependent arrangements at 12.0, a seed-stable 0.96 at 1.0). Pass a number to
+    override.
 
     A mixture model is fit to the data (a Dirichlet process mixture with
     automatically typed components by default, or pass mix_model), pairwise
@@ -169,6 +187,27 @@ def htsne(
         z_ij, l_ij = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
         n = z_ij.shape[0]
 
+    informative_init = Y is not None
+    if isinstance(Y, str):
+        if Y != "barycentric":
+            raise ValueError("Y accepts an (n, emb_dim) array, None, or the string 'barycentric'.")
+        if z_ij is not None:
+            z_bary = z_ij
+        elif mix_model is not None:  # 'auto'/'local' resolve to factor lists before posteriors exist
+            z_bary, _ = _posteriors_and_loglikes(mix_model, data=data, enc_data=enc_data)
+        else:
+            raise ValueError(
+                "Y='barycentric' needs mixture posteriors (a mix_model, or data to fit one); "
+                "a pre-built affinity factor list without a model carries no posterior to take "
+                "barycentric coordinates of."
+            )
+        from mixle.utils.hvis.affinity import barycentric_init
+
+        Y = barycentric_init(z_bary, emb_dim=emb_dim, seed=seed)
+
+    if early_exaggeration is None:
+        early_exaggeration = 1.0 if informative_init else 12.0
+
     if method == "auto":
         method = "exact" if (optimize_alpha or n <= 10) else "barnes_hut"
 
@@ -213,6 +252,7 @@ def htsne(
             leaf_size=barnes_hut_leaf_size,
             repulsion_method=repulsion_method,
             exact_repulsion_threshold=exact_repulsion_threshold,
+            goals=goals,
         )
 
     P = get_pmat(z_ij, l_ij, targ_perplexity=perplexity, affinity=affinity, evidence_cap=evidence_cap)
@@ -234,6 +274,7 @@ def htsne(
         print_iter=print_iter,
         seed=seed,
         out=out,
+        goals=goals,
     )
 
 
@@ -256,6 +297,8 @@ def humap(
     fisher_information: str = "observed",
     n_epochs: int | None = None,
     out=None,
+    engine: str = "auto",
+    goals=None,
     **umap_kwargs,
 ):
     """Embed heterogeneous data with model-based UMAP.
@@ -263,24 +306,54 @@ def humap(
     The same mixture-model affinities as htsne (see the affinity and
     evidence_cap arguments there), but the k-nearest-neighbor graph of model
     distances -log s_ij is handed to UMAP's fuzzy simplicial set construction
-    and layout (umap-learn) instead of t-SNE. Scales like UMAP: the dense
-    affinity matrix is never built.
+    and layout instead of t-SNE. Scales like UMAP: the dense affinity matrix
+    is never built.
 
-    Extra keyword arguments are passed to umap.UMAP. Returns the n x emb_dim
-    embedding.
+    engine selects the layout backend:
+        'umap-learn' - the optional umap-learn package (extra keyword
+            arguments are passed to umap.UMAP). Cannot honor goals: its numba
+            SGD loop takes no external gradients, so goals raise rather than
+            being silently dropped.
+        'internal'   - mixle.utils.hvis.umap_np, a dependency-free UMAP core
+            (same construction: smoothed-kNN fuzzy graph, fitted a/b curve,
+            epochs-per-sample SGD with negative sampling). Slower than the
+            numba path but always available, and the only engine that can
+            steer the layout with goals.
+        'auto'       - umap-learn when it is installed AND no goals were
+            given; the internal engine otherwise.
+
+    goals: optional sequence of embedding goals (mixle.utils.hvis.goals) --
+    Anchor / LabelCohesion / AxisAlign, as in htsne. Requires the internal
+    engine (auto selects it when goals are present).
     """
-    try:
-        import warnings
+    if engine not in ("auto", "umap-learn", "internal"):
+        raise ValueError("engine must be 'auto', 'umap-learn', or 'internal'.")
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore", message="Tensorflow not installed; ParametricUMAP will be unavailable", category=ImportWarning
-            )
-            import umap
-    except ImportError:
-        from mixle.utils.optional_deps import require
+    umap = None
+    if engine in ("auto", "umap-learn"):
+        try:
+            import warnings
 
-        require("umap-learn", "umap")
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Tensorflow not installed; ParametricUMAP will be unavailable",
+                    category=ImportWarning,
+                )
+                import umap
+        except ImportError:
+            if engine == "umap-learn":
+                from mixle.utils.optional_deps import require
+
+                require("umap-learn", "umap")
+
+    if engine == "umap-learn" and goals:
+        raise ValueError(
+            "goals require engine='internal' (or 'auto'): umap-learn's layout loop cannot honor them, "
+            "and silently dropping a stated goal would be worse than refusing."
+        )
+    if engine == "auto":
+        engine = "umap-learn" if (umap is not None and not goals) else "internal"
 
     if out is None:
         out = sys.stdout
@@ -320,6 +393,20 @@ def humap(
     k = min(n_neighbors, n - 1)
 
     knn_idx, knn_dist = model_knn(z_ij, l_ij, k=k, affinity=affinity, evidence_cap=evidence_cap)
+
+    if engine == "internal":
+        from mixle.utils.hvis.umap_np import internal_umap
+
+        return internal_umap(
+            knn_idx,
+            knn_dist,
+            emb_dim=emb_dim,
+            min_dist=min_dist,
+            n_epochs=n_epochs,
+            seed=seed,
+            goals=goals,
+            **umap_kwargs,
+        )
 
     reducer = umap.UMAP(
         n_components=emb_dim,

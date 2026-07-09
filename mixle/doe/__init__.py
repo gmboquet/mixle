@@ -7,8 +7,8 @@ bounded input space:
   classical factorial / fractional-factorial / Plackett-Burman / response-surface / mixture, and
   optimal designs (D/A/I/G/E/c criteria).
 * **Bayesian optimization** -- the single-point acquisitions (EI/PI/UCB/Thompson/knowledge-gradient),
-  plus the research frontier: rigorous Monte-Carlo q-EI and local-penalization *batch* design,
-  Max-value Entropy Search, trust-region BO (TuRBO) for high dimensions, constrained and
+  Monte-Carlo q-EI and local-penalization *batch* design, Max-value Entropy Search,
+  trust-region BO (TuRBO) for high dimensions, constrained and
   multi-objective BO, and cost-aware *multi-fidelity* BO.
 * **Active learning & optimal design** -- sequential design to learn a surrogate (ALM / ALC-IMSE) or
   model parameters (expected information gain, closed-form and nested-Monte-Carlo).
@@ -35,6 +35,7 @@ from mixle.doe.active import (
     expected_information_gain_nmc,
     propose_active_learning,
 )
+from mixle.doe.amplify import AmplificationRound, AmplifyReport, StudentTeacher, amplify_and_capture, fit_student
 from mixle.doe.analysis import (
     FactorialEffects,
     ResponseSurface,
@@ -82,6 +83,12 @@ from mixle.doe.designs import (
     random_design,
     sobol_design,
 )
+from mixle.doe.distillation import (
+    DistillationDesign,
+    cross_modal_distillation_design,
+    distillation_design,
+    multitask_distillation_design,
+)
 from mixle.doe.entropy import (
     max_value_entropy_search,
     propose_mes,
@@ -113,7 +120,16 @@ from mixle.doe.optimal import (
     register_criterion,
 )
 from mixle.doe.optimizer import BayesianOptimizer
+from mixle.doe.oracle import (
+    VERIFIABILITY_TIERS,
+    DesignCandidate,
+    DesignRun,
+    OracleResult,
+    VerifiableOracle,
+    optimize_under_oracle,
+)
 from mixle.doe.propagate import propagate, register_propagator, unscented_transform
+from mixle.doe.robust import IncumbentResult, noisy_minimize, posterior_incumbent
 from mixle.doe.sensitivity import dgsm, fast_indices, morris_screening, sobol_indices
 from mixle.doe.trust_region import TrustRegion, turbo_minimize
 
@@ -126,6 +142,10 @@ __all__ = [
     "maxpro_design",
     "random_design",
     "sobol_design",
+    "DistillationDesign",
+    "distillation_design",
+    "multitask_distillation_design",
+    "cross_modal_distillation_design",
     "fractional_factorial",
     "plackett_burman",
     "central_composite",
@@ -152,6 +172,17 @@ __all__ = [
     "minimize",
     "propose_next",
     "propose_batch",
+    "VerifiableOracle",
+    "OracleResult",
+    "DesignCandidate",
+    "DesignRun",
+    "optimize_under_oracle",
+    "VERIFIABILITY_TIERS",
+    "amplify_and_capture",
+    "AmplifyReport",
+    "AmplificationRound",
+    "StudentTeacher",
+    "fit_student",
     "optimal_design",
     "polynomial_features",
     "d_criterion",
@@ -193,6 +224,9 @@ __all__ = [
     "propagate",
     "register_propagator",
     "unscented_transform",
+    "noisy_minimize",
+    "posterior_incumbent",
+    "IncumbentResult",
     "calibrate",
     "KOCalibration",
 ]

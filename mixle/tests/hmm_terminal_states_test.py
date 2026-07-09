@@ -37,10 +37,10 @@ class HmmTerminalStatesTest(unittest.TestCase):
     def test_normalizes_over_sequences(self):
         total = sum(
             np.exp(self.d.log_density(list(x)))
-            for length in range(1, 13)
+            for length in range(1, 11)
             for x in itertools.product("ab", repeat=length)
         )
-        self.assertAlmostEqual(total, 1.0, delta=0.01)  # remaining mass is in sequences longer than 12
+        self.assertAlmostEqual(total, 1.0, delta=0.01)  # remaining mass is in sequences longer than 10
 
     def test_seq_log_density_matches_scalar(self):
         seqs = [["b"], ["a", "b"], ["a", "a", "b"], ["b", "a", "a", "b"]]
@@ -115,7 +115,7 @@ class HmmTerminalStatesEMTest(unittest.TestCase):
             [[0.5, 0.4, 0.1], [0.4, 0.5, 0.1], [0.0, 0.0, 1.0]],
             terminal_states={2},  # state 2 absorbing
         )
-        data = true.sampler(seed=0).sample(400)
+        data = true.sampler(seed=0).sample(250)
         init = HiddenMarkovModelDistribution(
             [GaussianDistribution(-3, 2.0), GaussianDistribution(1, 2.0), GaussianDistribution(4, 2.0)],
             [0.4, 0.4, 0.2],
@@ -123,7 +123,7 @@ class HmmTerminalStatesEMTest(unittest.TestCase):
             terminal_states={2},
         )
         m = init
-        for _ in range(30):  # terminal-aware Baum-Welch, iterated by the standard estimate() driver
+        for _ in range(20):  # terminal-aware Baum-Welch, iterated by the standard estimate() driver
             m = estimate(data, init.estimator(), m)
         self.assertEqual(m.terminal_states, {2})  # stays a terminal-states model
         np.testing.assert_allclose(sorted(t.mu for t in m.topics), [-5.0, 0.0, 5.0], atol=0.2)

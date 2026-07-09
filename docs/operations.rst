@@ -51,6 +51,10 @@ Capability Signatures
 The table is intentionally capability-oriented. You should not need to know
 the concrete class name before asking whether a transformation is legal.
 
+Operations should fail loudly when the required capability is missing. A manual
+fallback can be useful for exploration, but it should be documented as an
+approximation and kept separate from exact operation evidence.
+
 Quantization
 ------------
 
@@ -66,12 +70,15 @@ that require finite support.
    dist = GaussianDistribution(0.0, 1.0)
    finite = quantize(dist, bits=8)
 
-   top = finite.enumerator().top(5)
+   top = finite.enumerator().top_k(5)
 
 Use quantization when you need a bridge from continuous uncertainty to
 enumeration, top-k search, discrete decision policies, or compact artifacts.
 Keep the number of bits tied to the downstream need: more bins improve fidelity
 but make enumeration heavier.
+
+Record the support window, binning policy, and approximation error or coverage
+diagnostic when a quantized model is used outside exploration.
 
 Truncation
 ----------
@@ -88,7 +95,11 @@ set, then renormalizes mass.
 This is useful for policy constraints, legal label subsets, active learning
 pools, and diagnostic "what if this option were unavailable?" analysis.
 
-Conditioning And Marginalization
+Truncation changes normalization. Keep the allowed or forbidden set with the
+artifact so later reviewers can distinguish a policy-restricted distribution
+from the original model.
+
+Conditioning and Marginalization
 --------------------------------
 
 ``condition`` and ``marginalize`` are only available when the input distribution
@@ -104,6 +115,10 @@ declares the required capability.
 Prefer these operations to manual slicing. The distribution itself knows how
 to preserve normalization, sufficient statistics, and any family-specific
 closed forms.
+
+Conditioning and marginalization are exact only when the model advertises the
+capability. If a workflow uses sampling or projection instead, name that route
+and keep its error checks separate.
 
 Mixtures
 --------
@@ -125,7 +140,11 @@ Mixtures are the simplest way to express unobserved regimes. For fitted mixture
 estimators and EM workflows, see :doc:`distributions`, :doc:`inference`, and
 :doc:`hmms-latent`.
 
-Transforms And Tilts
+When constructing mixtures manually, validate weights and component support
+before scoring. A component with incompatible support can turn ordinary inputs
+into impossible observations.
+
+Transforms and Tilts
 --------------------
 
 ``transform`` applies an invertible change of variables with the appropriate
@@ -136,6 +155,10 @@ Use transforms when the natural modeling scale is not the data scale: logs,
 positive constraints, calibrated score transforms, or physical unit changes.
 Use tilts when you want to encode a moment preference while staying inside the
 exponential-family calculus.
+
+For transforms, record the data scale and model scale. For tilts, record the
+moment preference and any normalization check. These details determine how the
+result should be interpreted.
 
 Projection
 ----------
@@ -184,7 +207,7 @@ The distinction is important:
 * record which route was used, because a sampled projection and an exact
   moment projection have different error profiles.
 
-Product Of Experts
+Product of Experts
 ------------------
 
 ``product_of_experts`` pools distributions geometrically:
@@ -221,6 +244,18 @@ That distinction matters for debugging, calibration, and governance. A
 quantized or projected model can be perfectly useful, but it should not be
 mistaken for the original source model.
 
+Release Evidence
+----------------
+
+For operation-heavy workflows, preserve:
+
+* the source model and operation sequence;
+* capability checks before each exact operation;
+* parameters such as quantization bits, truncation sets, conditioning evidence,
+  transform definitions, projection sample sizes, or expert weights;
+* diagnostics showing normalization, score parity, or projection error; and
+* the downstream policy that consumes the transformed distribution.
+
 Common Pitfalls
 ---------------
 
@@ -231,5 +266,5 @@ Common Pitfalls
   support is required.
 * Do not pool experts with incompatible supports unless you have decided what
   zero-probability conflicts mean.
-* Do not promote a projected model solely because it is cheaper. Compare it
+* Do not promote a projected model solely because it is lower-cost. Compare it
   against the source model on held-out data and calibration metrics.

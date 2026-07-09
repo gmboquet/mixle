@@ -1,4 +1,9 @@
-"""Small Torch-backed Gaussian-process regression model."""
+"""Small Torch-backed Gaussian-process regression model.
+
+The implementation fits exact stationary-kernel GP regression with Gaussian
+noise through Mixle's generic Torch objective optimizer and exposes prediction
+and uncertainty helpers for examples and lightweight modeling workflows.
+"""
 
 from __future__ import annotations
 
@@ -24,8 +29,8 @@ class GaussianProcessRegressor:
     """Exact GP regression with a stationary kernel and Gaussian observation noise.
 
     The kernel is RBF (squared-exponential) by default; ``kernel="matern32"`` or ``"matern52"``
-    selects the Matern-3/2 or Matern-5/2 covariance, whose rougher sample paths often fit physical
-    responses better than the very smooth RBF.
+    selects the Matern-3/2 or Matern-5/2 covariance, whose less smooth sample paths often fit
+    physical responses better than the very smooth RBF.
     """
 
     def __init__(
@@ -93,7 +98,7 @@ class GaussianProcessRegressor:
         amp2 = self.log_amplitude.exp() ** 2
         if self.kernel_name == "rbf":
             return amp2 * torch.exp(-0.5 * dist2)
-        # Matern kernels need the (lengthscale-scaled) Euclidean distance; the tiny floor keeps the
+        # Matern kernels need the lengthscale-scaled Euclidean distance; the positive floor keeps the
         # sqrt subdifferentiable at zero separation.
         r = torch.sqrt(torch.clamp(dist2, min=0.0) + 1.0e-12)
         if self.kernel_name == "matern32":

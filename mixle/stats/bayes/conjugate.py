@@ -79,9 +79,11 @@ class ConjugatePosterior:
 
     # -- to be provided by subclasses -------------------------------------
     def mean(self) -> dict[str, Any]:
+        """Return posterior mean parameters as a family-specific dictionary."""
         raise NotImplementedError
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        """Draw ``n`` exact parameter samples from the posterior."""
         raise NotImplementedError
 
     def sampler(self, seed: int | None = None) -> ConjugatePosteriorSampler:
@@ -95,18 +97,23 @@ class ConjugatePosterior:
         return ConjugatePosteriorSampler(self, seed)
 
     def point_estimate(self):
+        """Return a likelihood distribution built from a representative posterior parameter value."""
         raise NotImplementedError
 
     def log_marginal_likelihood(self) -> float:
+        """Return the closed-form log evidence of the observed data."""
         raise NotImplementedError
 
     def posterior_predictive(self):
+        """Return the posterior predictive distribution for a new observation."""
         raise NotImplementedError
 
     def summary(self) -> dict[str, Any]:
+        """Return a compact summary of the posterior family, mean, and hyperparameters."""
         return {"family": self.family, "mean": self.mean(), "hyper": self.hyper()}
 
     def hyper(self) -> dict[str, Any]:
+        """Return family-specific posterior hyperparameters."""
         raise NotImplementedError
 
     def __repr__(self) -> str:
@@ -121,6 +128,7 @@ class ConjugatePosteriorSampler:
         self.rng = np.random.RandomState(seed)
 
     def sample(self, size: int | None = None) -> dict[str, Any]:
+        """Draw one parameter set when ``size`` is ``None`` or a batch otherwise."""
         draws = self.posterior.sample(n=1 if size is None else int(size), rng=self.rng)
         if size is None:
             return {
@@ -133,6 +141,8 @@ class ConjugatePosteriorSampler:
 # Beta posterior (Bernoulli / Binomial / Geometric likelihoods)
 # ---------------------------------------------------------------------------
 class BetaPosterior(ConjugatePosterior):
+    """Beta posterior for Bernoulli, binomial, geometric, or negative-binomial probabilities."""
+
     family = "Beta"
 
     def __init__(self, a: float, b: float, kind: str = "bernoulli", n_trials: int = 1):
@@ -144,17 +154,21 @@ class BetaPosterior(ConjugatePosterior):
         self._b0 = None
 
     def mean(self) -> dict[str, Any]:
+        """Return the posterior mean success probability."""
         return {"p": self.a / (self.a + self.b)}
 
     def variance(self) -> float:
+        """Return the posterior variance of the success probability."""
         a, b = self.a, self.b
         return a * b / ((a + b) ** 2 * (a + b + 1.0))
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        """Draw success-probability samples from the Beta posterior."""
         rng = rng or np.random.RandomState()
         return {"p": rng.beta(self.a, self.b, size=n)}
 
     def point_estimate(self):
+        """Return the likelihood distribution at the posterior mean probability."""
         p = self.a / (self.a + self.b)
         if self.kind == "geometric":
             from mixle.stats.univariate.discrete.geometric import GeometricDistribution
@@ -173,10 +187,12 @@ class BetaPosterior(ConjugatePosterior):
         return BernoulliDistribution(p)
 
     def posterior_predictive(self):
+        """Return the plug-in predictive distribution at the posterior mean probability."""
         # The plug-in predictive at the posterior mean (Beta-Bernoulli predictive prob == mean).
         return self.point_estimate()
 
     def hyper(self) -> dict[str, Any]:
+        """Return the Beta shape hyperparameters."""
         return {"a": self.a, "b": self.b}
 
     def _set_prior(self, a0: float, b0: float, n: float, s: float, extra: float) -> None:
@@ -184,6 +200,7 @@ class BetaPosterior(ConjugatePosterior):
         self._a0, self._b0, self._n, self._s, self._extra = a0, b0, n, s, extra
 
     def log_marginal_likelihood(self) -> float:
+        """Return the Beta-conjugate log marginal likelihood."""
         if self._a0 is None:
             raise ValueError("prior hyperparameters were not recorded")
         # Beta-Bernoulli/Binomial evidence: B(a0+s, b0+f) / B(a0, b0); ``log_base`` carries the
@@ -229,6 +246,8 @@ def _build_binomial(dist, data, weights, prior) -> BetaPosterior:
 # Gamma posterior (Poisson / Exponential / Gamma-known-shape rate)
 # ---------------------------------------------------------------------------
 class GammaRatePosterior(ConjugatePosterior):
+    """Gamma posterior over a rate parameter for Poisson, exponential, or known-shape Gamma likelihoods."""
+
     family = "Gamma"
 
     def __init__(self, shape: float, rate: float, kind: str = "poisson", known_shape: float = 1.0):
@@ -239,13 +258,16 @@ class GammaRatePosterior(ConjugatePosterior):
         self._a0 = None
 
     def mean(self) -> dict[str, Any]:
+        """Return the posterior mean rate."""
         return {"rate": self.shape / self.rate}
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        """Draw rate samples from the Gamma posterior."""
         rng = rng or np.random.RandomState()
         return {"rate": rng.gamma(self.shape, 1.0 / self.rate, size=n)}
 
     def point_estimate(self):
+        """Return the likelihood distribution at the posterior mean rate."""
         lam = self.shape / self.rate
         if self.kind == "poisson":
             from mixle.stats.univariate.discrete.poisson import PoissonDistribution
@@ -260,6 +282,7 @@ class GammaRatePosterior(ConjugatePosterior):
         return GammaDistribution(self.known_shape, 1.0 / lam)  # k=shape, theta=scale=1/rate
 
     def posterior_predictive(self):
+        """Return the closed-form predictive when available, otherwise the plug-in predictive."""
         if self.kind == "poisson":
             # Poisson-Gamma predictive is Negative-Binomial(r=A, p=B/(B+1)).
             from mixle.stats.univariate.discrete.negative_binomial import NegativeBinomialDistribution
@@ -268,12 +291,14 @@ class GammaRatePosterior(ConjugatePosterior):
         return self.point_estimate()
 
     def hyper(self) -> dict[str, Any]:
+        """Return the Gamma shape and rate hyperparameters."""
         return {"shape": self.shape, "rate": self.rate}
 
     def _set_prior(self, a0, b0, n, sx):
         self._a0, self._b0, self._n, self._sx = a0, b0, n, sx
 
     def log_marginal_likelihood(self) -> float:
+        """Return the Gamma-conjugate log marginal likelihood."""
         if self._a0 is None:
             raise ValueError("prior hyperparameters were not recorded")
         # Gamma-conjugate evidence; ``log_base`` carries sum_i log h(x_i) (-sum log x_i! for Poisson, 0
@@ -312,6 +337,8 @@ def _build_exponential(dist, data, weights, prior) -> GammaRatePosterior:
 # Dirichlet posterior (Categorical / IntegerCategorical)
 # ---------------------------------------------------------------------------
 class DirichletPosterior(ConjugatePosterior):
+    """Dirichlet posterior over categorical probabilities."""
+
     family = "Dirichlet"
 
     def __init__(self, alpha: np.ndarray, support: list, kind: str = "categorical", min_val: int = 0):
@@ -322,14 +349,17 @@ class DirichletPosterior(ConjugatePosterior):
         self._alpha0 = None
 
     def mean(self) -> dict[str, Any]:
+        """Return posterior mean probabilities and a support-to-probability map."""
         p = self.alpha / self.alpha.sum()
         return {"probs": p, "map": dict(zip(self.support, p))}
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        """Draw categorical probability vectors from the Dirichlet posterior."""
         rng = rng or np.random.RandomState()
         return {"probs": rng.dirichlet(self.alpha, size=n)}
 
     def point_estimate(self):
+        """Return a categorical likelihood at the posterior mean probabilities."""
         p = self.alpha / self.alpha.sum()
         if self.kind == "integer_categorical":
             from mixle.stats.univariate.discrete.integer_categorical import IntegerCategoricalDistribution
@@ -340,15 +370,18 @@ class DirichletPosterior(ConjugatePosterior):
         return CategoricalDistribution(dict(zip(self.support, p)))
 
     def posterior_predictive(self):
+        """Return the plug-in categorical predictive at posterior mean probabilities."""
         return self.point_estimate()
 
     def hyper(self) -> dict[str, Any]:
+        """Return the Dirichlet concentration vector."""
         return {"alpha": self.alpha}
 
     def _set_prior(self, alpha0):
         self._alpha0 = np.asarray(alpha0, dtype=np.float64)
 
     def log_marginal_likelihood(self) -> float:
+        """Return the Dirichlet-multinomial log marginal likelihood."""
         if self._alpha0 is None:
             raise ValueError("prior hyperparameters were not recorded")
         a0, an = self._alpha0, self.alpha
@@ -402,6 +435,8 @@ def _build_integer_categorical(dist, data, weights, prior) -> DirichletPosterior
 # Normal-Inverse-Gamma posterior (Gaussian, unknown mean AND variance)
 # ---------------------------------------------------------------------------
 class NormalInverseGammaPosterior(ConjugatePosterior):
+    """Normal-Inverse-Gamma posterior for a univariate Gaussian mean and variance."""
+
     family = "NormalInverseGamma"
 
     def __init__(self, m: float, kappa: float, a: float, b: float, kind: str = "gaussian"):
@@ -413,15 +448,18 @@ class NormalInverseGammaPosterior(ConjugatePosterior):
         self._prior = None
 
     def mean(self) -> dict[str, Any]:
+        """Return posterior mean parameters for ``mu`` and ``sigma2``."""
         return {"mu": self.m, "sigma2": self.b / (self.a - 1.0) if self.a > 1.0 else float("inf")}
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        """Draw paired ``mu`` and ``sigma2`` samples from the posterior."""
         rng = rng or np.random.RandomState()
         sigma2 = 1.0 / rng.gamma(self.a, 1.0 / self.b, size=n)  # InvGamma(a,b)
         mu = rng.normal(self.m, np.sqrt(sigma2 / self.kappa))
         return {"mu": mu, "sigma2": sigma2}
 
     def point_estimate(self):
+        """Return the Gaussian-family likelihood at posterior mean parameters."""
         sigma2 = self.b / (self.a - 1.0) if self.a > 1.0 else self.b / self.a
         if self.kind == "log_gaussian":
             from mixle.stats.univariate.continuous.log_gaussian import LogGaussianDistribution
@@ -432,6 +470,7 @@ class NormalInverseGammaPosterior(ConjugatePosterior):
         return GaussianDistribution(self.m, sigma2)
 
     def posterior_predictive(self):
+        """Return the Student-t predictive when available, otherwise the plug-in predictive."""
         # Marginalising (mu, sigma2) gives a Student-t: df=2a, loc=m, scale^2=b(kappa+1)/(a*kappa).
         # For log_gaussian the predictive is that Student-t in log-space (a log-Student-t in x); the
         # plug-in LogGaussian is returned as a usable mixle distribution.
@@ -443,12 +482,14 @@ class NormalInverseGammaPosterior(ConjugatePosterior):
         return StudentTDistribution(2.0 * self.a, self.m, scale)
 
     def hyper(self) -> dict[str, Any]:
+        """Return Normal-Inverse-Gamma posterior hyperparameters."""
         return {"m": self.m, "kappa": self.kappa, "a": self.a, "b": self.b}
 
     def _set_prior(self, m0, k0, a0, b0, n):
         self._prior = (m0, k0, a0, b0, n)
 
     def log_marginal_likelihood(self) -> float:
+        """Return the Normal-Inverse-Gamma log marginal likelihood."""
         if self._prior is None:
             raise ValueError("prior hyperparameters were not recorded")
         m0, k0, a0, b0, n = self._prior
@@ -490,6 +531,8 @@ def _build_gaussian(dist, data, weights, prior) -> NormalInverseGammaPosterior:
 # Normal-Inverse-Wishart posterior (multivariate Gaussian, unknown mean AND covariance)
 # ---------------------------------------------------------------------------
 class NormalInverseWishartPosterior(ConjugatePosterior):
+    """Normal-Inverse-Wishart posterior for multivariate Gaussian mean and covariance."""
+
     family = "NormalInverseWishart"
 
     def __init__(self, m: np.ndarray, kappa: float, nu: float, psi: np.ndarray):
@@ -501,10 +544,12 @@ class NormalInverseWishartPosterior(ConjugatePosterior):
         self._prior = None
 
     def mean(self) -> dict[str, Any]:
+        """Return posterior mean parameters for the Gaussian mean and covariance."""
         cov = self.psi / (self.nu - self.d - 1.0) if self.nu > self.d + 1 else None
         return {"mean": self.m, "cov": cov}
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        """Draw paired mean and covariance samples from the posterior."""
         rng = rng or np.random.RandomState()
         means = np.empty((n, self.d))
         covs = np.empty((n, self.d, self.d))
@@ -516,12 +561,14 @@ class NormalInverseWishartPosterior(ConjugatePosterior):
         return {"mean": means, "cov": covs}
 
     def point_estimate(self):
+        """Return a multivariate Gaussian at representative posterior parameters."""
         from mixle.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
 
         cov = self.psi / (self.nu - self.d - 1.0) if self.nu > self.d + 1 else self.psi / self.nu
         return MultivariateGaussianDistribution(self.m, cov)
 
     def posterior_predictive(self):
+        """Return the multivariate Student-t posterior predictive distribution."""
         from mixle.stats.multivariate.multivariate_student_t import MultivariateStudentTDistribution
 
         df = self.nu - self.d + 1.0
@@ -529,12 +576,14 @@ class NormalInverseWishartPosterior(ConjugatePosterior):
         return MultivariateStudentTDistribution(df, self.m, shape)
 
     def hyper(self) -> dict[str, Any]:
+        """Return Normal-Inverse-Wishart posterior hyperparameters."""
         return {"m": self.m, "kappa": self.kappa, "nu": self.nu, "psi": self.psi}
 
     def _set_prior(self, m0, k0, nu0, psi0, n):
         self._prior = (np.asarray(m0), k0, nu0, np.asarray(psi0), n)
 
     def log_marginal_likelihood(self) -> float:
+        """Return the Normal-Inverse-Wishart log marginal likelihood."""
         if self._prior is None:
             raise ValueError("prior hyperparameters were not recorded")
         m0, k0, nu0, psi0, n = self._prior
@@ -625,15 +674,18 @@ class InverseGammaVariancePosterior(ConjugatePosterior):
         return self.b / (self.a - 1.0) if self.a > 1.0 else self.b / self.a
 
     def mean(self) -> dict[str, Any]:
+        """Return posterior mean squared scale and scale."""
         s2 = self.b / (self.a - 1.0) if self.a > 1.0 else float("inf")
         return {"sigma2": s2, "sigma": math.sqrt(s2) if math.isfinite(s2) else float("inf")}
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        """Draw squared-scale and scale samples from the posterior."""
         rng = rng or np.random.RandomState()
         s2 = 1.0 / rng.gamma(self.a, 1.0 / self.b, size=n)
         return {"sigma2": s2, "sigma": np.sqrt(s2)}
 
     def point_estimate(self):
+        """Return the likelihood distribution at the posterior mean scale."""
         sigma = math.sqrt(self._sigma2_mean())
         if self.kind == "half_normal":
             from mixle.stats.univariate.continuous.half_normal import HalfNormalDistribution
@@ -644,16 +696,19 @@ class InverseGammaVariancePosterior(ConjugatePosterior):
         return RayleighDistribution(sigma)
 
     def posterior_predictive(self):
+        """Return the plug-in scale-family predictive distribution."""
         # the exact predictive is a compound (non-standard) density; the plug-in is returned.
         return self.point_estimate()
 
     def hyper(self) -> dict[str, Any]:
+        """Return inverse-gamma scale hyperparameters."""
         return {"a": self.a, "b": self.b}
 
     def _set_prior(self, a0, b0):
         self._prior = (a0, b0)
 
     def log_marginal_likelihood(self) -> float:
+        """Return the inverse-gamma scale log marginal likelihood."""
         a0, b0 = self._prior
         return float(self.log_base + a0 * math.log(b0) - gammaln(a0) + gammaln(self.a) - self.a * math.log(self.b))
 
@@ -702,13 +757,16 @@ class GammaParameterPosterior(ConjugatePosterior):
         self._prior = None
 
     def mean(self) -> dict[str, Any]:
+        """Return the posterior mean of the positive parameter."""
         return {self.param: self.shape / self.rate}
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        """Draw positive-parameter samples from the Gamma posterior."""
         rng = rng or np.random.RandomState()
         return {self.param: rng.gamma(self.shape, 1.0 / self.rate, size=n)}
 
     def point_estimate(self):
+        """Return the likelihood distribution at the posterior mean parameter."""
         psi = self.shape / self.rate
         if self.kind == "gamma":
             from mixle.stats.univariate.continuous.gamma import GammaDistribution
@@ -727,15 +785,18 @@ class GammaParameterPosterior(ConjugatePosterior):
         return ParetoDistribution(self.fixed, psi)  # known xm, alpha = psi
 
     def posterior_predictive(self):
+        """Return the plug-in predictive distribution for the known-parameter family."""
         return self.point_estimate()  # compound predictive is non-standard; plug-in returned
 
     def hyper(self) -> dict[str, Any]:
+        """Return Gamma posterior hyperparameters and posterior mean parameter."""
         return {"shape": self.shape, "rate": self.rate, self.param: self.shape / self.rate}
 
     def _set_prior(self, a0, b0):
         self._prior = (a0, b0)
 
     def log_marginal_likelihood(self) -> float:
+        """Return the Gamma-parameter log marginal likelihood."""
         a0, b0 = self._prior
         return float(
             self.log_base + gammaln(self.shape) - gammaln(a0) + a0 * math.log(b0) - self.shape * math.log(self.rate)
@@ -824,12 +885,14 @@ class DiagonalNIGPosterior(ConjugatePosterior):
         self.d = len(per_dim)
 
     def mean(self) -> dict[str, Any]:
+        """Return coordinate-wise posterior mean vectors."""
         return {
             "mu": np.array([p.mean()["mu"] for p in self.per_dim]),
             "sigma2": np.array([p.mean()["sigma2"] for p in self.per_dim]),
         }
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        """Draw diagonal Gaussian parameter samples coordinate by coordinate."""
         rng = rng or np.random.RandomState()
         mus = np.empty((n, self.d))
         s2 = np.empty((n, self.d))
@@ -840,6 +903,7 @@ class DiagonalNIGPosterior(ConjugatePosterior):
         return {"mu": mus, "sigma2": s2}
 
     def point_estimate(self):
+        """Return a diagonal Gaussian at coordinate-wise posterior mean parameters."""
         from mixle.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
 
         mu = np.array([p.mean()["mu"] for p in self.per_dim])
@@ -847,12 +911,15 @@ class DiagonalNIGPosterior(ConjugatePosterior):
         return DiagonalGaussianDistribution(mu, s2)
 
     def posterior_predictive(self):
+        """Return the plug-in diagonal Gaussian predictive distribution."""
         return self.point_estimate()  # product of per-dim Student-t; plug-in returned
 
     def hyper(self) -> dict[str, Any]:
+        """Return per-coordinate posterior hyperparameters."""
         return {"per_dim": [p.hyper() for p in self.per_dim]}
 
     def log_marginal_likelihood(self) -> float:
+        """Return the sum of coordinate-wise log marginal likelihoods."""
         return float(sum(p.log_marginal_likelihood() for p in self.per_dim))
 
 
@@ -884,27 +951,33 @@ class VonMisesMeanPosterior(ConjugatePosterior):
         self._prior = None
 
     def mean(self) -> dict[str, Any]:
+        """Return posterior mean direction and concentration."""
         return {"mu": self.m, "concentration": self.r}
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        """Draw mean-direction samples from the von Mises posterior."""
         rng = rng or np.random.RandomState()
         return {"mu": rng.vonmises(self.m, self.r, size=n)}
 
     def point_estimate(self):
+        """Return a von Mises likelihood at the posterior mean direction."""
         from mixle.stats.directional.von_mises import VonMisesDistribution
 
         return VonMisesDistribution(self.m, self.kappa)
 
     def posterior_predictive(self):
+        """Return the plug-in von Mises predictive distribution."""
         return self.point_estimate()
 
     def hyper(self) -> dict[str, Any]:
+        """Return von Mises posterior hyperparameters."""
         return {"m": self.m, "R": self.r, "kappa": self.kappa}
 
     def _set_prior(self, r0):
         self._prior = r0
 
     def log_marginal_likelihood(self) -> float:
+        """Return the von Mises conjugate log marginal likelihood."""
         from scipy.special import ive
 
         r0 = self._prior
@@ -1052,6 +1125,7 @@ class MixtureConjugatePosterior(ConjugatePosterior):
         self.comp_log_evidence = np.asarray(comp_log_evidence, dtype=np.float64)
 
     def mean(self) -> dict[str, Any]:
+        """Return the posterior-weighted mean of component posterior means."""
         # posterior mean of theta = sum_m w'_m E_m[theta]; per-key weighted average of the components.
         out: dict[str, Any] = {}
         keys = self.components[0].mean().keys()
@@ -1064,6 +1138,7 @@ class MixtureConjugatePosterior(ConjugatePosterior):
         return out
 
     def sample(self, n: int = 1, rng: np.random.RandomState | None = None) -> dict[str, np.ndarray]:
+        """Draw parameter samples from the posterior mixture."""
         rng = rng or np.random.RandomState()
         counts = rng.multinomial(n, self.weights)  # how many draws come from each component
         gathered: dict[str, list] = {}
@@ -1086,10 +1161,12 @@ class MixtureConjugatePosterior(ConjugatePosterior):
         return MixtureDistribution([c.posterior_predictive() for c in self.components], list(self.weights))
 
     def log_marginal_likelihood(self) -> float:
+        """Return the mixture-prior log evidence by log-summing component evidences."""
         # evidence of the whole data under the mixture prior: sum_m w_m Z_m
         return float(logsumexp(np.log(self.prior_weights) + self.comp_log_evidence))
 
     def hyper(self) -> dict[str, Any]:
+        """Return posterior weights and component hyperparameters."""
         return {"weights": self.weights, "components": [c.hyper() for c in self.components]}
 
 

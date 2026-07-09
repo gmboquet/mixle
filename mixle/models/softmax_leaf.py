@@ -1,4 +1,4 @@
-"""A neural classifier as a mixle conditional-density leaf: ``p(y | x) = softmax(module(x))``.
+"""A neural classifier as a Mixle conditional-density leaf: ``p(y | x) = softmax(module(x))``.
 
 The discriminative sibling of :class:`~mixle.models.neural_leaf.NeuralGaussian`. ``NeuralCategorical(module)`` wraps
 a Torch module that emits ``k`` logits as a mixle distribution over observations ``(x, y)`` with ``y`` an integer
@@ -11,8 +11,9 @@ leaf's log-density, never a user-supplied loss closure.
 This is the leaf that the declarative ``Categorical(logits=Net(...))`` PPL slot lowers to, and the component
 that makes a ``Mix([Categorical(logits=Net(...)), ...])`` a mixture of neural classifiers fit by ordinary EM.
 
-Requires torch. The leaf is conditional: ``predict(x)`` / ``sampler().sample_given(x)`` work; ``sample()`` raises
-(there is no ``p(x)``) -- the same honest limitation ``NeuralGaussian`` and ``RandomForestConditional`` carry.
+Requires torch. The leaf is conditional: ``predict(x)`` and ``sampler().sample_given(x)`` work; ``sample()`` raises
+because the model has no marginal ``p(x)``. This is the same conditional contract used by ``NeuralGaussian`` and
+``RandomForestConditional``.
 """
 
 from __future__ import annotations
@@ -82,10 +83,12 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
         return np.atleast_2d(np.concatenate(out))
 
     def log_density(self, xy: Any) -> float:
+        """Return ``log p(y | x)`` for one feature/class observation pair."""
         x, y = xy
         return float(self.seq_log_density((np.atleast_2d(x), np.array([int(y)])))[0])
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
+        """Return per-row categorical conditional log probabilities for encoded pairs."""
         x, y = enc
         check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "NeuralCategorical.seq_log_density")
         logp = _log_softmax(self._logits(x))
@@ -93,16 +96,20 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
         return logp[np.arange(len(y)), y]
 
     def predict(self, x: Any) -> np.ndarray:
+        """Return maximum-probability class predictions for one or more inputs."""
         p = self._logits(x).argmax(axis=1)
         return int(p[0]) if np.ndim(x) == 1 else p
 
     def sampler(self, seed: int | None = None) -> NeuralCategoricalSampler:
+        """Return a conditional sampler over labels given features."""
         return NeuralCategoricalSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> NeuralCategoricalEstimator:
+        """Return the generalized-EM estimator for weighted cross-entropy training."""
         return NeuralCategoricalEstimator(self.module, self.m_steps, self.lr, self.name, self.batch_size, self.device)
 
     def dist_to_encoder(self) -> NeuralCategoricalEncoder:
+        """Return the encoder for ``(x, class)`` observation pairs."""
         return NeuralCategoricalEncoder()
 
     # --- serialization: persist hparams + the module (as portable bytes); registered below so a mixture holding
@@ -117,6 +124,7 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
         self.module = decode_module(state["module"])
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize hyperparameters and module bytes for registry-based round trips."""
         return {
             "m_steps": self.m_steps,
             "lr": self.lr,
@@ -128,6 +136,7 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> NeuralCategorical:
+        """Rebuild a :class:`NeuralCategorical` from :meth:`to_dict` output."""
         return cls(
             decode_module(payload["module"]),
             m_steps=payload["m_steps"],
@@ -139,19 +148,25 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
 
 
 class NeuralCategoricalSampler(DistributionSampler):
+    """Conditional sampler over class labels for :class:`NeuralCategorical`."""
+
     def __init__(self, dist: NeuralCategorical, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Raise because the leaf defines ``p(y | x)`` and has no marginal ``p(x)``."""
         raise NotImplementedError("NeuralCategorical is conditional p(y|x); use sampler().sample_given(x).")
 
     def sample_given(self, x: Any) -> int:
+        """Draw one class label from ``p(y | x)``."""
         p = np.exp(_log_softmax(self.dist._logits(x))[0])
         return int(self.rng.choice(len(p), p=p / p.sum()))
 
 
 class NeuralCategoricalEncoder(DataSequenceEncoder):
+    """Encode feature/class pairs for neural-categorical scoring and fitting."""
+
     def __str__(self) -> str:
         return "NeuralCategoricalEncoder"
 
@@ -159,26 +174,30 @@ class NeuralCategoricalEncoder(DataSequenceEncoder):
         return isinstance(other, NeuralCategoricalEncoder)
 
     def seq_encode(self, data: list) -> tuple[np.ndarray, np.ndarray]:
+        """Convert ``(x, class)`` pairs into batched feature and integer-label arrays."""
         x = np.array([np.atleast_1d(np.asarray(xy[0], dtype=float)) for xy in data])
         y = np.array([int(xy[1]) for xy in data], dtype=int)
         return (x, y)
 
 
 class NeuralCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
+    """Buffer weighted feature/class batches for the neural-categorical M-step."""
+
     def __init__(self) -> None:
         self.x: list = []
         self.y: list = []
         self.w: list = []
 
-    # x/y/w hold contiguous batch arrays, concatenated once at value() rather than one ndarray per row (the
-    # audit's per-row buffering blowup). x batching is shape-PRESERVING so conv/structured inputs survive;
-    # y stays an integer class index.
+    # x/y/w hold contiguous batch arrays and concatenate once at value(), avoiding per-row ndarray buffering.
+    # x batching is shape-preserving so conv/structured inputs survive; y stays an integer class index.
     def update(self, xy: Any, weight: float, estimate: Any) -> None:
+        """Add one weighted feature/class pair to the accumulator."""
         self.x.append(np.atleast_1d(np.asarray(xy[0], dtype=float))[None, ...])
         self.y.append(np.asarray([int(xy[1])], dtype=int))
         self.w.append(np.asarray([float(weight)], dtype=float))
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
+        """Add an encoded batch and responsibility weights to the accumulator."""
         x, y = enc
         xb = np.asarray(x, dtype=float)
         self.x.append(xb.reshape(xb.shape[0], 1) if xb.ndim == 1 else xb)
@@ -186,12 +205,15 @@ class NeuralCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         self.w.append(np.asarray(weights, dtype=float).ravel())
 
     def initialize(self, xy: Any, weight: float, rng: Any) -> None:
+        """Initialize from one observation using the ordinary update path."""
         self.update(xy, weight, None)
 
     def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
+        """Initialize from an encoded batch using the ordinary batch update path."""
         self.seq_update(enc, weights, None)
 
     def combine(self, other: Any) -> NeuralCategoricalAccumulator:
+        """Merge the value tuple from another categorical accumulator."""
         xo, yo, wo = other
         if len(xo):
             self.x.append(np.asarray(xo, dtype=float))
@@ -200,12 +222,14 @@ class NeuralCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple:
+        """Return contiguous ``(x, class, weights)`` arrays for the M-step."""
         x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
         y = np.concatenate(self.y) if self.y else np.zeros((0,), dtype=int)
         w = np.concatenate(self.w) if self.w else np.zeros((0,))
         return (x, y, w)
 
     def from_value(self, value: tuple) -> NeuralCategoricalAccumulator:
+        """Restore accumulator buffers from a value tuple."""
         x, y, w = value
         self.x = [np.asarray(x, dtype=float)] if len(x) else []
         self.y = [np.asarray(y, dtype=int).ravel()] if len(y) else []
@@ -213,11 +237,15 @@ class NeuralCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def acc_to_encoder(self) -> NeuralCategoricalEncoder:
+        """Return the encoder expected by this accumulator."""
         return NeuralCategoricalEncoder()
 
 
 class NeuralCategoricalAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for neural-categorical accumulators."""
+
     def make(self) -> NeuralCategoricalAccumulator:
+        """Create a fresh accumulator."""
         return NeuralCategoricalAccumulator()
 
 
@@ -249,9 +277,11 @@ class NeuralCategoricalEstimator(ParameterEstimator):
         self.ewc = ewc
 
     def accumulator_factory(self) -> NeuralCategoricalAccumulatorFactory:
+        """Return an accumulator factory for weighted classification batches."""
         return NeuralCategoricalAccumulatorFactory()
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralCategorical:
+        """Run the weighted cross-entropy M-step and return the updated leaf."""
         torch = _torch()
         xs, ys, ws = suff_stat
         out = NeuralCategorical(self.module, self.m_steps, self.lr, self.name, self.batch_size, self.device)
@@ -259,9 +289,11 @@ class NeuralCategoricalEstimator(ParameterEstimator):
             return out
         dev = self.device
         self.module.to(dev)
-        # data stays on CPU (a large image set won't fit on the GPU); each minibatch is moved to the device
+        # data stays on CPU (a large image set won't fit on the GPU); each minibatch is moved to the device.
+        # x arrives shape-preserving from the buffer so conv/structured inputs survive; the generic buffer
+        # stores labels as a (n, 1) float64 column -- integral class indices cast to long exactly.
         xt = torch.as_tensor(np.array(xs), dtype=torch.float32)
-        yt = torch.as_tensor(np.array(ys), dtype=torch.long)
+        yt = torch.as_tensor(np.asarray(ys).reshape(-1), dtype=torch.long)
         wt = torch.as_tensor(np.array(ws), dtype=torch.float32)
         n = xt.shape[0]
         bs = self.batch_size or n

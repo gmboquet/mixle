@@ -1,4 +1,9 @@
-"""Functions for classification evaluation. Create ROC curves and search depth rankings."""
+"""Classification metrics for Mixle model evaluation.
+
+The module provides likelihood-based classification summaries, ROC/AUC helpers,
+search-depth ranking metrics, and paired operating-point utilities used by
+examples and validation notebooks.
+"""
 
 from collections.abc import Sequence
 from typing import TypeVar
@@ -122,6 +127,7 @@ def roc_percentiles(
     neg_x: list[float] | np.ndarray,
     perc_points: list[float] | np.ndarray,
 ) -> np.ndarray:
+    """Return false-alarm/probability-detection pairs at requested detection percentiles."""
 
     pd, fa = roc_curve(pos_x, neg_x)
     rv = []
@@ -140,6 +146,7 @@ def roc_percentiles(
 
 
 def ranking_depth(x, k=None, comp_func=lambda a, b: a == b):
+    """Return the first rank depth at which each target appears in ranked candidate lists."""
 
     if k is not None:
         retval = np.zeros((len(x), k))

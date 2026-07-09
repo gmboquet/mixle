@@ -140,6 +140,7 @@ class ProbabilisticCircuitDistribution(SequenceEncodableProbabilityDistribution)
         return x[sc[0]] if len(sc) == 1 else tuple(x[v] for v in sc)
 
     def log_density(self, x: Any) -> float:
+        """Return the log-density of one full observation by an upward circuit pass."""
         vals: list[float] = [0.0] * len(self.nodes)
         for i, node in enumerate(self.nodes):
             if node[0] == "leaf":
@@ -171,6 +172,7 @@ class ProbabilisticCircuitDistribution(SequenceEncodableProbabilityDistribution)
         return vals
 
     def seq_log_density(self, x: Any) -> np.ndarray:
+        """Return vectorized log-densities for encoded observations."""
         if self.lns_step is not None:
             return self._seq_log_density_lns(x)
         return self._node_values(x)[-1]
@@ -196,12 +198,15 @@ class ProbabilisticCircuitDistribution(SequenceEncodableProbabilityDistribution)
         return lns.dequantize(vals[-1])
 
     def dist_to_encoder(self) -> ProbabilisticCircuitEncoder:
+        """Return the encoder that projects observations into each leaf scope."""
         return ProbabilisticCircuitEncoder(self.leaf_dists, self.leaf_scope)
 
     def sampler(self, seed: int | None = None) -> ProbabilisticCircuitSampler:
+        """Return an ancestral sampler for this fixed circuit."""
         return ProbabilisticCircuitSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> Any:
+        """Return an EM estimator for this fixed circuit structure."""
         return ProbabilisticCircuitEstimator(self, pseudo_count=pseudo_count)
 
     def with_params(self, new_nodes: list[tuple], new_leaf_dists: dict[int, Any]) -> ProbabilisticCircuitDistribution:
@@ -227,6 +232,7 @@ class ProbabilisticCircuitEncoder(DataSequenceEncoder):
         return isinstance(other, ProbabilisticCircuitEncoder) and other.leaf_scope == self.leaf_scope
 
     def seq_encode(self, x: Any) -> dict[int, Any]:
+        """Encode a batch for every leaf distribution using its projected scope."""
         enc: dict[int, Any] = {}
         for lid, sc in self.leaf_scope.items():
             if len(sc) == 1:
@@ -269,6 +275,7 @@ class ProbabilisticCircuitSampler(DistributionSampler):
         return out
 
     def sample(self, size: int | None = None) -> Any:
+        """Draw one observation or ``size`` iid observations from the circuit."""
         if size is None:
             return self._sample_one()
         return [self._sample_one() for _ in range(size)]
@@ -301,6 +308,7 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
         self.leaf_accs = {lid: e.accumulator_factory().make() for lid, e in leaf_estimators.items()}
 
     def seq_update(self, enc: dict[int, Any], weights: Any, estimate: ProbabilisticCircuitDistribution) -> None:
+        """Update circuit-flow responsibilities and leaf sufficient statistics."""
         weights = np.asarray(weights, dtype=np.float64)
         n = weights.shape[0]
         node_vals = estimate._node_values(enc)
@@ -327,10 +335,12 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
                 self.leaf_accs[node[1]].seq_update(enc[node[1]], weights * resp, estimate.leaf_dists[node[1]])
 
     def update(self, x: Any, weight: float, estimate: ProbabilisticCircuitDistribution) -> None:
+        """Update from one weighted observation."""
         enc = estimate.dist_to_encoder().seq_encode([x])
         self.seq_update(enc, np.array([weight], dtype=np.float64), estimate)
 
     def initialize(self, x: Any, weight: float, rng: RandomState) -> None:
+        """Initialize sum counts and leaf statistics from one weighted observation."""
         for i, cnt in self.sum_counts.items():
             self.sum_counts[i] = cnt + float(weight) * rng.dirichlet(np.ones(len(cnt)))
         for lid, acc in self.leaf_accs.items():
@@ -338,6 +348,7 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
             acc.initialize(x[sc[0]] if len(sc) == 1 else tuple(x[v] for v in sc), weight, rng)
 
     def seq_initialize(self, enc: dict[int, Any], weights: Any, rng: RandomState) -> None:
+        """Initialize sum counts and leaf statistics from encoded observations."""
         weights = np.asarray(weights, dtype=np.float64)
         for i, cnt in self.sum_counts.items():
             r = rng.dirichlet(np.ones(len(cnt)))  # random initial responsibilities break symmetry
@@ -346,6 +357,7 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
             acc.seq_initialize(enc[lid], weights, rng)
 
     def combine(self, suff_stat: Any) -> ProbabilisticCircuitAccumulator:
+        """Merge sum-node expected counts and leaf accumulator values."""
         sc, lv = suff_stat
         for i in self.sum_counts:
             self.sum_counts[i] += sc[i]
@@ -354,12 +366,14 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> Any:
+        """Return sum-node expected counts and leaf sufficient statistics."""
         return (
             {i: c.copy() for i, c in self.sum_counts.items()},
             {lid: a.value() for lid, a in self.leaf_accs.items()},
         )
 
     def from_value(self, x: Any) -> ProbabilisticCircuitAccumulator:
+        """Restore sum-node and leaf sufficient statistics from ``value`` output."""
         sc, lv = x
         self.sum_counts = {i: np.asarray(c, dtype=np.float64) for i, c in sc.items()}
         for lid, v in lv.items():
@@ -367,6 +381,7 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def scale(self, c: float) -> ProbabilisticCircuitAccumulator:
+        """Scale sum-node and leaf sufficient statistics by a constant."""
         for i in self.sum_counts:
             self.sum_counts[i] *= c
         for lid in self.leaf_accs:
@@ -374,14 +389,17 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Delegate keyed merges to the leaf accumulators."""
         for acc in self.leaf_accs.values():
             acc.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Delegate keyed replacements to the leaf accumulators."""
         for acc in self.leaf_accs.values():
             acc.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> ProbabilisticCircuitEncoder:
+        """Return an encoder based on the current leaf accumulator estimates."""
         leaf_dists = {
             lid: self.leaf_estimators[lid].estimate(None, self.leaf_accs[lid].value()) for lid in self.leaf_accs
         }
@@ -389,12 +407,15 @@ class ProbabilisticCircuitAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class ProbabilisticCircuitAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create accumulators for fixed-structure probabilistic-circuit EM."""
+
     def __init__(self, nodes: list[tuple], leaf_scope: dict[int, tuple], leaf_estimators: dict[int, Any]) -> None:
         self.nodes = nodes
         self.leaf_scope = leaf_scope
         self.leaf_estimators = leaf_estimators
 
     def make(self) -> ProbabilisticCircuitAccumulator:
+        """Create an empty probabilistic-circuit accumulator."""
         return ProbabilisticCircuitAccumulator(self.nodes, self.leaf_scope, self.leaf_estimators)
 
 
@@ -408,9 +429,11 @@ class ProbabilisticCircuitEstimator(ParameterEstimator):
         self.leaf_estimators = {lid: d.estimator() for lid, d in dist.leaf_dists.items()}
 
     def accumulator_factory(self) -> ProbabilisticCircuitAccumulatorFactory:
+        """Return a factory for circuit-flow sufficient-statistic accumulators."""
         return ProbabilisticCircuitAccumulatorFactory(self.dist.nodes, self.dist.leaf_scope, self.leaf_estimators)
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> ProbabilisticCircuitDistribution:
+        """Estimate sum-node weights and leaf distributions from accumulated circuit flows."""
         sum_counts, leaf_values = suff_stat
         new_nodes: list[tuple] = []
         for i, node in enumerate(self.dist.nodes):

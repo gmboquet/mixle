@@ -46,7 +46,7 @@ Performance characteristics (Apple silicon, float64): on flat scalar fields
 the fused scalar loops run at rough parity with the legacy vectorized numpy
 path (numpy's per-field passes are SIMD-optimized; the kernels make a single
 threaded pass). On variable-length sequence data - the heterogeneous case
-this library targets - fusion wins decisively: ~8-9x faster scoring and EM
+this library targets - fusion is substantially faster: ~8-9x faster scoring and EM
 on topic-model-like mixtures of token sequences, because the legacy path
 re-walks the flattened token arrays once per component per field while the
 kernel path streams each observation exactly once.
@@ -1144,7 +1144,7 @@ class _IgnoredB:
         return None
 
     def merge_stats(self, dst, src):
-        # nothing is estimated; the dummy slot stays additive (zeros).
+        # nothing is estimated; the sentinel slot stays additive (zeros).
         for d, s in zip(dst, src):
             np.add(d, s, out=d)
 
@@ -1242,6 +1242,7 @@ class CompiledMixture:
     # -- data ------------------------------------------------------------
 
     def encode(self, data):
+        """Encode raw observations into the compiled mixture's columnar buffers."""
         bufs, add = self.builder.new_sink()
         n = 0
         for x in data:
@@ -1264,6 +1265,7 @@ class CompiledMixture:
         return self._pool
 
     def seq_component_log_density(self, enc, model=None, n_threads: int | None = None) -> np.ndarray:
+        """Return per-component log-density matrix for encoded observations."""
         model = self.model if model is None else model
         n, cols = enc
         out = np.empty((n, self.K), dtype=np.float64)
@@ -1289,6 +1291,7 @@ class CompiledMixture:
         return out
 
     def seq_log_density(self, enc, model=None) -> np.ndarray:
+        """Return mixture or single-model log densities for encoded observations."""
         model = self.model if model is None else model
         ll = self.seq_component_log_density(enc, model)
         if not self.is_mixture:
@@ -1301,6 +1304,7 @@ class CompiledMixture:
         return rv
 
     def posteriors(self, enc, model=None) -> np.ndarray:
+        """Return posterior component weights for encoded observations."""
         model = self.model if model is None else model
         ll = self.seq_component_log_density(enc, model)
         if self.is_mixture:
@@ -1399,7 +1403,7 @@ class CompiledMixture:
         if max_iter is not None:
             max_its = max_iter
         if model is None:
-            model = self.initialize(enc, estimator, rng or np.random.RandomState(), p=init_p)
+            model = self.initialize(enc, estimator, rng or np.random.RandomState(0), p=init_p)
 
         old_ll = self.seq_log_density(enc, model).sum()
         for it in range(max_its):

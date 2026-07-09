@@ -1,4 +1,4 @@
-Evolution And Search
+Evolution and Search
 ====================
 
 ``mixle.evolve`` is the self-improvement layer: measure, propose, verify, and
@@ -38,6 +38,10 @@ The core loop has four phases:
 If ``result.verified`` is true, the returned model beat the champion under the
 specified gate. If not, the champion is retained.
 
+Keep the champion immutable while challengers are evaluated. Mutation-in-place
+breaks the audit trail because it becomes unclear which model was measured,
+which model was proposed, and which model earned promotion.
+
 Objectives
 ----------
 
@@ -54,6 +58,10 @@ Use likelihood objectives when the model is generative and the probability
 assignment itself matters. Use calibration and interval objectives when
 uncertainty quality matters. Use decision regret when the model ultimately
 drives an action.
+
+The objective should be chosen before challenger results are inspected. If the
+objective or practical effect threshold changes, record a new experiment rather
+than rewriting the gate around the favorable result.
 
 Verification
 ------------
@@ -86,6 +94,10 @@ data. The verification gate can include:
 The verification step is the difference between automatic improvement and
 automatic churn.
 
+Verification data should be separate from proposal data. A search loop can use
+training or tuning data to generate candidates, but promotion evidence should
+come from held-out data or a documented validation stream.
+
 Improvement Operators
 ---------------------
 
@@ -99,7 +111,12 @@ Built-in operators include:
   and off by default in conservative loops.
 
 Operators advertise applicability and a cost hint. ``improve`` can use a
-budget so cheap candidates are tried before expensive candidates.
+budget so lower-cost candidates are tried before expensive candidates.
+
+Operator costs should include operational costs when they affect deployment:
+latency, memory, optional dependencies, hardware assumptions, or retraining
+time. A statistically better challenger can still be rejected when it exceeds
+the serving envelope.
 
 Ledgers
 -------
@@ -118,6 +135,10 @@ person or process will rely on.
 A ledger makes it possible to answer the important operational questions:
 which candidates were tried, why were they rejected, and what evidence justified
 promotion?
+
+Store rejected candidates or at least their signatures and failure reasons when
+they are plausible alternatives. Negative evidence is valuable because it
+prevents the same weak move from being rediscovered in the next loop.
 
 Automatic Selection
 -------------------
@@ -149,7 +170,7 @@ Typed Search Spaces
 
    space = Space({
        "components": Integer(1, 6),
-       "alpha": Real(0.1, 5.0, log=True),
+       "alpha": Real(0.1, 5.0),
        "family": Categorical(["gaussian", "student_t"]),
    })
 
@@ -188,6 +209,10 @@ This is intentionally conservative. Structural search can be powerful, but it
 has high variance and a larger blast radius than recalibration or refitting.
 Use it with held-out gates, ledgers, and clear budgets.
 
+Structural search should be disabled in release-like loops unless the review
+specifically allows it. Recalibration, refitting, and bounded family selection
+are easier to audit and usually make better first promotion candidates.
+
 Production Standard
 -------------------
 
@@ -201,6 +226,10 @@ should state:
 * the statistical and practical promotion thresholds;
 * the calibration and decision no-regression checks;
 * the final verdict and ledger entry.
+
+It should also state what was not promoted. A professional release record
+should include rejected challenger classes, blocked operators, and any gate
+that failed because of numerical, statistical, or operational evidence.
 
 That standard is the path from automatic inference to automatic improvement:
 models can become more capable over time without making silent regressions easy

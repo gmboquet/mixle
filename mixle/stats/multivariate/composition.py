@@ -104,16 +104,19 @@ class AitchisonNormalDistribution(SequenceEncodableProbabilityDistribution):
 
     @property
     def mean(self) -> np.ndarray:
+        """Return the Gaussian mean in ilr coordinates."""
         return self.gaussian.mu
 
     @property
     def cov(self) -> np.ndarray:
+        """Return the Gaussian covariance in ilr coordinates."""
         return np.asarray(self.gaussian.covar)
 
     def __str__(self) -> str:
         return "AitchisonNormalDistribution(%r, %r)" % (list(self.gaussian.mu), [list(r) for r in self.cov])
 
     def density(self, x: np.ndarray) -> float:
+        """Return the density of one composition under the ilr-space Gaussian."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: np.ndarray) -> float:
@@ -121,6 +124,7 @@ class AitchisonNormalDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.gaussian.log_density(ilr(x)[0]))
 
     def seq_log_density(self, x) -> np.ndarray:
+        """Return vectorized log-densities for ilr-encoded compositions."""
         return self.gaussian.seq_log_density(x)  # x is already ilr-encoded by the AitchisonNormal encoder
 
     def mean_composition(self) -> np.ndarray:
@@ -128,21 +132,27 @@ class AitchisonNormalDistribution(SequenceEncodableProbabilityDistribution):
         return ilr_inv(self.gaussian.mu)[0]
 
     def sampler(self, seed: int | None = None) -> AitchisonNormalSampler:
+        """Return a sampler that draws in ilr space and maps back to the simplex."""
         return AitchisonNormalSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> AitchisonNormalEstimator:
+        """Return an estimator that fits a Gaussian in ilr coordinates."""
         return AitchisonNormalEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> AitchisonNormalDataEncoder:
+        """Return the ilr-transform encoder used by vectorized methods."""
         return AitchisonNormalDataEncoder(self.gaussian.dist_to_encoder())
 
 
 class AitchisonNormalSampler(DistributionSampler):
+    """Sample compositions by drawing Gaussian ilr coordinates and inverting the transform."""
+
     def __init__(self, dist: AitchisonNormalDistribution, seed: int | None = None):
         self.dist = dist
         self.gaussian_sampler = dist.gaussian.sampler(seed)
 
     def sample(self, size: int | None = None) -> np.ndarray:
+        """Draw one composition or ``size`` iid compositions on the simplex."""
         y = self.gaussian_sampler.sample(size)
         return ilr_inv(np.atleast_2d(y))[0] if size is None else ilr_inv(np.asarray(y))
 
@@ -154,6 +164,7 @@ class AitchisonNormalDataEncoder:
         self.gaussian_encoder = gaussian_encoder
 
     def seq_encode(self, x):
+        """Encode compositions as Gaussian ilr-coordinate observations."""
         return self.gaussian_encoder.seq_encode(ilr(np.asarray(x, dtype=float)))
 
 
@@ -166,15 +177,18 @@ class AitchisonNormalEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> StatisticAccumulatorFactory:
+        """Return an accumulator factory that delegates to the Gaussian estimator."""
         gaussian_factory = self.gaussian_estimator.accumulator_factory()
 
         class _Factory(StatisticAccumulatorFactory):
             def make(self):
+                """Create an Aitchison-normal accumulator."""
                 return AitchisonNormalAccumulator(gaussian_factory.make())
 
         return _Factory()
 
     def estimate(self, nobs, suff_stat) -> AitchisonNormalDistribution:
+        """Estimate a logratio-normal distribution from ilr-space sufficient statistics."""
         g = self.gaussian_estimator.estimate(nobs, suff_stat)
         return AitchisonNormalDistribution(g.mu, g.covar, name=self.name, keys=self.keys)
 
@@ -186,27 +200,35 @@ class AitchisonNormalAccumulator:
         self.gaussian_acc = gaussian_acc
 
     def update(self, x: np.ndarray, weight: float, estimate: AitchisonNormalDistribution | None) -> None:
+        """Update delegated Gaussian statistics from one composition."""
         self.gaussian_acc.update(ilr(x)[0], weight, None if estimate is None else estimate.gaussian)
 
     def initialize(self, x: np.ndarray, weight: float, rng) -> None:
+        """Initialize delegated Gaussian statistics from one composition."""
         self.gaussian_acc.initialize(ilr(x)[0], weight, rng)
 
     def seq_update(self, x, weights, estimate) -> None:
+        """Update delegated Gaussian statistics from ilr-encoded compositions."""
         self.gaussian_acc.seq_update(x, weights, None if estimate is None else estimate.gaussian)
 
     def seq_initialize(self, x, weights, rng) -> None:
+        """Initialize delegated Gaussian statistics from ilr-encoded compositions."""
         self.gaussian_acc.seq_initialize(x, weights, rng)
 
     def combine(self, suff_stat) -> AitchisonNormalAccumulator:
+        """Merge delegated Gaussian sufficient statistics."""
         self.gaussian_acc.combine(suff_stat)
         return self
 
     def value(self) -> Any:
+        """Return delegated Gaussian sufficient statistics."""
         return self.gaussian_acc.value()
 
     def from_value(self, x) -> AitchisonNormalAccumulator:
+        """Restore delegated Gaussian sufficient statistics."""
         self.gaussian_acc.from_value(x)
         return self
 
     def acc_to_encoder(self) -> AitchisonNormalDataEncoder:
+        """Return the composition encoder compatible with this accumulator."""
         return AitchisonNormalDataEncoder(self.gaussian_acc.acc_to_encoder())

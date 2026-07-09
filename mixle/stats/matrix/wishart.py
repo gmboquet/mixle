@@ -120,6 +120,7 @@ class WishartSampler(DistributionSampler):
         return la @ la.T
 
     def sample(self, size: int | None = None) -> np.ndarray:
+        """Draw one SPD matrix or a stacked batch of independent Wishart samples."""
         if size is None:
             return self._one()
         return np.stack([self._one() for _ in range(int(size))])
@@ -129,7 +130,7 @@ class _MeanScatterAccumulator(SequenceEncodableStatisticAccumulator):
     """Shared accumulator for (inverse-)Wishart: weighted matrix sum ``sum_i w_i X_i`` and total weight.
 
     Subclasses override :meth:`acc_to_encoder` to return the matching :class:`DataSequenceEncoder`;
-    all other suff-stat scaffolding is shared.
+    the weighted sufficient-statistic update path is shared.
     """
 
     def __init__(self, dim: int, name: str | None = None, keys: str | None = None) -> None:
@@ -201,34 +202,41 @@ class WishartAccumulator(_MeanScatterAccumulator):
         return np.where(sign > 0, logdet, -np.inf)
 
     def update(self, x: np.ndarray, weight: float, estimate: Any | None) -> None:
+        """Accumulate matrix scatter and log-determinant statistics for one observation."""
         super().update(x, weight, estimate)
         self.sum_logdet += weight * float(self._logdet(np.asarray(x, dtype=np.float64)))
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any | None) -> None:
+        """Accumulate matrix scatter and log-determinants from encoded observations."""
         super().seq_update(x, weights, estimate)
         w = np.asarray(weights, dtype=np.float64)
         self.sum_logdet += float(np.dot(w, self._logdet(np.asarray(x, dtype=np.float64))))
 
     def combine(self, suff_stat: tuple[np.ndarray, float, float]) -> "WishartAccumulator":
+        """Merge serialized Wishart sufficient statistics into this accumulator."""
         super().combine((suff_stat[0], suff_stat[1]))
         self.sum_logdet += float(suff_stat[2])
         return self
 
     def value(self) -> tuple[np.ndarray, float, float]:
+        """Return scatter, total weight, and weighted log-determinant sum."""
         return self.sum_x.copy(), self.count, self.sum_logdet
 
     def from_value(self, x: tuple[np.ndarray, float, float]) -> "WishartAccumulator":
+        """Restore the accumulator from serialized Wishart sufficient statistics."""
         super().from_value((x[0], x[1]))
         self.sum_logdet = float(x[2])
         return self
 
     def scale(self, c: float) -> "WishartAccumulator":
+        """Scale accumulated Wishart sufficient statistics by a constant."""
         self.sum_x *= c
         self.count *= c
         self.sum_logdet *= c
         return self
 
     def acc_to_encoder(self) -> "WishartDataEncoder":
+        """Return an encoder for SPD matrix observations."""
         return WishartDataEncoder()
 
 
@@ -241,6 +249,7 @@ class WishartAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> WishartAccumulator:
+        """Create an empty Wishart accumulator."""
         return WishartAccumulator(self.dim, name=self.name, keys=self.keys)
 
 
@@ -294,9 +303,11 @@ class WishartEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> WishartAccumulatorFactory:
+        """Return a factory for Wishart sufficient-statistic accumulators."""
         return WishartAccumulatorFactory(self.dim, name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, float, float]) -> WishartDistribution:
+        """Estimate the Wishart scale and optionally degrees of freedom."""
         sum_x, count, sum_logdet = suff_stat
         if count <= 0.0:
             df = self.df if self.df is not None else float(self.dim + 1.0)
@@ -322,4 +333,5 @@ class WishartDataEncoder(DataSequenceEncoder):
         return isinstance(other, WishartDataEncoder)
 
     def seq_encode(self, x: Sequence[np.ndarray]) -> np.ndarray:
+        """Encode SPD matrix observations as a floating-point stack."""
         return np.asarray(x, dtype=np.float64)

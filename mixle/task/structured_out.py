@@ -1,4 +1,4 @@
-"""``solve_structured`` -- replace rigid code that returns a DICT, field by field, honestly.
+"""``solve_structured`` -- replace rigid code that returns a dict, field by field.
 
 The structured-output shape of the solve loop: ``teacher(x) -> {"field": value, ...}`` with a consistent
 schema (an enricher, a triager, a quote builder). Rather than inventing new machinery, each output field
@@ -8,7 +8,7 @@ decomposes onto the shape that already carries guarantees:
   * a numeric field -> a :func:`~mixle.task.regress.solve_regression` student (conformal interval +
     the caller's ``tol`` precision rule -- required per numeric field).
 
-The composition rule is strict: the input is answered locally ONLY when **every** field's sub-solution
+The composition rule is strict: the input is answered locally only when **every** field's sub-solution
 answers locally; one unsure field escalates the whole request to the teacher (harvested), so a
 locally-returned dict never contains a guessed field. The teacher is called exactly once per training
 example -- per-field sub-teachers are lookups over that single pass.
@@ -46,6 +46,7 @@ class StructuredSolution:
 
     @property
     def schema(self) -> dict[str, str]:
+        """Return each output field's inferred kind: ``categorical`` or ``numeric``."""
         return {**{k: "categorical" for k in self.fields_cat}, **{k: "numeric" for k in self.fields_num}}
 
     def try_local(self, x: Any) -> dict[str, Any] | None:
@@ -62,7 +63,12 @@ class StructuredSolution:
             out[key] = float(sub._predict([x])[0])
         return out
 
+    def decide(self, x: Any) -> dict[str, Any] | None:
+        """Return the local structured-output decision, or ``None`` when the example should escalate."""
+        return self.try_local(x)
+
     def __call__(self, x: Any) -> dict[str, Any]:
+        """Answer locally when every field is confident; otherwise call and harvest the teacher output."""
         self.n_requests += 1
         local = self.try_local(x)
         if local is not None:
@@ -74,6 +80,7 @@ class StructuredSolution:
         return got
 
     def report(self) -> dict[str, Any]:
+        """Return per-field calibration details and aggregate serving/harvest counts."""
         per_field: dict[str, Any] = {}
         for key, sub in self.fields_cat.items():
             per_field[key] = {"kind": "categorical", "holdout_agreement": round(sub.holdout_agreement, 4)}

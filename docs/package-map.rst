@@ -17,6 +17,11 @@ it as seven layers:
 The generated API reference is available at :doc:`api/modules`. This page is a
 human map for choosing where to start.
 
+The maturity level is not uniform across this map. Core distribution and
+inference contracts should be treated as stable unless marked otherwise.
+Applied neural, task, reasoning, DOE, evolution, and assembled application
+surfaces need explicit validation evidence before they carry production claims.
+
 Top-Level Facade
 ----------------
 
@@ -50,7 +55,7 @@ Important top-level exports include:
     High-level distribution and estimator namespace. This is the first import
     location for most probabilistic modeling code.
 
-Distribution And Model Objects
+Distribution and Model Objects
 ------------------------------
 
 ``mixle.stats`` contains the composable probability model substrate:
@@ -77,7 +82,7 @@ Use :doc:`distributions`, :doc:`stats-univariate`, :doc:`stats-structured`, and
 when you specifically need an applied helper that is not an ordinary
 distribution family.
 
-Inference And Probability Operations
+Inference and Probability Operations
 ------------------------------------
 
 Inference is split by kind of question rather than by data type:
@@ -106,7 +111,7 @@ The main guides are :doc:`automatic-inference`, :doc:`inference`,
 :doc:`inference-toolkit`, :doc:`enumeration`, :doc:`operations`,
 :doc:`reasoning-ecosystem`, and :doc:`ppl`.
 
-Applied Neural, LLM, And Task Workflows
+Applied Neural, LLM, and Task Workflows
 ---------------------------------------
 
 The neural and LLM-facing layers reuse the same model vocabulary where
@@ -139,10 +144,14 @@ Use :doc:`neural-llm`, :doc:`task-distillation`, :doc:`task-serving`,
 narrative guides. Use :doc:`maturity` to decide how much validation each
 surface needs.
 
+For these applied namespaces, a useful artifact record includes the teacher or
+training source, calibration split, optional dependency versions, escalation
+policy, and reload check. The package boundary should not hide those facts.
+
 Local Application Runtime
 -------------------------
 
-Version 0.6.2 adds local application surfaces around fitted models:
+Local application surfaces connect fitted models to operational workflows:
 
 .. list-table::
    :header-rows: 1
@@ -172,7 +181,7 @@ Use :doc:`reasoning-ecosystem` for the narrative guide and
 :doc:`api/mixle.substrate`, :doc:`api/mixle.pool`, :doc:`api/mixle.telemetry`,
 and :doc:`api/mixle.scientist` for API reference.
 
-Scientific Design And Analysis
+Scientific Design and Analysis
 ------------------------------
 
 Mixle also includes scientific modeling support:
@@ -199,12 +208,21 @@ Mixle also includes scientific modeling support:
    * - ``mixle.evolve``
      - Objective-led model improvement, structure search, verification, and
        anti-regression ledgers.
+   * - ``mixle.epistemic``
+     - Hypothesis portfolios with open-world mass, distribution discrepancy
+       (KL/JS/Wasserstein/MMD), EIG-driven action selection, and a
+       replayable decision journal -- the epistemic-loop control flow, built
+       on ``mixle.inference``, ``mixle.doe``, and ``mixle.evolve``.
 
 Use :doc:`processes`, :doc:`relations`, :doc:`analysis`, :doc:`doe`, and
 :doc:`evolution` when the modeling task is closer to scientific design,
 structured optimization, or repeated model improvement.
 
-Data, Engines, And Runtime
+Scientific workflows should record the design objective, constraints, random
+seed, and validation metric. A selector, optimizer, or evolutionary search
+result is only as trustworthy as the evidence attached to the chosen candidate.
+
+Data, Engines, and Runtime
 --------------------------
 
 The lower layers keep model code independent from storage location, array
@@ -245,7 +263,7 @@ surface is documented in :doc:`experimental-program`. Prefer stable surfaces in
 ``mixle.models``, and ``mixle.task`` deliberately when their higher-level or
 applied workflow is the reason for the code.
 
-Choosing An Entry Point
+Choosing an Entry Point
 -----------------------
 
 .. list-table::
@@ -269,3 +287,7 @@ Choosing An Entry Point
    * - You need speed or scale
      - :doc:`compute-layer`, :doc:`engines`, and
        :doc:`utilities-and-parallelism`.
+
+If you are unsure where a feature belongs, start from the most stable layer
+that can express the problem. Move upward to applied helpers only when their
+additional assumptions are part of the task.

@@ -1,18 +1,17 @@
-"""``recommend_model`` -- point a regular program at a data sample and get back a model shape, with confidence.
+"""Decision-oriented model recommendation for heterogeneous data samples.
 
-The other local task Grant named: "help recommend a model shape from the data." mixle already auto-selects
-structure (:func:`mixle.utils.automatic.analyze_structure` scores candidate families per field by description
-length); this wraps that into a decision-oriented answer a program can act on:
+``recommend_model`` wraps :func:`mixle.utils.automatic.analyze_structure` and
+returns an object a program can inspect, store, and optionally fit. The
+recommendation includes:
 
-  * the recommended estimator (ready to ``fit``),
-  * per field, the chosen family, the runner-up, and the **bit-gap** between them -- how *confident* the choice
-    is (a wide gap = clearly this family; a narrow gap = the data can't yet tell them apart),
-  * the fields whose choice is low-confidence -- exactly where collecting more data would pay off (the
-    "better data collection" lever),
-  * the pairwise dependencies that argue for modeling fields jointly rather than independently.
+* the selected estimator;
+* per-field family choices, runner-up families, and bit-scale confidence gaps;
+* low-confidence fields where more data or domain review would sharpen the
+  choice;
+* pairwise dependencies that support modeling fields jointly; and
+* profile warnings that should be reviewed before production use.
 
-No teacher, no GPU -- this is mixle's generative model selection exposed as a one-call advisor. ``fit=True``
-also returns the fitted model.
+Pass ``fit=True`` to attach a fitted model to the returned recommendation.
 """
 
 from __future__ import annotations

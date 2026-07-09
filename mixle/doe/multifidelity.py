@@ -1,7 +1,7 @@
 """Cost-aware multi-fidelity Bayesian optimization.
 
-Many expensive objectives have cheap approximations -- a coarser mesh, fewer Monte-Carlo samples, a
-shorter training run. Multi-fidelity BO exploits them: it spends cheap low-fidelity evaluations to
+Many expensive objectives have lower-fidelity approximations -- a coarser mesh, fewer Monte-Carlo samples, a
+shorter training run. Multi-fidelity BO exploits them: it spends low-cost low-fidelity evaluations to
 locate good regions and reserves the expensive high-fidelity ones for refinement, reaching the optimum
 of the true (target) objective for a fraction of the cost of optimizing it directly.
 
@@ -47,6 +47,8 @@ def multi_fidelity_minimize(
     reduction per unit cost, until the cumulative cost reaches ``max_cost``. Returns
     ``{'x', 'y', 'X', 'Y', 'cost'}`` -- the best *target-fidelity* point and the full augmented history.
     """
+    if int(n_candidates) <= 0:
+        raise ValueError("n_candidates must be positive.")
     b = _as_bounds(bounds)
     d = b.shape[0]
     rng = _as_rng(seed)
@@ -54,6 +56,13 @@ def multi_fidelity_minimize(
     target = float(fids.max()) if target is None else float(target)
     cost_arr = fids if costs is None else np.asarray(costs, dtype=np.float64).ravel()
     cost_map = {float(s): float(c) for s, c in zip(fids, cost_arr)}
+    if any(c <= 0.0 for c in cost_map.values()):
+        # a zero (or negative) cost breaks the budget loop's termination: `spent` never advances for
+        # that fidelity, and its per-cost score (variance_reduction / cost) is +inf, so it wins every
+        # round -- an unbounded hang, not a graceful "always prefer the free fidelity" outcome. A free
+        # fidelity is a real modeling choice (e.g. a cheap proxy at cost 0), so surface it as a clear
+        # error rather than silently freezing the caller.
+        raise ValueError(f"multi_fidelity_bo requires every fidelity cost > 0, got {cost_map}")
     sign = -1.0 if maximize else 1.0
     n_init = int(n_init) if n_init else 2 * d
 

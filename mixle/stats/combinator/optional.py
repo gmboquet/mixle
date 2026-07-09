@@ -1,14 +1,10 @@
-"""Create, estimate, and sample from an Optional distribution.
-
-Defines the OptionalDistribution, OptionalSampler, OptionalAccumulatorFactory, OptionalAccumulator,
-OptionalEstimator, and the OptionalDataEncoder classes for use with mixle.
+"""Optional distributions for explicit missing-value mass.
 
 This distribution assigns a probability (p) to data being missing. With probability (1-p) the data is assumed to come
 from a base distribution set by the user.
 
 The OptionalDistribution allows for potentially missing data. The value p (the probability of being missing)
 must be specified to sample from the distribution.
-
 """
 
 from __future__ import annotations
@@ -22,6 +18,7 @@ from numpy.random import RandomState
 from mixle.enumeration.algorithms import freeze, merge_enumerators
 from mixle.stats.combinator.composite import _distribute_child_prior
 from mixle.stats.compute.pdist import (
+    ContractError,
     DataSequenceEncoder,
     DistributionEnumerator,
     DistributionSampler,
@@ -31,6 +28,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
     child_enumerator,
+    prefix_contract_error,
 )
 from mixle.utils.special import digamma
 
@@ -46,6 +44,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
     """Mixture-style wrapper that models missing observations explicitly."""
 
     def compute_capabilities(self):
+        """Return compute capabilities inherited from the observed-data distribution."""
         from mixle.stats.compute.capabilities import DistributionCapabilities, capabilities_for
 
         child = capabilities_for(self.dist)
@@ -65,7 +64,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             dist (SequenceEncodableProbabilityDistribution): Base distribution.
             p (Optional[float]): Probability that dist has missing_value.
             missing_value (Any): Missing value from dist.
-            name (Optional[str]): Set a name for the object instance.
+            name (Optional[str]): Optional distribution name.
             prior (Optional): Joint parameter prior ``(p_prior, dist_prior)``. ``p_prior`` is a conjugate
                 Beta prior on the missing probability ``p`` (a
                 :class:`~mixle.stats.univariate.continuous.beta.BetaDistribution`); ``dist_prior`` is the underlying
@@ -80,7 +79,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             log_pn (float): log(1-p).
             missing_value_is_nan (bool): True if the missing value is nan.
             missing_value (Any): Missing value from dist.
-            name (Optional[str]): Set a name for the object instance.
+            name (Optional[str]): Optional distribution name.
 
         """
         self.dist = dist
@@ -155,6 +154,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def compute_declaration(self):
+        """Return a structured declaration for the optional missingness wrapper."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ParameterSpec,
@@ -203,6 +203,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         return np.exp(self.log_density(x))
 
     def density_semantics(self):
+        """Return density semantics for the observed branch of the wrapper."""
         from mixle.stats.compute.pdist import join_density_semantics
 
         return join_density_semantics(c.density_semantics() for c in [self.dist])
@@ -401,6 +402,8 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class OptionalEnumerator(DistributionEnumerator):
+    """Enumerate the optional support by merging missing mass with observed support."""
+
     def __init__(self, dist: OptionalDistribution) -> None:
         """Enumerates the base support scaled by (1-p), merged with the missing value at p.
 
@@ -433,12 +436,15 @@ class OptionalEnumerator(DistributionEnumerator):
 
 
 class OptionalSampler(DistributionSampler):
+    """Sample from an optional distribution by first drawing the missingness gate."""
+
     def __init__(self, dist: OptionalDistribution, seed: int | None = None) -> None:
         super().__init__(dist, seed)
         self.dist = dist
         self.sampler = self.dist.dist.sampler(self.new_seed())
 
     def sample(self, size: int | None = None):
+        """Draw one observation or a list of observations from the optional mixture."""
 
         sampler = self.sampler
 
@@ -471,6 +477,8 @@ class OptionalSampler(DistributionSampler):
 
 
 class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulate missing/observed gate weights plus observed-branch statistics."""
+
     def __init__(
         self,
         accumulator: SequenceEncodableStatisticAccumulator,
@@ -486,6 +494,7 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.name = name
 
     def update(self, x: T, weight: float, estimate: OptionalDistribution) -> None:
+        """Update from a single observation, routing observed values to the child accumulator."""
         base_estimate = estimate.dist if estimate is not None else None
         if self.missing_value_is_nan:
             if isinstance(x, (np.floating, float)) and np.isnan(x):
@@ -501,6 +510,7 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
                 self.weights[1] += weight
 
     def initialize(self, x: T, weight: float, rng: RandomState) -> None:
+        """Initialize from a single observation using the child initializer when observed."""
         if self.missing_value_is_nan:
             if isinstance(x, (np.floating, float)) and np.isnan(x):
                 self.weights[0] += weight
@@ -517,6 +527,7 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_update(
         self, x: tuple[int, np.ndarray, np.ndarray, E], weights: np.ndarray, estimate: OptionalDistribution
     ) -> None:
+        """Update from encoded optional data and observation weights."""
         sz, z_idx, nz_idx, enc_data = x
         nz_weights = weights[nz_idx]
         z_weights = weights[z_idx]
@@ -545,6 +556,7 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         )
 
     def seq_initialize(self, x: tuple[int, np.ndarray, np.ndarray, E], weights: np.ndarray, rng: RandomState) -> None:
+        """Initialize from encoded optional data and weights."""
         sz, z_idx, nz_idx, enc_data = x
         nz_weights = weights[nz_idx]
         z_weights = weights[z_idx]
@@ -554,6 +566,7 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulator.seq_initialize(enc_data, nz_weights, rng)
 
     def combine(self, suff_stat: tuple[list[float], SS]) -> OptionalEstimatorAccumulator:
+        """Merge missing/observed weights and child sufficient statistics."""
         self.weights[0] += suff_stat[0][0]
         self.weights[1] += suff_stat[0][1]
         self.accumulator.combine(suff_stat[1])
@@ -561,9 +574,11 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[list[float], Any]:
+        """Return gate weights together with observed-branch sufficient statistics."""
         return self.weights, self.accumulator.value()
 
     def from_value(self, x: tuple[list[float], SS]) -> OptionalEstimatorAccumulator:
+        """Restore gate weights and observed-branch sufficient statistics."""
         self.weights = x[0]
         self.accumulator.from_value(x[1])
 
@@ -577,6 +592,7 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace keyed statistics in ``stats_dict`` with this accumulator state."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].from_value(self.value())
@@ -584,6 +600,7 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into ``stats_dict`` under the configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -591,10 +608,13 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def acc_to_encoder(self) -> OptionalDataEncoder:
+        """Return the optional encoder matching the wrapped child accumulator."""
         return OptionalDataEncoder(encoder=self.accumulator.acc_to_encoder(), missing_value=self.missing_value)
 
 
 class OptionalEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create accumulators for optional missingness estimators."""
+
     def __init__(
         self,
         estimator: ParameterEstimator,
@@ -608,12 +628,15 @@ class OptionalEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
         self.name = name
 
     def make(self) -> OptionalEstimatorAccumulator:
+        """Create an empty optional estimator accumulator."""
         return OptionalEstimatorAccumulator(
             self.estimator.accumulator_factory().make(), self.missing_value, keys=self.keys, name=self.name
         )
 
 
 class OptionalEstimator(ParameterEstimator):
+    """Estimate optional missingness probability and observed-data distribution parameters."""
+
     def __init__(
         self,
         estimator: ParameterEstimator,
@@ -631,7 +654,7 @@ class OptionalEstimator(ParameterEstimator):
             missing_value (Any): Missing_value specification.
             est_prob (bool): If true estimate the probability of a missing value.
             pseudo_count (Optional[float]): Regularize estimate of missing data.
-            name (Optional[str]): Set name to object.
+            name (Optional[str]): Optional name assigned to the estimated distribution.
             keys (Optional[str]): Set keys for sufficient statistics.
             prior (Optional): Joint parameter prior ``(p_prior, dist_prior)``. ``p_prior`` is a conjugate
                 Beta prior on ``p``; ``dist_prior`` is delegated to the base estimator. ``None`` (default)
@@ -642,7 +665,7 @@ class OptionalEstimator(ParameterEstimator):
             missing_value (Any): Missing_value specification.
             est_prob (bool): If true estimate the probability of a missing value.
             pseudo_count (Optional[float]): Regularize estimate of missing data.
-            name (Optional[str]): Set name to object.
+            name (Optional[str]): Optional name assigned to the estimated distribution.
             keys (Optional[str]): Set keys for sufficient statistics.
 
         """
@@ -657,6 +680,7 @@ class OptionalEstimator(ParameterEstimator):
         self.set_prior(prior)
 
     def accumulator_factory(self) -> OptionalEstimatorAccumulatorFactory:
+        """Return an accumulator factory for optional sufficient statistics."""
         return OptionalEstimatorAccumulatorFactory(self.estimator, self.missing_value, keys=self.keys, name=self.name)
 
     def get_prior(self) -> tuple[Any, Any]:
@@ -684,6 +708,32 @@ class OptionalEstimator(ParameterEstimator):
             rv += float(self.prior.log_density(model.p))
         return rv
 
+    def _validate_suff_stat(self, suff_stat: tuple[list[float], SS] | None) -> None:
+        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 2:
+            raise ContractError(
+                "OptionalEstimator.estimate(suff_stat)",
+                "a 2-tuple ([missing_weight, present_weight], base_suff_stat)",
+                "%s%s"
+                % (
+                    type(suff_stat).__name__,
+                    " of length %d" % len(suff_stat) if isinstance(suff_stat, (tuple, list)) else "",
+                ),
+                "pass the 2-tuple produced by OptionalEstimatorAccumulator.value(), not a bare base "
+                "sufficient statistic.",
+            )
+        if not isinstance(suff_stat[0], (tuple, list, np.ndarray)) or len(suff_stat[0]) != 2:
+            raise ContractError(
+                "OptionalEstimator.estimate(suff_stat[0])",
+                "a 2-element [missing_weight, present_weight] pair",
+                "%s%s"
+                % (
+                    type(suff_stat[0]).__name__,
+                    " of length %d" % len(suff_stat[0]) if isinstance(suff_stat[0], (tuple, list, np.ndarray)) else "",
+                ),
+                "suff_stat[0] must be the [missing_weight, present_weight] pair produced by "
+                "OptionalEstimatorAccumulator.value().",
+            )
+
     def _estimate_conjugate(self, suff_stat: tuple[list[float], SS]) -> OptionalDistribution:
         """Closed-form Beta conjugate posterior update on ``p`` (carried forward as the fitted prior).
 
@@ -692,9 +742,13 @@ class OptionalEstimator(ParameterEstimator):
         """
         from mixle.stats.univariate.continuous.beta import BetaDistribution
 
+        self._validate_suff_stat(suff_stat)
         psum = suff_stat[0][0]
         nsum = suff_stat[0][1]
-        dist = self.estimator.estimate(nsum, suff_stat[1])
+        try:
+            dist = self.estimator.estimate(nsum, suff_stat[1])
+        except ContractError as e:
+            raise prefix_contract_error("OptionalDistribution.dist", e) from None
 
         a, b = self.prior.get_parameters()
         new_a = a + psum
@@ -710,10 +764,15 @@ class OptionalEstimator(ParameterEstimator):
         )
 
     def estimate(self, nobs: float | None, suff_stat: tuple[list[float], SS] | None) -> OptionalDistribution:
+        """Estimate an OptionalDistribution from missing/observed sufficient statistics."""
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
 
-        dist = self.estimator.estimate(suff_stat[0][1], suff_stat[1])
+        self._validate_suff_stat(suff_stat)
+        try:
+            dist = self.estimator.estimate(suff_stat[0][1], suff_stat[1])
+        except ContractError as e:
+            raise prefix_contract_error("OptionalDistribution.dist", e) from None
 
         if self.pseudo_count is not None and self.est_prob:
             return OptionalDistribution(
@@ -736,6 +795,8 @@ class OptionalEstimator(ParameterEstimator):
 
 
 class OptionalDataEncoder(DataSequenceEncoder):
+    """Encode optional data as missing indices, observed indices, and child-encoded data."""
+
     def __init__(self, encoder: DataSequenceEncoder, missing_value: Any = None) -> None:
         self.encoder = encoder
         self.missing_value = missing_value
@@ -750,6 +811,15 @@ class OptionalDataEncoder(DataSequenceEncoder):
             return False
 
     def seq_encode(self, x: Sequence[T]) -> tuple[int, np.ndarray, np.ndarray, Any]:
+        """Split a sequence into missing positions and encoded observed values."""
+        if not isinstance(x, (list, tuple, np.ndarray)):
+            raise ContractError(
+                "OptionalDistribution.seq_encode",
+                "a sequence of observations (or the missing-value sentinel)",
+                "%s" % type(x).__name__,
+                "pass a list/tuple of observations, e.g. [x0, missing_value, x2, ...].",
+            )
+
         nz_idx = []
         nz_val = []
         z_idx = []
@@ -769,7 +839,19 @@ class OptionalDataEncoder(DataSequenceEncoder):
                     nz_idx.append(i)
                     nz_val.append(v)
 
-        enc_data = self.encoder.seq_encode(nz_val)
+        try:
+            enc_data = self.encoder.seq_encode(nz_val)
+        except ContractError as e:
+            raise prefix_contract_error("OptionalDistribution.dist", e) from None
+        except (TypeError, ValueError, IndexError, KeyError) as e:
+            raise ContractError(
+                "OptionalDistribution.dist",
+                "every present (non-missing) value compatible with the base distribution's data type",
+                "a value that raised %s: %s" % (type(e).__name__, e),
+                "check that every present value matches the data type expected by the base "
+                "distribution (%s); missing entries should equal missing_value=%r."
+                % (self.encoder, self.missing_value),
+            ) from e
 
         nz_idx = np.asarray(nz_idx, dtype=int)
         z_idx = np.asarray(z_idx, dtype=int)
@@ -777,13 +859,15 @@ class OptionalDataEncoder(DataSequenceEncoder):
         return len(x), z_idx, nz_idx, enc_data
 
 
-# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+# --- Backward-compatible API naming aliases ---
 OptionalAccumulator = OptionalEstimatorAccumulator
 OptionalAccumulatorFactory = OptionalEstimatorAccumulatorFactory
 
 
 # --- Fisher view(s) co-located with this family ---
 class OptionalFisherView(EmpiricalMetricFixedFisherView):
+    """Fisher view for optional distributions with gate and observed-branch statistics."""
+
     def __init__(self, dist: Any) -> None:
         self.child_view = to_fisher(dist.dist)
         self.has_gate = getattr(dist, "has_p", getattr(dist, "p", None) is not None)
@@ -859,6 +943,7 @@ class OptionalFisherView(EmpiricalMetricFixedFisherView):
         return out
 
     def mean_statistics(self, stats: np.ndarray | None = None, model: bool = True, **kwargs: Any) -> np.ndarray:
+        """Return model or empirical mean statistics for the optional Fisher view."""
         try:
             return FixedFisherView.mean_statistics(self, stats=stats, model=model, **kwargs)
         except NotImplementedError:
@@ -867,6 +952,7 @@ class OptionalFisherView(EmpiricalMetricFixedFisherView):
     def fisher_information(
         self, stats: np.ndarray | None = None, diagonal: bool = False, ridge: float = 1.0e-8, **kwargs: Any
     ) -> np.ndarray:
+        """Return Fisher information, falling back to empirical statistics when needed."""
         try:
             return FixedFisherView.fisher_information(self, stats=stats, diagonal=diagonal, ridge=ridge, **kwargs)
         except NotImplementedError:
@@ -883,6 +969,7 @@ class OptionalFisherView(EmpiricalMetricFixedFisherView):
         ridge: float = 1.0e-8,
         **kwargs: Any,
     ) -> np.ndarray:
+        """Return Fisher-whitened statistic vectors for optional observations."""
         try:
             return FixedFisherView.fisher_vectors(
                 self, stats=stats, metric=metric, center=center, fisher=fisher, ridge=ridge, **kwargs

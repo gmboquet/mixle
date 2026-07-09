@@ -1,9 +1,4 @@
-"""Create, estimate, and sample from an integer step Bernoulli edit set distribution.
-
-Defines the IntegerStepBernoulliEditDistribution, IntegerStepBernoulliEditSampler,
-IntegerStepBernoulliEditAccumulatorFactory, IntegerStepBernoulliEditAccumulator,
-IntegerStepBernoulliEditEstimator, and the IntegerStepBernoulliEditDataEncoder classes for use with
-mixle.
+"""Integer step Bernoulli edit distributions over pairs of finite sets.
 
 Data type: Tuple[Sequence[int], Sequence[int]]: An observation x = (x1, x2) is a pair of integer sets
 (prev set, next set), each a subset of S = {0,1,2,...N-1}.
@@ -71,7 +66,7 @@ class IntegerStepBernoulliEditDistribution(IntegerBernoulliEditDistribution):
         init_dist: SequenceEncodableProbabilityDistribution | None = None,
         name: str | None = None,
     ) -> None:
-        """IntegerStepBernoulliEditDistribution object defining edit probabilities between integer sets.
+        """Create a stepwise Bernoulli-edit distribution over integer sets.
 
         Args:
             log_edit_pmat (Union[Sequence[Tuple[float, float]], np.ndarray]): num_vals by 2 (or 4) matrix of
@@ -81,26 +76,26 @@ class IntegerStepBernoulliEditDistribution(IntegerBernoulliEditDistribution):
                 log p(present | present).
             init_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for the previous set x[0].
                 Should be compatible with Sequence[int] observations (e.g. IntegerBernoulliSetDistribution).
-            name (Optional[str]): Set name to object instance.
+            name (Optional[str]): Optional distribution name.
 
         """
         super().__init__(log_edit_pmat, init_dist=init_dist, name=name)
 
     def __str__(self) -> str:
-        """Returns string representation of IntegerStepBernoulliEditDistribution object."""
+        """Return a constructor-style representation of the distribution."""
         s1 = repr(list(map(list, self.orig_log_edit_pmat)))
         s2 = repr(self.init_dist)
         s3 = repr(self.name)
         return "IntegerStepBernoulliEditDistribution(%s, init_dist=%s, name=%s)" % (s1, s2, s3)
 
     def sampler(self, seed: int | None = None) -> "IntegerStepBernoulliEditSampler":
-        """Create an IntegerStepBernoulliEditSampler object from this distribution.
+        """Create a sampler for this integer step Bernoulli edit distribution.
 
         Args:
             seed (Optional[int]): Used to set seed in random sampler.
 
         Returns:
-            IntegerStepBernoulliEditSampler object.
+            IntegerStepBernoulliEditSampler: Sampler bound to this distribution.
 
         """
         return IntegerStepBernoulliEditSampler(self, seed)
@@ -112,13 +107,13 @@ class IntegerStepBernoulliEditDistribution(IntegerBernoulliEditDistribution):
             pseudo_count (Optional[float]): Used to re-weight sufficient statistics in estimation.
 
         Returns:
-            IntegerStepBernoulliEditEstimator object.
+            IntegerStepBernoulliEditEstimator: Estimator configured with matching support size.
 
         """
         return IntegerStepBernoulliEditEstimator(self.num_vals, pseudo_count=pseudo_count, name=self.name)
 
     def dist_to_encoder(self) -> "IntegerStepBernoulliEditDataEncoder":
-        """Returns an IntegerStepBernoulliEditDataEncoder object for encoding sequences of data."""
+        """Return a data encoder for integer step Bernoulli edit observations."""
         return IntegerStepBernoulliEditDataEncoder(init_encoder=self.init_dist.dist_to_encoder())
 
     def enumerator(self) -> "IntegerStepBernoulliEditEnumerator":
@@ -131,37 +126,34 @@ class IntegerStepBernoulliEditEnumerator(IntegerBernoulliEditEnumerator):
 
 
 class IntegerStepBernoulliEditSampler(IntegerBernoulliEditSampler):
-    """IntegerStepBernoulliEditSampler object for drawing (prev set, next set) pairs from an
-    IntegerStepBernoulliEditDistribution instance.
+    """Sampler for ``(previous set, next set)`` pairs from a stepwise integer Bernoulli-edit distribution.
 
     Identical to :class:`IntegerBernoulliEditSampler`; only the bound distribution type differs.
     """
 
 
 class IntegerStepBernoulliEditAccumulator(IntegerBernoulliEditAccumulator):
-    """IntegerStepBernoulliEditAccumulator object for accumulating removed/added/kept counts from observed
-    set pairs.
+    """Accumulator for removed, added, and kept counts from stepwise integer set pairs.
 
     Identical to :class:`IntegerBernoulliEditAccumulator`; only the encoder type returned by
     :meth:`acc_to_encoder` differs.
     """
 
     def acc_to_encoder(self) -> "IntegerStepBernoulliEditDataEncoder":
-        """Returns an IntegerStepBernoulliEditDataEncoder object for encoding sequences of data."""
+        """Return a data encoder built from the previous-set accumulator."""
         return IntegerStepBernoulliEditDataEncoder(init_encoder=self.init_acc.acc_to_encoder())
 
 
 class IntegerStepBernoulliEditAccumulatorFactory(IntegerBernoulliEditAccumulatorFactory):
-    """IntegerStepBernoulliEditAccumulatorFactory object for creating IntegerStepBernoulliEditAccumulator objects."""
+    """Factory for integer step Bernoulli edit accumulators."""
 
     def make(self) -> "IntegerStepBernoulliEditAccumulator":
-        """Returns a new IntegerStepBernoulliEditAccumulator object."""
+        """Return a new integer step Bernoulli edit accumulator."""
         return IntegerStepBernoulliEditAccumulator(self.num_vals, init_acc=self.init_factory.make(), keys=self.keys)
 
 
 class IntegerStepBernoulliEditEstimator(IntegerBernoulliEditEstimator):
-    """IntegerStepBernoulliEditEstimator object for estimating an IntegerStepBernoulliEditDistribution from
-    aggregated sufficient statistics, with a two-level step fit to the edit probabilities."""
+    """Estimate integer step Bernoulli edit distributions with a two-level edit-probability fit."""
 
     def __init__(
         self,
@@ -174,23 +166,23 @@ class IntegerStepBernoulliEditEstimator(IntegerBernoulliEditEstimator):
         keys: str | None = None,
         num_values: int = MISSING,
     ) -> None:
-        """IntegerStepBernoulliEditEstimator object for estimating integer step Bernoulli edit set distributions.
+        """Create an estimator for integer step Bernoulli edit set distributions.
 
         Args:
             num_vals (int): Number of integer values N in the set range.
             init_estimator (Optional[ParameterEstimator]): Estimator for the previous set x[0].
             min_prob (float): Minimum probability for an edit transition.
-            pseudo_count (Optional[float]): Re-weight suff stats in estimation.
+            pseudo_count (Optional[float]): Prior mass used to smooth edit probabilities during estimation.
             suff_stat (Optional[np.ndarray]): num_vals by 4 matrix of edit probabilities.
-            name (Optional[str]): Set name for object instance.
-            keys (Optional[str]): Keys for merging sufficient statistics with matching key'd objects.
+            name (Optional[str]): Optional name assigned to estimated distributions.
+            keys (Optional[str]): Key for merging sufficient statistics with compatible accumulators.
 
         Attributes:
             num_vals (int): Number of integer values N in the set range.
-            keys (Optional[str]): Keys for merging sufficient statistics with matching key'd objects.
-            pseudo_count (Optional[float]): Re-weight suff stats in estimation.
+            keys (Optional[str]): Key for merging sufficient statistics with compatible accumulators.
+            pseudo_count (Optional[float]): Prior mass used to smooth edit probabilities during estimation.
             suff_stat (Optional[np.ndarray]): num_vals by 4 matrix of edit probabilities.
-            name (Optional[str]): Set name for object instance.
+            name (Optional[str]): Optional name assigned to estimated distributions.
             min_prob (float): Minimum probability for an edit transition.
             init_est (ParameterEstimator): Estimator for the previous set x[0].
 
@@ -208,7 +200,7 @@ class IntegerStepBernoulliEditEstimator(IntegerBernoulliEditEstimator):
         self.init_est = init_estimator if init_estimator is not None else NullEstimator()
 
     def accumulator_factory(self) -> "IntegerStepBernoulliEditAccumulatorFactory":
-        """Returns an IntegerStepBernoulliEditAccumulatorFactory for creating accumulator objects."""
+        """Return an accumulator factory configured from this estimator."""
         init_factory = self.init_est.accumulator_factory()
         return IntegerStepBernoulliEditAccumulatorFactory(self.num_vals, init_factory, self.keys)
 
@@ -335,17 +327,17 @@ class IntegerStepBernoulliEditEstimator(IntegerBernoulliEditEstimator):
 
 
 class IntegerStepBernoulliEditDataEncoder(IntegerBernoulliEditDataEncoder):
-    """IntegerStepBernoulliEditDataEncoder object for encoding sequences of iid (prev set, next set) observations.
+    """Encode iid ``(previous set, next set)`` observations for vectorized scoring.
 
     Identical to :class:`IntegerBernoulliEditDataEncoder`; only the reported class name differs.
     """
 
     def __str__(self) -> str:
-        """Returns string representation of IntegerStepBernoulliEditDataEncoder object."""
+        """Return a constructor-style representation of the encoder."""
         return "IntegerStepBernoulliEditDataEncoder(init_encoder=" + str(self.init_encoder) + ")"
 
     def __eq__(self, other: object) -> bool:
-        """Checks if other object is an equivalent IntegerStepBernoulliEditDataEncoder."""
+        """Return true when ``other`` is an equivalent integer step Bernoulli-edit encoder."""
         if isinstance(other, IntegerStepBernoulliEditDataEncoder):
             return other.init_encoder == self.init_encoder
         else:

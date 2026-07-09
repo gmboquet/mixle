@@ -1,4 +1,9 @@
-"""Conditional-dependence and small causal-structure learning utilities."""
+"""Conditional-dependence and small causal-structure learning utilities.
+
+The module provides Gaussian and discrete conditional-independence measures plus
+lightweight PC-style skeleton and collider-orientation helpers for exploratory
+causal structure analysis.
+"""
 
 from __future__ import annotations
 

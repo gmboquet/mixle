@@ -5,7 +5,7 @@ processes: the driver builds one encoder and ships each worker a shard of the
 raw data once; every worker encodes its own shard and keeps the encoded chunks
 resident for the lifetime of the handle. Per EM iteration only the (small)
 pickled model crosses the process boundary outward and only the per-worker
-``(count, accumulator.value())`` sufficient-statistic payloads come back; the
+``(count, accumulator.value())`` sufficient-statistic payloads return; the
 driver folds them with ``combine()``, applies ``key_merge``/``key_replace``
 once globally (parameter tying must happen after the full combine), and runs
 the M-step.

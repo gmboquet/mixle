@@ -28,16 +28,16 @@ def _transitive(rng, n):
     return out
 
 
-def _est(seed=0):
+def _est(seed=0, mc=4, anneal_iters=100):
     return VariationalMultiHopAttentionEstimator(
         num_symbols=S,
         embed_dim=Dm,
         num_targets=S,
         sigma2=0.3,
         lr=0.07,
-        mc=4,
+        mc=mc,
         prior_strength=0.05,
-        anneal_iters=100,
+        anneal_iters=anneal_iters,
         seed=seed,
     )
 
@@ -84,9 +84,16 @@ class MechanicsTest(unittest.TestCase):
 class LearningTest(unittest.TestCase):
     def test_variational_two_hop_solves_transitive_without_collapse(self):
         rng = np.random.RandomState(1)
-        tr = _transitive(rng, 2500)
-        te = _transitive(rng, 1000)
-        model = optimize(tr, _est(seed=0), max_its=180, delta=None, rng=np.random.RandomState(2), out=io.StringIO())
+        tr = _transitive(rng, 800)
+        te = _transitive(rng, 600)
+        model = optimize(
+            tr,
+            _est(seed=0, mc=2, anneal_iters=80),
+            max_its=140,
+            delta=None,
+            rng=np.random.RandomState(2),
+            out=io.StringIO(),
+        )
         ck = np.array([x[0] for x in te])
         cv = np.array([x[1] for x in te])
         q = np.array([x[2] for x in te])

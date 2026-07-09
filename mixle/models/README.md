@@ -1,23 +1,26 @@
-# `mixle.models` — the applied-model layer
+# `mixle.models` — applied model families
 
-`mixle.stats` holds the **elementary** distributions — a Gaussian, a Poisson, a categorical — each a pointwise
-density. `mixle.models` holds the models that are **more than one elementary density**: a neural network, a
-Gaussian process, a random forest, a knowledge graph, a grammar, a decision process, a causal skeleton.
+`mixle.stats` holds elementary distributions such as Gaussian, Poisson, and categorical families.
+`mixle.models` holds applied model families that go beyond a single pointwise density: neural leaves,
+Gaussian processes, random forests, knowledge graphs, grammars, decision processes, and causal discovery
+helpers.
 
-They are not a grab-bag — they share a purpose: **richer, domain-specialized model families exposed through the
-same contract as the stats core**, so they *compose* with it. A neural leaf drops into a `CompositeDistribution`;
-a Gaussian process becomes a mixture component; a grammar scores a structured record. Where a family is
-supervised, sequential-decision, or causal (not a plain generative density), it keeps a small, task-appropriate
-surface instead of forcing the five-piece contract.
+They share one purpose: richer, domain-specialized model families exposed through Mixle-compatible
+contracts, so they can compose with the statistical core where appropriate. A neural leaf can drop into a
+`CompositeDistribution`; a Gaussian process can act as a mixture component; a grammar can score a
+structured record. Where a family is supervised, sequential-decision, or causal rather than a plain
+generative density, it keeps a focused task-appropriate surface instead of forcing the full distribution
+contract.
 
-Maturity varies (see the Project status table in the top-level README). Treat these as **specialist adapters
-composable with the stable stats spine**, not the spine itself.
+Maturity varies across this namespace. Treat these as specialist adapters that compose with the stable
+statistics layer, and validate them on the target workflow before making production claims.
 
 ## Families
 
 | Family | Modules | What it gives you |
 | --- | --- | --- |
-| **Neural & deep** | `neural`, `neural_leaf`, `neural_density`, `mixture_density`, `energy`, `softmax_leaf`, `transformer`, `language_model`, `streaming_transformer_leaf`, `embedding`, `dpo_leaf`, `continual`, `train_search` | Neural networks as mixle leaves — **adapters** that make a torch model a composable `Distribution`. Three axes: `NeuralGaussian` wraps a conditional net as a single-Gaussian `p(y\|x)`; `NeuralDensity` wraps *any* unconditional density module as `p(x)` (ready instances: `build_coupling_flow` and `build_maf`, exact continuous normalizing flows; `build_vae`, a latent-variable VAE; `build_autoregressive_categorical`, an exact density over discrete vectors; and `EnergyModel`, an energy-based `p(x) ∝ exp(-E(x))` trained by NCE and sampled by Langevin — *approximately* normalized, flagged like the VAE); `NeuralConditionalDensity` wraps *any* conditional density (`build_mdn`, a mixture density network — multimodal, heteroscedastic `p(y\|x)`; `build_conditional_flow`, an exact conditional normalizing flow capturing within-`y` structure; `build_conditional_autoregressive_categorical`, an exact `p(y\|x)` over discrete `y`). All fit jointly with classical families by the same EM M-step. Plus a causal-Transformer LM, a shared `CategoricalEmbedding`, and training utilities — DPO, continual-learning (EWC), and multi-fidelity DoE over the training recipe (`tune_training`). The rule: add neural models when they're new *distributions*, not new architectures. |
+| **Neural & deep** | `neural`, `neural_leaf`, `neural_density`, `mixture_density`, `energy`, `softmax_leaf`, `transformer`, `language_model`, `streaming_transformer_leaf`, `embedding`, `dpo_leaf`, `continual`, `train_search`, `eval_harness` | Neural networks as mixle leaves — **adapters** that make a torch model a composable `Distribution`. Three axes: `NeuralGaussian` wraps a conditional net as a single-Gaussian `p(y\|x)`; `NeuralDensity` wraps *any* unconditional density module as `p(x)` (ready instances: `build_coupling_flow` and `build_maf`, exact continuous normalizing flows; `build_vae`, a latent-variable VAE; `build_autoregressive_categorical`, an exact density over discrete vectors; and `EnergyModel`, an energy-based `p(x) ∝ exp(-E(x))` trained by NCE and sampled by Langevin — *approximately* normalized, flagged like the VAE); `NeuralConditionalDensity` wraps *any* conditional density (`build_mdn`, a mixture density network — multimodal, heteroscedastic `p(y\|x)`; `build_conditional_flow`, an exact conditional normalizing flow capturing within-`y` structure; `build_conditional_autoregressive_categorical`, an exact `p(y\|x)` over discrete `y`; `build_projection_leaf`, a contrastive/InfoNCE projection between two — typically frozen — embedding spaces, the stage-1 "frozen encoder → projection → frozen encoder" pattern as a family). All fit jointly with classical families by the same EM M-step. Plus a causal-Transformer LM, a shared `CategoricalEmbedding`, training utilities — DPO, continual-learning (EWC), and multi-fidelity DoE over the training recipe (`tune_training`) — and `eval_harness`, the general-capability eval harness: a small synthetic proxy suite (`evaluate_checkpoint`, one command per checkpoint) plus cross-checkpoint regression tracking (`track_regression`) for training rungs or a compression ladder. The rule: add neural models when they're new *distributions*, not new architectures. |
+| **Neural & deep** | `neural`, `neural_leaf`, `neural_density`, `mixture_density`, `energy`, `softmax_leaf`, `transformer`, `language_model`, `streaming_transformer_leaf`, `embedding`, `dpo_leaf`, `continual`, `train_search` | Neural networks as Mixle leaves: adapters that make a torch model a composable `Distribution`. Three axes: `NeuralGaussian` wraps a conditional net as a single-Gaussian `p(y\|x)`; `NeuralDensity` wraps unconditional density modules as `p(x)`; `NeuralConditionalDensity` wraps conditional densities such as MDNs, conditional flows, and autoregressive categorical models. These can fit jointly with classical families through the same EM M-step pattern. The namespace also includes a causal-Transformer LM, shared `CategoricalEmbedding`, DPO, continual-learning utilities, and multi-fidelity DOE over training recipes (`tune_training`). |
 | **Non-parametric** | `gaussian_process`, `sparse_gaussian_process`, `random_forest` | Kernel and ensemble regressors as conditional `p(y \| x)` leaves — a GP (exact and sparse/inducing-point) and a random forest, usable as composite/mixture components. |
 | **Relational / structured** | `knowledge_graph`, `random_graph`, `grammar` | Generative models over *structure*: a TransE knowledge-graph model, random-graph models (Erdős–Rényi / stochastic-block), and induced PCFG grammars whose `log_density` is the parse likelihood. |
 | **Latent-variable** | `dirichlet_process_mixture` | Bayesian-nonparametric mixtures (truncated Dirichlet process) — a mixture whose number of clusters is inferred. |

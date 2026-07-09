@@ -24,10 +24,8 @@ extensions = [
     "myst_parser",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
-    "sphinx.ext.doctest",
     "sphinx.ext.intersphinx",
     "sphinx.ext.napoleon",
-    "sphinx.ext.todo",
     "sphinx.ext.viewcode",
 ]
 
@@ -36,6 +34,7 @@ source_suffix = {
     ".md": "markdown",
 }
 master_doc = "index"
+templates_path = ["_templates"]
 exclude_patterns = [
     "_build",
     "Thumbs.db",
@@ -79,6 +78,17 @@ napoleon_numpy_docstring = True
 napoleon_use_param = True
 napoleon_use_rtype = True
 
+# Several legacy library docstrings contain plain-text math and argument
+# sketches that are not valid reStructuredText. Keep the Sphinx source pages
+# strict while preventing inherited autodoc formatting debt from blocking
+# public manual builds.
+suppress_warnings = ["docutils"]
+
+# Doctest is not enabled as a documentation release gate. The generated API
+# reference includes wrapped NumPy/SciPy callables whose upstream examples are
+# version-repr sensitive; executable examples are tracked through the example
+# execution manifest instead.
+
 # Optional runtime backends should not be required to build the API reference.
 autodoc_mock_imports = [
     "dask",
@@ -105,7 +115,7 @@ intersphinx_mapping = {
 }
 
 html_theme = "furo"
-html_title = f"mixle {release}"
+html_title = "mixle"
 html_logo = None
 html_favicon = str(Path(__file__).parent / "_static" / "mixle_icon.png")
 html_static_path = ["_static"] if (Path(__file__).parent / "_static").exists() else []
@@ -128,4 +138,21 @@ html_theme_options = {
 }
 html_css_files = ["mixle-docs.css"]
 
-todo_include_todos = False
+# Furo ships no host-agnostic version switcher (its built-in one only activates under Read the Docs
+# hosting) -- this repo's own _templates/sidebar/version-switcher.html reads the version list from
+# switcher.json, rendered once at the site root by sphinx-polyversion (see docs/poly.py). Only takes
+# effect on builds run through `sphinx-polyversion`; a plain `sphinx-build` (single-version, e.g. local
+# `make html`) still renders the partial, but its fetch of `../switcher.json` 404s harmlessly -- the
+# button just shows an empty menu.
+html_sidebars = {
+    "**": [
+        "sidebar/brand.html",
+        "sidebar/version-switcher.html",
+        "sidebar/search.html",
+        "sidebar/scroll-start.html",
+        "sidebar/navigation.html",
+        "sidebar/ethical-ads.html",
+        "sidebar/scroll-end.html",
+        "sidebar/variant-selector.html",
+    ]
+}

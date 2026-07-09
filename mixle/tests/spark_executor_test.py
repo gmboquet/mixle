@@ -64,11 +64,15 @@ from mixle.inference.spark_executor import spark_em_step, spark_fit  # noqa: E40
 
 class SparkDistributedEMTest(unittest.TestCase):
     def test_spark_em_step_matches_serial(self):
+        # 1000 obs / 4 shards is plenty to exercise the depth=2 tree-reduce (still a genuine
+        # 4 -> 2 -> 1 combine tree) while avoiding redundant Spark task-scheduling overhead;
+        # data size beyond this does not change the numeric result (sufficient stats are
+        # shard-invariant) so it was only adding runtime, not coverage.
         m = _gmm()
-        data = m.sampler(1).sample(4000)
+        data = m.sampler(1).sample(1000)
         est = m.estimator()
         serial = heterogeneous_em_step(est, m, data, n_shards=8)
-        spark = spark_em_step(_SC, est, m, data, n_shards=8, depth=2)
+        spark = spark_em_step(_SC, est, m, data, n_shards=4, depth=2)
         self.assertTrue(np.allclose(sorted(serial.w), sorted(spark.w), atol=1e-9))
         sm = sorted(c.mu for c in serial.components)
         km = sorted(c.mu for c in spark.components)
@@ -76,9 +80,9 @@ class SparkDistributedEMTest(unittest.TestCase):
 
     def test_spark_fit_matches_serial(self):
         m = _gmm()
-        data = m.sampler(1).sample(4000)
+        data = m.sampler(1).sample(1000)
         serial = heterogeneous_fit(m, data, max_its=12, n_shards=1)
-        spark = spark_fit(_SC, m, data, max_its=12, n_shards=8, depth=2)
+        spark = spark_fit(_SC, m, data, max_its=12, n_shards=4, depth=2)
         self.assertTrue(np.allclose(sorted(serial.w), sorted(spark.w), atol=1e-7))
         sm = sorted(c.mu for c in serial.components)
         km = sorted(c.mu for c in spark.components)

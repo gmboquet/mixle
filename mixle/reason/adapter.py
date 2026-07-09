@@ -1,21 +1,24 @@
-"""``StructuredAdapter`` -- adapt a frozen multimodal encoder on a laptop WITHOUT breaking its generality.
+"""``StructuredAdapter`` for adapting a frozen multimodal encoder while preserving transfer.
 
-A frontier VLM's expensive part is the encoder; the cheap, laptop-trainable part is the bridge on top. The
-question is what bridge. This is the honest answer, measured on real CLIP: a *low-capacity structured* map
-adapts to a task and preserves zero-shot transfer to new text-specified classes, where a full (unstructured)
-map of 30x the parameters overfits and destroys that transfer even with regularization.
+For a frozen VLM, the encoder is the expensive component and the trainable bridge
+on top is the application-specific component. ``StructuredAdapter`` uses a
+low-capacity structured map that adapts to a task while preserving zero-shot
+transfer to text-specified classes; a full unstructured map can overfit and
+damage that transfer even with regularization.
 
 The map is a residual, class-agnostic transform of the image embedding::
 
     g(x) = x + (diag ⊙ x) + U Vᵀ x          # identity + diagonal reweight + rank-r correction
 
-Two structural choices do the work: (1) it is a RESIDUAL with weight decay, so it stays near the encoder's
-alignment; (2) it is CLASS-AGNOSTIC -- targets enter only as anchor (e.g. class-text) embeddings -- so a map
-fit on some classes still scores classes it never saw, specified only by text at test time. ``diag + U Vᵀ`` is
-the same diagonal+low-rank structure mixle uses for structured transition operators, here over a VLM bridge.
+Two structural choices matter: (1) it is residual with weight decay, so it stays
+near the encoder's alignment; (2) it is class-agnostic: targets enter only as
+anchor embeddings such as class-text embeddings, so a map fit on some classes
+still scores classes it never saw at training time. ``diag + U Vᵀ`` is the same
+diagonal+low-rank structure Mixle uses for structured transition operators,
+here over a VLM bridge.
 
-Frozen CLIP + this adapter is a small vision-language model you train in seconds on CPU; the same recipe
-takes any frozen encoder (Qwen-VL's vision tower) as the thing you adapt. Torch is imported lazily.
+The same recipe applies to any frozen encoder that emits comparable embeddings.
+Torch is imported lazily.
 """
 
 from __future__ import annotations
@@ -32,11 +35,12 @@ def _torch() -> Any:
 
 
 class StructuredAdapter:
-    """A residual diagonal+low-rank adapter over frozen embeddings; ``full=True`` is the unstructured baseline.
+    """A residual diagonal+low-rank adapter over frozen embeddings.
 
     ``rank`` sets the low-rank correction's width; ``weight_decay`` pulls the map toward identity (preserve
-    the encoder's geometry). Fit on ``(embeddings, labels, anchors)``; score any embeddings against any
-    anchors -- including anchors for classes not seen in training.
+    the encoder's geometry). ``full=True`` selects the unstructured baseline. Fit on
+    ``(embeddings, labels, anchors)``; score any embeddings against any anchors, including anchors for classes
+    not seen in training.
     """
 
     def __init__(self, dim: int, *, rank: int = 8, weight_decay: float = 1.0, full: bool = False) -> None:
@@ -106,16 +110,18 @@ class StructuredAdapter:
         return g.numpy()
 
     def scores(self, embeddings: np.ndarray, anchors: np.ndarray) -> np.ndarray:
-        """Cosine similarity of adapted embeddings to ``anchors`` -- anchors may be for UNSEEN classes."""
+        """Cosine similarity of adapted embeddings to ``anchors``; anchors may represent new classes."""
         g = self.transform(embeddings)
         a = np.asarray(anchors, dtype=np.float32)
         a = a / np.linalg.norm(a, axis=1, keepdims=True)
         return g @ a.T
 
     def predict(self, embeddings: np.ndarray, anchors: np.ndarray) -> np.ndarray:
+        """Return the highest-scoring anchor index for each embedding."""
         return self.scores(embeddings, anchors).argmax(1)
 
     def n_params(self) -> int:
+        """Return the number of learned adapter parameters."""
         if self._params is None:
             return self.dim * self.dim if self.full else self.dim + 2 * self.dim * self.rank
         return int(sum(p.numel() for p in self._params))

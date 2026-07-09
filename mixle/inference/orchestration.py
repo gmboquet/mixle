@@ -78,7 +78,7 @@ class LearnedPolicy:
         for feats, _choice, outcome in rows:
             c = float(outcome.get(cost_key, 0.0))
             # the realized cost of a decision depends on the choice; here we score by matching the row's
-            # OWN observed (choice, cost) -- so a policy "pays" the row's cost only for the choice it picks.
+            # own observed (choice, cost) -- so a policy "pays" the row's cost only for the choice it picks.
             pick, learned = self.decide(feats)
             deferred += int(not learned)
             static_pick = self.static(feats)
@@ -241,9 +241,9 @@ def learn_schedule_policy(
     k: int = 8,
     min_neighbors: int = 4,
 ) -> LearnedPolicy:
-    """Learned pool scheduling (J4): when work is pool-eligible, learn WHERE/WHEN it actually runs fastest.
+    """Learned pool scheduling (J4): when work is pool-eligible, learn where and when it actually runs fastest.
 
-    The same never-worse shape as placement, keyed on realized LATENCY instead of dollar cost: rows are
+    The same never-worse shape as placement, keyed on realized latency instead of dollar cost: rows are
     ``(features, choice, outcome)`` where features describe the moment (queue depth, job size, local
     load), choice is the scheduling decision ("run_local" / "queue_pool" / "defer"), and the outcome's
     ``latency`` is what the decision actually cost in wall-clock. Where nearby history is thin, the
@@ -283,7 +283,7 @@ def meta_improve(
 
     learned = learn_placement_policy(train, static_policy, cost_key=cost_key, k=k, min_neighbors=min_neighbors)
 
-    # Honest off-policy evaluation: a held-out row only tells us the realized cost of the choice that was
+    # Explicit off-policy evaluation: a held-out row only tells us the realized cost of the choice that was
     # ACTUALLY taken, so each policy is scored on the matched subset -- the rows where its pick equals the
     # logged choice. No matched support for either policy -> no comparison -> no promotion (abstain).
     def _matched_mean(pick: Callable[[dict[str, Any]], str]) -> tuple[float | None, int]:

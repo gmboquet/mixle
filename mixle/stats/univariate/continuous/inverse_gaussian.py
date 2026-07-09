@@ -1,11 +1,7 @@
-"""Create, estimate, and sample from an inverse Gaussian (Wald) distribution.
+"""Inverse Gaussian (Wald) distributions over positive real values.
 
-Defines the InverseGaussianDistribution, InverseGaussianSampler, InverseGaussianAccumulatorFactory,
-InverseGaussianAccumulator, InverseGaussianEstimator, and the InverseGaussianDataEncoder classes for
-use with mixle.
-
-Data type: (float): The InverseGaussianDistribution with mean mu > 0.0 and shape lam > 0.0 has
-    log-density
+Observations are floats ``x > 0``. An inverse Gaussian distribution with mean ``mu > 0`` and shape
+``lam > 0`` has log-density
 
         log(f(x; mu, lam)) = 0.5 * (log(lam) - log(2*pi) - 3*log(x)) - lam*(x - mu)**2 / (2*mu**2*x),
 
@@ -52,12 +48,14 @@ class InverseGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated inverse-Gaussian kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for inverse Gaussian distributions."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -133,7 +131,7 @@ class InverseGaussianDistribution(SequenceEncodableProbabilityDistribution):
             mu (float): Positive real-valued mean.
             lam (float): Positive real-valued shape parameter.
             log_lam (float): Cached log(lam).
-            name (Optional[str]): Name of object instance.
+            name (Optional[str]): Optional distribution name.
             keys (Optional[str]): Key for merging sufficient statistics.
 
         """
@@ -148,7 +146,7 @@ class InverseGaussianDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of InverseGaussianDistribution object."""
+        """Return a constructor-style representation of the inverse Gaussian distribution."""
         return "InverseGaussianDistribution(%s, %s, name=%s, keys=%s)" % (
             repr(self.mu),
             repr(self.lam),
@@ -310,6 +308,7 @@ class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: InverseGaussianDistribution | None) -> None:
+        """Accumulate count, sum, and reciprocal sum for one positive observation."""
         if x <= 0.0 or not np.isfinite(x):
             raise ValueError("InverseGaussianDistribution has support x > 0.")
         self.count += weight
@@ -317,6 +316,7 @@ class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum_inv += weight / x
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(
@@ -325,6 +325,7 @@ class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         weights: np.ndarray,
         estimate: InverseGaussianDistribution | None,
     ) -> None:
+        """Accumulate transformed sufficient statistics from encoded data."""
         vals, inv_vals, _ = x
         self.sum += np.dot(vals, weights)
         self.sum_inv += np.dot(inv_vals, weights)
@@ -333,24 +334,29 @@ class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(
         self, x: tuple[np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None
     ) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "InverseGaussianAccumulator":
+        """Merge another inverse-Gaussian sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.sum += suff_stat[1]
         self.sum_inv += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return count, sum, and reciprocal sum."""
         return self.count, self.sum, self.sum_inv
 
     def from_value(self, x: tuple[float, float, float]) -> "InverseGaussianAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.count = x[0]
         self.sum = x[1]
         self.sum_inv = x[2]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -358,10 +364,12 @@ class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "InverseGaussianDataEncoder":
+        """Return the encoder used by this accumulator."""
         return InverseGaussianDataEncoder()
 
 
@@ -372,6 +380,7 @@ class InverseGaussianAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> InverseGaussianAccumulator:
+        """Create a fresh inverse-Gaussian accumulator."""
         return InverseGaussianAccumulator(keys=self.keys)
 
 
@@ -390,7 +399,7 @@ class InverseGaussianEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """InverseGaussianEstimator object.
+        """Create an estimator for inverse-Gaussian parameters.
 
         Args:
             pseudo_count (Optional[float]): Re-weight the prior moments in ``suff_stat`` when not None.
@@ -410,9 +419,11 @@ class InverseGaussianEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> InverseGaussianAccumulatorFactory:
+        """Return an accumulator factory for inverse-Gaussian statistics."""
         return InverseGaussianAccumulatorFactory(keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> InverseGaussianDistribution:
+        """Estimate mean and shape from count, sum, and reciprocal sum."""
         count, sum_x, sum_inv = suff_stat
         if self.pseudo_count is not None and self.suff_stat is not None:
             mean0, inv_mean0 = self.suff_stat
@@ -443,6 +454,7 @@ class InverseGaussianDataEncoder(DataSequenceEncoder):
         return isinstance(other, InverseGaussianDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Encode observations as values, reciprocal values, and log-values."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and (np.any(rv <= 0.0) or np.any(~np.isfinite(rv))):
             raise ValueError("InverseGaussianDistribution has support x > 0.")

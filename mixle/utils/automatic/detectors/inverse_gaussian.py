@@ -1,4 +1,9 @@
-"""Inverse Gaussian (Wald) continuous candidate -- positive, right-skewed first-passage-time law."""
+"""Automatic detector for positive inverse-Gaussian continuous data.
+
+The detector fits the Wald first-passage-time law, scores it with a BIC-style
+penalty, and exposes the estimator factory used by automatic distribution
+selection.
+"""
 
 import math
 
@@ -52,8 +57,11 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
 
 def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
     from mixle.stats import InverseGaussianDistribution
+    from mixle.utils.automatic.profiling import _value_array_from_vdict
 
-    return InverseGaussianDistribution(1.0, 1.0).estimator()
+    fit = _mle(_value_array_from_vdict(vdict))
+    mu, lam = fit if fit is not None else (1.0, 1.0)
+    return InverseGaussianDistribution(mu, lam).estimator(pseudo_count=pseudo_count)
 
 
 def _cdf(arr: np.ndarray):

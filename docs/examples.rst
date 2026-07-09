@@ -5,8 +5,15 @@ Runnable examples live in ``examples/``. They are plain Python scripts, so the
 fastest way to learn a workflow is to run the script under the same environment
 you use for tests.
 
+For a shorter, receipt-focused index of the newer applied adapter and
+multimodal-pretraining workflows, see :doc:`examples_gallery`.
+
 Start with the base-install examples. Move to Torch, task, or real-data workflows
 only after the core distribution and inference path is clear.
+
+Examples are documentation assets, not release gates by themselves. When an
+example backs a public claim, record its execution status in
+:doc:`example-execution-manifest` and note any skipped optional dependency.
 
 Recommended First Runs
 ----------------------
@@ -47,7 +54,7 @@ Run them directly:
    python examples/structured_hmm_example.py
    python examples/production_example.py
 
-Choose By Workflow
+Choose by Workflow
 ------------------
 
 .. list-table::
@@ -133,6 +140,22 @@ scripts.
 Use ``mixle[all]`` only when you deliberately want the full optional surface.
 For most examples, a smaller extra is easier to debug.
 
+Execution Standard
+------------------
+
+When adding or updating an example:
+
+* keep it runnable from the repository root;
+* print a compact result that confirms the intended behavior;
+* avoid private data, external credentials, and hidden services;
+* mark optional dependencies in this page or in the script header;
+* keep long benchmarks outside the documentation example set;
+* update :doc:`example-execution-manifest` when the example is part of release
+  evidence.
+
+Examples that require downloaded datasets or large local weights should degrade
+clearly when those resources are missing.
+
 Complete Inventory
 ------------------
 
@@ -154,7 +177,8 @@ Complete Inventory
      - Latin hypercube designs, Bayesian optimization, and sensitivity.
    * - ``engine_benchmark_example.py``
      - Engines
-     - Compare NumPy and Torch engine paths honestly across workloads.
+     - Compare NumPy and Torch engine paths across workloads with explicit
+       tolerances.
    * - ``enumeration_example.py``
      - Enumeration
      - Exact top-k support traversal.
@@ -295,7 +319,7 @@ Complete Inventory
 
 Benchmark and distributed-stress harnesses that were previously under
 ``examples/`` have been moved to gitignored benchmark areas. The tracked
-examples page now focuses on scripts intended to be read and run as
+examples page now focuses on scripts designed to be read and run as
 documentation.
 
 Representative Source

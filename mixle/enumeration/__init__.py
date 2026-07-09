@@ -52,8 +52,19 @@ from mixle.enumeration.envelope import AREnvelopeIndex, LatticeEnvelopeIndex
 
 # --- HMM state paths: exact A* enumeration + the quantized random-access path index ---
 from mixle.enumeration.hmm_paths import HMMPathIndex, hmm_best_paths
-from mixle.enumeration.model_enumeration import best_first_decode, quantized_best_first_decode
+from mixle.enumeration.model_enumeration import (
+    beam_search,
+    best_first_decode,
+    quantized_best_first_decode,
+    top_k_scored,
+)
 
+# NOTE: model_enumeration.best_first (the generic engine function) is deliberately NOT re-exported
+# here despite being one of the module's own documented "four entry points" -- this package also has
+# a *submodule* named mixle.enumeration.best_first (best_first.py), and binding a same-named function
+# in this __init__ shadows `import mixle.enumeration.best_first` for anyone reaching the submodule
+# directly (verified: it silently resolves to the function instead, breaking that import). Reach the
+# generic engine via `from mixle.enumeration.model_enumeration import best_first` instead.
 # --- the count-budget seek / unrank index + the count semiring (rank-by-index machinery) ---
 from mixle.enumeration.quantization.core import count_budget_index, logit_error_bucket_slack
 from mixle.enumeration.quantization.semiring import CountSemiring, DecomposableSemiring, TropicalSemiring
@@ -98,6 +109,8 @@ __all__ = [
     "sound_top_k",
     "quantized_best_first_decode",
     "best_first_decode",
+    "beam_search",
+    "top_k_scored",
     # autoregressive (next_logprobs) models: count / threshold / unrank
     "AutoregressiveEnumerable",
     "autoregressive_count_index",

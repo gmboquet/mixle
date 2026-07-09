@@ -57,6 +57,64 @@ class EncodedDataBackendRegistryTestCase(unittest.TestCase):
         with self.assertRaises(TypeError):
             register_encoded_data_backend("bad", object())
 
+    def test_registering_over_a_builtin_name_is_rejected(self):
+        # Regression: registering under an already-taken name used to silently overwrite it -- a
+        # third-party package colliding with 'local' (or any other backend) would hijack every
+        # subsequent backend='local' call with no error, at whatever moment it happened to import.
+        def other_local(data, **kwargs):
+            return "HIJACKED"
+
+        with self.assertRaises(ValueError) as ctx:
+            register_encoded_data_backend("local", other_local)
+        self.assertIn("local", str(ctx.exception))
+        # the original registration must be untouched
+        handle = encoded_data(self.data, encoder=self.encoder, backend="local")
+        self.assertIsInstance(handle, LocalEncodedData)
+
+    def test_registering_over_a_colliding_alias_is_rejected(self):
+        def fake_backend(data, **kwargs):
+            return "FAKE"
+
+        with self.assertRaises(ValueError) as ctx:
+            register_encoded_data_backend("fake-test-backend-2", fake_backend, aliases=("mp",))
+        self.assertIn("mp", str(ctx.exception))
+        from mixle.utils.parallel.planner import _ENCODED_DATA_BACKENDS
+
+        # the whole call is rejected before any key is written, including the non-colliding name
+        self.assertNotIn("fake-test-backend-2", _ENCODED_DATA_BACKENDS)
+
+    def test_override_true_deliberately_replaces_a_registration(self):
+        def fake_backend(data, *, encoder=None, **kwargs):
+            return "OVERRIDDEN"
+
+        register_encoded_data_backend("fake-test-backend-3", fake_backend)
+        try:
+            register_encoded_data_backend("fake-test-backend-3", fake_backend, override=True)  # same factory: no error
+
+            def other_factory(data, **kwargs):
+                return "OTHER"
+
+            register_encoded_data_backend("fake-test-backend-3", other_factory, override=True)
+            self.assertEqual(encoded_data(self.data, encoder=self.encoder, backend="fake-test-backend-3"), "OTHER")
+        finally:
+            from mixle.utils.parallel.planner import _ENCODED_DATA_BACKENDS
+
+            _ENCODED_DATA_BACKENDS.pop("fake-test-backend-3", None)
+
+    def test_re_registering_the_identical_factory_is_not_a_collision(self):
+        # Re-importing a module that calls register_encoded_data_backend at import time (a legitimate,
+        # idempotent scenario) must not raise just because Python re-ran the top-level call.
+        def fake_backend(data, **kwargs):
+            return "FAKE"
+
+        register_encoded_data_backend("fake-test-backend-4", fake_backend)
+        try:
+            register_encoded_data_backend("fake-test-backend-4", fake_backend)  # same factory object again: fine
+        finally:
+            from mixle.utils.parallel.planner import _ENCODED_DATA_BACKENDS
+
+            _ENCODED_DATA_BACKENDS.pop("fake-test-backend-4", None)
+
     def test_passthrough_of_existing_handle(self):
         handle = encoded_data(self.data, encoder=self.encoder, backend="local")
         self.assertIs(encoded_data(handle, backend="mpi"), handle)  # already a handle: returned as-is

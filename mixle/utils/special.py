@@ -187,11 +187,6 @@ def digammainv(y: np.ndarray | float) -> np.ndarray | float:
             digamma(x, out=t1)
             zeta(2, x, out=t2)
 
-            # if np.any(t2 == 0) or np.any(np.isnan(t2)) or np.any(np.isinf(t2)):
-            #    print('bad')
-            # if np.any(np.isnan(t1)) or np.any(np.isinf(t1)):
-            #    print('bad')
-
             t1 -= z
             t1 /= t2
             x -= t1

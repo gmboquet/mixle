@@ -1,4 +1,4 @@
-Temporal And Stochastic Processes
+Temporal and Stochastic Processes
 =================================
 
 ``mixle.process`` collects temporal and stochastic-process families that are
@@ -17,11 +17,15 @@ The public namespace re-exports:
 * ``ContinuousTimeMarkovChainDistribution``;
 * ``ChineseRestaurantProcessDistribution``.
 
-When To Use A Process Model
+When to Use a Process Model
 ---------------------------
 
 Use a process model when the observation is not just a row, but an event
 history or trajectory. The timing is part of the likelihood.
+
+Keep the observation window with the data. Event-history likelihoods depend on
+start time, stop time, censoring, and exposure; dropping that context can make
+the same timestamp sequence mean something different.
 
 .. list-table::
    :header-rows: 1
@@ -78,6 +82,10 @@ Use multivariate Hawkes processes when event types influence each other, such
 as support categories, market event classes, operational alerts, or social
 interaction types.
 
+Compare self-exciting models against a non-self-exciting baseline before
+interpreting triggering. Apparent excitation can come from seasonality,
+batching, missing exposure, or changing observation windows.
+
 Renewal Processes
 -----------------
 
@@ -88,6 +96,10 @@ scientific question and there is no self-exciting feedback.
 Renewal models compose naturally with scalar interarrival distributions. For
 example, a Gamma or log-normal interarrival family can be fit as part of a
 larger event model.
+
+For renewal workflows, inspect residual waiting times and censoring behavior.
+A fitted interarrival distribution can look acceptable in aggregate while
+systematically missing early or late arrivals.
 
 Birth-Death Processes
 ---------------------
@@ -102,6 +114,10 @@ Examples include:
 * active session counts;
 * population dynamics;
 * open/closed case counts.
+
+Check whether zero, absorbing, or capacity states need explicit support. A
+birth-death fit should not hide impossible negative counts or unmodeled
+capacity limits in preprocessing.
 
 Continuous-Time Markov Chains
 -----------------------------
@@ -130,6 +146,11 @@ For fully observed trajectories, the MLE is closed form:
 ``T_i`` is total dwell time in state ``i``. ``mixle.inference.certify`` reports
 this family as ``GLOBAL_UNIQUE``.
 
+That certificate depends on the fully observed trajectory assumption. If jumps,
+dwell times, or state labels are censored or inferred upstream, record that
+source of uncertainty separately instead of treating the CTMC fit as a fully
+observed closed-form result.
+
 Chinese Restaurant Processes
 ----------------------------
 
@@ -151,7 +172,7 @@ single application might combine:
 * a positive continuous family over severity, amount, or duration;
 * a calibrated rule that escalates low-confidence records for review.
 
-That is the intended Mixle shape. Timing, labels, magnitudes, and decisions can
+That is the Mixle modeling shape: timing, labels, magnitudes, and decisions can
 remain separate components while sharing one scoring and inference story.
 
 Diagnostics
@@ -164,7 +185,7 @@ For process models, inspect more than aggregate likelihood:
 * inspect intensity around bursts;
 * hold out contiguous time ranges;
 * compare a self-exciting model against an inhomogeneous Poisson baseline;
-* verify calibration of predicted counts or intervals.
+* verify calibration of predicted counts or intervals;
 * for CTMCs, compare simulated dwell times and transition counts against
   held-out trajectories.
 
@@ -183,3 +204,18 @@ Process families now participate in estimation certificates:
 Use :doc:`analysis` for extreme-value and spatial diagnostics, :doc:`inference`
 for proper scoring and model comparison, and :doc:`production` for drift
 monitoring.
+
+Release Evidence
+----------------
+
+For process models, preserve:
+
+* observation-window definitions and exposure assumptions;
+* timestamp units, time zones, and censoring policy;
+* baseline comparisons such as renewal or inhomogeneous Poisson alternatives;
+* residual, simulation, or count-calibration diagnostics;
+* certificate assumptions for closed-form fits; and
+* blocked or missing optional dependencies for accelerated process examples.
+
+This evidence keeps temporal structure from being mistaken for ordinary row
+modeling.

@@ -1,6 +1,7 @@
 """optimize(data)/fit(data) with no estimator discover cross-field structure by default."""
 
 import unittest
+import unittest.mock
 
 import numpy as np
 
@@ -62,6 +63,30 @@ class StructureDefaultTest(unittest.TestCase):
     def test_small_samples_keep_the_composite(self):
         m = optimize(_dependent(30), out=None)  # under the 40-row floor: never engage on scraps
         self.assertEqual(type(m).__name__, "CompositeDistribution")
+
+    def test_structure_search_forwards_the_callers_rng_to_the_composite_candidate(self):
+        # Regression: the composite candidate fit inside the structure front door (built only to
+        # BIC-compare against the discovered network) used a fresh, unseeded RandomState() instead of
+        # the caller's rng -- silently breaking optimize(data, rng=...)'s documented reproducibility
+        # contract for that one internal fit. The composite candidate's seq_initialize call must be
+        # the exact rng object passed in, not a fresh default.
+        import mixle.inference.estimation as est_mod
+
+        calls = []
+        original = est_mod.seq_initialize
+
+        def spy(**kwargs):
+            calls.append(kwargs.get("rng"))
+            return original(**kwargs)
+
+        given_rng = np.random.RandomState(11)
+        with unittest.mock.patch.object(est_mod, "seq_initialize", side_effect=spy):
+            m = optimize(_dependent(400), out=None, rng=given_rng)
+
+        self.assertEqual(type(m).__name__, "HeterogeneousBayesianNetwork")  # net wins here -> composite
+        # candidate's own init is the last (and only rng-relevant) seq_initialize call for this path.
+        self.assertGreater(len(calls), 0)
+        self.assertIs(calls[-1], given_rng)
 
 
 if __name__ == "__main__":

@@ -1,35 +1,44 @@
-"""Array compute-engine protocol used by backend-neutral kernels."""
+"""Compute-engine protocol and active-engine context management.
+
+The protocol defines the array operations that backend-neutral scoring and
+estimation kernels may rely on, while the context helper lets nested M-step code
+discover the engine driving the current estimation pass.
+"""
 
 from __future__ import annotations
 
+import contextvars
 import math
-import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
 # The compute engine currently driving an EM step, if any. The estimation loop activates it around
-# each ``estimator.estimate(...)`` call so device-aware leaves (e.g. NeuralLeaf, whose M-step trains an
-# arbitrary torch module) can follow the engine's device without the ParameterEstimator.estimate
-# contract having to thread the engine through every subclass.
-_ACTIVE = threading.local()
+# each ``estimator.estimate(...)`` call so device-aware leaves can follow the engine's device without
+# changing the ``ParameterEstimator.estimate`` contract.
+#
+# A ContextVar, not threading.local: threading.local isolates OS threads but not concurrent asyncio
+# tasks sharing one thread. Two ``using_active_engine(...)`` blocks entered as overlapping tasks on the
+# same event loop would otherwise see each other's engine mid-block (reproduced with asyncio.gather).
+# ContextVar is copied into each Task's context at creation, so it is isolated per-task as well as
+# per-thread, with no cost to the synchronous call path mixle's own EM loop uses today.
+_ACTIVE: contextvars.ContextVar[Any] = contextvars.ContextVar("mixle_active_engine", default=None)
 
 
 def active_engine() -> ComputeEngine | None:
     """Return the compute engine driving the current EM step, or ``None`` outside one."""
-    return getattr(_ACTIVE, "engine", None)
+    return _ACTIVE.get()
 
 
 @contextmanager
 def using_active_engine(engine: Any):
     """Mark ``engine`` active for the duration of the block (used by the estimation loop)."""
-    prev = getattr(_ACTIVE, "engine", None)
-    _ACTIVE.engine = engine
+    token = _ACTIVE.set(engine)
     try:
         yield
     finally:
-        _ACTIVE.engine = prev
+        _ACTIVE.reset(token)
 
 
 class ComputeEngine(ABC):
@@ -45,16 +54,15 @@ class ComputeEngine(ABC):
     dtype = None
     device = "cpu"
 
-    # Canonical array-op surface that backend-neutral kernels duck-type on the engine.  Historically
+    # Canonical array-op surface that backend-neutral kernels duck-type on the engine. Historically
     # only the handful of allocation ops below were ``@abstractmethod``, while kernels reached for
     # ~25 more (``log``, ``where``, ``logsumexp``, ``gammaln``, ``index_add`` ...) that each engine
-    # provided informally -- the root cause of the "present on numpy, missing/divergent on torch or
-    # symbolic" bug class.  Declaring the contract here and checking it in ``__init_subclass__`` makes
-    # a missing op fail loudly at engine *class definition* rather than deep inside a kernel.
+    # provided informally. Declaring the contract here and checking it in ``__init_subclass__`` makes
+    # a missing op fail at engine class-definition time rather than deep inside a kernel.
     #
     # These are the elementwise/reduction/special-function ops every numeric engine must supply.
     # Optional capabilities (autograd, device placement, precision adjustment, symbolic comparison
-    # masks) are deliberately NOT listed -- they are not part of the universal kernel surface.
+    # masks) are not listed because they are not part of the universal kernel surface.
     REQUIRED_OPS: tuple[str, ...] = (
         # allocation / conversion
         "asarray",
@@ -97,8 +105,8 @@ class ComputeEngine(ABC):
         """Enforce the :attr:`REQUIRED_OPS` contract on every concrete engine subclass.
 
         Abstract subclasses (those still carrying ``@abstractmethod`` declarations) are exempt, so
-        intermediate bases can be declared incrementally.  A concrete engine missing any required op
-        raises here -- at import/class-definition time -- instead of failing inside a kernel.
+        intermediate bases can be declared incrementally. A concrete engine missing any required op
+        raises here at import/class-definition time instead of failing inside a kernel.
         """
         super().__init_subclass__(**kwargs)
         if getattr(cls, "__abstractmethods__", None):
@@ -109,7 +117,7 @@ class ComputeEngine(ABC):
 
     # Mathematical constants are part of the engine's arithmetic policy: a numeric engine returns
     # plain floats, but an exact/symbolic engine overrides these so that e.g. ``pi`` stays a symbolic
-    # ``pi`` (and ``half`` an exact 1/2) instead of collapsing to a float.  ``mixle.engines.arithmetic`` reads
+    # ``pi`` (and ``half`` an exact 1/2) instead of collapsing to a float. ``mixle.engines.arithmetic`` reads
     # them from the active engine so call sites can be backend-neutral.
     pi = math.pi
     e = math.e
@@ -124,12 +132,12 @@ class ComputeEngine(ABC):
         """Return ``value`` in this engine's scalar representation (identity for numeric engines)."""
         return value
 
-    # Capability flags for kernel/E-step dispatch -- routed on these instead of the engine name so
+    # Capability flags for kernel/E-step dispatch. Dispatch uses these instead of the engine name so
     # new backends opt in by setting flags rather than by editing core dispatch ("register, don't
     # branch"). ``supports_numba``: the engine operates on host numpy arrays, so numba-compiled /
     # pure-numpy kernels and the numpy ``seq_log_density`` fallback apply (numpy sets this True).
     # ``resident_estep``: prefer an engine-resident ``seq_update_engine`` over round-tripping the
-    # E-step through host numpy (every non-host engine, e.g. torch/jax, wants this -- the default).
+    # E-step through host numpy.
     supports_numba = False
     resident_estep = True
 
@@ -138,7 +146,7 @@ class ComputeEngine(ABC):
         """High-precision dtype for sufficient-statistic reductions, or ``None`` when not applicable.
 
         Numeric engines override this with their float64 accumulator so a reduced-precision fit does
-        not drift on large N (see ``NumpyEngine``/``TorchEngine``).  The base returns ``None`` --
+        not drift on large N (see ``NumpyEngine``/``TorchEngine``). The base returns ``None``:
         meaning "no separate accumulator dtype", which is the correct policy for engines that never
         drive the numeric accumulate path (e.g. the symbolic engine, where reductions are exact
         expression trees).  ``None`` is also a valid ``dtype=`` argument to ``sum`` (NumPy's default).

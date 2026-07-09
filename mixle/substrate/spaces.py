@@ -1,8 +1,8 @@
 """Team-scoped substrate views with explicit publishing.
 
 The substrate tags every item with an access ``scope`` ("local", a team id, or a shared scope like
-"public"), but the raw store filters on ONE scope at a time. A team's real visibility is a *union*: its
-own items PLUS whatever has been shared into a common scope, and never another team's private items.
+"public"), but the raw store filters on one scope at a time. A team's real visibility is a *union*: its
+own items plus whatever has been shared into a common scope, and never another team's private items.
 :class:`Space` is that view. Construct one for a team and it answers ``retrieve`` / ``all`` over exactly
 the team's visible set, so two teams querying the same substrate see different, correctly-isolated
 knowledge.
@@ -151,6 +151,7 @@ class Space:
 
     @property
     def scopes(self) -> set[str]:
+        """Scopes visible to this team space."""
         return visible_scopes(self.team, shared=self.shared)
 
     def _visible_shard(self) -> Substrate:

@@ -4,7 +4,6 @@ mixle.engines package
 .. automodule:: mixle.engines
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

@@ -65,6 +65,29 @@ Mixtures and HMMs have local optima. Use multiple starts:
 
 Set ``rng=`` when you need reproducibility.
 
+For release evidence, compare the selected mixture against a simpler baseline
+on held-out data and keep the rejected restart scores. A single improved run
+does not prove that the latent structure is stable.
+
+Unexpected ``NaN`` or ``-inf`` Scores
+-------------------------------------
+
+``NaN`` inputs, impossible observations, and missing fields should not be
+quietly rewritten by troubleshooting code. First identify which case you have:
+
+* ``NaN`` as source data means the data pipeline or model-specific missing-data
+  policy must decide what it represents;
+* ``-inf`` usually means the observation is impossible under the fitted
+  support;
+* ``NaN`` produced during fitting or scoring usually means a numerical or
+  validation bug that should be reproduced with a minimal row; and
+* masked, optional, or marginalized fields should be represented with the
+  explicit missing-data surface documented for the model.
+
+Do not replace non-finite values with zeros to keep a workflow running.
+That changes the statistical meaning of the observation and can hide the issue
+that the model needs to report.
+
 A Capability Is Missing
 -----------------------
 
@@ -130,7 +153,7 @@ For ``solve_regression``, a high escalation rate usually means the calibrated
 interval width ``qhat`` is larger than the requested ``tol``. Check whether
 ``tol`` is actually the application tolerance, whether the examples span the
 live input range, and whether the target function is noisy or discontinuous.
-Do not increase ``tol`` just to force local answers.
+Do not increase ``tol`` solely to force local answers.
 
 For ``solve_multilabel``, one ambiguous label escalates the whole request.
 Inspect labels with too few positive or negative calibration examples first:
@@ -160,8 +183,10 @@ Use the same strict verification command:
 
 .. code-block:: sh
 
-   .venv/bin/sphinx-build -W -b html docs docs/_build/html
+   make -C docs html SPHINXOPTS="-W --keep-going"
 
 Warnings are treated as errors. Common causes are stale ``:doc:`` links,
 missing optional dependencies during autodoc, or generated API files that need
-to be refreshed with ``make -C docs apidoc``.
+to be refreshed with ``make -C docs apidoc``. If the working tree build passes
+but a clean checkout fails, check for untracked ``docs/api/*.rst`` pages that
+were generated locally but never included in the documentation PR.

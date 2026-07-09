@@ -99,6 +99,7 @@ class WatsonDistribution(SequenceEncodableProbabilityDistribution):
     # accumulator stays host-side, so torch accelerates mixture E-step scoring with a bit-correct M-step. ---
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated Watson scoring kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
@@ -141,6 +142,7 @@ class WatsonSampler(DistributionSampler):
         self._tangent = u_[:, sv_ > 1e-9]  # (p, p-1)
 
     def sample(self, size: int | None = None) -> np.ndarray:
+        """Draw one unit vector or a stack of iid unit vectors."""
         d = self.dist
         n = 1 if size is None else int(size)
         s = np.interp(self.rng.uniform(size=n), self._cdf, self._s_grid)  # |mu^T x|
@@ -162,37 +164,45 @@ class WatsonAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: np.ndarray, weight: float, estimate: WatsonDistribution | None) -> None:
+        """Accumulate one weighted outer product into the scatter matrix."""
         xx = np.asarray(x, dtype=np.float64)
         self.scatter += weight * np.outer(xx, xx)
         self.count += weight
 
     def initialize(self, x: np.ndarray, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one unit vector."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: WatsonDistribution | None) -> None:
+        """Accumulate weighted scatter statistics from encoded unit vectors."""
         xx = np.asarray(x, dtype=np.float64)
         w = np.asarray(weights, dtype=np.float64)
         self.scatter += (xx * w[:, None]).T @ xx
         self.count += float(w.sum())
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded unit vectors."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[np.ndarray, float]) -> "WatsonAccumulator":
+        """Merge another Watson sufficient-statistic tuple."""
         self.scatter += suff_stat[0]
         self.count += suff_stat[1]
         return self
 
     def value(self) -> tuple[np.ndarray, float]:
+        """Return the scatter matrix and total weight."""
         return self.scatter.copy(), self.count
 
     def from_value(self, x: tuple[np.ndarray, float]) -> "WatsonAccumulator":
+        """Replace accumulator contents from scatter statistics."""
         self.scatter = np.asarray(x[0], dtype=np.float64).copy()
         self.count = float(x[1])
         self.dim = self.scatter.shape[0]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -200,10 +210,12 @@ class WatsonAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "WatsonDataEncoder":
+        """Return the encoder used by this accumulator."""
         return WatsonDataEncoder()
 
 
@@ -216,6 +228,7 @@ class WatsonAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> WatsonAccumulator:
+        """Create a fresh Watson accumulator."""
         return WatsonAccumulator(self.dim, name=self.name, keys=self.keys)
 
 
@@ -228,9 +241,11 @@ class WatsonEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> WatsonAccumulatorFactory:
+        """Return an accumulator factory for Watson scatter statistics."""
         return WatsonAccumulatorFactory(self.dim, name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, float]) -> WatsonDistribution:
+        """Estimate the Watson axis and concentration from weighted scatter."""
         scatter, count = suff_stat
         p = self.dim
         if count <= 0.0:
@@ -257,4 +272,5 @@ class WatsonDataEncoder(DataSequenceEncoder):
         return isinstance(other, WatsonDataEncoder)
 
     def seq_encode(self, x: Sequence[np.ndarray]) -> np.ndarray:
+        """Encode unit vectors as an ``(N, p)`` floating-point array."""
         return np.asarray(x, dtype=np.float64)

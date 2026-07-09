@@ -1,15 +1,10 @@
-"""Create, estimate, and sample from a Conditional distribution.
-
-Defines the ConditionalDistribution, ConditionalDistributionSampler, ConditionalDistributionAccumulatorFactory,
-ConditionalDistributionAccumulator, ConditionalDistributionEstimator, and the ConditionalDistributionDataEncoder
-classes for use with mixle.
+"""Conditional distributions over paired observations.
 
 Data type: (Tuple[T0, T1]): The ConditionalDistribution if given by density,
     P(X0,X1) = P_cond(X1|X0)*P_given(X0).
 
 The ConditionalDistribution allows for user defined conditional distributions P_cond(X1|X0), and given distributions
 P_given(X0).
-
 """
 
 import heapq
@@ -34,6 +29,7 @@ from mixle.stats.combinator.null_dist import (
 )
 from mixle.stats.compute.pdist import (
     ConditionalSampler,
+    ContractError,
     DataSequenceEncoder,
     DistributionEnumerator,
     DistributionSampler,
@@ -43,6 +39,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
     child_enumerator,
+    prefix_contract_error,
 )
 
 T0 = TypeVar("T0")
@@ -92,12 +89,12 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         keys: str | None = None,
         prior: tuple[dict[Any, Any], Any, Any] | None = None,
     ) -> None:
-        """ConditionalDistribution object for data types x=Tuple[T0, T1].
+        """Create a conditional distribution over observations ``x=(given, value)``.
 
         P(x) = P_cond(x[1] | x[0])*P_given(x[0]), where
 
-        p_cond(x[1] | x[0]) is a conditional distribution defined through dictionary dmap, with keys over data type T0,
-        and values containing the ArkoudaProbabilityDistribution objects compatible with data type T1.
+        ``p_cond(x[1] | x[0])`` is defined by ``dmap``, whose keys have data type ``T0`` and whose values are
+        child distributions compatible with data type ``T1``.
 
         P_given(x[0]) is defined as the given distribution. If None is provided, it is assumed that P_given(x[0]) = 1
         for all x[0].
@@ -110,10 +107,10 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
                 List[SequenceEncodableProbabilityDistribution]]): Used to create dictionary of
                 SequenceEncodableProbabilityDistribution objects. Type T0 is inferred to be type of dmap keys if dict,
                 else the T0 is inferred to integer.
-            default_dist (Optional[SequenceEncodableProbabilityDistribution]): Defines the distribution for the case
-                where x[0] is not a key in dmap
-            given_dist (Optional[SequenceEncodableProbabilityDistribution]): p_mat(x[0]) is defined as the given
-                distribution.
+            default_dist (Optional[SequenceEncodableProbabilityDistribution]): Branch used when ``x[0]`` is not a
+                key in ``dmap``.
+            given_dist (Optional[SequenceEncodableProbabilityDistribution]): Marginal distribution over the given
+                value ``x[0]``.
             name (Optional[str]): Name assigned to object.
             keys (Optional[str]): All ConditionalDistribution objects with same keys value are the same distribution.
 
@@ -202,6 +199,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def compute_capabilities(self):
+        """Declare generated-compute support joined across branch, default, and given models."""
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
         children = list(self.dmap.values())
@@ -212,6 +210,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         return DistributionCapabilities(engine_ready=intersect_engine_ready(tuple(children)), kernel_status="generic")
 
     def compute_declaration(self):
+        """Return the generated-compute declaration for the conditional distribution."""
         from mixle.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
 
         children = []
@@ -247,7 +246,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def __str__(self) -> str:
-        """Returns string representation of ConditionalDistribution and member variables."""
+        """Return a constructor-style representation of the conditional distribution."""
         s1 = repr(self.dmap)
         s2 = repr(self.default_dist)
         s3 = repr(self.given_dist)
@@ -524,19 +523,19 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         return ConditionalGradientFitState(self, dmap, default_child, given_child)
 
     def sampler(self, seed: int | None = None) -> "ConditionalDistributionSampler":
-        """Creates ConditionalDistributionSampler object for sampling from ConditionalDistribution instance.
+        """Create a sampler for this conditional distribution.
 
         Args:
-            seed (Optional[int]): Set seed for sampling from ConditionalDistributionSampler object.
+            seed (Optional[int]): Seed for the sampler's random number generator.
 
         Returns:
-            ConditionalDistributionSampler object.
+            ConditionalDistributionSampler configured from this distribution.
 
         """
         return ConditionalDistributionSampler(self, seed=seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "ConditionalDistributionEstimator":
-        """Creates ConditionalDistributionEstimator object from sufficient statistics of ConditionalDistribution object.
+        """Create an estimator initialized from this conditional distribution.
 
         Used to estimate a ConditionalDistribution from data observations.
 
@@ -544,7 +543,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
             pseudo_count (Optional[float]): Used to inflate the sufficient statistics of ConditionalDistribution.
 
         Returns:
-            ConditionalDistributionEstimator object.
+            ConditionalDistributionEstimator with estimators for the branch, default, and given distributions.
 
         """
         est_map = {k: v.estimator(pseudo_count) for k, v in self.dmap.items()}
@@ -560,7 +559,7 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def dist_to_encoder(self) -> "ConditionalDistributionDataEncoder":
-        """Creates ConditionalDistributionDataEncoder object for encoding sequences of ConditionalDistribution data."""
+        """Create a data encoder for conditional-distribution observations."""
         encoder_map = {k: v.dist_to_encoder() for k, v in self.dmap.items()}
         default_encoder = NullDataEncoder() if not self.has_default else self.default_dist.dist_to_encoder()
         given_encoder = NullDataEncoder() if not self.has_given else self.given_dist.dist_to_encoder()
@@ -682,18 +681,18 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
     or values conditioned on a fixed given value via sample_given()."""
 
     def __init__(self, dist: ConditionalDistribution, seed: int | None = None) -> None:
-        """ConditionalDistributionSampler object samples from ConditionalDistribution either directly or conditionally.
+        """Create a sampler for direct or given-conditioned draws from a conditional distribution.
 
         Args:
-            dist (ConditionalDistribution): ConditionalDistribution object to draw samples from.
+            dist (ConditionalDistribution): Conditional distribution to draw samples from.
             seed (Optional[int]): Used to set the seed of random number generator used in sampling.
 
         Attributes:
-            dist (ConditionalDistribution): ConditionalDistribution object to draw samples from.
-            default_sampler (DistributionSampler): DistributionSampler object for sampling from default_dist of
+            dist (ConditionalDistribution): Conditional distribution to draw samples from.
+            default_sampler (DistributionSampler): Sampler for ``default_dist`` of
                 ConditionalDistribution.
             has_default_sampler (bool): True if default sampler is not NullDistribution, else False.
-            given_sampler (DistributionSampler): DistributionSampler object for sampling from given_dist of
+            given_sampler (DistributionSampler): Sampler for ``given_dist`` of
                 ConditionalDistribution.
             has_given_sampler (bool): True if given sampler is not NullDistribution, else False.
             samplers (Dict[T0,DistributionSampler]): Dictionary of samplers for sampling from ConditionalDistribution,
@@ -715,10 +714,10 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
         self.samplers = {k: u.sampler(rng.randint(0, maxrandint)) for k, u in self.dist.dmap.items()}
 
     def single_sample(self) -> tuple[Any, Any]:
-        """Generates a simple sample from the ConditionalDistribution.
+        """Draw one ``(given, conditional)`` pair from the conditional distribution.
 
-        Returns Tuple of T0 and T1, where T1 is the data type of the conditional distribution, and T0 is the type of
-        the given distribution.
+        The first element is sampled from the given distribution; the second is sampled from the branch selected by
+        that value, or from the default branch when the value is not present in ``dmap``.
 
         Returns:
             Tuple[T0, T1] as defined from dmap and given_distribution types in dist (ConditionalDistribution instance).
@@ -753,7 +752,7 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
             return [self.single_sample() for i in range(size)]
 
     def sample_given(self, x: T0) -> Any:
-        """Sample from conditional distribution of ConditionalDistribution object with given value x.
+        """Sample from the conditional distribution for a supplied given value.
 
         Return data type T1 as defined for dictionary of ConditionalDistribution instance.
 
@@ -791,11 +790,11 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
         of data type T0 for the given type. Each value of the dict contains a SequenceEncodableStatisticAccumulator for
         accumulating respective sufficient statistics.
 
-        The sufficient statistics for the default_distribution are stored in SequenceEncodableStatisticAccumulator
-        obejct defualt_accumulator. If default_accumulator = None, default_accumulator is set to NullAccumualtor().
+        The sufficient statistics for the default distribution are stored in ``default_accumulator``. If
+        ``default_accumulator`` is None, it is set to ``NullAccumulator``.
 
-        The sufficient statistics for given_distribution are stored in given_accumulator. This is set to
-        NullAccumulator() if no given_accumulator is specified.
+        The sufficient statistics for ``given_distribution`` are stored in ``given_accumulator``. This is set to
+        ``NullAccumulator`` if no ``given_accumulator`` is specified.
 
         Args:
             accumulator_map (Dict[T0, SequenceEncodableStatisticAccumulator]): Stores sufficient statistics of each
@@ -819,8 +818,8 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
             _init_rng (bool): False unless a single call to initialize or seq_initialize has been made.
             _acc_rng (Optional[Dict[T0, RandomState]]): Used to seed RandomState calls of accumulator_map.
-            _defualt_rng (Optional[RandomState]): Used to seed RandomState calls of defualt_accumulator initialize.
-            _given_rng (Optional[RandomState]): Used to seed RandomState calls of given_accumulator initialize.
+            _default_rng (Optional[RandomState]): Used to seed RandomState calls for default accumulator initialization.
+            _given_rng (Optional[RandomState]): Used to seed RandomState calls for given accumulator initialization.
 
         """
         self.accumulator_map = accumulator_map
@@ -832,7 +831,7 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
         self.keys = keys
 
-        #### seeds for intializers
+        # Seeds for initializers.
         self._init_rng = False
         self._acc_rng: dict[T0, RandomState] | None = None
         self._default_rng: RandomState | None = None
@@ -1100,6 +1099,7 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def scale(self, c: float) -> "ConditionalDistributionAccumulator":
+        """Scale every branch, default, and given accumulator statistic in place."""
         for accumulator in self.accumulator_map.values():
             accumulator.scale(c)
         if self.has_default:
@@ -1151,7 +1151,7 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
             self.given_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "ConditionalDistributionDataEncoder":
-        """Creates ConditionalDistributionDataEncoder object for encoding sequences of ConditionalDistribution data."""
+        """Create a data encoder from the branch accumulator encoders."""
 
         encoder_map = {k: v.acc_to_encoder() for k, v in self.accumulator_map.items()}
         default_encoder = self.default_accumulator.acc_to_encoder()
@@ -1173,13 +1173,13 @@ class ConditionalDistributionAccumulatorFactory(StatisticAccumulatorFactory):
         given_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
         keys: str | None = None,
     ) -> None:
-        """ConditionalDistributionAccumulatorFactory creates ConditionalDistributionAccumulator objects.
+        """Create a factory for conditional-distribution accumulators.
 
         Args:
             factory_map (Dict[T0, StatisticAccumulatorFactory]): Dictionary of StatisticAccumulatorFactory objects for
                 creating SequenceEncodableStatisticAccumulator objects in ConditionalDistributionAccumulator
             default_factory (StatisticAccumulatorFactory): Used to create SequenceEncodableStatisticAccumulator for
-                defualt_accumulator in ConditionalDistributionAccumulator.
+                default_accumulator in ConditionalDistributionAccumulator.
             given_factory (StatisticAccumulatorFactory): Used to create SequenceEncodableStatisticAccumulator for
                 given_accumulator in ConditionalDistributionAccumulator.
             keys (Optional[str]): All ConditionalAccumulator objects with same keys value will merge suff stats.
@@ -1188,7 +1188,7 @@ class ConditionalDistributionAccumulatorFactory(StatisticAccumulatorFactory):
             factory_map (Dict[T0, StatisticAccumulatorFactory]): Dictionary of StatisticAccumulatorFactory objects for
                 creating SequenceEncodableStatisticAccumulator objects in ConditionalDistributionAccumulator
             default_factory (StatisticAccumulatorFactory): Used to create SequenceEncodableStatisticAccumulator for
-                defualt_accumulator in ConditionalDistributionAccumulator.
+                default_accumulator in ConditionalDistributionAccumulator.
             given_factory (StatisticAccumulatorFactory): Used to create SequenceEncodableStatisticAccumulator for
                 given_accumulator in ConditionalDistributionAccumulator.
             keys (Optional[str]): All ConditionalAccumulator objects with same keys value will merge suff stats.
@@ -1200,7 +1200,7 @@ class ConditionalDistributionAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> "ConditionalDistributionAccumulator":
-        """Create ConditionalAccumulator object from StatisticAccumulatorFactory member instances.
+        """Create a conditional accumulator from member factories.
 
         SequenceEncodableStatisticAccumulator objects are created for accumulator_map, default_accumulator, and
         given_accumulator in ConditionalAccumulator object.
@@ -1229,7 +1229,7 @@ class ConditionalDistributionEstimator(ParameterEstimator):
         keys: str | None = None,
         prior: tuple[dict[Any, Any], Any, Any] | None = None,
     ) -> None:
-        """ConditionalDistributionEstimator object used to estimate ConditionalDistribution from aggregated data.
+        """Create an estimator for a conditional distribution from aggregated data.
 
         If None is passed for default_estimator, default_estimator is set to NullEstimator().
         If None is passed for given_estimator, given_estimator is set to NullEstimator().
@@ -1289,12 +1289,7 @@ class ConditionalDistributionEstimator(ParameterEstimator):
         return rv
 
     def accumulator_factory(self) -> "ConditionalDistributionAccumulatorFactory":
-        """Creates ConditionalDistributionAccumulatorFactory from estimator member values.
-
-        Returns:
-            ConditionalDistributionAccumulatorFactory object.
-
-        """
+        """Return an accumulator factory for the given, branch, and default estimators."""
         emap_items = {k: v.accumulator_factory() for k, v in self.estimator_map.items()}
         def_factory = self.default_estimator.accumulator_factory()
         given_factory = self.given_estimator.accumulator_factory()
@@ -1313,7 +1308,7 @@ class ConditionalDistributionEstimator(ParameterEstimator):
         ParameterEstimator. Entry one of the Tuple must be a dict with keys of data type T0, matching the data type
         for the given distribution.
 
-        Returns a ConditionalDistribution object estimated from the sufficient statistics in suff_stat.
+        Return the conditional distribution estimated from the sufficient statistics in ``suff_stat``.
 
         Args:
             nobs (Optional[float]): Not used. Kept for consistency.
@@ -1323,9 +1318,50 @@ class ConditionalDistributionEstimator(ParameterEstimator):
             ConditionalDistribution object.
 
         """
-        default_dist = self.default_estimator.estimate(None, suff_stat[1])
-        given_dist = self.given_estimator.estimate(None, suff_stat[2])
-        dist_map = {k: self.estimator_map[k].estimate(None, v) for k, v in suff_stat[0].items()}
+        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 3:
+            raise ContractError(
+                "ConditionalDistributionEstimator.estimate(suff_stat)",
+                "a 3-tuple (dist_map_suff_stats, default_suff_stat, given_suff_stat)",
+                "%s%s"
+                % (
+                    type(suff_stat).__name__,
+                    " of length %d" % len(suff_stat) if isinstance(suff_stat, (tuple, list)) else "",
+                ),
+                "pass the 3-tuple produced by ConditionalDistributionAccumulator.value(), not a bare "
+                "component sufficient statistic.",
+            )
+        if not isinstance(suff_stat[0], dict):
+            raise ContractError(
+                "ConditionalDistributionEstimator.estimate(suff_stat[0])",
+                "a dict mapping each conditioning value to its sufficient statistic",
+                "%s" % type(suff_stat[0]).__name__,
+                "suff_stat[0] must be the dict-of-sufficient-statistics produced by "
+                "ConditionalDistributionAccumulator.value(), keyed by conditioning value.",
+            )
+
+        try:
+            default_dist = self.default_estimator.estimate(None, suff_stat[1])
+        except ContractError as e:
+            raise prefix_contract_error("ConditionalDistribution.default_dist", e) from None
+        try:
+            given_dist = self.given_estimator.estimate(None, suff_stat[2])
+        except ContractError as e:
+            raise prefix_contract_error("ConditionalDistribution.given_dist", e) from None
+
+        dist_map = {}
+        for k, v in suff_stat[0].items():
+            if k not in self.estimator_map:
+                raise ContractError(
+                    "ConditionalDistributionEstimator.estimator_map[%r]" % (k,),
+                    "a conditioning value present in estimator_map",
+                    "conditioning value %r, not in estimator_map" % (k,),
+                    "suff_stat[0] carries a key not covered by this estimator's estimator_map -- "
+                    "check the accumulator/estimator pairing, or add %r to estimator_map." % (k,),
+                )
+            try:
+                dist_map[k] = self.estimator_map[k].estimate(None, v)
+            except ContractError as e:
+                raise prefix_contract_error("ConditionalDistribution.estimator_map[%r]" % (k,), e) from None
 
         return ConditionalDistribution(
             dist_map, default_dist=default_dist, given_dist=given_dist, name=self.name, keys=self.keys
@@ -1371,7 +1407,7 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
         self.null_given_encoder = supports(self.given_encoder, Neutral)
 
     def __str__(self) -> str:
-        """Return string representation of the ConditionalDataEncoder with member DataSequenceEncoders printed out."""
+        """Return a constructor-style representation of the conditional encoder."""
         encoder_items = list(self.encoder_map.items())
         encoder_str = "ConditionalDataEncoder("
         for k, v in encoder_items[:-1]:
@@ -1391,11 +1427,10 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
         return encoder_str
 
     def __eq__(self, other) -> bool:
-        """Compare an object to instance of ConditionalDistributionDataEncoder.
+        """Return whether another encoder is equivalent to this encoder.
 
-        Object need to match each encoder of instance of ConditionalDistributionDataEncoder. That is, must match
-        encoder_map, defualt_encoder, and given_encoder. If any conditions do not match equality with not hold (i.e.
-        false returned).
+        The object must match each encoder in this ConditionalDistributionDataEncoder. That is, it must match
+        encoder_map, default_encoder, and given_encoder. If any condition does not match, equality does not hold.
 
         Args:
             other (object): Object to be compared to instance of ConditionalDistributionDataEncoder.
@@ -1446,12 +1481,31 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
             Returns rv (see description for details)
 
         """
+        if not isinstance(x, (list, tuple, np.ndarray)):
+            raise ContractError(
+                "ConditionalDistribution.seq_encode",
+                "a sequence of (given, value) pairs",
+                "%s" % type(x).__name__,
+                "pass a list of 2-tuples, e.g. [(given0, value0), (given1, value1), ...].",
+            )
+
         cond_enc = dict()
 
         given_vals = []
 
         for i in range(len(x)):
             xx = x[i]
+            if not isinstance(xx, (tuple, list, np.ndarray)) or len(xx) != 2:
+                raise ContractError(
+                    "ConditionalDistribution.seq_encode (row %d)" % i,
+                    "a 2-tuple (given_value, observed_value)",
+                    "%s%s"
+                    % (
+                        type(xx).__name__,
+                        " of length %d" % len(xx) if isinstance(xx, (tuple, list, np.ndarray)) else "",
+                    ),
+                    "each row must be a (given, value) pair -- check row %d for a missing/extra field." % i,
+                )
             given_vals.append(xx[0])
             if xx[0] not in cond_enc:
                 cond_enc[xx[0]] = [[xx[1]], [i]]
@@ -1467,26 +1521,48 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
         idx_vals = []
 
         for u in cond_enc_items:
-            if self.null_default_encoder:
-                if u[0] in self.encoder_map:
-                    eobs_vals.append(self.encoder_map[u[0]].seq_encode(u[1][0]))
+            field_path = "ConditionalDistribution.estimator_map[%r]" % (u[0],)
+            try:
+                if self.null_default_encoder:
+                    if u[0] in self.encoder_map:
+                        eobs_vals.append(self.encoder_map[u[0]].seq_encode(u[1][0]))
+                    else:
+                        # No encoder and no default for this conditioning value: append a
+                        # sentinel so eobs_vals stays aligned with cond_vals/idx_vals.
+                        # seq_log_density/seq_update guard on the cond key, so it is never
+                        # dereferenced (the group scores -inf / is skipped).
+                        eobs_vals.append(None)
                 else:
-                    # No encoder and no default for this conditioning value: append a
-                    # sentinel so eobs_vals stays aligned with cond_vals/idx_vals.
-                    # seq_log_density/seq_update guard on the cond key, so it is never
-                    # dereferenced (the group scores -inf / is skipped).
-                    eobs_vals.append(None)
-            else:
-                eobs_vals.append(self.encoder_map.get(u[0], self.default_encoder).seq_encode(u[1][0]))
+                    eobs_vals.append(self.encoder_map.get(u[0], self.default_encoder).seq_encode(u[1][0]))
+            except ContractError as e:
+                raise prefix_contract_error(field_path, e) from None
+            except (TypeError, ValueError, IndexError, KeyError) as e:
+                raise ContractError(
+                    field_path,
+                    "values compatible with the conditional distribution registered for given=%r" % (u[0],),
+                    "data that raised %s: %s" % (type(e).__name__, e),
+                    "check that every value observed under given=%r matches the data type expected "
+                    "by its conditional distribution." % (u[0],),
+                ) from e
 
             idx_vals.append(np.asarray(u[1][1]))
 
-        given_enc = self.given_encoder.seq_encode(given_vals)
+        try:
+            given_enc = self.given_encoder.seq_encode(given_vals)
+        except ContractError as e:
+            raise prefix_contract_error("ConditionalDistribution.given_dist", e) from None
+        except (TypeError, ValueError, IndexError, KeyError) as e:
+            raise ContractError(
+                "ConditionalDistribution.given_dist",
+                "given-values compatible with the given distribution's data type",
+                "data that raised %s: %s" % (type(e).__name__, e),
+                "check that every given-value matches the data type expected by given_dist (%s)." % self.given_encoder,
+            ) from e
 
         return len(x), cond_vals, tuple(eobs_vals), tuple(idx_vals), given_enc
 
 
-# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+# --- Backward-compatible API naming aliases ---
 ConditionalAccumulator = ConditionalDistributionAccumulator
 ConditionalAccumulatorFactory = ConditionalDistributionAccumulatorFactory
 ConditionalDataEncoder = ConditionalDistributionDataEncoder

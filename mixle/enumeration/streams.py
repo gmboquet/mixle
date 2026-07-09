@@ -70,6 +70,7 @@ class BufferedStream:
         self._done = False
 
     def get(self, i: int) -> tuple[Any, float] | None:
+        """Return buffered item ``i``, pulling from the stream if needed."""
         buf = self._buf
         # Fast path: already buffered (the common case -- coordinates are re-read every pop).
         if i < len(buf):

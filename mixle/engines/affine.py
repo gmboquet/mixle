@@ -8,8 +8,8 @@ over-spending bits.
 
 The dial: evaluating an operation at dtype ``d`` injects a fresh roundoff symbol of radius
 ``u(d) * |result|`` (``u`` = unit roundoff). The affine radius at the root *is* the certified error
-bound; a subtraction at a cancellation point makes it blow up -- the escalation signal, for free. Walk
-leaves->root choosing the cheapest dtype whose injected radius keeps the root bound under target.
+bound; a subtraction at a cancellation point makes it grow -- the escalation signal. Walk leaves->root
+choosing the lowest-cost dtype whose injected radius keeps the root bound under target.
 
 This is the tighter *estimate*; the fully IEEE-sound enclosure is :mod:`mixle.engines.error_tracing`
 (interval, outward-rounded). The radius here is reported with one outward ULP of slop.
@@ -61,6 +61,7 @@ class AffineForm:
 
     @classmethod
     def constant(cls, x: Any) -> AffineForm:
+        """Create an affine form with no uncertainty terms."""
         return cls(np.asarray(x, dtype=np.float64), {})
 
     @classmethod
@@ -82,16 +83,19 @@ class AffineForm:
         return np.nextafter(total, np.inf)
 
     def max_radius(self) -> float:
+        """Return the largest interval half-width across entries."""
         r = self.radius()
         return float(np.max(r)) if r.size else 0.0
 
     def to_interval(self) -> Any:
+        """Convert the affine form to an interval enclosure."""
         from mixle.engines.error_tracing import Interval
 
         r = self.radius()
         return Interval(self.center - r, self.center + r)
 
     def contains(self, value: Any) -> np.ndarray:
+        """Return a boolean mask for values contained in the affine enclosure."""
         v = np.asarray(value, dtype=np.float64)
         r = self.radius()
         return (self.center - r <= v) & (v <= self.center + r)
@@ -130,10 +134,10 @@ class AffineForm:
 
 
 def allocate_precision(center_magnitude: float, op_count: int, target_abs_error: float) -> str:
-    """Cheapest dtype whose accumulated roundoff over ``op_count`` ops keeps error under target.
+    """Lowest-cost dtype whose accumulated roundoff over ``op_count`` ops keeps error under target.
 
     Each op injects ~``u(d) * |magnitude|``; ``op_count`` of them accumulate to ``op_count*u*|mag|``.
-    Walk cheapest-first and return the first dtype that fits the budget -- spend minimal precision.
+    Walk from lower to higher precision and return the first dtype that fits the budget.
     """
     for name in ("float16", "bfloat16", "float32", "float64", "dd", "qd"):
         if op_count * UNIT_ROUNDOFF[name] * abs(center_magnitude) <= target_abs_error:

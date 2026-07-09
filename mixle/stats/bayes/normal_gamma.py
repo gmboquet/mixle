@@ -36,7 +36,7 @@ class NormalGammaDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         prior: Optional["SequenceEncodableProbabilityDistribution"] = None,
     ) -> None:
-        """NormalGammaDistribution object.
+        """Create a normal-gamma prior over scalar Gaussian mean and precision.
 
         Args:
             mu (float): Prior mean mu0.
@@ -158,7 +158,7 @@ class NormalGammaDistribution(SequenceEncodableProbabilityDistribution):
         raise NotImplementedError("NormalGammaDistribution is a parameter prior; it has no data estimator.")
 
     def dist_to_encoder(self) -> "NormalGammaDataEncoder":
-        """Returns a NormalGammaDataEncoder object for encoding (mu, tau) pairs."""
+        """Return the encoder for ``(mu, tau)`` normal-gamma observations."""
         return NormalGammaDataEncoder()
 
 
@@ -192,4 +192,5 @@ class NormalGammaDataEncoder(DataSequenceEncoder):
         return isinstance(other, NormalGammaDataEncoder)
 
     def seq_encode(self, x: Any) -> np.ndarray:
+        """Encode Normal-Gamma observations as a floating array."""
         return np.asarray(x, dtype=float)

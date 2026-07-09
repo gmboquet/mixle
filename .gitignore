@@ -43,6 +43,7 @@ pip-delete-this-directory.txt
 .venv/
 .DS_Store
 .claude/
+.worktrees/
 
 # Downloaded example datasets
 /data/
@@ -59,3 +60,9 @@ audit/
 mixle/engines/_dd_kernels.c
 mixle/engines/_bitpacked.c
 mixle/engines/_lns_kernel.c
+
+# coverage.py output (local runs and CI's --cov-report=xml artifact upload; never committed)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/

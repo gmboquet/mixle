@@ -84,7 +84,11 @@ class SftPlannerTest(unittest.TestCase):
         from mixle.task import ToolSpec, sft_planner
 
         tools = [ToolSpec("lookup_order", ["order_id"]), ToolSpec("notify", ["user"])]
-        planner = sft_planner(_teacher, _requests(180), tools, seed=0, epochs=40, d_model=64, n_layer=2)
+        # epochs=15/n_layer=1 verified (10+ seeds) to preserve the silent_wrong==0 invariant just as
+        # reliably as epochs=40/n_layer=2 while training ~4x faster; n_train=180 is NOT safely
+        # reducible -- smaller corpora starve the confidence-floor calibration and let wrong plans
+        # through confidently (see sft_planner's holdout calibration in mixle/task/sft_plan.py).
+        planner = sft_planner(_teacher, _requests(180), tools, seed=0, epochs=15, d_model=64, n_layer=1)
 
         specs = {t.name: t for t in tools}
         silent_wrong = 0
@@ -99,15 +103,80 @@ class SftPlannerTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class ScoreAndSamplePlansTest(unittest.TestCase):
+    """workstream C1/C2: a decomposition model you can fit, score, and sample -- a low-probability plan
+    is an escalation signal, not a silent guess."""
+
+    @classmethod
+    def setUpClass(cls):
+        # trained ONCE (seed=0, deterministic) and reused read-only across every test below -- the
+        # 4 tests in this class never mutate the planner, so a per-test setUp was retraining the
+        # identical model 4 times over for no behavioral difference.
+        from mixle.task import ToolSpec, sft_planner
+
+        # epochs=15/n_layer=1 verified (8+ seeds) to keep the same clean score separation between
+        # correct/wrong/implausible plans and the calibrated floor as epochs=40/n_layer=2, ~4x faster
+        # to train; n_train=180 is load-bearing for calibration quality and left unchanged.
+        cls.tools = [ToolSpec("lookup_order", ["order_id"]), ToolSpec("notify", ["user"])]
+        cls.planner = sft_planner(_teacher, _requests(180), cls.tools, seed=0, epochs=15, d_model=64, n_layer=1)
+
+    def test_the_teacher_plan_scores_far_above_a_wrong_plan(self):
+        from mixle.task import score_plan
+
+        req = "please refund order 5555 for bob as discussed"
+        correct = score_plan(self.planner, req, _teacher(req))
+        wrong = score_plan(self.planner, req, [{"tool": "notify", "args": {"user": "bob"}}])
+        self.assertGreater(correct, wrong)
+        self.assertGreater(correct, self.planner.conf_floor)  # the teacher plan clears the escalation floor
+
+    def test_a_low_probability_plan_falls_below_the_calibrated_floor(self):
+        from mixle.task import score_plan
+
+        req = "please refund order 5555 for bob as discussed"
+        # a plausible-looking but wrong-order plan: notify before the lookup it depends on
+        implausible = [
+            {"tool": "notify", "args": {"user": "bob"}},
+            {"tool": "lookup_order", "args": {"order_id": "5555"}},
+        ]
+        self.assertLess(score_plan(self.planner, req, implausible), self.planner.conf_floor)
+
+    def test_sample_plans_returns_n_candidates_sorted_by_score(self):
+        from mixle.task import sample_plans
+
+        req = "can you check status of order 4242 right away"
+        samples = sample_plans(self.planner, req, n=5, temperature=0.7, seed=3)
+        self.assertEqual(len(samples), 5)
+        scores = [s for _, s in samples]
+        self.assertEqual(scores, sorted(scores, reverse=True))  # highest-probability candidate first
+
+    def test_an_unparseable_sample_is_reported_not_guessed(self):
+        from mixle.task import sample_plans
+
+        req = "can you check status of order 4242 right away"
+        # a very high temperature makes malformed/invalid draws likely -- they must surface as (None, -inf),
+        # never as a silently-returned plan that failed to parse or validate
+        samples = sample_plans(self.planner, req, n=8, temperature=5.0, seed=9)
+        for plan, score in samples:
+            if plan is None:
+                self.assertEqual(score, float("-inf"))
+            else:
+                self.assertGreater(score, float("-inf"))
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class GenerativePlannerPersistenceTest(unittest.TestCase):
     def test_save_load_plans_identically(self):
         import tempfile
 
         from mixle.task import GenerativePlanner, ToolSpec, sft_planner
 
+        # This test only checks that save/load reproduces the SAME planner byte-for-byte-behaviorally
+        # (identical plans/escalations from a fresh process) -- it makes no claim about plan quality,
+        # so the model/corpus can be as small as sft_planner allows (>=16 requests). Verified (6+ seeds)
+        # to round-trip identically at this size just as reliably as the original, ~10x+ faster.
         tools = [ToolSpec("lookup_order", ["order_id"]), ToolSpec("notify", ["user"])]
-        planner = sft_planner(_teacher, _requests(160), tools, seed=0, epochs=25, d_model=64, n_layer=2)
-        fresh = _requests(30, seed=11)
+        planner = sft_planner(_teacher, _requests(24), tools, seed=0, epochs=8, d_model=16, n_layer=1)
+        fresh = _requests(8, seed=11)
         want = [planner(r) for r in fresh]
         with tempfile.TemporaryDirectory() as d:
             path = planner.save(d + "/gen")

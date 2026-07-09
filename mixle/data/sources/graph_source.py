@@ -167,8 +167,16 @@ def _coerce_mapping(x: Any, directed: bool, fallback_assignments: Any | None) ->
 
 
 def _coerce_pair_tuple(x: Any, directed: bool, fallback_assignments: Any | None) -> GraphObservation:
-    adj = _as_adjacency(x[0])
-    assignments = x[1] if x[1] is not None else fallback_assignments
+    # Mirror _coerce_pair_list's fallback: a 2-tuple is not ALWAYS an (adjacency, assignments) pair --
+    # a plain 2-node adjacency matrix given as nested tuples, e.g. ((0, 1), (1, 0)), also matches this
+    # predicate. Without the fallback, x[0] (a 1-D row) fails _as_adjacency's square-matrix check and
+    # this raises, while the identical input as nested LISTS was already handled correctly.
+    try:
+        adj = _as_adjacency(x[0])
+        assignments = x[1] if x[1] is not None else fallback_assignments
+    except Exception:
+        adj = _as_adjacency(x)
+        assignments = fallback_assignments
     return GraphObservation(adj, _as_assignments(assignments, adj.shape[0]))
 
 
@@ -287,10 +295,12 @@ class GraphDataEncoder(DataSequenceEncoder):
         )
 
     def seq_encode(self, x: Sequence[Any]) -> tuple[GraphObservation, ...]:
+        """Encode graph-like observations into graph observation records."""
         fallback = None if self.fallback_assignments is None else np.asarray(self.fallback_assignments, dtype=np.int64)
         return tuple(_extract_observation(u, directed=self.directed, fallback_assignments=fallback) for u in x)
 
     def nbytes(self, x: Any) -> int:
+        """Return approximate encoded byte size for graph observations."""
         total = 0
         for obs in x:
             total += int(obs.adjacency.nbytes)

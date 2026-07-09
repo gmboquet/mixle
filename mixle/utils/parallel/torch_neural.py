@@ -51,6 +51,9 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         parallel: str = "auto",
         precision: str = "fp32",
         activation_checkpointing: bool = False,
+        tp_size: int = 1,
+        pp_size: int = 1,
+        cp_size: int = 1,
     ) -> None:
         self.torch, self.dist = _torch_dist()
         self._owns_pg = False
@@ -60,6 +63,15 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         self.parallel = parallel
         self.precision = precision
         self.activation_checkpointing = bool(activation_checkpointing)
+        # tp_size/pp_size/cp_size: the F1 N-D-parallelism knobs, ORTHOGONAL to this handle's data-parallel
+        # axis (DDP/FSDP2 above). The plan is validated against the real module in `pysp_seq_estimate`
+        # (fails fast on a bad plan); wiring it into real per-axis NCCL process groups alongside FSDP2 is
+        # the multi-GPU piece that this CPU/gloo-validated handle does not execute -- see
+        # `tensor_pipeline_context_parallel.py` for the sharding/reconstruction mechanism itself, which
+        # IS implemented and tested at small scale.
+        self.tp_size = int(tp_size)
+        self.pp_size = int(pp_size)
+        self.cp_size = int(cp_size)
         self._maybe_init_process_group(init_process_group, backend)
         self.rank = self.dist.get_rank() if self.dist.is_initialized() else 0
         self.world = self.dist.get_world_size() if self.dist.is_initialized() else 1
@@ -130,6 +142,10 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         device = getattr(estimator, "device", "cpu")
         lr = float(getattr(estimator, "lr", 3e-3))
         module = estimator.module.to(device)
+        if self.tp_size > 1 or self.pp_size > 1 or self.cp_size > 1:
+            from mixle.utils.parallel.tensor_pipeline_context_parallel import validate_tp_pp_cp_plan
+
+            validate_tp_pp_cp_plan(module, self.tp_size, self.pp_size, self.cp_size)
         wrapped = self._wrap_for_scale(module, device)
         opt = torch.optim.AdamW(wrapped.parameters(), lr=lr)
         ce = torch.nn.CrossEntropyLoss()
@@ -149,11 +165,13 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         return StreamingTransformerLeaf(module, device)  # consistent across ranks -- no gather, no broadcast
 
     def pysp_seq_initialize(self, estimator: Any, rng: Any, p: float) -> Any:
+        """Return an initial streaming transformer leaf without distributed fitting."""
         from mixle.models.streaming_transformer_leaf import StreamingTransformerLeaf
 
         return StreamingTransformerLeaf(estimator.module, getattr(estimator, "device", "cpu"))
 
     def close(self) -> None:
+        """Destroy the owned process group, if this handle created one."""
         if self._owns_pg and self.dist.is_initialized():
             self.dist.destroy_process_group()
             self._owns_pg = False

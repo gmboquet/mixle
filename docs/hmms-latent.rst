@@ -46,6 +46,31 @@ Use ``best_of`` when local optima matter:
 The component can be any estimator with a compatible shape: a scalar
 distribution, a record, a sequence model, or a neural leaf.
 
+Interpret mixture components only after checking restart stability and
+held-out behavior. Component identities can swap across runs, and a component
+that appears in one local optimum should not be treated as a stable label.
+
+Latent-Model Numerical Contract
+--------------------------------
+
+Latent wrappers should preserve the same numerical contract as their child
+distributions:
+
+* scalar and vectorized scoring routes should agree up to ordinary floating
+  point tolerance;
+* impossible observations or impossible latent paths should score as
+  ``-inf``, not ``NaN``;
+* posterior responsibilities should be finite and normalized whenever the
+  observation has nonzero probability under the model;
+* caller-owned input data should not be rewritten to hide missing or non-finite
+  values; and
+* ambiguous latent labels should be reported with uncertainty instead of being
+  treated as observed classes.
+
+For release work, validate a latent model against a simpler baseline and keep
+the initialization, restart, missing-data, and decoding policies with the model
+record.
+
 Mixture of Heterogeneous Records
 --------------------------------
 
@@ -71,6 +96,10 @@ Mixture of Heterogeneous Records
 The latent component clusters whole records. Each component owns its own child
 distributions.
 
+For heterogeneous records, inspect field-level likelihoods inside components.
+A cluster can be driven by one malformed or high-variance field rather than a
+meaningful row-level regime.
+
 PPL Markov Models
 -----------------
 
@@ -86,6 +115,11 @@ For compact HMMs, ``mixle.ppl`` is often the clearest surface:
 ``Markov`` lowers to the same latent estimator machinery as the explicit stats
 surface.
 
+Inspect the lowered route when using PPL for HMMs. The compact expression is a
+model declaration; the release evidence should still name the fitted
+distribution, transition structure, missing-data policy, and posterior query
+surface.
+
 Default HMM Execution
 ---------------------
 
@@ -98,6 +132,31 @@ the fast path.
 Explicit settings still win. Pass ``use_numba=False`` on the HMM family when
 you need the pure NumPy path for debugging, parity checks, or an environment
 where compiled kernels are not desirable.
+
+When Numba is used as release evidence, record the package version and parity
+check against the NumPy route on a small sequence. Fast-path differences should
+be treated as execution evidence, not as a change in the model.
+
+HMM Diagnostics
+---------------
+
+.. list-table::
+   :header-rows: 1
+
+   * - Check
+     - Expected result
+   * - Scalar/vectorized scoring
+     - ``log_density`` and ``seq_log_density`` agree on the same sequences.
+   * - Impossible observation
+     - The sequence scores ``-inf`` and does not produce ``NaN``.
+   * - Posterior query
+     - State probabilities sum to one on valid observations.
+   * - Viterbi query
+     - Returned paths have one state per emitted observation.
+   * - Fast path
+     - Numba and NumPy routes match on a small parity fixture when both are used.
+   * - Length model
+     - Empty, short, and long sequences follow the documented length contract.
 
 Structured HMMs
 ---------------
@@ -172,6 +231,23 @@ HMMs are useful because they expose latent paths, not just likelihoods.
 Exact method names vary by HMM family; use ``mixle.describe(model)`` to see
 which latent queries are available.
 
+Decoded paths are explanations under the fitted model, not observed truth.
+When the path drives a decision, keep state posterior uncertainty or top-path
+margins with the decision record.
+
+Missing and Impossible Sequence Behavior
+----------------------------------------
+
+HMMs do not treat a ``NaN`` in caller data as something to repair implicitly.
+If missing values are valid observations for the application, model them with an
+emission distribution or wrapper that has an explicit missing-data contract. If
+the emission family rejects the value, the HMM should surface that rejection
+through the likelihood route instead of silently changing the input.
+
+When every latent path is impossible for a sequence, the correct log-density is
+``-inf``. Downstream posterior and decoding calls should be interpreted only for
+sequences with positive probability under the fitted model.
+
 Enumeration
 -----------
 
@@ -188,10 +264,14 @@ For decomposable supports, ranking and seek can be exact. For hard latent
 marginals, mixle reports bounded or approximate routes rather than pretending
 they are exact.
 
+Record whether enumeration returned state paths, observation sequences, or
+marginal value rankings. Those are different questions and should not be mixed
+in release evidence.
+
 HMMs with Neural or Heterogeneous Emissions
 -------------------------------------------
 
-An HMM emission is just another distribution. That means the emission can be:
+An HMM emission follows the ordinary distribution contract. The emission can be:
 
 * a Gaussian;
 * a categorical token model;
@@ -213,6 +293,22 @@ Run the Structured HMM Tour
 The structured tour demonstrates low-rank transitions, factorial Kronecker
 transitions, sparse left-to-right transitions, sticky priors, decoding,
 enumeration, terminal states, explicit-duration HMMs, and input-output HMMs.
+
+Treat those tours as validation examples only when they execute against the
+release wheel with their optional dependencies recorded. A source-checkout run
+is useful during development but is not enough release evidence.
+
+Release Evidence
+----------------
+
+For HMMs and other latent sequence models, preserve:
+
+* initialization and restart policy;
+* validation score against a simpler baseline;
+* transition structure and optional fast-path settings;
+* posterior state uncertainty, top-path margins, or responsibility summaries;
+* missing-data and impossible-transition behavior; and
+* example or notebook execution status for any documented workflow.
 
 API Map
 -------

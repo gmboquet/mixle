@@ -60,6 +60,10 @@ problems early.
 Use schema validation at the boundary of a pipeline. The fitted model can still
 receive ordinary Python records after they are conformed.
 
+Do not let schema coercion hide data quality problems. Record coercion errors,
+missing fields, dropped records, and unit conversions when the conformed data
+feeds a release or production artifact.
+
 Sources
 -------
 
@@ -77,6 +81,10 @@ supported external formats when the relevant optional extra is installed.
 The public source system includes adapters for pandas, Arrow, SQL, Mongo,
 Hadoop, Spark, text, and graph data. Heavy integrations are imported lazily so
 the base install stays small.
+
+External sources should record connection kind and query or file identity
+without embedding secrets. A source wrapper is not a data-governance boundary;
+the caller still owns credential handling and data-classification review.
 
 Sample Structure
 ----------------
@@ -98,8 +106,12 @@ Sample structure tells mixle how records may be partitioned or interpreted.
      - samples are exchangeable within groups, such as users or sessions
 
 Structure-aware partitioning matters for streaming, distributed fitting, and
-validation. It prevents sequence or group boundaries from being broken
+validation. It prevents sequence or group boundaries from being split
 accidentally.
+
+Use sample structure when splitting data. Random row splits can leak
+information across users, sessions, or time windows when the correct structure
+is sequential or partially exchangeable.
 
 Exchangeability Diagnostics
 ---------------------------
@@ -128,12 +140,15 @@ The report label is one of:
 
 ``shift``
     The early and late halves differ in location; treat the rows as a regime
-    change unless the split is intended.
+    change unless the split is deliberate.
 
 ``mixle.inference.create`` and ``mixle.inference.synthesize`` run this check
 when applicable and store the verdict in provenance. It is a warning signal,
 not an automatic refusal, because some applications intentionally pool after
 domain review.
+
+When a warning is overridden, record the reason. The override is part of the
+modeling assumption and should be visible in provenance.
 
 Encoded Data
 ------------
@@ -152,6 +167,10 @@ reuse the same preprocessing boundary, save encoded data:
 
 The encoded payload is the same kind of data consumed by ``optimize`` internally.
 
+Encoded payloads should be versioned with the encoder or fitted model that
+created them. Reusing encoded data after a schema or encoder change can produce
+valid-looking arrays with the wrong meaning.
+
 Hashes and Provenance
 ---------------------
 
@@ -167,6 +186,10 @@ Hashes and Provenance
 Production helpers use these values in model headers, registries, drift
 reports, and lineage checks.
 
+Hashes identify byte-level or canonicalized content; they do not prove that the
+data were appropriate for the model. Keep validation reports and data
+classification alongside hashes.
+
 DataFrame and Spark Helpers
 ---------------------------
 
@@ -181,6 +204,10 @@ shape used by ordinary lists.
 
 Spark helpers include sampling functions for RDD-backed workflows. Use them
 after the local model shape works on an in-memory sample.
+
+For distributed sources, record sampling policy and partition boundaries. A
+small local sample is useful for model shape, but it is not evidence that the
+distributed source has the same schema everywhere.
 
 Graph Data
 ----------
@@ -200,6 +227,19 @@ Practical Workflow
    sample structure, or partitioning.
 5. Add hashes and encoded-data persistence once the workflow becomes
    repeatable or production-facing.
+
+Release Evidence
+----------------
+
+For data-layer workflows, preserve:
+
+* schema and one representative conformed record;
+* validation report with coercion and missing-field behavior;
+* sample-structure declaration and split policy;
+* exchangeability diagnostics or override rationale;
+* source identity without credentials;
+* dataset hash and data classification; and
+* encoded-data versioning when payloads are persisted.
 
 API Map
 -------

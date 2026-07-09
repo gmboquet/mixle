@@ -120,16 +120,18 @@ class StudiedModel:
         return out + np.log(self.class_priors)[None, :]
 
     def predict(self, z: np.ndarray) -> np.ndarray:
+        """Return the most likely class for each latent vector."""
         return np.asarray([self.classes[i] for i in np.argmax(self._scores(np.atleast_2d(z)), axis=1)])
 
     def predict_proba(self, z: np.ndarray) -> np.ndarray:
+        """Return normalized class probabilities for each latent vector."""
         s = self._scores(np.atleast_2d(z))
         s = s - s.max(axis=1, keepdims=True)
         p = np.exp(s)
         return p / p.sum(axis=1, keepdims=True)
 
     def prediction_sets(self, z: np.ndarray) -> list[list[Any]]:
-        """Conformal label sets at level 1-alpha: possibly >1 label (honest ambiguity), never empty lies."""
+        """Conformal label sets at level 1-alpha; ambiguous cases may return multiple labels."""
         p = self.predict_proba(z)
         return [[self.classes[j] for j in range(p.shape[1]) if 1.0 - p[i, j] <= self.qhat] for i in range(len(p))]
 
@@ -207,10 +209,11 @@ class EdgeArtifact:
 
     @property
     def retention(self) -> float:
-        """The share of the teacher's accuracy the edge student keeps -- the compression's honest cost."""
+        """The share of the teacher's accuracy retained by the edge student."""
         return self.student_accuracy / self.teacher_accuracy if self.teacher_accuracy else 0.0
 
     def render(self) -> str:
+        """Render a compact human-readable edge-artifact receipt."""
         return (
             f"edge student ({self.family}, {self.bytes} bytes, torch_free={self.torch_free}): "
             f"teacher {self.teacher_accuracy:.3f} -> student {self.student_accuracy:.3f} "
@@ -236,7 +239,7 @@ def distill_to_edge(
     MiniLM + certified head). Its labels on ``train_inputs`` are the distillation target; the student
     learns them from the RAW inputs under a device byte budget, so the deployed artifact needs neither
     torch nor the foundation model. The receipt measures what survives: student accuracy vs the teacher's,
-    and their agreement. Honest boundary: this works only when the student's own features carry the
+    and their agreement. Boundary: this works only when the student's own features carry the
     signal (text n-grams do; raw pooled pixels do NOT recover a vision foundation model)."""
     from mixle.task.edge import DeviceSpec, distill_for_edge
 
@@ -277,7 +280,7 @@ def distill_to_edge(
 
 @dataclass
 class ResearchProposal:
-    """An honest gap, made actionable: what is missing and the ranked ways to acquire it."""
+    """A knowledge gap made actionable: what is missing and the ranked ways to acquire it."""
 
     question: str
     missing: str
@@ -286,9 +289,11 @@ class ResearchProposal:
     note: str = ""
 
     def best(self) -> dict[str, Any] | None:
+        """Return the highest-ranked acquisition option, if one exists."""
         return self.options[0] if self.options else None
 
     def render(self) -> str:
+        """Render the proposal as a concise research plan."""
         lines = [f"I don't know: {self.missing}."]
         if self.nearest_knowledge:
             lines.append("Closest things I do know:")
@@ -308,6 +313,7 @@ class Conjecture:
     proposal: ResearchProposal | None = None
 
     def render(self) -> str:
+        """Render the conjecture and its best proposed test."""
         head = f"[CONJECTURE] {self.question}"
         return head if self.proposal is None else f"{head}\n  test: {self.proposal.best()['how']}"
 
@@ -361,7 +367,7 @@ class Scientist:
         reasoner = Reasoner(
             answerer,
             substrate=self.knowledge,
-            retrieve_min_score=0.34,  # a real content match, not tiny-embedder noise (the honesty floor)
+            retrieve_min_score=0.34,  # substantive content match, above low-signal embedder noise
             min_confidence=min_confidence,
         )
         for a in self._actions:
@@ -379,7 +385,7 @@ class Scientist:
     def propose(self, question: str, investigation: Any = None) -> ResearchProposal:
         """Turn an abstention into a research plan: what is missing, and ranked ways to acquire it.
 
-        This is the difference between a dead end and a scientist: an honest "I don't know" comes back
+        This is the difference between a dead end and a scientist: an explicit "I don't know" comes back
         with the acquisition options -- add knowledge, run a mounted capability, fit a model to data,
         simulate, or delegate outward -- each with what it would take and what it would settle. The
         ranking is EIG-per-cost over the mounted actions plus the generic acquisition strategies."""
@@ -406,7 +412,7 @@ class Scientist:
                         "score": round(rel / max(a.cost, 1e-9), 3),
                     }
                 )
-        # 2. the generic acquisition strategies, priced by convention (cheap -> expensive)
+        # 2. the generic acquisition strategies, priced by convention (lower-cost -> higher-cost)
         generic = [
             ("ingest the missing source into the knowledge base (learn())", "retrieve", 1.0),
             ("fit a model to relevant data and query it (create()/study())", "create", 4.0),
@@ -493,14 +499,17 @@ class Scientist:
     # -- certified perception ------------------------------------------------------------------------
     @staticmethod
     def perceive(images: Any) -> np.ndarray:
+        """Encode images into the shared scientific latent space."""
         return encode_images(images)
 
     @staticmethod
     def read(texts: Any) -> np.ndarray:
+        """Encode texts into the shared scientific latent space."""
         return encode_texts(texts)
 
     @staticmethod
     def study(latents: np.ndarray, labels: Any, **kw: Any) -> StudiedModel:
+        """Fit a certified perception head over latent vectors."""
         return study(latents, labels, **kw)
 
     @staticmethod

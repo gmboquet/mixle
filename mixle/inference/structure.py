@@ -6,7 +6,7 @@ field -- and modeling it is worth a great deal of likelihood (a blatant category
 600 rows). No mainstream tool discovers that structure across *arbitrary* families: Stan/PyMC make you write it,
 sklearn/pomegranate mixtures assume independence, bnlearn/pgmpy are discrete-or-Gaussian only.
 
-This module closes the gap. Dependence is detected the mixle way -- **by modeling it**: fit ``P(child)`` vs
+This module closes the gap. Dependence is detected by modeling it: fit ``P(child)`` vs
 ``P(child | parent)`` and compare description length (:func:`dependency_gain`). The winning edges are assembled
 into a :class:`DependencyTreeDistribution` -- a directed forest over the record where each field is either a
 marginal or a per-parent-value conditional (a real :class:`~mixle.stats.combinator.conditional.ConditionalDistribution`
@@ -58,6 +58,7 @@ def dependency_gain(
     *,
     max_its: int = 30,
     penalty: str = "bic",
+    rng: np.random.RandomState | None = None,
 ) -> float:
     """Description-length gain (nats) of modeling ``child`` conditioned on a discrete ``parent`` vs. independently.
 
@@ -65,18 +66,21 @@ def dependency_gain(
     the same data and returns ``LL_cond - LL_marginal`` minus a complexity penalty for the extra parameters
     (BIC: ``0.5 * (levels - 1) * k * ln n``). Positive means the dependence is worth modeling. This is a
     model-based dependency test -- it works across *any* pair of families, unlike a same-type MI estimate.
+    ``rng`` seeds the fits' EM initializations (``None`` = a fixed seed: deterministic by default; matters when
+    the child family needs a randomized init, e.g. a mixture).
     """
+    rng = np.random.RandomState(0) if rng is None else rng
     child = list(child)
     n = len(child)
     levels = sorted(set(parent))
-    marginal = fit(child, _clone(child_estimator), max_its=max_its, out=None)
+    marginal = fit(child, _clone(child_estimator), max_its=max_its, out=None, rng=rng)
     ll_marginal = float(np.sum(marginal.seq_log_density(marginal.dist_to_encoder().seq_encode(child))))
 
     pairs = list(zip(parent, child))
     cond_est = ConditionalDistributionEstimator(
         estimator_map={lv: _clone(child_estimator) for lv in levels}, given_estimator=None
     )
-    cond = fit(pairs, cond_est, max_its=max_its, out=None)
+    cond = fit(pairs, cond_est, max_its=max_its, out=None, rng=rng)
     enc = cond.dist_to_encoder().seq_encode(pairs)
     ll_cond = float(np.sum(cond.seq_log_density(enc)))
 
@@ -107,19 +111,23 @@ class LinearGaussianEdge:
         self.a, self.b, self.sigma2 = float(a), float(b), max(float(sigma2), 1e-12)
 
     def log_density(self, x: tuple) -> float:
+        """Evaluate ``log p(child | parent)`` for one parent-child pair."""
         parent, child = x
         resid = float(child) - (self.a + self.b * float(parent))
         return float(-0.5 * np.log(2.0 * np.pi * self.sigma2) - 0.5 * resid * resid / self.sigma2)
 
     def dist_to_encoder(self) -> Any:
+        """Return the encoder for parent-child pairs."""
         return _EdgeEncoder()
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
+        """Evaluate log densities for encoded parent-child pairs."""
         parent, child = encoded
         resid = np.asarray(child, dtype=float) - (self.a + self.b * np.asarray(parent, dtype=float))
         return -0.5 * np.log(2.0 * np.pi * self.sigma2) - 0.5 * resid * resid / self.sigma2
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return a sampler for the linear Gaussian edge."""
         return _LinearGaussianEdgeSampler(self, seed)
 
     def __str__(self) -> str:
@@ -155,11 +163,19 @@ def fit_linear_gaussian_edge(pairs: Sequence[tuple]) -> LinearGaussianEdge:
 
 
 def regression_gain(
-    parent: Sequence[Any], child: Sequence[Any], child_estimator: Any, *, max_its: int = 30, penalty: str = "bic"
+    parent: Sequence[Any],
+    child: Sequence[Any],
+    child_estimator: Any,
+    *,
+    max_its: int = 30,
+    penalty: str = "bic",
+    rng: np.random.RandomState | None = None,
 ) -> float:
     """Description-length gain (nats) of a linear-Gaussian *regression* edge ``child ~ a + b*parent`` over the
     child marginal. One extra parameter (the slope) vs. the ``bins * k`` a binned conditional spends — so for a
-    real linear dependence this beats binning decisively. Returns ``-inf`` when a regression is undefined."""
+    real linear dependence this beats binning decisively. Returns ``-inf`` when a regression is undefined.
+    ``rng`` seeds the marginal fit's EM initialization (``None`` = a fixed seed: deterministic by default)."""
+    rng = np.random.RandomState(0) if rng is None else rng
     p = np.asarray(parent, dtype=float)
     c = np.asarray(child, dtype=float)
     n = len(c)
@@ -167,7 +183,7 @@ def regression_gain(
         return float("-inf")
     edge = fit_linear_gaussian_edge(list(zip(p.tolist(), c.tolist())))
     ll_reg = float(np.sum(edge.seq_log_density((p, c))))
-    marginal = fit(list(child), _clone(child_estimator), max_its=max_its, out=None)
+    marginal = fit(list(child), _clone(child_estimator), max_its=max_its, out=None, rng=rng)
     ll_marginal = float(np.sum(marginal.seq_log_density(marginal.dist_to_encoder().seq_encode(list(child)))))
     pen = 0.5 * 1.0 * np.log(max(n, 2)) if penalty == "bic" else 0.0  # a single extra parameter: the slope
     return ll_reg - ll_marginal - pen
@@ -229,19 +245,23 @@ class GLMEdge:
         return self._inv(self.beta[0] + self.beta[1] * np.asarray(parent, dtype=float))
 
     def log_density(self, x: tuple) -> float:
+        """Evaluate ``log p(child | parent)`` for one GLM edge pair."""
         parent, child = x
         return float(_family_logpmf(self.family, [float(child)], self._mu(np.array([float(parent)])), self.phi)[0])
 
     def dist_to_encoder(self) -> Any:
+        """Return the encoder for parent-child pairs."""
         return _EdgeEncoder()
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
+        """Evaluate log densities for encoded GLM edge pairs."""
         parent, child = encoded
         return _family_logpmf(
             self.family, np.asarray(child, dtype=float), self._mu(np.asarray(parent, dtype=float)), self.phi
         )
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return a sampler for the GLM edge."""
         return _GLMEdgeSampler(self, seed)
 
     def __str__(self) -> str:
@@ -280,9 +300,12 @@ def glm_gain(
     *,
     max_its: int = 30,
     penalty: str = "bic",
+    rng: np.random.RandomState | None = None,
 ) -> float:
     """Description-length gain (nats) of a GLM ``family`` regression edge over the child marginal (one extra slope
-    parameter). Returns ``-inf`` when the fit is undefined or non-finite."""
+    parameter). Returns ``-inf`` when the fit is undefined or non-finite. ``rng`` seeds the marginal fit's EM
+    initialization (``None`` = a fixed seed: deterministic by default)."""
+    rng = np.random.RandomState(0) if rng is None else rng
     p = np.asarray(parent, dtype=float)
     c = np.asarray(child, dtype=float)
     n = len(c)
@@ -295,14 +318,19 @@ def glm_gain(
         return float("-inf")
     if not np.isfinite(ll_glm):
         return float("-inf")
-    marginal = fit(list(child), _clone(child_estimator), max_its=max_its, out=None)
+    marginal = fit(list(child), _clone(child_estimator), max_its=max_its, out=None, rng=rng)
     ll_marginal = float(np.sum(marginal.seq_log_density(marginal.dist_to_encoder().seq_encode(list(child)))))
     pen = 0.5 * 1.0 * np.log(max(n, 2)) if penalty == "bic" else 0.0
     return ll_glm - ll_marginal - pen
 
 
 def _numeric_edge_candidate(
-    parent_col: Sequence[Any], child_col: Sequence[Any], template: Any, *, max_its: int = 30
+    parent_col: Sequence[Any],
+    child_col: Sequence[Any],
+    template: Any,
+    *,
+    max_its: int = 30,
+    rng: np.random.RandomState | None = None,
 ) -> tuple[float | None, str | None]:
     """The best regression/GLM edge of ``child`` on a numeric ``parent``: ``(gain, kind)`` or ``(None, None)``.
     Dispatches on the child's type — binary -> logistic, count -> Poisson, real -> linear-Gaussian."""
@@ -311,11 +339,11 @@ def _numeric_edge_candidate(
     if not _is_numeric(child_col):  # a categorical child stays a binned conditional
         return None, None
     if _is_binary(child_col):
-        return glm_gain(parent_col, child_col, template, "binomial", max_its=max_its), "glm:binomial"
+        return glm_gain(parent_col, child_col, template, "binomial", max_its=max_its, rng=rng), "glm:binomial"
     if _is_count(child_col):
-        return glm_gain(parent_col, child_col, template, "poisson", max_its=max_its), "glm:poisson"
+        return glm_gain(parent_col, child_col, template, "poisson", max_its=max_its, rng=rng), "glm:poisson"
     if _is_numeric(child_col):
-        return regression_gain(parent_col, child_col, template, max_its=max_its), "regression"
+        return regression_gain(parent_col, child_col, template, max_its=max_its, rng=rng), "regression"
     return None, None
 
 
@@ -324,7 +352,7 @@ def _safe_log_density(fac: Any, value: Any) -> float:
 
     Field factors are chosen automatically from the *training* column, so a support-restricted family
     (Weibull, Gamma, ...) can be picked from a slice that happened to satisfy its support; scoring new
-    data outside that support must then report ``log 0 = -inf`` (the model's honest answer), not raise.
+    data outside that support must then report ``log 0 = -inf`` (the model's support semantics), not raise.
     """
     try:
         ld = float(fac.log_density(value))
@@ -374,6 +402,7 @@ class DependencyTreeDistribution:
         return f"DependencyTreeDistribution(fields={len(self.parents)}, edges=[{', '.join(edges) or 'none'}])"
 
     def log_density(self, x: tuple) -> float:
+        """Evaluate the dependency-tree joint log density for one record."""
         total = 0.0
         for i, parent in enumerate(self.parents):
             if parent is None:
@@ -383,6 +412,7 @@ class DependencyTreeDistribution:
         return total
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
+        """Evaluate dependency-tree joint log density for encoded records."""
         cols, n = encoded
         out = np.zeros(n, dtype=np.float64)
         for i, parent in enumerate(self.parents):
@@ -395,9 +425,11 @@ class DependencyTreeDistribution:
         return out
 
     def dist_to_encoder(self) -> Any:
+        """Return the encoder for dependency-tree record batches."""
         return _DependencyEncoder(len(self.parents))
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return a sampler for the dependency tree."""
         return _DependencyTreeSampler(self, seed)
 
     def edges(self) -> list[tuple[int, int]]:
@@ -453,6 +485,17 @@ class MixtureOfDependencyTrees:
         self.weights = np.asarray(weights, dtype=np.float64)
         self.log_weights = np.log(np.clip(self.weights, 1e-300, None))
 
+    @property
+    def w(self) -> np.ndarray:
+        """Mixture-convention alias for ``weights`` -- lets mixture-generic tooling (e.g.
+        ``mixle.utils.hvis.model_fit_health`` / ``hvis_map``) accept this model unchanged."""
+        return self.weights
+
+    @property
+    def log_w(self) -> np.ndarray:
+        """Mixture-convention alias for ``log_weights`` (see :attr:`w`)."""
+        return self.log_weights
+
     def __str__(self) -> str:
         return f"MixtureOfDependencyTrees(k={len(self.components)}, weights={np.round(self.weights, 3).tolist()})"
 
@@ -460,16 +503,19 @@ class MixtureOfDependencyTrees:
         return np.stack([c.seq_log_density(encoded) for c in self.components], axis=1)  # (n, K)
 
     def log_density(self, x: tuple) -> float:
+        """Evaluate mixture log density for one dependency-tree record."""
         from scipy.special import logsumexp
 
         return float(logsumexp(self.log_weights + np.array([c.log_density(x) for c in self.components])))
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
+        """Evaluate mixture log density for encoded dependency-tree records."""
         from scipy.special import logsumexp
 
         return logsumexp(self._component_ll(encoded) + self.log_weights[None, :], axis=1)
 
     def dist_to_encoder(self) -> Any:
+        """Return the record encoder shared by all tree components."""
         return _DependencyEncoder(len(self.components[0].parents))
 
     def responsibilities(self, data: Sequence[tuple]) -> np.ndarray:
@@ -481,10 +527,12 @@ class MixtureOfDependencyTrees:
         return r / r.sum(axis=1, keepdims=True)
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return a sampler for the mixture of dependency trees."""
         return _MixtureTreeSampler(self, seed)
 
     @property
     def n_components(self) -> int:
+        """Return the number of mixture components."""
         return len(self.components)
 
 
@@ -512,12 +560,22 @@ def learn_mixture_structure(
     min_gain: float = 0.0,
     n_bins: int = 4,
     max_its: int = 30,
+    field_estimators: Sequence[Any] | None = None,
 ) -> MixtureOfDependencyTrees:
-    """Fit a :class:`MixtureOfDependencyTrees` by hard EM -- discover clusters AND each cluster's dependency graph.
+    """Fit a :class:`MixtureOfDependencyTrees` by hard EM: discover clusters and each cluster's dependency graph.
 
     Each iteration re-learns a dependency forest per cluster on its currently-assigned points (M-step), then
     reassigns every record to its most-probable cluster (E-step), until assignments stabilize. Runs ``restarts``
     random initializations and returns the highest-likelihood fit. Empty/tiny clusters are re-seeded so a
+    component never collapses. Deterministic given ``seed``: the one ``RandomState`` drives the k-means/random
+    initializations AND every per-cluster fit's EM init (via :func:`learn_structure`'s ``rng``).
+
+    ``field_estimators`` pins each field's family (forwarded to :func:`learn_structure`) instead of re-running
+    the automatic detector per cluster per iteration. Beyond the speedup, pinning matters for identifiability:
+    the detector models a multimodal column with a Gaussian MIXTURE, which lets ONE cluster absorb what the
+    caller intended as two -- with per-field families pinned to unimodal models, regimes that differ in level
+    must separate into different components to score well.
+    random initializations and returns the highest-likelihood fit. Empty or very small clusters are re-seeded so a
     component never collapses.
     """
     data = list(data)
@@ -528,7 +586,9 @@ def learn_mixture_structure(
     best_ll = -np.inf
 
     def learn(subset: list[tuple]) -> DependencyTreeDistribution:
-        return learn_structure(subset, min_gain=min_gain, n_bins=n_bins, max_its=max_its)
+        return learn_structure(
+            subset, field_estimators=field_estimators, min_gain=min_gain, n_bins=n_bins, max_its=max_its, rng=rng
+        )
 
     # seed the first restarts with k-means (numeric-level split, then full-feature split), rest random
     inits = [
@@ -562,6 +622,119 @@ def learn_mixture_structure(
     return best
 
 
+def _split_separation(values: np.ndarray) -> tuple[float, float]:
+    """Deterministic 1-D 2-means ``(separation, minority share)`` -- the same construction (sign
+    split + Lloyd, gap over pooled within-std) and calibration as the merged-regime detector in
+    ``mixle.utils.hvis.topology.model_fit_health``, so the ``2.65 + 6/sqrt(n)`` threshold carries
+    over. Returns ``(0, 0)`` when 2-means degenerates to one cluster."""
+    proj = np.asarray(values, dtype=np.float64)
+    proj = proj - proj.mean()
+    assign = proj > 0.0
+    for _ in range(15):
+        if assign.all() or (~assign).all():
+            return 0.0, 0.0
+        c1, c0 = float(proj[assign].mean()), float(proj[~assign].mean())
+        new_assign = np.abs(proj - c1) < np.abs(proj - c0)
+        if bool(np.all(new_assign == assign)):
+            break
+        assign = new_assign
+    if not 0 < int(assign.sum()) < len(proj):
+        return 0.0, 0.0
+    minority = min(float(assign.mean()), float(1.0 - assign.mean()))
+    within_var = float(
+        np.average([proj[assign].var(), proj[~assign].var()], weights=[assign.mean(), 1 - assign.mean()])
+    )
+    sep = abs(float(proj[assign].mean() - proj[~assign].mean())) / max(np.sqrt(within_var), 1.0e-12)
+    return sep, minority
+
+
+def mixture_structure_health(
+    mot: MixtureOfDependencyTrees, data: Sequence[tuple], *, merged_sep_threshold: float | None = None
+) -> dict:
+    """The identifiability receipt for a fitted :class:`MixtureOfDependencyTrees`.
+
+    The trap it names: a flexible per-field family (a Gaussian-mixture conditional, a heavy-tailed
+    catch-all marginal) lets ONE component absorb what the caller intended as SEVERAL regimes --
+    and because the absorbed fit scores well, likelihood-level receipts look healthy. Measured
+    concretely: on two planted regimes, a one-component fit matches the two-component fit's
+    likelihood, so nothing downstream of the density can see the difference.
+
+    The check that can: STRUCTURE-CONDITIONAL multimodality. For every continuous field of every
+    component, group that component's dominated points by the field's own learned conditioning
+    (parent level for a binned conditional, regression residuals for a linear edge, the whole
+    fiber for a root marginal) -- after the tree has explained what it can, each group must be
+    unimodal. A group that still splits (deterministic 2-means separation over the same
+    ``2.65 + 6/sqrt(n)`` finite-sample threshold the hvis merged-regime detector is calibrated
+    to, minority share >= 20%) is a regime split the component is hiding, whichever family
+    absorbed it.
+
+    Returns ``{"components": [...], "diagnosis": [str, ...]}`` -- empty ``diagnosis`` means no
+    component hides multimodal structure. Per component, ``multimodal_fields`` lists
+    ``(field, where, separation)`` and ``mixture_factors`` lists factors the detector fitted as
+    mixture families (supporting detail: where the absorbed structure went). The fix when it
+    fires is more components or pinned unimodal ``field_estimators`` (see
+    :func:`learn_mixture_structure`). Complementary to ``mixle.utils.hvis.model_fit_health``,
+    which audits density calibration and accepts this model directly.
+    """
+    from mixle.stats import MixtureDistribution
+    from mixle.stats.combinator.conditional import ConditionalDistribution
+
+    data = list(data)
+    cols = _columns(data)
+    dominant = mot.responsibilities(data).argmax(axis=1)
+    components, diagnosis = [], []
+    for k, tree in enumerate(mot.components):
+        rows_k = np.flatnonzero(dominant == k)
+        mixture_factors: list[tuple[int, str]] = []
+        multimodal: list[tuple[int, str, float]] = []
+        for j, factor in enumerate(tree.factors):
+            if isinstance(factor, MixtureDistribution):
+                mixture_factors.append((j, "marginal"))
+            elif isinstance(factor, ConditionalDistribution):
+                mixture_factors.extend(
+                    (j, f"conditional level {lv!r}")
+                    for lv, child in factor.dmap.items()
+                    if isinstance(child, MixtureDistribution)
+                )
+
+            if not _is_numeric(cols[j]):
+                continue
+            vals = np.asarray([cols[j][i] for i in rows_k], dtype=np.float64)
+            parent = tree.parents[j]
+            if parent is None:
+                groups = [("marginal", vals)]
+            elif isinstance(factor, LinearGaussianEdge):
+                pv = np.asarray([cols[parent][i] for i in rows_k], dtype=np.float64)
+                groups = [("regression residuals", vals - (factor.a + factor.b * pv))]
+            elif isinstance(factor, ConditionalDistribution):
+                binner = tree.binners[j]
+                keys = [cols[parent][i] if binner is None else binner(cols[parent][i]) for i in rows_k]
+                by_key: dict = {}
+                for key, v in zip(keys, vals):
+                    by_key.setdefault(key, []).append(float(v))
+                groups = [
+                    (f"level {key!r}", np.asarray(g)) for key, g in sorted(by_key.items(), key=lambda t: repr(t[0]))
+                ]
+            else:  # GLM edges have discrete children; nothing continuous to test
+                continue
+            for where, g in groups:
+                if len(g) < 20:
+                    continue
+                sep, minority = _split_separation(g)
+                threshold = (
+                    merged_sep_threshold if merged_sep_threshold is not None else 2.65 + 6.0 / np.sqrt(float(len(g)))
+                )
+                if sep > threshold and minority >= 0.2:
+                    multimodal.append((j, where, sep))
+                    diagnosis.append(
+                        f"component {k} field {j} ({where}): still splits after conditioning (2-means "
+                        f"separation {sep:.1f}, minority {minority:.0%}) -- this component is absorbing "
+                        "multiple regimes; consider more components or pinned field_estimators."
+                    )
+        components.append({"mixture_factors": mixture_factors, "multimodal_fields": multimodal})
+    return {"components": components, "diagnosis": diagnosis}
+
+
 # --- structure search + fitting ------------------------------------------------------------------------------
 
 
@@ -573,6 +746,7 @@ def learn_structure(
     max_levels: int = 64,
     n_bins: int = 4,
     max_its: int = 30,
+    rng: np.random.RandomState | None = None,
 ) -> DependencyTreeDistribution:
     """Discover the dependency forest for heterogeneous ``data`` and return the fitted joint model.
 
@@ -582,7 +756,13 @@ def learn_structure(
     field at most one parent), and fits each factor. Falls back to independent marginals where no dependence
     clears ``min_gain`` -- never worse than a composite, much better when structure exists. This is "automatic
     inference for composable models of heterogeneous data" made real.
+
+    ``rng`` seeds every internal fit's EM initialization; ``None`` resolves to a FIXED seed, so two calls on
+    the same data return the same model. (Before this knob, fits whose detected family needs a randomized
+    init -- a Gaussian-mixture conditional, say -- drew fresh OS entropy per call, so the learned model
+    itself was nondeterministic.)
     """
+    rng = np.random.RandomState(0) if rng is None else rng
     data = list(data)
     cols = _columns(data)
     n_fields = len(cols)
@@ -600,9 +780,9 @@ def learn_structure(
         for c in range(n_fields):
             if c == p:
                 continue
-            gain = dependency_gain(keyed[p], cols[c], templates[c], max_its=max_its)
+            gain = dependency_gain(keyed[p], cols[c], templates[c], max_its=max_its, rng=rng)
             kind = "binned"
-            ngain, nkind = _numeric_edge_candidate(cols[p], cols[c], templates[c], max_its=max_its)
+            ngain, nkind = _numeric_edge_candidate(cols[p], cols[c], templates[c], max_its=max_its, rng=rng)
             if ngain is not None and ngain > gain:
                 gain, kind = ngain, nkind
             if gain > min_gain:
@@ -625,7 +805,7 @@ def learn_structure(
     edge_binners: list[Any] = [None] * n_fields
     for i in range(n_fields):
         if parents[i] is None:
-            factors[i] = fit(cols[i], _clone(templates[i]), max_its=max_its, out=None)
+            factors[i] = fit(cols[i], _clone(templates[i]), max_its=max_its, out=None, rng=rng)
         elif edge_kind[i] == "regression":
             factors[i] = fit_linear_gaussian_edge(list(zip(cols[parents[i]], cols[i])))
             edge_binners[i] = None  # the raw parent value drives the regression
@@ -638,7 +818,7 @@ def learn_structure(
             est = ConditionalDistributionEstimator(
                 estimator_map={lv: _clone(templates[i]) for lv in sorted(set(keys))}, given_estimator=None
             )
-            factors[i] = fit(list(zip(keys, cols[i])), est, max_its=max_its, out=None)
+            factors[i] = fit(list(zip(keys, cols[i])), est, max_its=max_its, out=None, rng=rng)
             edge_binners[i] = binners[p]
     return DependencyTreeDistribution(parents, factors, edge_binners)
 
@@ -708,8 +888,8 @@ def _quantile_binner(column: Sequence[Any], n_bins: int) -> _QuantileBinner:
 def _clone(estimator: Any) -> Any:
     """A fresh, independent copy of an estimator template so structure-search candidates never share state.
 
-    Was ``eval(str(estimator))``, but most estimators have the default ``<object at 0x...>`` repr, so that
-    silently raised and fell back to sharing the SAME object -- safe only because estimators are stateless
+    The older ``eval(str(estimator))`` path failed for estimators with the default ``<object at 0x...>`` repr
+    and fell back to sharing the same object -- safe only because estimators are stateless
     templates. ``deepcopy`` gives real isolation with no source-level eval; the fallback keeps the old
     same-object behavior for any estimator that can't be copied (e.g. one holding an uncopyable handle)."""
     try:
@@ -719,14 +899,44 @@ def _clone(estimator: Any) -> Any:
 
 
 def _num_free_params(dist: Any) -> int:
-    """A rough parameter count for the BIC penalty (used only to scale the complexity term)."""
-    for attr in ("mu", "p", "lam", "beta", "alpha"):
+    """An approximate parameter count for the BIC penalty (used only to scale the complexity term).
+
+    Composes over :class:`~mixle.stats.combinator.composite.CompositeDistribution` (sums each field's
+    own count) rather than falling through to a flat constant -- a composite of any size used to score
+    the same as a single scalar leaf, which made the network-vs-composite BIC comparison in
+    :func:`mixle.inference.estimation._maybe_structured_model` nearly meaningless for multi-field data.
+
+    Counts a fitted categorical-family leaf (``pmap``/``p_vec``) as ``K - 1`` (the true simplex free
+    parameter count), not the flat constant every other attribute check fell through to -- undercounting
+    complexity there let :func:`mixle.inference.bayesian_network.learn_bayesian_network`'s greedy search
+    accept spurious edges between fields with no real dependence, since the BIC penalty for the extra
+    per-parent-config categorical table barely grew with the number of categories.
+
+    The single-scalar-parameter families below (Poisson rate, Bernoulli/Binomial success probability)
+    count 1, not 2 -- the old code doubled every matched attribute uniformly, correct only for a
+    location+scale pair (Gaussian's mean+variance) and an overcount for these. NegativeBinomialDistribution
+    is a deliberate exception: it has both ``r`` and ``p`` attributes, and ``NegativeBinomialEstimator``
+    fits both by default (``estimate_r=True``), so it counts 2 even though ``p`` alone would otherwise
+    match the single-scalar bucket below. Other leaf families (Weibull, Gumbel, Beta, ...) use the
+    conservative flat-2 fallback unless they expose a more specific parameter-count hook.
+    """
+    name = type(dist).__name__
+    if name == "CompositeDistribution":
+        return sum(_num_free_params(d) for d in dist.dists)
+    if hasattr(dist, "pmap"):  # CategoricalDistribution: a K-outcome simplex has K-1 free params
+        return max(1, len(dist.pmap) - 1)
+    if hasattr(dist, "p_vec"):  # IntegerCategoricalDistribution: same simplex parameterization
+        return max(1, int(np.asarray(dist.p_vec).size) - 1)
+    if hasattr(dist, "r") and hasattr(dist, "p"):  # NegativeBinomialDistribution: r and p both estimated
+        return 2
+    if hasattr(dist, "mu"):  # location+scale family (Gaussian, ...): mean + variance
+        try:
+            return max(1, int(np.asarray(dist.mu).size) * 2)
+        except (TypeError, ValueError):
+            return 2
+    for attr in ("lam", "p"):  # single free scalar: Poisson rate, Bernoulli/Binomial/NegBinom success prob
         if hasattr(dist, attr):
-            v = getattr(dist, attr)
-            try:
-                return max(1, int(np.asarray(v).size) * 2)
-            except (TypeError, ValueError):
-                return 2
+            return 1
     return 2
 
 

@@ -1,19 +1,12 @@
-"""Create, estimate, and sample from a multivariate normal distribution with mean vector 'mu' (length n), and
-covariance matrix 'covar' (n by n).
-
-Defines the MultivariateGaussianDistribution, MultivariateGaussianSampler, MultivariateGaussianAccumulatorFactory,
-MultivariateGaussianAccumulator, MultivariateGaussianEstimator, and the MultivariateGaussianDataEncoder classes for use
-with mixle.
+"""Multivariate Gaussian distributions over real-valued vectors.
 
 Data type: np.ndarray[float]
 
-x = (x_1,x_2,..,x_n) ~ MVN(mu, covar), where mu is a length n numpy array, anc covar is an n by n positive definite
+x = (x_1,x_2,..,x_n) ~ MVN(mu, covar), where mu is a length n numpy array, and covar is an n by n positive definite
 covariance matrix.
 
 The log-density is given by
     log(p(x)) = -0.5*k*log(2*pi) - 0.5*log|covar| - 0.5*(x-mu)' covar^{-1} (x-mu).
-
-
 
 Reference: Mardia, Kent & Bibby, *Multivariate Analysis* (Academic Press, 1979).
 """
@@ -65,6 +58,8 @@ def _robust_cho_factor(covar: np.ndarray):
 
 
 class MultivariateGaussianFisherView(FixedFisherView):
+    """Fisher view over first and upper-triangular second moments for a full Gaussian."""
+
     def __init__(self, dist: Any) -> None:
         self.dim = int(dist.dim if hasattr(dist, "dim") else len(dist.mu))
         self._tri = np.triu_indices(self.dim)
@@ -127,12 +122,14 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare backend support for multivariate Gaussian generated kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the generated-compute declaration for the multivariate Gaussian."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -205,27 +202,28 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         covariance: list[list[float]] | np.ndarray = MISSING,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
-        """MultivariateGaussianDistribution object for multivariate Gaussian with mean mu and covaraince 'covar'.
+        """Create a multivariate Gaussian distribution.
 
         Args:
-            mu (Union[List[float], np.ndarray]): N-dimensional mean.
-            covar (Union[List[List[float]], np.ndarray]): Covariance matrix, should be N by N and positive definite.
-            name (Optional[str]): Set name to object.
-            keys (Optional[str]): Set keys for distribution.
+            mu: Mean vector.
+            covar: Positive-definite covariance matrix. ``covariance`` is
+                accepted as an alias.
+            name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate parameter prior over (mu, Lambda=covar^-1). A
                 :class:`~mixle.stats.bayes.normal_wishart.NormalWishartDistribution` enables the
                 Bayesian/variational machinery (``expected_log_density`` and the conjugate
                 posterior update); ``None`` (default) is a plain point model.
 
         Attributes:
-            dim (int): N is the dim of multivariate normal.
-            mu (np.ndarray): Length N numpy array
-            covar (np.ndarray): N by N numpy array for Covariance matrix.
-            chol (np.ndarray): Cholesky decomposition of covar.
-            name (Optional[str]): Set name to object.
-            keys (Optional[str]): Set keys for distribution.
-            self.use_lstsq (bool): Cholesky does not exist so use least squares approx.
-            self.chol_const (float): det from covar if lstsq is to be used.
+            dim: Dimension of the Gaussian.
+            mu: Mean vector.
+            covar: Covariance matrix.
+            chol: Cholesky factor when available.
+            name: Optional diagnostic name.
+            keys: Optional sufficient-statistic key.
+            use_lstsq: Whether scoring falls back to least-squares solves.
+            chol_const: Log-normalization term used by the scoring path.
 
         """
         covar = coalesce_alias("covar", covar, "covariance", covariance, default=MISSING)
@@ -287,7 +285,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         return self.seq_log_density(x)
 
     def __str__(self) -> str:
-        """Returns string representation of MultivariateGaussianDistribution object."""
+        """Return a readable distribution summary."""
         s1 = repr(list(self.mu))
         s2 = repr([list(u) for u in self.covar])
         s3 = repr(self.name)
@@ -455,13 +453,13 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         return MultivariateGaussianFisherView(self)
 
     def sampler(self, seed: int | None = None):
-        """Create a MultivariateGaussianSampler for sampling from this distribution.
+        """Return a sampler for iid draws from this distribution.
 
         Args:
-            seed (Optional[int]): Seed to set for sampling with RandomState.
+            seed: Optional seed for the sampler's random state.
 
         Returns:
-            MultivariateGaussianSampler object.
+            A configured ``MultivariateGaussianSampler``.
 
         """
         return MultivariateGaussianSampler(self, seed)
@@ -498,7 +496,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         return MultivariateGaussianDistribution(mu_cond, cov_cond)
 
     def marginal(self, keep: Sequence[int]) -> "MultivariateGaussianDistribution":
-        """Return the marginal Gaussian over the dimensions ``keep`` (Gaussian marginals just drop rows).
+        """Return the marginal Gaussian over dimensions ``keep``.
 
         ``N(mu, Sigma)`` marginalized to index set ``keep`` is ``N(mu[keep], Sigma[keep, keep])``. The
         order of ``keep`` is preserved, so the result's dimensions follow the given order.
@@ -511,15 +509,16 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         return MultivariateGaussianDistribution(self.mu[idx], np.asarray(self.covar)[np.ix_(idx, idx)])
 
     def estimator(self, pseudo_count: float | None = None):
-        """Create a MultivariateGaussianEstimator for estimating this distribution.
+        """Return an estimator initialized from this distribution's shape.
 
         If pseudo_count is passed, the current mean and covariance are used to regularize the estimate.
 
         Args:
-            pseudo_count (Optional[float]): Used to inflate sufficient statistics in estimation.
+            pseudo_count: Optional smoothing count applied to mean and
+                covariance estimates.
 
         Returns:
-            MultivariateGaussianEstimator object.
+            A ``MultivariateGaussianEstimator``.
 
         """
         if pseudo_count is None:
@@ -531,23 +530,23 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
             )
 
     def dist_to_encoder(self) -> "MultivariateGaussianDataEncoder":
-        """Returns a MultivariateGaussianDataEncoder object for encoding sequences of iid observations."""
+        """Return an encoder for iid multivariate Gaussian observations."""
         return MultivariateGaussianDataEncoder(dim=self.dim)
 
 
 class MultivariateGaussianSampler(DistributionSampler):
-    """MultivariateGaussianSampler object for sampling from a MultivariateGaussianDistribution."""
+    """Sampler for iid multivariate Gaussian observations."""
 
     def __init__(self, dist: "MultivariateGaussianDistribution", seed: int | None = None) -> None:
-        """MultivariateGaussianSampler object.
+        """Create a sampler bound to ``dist``.
 
         Args:
-            dist (MultivariateGaussianDistribution): Object instance to sample from.
-            seed (Optional[int]): Seed for random number generator.
+            dist: Distribution to sample from.
+            seed: Optional seed for the sampler's random state.
 
         Attributes:
-            dist (MultivariateGaussianDistribution): Object instance to sample from.
-            rng (RandomState): Seeded RandomState for sampling.
+            dist: Distribution being sampled.
+            rng: Random state used for draws.
 
         """
         self.rng = RandomState(seed)
@@ -567,23 +566,24 @@ class MultivariateGaussianSampler(DistributionSampler):
 
 
 class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
-    """MultivariateGaussianAccumulator object for aggregating sufficient statistics from iid observations."""
+    """Accumulator for multivariate Gaussian sufficient statistics."""
 
     def __init__(self, dim: int | None = None, keys: str | None = None, name: str | None = None) -> None:
-        """MultivariateGaussianAccumulator object.
+        """Create an accumulator for weighted first and second moments.
 
         Args:
-            dim (Optional[int]): Optional dimension of the Gaussian. Inferred from data if None.
-            keys (Optional[str]): Set keys for merging sufficient statistics.
-            name (Optional[str]): Set name for object instance.
+            dim: Optional dimension of the Gaussian. Inferred from data when
+                omitted.
+            keys: Optional key for merging sufficient statistics.
+            name: Optional diagnostic name.
 
         Attributes:
-            dim (Optional[int]): Dimension of the Gaussian, set on first update if None.
-            count (float): Sum of observation weights.
-            sum (Optional[np.ndarray]): Weighted sum of observation vectors.
-            sum2 (Optional[np.ndarray]): Weighted sum of observation outer products.
-            key (Optional[str]): Key for merging sufficient statistics.
-            name (Optional[str]): Name of object instance.
+            dim: Dimension of the Gaussian.
+            count: Sum of observation weights.
+            sum: Weighted sum of observation vectors.
+            sum2: Weighted sum of observation outer products.
+            keys: Optional key for merging sufficient statistics.
+            name: Optional diagnostic name.
 
         """
         self.dim = dim
@@ -676,14 +676,14 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, float]) -> "MultivariateGaussianAccumulator":
-        """Merge the sufficient statistics of suff_stat into this accumulator.
+        """Merge sufficient statistics into this accumulator.
 
         Args:
             suff_stat (Tuple[np.ndarray, np.ndarray, float]): Tuple of (weighted sum of observations,
                 weighted sum of outer products, sum of weights).
 
         Returns:
-            MultivariateGaussianAccumulator object.
+            This accumulator.
 
         """
         if suff_stat[0] is not None and self.sum is not None:
@@ -699,18 +699,18 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, float]:
-        """Returns the sufficient statistics (sum, sum of outer products, count) of the accumulator."""
+        """Return ``(sum, sum_outer, count)`` sufficient statistics."""
         return self.sum, self.sum2, self.count
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray, float]) -> "MultivariateGaussianAccumulator":
-        """Set the sufficient statistics of the accumulator to x.
+        """Replace this accumulator's sufficient statistics.
 
         Args:
             x (Tuple[np.ndarray, np.ndarray, float]): Tuple of (weighted sum of observations,
                 weighted sum of outer products, sum of weights).
 
         Returns:
-            MultivariateGaussianAccumulator object.
+            This accumulator.
 
         """
         self.sum = x[0]
@@ -749,25 +749,25 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
                 self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "MultivariateGaussianDataEncoder":
-        """Returns a MultivariateGaussianDataEncoder object for encoding sequences of iid observations."""
+        """Return an encoder compatible with this accumulator's dimension."""
         return MultivariateGaussianDataEncoder(dim=self.dim)
 
 
 class MultivariateGaussianAccumulatorFactory(StatisticAccumulatorFactory):
-    """MultivariateGaussianAccumulatorFactory object for creating MultivariateGaussianAccumulator objects."""
+    """Factory for multivariate Gaussian accumulators."""
 
     def __init__(self, dim: int | None, keys: str | None = None, name: str | None = None) -> None:
-        """MultivariateGaussianAccumulatorFactory object.
+        """Create an accumulator factory.
 
         Args:
-            dim (Optional[int]): Optional dimension of the Gaussian.
-            keys (Optional[str]): Set keys for merging sufficient statistics.
-            name (Optional[str]): Set name for object instance.
+            dim: Optional Gaussian dimension.
+            keys: Optional key for merging sufficient statistics.
+            name: Optional diagnostic name.
 
         Attributes:
-            dim (Optional[int]): Optional dimension of the Gaussian.
-            key (Optional[str]): Key for merging sufficient statistics.
-            name (Optional[str]): Name of object instance.
+            dim: Optional Gaussian dimension.
+            keys: Optional sufficient-statistic key.
+            name: Optional diagnostic name.
 
         """
         self.dim = dim
@@ -775,13 +775,12 @@ class MultivariateGaussianAccumulatorFactory(StatisticAccumulatorFactory):
         self.name = name
 
     def make(self) -> "MultivariateGaussianAccumulator":
-        """Returns a new MultivariateGaussianAccumulator with the factory's dim, keys, and name."""
+        """Return a fresh accumulator with the factory configuration."""
         return MultivariateGaussianAccumulator(dim=self.dim, keys=self.keys, name=self.name)
 
 
 class MultivariateGaussianEstimator(ParameterEstimator):
-    """MultivariateGaussianEstimator object for estimating a multivariate normal distribution from
-    aggregated sufficient statistics."""
+    """Estimator for multivariate Gaussian distributions."""
 
     def __init__(
         self,
@@ -793,16 +792,17 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         prior: SequenceEncodableProbabilityDistribution | None = None,
         min_covar: float | None = None,
         ridge: float | None = None,
+        track_conditioning: bool = False,
+        degenerate_ratio: float = 1.0e-6,
     ) -> None:
-        """MultivariateGaussianEstimator object for estimating multivariate normal distribution from sufficient stats.
+        """Create an estimator for weighted multivariate Gaussian statistics.
 
         Args:
-            dim (Optional[int]): Dimension of multivariate normal. Inferred from 'suff_stat' if None.
-            pseudo_count (Optional[Tuple[Optional[float], Optional[float]]]): Regularize mean and/or covariance.
-            suff_stat (Optional[Tuple[Optional[np.ndarray], Optional[np.ndarray]]]): Mean and covariance estimated
-                from previous data or used to regularize.
-            name (Optional[str]): Set name for object instance.
-            keys (Optional[str]): Set keys for estimator.
+            dim: Gaussian dimension. Inferred from ``suff_stat`` when omitted.
+            pseudo_count: Optional smoothing counts for mean and covariance.
+            suff_stat: Optional prior mean and covariance used for smoothing.
+            name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate NormalWishart prior over (mu, Lambda=covar^-1). When present,
                 ``estimate`` performs the closed-form conjugate posterior update (returning the joint
                 MAP estimate and carrying the posterior forward as the fitted model's prior) instead
@@ -814,14 +814,24 @@ class MultivariateGaussianEstimator(ParameterEstimator):
                 ``eps = max(min_covar, ridge * trace(cov) / d)`` so a singular / non-finite
                 covariance (a component holding < d points) cannot break the Cholesky factor.
                 Bias is negligible at the defaults.
+            track_conditioning (bool): Opt-in numerics-conditioning receipt. When ``True``,
+                ``estimate`` computes the eigenspectrum of the RAW (pre-ridge) empirical covariance
+                and attaches it to the returned distribution as ``.conditioning_receipt`` -- a
+                :class:`~mixle.stats.compute.error_receipts.ConditioningReceipt` with the eigenvalues,
+                condition number, and a near-degenerate-variance flag. Computed on the raw scatter
+                (not the ridge-regularized one) so the receipt reports the DATA's true conditioning
+                rather than the numerical safety net masking it. ``False`` by default (no overhead).
+            degenerate_ratio (float): Smallest/largest covariance-eigenvalue ratio below which
+                ``track_conditioning`` flags the fit as near-degenerate. Only used when
+                ``track_conditioning=True``.
 
         Attributes:
-            dim (int): Dimension of multivariate normal.
-            pseudo_count (Optional[Tuple[Optional[float], Optional[float]]]): Regularize mean and/or covariance.
-            prior_mu (Optional[np.ndarray]): Mean from prior data or used to regularize.
-            prior_covar (Optional[np.ndarray]): Covariance matrix from prior data or used to regularize.
-            name (Optional[str]): Set name to object.
-            keys (Optional[str]): Keys for merging sufficient statistics.
+            dim: Gaussian dimension.
+            pseudo_count: Smoothing counts for mean and covariance.
+            prior_mu: Prior mean used for smoothing.
+            prior_covar: Prior covariance used for smoothing.
+            name: Optional diagnostic name.
+            keys: Optional sufficient-statistic key.
         """
 
         dim_loc = (
@@ -844,9 +854,11 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         self.has_conj_prior = isinstance(prior, NormalWishartDistribution)
         self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
         self.ridge = 1.0e-6 if ridge is None else float(ridge)
+        self.track_conditioning = track_conditioning
+        self.degenerate_ratio = float(degenerate_ratio)
 
     def accumulator_factory(self) -> "MultivariateGaussianAccumulatorFactory":
-        """Returns a MultivariateGaussianAccumulatorFactory built from the estimator's attributes."""
+        """Return an accumulator factory matching this estimator."""
         return MultivariateGaussianAccumulatorFactory(dim=self.dim, keys=self.keys, name=self.name)
 
     def model_log_density(self, model: "MultivariateGaussianDistribution") -> float:
@@ -922,9 +934,11 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             # rather than dividing by zero and emitting a NaN mean.
             d = self.dim if self.dim is not None else len(suff_stat[0])
             mu = np.asarray(self.prior_mu, dtype=float) if self.prior_mu is not None else vec.zeros(d)
-            covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.eye(d)
-            covar = self._regularize_covar(covar)
-            return MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.keys)
+            raw_covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.eye(d)
+            covar = self._regularize_covar(raw_covar)
+            dist = MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.keys)
+            self._attach_conditioning_receipt(dist, raw_covar)
+            return dist
 
         if pc1 is not None and self.prior_mu is not None:
             mu = (suff_stat[0] + pc1 * self.prior_mu) / (nobs + pc1)
@@ -932,13 +946,23 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             mu = suff_stat[0] / nobs
 
         if pc2 is not None and self.prior_covar is not None:
-            covar = (suff_stat[1] + (pc2 * self.prior_covar) - vec.outer(mu, mu * nobs)) / (nobs + pc2)
+            raw_covar = (suff_stat[1] + (pc2 * self.prior_covar) - vec.outer(mu, mu * nobs)) / (nobs + pc2)
         else:
-            covar = (suff_stat[1] / nobs) - vec.outer(mu, mu)
+            raw_covar = (suff_stat[1] / nobs) - vec.outer(mu, mu)
 
-        covar = self._regularize_covar(covar)
+        covar = self._regularize_covar(raw_covar)
 
-        return MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.keys)
+        dist = MultivariateGaussianDistribution(mu, covar, name=self.name, keys=self.keys)
+        self._attach_conditioning_receipt(dist, raw_covar)
+        return dist
+
+    def _attach_conditioning_receipt(self, dist: "MultivariateGaussianDistribution", raw_covar: np.ndarray) -> None:
+        """Opt-in: compute and attach a numerics-conditioning receipt to ``dist`` (see ``__init__``)."""
+        if not self.track_conditioning:
+            return
+        from mixle.stats.compute.error_receipts import conditioning_receipt
+
+        dist.conditioning_receipt = conditioning_receipt(raw_covar, degenerate_ratio=self.degenerate_ratio)
 
     def _regularize_covar(self, covar: np.ndarray) -> np.ndarray:
         """P1 covariance ridge: cov <- cov + eps*I with eps = max(min_covar, ridge*trace/d).
@@ -958,23 +982,23 @@ class MultivariateGaussianEstimator(ParameterEstimator):
 
 
 class MultivariateGaussianDataEncoder(DataSequenceEncoder):
-    """MultivariateGaussianDataEncoder object for encoding sequences of iid multivariate Gaussian observations."""
+    """Encoder for iid multivariate Gaussian observations."""
 
     def __init__(self, dim: int | None = None) -> None:
-        """MultivariateGaussianDataEncoder object.
+        """Create an encoder with an optional fixed dimension.
 
         Args:
-            dim (Optional[int]): Optional dimension of the Gaussian. Inferred from data if None.
+            dim: Optional Gaussian dimension. Inferred from data when omitted.
 
         """
         self.dim = dim
 
     def __str__(self) -> str:
-        """Returns string representation of MultivariateGaussianDataEncoder object."""
+        """Return a readable encoder summary."""
         return "MultivariateGaussianDataEncoder(dim=" + str(self.dim) + ")"
 
     def __eq__(self, other: object) -> bool:
-        """Checks if other object is a MultivariateGaussianDataEncoder with the same dim.
+        """Return whether ``other`` is an encoder with the same dimension.
 
         Args:
             other (object): Object to compare against.

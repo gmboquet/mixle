@@ -275,7 +275,11 @@ class QuantizedHmmEstimationTestCase(unittest.TestCase):
             model = seq_initialize(enc_data, est, RandomState(3), p=1.0)
             model = seq_estimate(enc_data, est, model)
             ll_first = np.sum(model.seq_log_density(enc_eval))
-            for _ in range(24):
+            # 10 refit iterations (down from 24) still clear the +100 margin with ~4x headroom
+            # (verified ll_last_on - ll_first_on / ll_last_off is ~440-450 nats at this count, vs. the
+            # ~490 nats reached by 24 iterations); data size (500) is load-bearing here -- halving it to
+            # 250 was verified to make the split never trigger at all, so it is left unchanged.
+            for _ in range(10):
                 model = seq_estimate(enc_data, est, model)
             lls[split] = (ll_first, np.sum(model.seq_log_density(enc_eval)))
 

@@ -58,7 +58,7 @@ def seq_encode(
         chunk_size (Optional[int]): Approximate size of chunks to determine num_chunks above.
 
     Returns:
-        Sequence encoded data for use with 'seq_' functions.
+        Encoded data ready for vectorized ``seq_*`` methods.
 
     """
     # tolerate a model or estimator passed positionally in the encoder slot
@@ -115,11 +115,10 @@ def seq_encode(
 def seq_log_density_sum(
     enc_data: list[tuple[int, T]] | pyspark.rdd.RDD, estimate: SequenceEncodableProbabilityDistribution
 ) -> tuple[float, float]:
-    """Vectorized evaluation of the sum of log_density values for a given SequenceEncodableProbabilityDistribution
-        over encoded data.
+    """Vectorized evaluation of total count and total log-density over encoded data.
 
-    Returns a Tuple containing the sum of all observations in enc_data, and the sum of the log_density evaluated at all
-    encoded data observations in enc_data. This is a fully vectorized evaluation.
+    The returned pair contains the observation count represented by ``enc_data`` and the sum of
+    ``log_density`` over those encoded observations.
 
     Args:
         enc_data (Union[List[Tuple[int, T]], 'pyspark.rdd.RDD']): Sequence encoded data of format matching output of

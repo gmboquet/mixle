@@ -1,4 +1,9 @@
-"""Metadata wrapper for sequence-encoded data batches."""
+"""Metadata wrappers and transfer helpers for sequence-encoded data batches.
+
+The module attaches count, byte-size, encoder, and engine metadata to encoded
+payloads and moves numeric fields to resident engines without disturbing object
+or string metadata.
+"""
 
 from __future__ import annotations
 

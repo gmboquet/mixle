@@ -45,9 +45,13 @@ class Surrogate(Protocol):
     (``return_cov=True``).
     """
 
-    def fit(self, x: Any, y: Any, **kwargs: Any) -> Any: ...
+    def fit(self, x: Any, y: Any, **kwargs: Any) -> Any:
+        """Fit or update the surrogate from observed design points ``x`` and responses ``y``."""
+        ...
 
-    def predict(self, x_train: Any, y_train: Any, x_new: Any, return_cov: bool = ...) -> Any: ...
+    def predict(self, x_train: Any, y_train: Any, x_new: Any, return_cov: bool = ...) -> Any:
+        """Return predictive moments at ``x_new`` using the observed training data."""
+        ...
 
 
 @runtime_checkable

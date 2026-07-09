@@ -34,6 +34,10 @@ tuple, a dictionary, a sequence, a graph-like object, or a neural training pair.
 The fitted model scores that whole value with ``log_density(x)``. If the model
 can sample, it samples values with the same shape.
 
+Keep the observation shape stable. If a field is sometimes absent, sometimes a
+list, or sometimes a scalar, represent that policy explicitly with a structured
+family rather than relying on preprocessing side effects.
+
 Estimator Shape Mirrors Data Shape
 ----------------------------------
 
@@ -129,6 +133,11 @@ This is why mixle can fit heterogeneous records and latent structures without a
 new training loop for every combination. The child estimators do different work,
 but they present the same outer shape to the parent composite or latent model.
 
+Because the same loop serves many structures, validation should check both the
+scalar path and the encoded/vectorized path when a family or backend changes.
+They should agree on ordinary observations, impossible observations, and
+documented missing-data behavior.
+
 Distributions Are Query Objects
 -------------------------------
 
@@ -170,6 +179,10 @@ Ask what an object supports instead of guessing from its class:
 Capabilities cover exact density, finite support, enumeration, ranking,
 conditioning, marginalization, latent posterior behavior, backend scoring,
 conjugate updates, and more.
+
+Capability reports are part of release evidence. If a guide relies on
+enumeration, posterior queries, backend scoring, or exact density, record the
+capability check near the workflow that uses it.
 
 See :doc:`capabilities-contracts` for the full capability catalog and the
 contracts used by distribution, estimator, accumulator, and encoder objects.
@@ -214,3 +227,15 @@ The shortest practical advice is: start with ``mixle.stats`` when you know the
 model, ``mixle.task.recommend_model`` when you want help choosing one,
 ``mixle.ppl`` when the formula is clearer than the estimator tree, and
 ``mixle.describe`` whenever you are unsure what the fitted object can do.
+
+Release Evidence
+----------------
+
+For core Mixle workflows, preserve:
+
+* the observation shape and estimator tree;
+* fitting route, seed, restart policy, and validation split;
+* scalar/vectorized parity evidence for new families or backends;
+* capability checks for downstream operations;
+* missing-data and impossible-observation policy; and
+* artifact provenance when the fitted model leaves the notebook.

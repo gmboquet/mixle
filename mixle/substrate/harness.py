@@ -31,6 +31,7 @@ class HarnessResult:
     redactions: int = 0  # how many secrets the guardrails masked
 
     def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable harness result."""
         return {
             "status": self.status,
             "answer": self.answer,

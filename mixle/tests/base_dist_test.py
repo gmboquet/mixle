@@ -184,8 +184,14 @@ def _build_dists():
     w = np.ones(num_states) / num_states
     len_dist = IntegerCategoricalDistribution(min_val=0, p_vec=len_probs)
 
+    # terminal_level=2 (rather than the previously used 4) trims this fixture back down: with
+    # len_probs favoring >1 child on average, tree size (and the non-vectorized per-tree cost
+    # paid by the plain `estimate()` E-step used in estimation_test) grows quickly with depth.
+    # terminal_level=2 was verified to keep the KLD-decreases-with-more-data recovery property
+    # (checked in estimation_test/seq_estimation_test) robust across 10 seeds (1-10), not just
+    # the 4 seeds asserted here.
     d = TreeHiddenMarkovModelDistribution(
-        topics=topics, w=w, transitions=trans_mat, len_dist=len_dist, terminal_level=4
+        topics=topics, w=w, transitions=trans_mat, len_dist=len_dist, terminal_level=2
     )
     dists.append(d)
 

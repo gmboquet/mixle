@@ -108,6 +108,8 @@ def _to_binary_vector(x: Any, num_features: int, data_format: str) -> np.ndarray
 
 
 class IndianBuffetProcessFisherView(FixedFisherView):
+    """Fixed Fisher view whose statistics are the binary feature indicators."""
+
     def __init__(self, dist: Any) -> None:
         self.num_features = int(dist.num_features)
         super().__init__(dist, [("feature", str(i)) for i in range(self.num_features)])
@@ -146,12 +148,14 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare generic table-kernel capabilities for finite IBP rows."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic_table")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured declaration for finite IBP parameters and statistics."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -238,6 +242,7 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
         return float(np.exp(self.log_density(x)))
 
     def density_semantics(self):
+        """Return that plug-in densities use posterior mean feature probabilities."""
         from mixle.stats.compute.pdist import DensitySemantics
 
         return DensitySemantics.ESTIMATE  # plug-in using E_q[pi_k], not the exact marginal
@@ -340,6 +345,8 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class IndianBuffetProcessEnumerator(DistributionEnumerator):
+    """Enumerate finite IBP feature rows in descending plug-in probability order."""
+
     def __init__(self, dist: IndianBuffetProcessDistribution) -> None:
         """Best-first enumeration of IBP feature rows over independent Bernoulli features.
 
@@ -382,6 +389,7 @@ class IndianBuffetProcessSampler(DistributionSampler):
         return z.astype(int).tolist()
 
     def sample(self, size: int | None = None) -> list[int] | list[list[int]]:
+        """Draw one feature row or ``size`` iid feature rows."""
         if size is None:
             z = self.rng.rand(self.dist.num_features) <= self.dist.feature_probs
             return self._format(z)
@@ -410,6 +418,7 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         self._seq_ll = 0.0
 
     def update(self, x: Any, weight: float, estimate: IndianBuffetProcessDistribution | None) -> None:
+        """Update weighted feature-use counts from one row."""
         if estimate is not None:
             self.alpha = estimate.alpha
         xx = _to_binary_vector(x, self.num_features, self.data_format)
@@ -417,9 +426,11 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         self.total_count += weight
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize feature-use counts from one row."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: IndianBuffetProcessDistribution | None) -> None:
+        """Update weighted feature-use counts from encoded rows."""
         if estimate is not None:
             self.alpha = estimate.alpha
         xx = np.asarray(x, dtype=np.float64)
@@ -453,9 +464,11 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         self.total_count += float(engine.to_numpy(engine.sum(w)))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize feature-use counts from encoded rows."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: SS) -> "IndianBuffetProcessAccumulator":
+        """Merge feature-use counts, total count, and alpha metadata."""
         self.feature_counts += suff_stat[0]
         self.total_count += suff_stat[1]
         if suff_stat[2] is not None:
@@ -463,9 +476,11 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> SS:
+        """Return feature-use counts, total count, and alpha metadata."""
         return self.feature_counts.copy(), self.total_count, self.alpha
 
     def from_value(self, x: SS) -> "IndianBuffetProcessAccumulator":
+        """Restore feature-use counts, total count, and alpha metadata."""
         self.feature_counts = np.asarray(x[0], dtype=np.float64).copy()
         self.total_count = float(x[1])
         if x[2] is not None:
@@ -479,6 +494,7 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -486,10 +502,12 @@ class IndianBuffetProcessAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "IndianBuffetProcessDataEncoder":
+        """Return the encoder compatible with finite IBP sufficient statistics."""
         return IndianBuffetProcessDataEncoder(self.num_features, self.data_format)
 
 
@@ -505,6 +523,7 @@ class IndianBuffetProcessAccumulatorFactory(StatisticAccumulatorFactory):
         self.data_format = _check_data_format(data_format)
 
     def make(self) -> IndianBuffetProcessAccumulator:
+        """Create an empty finite IBP accumulator."""
         return IndianBuffetProcessAccumulator(self.num_features, self.alpha, self.keys, self.data_format)
 
 
@@ -544,9 +563,11 @@ class IndianBuffetProcessEstimator(ParameterEstimator):
         self.data_format = _check_data_format(data_format)
 
     def accumulator_factory(self) -> IndianBuffetProcessAccumulatorFactory:
+        """Return a factory for finite IBP sufficient-statistic accumulators."""
         return IndianBuffetProcessAccumulatorFactory(self.num_features, self.alpha, self.keys, self.data_format)
 
     def estimate(self, nobs: float | None, suff_stat: SS) -> IndianBuffetProcessDistribution:
+        """Update the variational Beta posterior and optional concentration parameter."""
         feature_counts, total_count, prev_alpha = suff_stat
         alpha = self.alpha if prev_alpha is None else _validate_alpha(prev_alpha)
         feature_counts = np.asarray(feature_counts, dtype=np.float64)
@@ -625,6 +646,7 @@ class IndianBuffetProcessDataEncoder(DataSequenceEncoder):
         )
 
     def seq_encode(self, x: Sequence[Any] | np.ndarray) -> np.ndarray:
+        """Validate and encode dense or sparse feature rows as a boolean matrix."""
         if isinstance(x, np.ndarray) and x.ndim == 2:
             if x.shape[1] != self.num_features:
                 raise ValueError("dense IBP matrix must have num_features columns")

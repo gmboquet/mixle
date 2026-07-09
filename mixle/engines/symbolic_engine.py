@@ -22,7 +22,7 @@ from mixle.engines.base import ComputeEngine
 
 @dataclass(frozen=True)
 class SymbolicExpression:
-    """A tiny immutable symbolic expression tree."""
+    """A compact immutable symbolic expression tree."""
 
     op: str
     args: tuple[Any, ...] = ()

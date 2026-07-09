@@ -1,17 +1,10 @@
-"""Create, estimate, and sample from a diagonal Gaussian distribution (independent-multivariate Gaussian).
+"""Diagonal Gaussian distributions, estimators, accumulators, and encoders.
 
-Defines the DiagonalGaussianDistribution, DiagonalGaussianSampler, DiagonalGaussianAccumulatorFactory,
-DiagonalGaussianAccumulator, DiagonalGaussianEstimator, and the DiagonalGaussianDataEncoder classes for use with
-mixle.
-
-The log-density of an 'n' dimensional diagonal-gaussian observation x = (x_1,x_2,...,x_n) with mean mu=(m_1,m_2,..,m_n),
-and diagonal covariance matrix given by covar = diag(s2_1, s2_2,...,s2_n).
+The log-density of an ``n``-dimensional diagonal Gaussian observation
+``x = (x_1, x_2, ..., x_n)`` with mean ``mu`` and diagonal covariance
+``covar = diag(s2_1, s2_2, ..., s2_n)`` is:
 
     log(p_mat(x)) = -0.5*sum_{i=1}^{n} (x_i-m_i)^2 / s2_i - 0.5*log(s2_i) - (n/2)*log(2*pi).
-
-Data type: x (List[float], np.ndarray).
-
-
 
 Reference: Mardia, Kent & Bibby, *Multivariate Analysis* (Academic Press, 1979).
 """
@@ -39,6 +32,8 @@ from mixle.utils.special import digamma
 
 
 class DiagonalGaussianFisherView(FixedFisherView):
+    """Fisher view over per-dimension first and second moments for a diagonal Gaussian."""
+
     def __init__(self, dist: Any) -> None:
         self.dim = int(dist.dim if hasattr(dist, "dim") else len(dist.mu))
         labels = [("sum", str(i)) for i in range(self.dim)]
@@ -80,12 +75,14 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare backend support for diagonal Gaussian generated kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the generated-compute declaration for the diagonal Gaussian."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -152,28 +149,29 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         covariance: Sequence[float] | np.ndarray = MISSING,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
-        """Create a DiagonalGaussianDistribution object with mean mu and covariance covar.
+        """Create a diagonal Gaussian distribution.
 
         Args:
-            mu (Union[Sequence[float], np.ndarray]): Mean of Gaussian distribution.
-            covar (Union[Sequence[float], np.ndarray]): Variance of each component.
-            name (Optional[str]): Set name for object instance.
-            keys (Optional[str]): Set keys for object isntance.
+            mu: Mean vector.
+            covar: Per-coordinate variances. ``covariance`` is accepted as an
+                alias.
+            name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate parameter prior over (mu, tau=1/covar). A
                 :class:`~mixle.stats.bayes.multivariate_normal_gamma.MultivariateNormalGammaDistribution` enables the
                 Bayesian/variational machinery (``expected_log_density`` and the conjugate
                 posterior update); ``None`` (default) is a plain point model.
 
         Attributes:
-             dim (int): Dimension of the multivariate Gaussian. Determined by mean length.
-             mu (np.ndarray): Mean of the Gaussian.
-             covar (np.ndarray): Variance for each component.
-             name (Optional[str]): Name of object instance.
-             log_c (float): Normalizing constant for diagonal Gausisan.
-             ca (np.ndarray): Term for likelihood-calc.
-             cb (np.ndarray): Term for likelihood-calc.
-             cc (np.ndarray): Term for likelihood-calc.
-             key (Optional[str]): Key for merging sufficient statistics.
+             dim: Dimension of the Gaussian.
+             mu: Mean vector.
+             covar: Per-coordinate variances.
+             name: Optional diagnostic name.
+             log_c: Log-normalization constant.
+             ca: Quadratic scoring coefficient.
+             cb: Linear scoring coefficient.
+             cc: Constant scoring coefficient.
+             keys: Optional sufficient-statistic key.
 
         """
         covar = coalesce_alias("covar", covar, "covariance", covariance, default=MISSING)
@@ -235,7 +233,7 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         return self.seq_log_density(x)
 
     def __str__(self) -> str:
-        """Returns string representation of DiagonalGaussianDistribution object."""
+        """Return a readable distribution summary."""
         s1 = repr(list(self.mu.flatten()))
         s2 = repr(list(self.covar.flatten()))
         s3 = repr(self.name)
@@ -391,25 +389,26 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         return DiagonalGaussianFisherView(self)
 
     def sampler(self, seed: int | None = None) -> "DiagonalGaussianSampler":
-        """Create a DiagonalGaussianSampler for sampling from this distribution.
+        """Return a sampler for iid draws from this distribution.
 
         Args:
-            seed (Optional[int]): Seed to set for sampling with RandomState.
+            seed: Optional seed for the sampler's random state.
 
         Returns:
-            DiagonalGaussianSampler object.
+            A configured ``DiagonalGaussianSampler``.
 
         """
         return DiagonalGaussianSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "DiagonalGaussianEstimator":
-        """Create a DiagonalGaussianEstimator for estimating this distribution.
+        """Return an estimator initialized from this distribution's shape.
 
         Args:
-            pseudo_count (Optional[float]): Used to inflate sufficient statistics in estimation.
+            pseudo_count: Optional smoothing count applied to mean and variance
+                estimates.
 
         Returns:
-            DiagonalGaussianEstimator object.
+            A ``DiagonalGaussianEstimator``.
 
         """
         if pseudo_count is None:
@@ -420,23 +419,23 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
             )
 
     def dist_to_encoder(self) -> "DiagonalGaussianDataEncoder":
-        """Returns a DiagonalGaussianDataEncoder object for encoding sequences of iid observations."""
+        """Return an encoder for iid diagonal Gaussian observations."""
         return DiagonalGaussianDataEncoder(dim=self.dim)
 
 
 class DiagonalGaussianSampler(DistributionSampler):
-    """DiagonalGaussianSampler object for sampling from a DiagonalGaussianDistribution."""
+    """Sampler for iid diagonal Gaussian observations."""
 
     def __init__(self, dist: DiagonalGaussianDistribution, seed: int | None = None) -> None:
-        """DiagonalGaussianSampler object for sampling from DiagonalGaussian instance.
+        """Create a sampler bound to ``dist``.
 
         Args:
-            dist (DiagonalGaussianDistribution): Object instance to sample from.
-            seed (Optional[int]): Seed for random number generator.
+            dist: Distribution to sample from.
+            seed: Optional seed for the sampler's random state.
 
         Attributes:
-            dist (DiagonalGaussianDistribution): Object instance to sample from.
-            seed (Optional[int]): Seed for random number generator.
+            dist: Distribution being sampled.
+            rng: Random state used for draws.
 
         """
         self.rng = RandomState(seed)
@@ -464,21 +463,21 @@ class DiagonalGaussianSampler(DistributionSampler):
 
 
 class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
-    """DiagonalGaussianAccumulator object for aggregating sufficient statistics from iid observations."""
+    """Accumulator for diagonal Gaussian sufficient statistics."""
 
     def __init__(self, dim: int | None = None, keys: str | None = None) -> None:
-        """DiagonalGaussianAccumulator object for aggregating sufficient statistics from iid observations.
+        """Create an accumulator for weighted first and second moments.
 
         Args:
-            dim (Optional[int]): Optional dimension of Gaussian.
-            keys (Optional[str]): Set keys for merging sufficient statistics.
+            dim: Optional Gaussian dimension. Inferred from data when omitted.
+            keys: Optional key for merging sufficient statistics.
 
         Attributes:
-             dim (Optional[int]): Optional dimension of Gaussian.
-             count (float): Used for tracking weighted observations counts.
-             sum (np.ndarray): Sum of observation vectors.
-             sum2 (np.ndarray): Sum of squared observation vectors.
-             key (Optional[str]): If set, merge sufficient statistics with objects containing matching keys.
+             dim: Gaussian dimension.
+             count: Sum of observation weights.
+             sum: Weighted sum of observation vectors.
+             sum2: Weighted sum of squared observation vectors.
+             keys: Optional sufficient-statistic key.
 
         """
         self.dim = dim
@@ -565,14 +564,14 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, float]) -> "DiagonalGaussianAccumulator":
-        """Merge the sufficient statistics of suff_stat into this accumulator.
+        """Merge sufficient statistics into this accumulator.
 
         Args:
             suff_stat (Tuple[np.ndarray, np.ndarray, float]): Tuple of (weighted sum of observations,
                 weighted sum of squared observations, sum of weights).
 
         Returns:
-            DiagonalGaussianAccumulator object.
+            This accumulator.
 
         """
         if suff_stat[0] is not None and self.sum is not None:
@@ -588,18 +587,18 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, float]:
-        """Returns the sufficient statistics (sum, sum of squares, count) of the accumulator."""
+        """Return ``(sum, sum_squares, count)`` sufficient statistics."""
         return self.sum, self.sum2, self.count
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray, float]) -> "DiagonalGaussianAccumulator":
-        """Set the sufficient statistics of the accumulator to x.
+        """Replace this accumulator's sufficient statistics.
 
         Args:
             x (Tuple[np.ndarray, np.ndarray, float]): Tuple of (weighted sum of observations,
                 weighted sum of squared observations, sum of weights).
 
         Returns:
-            DiagonalGaussianAccumulator object.
+            This accumulator.
 
         """
         self.sum = x[0]
@@ -638,36 +637,35 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
                 self.from_value(stats_dict[self.keys])
 
     def acc_to_encoder(self) -> "DiagonalGaussianDataEncoder":
-        """Returns a DiagonalGaussianDataEncoder object for encoding sequences of iid observations."""
+        """Return an encoder compatible with this accumulator's dimension."""
         return DiagonalGaussianDataEncoder(dim=self.dim)
 
 
 class DiagonalGaussianAccumulatorFactory(StatisticAccumulatorFactory):
-    """DiagonalGaussianAccumulatorFactory object for creating DiagonalGaussianAccumulator objects."""
+    """Factory for diagonal Gaussian accumulators."""
 
     def __init__(self, dim: int | None = None, keys: str | None = None) -> None:
-        """DiagonalGaussianAccumulatorFactory object for creating DiagonalGaussianAccumulator objects.
+        """Create an accumulator factory.
 
         Args:
-            dim (Optional[int]): Optional dimension of Gaussian.
-            keys (Optional[str]): Set keys for merging sufficient statistics.
+            dim: Optional Gaussian dimension.
+            keys: Optional key for merging sufficient statistics.
 
         Attributes:
-             dim (Optional[int]): Optional dimension of Gaussian.
-             key (Optional[str]): If set, merge sufficient statistics with objects containing matching keys.
+             dim: Optional Gaussian dimension.
+             keys: Optional sufficient-statistic key.
 
         """
         self.dim = dim
         self.keys = keys
 
     def make(self) -> "DiagonalGaussianAccumulator":
-        """Returns a new DiagonalGaussianAccumulator with the factory's dim and keys."""
+        """Return a fresh accumulator with the factory configuration."""
         return DiagonalGaussianAccumulator(dim=self.dim, keys=self.keys)
 
 
 class DiagonalGaussianEstimator(ParameterEstimator):
-    """DiagonalGaussianEstimator object for estimating a diagonal Gaussian distribution from
-    aggregated sufficient statistics."""
+    """Estimator for diagonal Gaussian distributions."""
 
     def __init__(
         self,
@@ -680,17 +678,14 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         min_covar: float | None = None,
         ridge: float | None = None,
     ) -> None:
-        """DiagonalGaussianEstimator object for estimating diagonal Gaussian distributions from aggregated sufficient
-            statistics.
+        """Create an estimator for weighted diagonal Gaussian statistics.
 
         Args:
-            dim (Optional[int]): Optional dimension of Gaussian.
-            pseudo_count (Tuple[Optional[float], Optional[float]]): Re-weight the sum of observations and sum of
-                squared observations in estimation.
-            suff_stat (Tuple[Optional[np.ndarray], Optional[np.ndarray]]): Sum of observations and sum of squared
-                observations both having same dimension.
-            name (Optinal[str]): Set name for object instance.
-            keys (Optional[str]): Set keys for merging sufficient statistics.
+            dim: Optional Gaussian dimension.
+            pseudo_count: Optional smoothing counts for mean and variance.
+            suff_stat: Optional prior mean and variance used for smoothing.
+            name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate MultivariateNormalGamma prior over (mu, tau=1/covar). When present,
                 ``estimate`` performs the closed-form per-component conjugate posterior update (returning the
                 joint MAP estimate and carrying the posterior forward as the fitted model's prior) instead
@@ -702,13 +697,12 @@ class DiagonalGaussianEstimator(ParameterEstimator):
                 safeguard is data-scaled. Bias is negligible at the defaults.
 
         Attributes:
-            name (Optinal[str]): Name for object instance.
-            dim (int): Dimension of Gaussian, either set of determined from suff_stat arg.
-            prior_mu (Optional[np.ndarray]): Set from suff_stat[0].
-            prior_covar ((Optional[np.ndarray]): Set from suff_stat[1].
-            pseudo_count (Tuple[Optional[float], Optional[float]]): Re-weight the sum of observations and sum of
-                squared observations in estimation.
-            keys (Optional[str]): Key for merging sufficient statistics.
+            name: Optional diagnostic name.
+            dim: Gaussian dimension.
+            prior_mu: Prior mean used for smoothing.
+            prior_covar: Prior variance used for smoothing.
+            pseudo_count: Smoothing counts for mean and variance.
+            keys: Optional sufficient-statistic key.
 
         """
         dim_loc = (
@@ -733,7 +727,7 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         self.ridge = 1.0e-6 if ridge is None else float(ridge)
 
     def accumulator_factory(self) -> "DiagonalGaussianAccumulatorFactory":
-        """Returns a DiagonalGaussianAccumulatorFactory built from the estimator's attributes."""
+        """Return an accumulator factory matching this estimator."""
         return DiagonalGaussianAccumulatorFactory(dim=self.dim, keys=self.keys)
 
     def model_log_density(self, model: "DiagonalGaussianDistribution") -> float:
@@ -841,23 +835,23 @@ class DiagonalGaussianEstimator(ParameterEstimator):
 
 
 class DiagonalGaussianDataEncoder(DataSequenceEncoder):
-    """DiagonalGaussianDataEncoder object for encoding sequences of iid diagonal-Gaussian observations."""
+    """Encoder for iid diagonal Gaussian observations."""
 
     def __init__(self, dim: int | None = None) -> None:
-        """DiagonalGaussianDataEncoder object.
+        """Create an encoder with an optional fixed dimension.
 
         Args:
-            dim (Optional[int]): Optional dimension of the Gaussian. Inferred from data if None.
+            dim: Optional Gaussian dimension. Inferred from data when omitted.
 
         """
         self.dim = dim
 
     def __str__(self) -> str:
-        """Returns string representation of DiagonalGaussianDataEncoder object."""
+        """Return a readable encoder summary."""
         return "DiagonalGaussianDataEncoder(dim=" + str(self.dim) + ")"
 
     def __eq__(self, other: object) -> bool:
-        """Checks if other object is a DiagonalGaussianDataEncoder with the same dim.
+        """Return whether ``other`` is an encoder with the same dimension.
 
         Args:
             other (object): Object to compare against.

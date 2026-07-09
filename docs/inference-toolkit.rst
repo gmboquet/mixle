@@ -59,6 +59,11 @@ Key imports:
 Use these before allowing probabilities to drive decisions, escalation, or
 claims about uncertainty quality.
 
+Calibration evidence should name the split, target coverage, realized
+coverage, and any segment where coverage is materially worse. A single global
+ECE or PIT number is useful, but it is rarely enough for a decision-facing
+model.
+
 Conformal Prediction
 --------------------
 
@@ -106,6 +111,10 @@ Use paired comparisons when two models score the same held-out cases. Use
 non-nested tests when a family swap is being considered. For promotion gates,
 see :doc:`evolution`.
 
+For release or deployment decisions, store the per-case scores as well as the
+summary statistic. They let reviewers inspect whether an apparent improvement
+comes from broad gains or from a few extreme examples.
+
 Multiple Testing
 ----------------
 
@@ -123,7 +132,7 @@ multiple-testing helpers:
 These tools belong near monitoring, model selection, and large diagnostic
 reports where isolated p-values would be misleading.
 
-Regression And Classical Inference
+Regression and Classical Inference
 ----------------------------------
 
 ``mixle.inference`` includes plain-array regression tools for cases where a
@@ -173,7 +182,7 @@ Use these as diagnostics and scientific-analysis tools, not as substitutes for
 a fitted generative model when the downstream workflow needs prediction,
 sampling, or composition.
 
-Ordinal And Survival Models
+Ordinal and Survival Models
 ---------------------------
 
 Ordinal tools:
@@ -199,7 +208,7 @@ Use these for ordered outcomes and time-to-event data. Use
 ``SurvivalDistribution`` from :doc:`stats-structured` when survival behavior is
 part of a larger distribution composition.
 
-Bayesian Networks, Causal Interventions, And Structure
+Bayesian Networks, Causal Interventions, and Structure
 ------------------------------------------------------
 
 Structure helpers include:
@@ -223,7 +232,7 @@ Use these tools when the model structure itself is the object of inference.
 Treat learned causal structure as a hypothesis that requires domain review and
 held-out checks.
 
-Posterior, Belief, And Explanation
+Posterior, Belief, and Explanation
 ----------------------------------
 
 Posterior and belief helpers include:
@@ -248,7 +257,7 @@ builds a Gaussian approximation from the model's own density scorer and a
 finite-difference Hessian. Unsupported parameter structures fail explicitly
 rather than pretending to be Bayesian.
 
-Projection And Compression
+Projection and Compression
 --------------------------
 
 ``mixle.inference.project`` contains closed-form projections for cases where a
@@ -321,6 +330,10 @@ The target interface exposes sampling-based inference and diagnostics:
 Use these when the target is differentiable or sampleable but closed-form
 updates are unavailable.
 
+Sampling routes need diagnostics in the artifact record. Keep chain count,
+warmup, draws, acceptance or step-size summaries when available, R-hat, ESS,
+and the reason a sampling route was chosen over a simpler point estimate.
+
 JIT Scoring
 -----------
 
@@ -383,3 +396,6 @@ A robust applied workflow usually has this order:
 4. Compare models on paired held-out cases.
 5. Add conformal or decision rules if behavior must change under uncertainty.
 6. Record the verification result in :doc:`production` or :doc:`evolution`.
+
+If any step is skipped, record that explicitly. Silent omissions are the
+hardest release defects to audit later.

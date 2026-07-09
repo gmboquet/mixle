@@ -1,4 +1,9 @@
-"""Torch neural-network objective helpers."""
+"""Torch neural-network wrappers trained through Mixle objective utilities.
+
+The wrappers expose Gaussian regression and categorical classification models
+with consistent log-likelihood objectives, convergence diagnostics, precision
+handling, and prediction helpers.
+"""
 
 from __future__ import annotations
 
@@ -305,6 +310,129 @@ def make_mlp(input_dim: int, hidden_dims: Sequence[int], output_dim: int = 1, ac
         if i < len(dims) - 2:
             layers.append(activations[activation]())
     return torch.nn.Sequential(*layers)
+
+
+def make_monotonic_mlp(
+    input_dim: int, hidden_dims: Sequence[int], output_dim: int = 1, *, increasing: bool = True
+) -> Any:
+    """A fully connected Torch MLP that is monotonic in every input dimension jointly, BY CONSTRUCTION.
+
+    Each layer's weight matrix is reparameterized through ``softplus`` before use, so every weight is
+    strictly non-negative; composed with the (smooth, strictly increasing) ``Softplus`` activation, a
+    non-negative-weight affine map followed by an increasing activation is itself increasing, and that
+    property is closed under composition -- so the whole network is provably non-decreasing in every
+    input coordinate, with no penalty term and no post-hoc check needed. ``increasing=False`` negates the
+    output, giving a network non-increasing in every coordinate instead.
+
+    This is a hard architectural constraint (unlike :class:`~mixle.models.pinn.PINNRegression`'s soft
+    residual penalty): the guarantee holds at every point in input space, not just where training data
+    landed. Drops into the same wrappers as :func:`make_mlp` -- :class:`~mixle.models.neural_leaf.NeuralGaussian`
+    for regression, :class:`~mixle.models.softmax_leaf.NeuralCategorical` for classification -- no other
+    changes needed. Only jointly monotonic in ALL inputs; a network monotonic in some coordinates and free
+    in others needs a two-path (monotonic + unconstrained) variant, not built here.
+    """
+    try:
+        import torch
+    except ImportError as e:  # pragma: no cover
+        raise ImportError("make_monotonic_mlp requires torch.") from e
+    if int(input_dim) <= 0 or int(output_dim) <= 0 or any(int(h) <= 0 for h in hidden_dims):
+        raise ValueError(
+            "make_monotonic_mlp dims must be positive; got input_dim=%r hidden_dims=%r output_dim=%r"
+            % (input_dim, list(hidden_dims), output_dim)
+        )
+
+    class _NonNegativeLinear(torch.nn.Module):
+        def __init__(self, in_features: int, out_features: int) -> None:
+            super().__init__()
+            # softplus(0) = log(2) =~ 0.69, not ~0. A naive small-mean raw_weight init would put every
+            # effective weight near 0.69 rather than near 0, exploding the signal through depth. Instead
+            # initialize the effective weight at a normal fan-in scale, then invert softplus to get raw_weight.
+            fan_in = max(in_features, 1)
+            target = torch.empty(out_features, in_features).uniform_(1e-3, 1.0 / fan_in**0.5)
+            self.raw_weight = torch.nn.Parameter(target + torch.log(-torch.expm1(-target)))  # softplus^-1
+            self.bias = torch.nn.Parameter(torch.zeros(out_features))
+
+        def forward(self, x: Any) -> Any:
+            weight = torch.nn.functional.softplus(self.raw_weight)
+            return torch.nn.functional.linear(x, weight, self.bias)
+
+    class _NegateOutput(torch.nn.Module):
+        def __init__(self, module: Any) -> None:
+            super().__init__()
+            self.module = module
+
+        def forward(self, x: Any) -> Any:
+            return -self.module(x)
+
+    dims = [int(input_dim)] + [int(h) for h in hidden_dims] + [int(output_dim)]
+    layers: list[Any] = []
+    for i in range(len(dims) - 1):
+        layers.append(_NonNegativeLinear(dims[i], dims[i + 1]))
+        if i < len(dims) - 2:
+            layers.append(torch.nn.Softplus())
+    module = torch.nn.Sequential(*layers)
+    return module if increasing else _NegateOutput(module)
+
+
+def make_deep_set(
+    element_dim: int,
+    phi_hidden: Sequence[int],
+    latent_dim: int,
+    rho_hidden: Sequence[int],
+    output_dim: int = 1,
+    *,
+    pooling: str = "mean",
+) -> Any:
+    """A Deep Sets network (Zaheer et al. 2017): invariant to any permutation of the set axis, by construction.
+
+    Input shape ``(..., set_size, element_dim)``: a per-element MLP ``phi`` (shared weights, applied
+    identically to every element -- ``torch.nn.Linear`` already broadcasts over all leading dims, so
+    reusing :func:`make_mlp` for ``phi`` gives exactly that) maps each element to a ``latent_dim`` code;
+    a permutation-invariant pool (``pooling="mean"``/``"sum"``/``"max"``, taken over the set axis)
+    aggregates the codes into one order-independent summary; a second MLP ``rho`` maps the summary to the
+    output. Because ``phi`` is applied identically per element and the pool is a symmetric function, the
+    output is exactly unchanged by any permutation of the set axis -- true for any weights, trained or not,
+    unlike e.g. training on many random orderings and hoping the network learns invariance.
+
+    The returned module is a plain ``torch.nn.Module``, trainable with any ordinary Torch optimizer loop
+    over ``(set_size, element_dim)``-shaped inputs. Note: :class:`~mixle.models.neural_leaf.NeuralGaussian`'s
+    accumulator flattens each observation to a 1-D feature vector (``reshape(n, -1)``) before the M-step,
+    which destroys the set axis this module needs -- so it is not a drop-in wrapper for set-shaped data as
+    :func:`make_mlp`/:func:`make_monotonic_mlp` are for flat feature vectors. Use this module directly with
+    a custom training loop (or through a wrapper that preserves the set axis) for a fixed set size.
+    """
+    try:
+        import torch
+    except ImportError as e:  # pragma: no cover
+        raise ImportError("make_deep_set requires torch.") from e
+    if pooling not in ("mean", "sum", "max"):
+        raise ValueError('pooling must be one of "mean", "sum", "max"; got %r' % (pooling,))
+    if int(element_dim) <= 0 or int(latent_dim) <= 0 or int(output_dim) <= 0:
+        raise ValueError(
+            "make_deep_set dims must be positive; got element_dim=%r latent_dim=%r output_dim=%r"
+            % (element_dim, latent_dim, output_dim)
+        )
+    phi = make_mlp(element_dim, phi_hidden, latent_dim, activation="relu")
+    rho = make_mlp(latent_dim, rho_hidden, output_dim, activation="relu")
+
+    class _DeepSet(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.phi = phi
+            self.rho = rho
+            self.pooling = pooling
+
+        def forward(self, x: Any) -> Any:
+            codes = self.phi(x)  # (..., set_size, latent_dim); phi is shared/identical across the set axis
+            if self.pooling == "mean":
+                pooled = codes.mean(dim=-2)
+            elif self.pooling == "sum":
+                pooled = codes.sum(dim=-2)
+            else:
+                pooled = codes.max(dim=-2).values
+            return self.rho(pooled)
+
+    return _DeepSet()
 
 
 def _torch_engine(

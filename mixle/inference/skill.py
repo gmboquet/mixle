@@ -83,13 +83,16 @@ class SkillRegistry:
         self._skills: dict[str, Skill] = {}
 
     def add(self, sk: Skill) -> Skill:
+        """Register a skill and return it for chaining."""
         self._skills[sk.name] = sk
         return sk
 
     def get(self, name: str) -> Skill:
+        """Return a registered skill by exact name."""
         return self._skills[name]
 
     def all(self) -> list[Skill]:
+        """Return all registered skills in insertion order."""
         return list(self._skills.values())
 
     def __len__(self) -> int:

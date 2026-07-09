@@ -59,6 +59,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
     """HMM with shared emissions/transitions where each observation may carry a per-position state prior."""
 
     def compute_capabilities(self):
+        """Declare the legacy NumPy execution path for semi-supervised HMM inference."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy",), kernel_status="legacy_numpy")
@@ -124,6 +125,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         )
 
     def density(self, x) -> float:
+        """Return the probability of one semi-supervised HMM observation."""
         return float(np.exp(self.log_density(x)))
 
     def _emission_potential(self, emissions, prior) -> tuple[np.ndarray, np.ndarray]:
@@ -168,6 +170,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         return float(ll)
 
     def log_density(self, x) -> float:
+        """Return the log-likelihood of one ``(emissions, state_prior)`` observation."""
         emissions, prior = x
         ll = self._forward_loglik(emissions, prior)
         if not supports(self.len_dist, Neutral):
@@ -175,6 +178,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         return ll
 
     def seq_log_density(self, x) -> np.ndarray:
+        """Return vectorized log-likelihoods for encoded semi-supervised HMM observations."""
         emissions_list, priors, len_enc, _ = x
         out = np.empty(len(emissions_list))
         for i, emissions in enumerate(emissions_list):
@@ -184,6 +188,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         return out
 
     def density_semantics(self):
+        """Return the joined density semantics of emission and optional length distributions."""
         from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
 
         children = list(self.topics) + ([] if self.len_dist is None else [self.len_dist])
@@ -191,9 +196,11 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         return join_density_semantics(sems) if sems else DensitySemantics.EXACT
 
     def sampler(self, seed=None):
+        """Return a sampler for emission sequences with no external state priors."""
         return SemiSupervisedHiddenMarkovSampler(self, seed)
 
     def estimator(self, pseudo_count=None):
+        """Return a Baum-Welch estimator for transitions, emissions, and optional length."""
         len_est = None if supports(self.len_dist, Neutral) else self.len_dist.estimator(pseudo_count=pseudo_count)
         comp_ests = [u.estimator(pseudo_count=pseudo_count) for u in self.topics]
         return SemiSupervisedHiddenMarkovEstimator(
@@ -201,6 +208,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         )
 
     def dist_to_encoder(self):
+        """Return the encoder for emission sequences, priors, and optional lengths."""
         emission_encoder = self.topics[0].dist_to_encoder()
         len_encoder = self.len_dist.dist_to_encoder() if not supports(self.len_dist, Neutral) else NullDataEncoder()
         return SemiSupervisedHiddenMarkovDataEncoder(emission_encoder=emission_encoder, len_encoder=len_encoder)
@@ -244,6 +252,7 @@ class SemiSupervisedHiddenMarkovSampler(DistributionSampler):
         return ([self.state_samplers[st].sample() for st in states], None)
 
     def sample(self, size=None):
+        """Draw one observation or a list of observations with ``None`` state priors."""
         if self.dist.terminal_states is not None:
             return self._sample_terminal() if size is None else [self._sample_terminal() for _ in range(size)]
         if size is None:
@@ -339,10 +348,12 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
             self.len_accumulator.update(n, weight, None if dist is None else dist.len_dist)
 
     def update(self, x, weight, estimate):
+        """Update Baum-Welch sufficient statistics from one weighted observation."""
         emissions, prior = x
         self._accumulate(estimate, emissions, prior, weight)
 
     def initialize(self, x, weight, rng):
+        """Initialize emission and transition statistics with random soft state assignments."""
         emissions, prior = x
         n = len(emissions)
         # random soft responsibilities (respecting the prior's zeros) to break symmetry
@@ -361,16 +372,19 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
             self.len_accumulator.initialize(n, weight, rng)
 
     def seq_update(self, x, weights, estimate):
+        """Update sufficient statistics from encoded observations and weights."""
         emissions_list, priors, _, _ = x
         for i, emissions in enumerate(emissions_list):
             self._accumulate(estimate, emissions, priors[i], float(weights[i]))
 
     def seq_initialize(self, x, weights, rng):
+        """Initialize sufficient statistics from encoded observations and weights."""
         emissions_list, priors, _, _ = x
         for i, emissions in enumerate(emissions_list):
             self.initialize((emissions, priors[i]), float(weights[i]), rng)
 
     def combine(self, suff_stat):
+        """Merge transition, emission, and length sufficient statistics."""
         trans, emissions, length = suff_stat
         self.trans_counts += trans
         for s in range(self.num_states):
@@ -379,6 +393,7 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
         return self
 
     def value(self):
+        """Return transition counts, per-state emission stats, and length stats."""
         return (
             self.trans_counts,
             tuple(acc.value() for acc in self.accumulators),
@@ -386,6 +401,7 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
         )
 
     def from_value(self, x):
+        """Restore transition counts, per-state emission stats, and length stats."""
         trans, emissions, length = x
         self.trans_counts = trans
         for s in range(self.num_states):
@@ -394,6 +410,7 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
         return self
 
     def key_merge(self, stats_dict):
+        """Merge transition, state, and child statistics into ``stats_dict``."""
         if self.trans_key is not None:
             if self.trans_key in stats_dict:
                 stats_dict[self.trans_key] = stats_dict[self.trans_key] + self.trans_counts
@@ -411,6 +428,7 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
         self.len_accumulator.key_merge(stats_dict)
 
     def key_replace(self, stats_dict):
+        """Replace transition, state, and child statistics from keyed entries when present."""
         if self.trans_key is not None and self.trans_key in stats_dict:
             self.trans_counts = stats_dict[self.trans_key]
         if self.state_key is not None and self.state_key in stats_dict:
@@ -420,18 +438,22 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
         self.len_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self):
+        """Return the encoder compatible with this accumulator."""
         emission_encoder = self.accumulators[0].acc_to_encoder()
         len_encoder = self.len_accumulator.acc_to_encoder()
         return SemiSupervisedHiddenMarkovDataEncoder(emission_encoder=emission_encoder, len_encoder=len_encoder)
 
 
 class SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create accumulators for semi-supervised HMM Baum-Welch statistics."""
+
     def __init__(self, factories, len_factory=None, keys=(None, None)):
         self.factories = factories
         self.len_factory = len_factory
         self.keys = keys
 
     def make(self):
+        """Create an empty semi-supervised HMM accumulator."""
         len_acc = self.len_factory.make() if self.len_factory is not None else NullAccumulator()
         return SemiSupervisedHiddenMarkovEstimatorAccumulator(
             [f.make() for f in self.factories], len_accumulator=len_acc, keys=self.keys
@@ -439,6 +461,8 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulatorFactory(StatisticAccumulator
 
 
 class SemiSupervisedHiddenMarkovEstimator(ParameterEstimator):
+    """Estimate transitions, emissions, and optional length from semi-supervised HMM statistics."""
+
     def __init__(
         self, estimators, len_estimator=None, pseudo_count=None, name=None, keys=(None, None), terminal_states=None
     ):
@@ -453,6 +477,7 @@ class SemiSupervisedHiddenMarkovEstimator(ParameterEstimator):
         self.terminal_states = terminal_states
 
     def accumulator_factory(self):
+        """Return a factory for semi-supervised HMM sufficient-statistic accumulators."""
         len_factory = (
             None if isinstance(self.len_estimator, NullEstimator) else self.len_estimator.accumulator_factory()
         )
@@ -461,6 +486,7 @@ class SemiSupervisedHiddenMarkovEstimator(ParameterEstimator):
         )
 
     def estimate(self, nobs, suff_stat):
+        """Estimate the HMM transition matrix and child distributions from accumulated statistics."""
         trans_counts, emission_stats, length_stat = suff_stat
         pc = 0.0 if self.pseudo_count is None else float(self.pseudo_count)
         row = trans_counts + pc / self.num_states
@@ -494,6 +520,7 @@ class SemiSupervisedHiddenMarkovDataEncoder(DataSequenceEncoder):
         )
 
     def seq_encode(self, x):
+        """Encode observations as emission lists, priors, optional lengths, and raw lengths."""
         emissions_list = [list(obs[0]) for obs in x]
         priors = [obs[1] for obs in x]
         lengths = np.asarray([len(e) for e in emissions_list], dtype=int)

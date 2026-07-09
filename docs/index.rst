@@ -80,7 +80,7 @@ Infer a first model from raw data
     validation, and fallback behavior.
 
 Work with neural or language-model components
-    Read :doc:`neural-llm`, :doc:`representation`,
+    Read :doc:`neural-llm`, :doc:`torch-modules`, :doc:`representation`,
     :doc:`task-distillation`, :doc:`task-serving`, and
     :doc:`agentic-task-distillation`.
 
@@ -91,8 +91,9 @@ Add uncertainty to LLM or reasoning systems
 
 Scale, serve, or audit fitted models
     Read :doc:`engines`, :doc:`compute-layer`,
-    :doc:`utilities-and-parallelism`, :doc:`data`, :doc:`production`, and
-    :doc:`lifecycle`.
+    :doc:`utilities-and-parallelism`, :doc:`data`, :doc:`production`,
+    :doc:`lifecycle`, and :doc:`training-at-scale` for MFU/anomaly receipts
+    and the pilot-ladder GO/NO-GO staging.
 
 Build a local reasoning workflow
     Read :doc:`reasoning-ecosystem` for substrate storage, skills, reasoner
@@ -153,8 +154,8 @@ Manual Map
 The foundational pages are :doc:`installation`, :doc:`quickstart`,
 :doc:`concepts`, :doc:`maturity`, and :doc:`package-map`. The tutorial index in
 :doc:`tutorials/index` provides task-sized walkthroughs. The generated
-reference under :doc:`api/modules` is exhaustive; :doc:`api-overview` is the
-human map for finding the right import.
+reference under :doc:`api/modules` covers the broad public module surface;
+:doc:`api-overview` is the human map for finding the right import.
 
 .. toctree::
    :caption: Start Here
@@ -176,11 +177,14 @@ human map for finding the right import.
    :maxdepth: 2
 
    neural-llm
+   torch-modules
    automatic-inference
    models
    representation
    task-distillation
    task-serving
+   bring_your_own_model
+   training-at-scale
    agentic-task-distillation
    uncertainty
    reasoning-systems
@@ -189,6 +193,21 @@ human map for finding the right import.
    processes
    automatic-modeling-internals
    cookbook
+
+.. toctree::
+   :caption: Release And Validation
+   :hidden:
+   :maxdepth: 2
+
+   release-readiness
+   validation
+   support-policy
+   security-and-data
+   stability-and-missing-data
+   family-release
+   release-notes
+   example-execution-manifest
+   changelog
 
 .. toctree::
    :caption: Reference Guides
@@ -217,6 +236,7 @@ human map for finding the right import.
    utilities-and-parallelism
    experimental-program
    examples
+   examples_gallery
    troubleshooting
    glossary
    extending

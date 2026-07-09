@@ -39,13 +39,13 @@ class Candidate:
 
 @runtime_checkable
 class ImprovementOperator(Protocol):
-    """A uniform proposal move: a cheap applicability pre-flight plus a fitted-challenger ``propose``."""
+    """A uniform proposal move: an applicability pre-flight plus a fitted-challenger ``propose``."""
 
     name: str
     cost_hint: float
 
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
-        """Cheap structural gate -- can this operator even run on this model/data?"""
+        """Structural gate: whether this operator can run on the model and data."""
         ...
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
@@ -97,9 +97,11 @@ class Refit:
     max_its: int = 20
 
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
+        """Return whether ``model`` can be re-fit on a non-empty batch."""
         return callable(getattr(model, "estimator", None)) and bool(len(list(data)))
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
+        """Fit the model family on ``data`` using ``model`` as the warm start."""
         rows = list(data)
         estimator = model.estimator()
         fitted = optimize(rows, estimator, max_its=self.max_its, prev_estimate=model, out=None)
@@ -117,7 +119,7 @@ class OnlineUpdate:
       * ``'streaming'``       -- decay-mode :class:`StreamingEstimator` (running-accumulator forgetting).
       * ``'incremental'``     -- Neal-Hinton :class:`IncrementalEstimator` (replace one chunk).
       * ``'posterior_carry'`` -- exact recursive-Bayes :class:`BayesianStreamingEstimator` (needs a
-                                conjugate family; ``applicable`` honestly checks ``ConjugateUpdatable``).
+                                conjugate family; ``applicable`` checks ``ConjugateUpdatable``).
       * ``'forgetting'``      -- power-prior :class:`BayesianStreamingEstimator`.
     """
 
@@ -126,19 +128,22 @@ class OnlineUpdate:
 
     @property
     def name(self) -> str:
+        """Registry name including the selected online-update mode."""
         return f"online_update[{self.mode}]"
 
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
+        """Return whether the selected update mode is legal for ``model`` and ``data``."""
         if not (callable(getattr(model, "estimator", None)) and len(list(data))):
             return False
         if self.mode in ("posterior_carry", "forgetting"):
-            # honest conjugacy pre-flight: the Bayesian carry/forgetting paths need a conjugate family.
+            # Bayesian carry/forgetting paths need a conjugate family.
             return bool(supports(model, ConjugateUpdatable))
         if self.mode in ("streaming", "incremental"):
             return True
         return False
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
+        """Apply the selected streaming update and return the updated challenger."""
         rows = list(data)
         estimator = model.estimator()
         if self.mode == "streaming":
@@ -167,9 +172,11 @@ class AutoSelect:
     max_its: int = 20
 
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
+        """Return whether there is data available for automatic family selection."""
         return bool(len(list(data)))
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
+        """Infer an estimator from ``data``, fit it, and return the fitted challenger."""
         from mixle.utils.automatic import get_estimator
 
         rows = list(data)
@@ -271,11 +278,13 @@ class Recalibrate:
     grid: tuple[float, ...] = (0.6, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0)
 
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
+        """Return whether ``model`` can be sampled and the batch is non-empty."""
         if isinstance(model, _RecalibratedModel):
             return False  # don't stack recalibrations
         return callable(getattr(model, "sampler", None)) and bool(len(list(data)))
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
+        """Search the temperature grid and wrap ``model`` in the best calibration transform."""
         from mixle.inference.calibration import pit_calibration_error, pit_ensemble
 
         rows = np.asarray(list(data), dtype=float).reshape(-1)
@@ -303,19 +312,25 @@ class Recalibrate:
 
 @dataclass(frozen=True)
 class Recompose:
-    """Propose a richer STRUCTURE for the champion: a 2-component mixture of its family, each component warm-fit on
-    a different half of the data so EM starts non-degenerate (avoiding the identical-component collapse). It wins
-    the verify gate only when the data has structure a single component misses — anti-regression keeps it honest.
-    Expensive, so it is registered but kept OUT of the default operator set."""
+    """Propose a richer two-component mixture structure for the champion family.
+
+    Each component is warm-fit on a different half of the data so EM starts
+    away from the identical-component solution. The normal verification gate
+    decides whether the additional structure improves held-out evidence enough
+    to promote. The operator is registered but omitted from the default set
+    because it is intentionally more expensive than the conservative updates.
+    """
 
     name: str = "recompose"
     cost_hint: float = 4.0
     max_its: int = 30
 
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
+        """Return whether the model can be re-estimated on enough rows for a split."""
         return callable(getattr(model, "estimator", None)) and len(list(data)) >= 8
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
+        """Fit a two-component mixture challenger initialized from data splits."""
         import numpy as np
 
         from mixle.ops import mixture
@@ -336,20 +351,27 @@ class Recompose:
 
 @dataclass(frozen=True)
 class Mutate:
-    """Genetic-programming structure search (Koza 1992): apply a random structural mutation to the champion and
-    refit. Moves: ``grow`` (add a bootstrap-fit component), ``shrink`` (drop the lowest-weight component), and
-    ``perturb`` (bootstrap re-fit). Repeated application inside a :class:`~mixle.evolve.population.Population` +
-    the verify gate + a tree-edit genotype distance IS structure induction by selection (cf. Bayesian model
-    merging, Stolcke & Omohundro 1994) — not open research. Registered but OUT of the default set (expensive)."""
+    """Apply a random structural mutation to the champion and refit.
+
+    Available moves are ``grow`` for adding a bootstrap-fit component,
+    ``shrink`` for dropping the lowest-weight component from an existing
+    mixture, and ``perturb`` for a bootstrap re-fit. Repeated use inside a
+    :class:`~mixle.evolve.population.Population` gives the search driver a
+    structure-induction move, while the verification gate remains responsible
+    for promotion. The operator is registered but omitted from the default set
+    because it is comparatively expensive.
+    """
 
     name: str = "mutate"
     cost_hint: float = 4.0
     max_its: int = 30
 
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
+        """Return whether the model can be structurally mutated and re-fit."""
         return callable(getattr(model, "estimator", None)) and len(list(data)) >= 8
 
     def propose(self, model: Any, data: Any, *, ctx: dict) -> Candidate:
+        """Sample one structural move, refit it, and return the resulting challenger."""
         import numpy as np
 
         from mixle.ops import mixture

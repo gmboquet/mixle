@@ -26,6 +26,20 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # Heavy integration / PDE-inversion / stochastic-recovery / exhaustive-precision tests: each has a
     # call >~5 s and together they floor the fast gate at ~100 s. Tagged `slow` so they leave the fast
     # gate (`pytest -m fast` -> <30 s) while still running in the full CI gate (`-m "not optional ..."`).
+    # Torch-trained conditional-transport + belief-composition tests: each fits a neural conditional
+    # density and/or runs a Monte-Carlo calibration check (100s of samples per held-out point across
+    # multiple hop counts) -- legitimately needed for a real coverage/calibration claim, not padding.
+    # Unmarked, these alone floor the fast gate at 60+ s; tagged `slow` so they still run in full CI.
+    "belief_walk_test.py": ("torch", "stochastic", "slow"),
+    "cycle_consistency_test.py": ("torch", "stochastic", "slow"),
+    "cross_modal_model_test.py": ("torch", "stochastic", "slow"),
+    "transport_edge_test.py": ("torch", "stochastic", "slow"),
+    "transport_proof_test.py": ("torch", "stochastic", "slow"),
+    "task_extract_test.py": ("torch", "slow"),
+    "data_mixture_test.py": ("torch", "slow"),
+    "task_constrained_test.py": ("torch", "slow"),
+    "task_sft_plan_test.py": ("torch", "slow"),
+    "task_plan_refine_test.py": ("torch", "slow"),
     "bingham_test.py": ("distribution", "stochastic", "slow"),
     "conformal_test.py": ("ppl", "integration", "slow"),
     "fused_codegen_test.py": ("numba", "optional"),
@@ -43,6 +57,8 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "scheduled_hmm_test.py": ("hmm", "integration", "slow"),
     "program_test.py": ("torch", "integration", "slow"),
     "neural_leaf_test.py": ("torch", "integration", "slow"),
+    "multimodal_stage1_demo_smoke_test.py": ("torch", "integration", "slow"),
+    "vlm_trust_receipts_demo_smoke_test.py": ("torch", "integration", "slow"),
     "neural_ppl_test.py": ("torch", "integration", "slow"),
     "language_model_sft_test.py": ("torch", "integration", "slow"),
     "project_neural_test.py": ("torch", "integration", "slow"),
@@ -51,6 +67,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "structure_embedded_test.py": ("torch", "integration", "slow"),
     "estimation_structure_default_test.py": ("integration", "slow"),
     "scientist_test.py": ("torch", "integration", "optional", "slow"),
+    # Downloads a real tiny HF checkpoint (peft/transformers, network-gated) and fits it -- skips cleanly
+    # offline, but is neither fast nor a core-path test.
+    "peft_lora_grad_leaf_smoke_test.py": ("torch", "integration", "optional", "slow"),
     "planning_test.py": ("planner",),
     "uq_test.py": ("torch", "integration", "slow"),
     "infer_backends_test.py": ("numba", "integration", "slow"),
@@ -91,6 +110,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "automatic_scientific_test.py": ("automatic", "integration", "slow"),
     "automatic_test.py": ("automatic", "distribution"),
     "base_dist_test.py": ("distribution", "integration", "slow"),
+    # Volume-scale performance receipts (roadmap A7): GradLeaf/mixture-E-step/A3-patch-streamed
+    # timing receipts, each printing a measured wall-clock number against a generous pinned floor.
+    "bench_receipts_test.py": ("benchmark", "slow"),
     "bayes_test.py": ("bayes", "distribution", "integration"),
     "bayes_streaming_test.py": ("bayes",),
     "wave_bayes1_test.py": ("bayes",),
@@ -158,7 +180,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "ewens_test.py": ("distribution", "numba", "stochastic"),
     "generalized_mallows_test.py": ("distribution", "numba", "stochastic"),
     "generalized_mallows_model_test.py": ("distribution", "numba", "stochastic"),
-    "survival_regression_test.py": ("distribution", "stochastic"),
+    "survival_regression_test.py": ("distribution", "stochastic", "slow"),
     "scoring_rules_test.py": ("distribution",),
     "calibration_diagnostics_test.py": ("distribution",),
     "multiple_testing_test.py": ("distribution",),
@@ -177,9 +199,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "ppl_separation_test.py": ("ppl",),
     "random_graph_models_test.py": ("graph",),
     "quantized_hmm_test.py": ("hmm", "integration", "slow"),
-    "quantized_triangular_hmm_test.py": ("hmm", "enumeration", "integration"),
+    "quantized_triangular_hmm_test.py": ("hmm", "enumeration", "integration", "slow"),
     "hmm_determinize_test.py": ("hmm", "enumeration", "integration"),
-    "missing_data_test.py": ("distribution", "hmm", "ppl", "integration"),
+    "missing_data_test.py": ("distribution", "hmm", "ppl", "integration", "slow"),
     "provenance_test.py": ("distribution", "serialization"),
     "drift_test.py": ("distribution", "doe", "stochastic"),
     "serving_test.py": ("distribution", "serialization"),
@@ -194,6 +216,8 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "sparse_markov_transform_test.py": ("latent",),
     "spearman_rho_test.py": ("distribution",),
     "spark_encoded_data_test.py": ("spark", "optional", "parallel", "slow"),
+    "spark_executor_test.py": ("spark", "optional", "parallel", "slow"),
+    "ray_encoded_data_test.py": ("ray", "optional", "parallel", "slow"),
     "torchrun_encoded_data_test.py": ("torchrun", "torch", "optional", "parallel", "slow"),
     "torch_neural_test.py": ("torchrun", "torch", "optional", "parallel", "slow"),
     "torch_engine_ext_test.py": ("torch", "optional", "integration", "slow"),
@@ -211,6 +235,67 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "wave_select_test.py": ("distribution", "enumeration", "latent"),
     "wave_setdist_test.py": ("distribution", "enumeration"),
     "zero_count_estimate_test.py": ("distribution",),
+    # Newer files never triaged into this registry: each floors well above the ~1s/test the fast gate
+    # is built around (profiled via `pytest -m fast --durations=40`, individual calls 8-105s), so the
+    # fast gate silently regressed by ~9 minutes of wall time across all three of them as these landed.
+    # Tagged the same way their nearest existing sibling already is.
+    "doe_robust_test.py": ("doe", "stochastic", "slow"),  # 10-seed BO loop averaged for a noise claim
+    "quotient_leaf_test.py": ("torch", "integration", "slow"),  # conv+pool leaf, fits/compares real nets
+    "ppl_guide_test.py": ("ppl", "stochastic", "slow"),  # structured VI, admixture/LDA recovery
+    "structure_learning_test.py": ("integration", "slow"),  # multi-restart EM structure search
+    "task_traces_test.py": ("integration", "slow"),
+    "temporal_graph_grammar_test.py": ("graph", "stochastic", "slow"),
+    "anchor_harness_test.py": ("torch", "stochastic", "slow"),  # neural conditional-transport + calibration
+    "edge_distill_test.py": ("torch", "integration", "slow"),
+    "structured_hmm_test.py": ("hmm", "integration", "slow"),
+    "task_realteacher_smoke_test.py": ("integration", "slow"),
+    "task_model_test.py": ("integration", "slow"),  # fresh-process save/load round trip
+    "symbolic_export_test.py": ("integration", "slow"),
+    "task_tune_test.py": ("doe", "stochastic", "slow"),  # BO over student recipes via mixle.doe
+    "task_plan_test.py": ("integration", "slow"),
+    "task_distill_structured_test.py": ("integration", "slow"),
+    # E1 chunked-recurrent spine (mixle/experimental/context_spine.py): several small TBPTT training
+    # loops plus a repeated-timing receipt -- ~4s total, tagged slow so it leaves the fast gate while
+    # still running in full CI under the `experimental` marker's own tests.
+    "context_spine_test.py": ("torch", "experimental", "slow"),
+    # E7 long-context referee (mixle/experimental/long_context_eval.py): needle/copy/multi-hop suites x
+    # small stand-in ranges x a length-curriculum bandit round -- several TBPTT training loops, tagged
+    # slow for the same reason as context_spine_test.py.
+    "long_context_eval_test.py": ("torch", "experimental", "slow"),
+    # E6 retrieval memory over frozen past (mixle/experimental/retrieval_memory_spine.py): several TBPTT
+    # training loops (including a needle-suite baseline comparison), tagged slow for the same reason as
+    # context_spine_test.py / long_context_eval_test.py.
+    "retrieval_memory_spine_test.py": ("torch", "experimental", "slow"),
+    # E3 sketch-state attention (mixle/experimental/sketch_state_attention.py): FD's deterministic bound
+    # over several seeded streams, chunked-scan equivalence, ContextMechanism conformance via train_tbptt,
+    # a tensor-sketch concentration check, misfit receipts, and an E7 bake-off across four mechanisms --
+    # tagged slow for the same reason as context_spine_test.py/long_context_eval_test.py.
+    "sketch_state_attention_test.py": ("torch", "experimental", "slow"),
+    # E2 moment-closure (mixture-state) attention (mixle/experimental/moment_closure_attention.py):
+    # gradcheck, Welford-vs-batch, birth/merge, TBPTT protocol conformance, an E7 referee smoke test, and
+    # a real (multi-model-training) Spearman correlation measurement -- tagged slow for the same reason as
+    # context_spine_test.py / long_context_eval_test.py.
+    "moment_closure_attention_test.py": ("torch", "experimental", "slow"),
+    # E5 part 1: S6/Mamba selective scan (mixle/experimental/selective_scan.py) -- protocol conformance,
+    # detach, log_density, and a real 3000-step TBPTT Selective Copying training receipt -- tagged slow for
+    # the same reason as context_spine_test.py / moment_closure_attention_test.py.
+    "selective_scan_test.py": ("torch", "experimental", "slow"),
+    # E5 part 2: the hybrid block (mixle/experimental/ssm_hybrid.py) -- local attention + SSM + E2 far
+    # field, protocol conformance, contribution-receipt bookkeeping, and a real matched-parameter E7
+    # referee-suite comparison against local-only and SSM-only ablations -- several TBPTT training loops,
+    # tagged slow for the same reason as the other Track-E mechanism tests.
+    "ssm_hybrid_test.py": ("torch", "experimental", "slow"),
+    # E4 hierarchical summary tree (mixle/experimental/summary_tree.py): needle-suite training runs
+    # over several seeds (needle receipt + auxiliary-loss ablation) plus a re-chunking topology check
+    # -- several TBPTT training loops, tagged slow for the same reason as context_spine_test.py.
+    "summary_tree_test.py": ("torch", "experimental", "slow"),
+    # E8 context parallelism (mixle/utils/parallel/context_parallel_spine.py): parametrized exact-match
+    # correctness sweeps plus a real torch.multiprocessing.spawn/gloo 4-process test -- tagged slow so it
+    # leaves the fast gate while still running in full CI under the `parallel` marker's own tests.
+    "context_parallel_spine_test.py": ("torch", "experimental", "parallel", "slow"),
+    # GP-surrogate active-learning + multi-fidelity placement (roadmap M4): each test fits several torch
+    # GPs across a sequential design loop, mirroring doe_active_test.py / doe_multifidelity_test.py.
+    "task_emulate_test.py": ("doe", "torch", "slow"),
 }
 
 
@@ -221,6 +306,13 @@ NODEID_MARKERS: tuple[tuple[str, MarkerTuple], ...] = (
     ("MPS", ("torch", "optional")),
     ("numba", ("numba",)),
     ("umap", ("optional", "hvis")),
+    # PeakRssPatchStreamingTest writes+reads a ~476 MiB synthetic zarr volume to exercise the A3
+    # patch-streaming peak-RSS receipt; the rest of array_data_sources_test.py stays in the fast gate.
+    ("PeakRssPatchStreamingTest", ("optional", "slow")),
+    # G2's real-perplexity acceptance test trains several real small LMs end to end (not a layer-local
+    # proxy) to get an honest, independent perplexity number -- multiple real training runs are the point,
+    # so it's slow by construction; the rest of sigma_weighted_projection_test.py stays in the fast gate.
+    ("DataFreeSigmaBeatsPlainSvdTest", ("slow",)),
 )
 
 

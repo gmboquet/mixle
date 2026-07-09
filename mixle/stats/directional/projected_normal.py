@@ -87,12 +87,14 @@ class ProjectedNormalDistribution(SequenceEncodableProbabilityDistribution):
     # E[r|theta] = (a + (1+a^2) M) / (1 + a M) — the estimate-dependent stats come from the params dict. ---
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated projected-normal kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for projected normal distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -190,6 +192,7 @@ class ProjectedNormalSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one angle or an array of iid angles."""
         d = self.dist
         n = 1 if size is None else int(size)
         z1 = d.mu_x + self.rng.standard_normal(n)
@@ -221,6 +224,7 @@ class ProjectedNormalAccumulator(SequenceEncodableStatisticAccumulator):
         return _expected_radius(a)
 
     def update(self, x: float, weight: float, estimate: ProjectedNormalDistribution | None) -> None:
+        """Accumulate one EM radius-weighted directional contribution."""
         cos_t, sin_t = math.cos(float(x)), math.sin(float(x))
         r = float(self._radius_for(np.array([cos_t]), np.array([sin_t]), estimate)[0])
         self.sum_x += weight * r * cos_t
@@ -228,9 +232,11 @@ class ProjectedNormalAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one angle."""
         self.update(x, weight, None)
 
     def seq_update(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: Any) -> None:
+        """Accumulate EM radius-weighted direction statistics from encoded angles."""
         cos_t, sin_t = x
         w = np.asarray(weights, dtype=np.float64)
         r = self._radius_for(cos_t, sin_t, estimate)
@@ -239,22 +245,27 @@ class ProjectedNormalAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += float(w.sum())
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded angles."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "ProjectedNormalAccumulator":
+        """Merge another projected-normal sufficient-statistic tuple."""
         self.sum_x += suff_stat[0]
         self.sum_y += suff_stat[1]
         self.count += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return radius-weighted x/y sums and total weight."""
         return self.sum_x, self.sum_y, self.count
 
     def from_value(self, x: tuple[float, float, float]) -> "ProjectedNormalAccumulator":
+        """Replace accumulator contents from radius-weighted statistics."""
         self.sum_x, self.sum_y, self.count = float(x[0]), float(x[1]), float(x[2])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -262,10 +273,12 @@ class ProjectedNormalAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "ProjectedNormalDataEncoder":
+        """Return the encoder used by this accumulator."""
         return ProjectedNormalDataEncoder()
 
 
@@ -277,6 +290,7 @@ class ProjectedNormalAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> ProjectedNormalAccumulator:
+        """Create a fresh projected-normal accumulator."""
         return ProjectedNormalAccumulator(name=self.name, keys=self.keys)
 
 
@@ -288,9 +302,11 @@ class ProjectedNormalEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> ProjectedNormalAccumulatorFactory:
+        """Return an accumulator factory for projected-normal EM statistics."""
         return ProjectedNormalAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> ProjectedNormalDistribution:
+        """Estimate the projected-normal mean vector from EM sufficient statistics."""
         sum_x, sum_y, count = suff_stat
         if count <= 0.0:
             return ProjectedNormalDistribution(0.0, 0.0, name=self.name, keys=self.keys)
@@ -307,5 +323,6 @@ class ProjectedNormalDataEncoder(DataSequenceEncoder):
         return isinstance(other, ProjectedNormalDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+        """Encode angles as cosine and sine arrays."""
         theta = np.asarray(x, dtype=np.float64)
         return np.cos(theta), np.sin(theta)

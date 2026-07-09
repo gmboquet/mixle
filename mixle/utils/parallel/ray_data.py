@@ -101,10 +101,12 @@ class RayEncodedData(EncodedDataHandle):
         return ray.get(futures)
 
     def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
+        """Return total observation count and summed log-density over Ray partitions."""
         results = self._map(_score_chunk, estimate)
         return float(sum(r[0] for r in results)), float(sum(r[1] for r in results))
 
     def pysp_seq_estimate(self, estimator: Any, prev_estimate: Any) -> Any:
+        """Fold sufficient statistics over Ray partitions and run the estimator M-step."""
         from mixle.stats import validate_estimator_keys
 
         validate_estimator_keys(estimator)
@@ -118,6 +120,7 @@ class RayEncodedData(EncodedDataHandle):
         return estimator.estimate(nobs, accumulator.value())
 
     def pysp_seq_initialize(self, estimator: Any, rng: RandomState, p: float) -> Any:
+        """Initialize an estimate from Bernoulli-subsampled Ray partitions."""
         import ray
 
         from mixle.stats import validate_estimator_keys
@@ -135,6 +138,7 @@ class RayEncodedData(EncodedDataHandle):
         return estimator.estimate(nobs, accumulator.value())
 
     def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
+        """Return accumulated streaming statistics for all Ray partitions."""
         from mixle.stats import validate_estimator_keys
 
         validate_estimator_keys(estimator)
@@ -149,6 +153,7 @@ class RayEncodedData(EncodedDataHandle):
 
     @property
     def num_chunks(self) -> int:
+        """Number of encoded Ray partitions held by this handle."""
         return len(self._chunks)
 
     def __len__(self) -> int:

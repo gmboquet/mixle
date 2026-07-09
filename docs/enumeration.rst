@@ -29,6 +29,10 @@ The values returned by enumeration are model values. For a composite
 distribution, the value is a whole tuple or record. For a Markov model, it may
 be a sequence or path.
 
+Keep log probabilities in artifacts and convert to ordinary probabilities only
+for display. Long records, paths, and products of factors can underflow in
+probability space even when the ordering is numerically stable in log space.
+
 Enumerator Surface
 ------------------
 
@@ -57,6 +61,11 @@ Common operations:
 
 Not every enumerable model supports every operation. Use ``mixle.describe`` to
 inspect exact capabilities.
+
+The capability check should be close to the call that depends on it. A model
+can be enumerable without being rankable, finite without supporting efficient
+seek, or approximate in a way that is acceptable for inspection but not for a
+release gate.
 
 Capabilities
 ------------
@@ -105,6 +114,10 @@ Combinators preserve enumeration when their children support it.
 
 The enumeration is over whole records, not independent per-field lists.
 
+This distinction is important for structured decisions. The best joint record
+can differ from the tuple formed by choosing each field's local best value,
+especially after constraints, weights, or latent structure are introduced.
+
 Quantized and Count-Budget Indexes
 ----------------------------------
 
@@ -116,11 +129,15 @@ accuracy for access to high-probability regions.
 
    from mixle.enumeration import count_budget_index, quantized_index
 
-   q_index = quantized_index(dist, budget=4096)
-   c_index = count_budget_index(dist, budget=4096)
+   q_index = quantized_index(dist.enumerator(), max_bits=4096)
+   c_index = count_budget_index(dist, budget_bits=4096)
 
 Use these when top-k traversal is too slow but you still need structured access
 to likely support values.
+
+Index parameters are part of the approximation. Record the budget, quantization
+scheme, and any error or coverage report next to the result that consumes the
+index.
 
 Latent Models and HMM Paths
 ---------------------------
@@ -137,6 +154,10 @@ an approximation as exact.
    paths = hmm_best_paths(hmm, observations, k=10)
 
 Use :doc:`hmms-latent` for HMM modeling details.
+
+For latent models, distinguish path ranking from marginal value ranking.
+K-best state paths are not automatically the same evidence as the top marginal
+observation values, and the artifact should name which question was answered.
 
 Autoregressive Enumeration
 --------------------------
@@ -172,6 +193,21 @@ Practical Guidance
 * Treat latent marginal ranking as a different problem from path enumeration.
 * Prefer exact guarantees where available; inspect result objects when a route
   is approximate or bounded.
+
+Release Evidence
+----------------
+
+When enumeration supports a documented workflow, preserve:
+
+* the object or relation being enumerated;
+* the advertised capabilities checked before enumeration;
+* the exact operation, such as ``top_k``, ``top_p``, ``rank``, or ``seek``;
+* log scores for returned values;
+* any approximation budget, bound, or index settings; and
+* the policy that consumes ties, near ties, omitted tails, or infeasible values.
+
+This prevents a ranked list from becoming detached from the guarantee that made
+it safe to use.
 
 API Map
 -------

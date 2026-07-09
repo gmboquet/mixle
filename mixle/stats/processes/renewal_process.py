@@ -135,6 +135,7 @@ class RenewalProcessSampler(DistributionSampler):
         return np.asarray(events, dtype=np.float64)
 
     def sample(self, size: int | None = None) -> np.ndarray | list[np.ndarray]:
+        """Draw one realization, or ``size`` iid realizations, on the fixed window."""
         if size is None:
             return self._sample_one()
         return [self._sample_one() for _ in range(int(size))]
@@ -151,6 +152,7 @@ class RenewalProcessAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: Any, weight: float, estimate: RenewalProcessDistribution | None) -> None:
+        """Accumulate observed inter-arrival gaps from one realization."""
         ev = np.sort(np.asarray(x, dtype=np.float64).reshape(-1))
         gaps = np.diff(np.concatenate(([0.0], ev))) if ev.size else np.empty(0, dtype=np.float64)
         gap_est = estimate.interarrival if estimate is not None else None
@@ -158,12 +160,14 @@ class RenewalProcessAccumulator(SequenceEncodableStatisticAccumulator):
             self.gap_accumulator.update(float(g), weight, gap_est)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize the gap accumulator from one realization."""
         ev = np.sort(np.asarray(x, dtype=np.float64).reshape(-1))
         gaps = np.diff(np.concatenate(([0.0], ev))) if ev.size else np.empty(0, dtype=np.float64)
         for g in gaps:
             self.gap_accumulator.initialize(float(g), weight, rng)
 
     def seq_update(self, x: Any, weights: np.ndarray, estimate: RenewalProcessDistribution | None) -> None:
+        """Accumulate encoded observed gaps with realization-level weights."""
         child_enc, seg_ids, num_real, remaining, ok = x
         if seg_ids.size:
             gap_weights = np.asarray(weights, dtype=np.float64)[seg_ids]
@@ -171,33 +175,41 @@ class RenewalProcessAccumulator(SequenceEncodableStatisticAccumulator):
             self.gap_accumulator.seq_update(child_enc, gap_weights, gap_est)
 
     def seq_initialize(self, x: Any, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize from encoded observed gaps."""
         child_enc, seg_ids, num_real, remaining, ok = x
         if seg_ids.size:
             gap_weights = np.asarray(weights, dtype=np.float64)[seg_ids]
             self.gap_accumulator.seq_initialize(child_enc, gap_weights, rng)
 
     def combine(self, suff_stat: Any) -> "RenewalProcessAccumulator":
+        """Merge another inter-arrival sufficient-statistic value."""
         self.gap_accumulator.combine(suff_stat)
         return self
 
     def value(self) -> Any:
+        """Return the wrapped inter-arrival accumulator value."""
         return self.gap_accumulator.value()
 
     def from_value(self, x: Any) -> "RenewalProcessAccumulator":
+        """Replace the wrapped inter-arrival accumulator from ``x``."""
         self.gap_accumulator.from_value(x)
         return self
 
     def scale(self, c: float) -> "RenewalProcessAccumulator":
+        """Scale the wrapped inter-arrival sufficient statistics by ``c``."""
         self.gap_accumulator.scale(c)
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Delegate keyed statistic merging to the gap accumulator."""
         self.gap_accumulator.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Delegate keyed statistic replacement to the gap accumulator."""
         self.gap_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "RenewalProcessDataEncoder":
+        """Return an encoder that converts event times into inter-arrival gaps."""
         # window is recovered by the estimator; the encoder only needs the gap encoder + a window for
         # the survival term, which the estimator supplies via dist_to_encoder on the fitted model.
         return RenewalProcessDataEncoder(self.gap_accumulator.acc_to_encoder(), None)
@@ -214,6 +226,7 @@ class RenewalProcessAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> "RenewalProcessAccumulator":
+        """Create a fresh renewal-process accumulator."""
         return RenewalProcessAccumulator(self.gap_factory.make(), name=self.name, keys=self.keys)
 
 
@@ -233,11 +246,13 @@ class RenewalProcessEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> "RenewalProcessAccumulatorFactory":
+        """Return an accumulator factory for observed inter-arrival gaps."""
         return RenewalProcessAccumulatorFactory(
             self.interarrival_estimator.accumulator_factory(), name=self.name, keys=self.keys
         )
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> "RenewalProcessDistribution":
+        """Estimate the inter-arrival distribution and keep the fixed window."""
         interarrival = self.interarrival_estimator.estimate(nobs, suff_stat)
         return RenewalProcessDistribution(interarrival, self.window, name=self.name, keys=self.keys)
 
@@ -260,6 +275,7 @@ class RenewalProcessDataEncoder(DataSequenceEncoder):
         )
 
     def seq_encode(self, x: Sequence[Any]) -> Any:
+        """Encode event-time realizations into flattened gaps and censoring metadata."""
         window = self.window
         flat_gaps: list[float] = []
         seg_ids: list[int] = []

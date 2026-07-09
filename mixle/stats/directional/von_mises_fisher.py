@@ -1,13 +1,10 @@
-"""Create, estimate, and sample from a von Mises-Fisher distribution.
-
-Defines the VonMisesFisherDistribution, VonMisesFisherSampler, VonMisesFisherAccumulatorFactory,
-VonMisesFisherAccumulator, VonMisesFisherEstimator, and the VonMisesFisherDataEncoder classes for use with mixle.
+"""Von Mises-Fisher distributions on unit spheres.
 
 Data type: Union[Sequence[float], np.ndarray] (a unit-norm vector on the (p-1)-sphere in R^p).
 
-The von Mises-Fisher (vmf) distribution on the (p-1) sphere in R^{p}. Assume x_mat = (X_1,..,X_p) follows a vmf
+The von Mises-Fisher (vMF) distribution is defined on the (p-1)-sphere in R^{p}. Assume x_mat = (X_1,..,X_p) follows a vMF
 distribution with mean direction vector mu = (mu_1, mu_2, ..., mu_p) s.t. ||mu||=1 and concentration parameter
-kappa > 0. The vmf log-density if given by
+kappa > 0. The vMF log-density is
 
     log(f(x; mu, kappa)) = log(c_p(kappa)) + kappa * dot(mu, x),
 
@@ -118,12 +115,14 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare backend support for von Mises-Fisher generated kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the generated-compute declaration for the von Mises-Fisher distribution."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -163,21 +162,21 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """VonMisesFisherDistribution object.
+        """Create a von Mises-Fisher distribution on the unit sphere.
 
         Args:
             mu (Union[Sequence[float], np.ndarray]): Mean direction vector. Norm should be 1.0.
             kappa (float): Positive valued concentration parameter.
-            name (Optional[str]): Optional name for object instance.
-            keys (Optional[str]): Optional keys for object instance.
+            name (Optional[str]): Optional distribution name.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional distribution name.
             dim (int): Length of mu (dimension for vmf-distribution).
             mu (np.ndarray): Mean direction vector. Norm should be 1.0.
             kappa (float): Positive valued concentration parameter.
             log_const (float): Normalizing constant for vmf distribution.
-            keys (Optional[str]): Optional keys for object instance.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
         dim = len(mu)
@@ -199,7 +198,7 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        """Returns string representation of VonMisesFisherDistribution object."""
+        """Return a constructor-style representation of the von Mises-Fisher distribution."""
         s1 = repr(list(self.mu))
         s2 = repr(self.kappa)
         s3 = repr(self.name)
@@ -360,25 +359,25 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         return engine.sum(ww, axis=0), engine.matmul(ww.T, xx)
 
     def sampler(self, seed: int | None = None) -> "VonMisesFisherSampler":
-        """Create a VonMisesFisherSampler object from parameters of VonMisesFisherDistribution instance.
+        """Create a sampler from this von Mises-Fisher distribution.
 
         Args:
             seed (Optional[int]): Used to set seed in random sampler.
 
         Returns:
-            VonMisesFisherSampler object.
+            VonMisesFisherSampler configured from this distribution.
 
         """
         return VonMisesFisherSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "VonMisesFisherEstimator":
-        """Create a VonMisesFisherEstimator object.
+        """Create an estimator for a von Mises-Fisher distribution.
 
         Args:
             pseudo_count (Optional[float]): Kept for interface consistency (has no effect on estimation).
 
         Returns:
-            VonMisesFisherEstimator object.
+            VonMisesFisherEstimator configured with this distribution's name and keys.
 
         """
         if pseudo_count is None:
@@ -387,7 +386,7 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
             return VonMisesFisherEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "VonMisesFisherDataEncoder":
-        """Returns a VonMisesFisherDataEncoder object for encoding sequences of data."""
+        """Return the encoder for von Mises-Fisher observations."""
         return VonMisesFisherDataEncoder()
 
 
@@ -395,7 +394,7 @@ class VonMisesFisherSampler(DistributionSampler):
     """Sampler for the VonMisesFisherDistribution using Wood's rejection sampling scheme."""
 
     def __init__(self, dist: "VonMisesFisherDistribution", seed: int | None = None) -> None:
-        """VonMisesFisherSampler object.
+        """Create a sampler for a von Mises-Fisher distribution.
 
         Args:
             dist (VonMisesFisherDistribution): Distribution to sample from.
@@ -475,11 +474,11 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulator for the VonMisesFisherDistribution. Tracks the weighted vector sum and total weight."""
 
     def __init__(self, dim: int | None = None, name: str | None = None, keys: str | None = None) -> None:
-        """VonMisesFisherAccumulator object.
+        """Create an accumulator for von Mises-Fisher sufficient statistics.
 
         Args:
             dim (Optional[int]): Dimension p of the observations. If None, set from data on first update.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional accumulator name.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
@@ -487,7 +486,7 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
             count (float): Sum of observation weights.
             ssum (Optional[np.ndarray]): Weighted sum of observation vectors. None until dim is known.
             key (Optional[str]): Optional key for merging sufficient statistics.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional accumulator name.
 
         """
         self.dim = dim
@@ -603,7 +602,7 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge sufficient statistics of object instance with suff stats containing matching keys.
+        """Merge sufficient statistics from ``stats_dict`` when this accumulator's key is present.
 
         Args:
             stats_dict (Dict[str, Any]): Dict mapping keys to accumulators with shared sufficient statistics.
@@ -619,7 +618,7 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Set sufficient statistics of object instance to suff stats with matching keys.
+        """Replace sufficient statistics from ``stats_dict`` when this accumulator's key is present.
 
         Args:
             stats_dict (Dict[str, Any]): Dict mapping keys to accumulators with shared sufficient statistics.
@@ -633,7 +632,7 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
                 self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "VonMisesFisherDataEncoder":
-        """Returns a VonMisesFisherDataEncoder object for encoding sequences of data."""
+        """Return the encoder associated with this accumulator."""
         return VonMisesFisherDataEncoder()
 
 
@@ -641,11 +640,11 @@ class VonMisesFisherAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for creating VonMisesFisherAccumulator objects."""
 
     def __init__(self, dim: int | None = None, name: str | None = None, keys: str | None = None) -> None:
-        """VonMisesFisherAccumulatorFactory object.
+        """Create a factory for von Mises-Fisher accumulators.
 
         Args:
             dim (Optional[int]): Dimension p of the observations. If None, set from data.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional name assigned to created accumulators.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
@@ -654,7 +653,7 @@ class VonMisesFisherAccumulatorFactory(StatisticAccumulatorFactory):
         self.name = name
 
     def make(self) -> "SequenceEncodableStatisticAccumulator":
-        """Returns a new VonMisesFisherAccumulator object."""
+        """Return a fresh von Mises-Fisher accumulator."""
         return VonMisesFisherAccumulator(dim=self.dim, keys=self.keys)
 
 
@@ -668,12 +667,12 @@ class VonMisesFisherEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """VonMisesFisherEstimator object.
+        """Create an estimator for von Mises-Fisher parameters.
 
         Args:
             dim (Optional[int]): Dimension p of the observations. If None, set from data.
             pseudo_count (Optional[float]): Kept for interface consistency (has no effect on estimation).
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional name assigned to the estimated distribution.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
@@ -684,7 +683,7 @@ class VonMisesFisherEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self):
-        """Returns a VonMisesFisherAccumulatorFactory for creating VonMisesFisherAccumulator objects."""
+        """Return a factory for von Mises-Fisher accumulators."""
         return VonMisesFisherAccumulatorFactory(dim=self.dim, name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray]) -> "VonMisesFisherDistribution":
@@ -746,11 +745,11 @@ class VonMisesFisherDataEncoder(DataSequenceEncoder):
     """Data encoder for sequences of unit-norm vector observations."""
 
     def __str__(self) -> str:
-        """Returns string representation of VonMisesFisherDataEncoder object."""
+        """Return the von Mises-Fisher encoder's display name."""
         return "VonMisesFisherDataEncoder"
 
     def __eq__(self, other) -> bool:
-        """Checks if other object is an instance of a VonMisesFisherDataEncoder.
+        """Return true when ``other`` is a von Mises-Fisher data encoder.
 
         Args:
             other (object): Object to compare against.

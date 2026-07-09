@@ -36,7 +36,7 @@ class DensityGate:
 
     def _rows(self, texts: Sequence[Any]) -> list[np.ndarray]:
         # str-coerce only for the text featurizer: a record featurizer must see the raw dict/tuple,
-        # not its repr, or the gate silently scores garbage features.
+        # not its repr, or the gate silently scores invalid feature representations.
         items = [str(t) for t in texts] if isinstance(self.featurizer, HashedNGram) else list(texts)
         return [np.asarray(r, dtype=np.float64) for r in self.featurizer.transform(items)]
 
@@ -77,9 +77,11 @@ class DensityGate:
         return bool(self.log_density([text])[0] < self.log_threshold)
 
     def ood_mask(self, texts: Sequence[str]) -> np.ndarray:
+        """Return a boolean mask marking inputs below the calibrated density floor."""
         return self.log_density(texts) < self.log_threshold
 
     def to_spec(self) -> dict[str, Any]:
+        """Serialize the featurizer, fitted density, and threshold for task artifacts."""
         from mixle.utils.serialization import ensure_pysp_serialization_registry, to_serializable
 
         ensure_pysp_serialization_registry()
@@ -92,6 +94,7 @@ class DensityGate:
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> DensityGate:
+        """Rebuild a density gate from :meth:`to_spec` output."""
         from mixle.utils.serialization import ensure_pysp_serialization_registry, from_serializable
 
         ensure_pysp_serialization_registry()

@@ -24,6 +24,9 @@ _KINDS: dict[str, tuple[str, str]] = {
     "pandas": ("pandas_source", "read_dataframe"),
     "mongo": ("mongo_source", "read_mongo"),
     "remote": ("hadoop_source", "read_remote"),
+    "zarr": ("array_source", "read_zarr"),
+    "hdf5": ("array_source", "read_hdf5"),
+    "memmap": ("array_source", "read_memmap"),
 }
 
 

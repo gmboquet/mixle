@@ -54,13 +54,16 @@ class PhaseSchedule:
     n_phases: int = 1
 
     def phase(self, t: int, length: int) -> int:  # pragma: no cover - overridden
+        """Return the phase index for position ``t`` in a sequence of ``length``."""
         raise NotImplementedError
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the schedule to a JSON-compatible dictionary."""
         raise NotImplementedError
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> PhaseSchedule:
+        """Deserialize a schedule produced by :meth:`to_dict`."""
         kind = d["kind"]
         for cls in (Homogeneous, ByPosition, ByRelativePosition, ByLength):
             if cls.__name__ == kind:
@@ -74,9 +77,11 @@ class Homogeneous(PhaseSchedule):
     n_phases = 1
 
     def phase(self, t: int, length: int) -> int:
+        """Return the single homogeneous phase."""
         return 0
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the homogeneous schedule."""
         return {"kind": "Homogeneous"}
 
     @classmethod
@@ -94,9 +99,11 @@ class ByPosition(PhaseSchedule):
         self.n_phases = self.cap
 
     def phase(self, t: int, length: int) -> int:
+        """Return the absolute-position phase capped at the final phase."""
         return min(int(t), self.cap - 1)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the absolute-position schedule."""
         return {"kind": "ByPosition", "cap": self.cap}
 
     @classmethod
@@ -114,11 +121,13 @@ class ByRelativePosition(PhaseSchedule):
         self.n_phases = self.bins
 
     def phase(self, t: int, length: int) -> int:
+        """Return the relative-position phase for ``t / length``."""
         if length <= 0:
             return 0
         return min(self.bins - 1, (int(t) * self.bins) // int(length))
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the relative-position schedule."""
         return {"kind": "ByRelativePosition", "bins": self.bins}
 
     @classmethod
@@ -139,9 +148,11 @@ class ByLength(PhaseSchedule):
         self.n_phases = len(self.boundaries) + 1
 
     def phase(self, t: int, length: int) -> int:
+        """Return the length-bucket phase for the sequence length."""
         return int(sum(1 for b in self.boundaries if length > b))
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the length-bucket schedule."""
         return {"kind": "ByLength", "boundaries": list(self.boundaries)}
 
     @classmethod
@@ -239,6 +250,7 @@ class ScheduledHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
         )
 
     def log_density(self, x: list[Any]) -> float:
+        """Return the log likelihood of one scheduled HMM sequence."""
         length = len(x)
         if length == 0:
             return self.len_dist.log_density(0) if self.len_dist is not None else _NEG_INF
@@ -248,15 +260,19 @@ class ScheduledHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
         return lp
 
     def seq_log_density(self, x: Any) -> np.ndarray:
+        """Score a batch of scheduled HMM sequences."""
         return np.array([self.log_density(seq) for seq in x], dtype=float)
 
     def sampler(self, seed: int | None = None) -> ScheduledHMMSampler:
+        """Return a sampler for scheduled HMM sequences."""
         return ScheduledHMMSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> ScheduledHMMEstimator:
+        """Raise because emission and length estimators must be supplied explicitly."""
         raise NotImplementedError("supply emission/len estimators via ScheduledHMMEstimator(...) directly")
 
     def dist_to_encoder(self) -> ScheduledHMMDataEncoder:
+        """Return the pass-through scheduled HMM encoder."""
         return ScheduledHMMDataEncoder()
 
 
@@ -264,6 +280,8 @@ class ScheduledHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
 # Sampler.
 # ---------------------------------------------------------------------------------------------------------
 class ScheduledHMMSampler(DistributionSampler):
+    """Sampler for scheduled HMM sequences."""
+
     def __init__(self, dist: ScheduledHiddenMarkovModelDistribution, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = RandomState(seed)
@@ -276,6 +294,7 @@ class ScheduledHMMSampler(DistributionSampler):
         return int(self.len_sampler.sample())
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Draw one sequence or a list of sequences."""
         if size is not None:
             return [self.sample() for _ in range(size)]
         d = self.dist
@@ -298,6 +317,8 @@ class ScheduledHMMSampler(DistributionSampler):
 # Encoder (lean pass-through; the seq_* methods loop over raw sequences).
 # ---------------------------------------------------------------------------------------------------------
 class ScheduledHMMDataEncoder(DataSequenceEncoder):
+    """Pass-through encoder for scheduled HMM sequence observations."""
+
     def __str__(self) -> str:
         return "ScheduledHMMDataEncoder"
 
@@ -305,6 +326,7 @@ class ScheduledHMMDataEncoder(DataSequenceEncoder):
         return isinstance(other, ScheduledHMMDataEncoder)
 
     def seq_encode(self, x: list[list[Any]]) -> list[list[Any]]:
+        """Encode scheduled HMM records as sequence lists."""
         return [list(seq) for seq in x]
 
 
@@ -312,6 +334,8 @@ class ScheduledHMMDataEncoder(DataSequenceEncoder):
 # EM: phase-pooled forward-backward. Emissions and len_dist are re-estimated by their own estimators.
 # ---------------------------------------------------------------------------------------------------------
 class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulator for phase-pooled scheduled HMM EM sufficient statistics."""
+
     def __init__(self, n_states: int, schedule: PhaseSchedule, emission_factory: Any, len_factory: Any = None) -> None:
         self.n_states = int(n_states)
         self.schedule = schedule
@@ -339,6 +363,7 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
                 self.emission_acc[p][j].update(x[t], weight * gamma[t, j], prev)
 
     def update(self, x: list[Any], weight: float, estimate: ScheduledHiddenMarkovModelDistribution) -> None:
+        """Accumulate sufficient statistics from one weighted sequence."""
         if len(x) == 0:
             self._accumulate(
                 x, weight, np.zeros((0, self.n_states)), np.zeros((0, self.n_states, self.n_states)), estimate
@@ -349,10 +374,12 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
         self._accumulate(x, weight, gamma, xi, estimate)
 
     def seq_update(self, x: Any, weights: np.ndarray, estimate: ScheduledHiddenMarkovModelDistribution) -> None:
+        """Accumulate weighted sufficient statistics from a batch."""
         for seq, w in zip(x, weights):
             self.update(seq, float(w), estimate)
 
     def initialize(self, x: list[Any], weight: float, rng: RandomState) -> None:
+        """Initialize sufficient statistics with random soft state responsibilities."""
         length = len(x)
         if length == 0:
             self._accumulate(x, weight, np.zeros((0, self.n_states)), np.zeros((0, self.n_states, self.n_states)), None)
@@ -364,10 +391,12 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
         self._accumulate(x, weight, gamma, xi, None)
 
     def seq_initialize(self, x: Any, weights: np.ndarray, rng: RandomState) -> None:
+        """Initialize sufficient statistics from a weighted batch."""
         for seq, w in zip(x, weights):
             self.initialize(seq, float(w), rng)
 
     def combine(self, other: Any) -> ScheduledHMMAccumulator:
+        """Merge serialized scheduled HMM sufficient statistics."""
         ic, tc, em, lv = other
         self.init_counts += ic
         self.trans_counts += tc
@@ -379,6 +408,7 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple:
+        """Return serialized scheduled HMM sufficient statistics."""
         em = [[self.emission_acc[p][j].value() for j in range(self.n_states)] for p in range(self.n_phases)]
         return (
             self.init_counts.copy(),
@@ -388,6 +418,7 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
         )
 
     def from_value(self, value: tuple) -> ScheduledHMMAccumulator:
+        """Restore accumulator state from serialized sufficient statistics."""
         ic, tc, em, lv = value
         self.init_counts = np.array(ic, dtype=float)
         self.trans_counts = np.array(tc, dtype=float)
@@ -399,10 +430,13 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def acc_to_encoder(self) -> ScheduledHMMDataEncoder:
+        """Return the encoder associated with this accumulator."""
         return ScheduledHMMDataEncoder()
 
 
 class ScheduledHMMAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for scheduled HMM accumulators."""
+
     def __init__(
         self, n_states: int, schedule: PhaseSchedule, emission_estimator: Any, len_estimator: Any = None
     ) -> None:
@@ -412,6 +446,7 @@ class ScheduledHMMAccumulatorFactory(StatisticAccumulatorFactory):
         self.len_estimator = len_estimator
 
     def make(self) -> ScheduledHMMAccumulator:
+        """Create a fresh scheduled HMM accumulator."""
         len_factory = None if self.len_estimator is None else self.len_estimator.accumulator_factory()
         return ScheduledHMMAccumulator(
             self.n_states, self.schedule, self.emission_estimator.accumulator_factory(), len_factory
@@ -443,9 +478,11 @@ class ScheduledHMMEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self) -> ScheduledHMMAccumulatorFactory:
+        """Return the accumulator factory used by this estimator."""
         return ScheduledHMMAccumulatorFactory(self.n_states, self.schedule, self.emission_estimator, self.len_estimator)
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> ScheduledHiddenMarkovModelDistribution:
+        """Estimate phase-indexed initial, transition, emission, and length models."""
         ic, tc, em_vals, lv = suff_stat
         pc = self.pseudo_count
         inits = ic + pc

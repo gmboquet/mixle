@@ -1,4 +1,4 @@
-"""The reasoning front door: fuse modality evidence into a belief, query it with native UQ.
+"""Reasoning front door for fusing modality evidence into a belief.
 
 ``reason(prior, evidence)`` folds a sequence of linear-Gaussian observations into a belief state
 by exact Kalman assimilation, tracking how many nats of uncertainty each modality removed. The
@@ -18,7 +18,7 @@ from mixle.inference.uncertainty import UncertaintyDecomposition
 
 
 class Latent:
-    """Factories for the shared latent's prior belief (the starting point of assimilation)."""
+    """Factories for the shared latent prior used at the start of assimilation."""
 
     @staticmethod
     def gaussian(mean: Any, cov: Any) -> GaussianBelief:
@@ -39,16 +39,14 @@ class Latent:
         x0_cov: Any = None,
         process_cov: Any = None,
     ) -> GaussianBelief:
-        """A physics-constrained prior over a latent *trajectory* ``z_0 .. z_{steps-1}``.
+        """Return a linear-dynamics prior over ``z_0 .. z_{steps-1}``.
 
-        The trajectory follows a linear dynamical law ``z_{t+1} = A z_t + w_t``, ``w_t ~ N(0, Q)`` --
-        a discretized linear ODE/PDE (``A`` is the state-transition operator; take it from a
-        ``mixle_pde`` ``DynamicsOperator`` for real physics). The returned belief is the exact joint
-        Gaussian over the stacked trajectory ``(steps * d,)`` (block ``t`` is ``z_t``); its
-        block-tridiagonal precision *is* the mechanistic prior. Because the states are coupled,
-        evidence at any one time informs *all* times through the dynamics -- fusing observations via
-        :func:`reason` is then exact Kalman smoothing, so a sparsely-observed field is filled in by
-        the physics, not by a generic smoothness assumption.
+        The trajectory follows ``z_{t+1} = A z_t + w_t`` with
+        ``w_t ~ N(0, Q)``. The returned belief is the joint Gaussian over the
+        stacked trajectory ``(steps * d,)``. Because the states are coupled,
+        evidence at one time can inform other times through the dynamics, so
+        fusing observations via :func:`reason` performs exact Kalman smoothing
+        for this linear-Gaussian model.
 
         Args:
             A: ``(d, d)`` linear state-transition operator (one discrete step).
@@ -106,15 +104,16 @@ Evidence = LinearGaussianEvidence
 
 @dataclass
 class NonlinearEvidence:
-    """One modality's evidence through a NONLINEAR forward model: ``y = h(z) + noise``.
+    """One modality's evidence through a nonlinear forward model.
 
     Assimilated by (iterated) extended-Kalman linearization: at the current belief mean ``m`` the
     forward is replaced by its tangent ``h(z) ~ h(m) + J(m)(z - m)`` and the exact linear update runs
     on that tangent; with ``iterations > 1`` the linearization point is refined at the updated mean and
-    the update repeats FROM THE PRE-UPDATE BELIEF (the iterated EKF), which matters when the prior mean
+    the update repeats from the pre-update belief, which matters when the prior mean
     is far from the truth. ``jacobian`` is analytic when you have it; otherwise a central finite
-    difference is used. Honest caveat: this is a Gaussian approximation around the linearization point
-    -- for strongly multimodal posteriors it reports one mode's belief, not the mixture.
+    difference is used. This is a Gaussian approximation around the
+    linearization point; for strongly multimodal posteriors it reports one
+    mode's belief, not the full mixture.
     """
 
     h: Any  # callable z -> predicted measurement (m,)
@@ -182,15 +181,19 @@ class ReasonedAnswer:
 
     @property
     def mean(self) -> np.ndarray:
+        """Return posterior mean from the underlying belief."""
         return self.belief.mean()
 
     def cov(self) -> np.ndarray:
+        """Return posterior covariance from the underlying belief."""
         return self.belief.cov()
 
     def sd(self) -> np.ndarray:
+        """Return posterior standard deviations from the underlying belief."""
         return self.belief.sd()
 
     def entropy(self) -> float:
+        """Return posterior entropy from the underlying belief."""
         return self.belief.entropy()
 
     def interval(self, level: float = 0.9) -> np.ndarray:

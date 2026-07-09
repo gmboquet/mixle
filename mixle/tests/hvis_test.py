@@ -838,7 +838,24 @@ class HTSNETestCase(unittest.TestCase):
         y = htsne(data, mix_model=self.model, perplexity=10.0, method="exact", max_its=300, seed=3, out=io.StringIO())
         self.assertEqual(y.shape, (len(data), 2))
         self.assertTrue(np.all(np.isfinite(y)))
-        self.assertGreater(separation_ratio(y, labels), 1.5)
+        # the old 1.5 bar encoded the categorical field contributing NOTHING within a cluster; the
+        # universal typicality coordinates now surface real within-cluster substructure (a cluster's
+        # minority-category points genuinely differ), which legitimately widens clusters. The exact
+        # ratio is trajectory-volatile even at a fixed seed (1.249 on the CI numpy/BLAS build vs
+        # 1.414 locally), so pin decisive separation with cross-build margin rather than a value
+        # inside that noise...
+        self.assertGreater(separation_ratio(y, labels), 1.15)
+        # ...and that substructure is the new claim worth pinning: within a cluster, cross-category
+        # pairs sit measurably farther apart than same-category pairs.
+        cats = np.array([x[1] for x in data])
+        same_d, cross_d = [], []
+        for c in np.unique(labels):
+            idx = np.where(labels == c)[0]
+            for a_pos, i in enumerate(idx):
+                for j in idx[a_pos + 1 :]:
+                    d = float(np.linalg.norm(y[i] - y[j]))
+                    (same_d if cats[i] == cats[j] else cross_d).append(d)
+        self.assertGreater(np.mean(cross_d) / np.mean(same_d), 1.1)
 
     def test_exact_kl_decreases(self):
         p = get_pmat(self.z, self.l, targ_perplexity=20.0)
@@ -1117,7 +1134,13 @@ class HTSNETestCase(unittest.TestCase):
         data, labels, model = self._complex_heterogeneous_data_and_model()
         factors = local_factors(model, data)
         self.assertEqual(len(factors), 7)
-        self.assertEqual(sum(isinstance(f, dict) and f.get("kind") == "local" for f in factors), 3)
+        # every field except gated-inner scores now carries local geometry: native coordinates
+        # where the leaf has them, universal typicality coordinates otherwise, and the Optional
+        # missingness gate carries its presence indicator (the missing/present pattern is real
+        # within-cluster structure). Only the Optional INNER field (scores gated to present rows)
+        # remains posterior-only. Earlier pins (3, then 5) documented the fallback gaps as they
+        # were successively closed.
+        self.assertEqual(sum(isinstance(f, dict) and f.get("kind") == "local" for f in factors), 6)
 
         log_s = model_log_affinity(None, None, affinity=factors, evidence_cap=1.0)
         self.assertGreater(affinity_neighbor_purity(log_s, labels, k=12), 0.95)

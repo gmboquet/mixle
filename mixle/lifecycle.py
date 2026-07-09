@@ -9,11 +9,11 @@ knowing which subpackage owns which verb::
     m.sample(5)                      # draw new records
     m.enumerate().top_k(3)           # most-probable support (discrete/structured families)
     m.posterior(x)                   # latent posteriors (mixtures, HMMs, ...)
-    m.distill(teacher, inputs)       # tiny deployable student in front of the teacher (task spine)
+    m.distill(teacher, inputs)       # compact deployable student in front of the teacher (task spine)
     m.deploy("artifacts/m")          # durable artifact directory; Model.load() restores it
     m.explain()                      # what it is, what it supports, and how it was proposed
     m.explain_prediction(x)          # exact per-part attribution of one score
-    m.forecast(history, h)           # horizon predictions with honest intervals (HMMs)
+    m.forecast(history, h)           # horizon predictions with calibrated intervals (HMMs)
     m.do({field: value})             # graph-surgery intervention (learned Bayesian networks)
     m(x)                             # use it: log-density of an observation
 
@@ -68,7 +68,7 @@ class Model:
         self.notes: list[str] = list(notes or [])
         self.frontier: list[dict[str, Any]] | None = None  # candidate ranking when built by propose()
         self.certificate: Any = None  # EstimationCertificate attached by fit() -- how each block was solved
-        self.calibration: Any = None  # CalibrationReport attached by fit(calibrate=...) -- is the UQ honest
+        self.calibration: Any = None  # CalibrationReport attached by fit(calibrate=...) -- UQ validation
         self._fit_info: dict[str, Any] = {}
 
     # --- fit / use -------------------------------------------------------------------------------
@@ -84,7 +84,7 @@ class Model:
 
         ``calibrate`` (opt-in, default off): reserve a holdout slice (a fraction, or ``True`` for
         25%), fit on the rest, and attach a :class:`~mixle.inference.CalibrationReport` on
-        ``self.calibration`` measuring whether the model's uncertainty is honest on the held-out data
+        ``self.calibration`` measuring calibration quality on held-out data
         (PIT test + held-out log-density). Off by default because it costs training data."""
         from mixle.inference import certify, optimize
 
@@ -116,7 +116,7 @@ class Model:
             elif restarts == "auto":
                 self.notes.append("saddle suspected: symmetry-broken refits did not improve — inspect the fit")
         # the estimation certificate: which method solved each block, how strong the guarantee, and
-        # exactly where (if anywhere) gradient descent was unavoidable. Cheap inspection, computed once.
+        # exactly where (if anywhere) gradient descent was unavoidable. Low-overhead inspection, computed once.
         try:
             self.certificate = certify(self.fitted, escape_tested=escape_tested)
         except Exception:  # noqa: BLE001 - certification is a report; never let it break a fit
@@ -208,6 +208,7 @@ class Model:
         return {"n": int(ll.size), "mean_log_density": float(ll.mean()), "total_log_density": float(ll.sum())}
 
     def sample(self, size: int | None = None, *, seed: int | None = None) -> Any:
+        """Draw samples from the fitted distribution."""
         return self._require_fitted().sampler(seed=seed).sample(size)
 
     # --- structure verbs -------------------------------------------------------------------------
@@ -221,7 +222,7 @@ class Model:
 
     # --- distill / deploy ------------------------------------------------------------------------
     def distill(self, teacher: Any = None, inputs: Any = None, **solve_kw: Any):
-        """Distill a tiny deployable student via :func:`mixle.task.solve`.
+        """Distill a compact deployable student via :func:`mixle.task.solve`.
 
         With ``teacher=None`` the *fitted model itself* teaches: inputs are labeled by their most-probable
         latent component (``posterior`` argmax), so a fitted mixture becomes a fast, calibrated classifier
@@ -258,6 +259,7 @@ class Model:
 
     @classmethod
     def load(cls, path: str) -> Model:
+        """Restore a :class:`Model` from an artifact directory created by :meth:`deploy`."""
         p = Path(path)
         with open(p / "model.pkl", "rb") as f:
             fitted = pickle.load(f)
@@ -277,13 +279,15 @@ class Model:
         return explain(self._require_fitted(), x)
 
     def forecast(self, history: Any, horizon: int, **kw: Any):
-        """Horizon predictions with honest intervals — :func:`mixle.inference.forecast` (HMMs)."""
+        """Horizon predictions with calibrated intervals — :func:`mixle.inference.forecast` (HMMs)."""
         from mixle.inference import forecast
 
         return forecast(self._require_fitted(), history, horizon, **kw)
 
     def do(self, interventions: dict, **kw: Any):
-        """Graph-surgery intervention — :func:`mixle.inference.do` (learned Bayesian networks)."""
+        """Graph-surgery intervention — :func:`mixle.inference.do` (M0's generic engine: dependency
+        trees, Bayesian networks, composites, mixtures; reduces to :func:`mixle.inference.bn_do`'s
+        exact behavior for a fitted ``HeterogeneousBayesianNetwork``)."""
         from mixle.inference import do
 
         return do(self._require_fitted(), interventions, **kw)

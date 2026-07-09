@@ -1,13 +1,17 @@
 Neural and LLM Models
 =====================
 
-Neural models enter mixle in three different ways. Keeping them separate makes
+Neural models enter Mixle in three different ways. Keeping them separate makes
 the API much easier to reason about.
 
-This page covers an incubating part of the project. The examples are useful
-for experiments and for hybrid models that genuinely need a neural likelihood,
-but they carry more dependency, training-state, and reproducibility risk than
-the core ``mixle.stats`` families.
+This page covers the optional neural-model surface. The examples are useful for
+hybrid models that genuinely need a neural likelihood, but they carry more
+dependency, training-state, and reproducibility risk than the core
+``mixle.stats`` families.
+
+Install and document neural dependencies explicitly. A model that only works
+with Torch, a GPU device, or a registered module builder must record that
+requirement in its artifact manifest and in the deployment environment.
 
 .. list-table::
    :header-rows: 1
@@ -21,7 +25,7 @@ the core ``mixle.stats`` families.
        deliberately part of a larger distribution
    * - ``mixle.task``
      - local task models distilled from teachers
-     - you want ``text -> label`` or ``text -> fields`` served cheaply
+     - you want ``text -> label`` or ``text -> fields`` served cost-effectively
    * - ``mixle.reason``
      - uncertainty over LLM answers
      - you already have ``generate(prompt) -> str`` and need confidence,
@@ -123,15 +127,16 @@ the structure.
 
 Observations for a conditional density leaf are ``(x, y)`` pairs. The M-step is
 responsibility-weighted negative log-likelihood, so the leaf can sit inside a
-mixture or another latent wrapper, but it should be treated as an incubating
-Torch-backed surface with the usual training and reproducibility checks.
+mixture or another latent wrapper. Treat the fitted object as a Torch-backed
+artifact: record dependencies, training settings, validation data, and reload
+behavior.
 
 Constructible Neural Density Families
 -------------------------------------
 
-Version 0.6.2 adds direct distribution classes for common neural density
-families. Use them when the model tree should contain a neural density leaf
-without first building a Torch module and then wrapping it.
+Mixle provides direct distribution classes for common neural density families.
+Use them when the model tree should contain a neural density leaf without first
+building a Torch module and then wrapping it.
 
 .. code-block:: python
 
@@ -206,10 +211,10 @@ Use ``TransformerLMEstimator`` first. Reach for ``StreamingTransformer``
 when you need to bring your own module, control streaming behavior, or share a
 live module across a larger fitting loop.
 
-In 0.6.2, streaming Transformer accumulation preserves sample weights. When the
-leaf sits below a mixture or HMM, EM responsibilities are passed into the
-streaming update instead of being discarded. That makes the streaming adapter
-consistent with the other neural leaves for latent-model M-steps.
+Streaming Transformer accumulation preserves sample weights. When the leaf sits
+below a mixture or HMM, EM responsibilities are passed into the streaming update
+instead of being discarded. That makes the streaming adapter consistent with the
+other neural leaves for latent-model M-steps.
 
 Shared Embeddings
 -----------------
@@ -270,8 +275,9 @@ The PPL can place neural predictors inside distribution parameters:
        lr=0.003,
    )
 
-Tests also cover MLP and convolutional predictors. The output is still a
-probabilistic model with scoring and diagnostics, not just a neural network.
+The same contract supports MLP and convolutional predictors. The output is
+still a probabilistic model with scoring and diagnostics, not just a neural
+network.
 
 Preference Optimization
 -----------------------
@@ -287,11 +293,11 @@ Preference Optimization
    model = estimate(preference_triples, leaf.estimator())
 
 Use it when the learning signal is comparative preference rather than a
-categorical label. In v0.6.2, DPO accumulation preserves per-pair weights, so
-responsibilities, streaming decay, or sample weights affect the DPO loss
-instead of being dropped.
+categorical label. DPO accumulation preserves per-pair weights, so
+responsibilities, streaming decay, or sample weights affect the DPO loss instead
+of being dropped.
 
-Serialization And Artifacts
+Serialization and Artifacts
 ---------------------------
 
 The neural surface now supports more durable round trips:
@@ -311,6 +317,24 @@ Treat serialization as an artifact boundary, not a quality guarantee. Reload
 the model in a fresh process and rerun a small scoring or prediction check
 before relying on it in a service.
 
+Device and Dependency Checks
+----------------------------
+
+Neural artifacts should not assume the training environment is still present at
+serve time. Before promoting a neural or LLM-centered model, verify:
+
+* the artifact loads on the intended CPU or GPU target;
+* missing optional dependencies produce a clear error or a documented fallback;
+* seeds and training settings are recorded;
+* a held-out prediction or log-density matches the pre-save result within the
+  expected numerical tolerance;
+* the artifact does not claim unconditional sampling when the leaf is purely
+  conditional.
+
+These checks are especially important for streaming Transformer leaves, DPO
+models, and custom neural-density modules whose builder registration is part of
+the artifact contract.
+
 How Neural Leaves Compose with Latents
 --------------------------------------
 
@@ -327,11 +351,10 @@ Practical Checklist
 * Start with ``TransformerLMEstimator`` unless you already own the module.
 * Keep one observation as ``(context, target)`` for next-token leaves.
 * Use neural leaves when the neural likelihood is the natural model for that
-  field or latent expert, not just to demonstrate that different APIs can be
-  forced together.
+  field or latent expert.
 * Use ``CategoricalEmbedding`` to tie embeddings across experts.
 * Prefer ``Flow``, ``MAF``, ``VAE``, or ``DiscreteAR`` when a common neural
-  density family is the intended distribution.
+  density family is the target distribution.
 * Treat ``EnergyModel`` scores as approximately normalized; validate them
   before comparing directly with exact-density leaves.
 * Verify serialized neural artifacts after load, especially when optional
@@ -345,14 +368,66 @@ The older names ``StreamingTransformerLeaf``, ``NeuralLeaf``,
 ``StreamingTransformer``, ``NeuralGaussian``, ``NeuralCategorical``, and
 ``DPOModel`` in new code.
 
-Examples And Tests
-------------------
+Composition Grid
+-----------------
 
-* ``examples/shared_embedding_example.py``: shared embeddings across LM mixture
-  experts.
-* ``mixle/tests/neural_ppl_test.py``: neural PPL, streaming Transformer leaves,
-  EWC, DPO, and the direct ``LM`` surface.
-* ``mixle/tests/neural_families_test.py``: constructible neural-density
-  families.
-* ``mixle/tests/neural_leaf_serialization_test.py`` and
-  ``mixle/tests/lm_serialization_test.py``: neural and LM artifact round trips.
+The composition grid makes the advertised behavior checkable. It lists which
+latent or structured contexts are validated and where a JSON or pickle round
+trip is part of that validation rather than assumed.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Leaf
+     - Mixture component
+     - Composite field
+     - HMM emission
+     - Serializes in each context
+   * - ``NeuralGaussian`` (conditional, ``p(y|x)``)
+     - tested
+     - tested
+     - tested
+     - tested in all three
+   * - ``NeuralCategorical`` (conditional, ``p(y|x)``)
+     - tested
+     - tested
+     - tested
+     - tested in all three
+   * - ``NeuralDensity`` / ``Flow`` / ``VAE`` / ``MAF`` / ``DiscreteAR`` (unconditional)
+     - tested
+     - tested
+     - tested
+     - tested in all three
+   * - ``NeuralConditionalDensity`` (``mixture_density``, conditional)
+     - tested
+     - tested
+     - tested
+     - tested in all three
+   * - ``EnergyModel`` (unconditional, approximately normalized)
+     - tested
+     - tested
+     - not currently validated
+     - tested (Mixture, Composite)
+
+A purely conditional leaf such as ``NeuralCategorical``, ``NeuralGaussian``,
+or ``NeuralConditionalDensity`` has no marginal ``p(x)`` to draw from. A
+Mixture or HMM whose every component or state is conditional therefore cannot
+use the model's own ``sampler()``; ``NeuralCategorical.sample()`` raises by
+design. Fitting still works because ``optimize`` needs ``log_density`` and the
+accumulator contract, not unconditional sampling, so a conditionally emitting
+HMM trains normally on externally supplied ``(x, y)`` sequences.
+
+``EnergyModel`` as an HMM emission is outside the current validation grid.
+Do not document that route as supported until it has the same fitting,
+scoring, and serialization evidence as the validated neural leaves.
+
+Examples and Validation
+-----------------------
+
+Validation for neural and LLM-centered models should cover:
+
+* shared embeddings across language-model mixture experts;
+* neural PPL predictors, streaming Transformer leaves, EWC, DPO, and the
+  direct ``LM`` surface;
+* constructible neural-density families; and
+* neural and LM artifact round trips in a fresh process.

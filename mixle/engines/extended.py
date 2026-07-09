@@ -80,6 +80,7 @@ class DoubleDouble:
 
     @classmethod
     def from_float(cls, x: Any) -> DoubleDouble:
+        """Create a double-double value from float64 data."""
         x = np.asarray(x, dtype=np.float64)
         return cls(x, np.zeros_like(x))
 

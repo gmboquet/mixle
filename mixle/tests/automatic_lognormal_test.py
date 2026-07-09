@@ -59,6 +59,24 @@ class AutomaticLogNormalTest(unittest.TestCase):
         self.assertEqual(field.recommendation, "gaussian")
         self.assertIsInstance(get_estimator(data), GaussianEstimator)
 
+    def test_constant_positive_data_does_not_win_spuriously_as_lognormal(self):
+        # Regression: for exactly-constant data, raw-space variance is exactly 0.0 (correctly
+        # excluding the Gaussian candidate), but log-space variance of a constant array is NOT
+        # exactly zero -- np.log(c) computed independently per repeated element rounds slightly
+        # differently, leaving a ~1e-32-scale floating-point artifact. With gaussian excluded and
+        # nothing else to compare against, that spurious near-zero log-variance used to win
+        # unconditionally, producing a LogGaussianDistribution that assigns catastrophically low
+        # density to any value even 1% away from the training constant.
+        from mixle.inference.estimation import optimize
+
+        for value, n in ((7.0, 10), (123.456, 50), (100.0, 50)):
+            data = [value] * n
+            with self.subTest(value=value, n=n):
+                model = optimize(data, out=None)
+                # the correct fallback (a degenerate Gaussian, its min_covar floor already handling
+                # constant data elsewhere in the codebase), not a spurious LogGaussianDistribution
+                self.assertEqual(type(model).__name__, "GaussianDistribution")
+
 
 if __name__ == "__main__":
     unittest.main()

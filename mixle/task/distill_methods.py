@@ -1,6 +1,6 @@
-"""The classic knowledge-distillation FAMILIES as composable, verified procedures on torch modules.
+"""Classic knowledge-distillation families as composable, verified procedures on Torch modules.
 
-:mod:`mixle.task.distill` distills a *frontier teacher's labels* into a tiny local student (response/label
+:mod:`mixle.task.distill` distills a teacher's labels into a local student (response/label
 distillation, no gradients through the teacher). This module is its representation-matching sibling: given a
 trained torch teacher and an untrained torch student, transfer knowledge through the classic KD signals --
 
@@ -13,10 +13,10 @@ trained torch teacher and an untrained torch student, transfer knowledge through
   teacher and student layer.
 - :func:`relational_distill` -- RKD: match the pairwise *distance* (and *angle*) structure of a batch in
   feature space, so the student preserves relations rather than absolute activations.
-- :func:`sequence_level_distill` -- Kim-Rush: for a small LM, train the student on teacher-generated sequences
+- :func:`sequence_level_distill` -- Kim-Rush: for a compact LM, train the student on teacher-generated sequences
   (the teacher's argmax continuation stands in for the reference).
 
-Everything is deterministic given ``seed`` and needs only torch. Each returns a small result record with the
+Everything is deterministic given ``seed`` and needs only torch. Each returns a compact result record with the
 before/after fidelity numbers the tests assert on.
 """
 
@@ -54,6 +54,7 @@ class DistillResult:
 
     @property
     def improved(self) -> bool:
+        """Whether the after metric is better than the before metric."""
         return self.after < self.before if self.lower_is_better else self.after > self.before
 
     @property
@@ -525,7 +526,7 @@ def sequence_level_distill(
     seed: int = 0,
     baseline: bool = True,
 ) -> DistillResult:
-    """Kim-Rush sequence-level KD for a small autoregressive LM.
+    """Kim-Rush sequence-level KD for a compact autoregressive LM.
 
     ``teacher(context) -> next-token logits`` generates a hard continuation (its greedy argmax sequence) for each
     prompt; the student is then trained by teacher forcing to reproduce that teacher-generated sequence. ``x`` are

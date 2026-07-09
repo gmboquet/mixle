@@ -1,7 +1,4 @@
-"""Create, estimate, and sample from a Mallows distribution over permutations (Kendall's tau).
-
-Defines the MallowsDistribution, MallowsEnumerator, MallowsSampler, MallowsAccumulatorFactory,
-MallowsAccumulator, MallowsEstimator, and the MallowsDataEncoder classes for use with mixle.
+"""Mallows ranking distributions over permutations using Kendall tau distance.
 
 Data type: List[int] (a full ranking/ordering of n items, given as a permutation of 0,...,n-1 where
 ``x[r]`` is the item placed at rank r, best first).
@@ -99,6 +96,7 @@ class MallowsDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Return compute-backend metadata for the Mallows distribution."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(
@@ -114,12 +112,12 @@ class MallowsDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """MallowsDistribution object.
+        """Create a Mallows distribution around a central permutation.
 
         Args:
             sigma0 (Union[Sequence[int], np.ndarray]): Central permutation (an ordering of 0,...,n-1).
             theta (float): Non-negative dispersion. theta = 0 is uniform; larger theta concentrates on sigma0.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional distribution name.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
@@ -146,7 +144,7 @@ class MallowsDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of MallowsDistribution object."""
+        """Return a constructor-style representation of the Mallows distribution."""
         return "MallowsDistribution(%s, theta=%s, name=%s, keys=%s)" % (
             repr([int(v) for v in self.sigma0]),
             repr(self.theta),
@@ -265,12 +263,15 @@ class MallowsAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: Sequence[int], weight: float, estimate: MallowsDistribution | None) -> None:
+        """Accumulate weighted pairwise-precedence counts for one ordering."""
         self.seq_update(np.asarray([x], dtype=int), np.asarray([weight], dtype=float), estimate)
 
     def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics with one weighted ordering."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: MallowsDistribution | None) -> None:
+        """Accumulate weighted pairwise-precedence counts for encoded orderings."""
         n = self.dim
         r_idx, rp_idx = np.triu_indices(n, 1)  # all rank pairs r < r'
         for row, w in zip(x, weights):
@@ -279,22 +280,27 @@ class MallowsAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += float(np.sum(weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics from encoded orderings."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, np.ndarray]) -> "MallowsAccumulator":
+        """Merge serialized precedence-count statistics into this accumulator."""
         self.count += suff_stat[0]
         self.precede += suff_stat[1]
         return self
 
     def value(self) -> tuple[float, np.ndarray]:
+        """Return the accumulated weight and pairwise-precedence matrix."""
         return self.count, self.precede
 
     def from_value(self, x: tuple[float, np.ndarray]) -> "MallowsAccumulator":
+        """Restore the accumulator from serialized precedence-count statistics."""
         self.count, self.precede = x[0], np.asarray(x[1])
         self.dim = self.precede.shape[0]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into a keyed statistics dictionary."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -302,10 +308,12 @@ class MallowsAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from a keyed statistics dictionary."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "MallowsDataEncoder":
+        """Return an encoder compatible with the accumulated ordering dimension."""
         return MallowsDataEncoder(dim=self.dim)
 
 
@@ -317,6 +325,7 @@ class MallowsAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> MallowsAccumulator:
+        """Create an empty Mallows accumulator."""
         return MallowsAccumulator(dim=self.dim, keys=self.keys)
 
 
@@ -338,9 +347,11 @@ class MallowsEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> MallowsAccumulatorFactory:
+        """Return a factory for Mallows sufficient-statistic accumulators."""
         return MallowsAccumulatorFactory(dim=self.dim, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray]) -> MallowsDistribution:
+        """Estimate the central permutation and dispersion from precedence counts."""
         count, precede = suff_stat
         n = self.dim
         if count <= 0.0:
@@ -377,6 +388,7 @@ class MallowsDataEncoder(DataSequenceEncoder):
         return isinstance(other, MallowsDataEncoder)
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray:
+        """Validate and encode orderings as a two-dimensional integer array."""
         rv = np.asarray([list(row) for row in x], dtype=int)
         if rv.ndim != 2 or rv.shape[0] == 0:
             raise ValueError("MallowsDistribution requires a non-empty sequence of orderings.")

@@ -35,10 +35,16 @@ class CreateTest(unittest.TestCase):
         art = create(_scalar(300, 0), quantify_uq=True, seed=0)
         self.assertIsNotNone(art.uq)  # scalar Gaussian → Laplace posterior
 
-    def test_uq_attaches_for_a_bayesian_network(self):
+    def test_uq_attaches_for_a_structured_bn_model(self):
+        # HeterogeneousBayesianNetwork Laplace-flattening landed (bn-laplace-flatten); a structured
+        # fit over a mixed categorical+numeric record now gets a real parameter posterior too, not a
+        # graceful None -- assert the new capability, not the old gap.
         art = create(_plan_spend(300, 0), quantify_uq=True, seed=0)
-        self.assertIsNotNone(art.uq)  # a learned BN is now Laplace-flattenable → parameter posterior
+        self.assertIsNotNone(art.uq)
         self.assertEqual(art.uq.kind, "parameter_posterior")
+        self.assertIn("laplace", art.uq.method.lower())
+        models = art.uq.sample_models(5, seed=0)
+        self.assertEqual(len(models), 5)
         self.assertGreaterEqual(int(art.guarantee), 4)  # everything else still holds
 
     def test_budget_device_constrains_to_a_smaller_model(self):

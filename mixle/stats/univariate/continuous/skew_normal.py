@@ -80,6 +80,7 @@ class SkewNormalDistribution(SequenceEncodableProbabilityDistribution):
     # evaluation while estimation statistics remain exactly the legacy path. ---
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated skew-normal scoring kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
@@ -136,6 +137,7 @@ class SkewNormalSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one sample or an array of iid samples."""
         d = self.dist
         delta = d.shape / math.sqrt(1.0 + d.shape * d.shape)
         z0 = self.rng.randn() if size is None else self.rng.randn(int(size))
@@ -184,13 +186,16 @@ class SkewNormalAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = count
 
     def update(self, x: float, weight: float, estimate: SkewNormalDistribution | None) -> None:
+        """Accumulate a single weighted observation into central moments."""
         # A single observation is a batch with zero internal spread (M2 = M3 = 0).
         self._merge(float(weight), float(x), 0.0, 0.0)
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: SkewNormalDistribution | None) -> None:
+        """Accumulate weighted central moments from encoded observations."""
         xx = np.asarray(x, dtype=np.float64)
         ww = np.asarray(weights, dtype=np.float64)
         c_b = float(np.sum(ww))
@@ -203,20 +208,25 @@ class SkewNormalAccumulator(SequenceEncodableStatisticAccumulator):
         self._merge(c_b, mean_b, m2_b, m3_b)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float, float]) -> "SkewNormalAccumulator":
+        """Merge another central-moment statistic tuple."""
         self._merge(float(suff_stat[0]), float(suff_stat[1]), float(suff_stat[2]), float(suff_stat[3]))
         return self
 
     def value(self) -> tuple[float, float, float, float]:
+        """Return count, mean, second central moment sum, and third central moment sum."""
         return self.count, self.mean, self.m2, self.m3
 
     def from_value(self, x: tuple[float, float, float, float]) -> "SkewNormalAccumulator":
+        """Replace accumulator contents from a central-moment statistic tuple."""
         self.count, self.mean, self.m2, self.m3 = float(x[0]), float(x[1]), float(x[2]), float(x[3])
         return self
 
     def scale(self, c: float) -> "SkewNormalAccumulator":
+        """Scale weight-linear statistics while preserving the weighted mean."""
         # value() carries (count, mean, M2, M3): the count and the central-moment sums are linear
         # in the weights, but ``mean`` is an average and must NOT be scaled. Override the structural
         # default (which would multiply every element, corrupting the mean).
@@ -226,6 +236,7 @@ class SkewNormalAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -233,10 +244,12 @@ class SkewNormalAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "SkewNormalDataEncoder":
+        """Return the encoder used by this accumulator."""
         return SkewNormalDataEncoder()
 
 
@@ -248,6 +261,7 @@ class SkewNormalAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> SkewNormalAccumulator:
+        """Create a fresh skew-normal accumulator."""
         return SkewNormalAccumulator(name=self.name, keys=self.keys)
 
 
@@ -260,9 +274,11 @@ class SkewNormalEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> SkewNormalAccumulatorFactory:
+        """Return an accumulator factory for skew-normal moment statistics."""
         return SkewNormalAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float]) -> SkewNormalDistribution:
+        """Estimate location, scale, and shape from weighted central moments."""
         count, mean, sum_m2, sum_m3 = suff_stat
         if count <= 0.0:
             return SkewNormalDistribution(0.0, 1.0, 0.0, name=self.name, keys=self.keys)
@@ -297,4 +313,5 @@ class SkewNormalDataEncoder(DataSequenceEncoder):
         return isinstance(other, SkewNormalDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
+        """Encode observations as a floating-point array."""
         return np.asarray(x, dtype=np.float64)

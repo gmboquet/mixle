@@ -23,10 +23,8 @@ observations.
      - fields are ordered by position.
    * - ``RecordDistribution`` / ``RecordEstimator``
      - named record
-     - fields are dictionaries or schema-backed records.
-   * - ``DictRecordDistribution`` / ``DictRecordEstimator``
-     - dictionary record
-     - dictionary shape should be explicit.
+     - fields are dictionaries or schema-backed records; dictionary shape
+       should be explicit.
    * - ``SequenceDistribution`` / ``SequenceEstimator``
      - variable-length sequence
      - elements share a family and length may be modeled.
@@ -36,7 +34,7 @@ observations.
    * - ``SelectDistribution`` / ``SelectEstimator``
      - dispatch by type or field
      - different subfamilies apply to different observed cases.
-   * - ``ConditionalDistribution`` / ``ConditionalEstimator``
+   * - ``ConditionalDistribution`` / ``ConditionalDistributionEstimator``
      - conditional relation
      - a distribution depends on observed covariates.
    * - ``TransformDistribution`` / ``TransformEstimator``
@@ -78,15 +76,19 @@ Combinators are how a heterogeneous row becomes one model:
    from mixle.stats import CategoricalEstimator, GammaEstimator, RecordEstimator, field
 
    estimator = RecordEstimator(
-       (
-           field("event", CategoricalEstimator()),
-           field("duration", GammaEstimator()),
-       )
+       {
+           field("event"): CategoricalEstimator(),
+           field("duration"): GammaEstimator(),
+       }
    )
 
    model = optimize(records, estimator, out=None)
 
-Multivariate And Matrix Families
+Validate the record contract before fitting. A structured estimator should
+describe the intended observation shape; it should not silently repair rows
+where a field changes type, disappears, or uses a different unit.
+
+Multivariate and Matrix Families
 --------------------------------
 
 .. list-table::
@@ -107,10 +109,11 @@ Multivariate And Matrix Families
    * - ``GaussianCopulaDistribution`` / ``GaussianCopulaEstimator``
      - vector with copula dependence
      - separate marginal behavior from Gaussian dependence.
-   * - ``CompositionDistribution``
+   * - ``AitchisonNormalDistribution`` / ``AitchisonNormalEstimator``
      - compositional vector
-     - parts constrained to a whole.
-   * - ``CategoricalMultinomialDistribution`` / ``MultinomialDistribution``
+     - parts constrained to a whole, modeled via the Aitchison logratio
+       transform.
+   * - ``MultinomialDistribution`` / ``MultinomialEstimator``
      - finite-count vector
      - category counts from repeated trials.
    * - ``IntegerMultinomialDistribution`` / ``IntegerMultinomialEstimator``
@@ -132,13 +135,17 @@ Multivariate And Matrix Families
      - correlation matrix
      - correlation priors or fitted correlation structure.
 
-For full-covariance multivariate Gaussian fits, 0.6.2 improves the default
-numeric path in two ways. Weighted second moments are accumulated through a
-BLAS-backed matrix multiply instead of a naive tensor contraction, which keeps
-large mixture fits from spending most of their time in covariance assembly. The
-Cholesky path also has a minimal jitter fallback for nearly positive-definite
-float32 covariance estimates, so GPU or reduced-precision EM runs can recover
-from roundoff without changing the ordinary float64 fast path.
+For full-covariance multivariate Gaussian fits, the default numeric path uses
+two safeguards. Weighted second moments are accumulated through a BLAS-backed
+matrix multiply instead of a naive tensor contraction, which keeps large mixture
+fits from spending most of their time in covariance assembly. The Cholesky path
+also has a minimal jitter fallback for nearly positive-definite float32
+covariance estimates, so GPU or reduced-precision EM runs can recover from
+roundoff without changing the ordinary float64 fast path.
+
+For release evidence, compare reduced-precision or GPU-oriented covariance
+fits with a float64 baseline on representative data. Jitter recovery should be
+visible in diagnostics when it occurs.
 
 Directional Families
 --------------------
@@ -176,17 +183,27 @@ Directional observations live on circles, spheres, or orientation manifolds.
      - sphere/circle
      - directions induced by projecting Gaussian vectors.
 
-Sequences And Markov Families
+Directional families require support checks that ordinary vector models do not
+need. Normalize or validate angular units, antipodal equivalence, and sphere
+constraints before interpreting fitted concentration or orientation.
+
+Sequences and Markov Families
 -----------------------------
 
 The sequence package covers explicit Markov structure over observed states:
 
 * ``MarkovChainDistribution`` and ``MarkovChainEstimator``;
 * ``IntegerMarkovChainDistribution`` and ``IntegerMarkovChainEstimator``;
-* ``MarkovTransform`` and ``SparseMarkovTransform`` families.
+* ``MarkovTransformDistribution`` and ``MarkovTransformEstimator``;
+* ``SparseMarkovAssociationDistribution`` and
+  ``SparseMarkovAssociationEstimator``.
 
 Use these when the observation is an observed-state sequence. Use
 :doc:`hmms-latent` when the state path is hidden.
+
+Observed-state sequence families should be checked for start-state and
+transition support. An unseen state or impossible transition should remain
+visible as support evidence rather than being hidden by preprocessing.
 
 Sets
 ----
@@ -201,7 +218,7 @@ Set families model unordered finite collections:
 Use set families when membership matters but order does not. Use edit families
 when the likelihood is naturally expressed as set changes from a reference.
 
-Rankings And Pairwise Preferences
+Rankings and Pairwise Preferences
 ---------------------------------
 
 Ranking families model permutations, partial orderings, or pairwise outcomes:
@@ -224,7 +241,12 @@ Use these for preference data, rankings, pairwise comparison, matching, or
 ordering uncertainty. For consensus analysis outside a distribution family, see
 :doc:`analysis`.
 
-Trees And Graphs
+Preference data need explicit treatment of ties, missing comparisons, and
+judge identity. A ranking model can fit the observed orderings while still
+being inappropriate for a downstream policy if the comparison process is
+biased.
+
+Trees and Graphs
 ----------------
 
 Tree and graph families score structured graph-valued observations:
@@ -245,6 +267,10 @@ Use graph distributions when the graph itself is the observation. Use
 :doc:`relations` when a graph algorithm is the decision layer after a model has
 produced edge or node scores.
 
+Graph-valued observations should carry node identity, edge direction, and
+schema assumptions with the artifact. Reindexing a graph can change the meaning
+of a fitted model even when the adjacency shape is unchanged.
+
 Workflow
 --------
 
@@ -256,6 +282,19 @@ The safest workflow for structured families is:
 4. Add latent structure only when held-out scoring supports it.
 5. Add enumeration, relation, or production constraints only after the
    probabilistic model is behaving sensibly.
+
+Release Evidence
+----------------
+
+For structured families, keep:
+
+* a schema example for one valid observation;
+* field-level preprocessing and missing-data policy;
+* support checks for sequences, sets, rankings, graphs, matrices, or
+  directional values;
+* baseline comparisons before adding latent or high-capacity structure;
+* capability checks for enumeration, conditioning, or backend scoring; and
+* diagnostics for malformed or impossible observations.
 
 API Reference
 -------------

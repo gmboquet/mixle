@@ -35,7 +35,7 @@ def empirical_kl_divergence(
         enc_data (List[Tuple[int, Any]]): List of Tuple containing chunk size and encoded sequence for chunked data.
 
     Returns:
-        Tuple of KL-div estiamte, number of 'bad' likelihood values for dist1, 'bad' likelihood values for dist2.
+        Tuple of KL-divergence estimate and counts of invalid likelihood values for each distribution.
 
     """
 

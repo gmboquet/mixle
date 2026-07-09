@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
+from mixle.models.grad_leaf import _resolve_device
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -38,28 +39,6 @@ def _torch() -> Any:
     import torch
 
     return torch
-
-
-def _resolve_device(device: Any, torch: Any) -> Any:
-    """Where to run the module, in priority order:
-
-    1. an explicit ``device=`` on the leaf (always wins);
-    2. the device of the **active compute engine** -- so ``optimize(engine=TorchEngine(device="mps"))``
-       (or ``"cuda"``) drives the leaf's M-step onto that device, matching mixle's engine philosophy
-       (set the device once on the engine, the leaf follows);
-    3. otherwise CUDA if available, else CPU -- the implicit default (note: not MPS, so existing local
-       CPU behaviour and tests are unchanged; reach MPS explicitly or via the engine)."""
-    if device is not None:
-        return torch.device(device)
-    from mixle.engines.base import active_engine
-
-    eng_dev = getattr(active_engine(), "device", None)
-    if eng_dev is not None and str(eng_dev) != "cpu":
-        try:
-            return torch.device(eng_dev)
-        except (TypeError, RuntimeError):
-            pass
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class NeuralGaussian(SequenceEncodableProbabilityDistribution):
@@ -95,10 +74,12 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
         return np.atleast_2d(mean.detach().cpu().numpy())
 
     def log_density(self, xy: Any) -> float:
+        """Return ``log p(y | x)`` for one encoded observation pair ``(x, y)``."""
         x, y = xy
         return float(self.seq_log_density((np.atleast_2d(x), np.atleast_2d(y)))[0])
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
+        """Return per-row Gaussian conditional log densities for encoded ``(x, y)`` arrays."""
         x, y = enc
         check_finite(np.atleast_2d(np.asarray(x, dtype=float)), "NeuralGaussian.seq_log_density (x)")
         mean = self._forward(x)
@@ -113,6 +94,7 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
     # The accumulator (the responsibility-weighted gradient M-step buffer) stays host-side by design. ---
     @classmethod
     def compute_capabilities(cls):
+        """Declare engine-ready scoring support for NumPy and Torch execution backends."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
@@ -128,12 +110,15 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
         return -0.5 * sq / (self.noise**2) - 0.5 * d * float(np.log(2.0 * np.pi * self.noise**2))
 
     def sampler(self, seed: int | None = None) -> NeuralGaussianSampler:
+        """Return a conditional sampler for drawing ``y`` given ``x``."""
         return NeuralGaussianSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> NeuralGaussianEstimator:
+        """Return the generalized-EM estimator for responsibility-weighted neural regression."""
         return NeuralGaussianEstimator(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
 
     def dist_to_encoder(self) -> NeuralGaussianEncoder:
+        """Return the encoder for batches of ``(x, y)`` observation pairs."""
         return NeuralGaussianEncoder()
 
     # --- serialization: persist hparams + the module (as portable bytes); registered below so a mixture holding
@@ -148,6 +133,7 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
         self.module = decode_module(state["module"])
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize hyperparameters and module bytes for registry-based round trips."""
         return {
             "noise": self.noise,
             "m_steps": self.m_steps,
@@ -159,6 +145,7 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> NeuralGaussian:
+        """Rebuild a :class:`NeuralGaussian` from :meth:`to_dict` output."""
         return cls(
             decode_module(payload["module"]),
             noise=payload["noise"],
@@ -170,19 +157,25 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
 
 
 class NeuralGaussianSampler(DistributionSampler):
+    """Conditional sampler for :class:`NeuralGaussian`; draws responses given covariates."""
+
     def __init__(self, dist: NeuralGaussian, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Raise because the leaf defines ``p(y | x)`` and has no marginal ``p(x)``."""
         raise NotImplementedError("NeuralGaussian is conditional p(y|x); use sampler().sample_given(x).")
 
     def sample_given(self, x: Any) -> np.ndarray:
+        """Draw one Gaussian response from ``p(y | x)``."""
         mean = self.dist._forward(x)[0]
         return mean + self.dist.noise * self.rng.randn(*mean.shape)
 
 
 class NeuralGaussianEncoder(DataSequenceEncoder):
+    """Encode ``(x, y)`` observation pairs for vectorized neural-Gaussian scoring and fitting."""
+
     def __str__(self) -> str:
         return "NeuralGaussianEncoder"
 
@@ -190,25 +183,30 @@ class NeuralGaussianEncoder(DataSequenceEncoder):
         return isinstance(other, NeuralGaussianEncoder)
 
     def seq_encode(self, data: list) -> tuple[np.ndarray, np.ndarray]:
+        """Convert a list of ``(x, y)`` pairs into batched feature and target arrays."""
         x = np.array([np.atleast_1d(np.asarray(xy[0], dtype=float)) for xy in data])
         y = np.array([np.atleast_1d(np.asarray(xy[1], dtype=float)) for xy in data])
         return (x, y)
 
 
 class NeuralGaussianAccumulator(SequenceEncodableStatisticAccumulator):
+    """Buffer weighted ``(x, y)`` batches for the neural-Gaussian M-step."""
+
     def __init__(self) -> None:
         self.x: list = []
         self.y: list = []
         self.w: list = []
 
-    # x/y/w hold a list of contiguous (n_i, dim) batch arrays; they are concatenated once at value(), so a
-    # streamed shard is a few batch arrays rather than one tiny ndarray per row (the audit's 50k-ndarray blowup).
+    # x/y/w hold contiguous (n_i, dim) batch arrays and concatenate once at value(), avoiding per-row ndarray
+    # buffering during streamed updates.
     def update(self, xy: Any, weight: float, estimate: Any) -> None:
+        """Add one weighted observation pair to the accumulator."""
         self.x.append(np.asarray(xy[0], dtype=float).reshape(1, -1))
         self.y.append(np.asarray(xy[1], dtype=float).reshape(1, -1))
         self.w.append(np.asarray([float(weight)], dtype=float))
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: Any) -> None:
+        """Add a batch of encoded observation pairs and responsibility weights."""
         x, y = enc
         xb = np.asarray(x, dtype=float)
         yb = np.asarray(y, dtype=float)
@@ -217,12 +215,15 @@ class NeuralGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.w.append(np.asarray(weights, dtype=float).ravel())
 
     def initialize(self, xy: Any, weight: float, rng: Any) -> None:
+        """Initialize from one observation using the ordinary update path."""
         self.update(xy, weight, None)
 
     def seq_initialize(self, enc: Any, weights: np.ndarray, rng: Any) -> None:
+        """Initialize from an encoded batch using the ordinary batch update path."""
         self.seq_update(enc, weights, None)
 
     def combine(self, other: Any) -> NeuralGaussianAccumulator:
+        """Merge the value tuple from another neural-Gaussian accumulator."""
         xo, yo, wo = other  # another accumulator's value(): contiguous (n, dim) arrays
         if len(xo):
             self.x.append(np.asarray(xo, dtype=float))
@@ -231,12 +232,14 @@ class NeuralGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple:
+        """Return contiguous ``(x, y, weights)`` arrays for the M-step."""
         x = np.concatenate(self.x, axis=0) if self.x else np.zeros((0, 0))
         y = np.concatenate(self.y, axis=0) if self.y else np.zeros((0, 0))
         w = np.concatenate(self.w) if self.w else np.zeros((0,))
         return (x, y, w)
 
     def from_value(self, value: tuple) -> NeuralGaussianAccumulator:
+        """Restore accumulator buffers from a value tuple."""
         x, y, w = value
         self.x = [np.asarray(x, dtype=float)] if len(x) else []
         self.y = [np.asarray(y, dtype=float)] if len(y) else []
@@ -244,11 +247,15 @@ class NeuralGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def acc_to_encoder(self) -> NeuralGaussianEncoder:
+        """Return the encoder expected by this accumulator."""
         return NeuralGaussianEncoder()
 
 
 class NeuralGaussianAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for neural-Gaussian accumulators."""
+
     def make(self) -> NeuralGaussianAccumulator:
+        """Create a fresh accumulator."""
         return NeuralGaussianAccumulator()
 
 
@@ -276,17 +283,21 @@ class NeuralGaussianEstimator(ParameterEstimator):
         self.device = device
 
     def accumulator_factory(self) -> NeuralGaussianAccumulatorFactory:
+        """Return an accumulator factory for weighted neural-regression batches."""
         return NeuralGaussianAccumulatorFactory()
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralGaussian:
+        """Run the weighted neural-regression M-step and return the updated leaf."""
         torch = _torch()
         xs, ys, ws = suff_stat
         if len(xs) == 0:
             return NeuralGaussian(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
         dev = _resolve_device(self.device, torch)
         self.module.to(dev)
-        xt = torch.as_tensor(np.array(xs), dtype=torch.float32, device=dev)
-        yt = torch.as_tensor(np.array(ys), dtype=torch.float32, device=dev)
+        xs = np.asarray(xs, dtype=float).reshape(len(xs), -1)
+        ys = np.asarray(ys, dtype=float).reshape(len(ys), -1)
+        xt = torch.as_tensor(xs, dtype=torch.float32, device=dev)
+        yt = torch.as_tensor(ys, dtype=torch.float32, device=dev)
         wt = torch.as_tensor(np.array(ws), dtype=torch.float32, device=dev)
         wsum = float(wt.sum()) + 1e-8
         log_noise = torch.log(torch.tensor(float(self.noise), device=dev)).clone().detach().requires_grad_(True)

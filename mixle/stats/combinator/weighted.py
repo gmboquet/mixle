@@ -1,7 +1,4 @@
-"""Evaluate, estimate, and sample from a weighted wrapper around a base distribution.
-
-Defines the WeightedDistribution, WeightedSampler, WeightedAccumulator, WeightedAccumulatorFactory,
-WeightedEstimator, and the WeightedDataEncoder classes for use with mixle.
+"""Weighted observation wrapper around a base distribution.
 
 Data type: Tuple[D, float]: An observation is a pair (value, weight) where value has the data type D of
 the base distribution and weight is a non-negative score attached to the observation. The weight does not
@@ -40,19 +37,20 @@ from mixle.inference.fisher import FixedFisherView, to_fisher
 
 
 class WeightedDistribution(SequenceEncodableProbabilityDistribution):
-    """WeightedDistribution object that attaches observation weights to a base distribution.
+    """Distribution wrapper that attaches observation weights to a base distribution.
 
     Args:
         dist (SequenceEncodableProbabilityDistribution): Base distribution for the observed values.
-        name (Optional[str]): Set name for object instance.
+        name (Optional[str]): Optional distribution name.
 
     Attributes:
         dist (SequenceEncodableProbabilityDistribution): Base distribution for the observed values.
-        name (Optional[str]): Name for object instance.
+        name (Optional[str]): Optional distribution name.
 
     """
 
     def compute_capabilities(self):
+        """Delegate generated-compute support to the wrapped value distribution."""
         from dataclasses import replace
 
         from mixle.stats.compute.capabilities import capabilities_for, delegated_engine_ready
@@ -63,6 +61,7 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
         return replace(child, engine_ready=delegated_engine_ready(child.engine_ready))
 
     def compute_declaration(self):
+        """Return the generated-compute declaration for the weighted wrapper."""
         from mixle.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
 
         child = declaration_for(self.dist)
@@ -83,7 +82,7 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
 
     def __str__(self) -> str:
-        """Returns string representation of WeightedDistribution object."""
+        """Return a constructor-style representation of the weighted distribution."""
         return "WeightedDistribution(dist=%s, name=%s)" % (repr(self.dist), repr(self.name))
 
     def density(self, x: D) -> float:
@@ -208,7 +207,7 @@ class WeightedDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class WeightedSampler(DistributionSampler):
-    """WeightedSampler object for drawing (value, weight) observations from a WeightedDistribution.
+    """Sampler for ``(value, weight)`` observations from a weighted distribution.
 
     The likelihood does not model the weight, so samples carry the neutral weight 1.0: accumulating
     (value, 1.0) is equivalent to accumulating the bare value with the base distribution. Values are
@@ -246,15 +245,15 @@ class WeightedSampler(DistributionSampler):
 
 
 class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
-    """WeightedAccumulator object that scales each observation's weight by its attached score.
+    """Accumulator that scales each observation's weight by its attached score.
 
     Args:
         accumulator (SequenceEncodableStatisticAccumulator): Accumulator for the base distribution.
-        name (Optional[str]): Set name for object instance.
+        name (Optional[str]): Optional accumulator name.
 
     Attributes:
         accumulator (SequenceEncodableStatisticAccumulator): Accumulator for the base distribution.
-        name (Optional[str]): Name for object instance.
+        name (Optional[str]): Optional accumulator name.
 
     """
 
@@ -365,15 +364,15 @@ class WeightedAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class WeightedAccumulatorFactory(StatisticAccumulatorFactory):
-    """WeightedAccumulatorFactory object for creating WeightedAccumulator objects.
+    """Factory for weighted accumulators.
 
     Args:
         factory (StatisticAccumulatorFactory): Accumulator factory for the base distribution.
-        name (Optional[str]): Set name for object instance.
+        name (Optional[str]): Optional name assigned to created accumulators.
 
     Attributes:
         factory (StatisticAccumulatorFactory): Accumulator factory for the base distribution.
-        name (Optional[str]): Name for object instance.
+        name (Optional[str]): Optional name assigned to created accumulators.
 
     """
 
@@ -387,15 +386,15 @@ class WeightedAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class WeightedEstimator(ParameterEstimator):
-    """WeightedEstimator object for estimating a WeightedDistribution from weighted observations.
+    """Estimator for a weighted distribution from weighted observations.
 
     Args:
         estimator (ParameterEstimator): Estimator for the base distribution.
-        name (Optional[str]): Set name for object instance.
+        name (Optional[str]): Optional name assigned to the estimated distribution.
 
     Attributes:
         estimator (ParameterEstimator): Estimator for the base distribution.
-        name (Optional[str]): Name for object instance.
+        name (Optional[str]): Optional name assigned to the estimated distribution.
 
     """
 
@@ -422,7 +421,7 @@ class WeightedEstimator(ParameterEstimator):
 
 
 class WeightedDataEncoder(DataSequenceEncoder):
-    """WeightedDataEncoder object for encoding sequences of iid (value, weight) observations.
+    """Data encoder for sequences of iid ``(value, weight)`` observations.
 
     Args:
         encoder (DataSequenceEncoder): Encoder for the base distribution's values.
@@ -436,7 +435,7 @@ class WeightedDataEncoder(DataSequenceEncoder):
         self.encoder = encoder
 
     def __str__(self) -> str:
-        """Returns string representation of WeightedDataEncoder object."""
+        """Return a constructor-style representation of the weighted encoder."""
         return "WeightedDataEncoder(encoder=%s)" % (repr(self.encoder))
 
     def __eq__(self, other: object) -> bool:
@@ -461,6 +460,8 @@ class WeightedDataEncoder(DataSequenceEncoder):
 
 # --- Fisher view(s) co-located with this family ---
 class WeightedFisherView(FixedFisherView):
+    """Fisher view that scales child sufficient statistics by observation weights."""
+
     def __init__(self, dist: Any) -> None:
         self.child_view = to_fisher(dist.dist)
         super().__init__(dist, list(self.child_view.vectorizer.labels))
@@ -481,6 +482,7 @@ class WeightedFisherView(FixedFisherView):
         return np.asarray(self.child_view.fisher_information(ridge=0.0), dtype=np.float64)
 
     def score_center(self, stats: np.ndarray | None = None, **kwargs: Any) -> np.ndarray:
+        """Return the empirical center used when centering weighted Fisher scores."""
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
         return np.asarray(stats, dtype=np.float64).mean(axis=0)

@@ -2,9 +2,9 @@
 
 ``check_dataset(model, data)`` derives the model's schema (:func:`mixle.data.schema.Schema.for_model`) and,
 over a sample of records, verifies each record (a) coerces to the schema's logical types and (b) lies in
-the model's support (finite log-density). It returns a report (and can ``raise`` on failure) so a bad
+the model's support (finite log-density). It returns a report (and can ``raise`` on failure) so an invalid
 feed -- wrong column types, out-of-support values, malformed records -- is caught up front rather than
-producing a silent NaN or a cryptic error deep in EM.
+surfacing later as a non-finite likelihood or a cryptic error deep in EM.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ import numpy as np
 
 @dataclass
 class DataReport:
+    """Result of checking sample records against a model-derived schema and support."""
+
     ok: bool
     n_checked: int
     schema: list[tuple[str, str]]
