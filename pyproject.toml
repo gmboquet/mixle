@@ -85,7 +85,9 @@ torch = ["torch>=2.0", "safetensors>=0.4"]
 # leaves. Weights load from the local HF cache; nothing is downloaded at import.
 scientist = ["torch>=2.0", "safetensors>=0.4", "transformers>=4.40", "sentence-transformers>=3.0", "datasets>=2.14"]
 # Documentation build (Sphinx site): the Furo theme + MyST markdown; autodoc mocks the heavy back-ends.
-docs = ["sphinx>=7", "furo", "myst-parser>=2"]
+# sphinx-polyversion drives the multi-version build (docs/poly.py) -- a plain `sphinx-build` doesn't
+# need it, only `sphinx-polyversion docs/poly.py` (what the Docs CI workflow runs) does.
+docs = ["sphinx>=7", "furo", "myst-parser>=2", "sphinx-polyversion>=2.0"]
 # JaxEngine (XLA arrays, functional autograd) + the NumPyro NUTS sampler backend (how="nuts", backend="jax").
 jax = ["jax>=0.4", "numpyro>=0.13"]
 mpi = ["mpi4py>=3.1"]
