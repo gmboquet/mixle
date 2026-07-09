@@ -253,6 +253,10 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "task_tune_test.py": ("doe", "stochastic", "slow"),  # BO over student recipes via mixle.doe
     "task_plan_test.py": ("integration", "slow"),
     "task_distill_structured_test.py": ("integration", "slow"),
+    # E1 chunked-recurrent spine (mixle/experimental/context_spine.py): several small TBPTT training
+    # loops plus a repeated-timing receipt -- ~4s total, tagged slow so it leaves the fast gate while
+    # still running in full CI under the `experimental` marker's own tests.
+    "context_spine_test.py": ("torch", "experimental", "slow"),
 }
 
 
