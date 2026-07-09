@@ -47,8 +47,8 @@ commit.
   changed.
 - Include a test plan: what you ran, what passed, what you narrowed the test selection to and why.
 - Target `main` unless you're told otherwise; release branches (`release/X.Y.Z-*`) are used for
-  large in-flight bodies of work and merged back per
-  `notes/mixle-development-agent-rules.md`'s release checklist.
+  large in-flight bodies of work and merged back per the checklist in
+  [`release-checklists/`](release-checklists/README.md).
 - Update `CHANGELOG.md`'s `[Unreleased]` section for any user-visible change (new public API, fixed
   bug, behavior change). Purely internal refactors with no visible effect don't need an entry.
 - CI must be green (lint, fast, full) before merge; the `optional` and `security` jobs are informative
