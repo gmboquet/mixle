@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # PyPI distribution name; the import package is `mixle` (cf. scikit-learn -> sklearn).
 name = "mixle"
-version = "0.6.2"
+version = "0.6.3"
 description = "A package for estimating heterogeneous probability density functions."
 readme = "README.md"
 requires-python = ">=3.10"

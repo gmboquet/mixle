@@ -4,12 +4,11 @@ All notable changes to mixle are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — 0.6.3
+## [0.6.3] — 2026-07-09
 
 Workstream: generic AI-capability platform pieces on top of the core estimation engine (task
 decomposition, cross-modal reasoning, self-improvement loops, a system facade), plus a hardening
-pass across the automatic-inference and design-of-experiments subsystems. This section is finalized
-at release time per [`release-checklists/0.6.3.md`](release-checklists/0.6.3.md).
+pass across the automatic-inference and design-of-experiments subsystems.
 
 ### Added
 
