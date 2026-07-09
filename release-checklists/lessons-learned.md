@@ -192,19 +192,3 @@ private/inaccessible location is the same as no process for an outside contribut
 
 **→ Gate:** §7 *docs/process references resolve within the repo* — the checklist, and any process doc
 it links, live in `mixle` itself, not in a sibling repo.
-
-### L-0.6.3-13 — AI-assistant attribution can hide where a plain commit-message grep won't find it
-
-**What happened.** A sweep for AI-assistant attribution found 40 commits carrying a
-`Co-Authored-By: Claude …` *trailer* — which a `git log --grep` over commit *subjects* misses, and
-which can also live in PR bodies/comments that never touch `git log` at all. (In this case all 40
-were on since-closed PR branches, unreachable from `release`/`main` — but the point is the search has
-to be wide enough to know that.)
-
-**Root cause.** Attribution hides in commit trailers, author/committer identity fields, and the
-GitHub PR layer — not just the visible commit message — so a narrow grep gives false confidence.
-
-**→ Gate:** §6 *no AI-assistant mention* — the check spans author/committer identity, full commit
-bodies/trailers (`--grep` over `%B`, not just `%s`), and PR titles/bodies/comments via the GitHub
-API, evaluated against refs actually reachable from the release, with any residual (e.g. closed-PR
-pages) stated rather than hidden.

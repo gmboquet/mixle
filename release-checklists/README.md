@@ -58,8 +58,7 @@ The gate categories run pre-flight → verify → publish → post-publish:
   optional deps stay optional.
 - **Test rigor** — the *full* suite (not the fast default), across the supported Python/OS matrix,
   run against the clean install, with no known flakes.
-- **Hygiene** — secrets, debug leftovers, and — specific to how this codebase is developed — no
-  AI-assistant attribution anywhere in authorship, commit trailers, or PR history.
+- **Hygiene** — secrets, debug leftovers, and clean commit/author history.
 - **Documentation and examples** — docs build strict, process references resolve *within the repo*,
   every shipped example/notebook actually executes.
 - **Post-merge re-verification** — the confidence gates re-run against the exact tag commit, because
