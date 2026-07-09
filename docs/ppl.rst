@@ -220,7 +220,7 @@ Named variables can be shared across a model and constrained by comparisons.
 
 .. code-block:: python
 
-   from mixle.ppl import Normal, constrain
+   from mixle.ppl import Mix, Normal, constrain
 
    a = Normal(0.0, 10.0, name="a")
    b = Normal(0.0, 10.0, name="b")
@@ -228,8 +228,14 @@ Named variables can be shared across a model and constrained by comparisons.
    ordered = constrain(a < b)
    samples = ordered.sample(1000)
 
+   model = Mix([Normal(a, 1.0), Normal(b, 1.0)])
+   fitted = model.fit(data, how="mcmc", constraints=a < b)
+
 Use this for parameter tying, label-switching constraints, monotonicity, and
-other structural assumptions.
+other structural assumptions. ``constrain(a < b)`` on its own builds a joint
+random variable over ``a`` and ``b`` restricted to the region (for sampling or
+scoring the constraint directly); passing ``constraints=`` to ``fit`` is how
+an ordering assumption is applied while fitting a downstream model.
 
 Regression and Group Effects
 ----------------------------

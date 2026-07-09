@@ -46,8 +46,9 @@ Use diagnostics before spending an expensive run budget:
 .. code-block:: python
 
    from mixle.doe import design_diagnostics
+   from mixle.doe.optimal import polynomial_features
 
-   report = design_diagnostics(x_lhs)
+   report = design_diagnostics(x_lhs, polynomial_features(degree=1))
    print(report)
 
 Diagnostics help compare coverage, spacing, and projection behavior across
