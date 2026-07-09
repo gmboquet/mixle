@@ -24,9 +24,11 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from numba import njit
 
 from mixle.inference.mcmc.samplers import MCMCResult
+from mixle.utils.optional_deps import numba
+
+njit = numba.njit
 
 
 @njit(cache=True)
