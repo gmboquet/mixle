@@ -9,7 +9,7 @@ All notable changes to mixle are documented here. The format follows
 Workstream: generic AI-capability platform pieces on top of the core estimation engine (task
 decomposition, cross-modal reasoning, self-improvement loops, a system facade), plus a hardening
 pass across the automatic-inference and design-of-experiments subsystems. This section is finalized
-at release time per the version release checklist in `notes/mixle-development-agent-rules.md`.
+at release time per [`release-checklists/0.6.3.md`](release-checklists/0.6.3.md).
 
 ### Added
 
