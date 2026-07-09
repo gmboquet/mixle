@@ -80,6 +80,31 @@ class RouterTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             Router([("bad", object(), 0.001), ("frontier", lambda x: "a", 0.03)])
 
+    def test_final_tier_batches_a_single_request_to_the_teacher(self):
+        """Regression: the final/frontier tier must call a BATCHED teacher (`texts -> [label]`, the
+        shape mixle.task.llm_labeler and every mixle.task distillation entry point produces) with
+        `[x]`, not a bare `x` -- calling a batched callable with a single string silently iterates
+        over its CHARACTERS instead of treating it as one request (caught by an independent audit
+        running mixle's own docs/bring_your_own_model.rst sample end to end)."""
+        from mixle.task import Router
+
+        class DecideNeverConfident:
+            def decide(self, x):
+                from mixle.task.calibrate import ESCALATE
+
+                return ESCALATE  # always defer to the frontier tier
+
+        def batched_teacher(xs):
+            # A real batched-teacher shape: takes a LIST, returns a LIST of the same length. If the
+            # router ever calls this with a bare string again, `len(xs)` will be the string's
+            # character count instead of 1, and this assertion will fail loudly.
+            assert isinstance(xs, list), f"teacher must be called with a list, got {type(xs).__name__}"
+            return [f"label-for:{x}" for x in xs]
+
+        router = Router([("local", DecideNeverConfident(), 0.0001), ("frontier", batched_teacher, 0.03)])
+        result = router("a single multi-character request")
+        self.assertEqual(result, "label-for:a single multi-character request")
+
 
 if __name__ == "__main__":
     unittest.main()
