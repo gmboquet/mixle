@@ -57,7 +57,7 @@ isn't CI-gated. Windows is untested and unclaimed.
 
 ```sh
 pip install mixle          # base (numpy, scipy, mpmath): every family, fit locally
-pip install "mixle[all]"   # acceleration, scale-out, and connectors
+pip install "mixle[all]"   # numba, torch, distributed backends, and the core data connectors
 ```
 
 The base install fits every distribution locally. Acceleration and scale-out are opt-in extras:
@@ -66,12 +66,17 @@ The base install fits every distribution locally. Acceleration and scale-out are
 | -------------------------------------------------------- | ------------------------------------------------------------- |
 | `numba`                                                  | JIT-compiled hot paths (falls back to pure NumPy when absent) |
 | `torch`                                                  | GPU / autograd engine                                         |
+| `jax`                                                    | JAX engine + NUTS sampling backend                            |
 | `spark` · `dask` · `ray` · `lightning` · `mpi`           | distributed estimation backends                               |
 | `pandas` · `arrow` · `sql` · `mongo` · `hadoop` · `data` · `arrays` | data-source connectors                              |
 | `gmpy2`                                                  | GMP-FFT big-integer multiply for count-DP ranking             |
 | `umap`                                                   | model-based UMAP embeddings                                   |
 | `sympy` · `sage`                                         | symbolic / closed-form export                                 |
 | `grammar`                                                | graph-grammar models (networkx)                               |
+
+`[all]` bundles `numba`, `torch`, `spark`/`dask`/`ray`/`lightning`/`mpi`, and `pandas`/`arrow`/`sql`;
+`jax`, `gmpy2`, `sympy`/`sage`, and `mongo`/`hadoop`/`arrays` install separately, e.g. `pip install
+"mixle[jax]"` — narrower extras that most installs do not need.
 
 Development: `git clone … && pip install -e ".[all]"`.
 
@@ -185,7 +190,8 @@ def next_logprobs(continuation):   # tokens so far -> [(token_id, log_prob), ...
 
 # branch_cap tames the 49K-token vocab
 continuations = AutoregressiveEnumerable(next_logprobs, max_len=3, branch_cap=8)
-continuations.top_k(3)  # -> [' located in the', ' the city of', ' the capital of']
+[tokenizer.decode(seq) for seq, _ in continuations.top_k(3)]
+# -> [' located in the', ' the city of', ' the capital of']
 
 # rank() inverts unrank(); cumulative_prob is exact, never approximated
 continuations.rank(continuations.unrank(5)[0])   # -> rank=6, cumulative_prob=0.114
@@ -204,7 +210,7 @@ model = optimize(sequences,
     HiddenMarkovEstimator([CategoricalEstimator()] * 3, terminal_states={2}))
 
 # most probable EOL-terminated sequences
-model.enumerator().top_k(3)   # -> [('buy <EOL>', -2.09), ('meet <EOL>', -2.12), ...]
+model.enumerator().top_k(3)   # -> [(['buy', '<EOL>'], -2.09), ...]
 ```
 
 - **Decomposable families** (Composite / Record / Sequence / MarkovChain): rank ↔ value is an exact
