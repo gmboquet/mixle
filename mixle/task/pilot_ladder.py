@@ -13,7 +13,7 @@ the real 1B -> 8B -> headline progression -- the gate/journal/artifact-collectio
 what a real run would drive, only the scale is fake.
 
 **Which of the roadmap's staged sub-pieces this module can actually reach, from this worktree's base**
-(``release/0.6.3-generic-capabilities``) **and which it cannot:**
+(``release/0.7.0``) **and which it cannot:**
 
 * **F4** (training-health + MFU receipts, PR #147) -- merged into this worktree's base. Wired in for real
   via :class:`mixle.utils.parallel.training_health.TrainingHealthMonitor`; every rung's MFU/loss-curve/
@@ -81,7 +81,7 @@ __all__ = [
 PILOT_LADDER_UNAVAILABLE_PIECES: dict[str, str] = {
     "F2": (
         "fault-tolerant checkpointing (roadmap F2) lives on origin/fault-tolerant-checkpointing, which is "
-        "not an ancestor of this worktree's base (release/0.6.3-generic-capabilities) and diverges from "
+        "not an ancestor of this worktree's base (release/0.7.0) and diverges from "
         "it; this rung ran without fault injection."
     ),
     "F5": (

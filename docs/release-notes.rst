@@ -1,7 +1,7 @@
 Release Notes
 =============
 
-The 0.6.3 release is a capability and hardening release. It expands Mixle's
+The 0.7.0 release is a capability and hardening release. It expands Mixle's
 task, DOE, neural, latent-model, and reasoning surfaces while tightening
 numerical behavior in mixture, automatic-inference, and registry paths.
 

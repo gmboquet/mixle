@@ -80,7 +80,7 @@ E2_UNAVAILABLE_PIECES: dict[str, str] = {
     ),
     "I2/G4": (
         "mixle/task/quantize_profile.py (the sorted-profile quantizer, roadmap I2/G4) is absent from this "
-        "worktree and from origin/release/0.6.3-generic-capabilities; origin/sorted-profile-quantizer "
+        "worktree and from origin/release/0.7.0; origin/sorted-profile-quantizer "
         "exists but is unmerged and off a different point in history. ClusterBank's outlier/tail storage "
         "is therefore a plain dense tensor in v1 (see ClusterBank.per_cluster_outlier_tokens below) -- a "
         "documented storage seam, not an implemented quantizer."
