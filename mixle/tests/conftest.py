@@ -265,6 +265,11 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # training loops (including a needle-suite baseline comparison), tagged slow for the same reason as
     # context_spine_test.py / long_context_eval_test.py.
     "retrieval_memory_spine_test.py": ("torch", "experimental", "slow"),
+    # E3 sketch-state attention (mixle/experimental/sketch_state_attention.py): FD's deterministic bound
+    # over several seeded streams, chunked-scan equivalence, ContextMechanism conformance via train_tbptt,
+    # a tensor-sketch concentration check, misfit receipts, and an E7 bake-off across four mechanisms --
+    # tagged slow for the same reason as context_spine_test.py/long_context_eval_test.py.
+    "sketch_state_attention_test.py": ("torch", "experimental", "slow"),
 }
 
 
