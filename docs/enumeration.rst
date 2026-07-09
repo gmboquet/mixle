@@ -129,8 +129,8 @@ accuracy for access to high-probability regions.
 
    from mixle.enumeration import count_budget_index, quantized_index
 
-   q_index = quantized_index(dist, budget=4096)
-   c_index = count_budget_index(dist, budget=4096)
+   q_index = quantized_index(dist.enumerator(), max_bits=4096)
+   c_index = count_budget_index(dist, budget_bits=4096)
 
 Use these when top-k traversal is too slow but you still need structured access
 to likely support values.

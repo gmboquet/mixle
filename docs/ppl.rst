@@ -318,7 +318,6 @@ The namespace also includes:
   ``ConformalClassifier``;
 * survival helpers such as ``fit_censored`` and ``kaplan_meier``;
 * posterior summaries such as ``hdi`` and ``posterior_summary``;
-* guide-based routes such as ``structured_vi`` and ``admixture``.
 * guide-based routes such as ``structured_vi`` and ``admixture``;
 * state-space families such as ``LocalLevel`` and ``AR1`` that expose a fitted
   distribution after ``.fit()`` for log-probability and simulation;

@@ -9,7 +9,7 @@ public release.
 Current Inventory
 -----------------
 
-The core package currently ships 48 Python example scripts:
+The core package currently ships 55 Python example scripts:
 
 .. list-table::
    :header-rows: 1
@@ -132,6 +132,8 @@ Inventory
      - Expected status before release
    * - ``examples/auto_example.py``
      - Execute or record failure.
+   * - ``examples/calibrated_report_demo.py``
+     - Execute with optional-dependency status recorded.
    * - ``examples/cross_modal_fit_receipt.py``
      - Execute with optional-dependency status recorded.
    * - ``examples/doe_example.py``
@@ -150,6 +152,10 @@ Inventory
      - Execute or mark blocked on PDE/scientific dependencies.
    * - ``examples/flagship_triage_app.py``
      - Manual unless local reasoning prerequisites are provisioned.
+   * - ``examples/frontier_family_showcase.py``
+     - Manual/integration.
+   * - ``examples/geoscience_inversion_report.py``
+     - Execute or mark blocked on scientific dependencies.
    * - ``examples/foundation_to_edge.py``
      - Manual unless model weights are provisioned.
    * - ``examples/frontier_ecosystem_demo.py``
@@ -180,6 +186,8 @@ Inventory
      - Execute.
    * - ``examples/joint_mixture_example.py``
      - Execute.
+   * - ``examples/label_economics_demo.py``
+     - Execute with optional-dependency status recorded.
    * - ``examples/laptop_scientist.py``
      - Manual unless local model weights are provisioned.
    * - ``examples/latent_variable_models_example.py``
@@ -188,6 +196,11 @@ Inventory
      - Execute.
    * - ``examples/mixture_reduction_benchmark.py``
      - Manual/benchmark or bounded smoke run.
+   * - ``examples/multimodal_stage1_demo.py``
+     - Execute with optional-dependency status recorded.
+   * - ``examples/peft_lora_grad_leaf.py``
+     - Execute with optional-dependency status recorded (needs ``peft``,
+       not a mixle dependency).
    * - ``examples/ppl_example.py``
      - Execute.
    * - ``examples/production_example.py``
@@ -226,6 +239,8 @@ Inventory
      - Manual or blocked unless cached features/model weights are present.
    * - ``examples/vision_edge_distillation/verify_on_laptop.py``
      - Execute when the distilled artifact exists; otherwise blocked.
+   * - ``examples/vlm_trust_receipts_demo.py``
+     - Execute with optional-dependency status recorded.
    * - ``examples/win_demo_example.py``
      - Blocked on ``torch`` (``solve()``'s MLP distillation path
        (``mixle.task.distill._fit_mlp``) always needs torch, no classical

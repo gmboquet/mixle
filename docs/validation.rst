@@ -26,10 +26,11 @@ estimator, latent model, probabilistic-programming route, DOE selector, and
 capability contract.
 
 When a change touches generated API documentation only, the test obligation is
-usually lower, but importability still matters: autodoc imports the public
-invalid imports, stale re-exports, and missing optional-dependency guards. When a docstring change describes runtime
-behavior, prefer at least a focused test or example run that exercises the
-behavior being documented.
+usually lower, but importability still matters: autodoc imports the public API
+surface, so importability failures there catch invalid imports, stale
+re-exports, and missing optional-dependency guards. When a docstring change
+describes runtime behavior, prefer at least a focused test or example run that
+exercises the behavior being documented.
 
 For documentation-only patches, the minimum useful evidence is a strict Sphinx
 build plus a content scan for stale release labels, private paths, notes to
