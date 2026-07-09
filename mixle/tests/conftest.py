@@ -293,6 +293,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # correctness sweeps plus a real torch.multiprocessing.spawn/gloo 4-process test -- tagged slow so it
     # leaves the fast gate while still running in full CI under the `parallel` marker's own tests.
     "context_parallel_spine_test.py": ("torch", "experimental", "parallel", "slow"),
+    # GP-surrogate active-learning + multi-fidelity placement (roadmap M4): each test fits several torch
+    # GPs across a sequential design loop, mirroring doe_active_test.py / doe_multifidelity_test.py.
+    "task_emulate_test.py": ("doe", "torch", "slow"),
 }
 
 
