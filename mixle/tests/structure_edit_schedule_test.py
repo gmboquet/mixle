@@ -178,9 +178,39 @@ class AdaptiveVsFixedLadderTest(unittest.TestCase):
 
     Averaged over several seeds (compute-to-target on a tiny model/task is genuinely noisy step to
     step -- see the module docstring's honesty note): the adaptive run's AVERAGE total compute is
-    asserted below the best FIXED baseline's AVERAGE total compute. Individual-seed numbers are
-    printed so a wins-most-but-not-all-seeds outcome, if it occurs, is visible rather than hidden.
+    asserted below the best FIXED baseline's AVERAGE total compute, by a real margin (see
+    ``_MIN_ADAPTIVE_MARGIN`` below), not just "any nonzero win". Individual-seed numbers are printed
+    so a wins-most-but-not-all-seeds outcome, if it occurs, is visible rather than hidden.
+
+    CORRECTED RESULT (this run, under the repo's reproducible single-threaded CPU-math harness --
+    see mixle/tests/conftest.py's ``OMP_NUM_THREADS``/``MKL_NUM_THREADS``/``torch.set_num_threads(1)``
+    pinning, which is how `pytest` -- the sanctioned way to run this suite -- actually executes it):
+    fixed n_layer=2 avg 1.725e+10 FLOPs, fixed n_layer=3 avg 1.330e+10, adaptive avg 1.314e+10 --
+    adaptive beats the best fixed baseline by ~1.3% less compute, winning individually on only 1 of
+    3 seeds. This is BOTH byte-identical run-to-run under the pinned harness AND the number that
+    reproduces on a clean checkout via `pytest mixle/tests/structure_edit_schedule_test.py`.
+
+    An earlier PR description for this module (H3, #172/#230) reported a materially larger flagship
+    number -- fixed n_layer=2 avg 1.872e+10, fixed n_layer=3 avg 1.336e+10, adaptive avg 1.210e+10,
+    a 9.4% win on 2 of 3 seeds. That number does NOT reproduce under this repo's own CI-sanctioned
+    single-threaded harness; it only reproduces when the benchmark is run OUTSIDE that harness (e.g.
+    directly via ``python -m unittest`` without conftest.py's thread pinning in effect), where the
+    default multi-threaded BLAS matmul reduction order is not bit-reproducible across environments.
+    Because the controller's plateau detector is a hard numeric threshold
+    (``ema_hist[-1] - ema_hist[-plateau_window] > -plateau_eps``), those tiny floating-point
+    differences can flip exactly when an edit is considered, cascading into a materially different
+    total-compute outcome over a 2500-step run -- i.e. the PR's flagship number was a real but
+    non-reproducible-under-CI measurement, not a bug in the scheduler itself. Ad hoc sampling of
+    other seed triples under the pinned harness confirms the mechanism's win is genuinely fragile
+    (single-digit-percent at best, sometimes a net loss) rather than a reliable double-digit margin
+    -- so the margin asserted below is calibrated to the modest, honestly-reproducible result above,
+    not the original overstated one.
     """
+
+    # Calibrated to the CI-reproducible ~1.3% margin measured above for SEEDS=(1, 2, 3): a real,
+    # non-trivial floor (rules out "wins by any nonzero amount, however marginal") that still leaves
+    # headroom below the actual measured margin so this doesn't flake on the pinned harness.
+    _MIN_ADAPTIVE_MARGIN = 0.01  # require >=1% less compute than the best fixed baseline, not just any win
 
     TARGET_LOSS = 1.3
     SEEDS = (1, 2, 3)
@@ -271,7 +301,9 @@ class AdaptiveVsFixedLadderTest(unittest.TestCase):
 
         self.assertIsNotNone(best_fixed_avg, "no fixed baseline reached target_loss on every seed")
         self.assertTrue(all(adaptive_reached), "adaptive run failed to reach target_loss on some seed")
-        self.assertLess(avg_adaptive, best_fixed_avg)
+        # A real margin, not just "any win, however marginal" -- see _MIN_ADAPTIVE_MARGIN's docstring
+        # note above for how this was calibrated and why it replaced a bare assertLess.
+        self.assertLess(avg_adaptive, best_fixed_avg * (1.0 - self._MIN_ADAPTIVE_MARGIN))
 
 
 if __name__ == "__main__":
