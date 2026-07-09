@@ -270,6 +270,10 @@ NODEID_MARKERS: tuple[tuple[str, MarkerTuple], ...] = (
     # PeakRssPatchStreamingTest writes+reads a ~476 MiB synthetic zarr volume to exercise the A3
     # patch-streaming peak-RSS receipt; the rest of array_data_sources_test.py stays in the fast gate.
     ("PeakRssPatchStreamingTest", ("optional", "slow")),
+    # G2's real-perplexity acceptance test trains several real small LMs end to end (not a layer-local
+    # proxy) to get an honest, independent perplexity number -- multiple real training runs are the point,
+    # so it's slow by construction; the rest of sigma_weighted_projection_test.py stays in the fast gate.
+    ("DataFreeSigmaBeatsPlainSvdTest", ("slow",)),
 )
 
 
