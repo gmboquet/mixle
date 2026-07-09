@@ -82,8 +82,8 @@ Development: `git clone … && pip install -e ".[all]"`.
 ```python
 from mixle.inference import optimize
 
-records = [...]                  # your rows — any mix of numbers, text, categories, missing values
-model = optimize(records)        # mixle works out the model and fits it
+records = [...]                # your rows: numbers, text, categories, missing values
+model = optimize(records)      # mixle works out the model and fits it
 
 model.log_density(records[0])    # score an observation
 model.sampler().sample(5)        # draw new ones
@@ -97,7 +97,7 @@ easy cases itself and escalates only the hard ones.
 from mixle.task import solve
 
 # teacher = the function doing the job now; inputs = representative examples
-assistant = solve(teacher, inputs)   # `teacher` labels once; a small local model learns from it
+assistant = solve(teacher, inputs)   # `teacher` labels once; a small model learns from it
 
 assistant(x)            # answers locally when confident, calls `teacher` only when it is not
 assistant.report()      # how often it matched the teacher, and how much it deferred
@@ -179,12 +179,16 @@ prompt = tokenizer("The capital of France is", return_tensors="pt").input_ids
 
 @torch.no_grad()
 def next_logprobs(continuation):   # tokens so far -> [(token_id, log_prob), ...]
-    ids = torch.cat([prompt, torch.tensor([continuation])], 1) if continuation else prompt
+    ids = (torch.cat([prompt, torch.tensor([continuation])], 1)
+           if continuation else prompt)
     return list(enumerate(torch.log_softmax(llm(ids).logits[0, -1], -1).tolist()))
 
-continuations = AutoregressiveEnumerable(next_logprobs, max_len=3, branch_cap=8)   # tames the 49K-token vocab
-continuations.top_k(3)                          # -> [' located in the', ' the city of', ' the capital of']
-continuations.rank(continuations.unrank(5)[0])  # inverse of unrank -> rank=6, cumulative_prob=0.114 (exact)
+# branch_cap tames the 49K-token vocab
+continuations = AutoregressiveEnumerable(next_logprobs, max_len=3, branch_cap=8)
+continuations.top_k(3)  # -> [' located in the', ' the city of', ' the capital of']
+
+# rank() inverts unrank(); cumulative_prob is exact, never approximated
+continuations.rank(continuations.unrank(5)[0])   # -> rank=6, cumulative_prob=0.114
 ```
 
 The same operations work on a model you just fit — here an HMM learns *when to stop* from an absorbing
@@ -194,10 +198,13 @@ terminal state, and its EOL-terminated support enumerates in descending probabil
 from mixle.inference import optimize
 from mixle.stats import HiddenMarkovEstimator, CategoricalEstimator
 
-sequences = [["team", "meet", "buy", "<EOL>"], ["now", "now", "<EOL>"], ...]   # each ends in an EOL token
-model = optimize(sequences, HiddenMarkovEstimator([CategoricalEstimator()] * 3, terminal_states={2}))
+# each sequence ends in an EOL token
+sequences = [["team", "meet", "buy", "<EOL>"], ["now", "now", "<EOL>"], ...]
+model = optimize(sequences,
+    HiddenMarkovEstimator([CategoricalEstimator()] * 3, terminal_states={2}))
 
-model.enumerator().top_k(3)   # most probable EOL-terminated sequences -> [('buy <EOL>', -2.09), ('meet <EOL>', -2.12), ...]
+# most probable EOL-terminated sequences
+model.enumerator().top_k(3)   # -> [('buy <EOL>', -2.09), ('meet <EOL>', -2.12), ...]
 ```
 
 - **Decomposable families** (Composite / Record / Sequence / MarkovChain): rank ↔ value is an exact
@@ -222,7 +229,8 @@ Normal(free, free).fit(data)                             # estimate mean + stand
 Normal(Normal(0, 10), 1.0).fit(data)                      # a prior on the mean
 Mix([Normal(free, free), Normal(free, free)]).fit(data)   # two-cluster mixture
 Markov(Normal(free, free), states=2).fit(seqs)            # a 2-state Gaussian HMM
-Normal(free * Field("x") + free * Field("z") + free, free).fit(..., given={"x": ..., "z": ...})  # regression
+Normal(free * Field("x") + free * Field("z") + free, free).fit(
+    ..., given={"x": ..., "z": ...})   # a regression
 ```
 
 - **`how=`** picks the inference route from the model's structure (`conjugate | em | map | laplace | vi |
