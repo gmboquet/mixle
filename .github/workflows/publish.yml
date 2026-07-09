@@ -2,7 +2,7 @@ name: Publish
 
 # Build the sdist + wheel and publish to PyPI via Trusted Publishing (OIDC) -- no API tokens are
 # stored as secrets. Publishing to PyPI runs only when a GitHub Release is published; a manual
-# workflow_dispatch can build-and-check (and optionally push to TestPyPI) without touching PyPI.
+# workflow_dispatch can build-and-check without touching PyPI.
 #
 # The PyPI distribution name is "mixle" (the import package is still `mixle`); the GitHub repo
 # is gmboquet/mixle.
@@ -12,20 +12,13 @@ name: Publish
 #      does not exist yet):
 #        Owner: gmboquet   Repository: mixle
 #        Workflow: publish.yml   Environment: pypi
-#      and likewise a TestPyPI pending publisher with Environment: testpypi if you want the test path.
-#   3. (Optional) Create GitHub Environments named "pypi" and "testpypi" with any protection rules.
 # To release: bump `version` in pyproject.toml, tag the commit (e.g. v0.2.0), and publish a GitHub
 # Release for that tag -- this workflow then builds and uploads it.
 
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      testpypi:
-        description: "Also upload to TestPyPI (manual runs only)"
-        type: boolean
-        default: false
+  workflow_dispatch: {}
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -52,24 +45,6 @@ jobs:
         with:
           name: dist
           path: dist/
-
-  publish-testpypi:
-    name: Publish to TestPyPI
-    # Manual dry-run path: only when explicitly requested via workflow_dispatch.
-    if: github.event_name == 'workflow_dispatch' && inputs.testpypi
-    needs: build
-    runs-on: ubuntu-latest
-    environment: testpypi
-    permissions:
-      id-token: write # required for trusted publishing (OIDC)
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
 
   publish-pypi:
     name: Publish to PyPI
