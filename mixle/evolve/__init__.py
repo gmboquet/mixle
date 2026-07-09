@@ -26,10 +26,30 @@ Phase 2-3 surface:
 * **structure search** -- :class:`Recompose` / :class:`Mutate` (genetic-programming structural moves over the
   model's compositional tree) + :func:`structural_distance` (a tree-edit genotype distance) driving the
   population's diversity; registered but off by default (structural + expensive).
+
+L1 surface (closed-loop self-evolution, :mod:`mixle.evolve.closed_loop`):
+
+* :class:`ClosedLoopSelfEvolution` -- harvest -> A5 acquire -> distill/refine/evolve challenger
+  production -> :func:`challenger_beats_champion` -> deploy, as one budgeted background loop.
+* :class:`OperatorCreditBandit` -- a per-context meta-bandit (over :class:`mixle.task.bandit.UCB1`)
+  crediting WHICH challenger-production operator wins for which kind of failure.
+* :class:`GenealogyLedger` -- parent/operator/measured-gap receipts on every adopted champion, with a
+  real ``lineage(model)`` walk-back.
 """
 
 from __future__ import annotations
 
+from mixle.evolve.closed_loop import (
+    ClosedLoopSelfEvolution,
+    GenealogyLedger,
+    LoopStepResult,
+    OperatorCreditBandit,
+    accuracy_objective,
+    default_challenger_operators,
+    harvest_failures,
+    harvested_from_router,
+    principled_crossover,
+)
 from mixle.evolve.concept_discovery import (
     AdmissionEvent,
     ConceptLibrary,
@@ -112,6 +132,16 @@ __all__ = [
     "Categorical",
     "Population",
     "OperatorBandit",
+    # L1: closed-loop self-evolution with operator credit + genealogy
+    "ClosedLoopSelfEvolution",
+    "LoopStepResult",
+    "OperatorCreditBandit",
+    "GenealogyLedger",
+    "accuracy_objective",
+    "harvest_failures",
+    "harvested_from_router",
+    "default_challenger_operators",
+    "principled_crossover",
     # CARD L6: concept discovery -- the library of families itself under selection
     "ConceptLibrary",
     "AdmissionEvent",
