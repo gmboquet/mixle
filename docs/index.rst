@@ -91,8 +91,9 @@ Add uncertainty to LLM or reasoning systems
 
 Scale, serve, or audit fitted models
     Read :doc:`engines`, :doc:`compute-layer`,
-    :doc:`utilities-and-parallelism`, :doc:`data`, :doc:`production`, and
-    :doc:`lifecycle`.
+    :doc:`utilities-and-parallelism`, :doc:`data`, :doc:`production`,
+    :doc:`lifecycle`, and :doc:`training-at-scale` for MFU/anomaly receipts
+    and the pilot-ladder GO/NO-GO staging.
 
 Build a local reasoning workflow
     Read :doc:`reasoning-ecosystem` for substrate storage, skills, reasoner
@@ -183,6 +184,7 @@ human map for finding the right import.
    task-distillation
    task-serving
    bring_your_own_model
+   training-at-scale
    agentic-task-distillation
    uncertainty
    reasoning-systems
