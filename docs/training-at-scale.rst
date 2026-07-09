@@ -178,17 +178,17 @@ ones after it:
 
    rungs = [
        Rung(name="rung_i_shakeout", real_target="1B params / 8k context / 8 GPUs",
-            decision_pieces=("F1", "F4"), ...),
+            decision_pieces=("F1", "F4"), max_final_loss=5.0),
        Rung(name="rung_ii_impossible", real_target="8B params / 128k context / 256 GPUs",
-            decision_pieces=("H2",), max_final_loss=1.0e-6, steps=10, ...),
+            decision_pieces=("H2",), max_final_loss=1.0e-6, steps=10),
        Rung(name="rung_iii_unreached", real_target="8B params / 10M context / 1000 GPUs",
-            decision_pieces=("E8", "F5"), ...),
+            decision_pieces=("E8", "F5")),
    ]
    result = run_pilot_ladder(rungs, peak_flops_per_sec=1.0e9)
 
 Running this produced ``halted_at="rung_ii_impossible"`` with only 2 outcomes recorded (rung iii
 was never attempted). The second outcome's ``reason`` is the literal measured margin:
-``"final loss 2.9198 > target 1e-06"``, and its journal entry's ``action_chosen`` is
+``"final loss 5.8563 > target 1e-06"``, and its journal entry's ``action_chosen`` is
 ``"halt_ladder"`` -- the same decision-journal machinery that records an advance also records a
 halt, with the number that caused it.
 
