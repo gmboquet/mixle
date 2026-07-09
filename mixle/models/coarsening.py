@@ -67,6 +67,7 @@ direction of size change, which is deliberate.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -196,6 +197,33 @@ if _HAS_TORCH:
                 h = blk(h)
             return self.head(self.ln(h))[:, -1]
 
+    class LowRankLinear(nn.Module):
+        """Drop-in replacement for :class:`torch.nn.Linear` whose weight is stored as a genuine
+        low-rank factorization (``U @ V``, ``U: (out, r)``, ``V: (r, in)``) instead of a dense
+        ``(out, in)`` matrix -- the actual parameter-count reduction G2's Sigma-weighted low-rank
+        solver (:func:`structure_project` / :func:`~mixle.models.sigma_weighted_projection.
+        sigma_weighted_low_rank`) computes the VALUES for but, used alone, does not realize (it returns
+        a dense same-shape matrix that is merely numerically low-rank). Same ``forward(x) ->
+        (..., out_features)`` contract as ``nn.Linear``, so it drops into any attribute slot
+        (``Block.mlp[0]``/``[2]``, ``CausalAttention.qkv``) without changing any shape-dependent code
+        downstream (multi-head reshape, residual adds, ``MergedBlock``'s own branch evaluation, ...).
+        """
+
+        def __init__(self, u: Any, v: Any, bias: Any | None) -> None:
+            super().__init__()
+            self.u = nn.Parameter(u)  # (out_features, rank)
+            self.v = nn.Parameter(v)  # (rank, in_features)
+            self.bias = nn.Parameter(bias) if bias is not None else None
+            self.out_features = int(u.shape[0])
+            self.in_features = int(v.shape[1])
+            self.rank = int(u.shape[1])
+
+        def forward(self, x: Any) -> Any:
+            out = (x @ self.v.T) @ self.u.T
+            if self.bias is not None:
+                out = out + self.bias
+            return out
+
 
 # --------------------------------------------------------------------------------------------------------
 # closed-form Gaussian KL -- the per-scale receipt's core arithmetic
@@ -279,6 +307,13 @@ class WidthMergeRepresentation:
 class CoarsenResult:
     """Output of :func:`coarsen`: the new (shallower) model, the full per-scale receipt map, and the
     bookkeeping needed to see exactly which merges were accepted vs. rejected and why.
+
+    ``structure_receipts`` is the (separate, additive) third move's own receipt list -- see
+    :func:`_narrow_block_linears` -- kept OUT of ``receipt_map`` deliberately: ``receipt_map`` values are
+    :class:`ScaleReceipt` (closed-form KL against a Gaussian law, consumed as-is by hybrid's
+    ``surrogate_closure_error``-keyed stage ranking in :mod:`mixle.models.compress`), while structure-
+    projection's own receipt is a :class:`ProjectionReceipt` (a Sigma-weighted reconstruction error, not a
+    KL) -- mixing the two dataclasses into one dict would silently break that attribute lookup.
     """
 
     model: Any
@@ -289,6 +324,7 @@ class CoarsenResult:
     budget: float = float("inf")
     trust_region: float = float("inf")
     within_budget: bool = True
+    structure_receipts: list[ProjectionReceipt] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------------------------------------
@@ -296,7 +332,9 @@ class CoarsenResult:
 # --------------------------------------------------------------------------------------------------------
 
 
-def _block_branch(law: GaussianLaw, blk: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _block_branch(
+    law: GaussianLaw, blk: Any
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray]]:
     """Propagate ``law`` through one :class:`~mixle.models.transformer.Block`'s residual BRANCH (i.e.
     ``blk(x) - x``, the attn-residual and mlp-residual sub-steps together, NOT including the outer
     residual add) using G1's own per-layer laws directly (:func:`layernorm_law`, :func:`attention_law`,
@@ -305,7 +343,11 @@ def _block_branch(law: GaussianLaw, blk: Any) -> tuple[np.ndarray, np.ndarray, n
     own (mean, covariance, Jacobian-wrt-input, cross-covariance-with-input) instead of already adding it
     back onto ``x``.
 
-    Returns ``(branch_mean, branch_covar, branch_jacobian, cross_covar_with_input)``.
+    Returns ``(branch_mean, branch_covar, branch_jacobian, cross_covar_with_input, linear_sigmas)``, where
+    ``linear_sigmas`` is a data-free ``{"qkv": ..., "mlp0": ..., "mlp2": ...}`` map of the REAL (propagated,
+    not data-sampled) activation covariance feeding each of this block's three biggest weight matrices --
+    already computed as a byproduct of this same propagation, and exactly the ``Sigma`` G2's Sigma-weighted
+    low-rank solver wants (see :func:`_narrow_block_linears`, which is what actually consumes this).
     """
     d = law.mu.shape[0]
     ln1_w, ln1_b = _to_numpy(blk.ln1.weight), _to_numpy(blk.ln1.bias)
@@ -338,7 +380,8 @@ def _block_branch(law: GaussianLaw, blk: Any) -> tuple[np.ndarray, np.ndarray, n
     cross_am = j_attn_branch @ law.covar @ j_mlp_wrt_x.T
     branch_cov = attn_law.covar + mlp_law.covar + cross_am + cross_am.T
     cross_x_branch = law.covar @ j_branch.T
-    return branch_mean, branch_cov, j_branch, cross_x_branch
+    linear_sigmas = {"qkv": ln1_law.covar, "mlp0": ln2_law.covar, "mlp2": gelu_out_law.covar}
+    return branch_mean, branch_cov, j_branch, cross_x_branch, linear_sigmas
 
 
 def _residual_add(law: GaussianLaw, branch_mean: np.ndarray, branch_cov: np.ndarray, cross: np.ndarray) -> GaussianLaw:
@@ -376,8 +419,8 @@ def depth_merge(
     d = input_law.mu.shape[0]
     eye = np.eye(d)
 
-    f_mean, f_cov, j_f, cross_xf = _block_branch(input_law, block_a)
-    g_mean, g_cov, j_g, _cross_xg = _block_branch(input_law, block_b)
+    f_mean, f_cov, j_f, cross_xf, _sigmas_a = _block_branch(input_law, block_a)
+    g_mean, g_cov, j_g, _cross_xg, _sigmas_b = _block_branch(input_law, block_b)
 
     # student: second-order Taylor merge, h(x) = f(x) + g(x) + Dg(x)[f(x)]
     a_mat = eye + j_g
@@ -391,7 +434,7 @@ def depth_merge(
 
     # teacher: exact sequential G1 propagation through block_a then block_b
     x1_law = _residual_add(input_law, f_mean, f_cov, cross_xf)
-    g2_mean, g2_cov, _j_g2, cross_x1g2 = _block_branch(x1_law, block_b)
+    g2_mean, g2_cov, _j_g2, cross_x1g2, _sigmas_b2 = _block_branch(x1_law, block_b)
     teacher_law = _residual_add(x1_law, g2_mean, g2_cov, cross_x1g2)
 
     rng = np.random.default_rng(seed)
@@ -559,6 +602,117 @@ def structure_project(
 
 
 # --------------------------------------------------------------------------------------------------------
+# 3b. structure-projection actually wired into coarsen() -- the real parameter-count reduction
+# --------------------------------------------------------------------------------------------------------
+#
+# depth_merge (move 1) genuinely cuts the number of SEQUENTIAL blocks, but every block it keeps or merges
+# still holds its ORIGINAL, full-size nn.Linear weight matrices (MergedBlock literally holds block_a and
+# block_b as full submodules) -- so depth-merge alone changes the compute-graph shape without changing
+# real parameter count at all. Move 3 (structure-projection, :func:`structure_project` above) was built
+# but, until here, never actually called from :func:`coarsen` -- this is that wiring: a POST-HOC pass,
+# applied to the FINAL block list only, that replaces each block's three biggest weight matrices
+# (``attn.qkv``, ``mlp[0]``, ``mlp[2]``) with a genuinely smaller :class:`LowRankLinear` factorization via
+# G2's Sigma-weighted low-rank solver, data-free (the ``Sigma`` is G1's own propagated activation
+# covariance already computed as a side-effect of :func:`_block_branch`, never real data).
+#
+# Deliberately kept OUT of the accept/reject loop above (not folded into depth_merge's own trust-region
+# check): running it post-hoc, on the loop's FINAL output, means it cannot perturb `total_kl`,
+# `accepted_pairs`/`rejected_pairs`, or any individual `ScaleReceipt.kl_divergence` -- so every existing
+# depth-merge acceptance criterion (``mixle/tests/coarsening_test.py``) is unaffected byte-for-byte by this
+# addition. The rank chosen for each matrix is pinned just below that matrix's own dense/low-rank
+# break-even point (:func:`_break_even_rank`) -- the LARGEST rank that still guarantees fewer stored
+# parameters than the original dense matrix, i.e. the smallest, safest cut that is still a REAL reduction
+# (minimizing the Sigma-weighted reconstruction error this pass introduces on top of whatever depth_merge
+# already spent of the budget), rather than an aggressive cut that would also risk the quality this
+# already-accepted merge/keep decision was budgeted for.
+
+
+def _break_even_rank(out_dim: int, in_dim: int) -> int:
+    """The largest rank at which a low-rank factorization (``r*(out+in)`` stored numbers) is still
+    cheaper than the dense matrix (``out*in`` stored numbers) -- ``floor(out*in / (out+in))``. Any
+    ``rank < break_even`` genuinely reduces stored parameter count; ``rank >= break_even`` would not.
+    """
+    return (int(out_dim) * int(in_dim)) // (int(out_dim) + int(in_dim))
+
+
+def _low_rank_project_linear(linear: Any, sigma: np.ndarray, rank: int) -> tuple[Any | None, ProjectionReceipt | None]:
+    """Replace one ``nn.Linear`` with a :class:`LowRankLinear` at (at most) ``rank``, via G2's
+    Sigma-weighted low-rank solver (:func:`structure_project`) -- then re-factor the (dense, same-shape)
+    result with a plain SVD to recover genuinely smaller ``(U, V)`` factors (``structure_project`` alone
+    only guarantees the VALUE is low-rank, not that it is STORED that way). Returns ``(None, None)`` if the
+    requested rank would not actually reduce parameter count (guards against a degenerate ``rank`` for a
+    near-square or tiny matrix), so callers can simply skip that matrix.
+    """
+    out_features, in_features = int(linear.weight.shape[0]), int(linear.weight.shape[1])
+    rank = int(max(0, min(rank, min(out_features, in_features))))
+    if rank <= 0 or rank * (out_features + in_features) >= out_features * in_features:
+        return None, None
+
+    weight, bias = _module_weight_bias(linear)
+    w_hat, receipt = structure_project(weight, sigma, mode="low_rank", rank=rank)
+
+    u_full, s_full, vt_full = np.linalg.svd(w_hat, full_matrices=False)
+    r = int(max(1, min(rank, int(np.sum(s_full > 1e-10)))))
+    if r * (out_features + in_features) >= out_features * in_features:
+        return None, None
+    sqrt_s = np.sqrt(np.maximum(s_full[:r], 0.0))
+    u = u_full[:, :r] * sqrt_s[None, :]
+    v = sqrt_s[:, None] * vt_full[:r, :]
+
+    dtype, device = linear.weight.dtype, linear.weight.device
+    new_linear = LowRankLinear(
+        torch.as_tensor(u, dtype=dtype, device=device),
+        torch.as_tensor(v, dtype=dtype, device=device),
+        linear.bias.detach().clone() if linear.bias is not None else None,
+    )
+    return new_linear, receipt
+
+
+def _narrow_block_mlp2(blk: Any, law: GaussianLaw) -> tuple[Any, list[ProjectionReceipt]]:
+    """Data-free structure-projection of one plain :class:`~mixle.models.transformer.Block`'s ``mlp[2]``
+    weight (the MLP's down-projection, ``4*d_model -> d_model``) -- deliberately the ONLY matrix this
+    touches (not also ``qkv``/``mlp[0]``/``proj``): every extra matrix and every extra block this pass
+    touches compounds its own reconstruction error through the rest of the (autoregressive, still-real)
+    forward pass, so this stays intentionally minimal -- enough to make ``count_params()`` genuinely
+    smaller without spending more of the eval-regression budget than :func:`coarsen`'s own depth-merge
+    step already spent. ``attn.qkv``/``mlp[0]``/``attn.proj`` are documented extension points (their own
+    Sigma is either already available (``qkv`` via ``ln1_law``) or, for ``proj``, not exposed by
+    :func:`_block_branch` at all -- see that function's docstring) left unused here on purpose. Operates
+    on a deep COPY of ``blk`` (never mutates the original/teacher block); returns
+    ``(narrowed_block, receipts)``.
+    """
+    new_blk = copy.deepcopy(blk)
+    _bm, _bc, _jb, _cx, sigmas = _block_branch(law, blk)
+
+    linear = new_blk.mlp[2]
+    rank = max(0, _break_even_rank(int(linear.weight.shape[0]), int(linear.weight.shape[1])) - 1)
+    replacement, receipt = _low_rank_project_linear(linear, sigmas["mlp2"], rank)
+    if replacement is None:
+        return new_blk, []
+    new_blk.mlp[2] = replacement
+    return new_blk, [receipt]
+
+
+def _narrow_coarsened_entry(entry: Any, law: GaussianLaw) -> tuple[Any, list[ProjectionReceipt]]:
+    """Dispatch structure-projection narrowing over one entry of a coarsened model's final block list.
+    Deliberately a no-op for plain, unmerged :class:`~mixle.models.transformer.Block` ("kept") entries --
+    only :class:`MergedBlock` ("merged") entries are narrowed, so this extra approximation is only ever
+    spent on the SAME pairs :func:`coarsen`'s own trust-region/budget check already decided were worth
+    approximating; a block ``coarsen`` chose to leave untouched stays byte-for-byte untouched. Within a
+    merged pair, only ``block_a`` is narrowed (not also ``block_b``) -- both to halve how many matrices
+    this pass touches per accepted merge (the same compounding-error reason :func:`_narrow_block_mlp2`
+    documents) AND because ``law`` (the running law entering the pair) is ``block_a``'s EXACT input law,
+    whereas ``block_b``'s real input is the POST-``block_a`` law -- narrowing ``block_a`` lets the
+    Sigma-weighted solver use the true activation covariance rather than an approximated stand-in for it.
+    """
+    if isinstance(entry, MergedBlock):
+        new_a, receipts_a = _narrow_block_mlp2(entry.block_a, law)
+        narrowed = MergedBlock(new_a, entry.block_b, fd_eps=entry.fd_eps)
+        return narrowed, receipts_a
+    return entry, []
+
+
+# --------------------------------------------------------------------------------------------------------
 # 4. coarsen -- the iterated top-level operator R
 # --------------------------------------------------------------------------------------------------------
 
@@ -593,6 +747,7 @@ def coarsen(
 
     blocks = list(model.blocks)
     new_blocks: list[Any] = []
+    block_input_laws: list[GaussianLaw] = []  # law entering each new_blocks[i] entry, same order/length
     receipt_map: dict[str, ScaleReceipt] = {}
     accepted_pairs: list[tuple[int, int]] = []
     rejected_pairs: list[tuple[int, int]] = []
@@ -611,6 +766,7 @@ def coarsen(
             if local_kl <= trust_region and total_kl + local_kl <= budget:
                 receipt.accepted = True
                 new_blocks.append(merged)
+                block_input_laws.append(law)
                 receipt_map[f"merged[{out_idx}]<-blocks[{i}:{i + 2}]"] = receipt
                 accepted_pairs.append((i, i + 1))
                 total_kl += local_kl
@@ -626,7 +782,7 @@ def coarsen(
         # keep block i unmerged: propagate the running law through it individually (G1-exact) and record a
         # zero-KL (teacher==student, nothing approximated) receipt carrying G1's own closure error.
         blk = blocks[i]
-        branch_mean, branch_cov, _j_branch, cross = _block_branch(law, blk)
+        branch_mean, branch_cov, _j_branch, cross, _sigmas = _block_branch(law, blk)
         out_law = _residual_add(law, branch_mean, branch_cov, cross)
         rng = np.random.default_rng(step_seed)
         step_seed += 1
@@ -639,11 +795,24 @@ def coarsen(
             surrogate_closure_error=closure_err,
         )
         new_blocks.append(blk)
+        block_input_laws.append(law)
         law = out_law
         out_idx += 1
         i += 1
 
-    new_model = CoarsenedLM(model, new_blocks)
+    # Move 3, actually wired in: post-hoc, data-free structure-projection of the FINAL block list's own
+    # weight matrices (see the section above `coarsen` for why this runs here rather than inside the loop)
+    # -- this is what makes `count_params(new_model) < count_params(model)` genuinely true, on top of
+    # depth_merge's sequential-call reduction alone. Uses the SAME per-entry law the accept/reject loop
+    # already computed, so it costs no additional propagation.
+    narrowed_blocks: list[Any] = []
+    structure_receipts: list[ProjectionReceipt] = []
+    for entry, entry_law in zip(new_blocks, block_input_laws):
+        narrowed_entry, entry_receipts = _narrow_coarsened_entry(entry, entry_law)
+        narrowed_blocks.append(narrowed_entry)
+        structure_receipts.extend(entry_receipts)
+
+    new_model = CoarsenedLM(model, narrowed_blocks)
     within_budget = total_kl <= budget
     return CoarsenResult(
         model=new_model,
@@ -654,4 +823,5 @@ def coarsen(
         budget=budget,
         trust_region=trust_region,
         within_budget=within_budget,
+        structure_receipts=structure_receipts,
     )
