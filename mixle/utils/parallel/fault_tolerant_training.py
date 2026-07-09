@@ -56,7 +56,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
+
+try:
+    import torch
+except ImportError:  # pragma: no cover - torch is optional
+    torch = None
 
 from mixle.utils.parallel.dcp_checkpoint import load_sharded
 from mixle.utils.parallel.training_health import TrainingHealthMonitor
