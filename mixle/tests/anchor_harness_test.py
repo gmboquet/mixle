@@ -59,7 +59,7 @@ class AnchorHarnessTest(unittest.TestCase):
         self.assertIsInstance(report.frontier_mae, float)
         self.assertIsInstance(report.walk_mae, float)
         self.assertFalse(report.frontier_is_calibrated)  # the frontier baseline reports no interval at all
-        self.assertTrue(any("cheap" in note for note in report.notes))  # where the frontier wins: cost
+        self.assertTrue(any("lowest-cost" in note for note in report.notes))  # where the frontier wins: cost
 
     def test_deterministic_given_seed(self):
         r1 = run_anchor_harness(n_train=1200, n_test=80, seed=3)

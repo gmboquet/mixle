@@ -64,8 +64,12 @@ class RegistryTest(unittest.TestCase):
             reg.register(pricier, capabilities=["spam_filter"], cost=0.05)
             reg.register(cheap, capabilities=["spam_filter"], cost=0.01)
 
-            def frontier(text):
-                return _spam_teacher([text])[0]
+            def frontier(texts):
+                # Router calls the frontier as a BATCHED callable (texts -> [label]) and does its own
+                # single-item wrap/unwrap (see Router.__call__) -- matching Cascade._teacher_label's
+                # convention of "teacher is the raw batched function". A frontier that already unwraps
+                # to one text in/out double-wraps and breaks (a list-of-one-string gets .split()'d).
+                return _spam_teacher(texts)
 
             stack = reg.tier_stack("spam_filter", frontier=frontier, costs=[0.01, 0.05, 1.0])
 
