@@ -119,19 +119,25 @@ model.module                     # the raw module back, nothing trapped
 Freeze submodules, swap the optimizer, or distribute the fit with `backend=`; parity with a hand-written
 training loop is checked by a test, not claimed here.
 
-**Compose to any depth; one call fits the whole thing.** A neural network and a Gaussian are the same
-kind of object here, so they go in the same mixture — and a single `optimize` call trains both.
+**Compose to any depth; one call fits the whole thing.** You hand it estimators, not fitted
+distributions — you don't know the parameters yet, and that's the point. Nest them and a single
+`optimize` call learns every level together: here, a hidden Markov model whose two states emit through
+different learned models — a Gaussian mixture, and the neural density from above.
 
 ```python
-from mixle.models import GradLeaf
-from mixle.stats import GaussianDistribution, MixtureDistribution
+from mixle.stats import GaussianEstimator, MixtureEstimator, HiddenMarkovEstimator
+from mixle.models import GradEstimator
 
-# the module from above, now one component of a mixture — fit jointly in a single call
-model = optimize(x, MixtureDistribution([GradLeaf(my_module), GaussianDistribution(0, 1)], [0.5, 0.5]))
+# sequences: a list of observation series; nothing below fixes a parameter
+model = optimize(sequences, HiddenMarkovEstimator([
+    MixtureEstimator([GaussianEstimator(), GaussianEstimator()]),  # one state: a two-cluster mixture
+    GradEstimator(my_module),                                      # the other: a neural density
+]))
 ```
 
-One call, each piece fit the right way: EM over the mixture, gradient descent inside the neural leaf, a
-closed-form update for the Gaussian. Nest deeper — sequences, hidden Markov models, a PCFG — and it holds.
+One call, each part fit by the right M-step: Baum-Welch for the Markov dynamics, EM for the mixture
+inside a state, gradient descent for the neural leaf. Every node is an estimator, so the tree nests as
+deep as the model does — the call at the top never changes.
 
 ## Engines & orchestration
 
