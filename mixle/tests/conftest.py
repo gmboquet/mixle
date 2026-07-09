@@ -275,6 +275,15 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # a real (multi-model-training) Spearman correlation measurement -- tagged slow for the same reason as
     # context_spine_test.py / long_context_eval_test.py.
     "moment_closure_attention_test.py": ("torch", "experimental", "slow"),
+    # E5 part 1: S6/Mamba selective scan (mixle/experimental/selective_scan.py) -- protocol conformance,
+    # detach, log_density, and a real 3000-step TBPTT Selective Copying training receipt -- tagged slow for
+    # the same reason as context_spine_test.py / moment_closure_attention_test.py.
+    "selective_scan_test.py": ("torch", "experimental", "slow"),
+    # E5 part 2: the hybrid block (mixle/experimental/ssm_hybrid.py) -- local attention + SSM + E2 far
+    # field, protocol conformance, contribution-receipt bookkeeping, and a real matched-parameter E7
+    # referee-suite comparison against local-only and SSM-only ablations -- several TBPTT training loops,
+    # tagged slow for the same reason as the other Track-E mechanism tests.
+    "ssm_hybrid_test.py": ("torch", "experimental", "slow"),
 }
 
 
