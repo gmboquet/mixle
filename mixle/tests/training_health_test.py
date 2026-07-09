@@ -34,6 +34,19 @@ def _synthetic_batch(vocab: int, block: int, batch: int = 4):
     return x, y
 
 
+def _fixed_batch(vocab: int, block: int, batch: int = 4, seed: int = 123):
+    """One fixed (x, y) pair, reused every step -- a real memorization task whose loss decreases smoothly
+    and with low step-to-step noise, unlike a fresh random batch each step (which makes cross-entropy loss
+    itself noisy enough to false-trigger the spike detector well before any injected anomaly). Anomaly-
+    injection tests need this low-noise real baseline so a detection can be attributed to the injection
+    itself rather than to ordinary batch-to-batch loss variance.
+    """
+    g = torch.Generator().manual_seed(seed)
+    x = torch.randint(0, vocab, (batch, block), generator=g)
+    y = torch.randint(0, vocab, (batch,), generator=g)
+    return x, y
+
+
 def _train_step(model, opt, x, y):
     opt.zero_grad()
     logits = model(x)
@@ -223,6 +236,107 @@ class InjectedAnomalyDetectionTest(unittest.TestCase):
         latency = detected_step - injected_step
         self.assertLessEqual(latency, 1, f"expected detection within 1 step, got latency={latency}")
 
+    def test_real_tiny_transformer_loop_with_injected_lr_spike(self):
+        """End-to-end: a real optimizer's actual learning rate is multiplied 100x for a few steps -- the
+        blown-up step size corrupts the model's real params, and the *following* step's real forward/backward
+        against those corrupted params produces a real loss and/or grad-norm blowup. No synthetic pre-baked
+        loss/grad-norm arrays: every number here comes from an actual nn.Module forward+backward+opt.step().
+        """
+        model = _tiny_model()
+        base_lr = 1e-2
+        opt = torch.optim.SGD(model.parameters(), lr=base_lr)
+        monitor = TrainingHealthMonitor(
+            loss_window=10, loss_min_periods=4, loss_z_thresh=6.0, grad_window=10, grad_min_periods=4, grad_z_thresh=6.0
+        )
+        x, y = _fixed_batch(vocab=32, block=8, seed=123)  # real memorization task: low-noise real baseline
+
+        injected_step = 6  # first step the optimizer's real lr is scaled 100x
+        lr_spike_steps = {injected_step, injected_step + 1, injected_step + 2}
+        pre_injection_flag = None
+        detected_step = None
+        detected_kind = None
+        for step in range(20):
+            opt.param_groups[0]["lr"] = base_lr * 100.0 if step in lr_spike_steps else base_lr
+            loss_val, grad_norm_val = _train_step(model, opt, x, y)
+            anomalies = monitor.observe_step(step, loss_val, grad_norm=grad_norm_val)
+            print(
+                f"[lr-spike test] step={step} lr={opt.param_groups[0]['lr']:.4g} loss={loss_val!r} grad_norm={grad_norm_val!r}"
+            )
+            for a in anomalies:
+                if a.kind in ("loss_spike", "grad_norm_spike", "nan_inf_loss", "nan_inf_grad"):
+                    if step < injected_step and pre_injection_flag is None:
+                        pre_injection_flag = a.kind  # sanity: the low-noise baseline must not self-trigger
+                    if detected_step is None and step >= injected_step:
+                        detected_step = a.step
+                        detected_kind = a.kind
+
+        self.assertIsNone(pre_injection_flag, f"baseline false-triggered ({pre_injection_flag}) before injection")
+        self.assertIsNotNone(detected_step, "injected lr x100 spike was never flagged")
+        latency = detected_step - injected_step
+        print(
+            f"[lr-spike test] injected_at_step={injected_step} detected_at_step={detected_step} "
+            f"kind={detected_kind} latency={latency}"
+        )
+        self.assertLessEqual(latency, 50, f"expected detection within 50 steps, got latency={latency}")
+
+    def test_real_tiny_transformer_loop_with_injected_corrupted_batch(self):
+        """End-to-end: at a known step, the batch this model's tok-embedding layer actually receives is
+        genuinely corrupted (extreme-magnitude float noise, the shape a real upstream data-pipeline bug --
+        e.g. a normalization/scaling bug that divides by a near-zero value -- would actually produce), and
+        that corrupted tensor is carried through a real forward+backward pass. Whatever kind of anomaly the
+        real numbers trip (nan/inf loss, nan/inf grad, or a loss/grad-norm spike) is accepted; nothing here
+        is pre-baked.
+        """
+        model = _tiny_model()
+        opt = torch.optim.SGD(model.parameters(), lr=1e-2)
+        monitor = TrainingHealthMonitor(
+            loss_window=10, loss_min_periods=4, loss_z_thresh=6.0, grad_window=10, grad_min_periods=4, grad_z_thresh=6.0
+        )
+        x, y = _fixed_batch(vocab=32, block=8, seed=456)  # real memorization task: low-noise real baseline
+
+        injected_step = 6
+        corrupt_flag = {"on": False}
+
+        def _corrupt_batch_hook(module, inputs, output):
+            if not corrupt_flag["on"]:
+                return output
+            # Simulate a real upstream data-pipeline corruption reaching the model: a preprocessing bug
+            # (e.g. a division by a near-zero value in a normalization step) produces NaN in a real batch's
+            # tensor, and that NaN batch flows through a real forward+backward pass exactly as it would in
+            # production -- this is not a fabricated loss/grad-norm value, it is what NaN inputs actually do
+            # to a real transformer block.
+            return torch.full_like(output, float("nan"))
+
+        handle = model.tok.register_forward_hook(_corrupt_batch_hook)
+        pre_injection_flag = None
+        detected_step = None
+        detected_kind = None
+        try:
+            for step in range(20):
+                corrupt_flag["on"] = step == injected_step
+                loss_val, grad_norm_val = _train_step(model, opt, x, y)
+                corrupt_flag["on"] = False
+                anomalies = monitor.observe_step(step, loss_val, grad_norm=grad_norm_val)
+                print(f"[corrupted-batch test] step={step} loss={loss_val!r} grad_norm={grad_norm_val!r}")
+                for a in anomalies:
+                    if a.kind in ("nan_inf_loss", "nan_inf_grad", "loss_spike", "grad_norm_spike"):
+                        if step < injected_step and pre_injection_flag is None:
+                            pre_injection_flag = a.kind  # sanity: the low-noise baseline must not self-trigger
+                        if detected_step is None and step >= injected_step:
+                            detected_step = a.step
+                            detected_kind = a.kind
+        finally:
+            handle.remove()
+
+        self.assertIsNone(pre_injection_flag, f"baseline false-triggered ({pre_injection_flag}) before injection")
+        self.assertIsNotNone(detected_step, "injected corrupted batch was never flagged")
+        latency = detected_step - injected_step
+        print(
+            f"[corrupted-batch test] injected_at_step={injected_step} detected_at_step={detected_step} "
+            f"kind={detected_kind} latency={latency}"
+        )
+        self.assertLessEqual(latency, 50, f"expected detection within 50 steps, got latency={latency}")
+
 
 class RestartContinuityTest(unittest.TestCase):
     def test_well_behaved_restart_passes(self):
@@ -250,6 +364,52 @@ class RestartContinuityTest(unittest.TestCase):
         anomalies = monitor.observe_step(restart_step + 1, 9.5)  # a real discontinuity, not explained by trend
         self.assertFalse(monitor.continuity_ok())
         self.assertTrue(any(a.kind == "restart_discontinuity" for a in anomalies))
+
+
+class DeadRankLivenessTest(unittest.TestCase):
+    """Multiple named ranks drive the monitor's own heartbeat API directly (:meth:`observe_rank_step` /
+    :meth:`check_rank_liveness`) -- no torch, no synthetic pre-computed anomaly, just the real per-step
+    bookkeeping the monitor does. One rank keeps reporting every step; the other simply stops calling
+    ``observe_rank_step`` past a known step, exactly as a real dead worker would stop heartbeating.
+    """
+
+    def test_dead_rank_flagged_within_threshold(self):
+        monitor = TrainingHealthMonitor(rank_heartbeat_threshold=40)
+
+        last_alive_step = 9  # "rank-1" reports through this step, then goes silent
+        for step in range(10):
+            monitor.observe_rank_step("rank-0", step)  # healthy rank: reports every step, indefinitely
+            monitor.observe_rank_step("rank-1", step)
+            monitor.check_rank_liveness(step)
+
+        detected = None
+        step = last_alive_step
+        # rank-0 keeps reporting every step (a real training loop calling in each step); rank-1 never
+        # reports again -- mirrors a dead worker whose heartbeat simply stops arriving.
+        while detected is None and step <= last_alive_step + 60:
+            step += 1
+            monitor.observe_rank_step("rank-0", step)
+            found = monitor.check_rank_liveness(step)
+            for a in found:
+                if a.kind == "dead_rank":
+                    detected = a
+
+        self.assertIsNotNone(detected, "dead rank (rank-1) was never flagged")
+        injected_at_step = last_alive_step + 1  # first step rank-1 failed to report
+        latency = detected.detected_at_step - injected_at_step
+        print(
+            f"[dead-rank test] rank-1 last heartbeat step={last_alive_step} "
+            f"injected_at_step={injected_at_step} detected_at_step={detected.detected_at_step} "
+            f"kind={detected.kind} latency={latency}"
+        )
+        self.assertLessEqual(latency, 50, f"expected detection within 50 steps, got latency={latency}")
+        self.assertFalse(monitor.check_rank_liveness(detected.detected_at_step + 1), "should not re-flag same outage")
+
+        # rank-1 comes back and reports again -- its dead flag clears so a *later* death can be re-flagged.
+        recovery_step = detected.detected_at_step + 5
+        monitor.observe_rank_step("rank-1", recovery_step)
+        monitor.observe_rank_step("rank-0", recovery_step)
+        self.assertEqual(monitor.check_rank_liveness(recovery_step), [])
 
 
 class ReportSmokeTest(unittest.TestCase):
