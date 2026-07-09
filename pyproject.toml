@@ -42,8 +42,12 @@ dependencies = [
 [project.optional-dependencies]
 # Extras are opt-in; the lower bounds are conservative floors (oldest releases with Python 3.10-3.12
 # wheels and the APIs mixle uses), not pins -- newer majors are allowed. numba >= 0.59 is the first
-# series with 3.10-3.12 wheels and the njit features the kernels use.
-numba = ["numba>=0.59", "tbb>=2021.6"]
+# series with 3.10-3.12 wheels and the njit features the kernels use. tbb is numba's optional
+# parallel=True threading backend (several kernels use parallel=True); numba falls back to its own
+# built-in "workqueue" threading layer without it, so it's a performance extra, not a hard requirement
+# -- and it must stay platform-gated: Intel TBB ships no arm64 (Apple Silicon) wheels, so an
+# unconditional floor here makes `pip install mixle[numba]` uninstallable on that platform.
+numba = ["numba>=0.59", "tbb>=2021.6; platform_machine == 'x86_64'"]
 # pandas is only used by the DataFrame data adapter (which duck-types and never imports pandas);
 # it is optional so the base install stays lean.
 pandas = ["pandas>=2.0"]
@@ -62,6 +66,13 @@ grammar = ["networkx>=3.0"]
 gmpy2 = ["gmpy2>=2.1"]
 spark = ["pyspark>=3.4"]
 dask = ["dask>=2023.5.0", "distributed>=2023.5.0"]
+# mixle.utils.parallel.ray_data's "ray" encoded-data backend (map/fold sufficient statistics over a
+# Ray cluster, same contract as the spark/dask backends); only ray.remote/ray.put/ray.get/ray.init are
+# used, all stable since early 2.x.
+ray = ["ray>=2.9"]
+# mixle.utils.parallel.lightning_data's "lightning" encoded-data backend (mini-batch iteration via a
+# lightning.pytorch.LightningDataModule + DataLoader, driving stochastic/mini-batch EM).
+lightning = ["lightning>=2.1"]
 # safetensors is the companion of torch here: torch TaskModel artifacts persist their weights through
 # safetensors.torch.save_model (see mixle/task/artifact.py), so a torch install needs it to save/load.
 torch = ["torch>=2.0", "safetensors>=0.4"]
@@ -81,7 +92,7 @@ sage = ["passagemath-symbolics>=10.4"]
 test = ["pytest>=8", "pytest-xdist>=3.0", "pytest-cov>=5.0"]
 # ruff is pinned: a newer release could add rules and break the blocking lint check unexpectedly.
 lint = ["ruff==0.15.17", "mypy>=1.0"]
-all = ["numba>=0.59", "tbb>=2021.6", "pyspark>=3.4", "dask>=2023.5.0", "distributed>=2023.5.0", "torch>=2.0", "safetensors>=0.4", "mpi4py>=3.1", "umap-learn>=0.5.4", "pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "networkx>=3.0"]
+all = ["numba>=0.59", "tbb>=2021.6; platform_machine == 'x86_64'", "pyspark>=3.4", "dask>=2023.5.0", "distributed>=2023.5.0", "torch>=2.0", "safetensors>=0.4", "mpi4py>=3.1", "umap-learn>=0.5.4", "pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "networkx>=3.0", "ray>=2.9", "lightning>=2.1"]
 
 [project.urls]
 Homepage = "https://github.com/gmboquet/mixle"
