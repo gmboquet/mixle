@@ -52,6 +52,29 @@ def _torch() -> Any:
     return torch
 
 
+def _resolve_device(device: Any, torch: Any) -> Any:
+    """Where to run a leaf's module, in priority order (shared by every gradient-fit leaf --
+    ``neural_leaf.py`` imports this rather than redefining it, so the priority order is one place):
+
+    1. an explicit ``device=`` on the leaf/estimator (always wins);
+    2. the device of the **active compute engine** -- so ``optimize(engine=TorchEngine(device="mps"))``
+       (or ``"cuda"``) drives the M-step onto that device, matching mixle's engine philosophy
+       (set the device once on the engine, the leaf follows);
+    3. otherwise CUDA if available, else CPU -- the implicit default (note: not MPS, so existing local
+       CPU behaviour and tests are unchanged; reach MPS explicitly or via the engine)."""
+    if device is not None:
+        return torch.device(device)
+    from mixle.engines.base import active_engine
+
+    eng_dev = getattr(active_engine(), "device", None)
+    if eng_dev is not None and str(eng_dev) != "cpu":
+        try:
+            return torch.device(eng_dev)
+        except (TypeError, RuntimeError):
+            pass
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 def looks_like_torch_module(obj: Any) -> bool:
     """A bare torch density module: scores batches and carries parameters -- coercible to a leaf."""
     return (
@@ -74,7 +97,9 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         *,
         m_steps: int = 60,
         lr: float = 5e-3,
-        device: str = "cpu",
+        device: Any = None,
+        batch_size: int | None = None,
+        precision: str = "fp32",
         name: str | None = None,
         loss: Any = None,
         optimizer: Any = None,
@@ -82,7 +107,9 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         self.module = module
         self.m_steps = int(m_steps)
         self.lr = float(lr)
-        self.device = device
+        self.device = device  # None => active engine's device, else CUDA if available, else CPU (_resolve_device)
+        self.batch_size = None if batch_size is None else int(batch_size)
+        self.precision = precision
         self.name = name
         self.loss = loss
         self.optimizer = optimizer
@@ -91,15 +118,28 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         return f"{type(self).__name__}({type(self.module).__name__})"
 
     def log_density(self, x: Any) -> float:
-        return float(self.seq_log_density(np.atleast_2d(np.asarray(x, dtype=float)))[0])
+        fields = x if isinstance(x, tuple) else (x,)
+        rows = tuple(np.atleast_2d(np.asarray(f, dtype=float)) for f in fields)
+        return float(self.seq_log_density(rows if isinstance(x, tuple) else rows[0])[0])
 
     def seq_log_density(self, x: Any) -> np.ndarray:
         torch = _torch()
-        xx = check_finite(np.atleast_2d(np.asarray(x, dtype=float)), f"{type(self).__name__}.seq_log_density")
-        self.module.to(self.device).eval()
-        xt = torch.as_tensor(xx, dtype=torch.float32, device=self.device)
+        # a bare unconditional module sees one field (x); a bare CONDITIONAL module (log_density(x, y, ...))
+        # sees a tuple of fields (GradLeafEncoder.seq_encode's arity-generalized output) -- unpack with
+        # ``*`` either way, same tuple-default pattern GradEstimator.estimate uses for the M-step.
+        fields = x if isinstance(x, tuple) else (x,)
+        dev = _resolve_device(self.device, torch)
+        self.module.to(dev).eval()
+        xts = tuple(
+            torch.as_tensor(
+                check_finite(np.atleast_2d(np.asarray(f, dtype=float)), f"{type(self).__name__}.seq_log_density"),
+                dtype=torch.float32,
+                device=dev,
+            )
+            for f in fields
+        )
         with torch.no_grad():
-            return self.module.log_density(xt).cpu().numpy().reshape(-1)
+            return self.module.log_density(*xts).cpu().numpy().reshape(-1)
 
     def sampler(self, seed: int | None = None) -> GradLeafSampler:
         return GradLeafSampler(self, seed)
@@ -110,6 +150,8 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
             m_steps=self.m_steps,
             lr=self.lr,
             device=self.device,
+            batch_size=self.batch_size,
+            precision=self.precision,
             name=self.name,
             loss=self.loss,
             optimizer=self.optimizer,
@@ -141,7 +183,8 @@ class GradLeafSampler(DistributionSampler):
             )
         torch = _torch()
         n = int(size or 1)
-        self.dist.module.to(self.dist.device).eval()
+        dev = _resolve_device(self.dist.device, torch)
+        self.dist.module.to(dev).eval()
         torch.manual_seed(int(self.rng.randint(0, 2**31 - 1)))
         with torch.no_grad():
             out = self.dist.module.sample(n).cpu().numpy()
@@ -157,7 +200,14 @@ class GradLeafEncoder(DataSequenceEncoder):
     def __eq__(self, other: object) -> bool:
         return isinstance(other, GradLeafEncoder)
 
-    def seq_encode(self, data: list) -> np.ndarray:
+    def seq_encode(self, data: list) -> Any:
+        # a bare unconditional module sees one field (x); a bare CONDITIONAL module (log_density(x, y, ...))
+        # sees rows as tuples -- split into one contiguous array per position, same shape-preserving contract
+        # DataBufferAccumulator already documents ("a single array ... a tuple like (x, y)"), just generalized
+        # to arbitrary arity instead of hand-picking n_fields=2 per family.
+        if len(data) and isinstance(data[0], tuple):
+            n = len(data[0])
+            return tuple(np.array([np.atleast_1d(np.asarray(row[i], dtype=float)) for row in data]) for i in range(n))
         return np.array([np.atleast_1d(np.asarray(x, dtype=float)) for x in data])
 
 
@@ -178,6 +228,11 @@ class DataBufferAccumulator(SequenceEncodableStatisticAccumulator):
     # Contiguous batch arrays concatenated once at value() (shape-preserving) rather than one ndarray per row.
     def _append(self, enc: Any, weights: np.ndarray) -> None:
         fields = enc if isinstance(enc, tuple) else (enc,)
+        # the declared n_fields is a default, not a ceiling: a generic bridge (GradLeaf) doesn't know a bare
+        # module's arity until the first real batch arrives, so widen once, from empty, to match it.
+        if len(fields) != len(self.parts) and not any(self.parts):
+            self.parts = [[] for _ in fields]
+            self.n_fields = len(fields)
         for buf, f in zip(self.parts, fields):
             fb = np.asarray(f, dtype=float)
             buf.append(fb.reshape(fb.shape[0], 1) if fb.ndim == 1 else fb)
@@ -239,7 +294,9 @@ class GradEstimator(ParameterEstimator):
         *,
         m_steps: int = 60,
         lr: float = 5e-3,
-        device: str = "cpu",
+        device: Any = None,
+        batch_size: int | None = None,
+        precision: str = "fp32",
         name: str | None = None,
         loss: Any = None,
         optimizer: Any = None,
@@ -248,6 +305,8 @@ class GradEstimator(ParameterEstimator):
         self.m_steps = int(m_steps)
         self.lr = float(lr)
         self.device = device
+        self.batch_size = None if batch_size is None else int(batch_size)
+        self.precision = precision
         self.name = name
         self.loss = loss
         self.optimizer = optimizer
@@ -258,6 +317,8 @@ class GradEstimator(ParameterEstimator):
             m_steps=self.m_steps,
             lr=self.lr,
             device=self.device,
+            batch_size=self.batch_size,
+            precision=self.precision,
             name=self.name,
             loss=self.loss,
             optimizer=self.optimizer,
@@ -269,23 +330,37 @@ class GradEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple) -> GradLeaf:
         torch = _torch()
         *fields, ws = suff_stat
-        xs = fields[0]
         params = [p for p in self.module.parameters() if p.requires_grad]
-        if len(xs) == 0 or not params:  # nothing to fit, or a fully frozen (fixed) module
+        if not fields or len(fields[0]) == 0 or not params:  # nothing to fit, or a fully frozen (fixed) module
             return self._leaf()
-        x = torch.as_tensor(np.asarray(xs, dtype=float), dtype=torch.float32, device=self.device)
-        w = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32, device=self.device)
-        w = w / w.sum().clamp(min=1e-8)
-        self.module.to(self.device).train()
+        dev = _resolve_device(self.device, torch)
+        # data stays on CPU (mirrors softmax_leaf.py) -- each minibatch is moved to the device, so a
+        # larger-than-device-memory dataset still fits; batch_size=None keeps today's single full-batch pass.
+        xs = tuple(torch.as_tensor(np.asarray(f, dtype=float), dtype=torch.float32) for f in fields)
+        w = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32)
+        w = w / w.sum().clamp(min=1e-8)  # normalized once, up front -- batch_size=None reproduces the old math exactly
+        n = xs[0].shape[0]
+        bs = self.batch_size or n
+        self.module.to(dev).train()
         opt = self.optimizer(params) if self.optimizer is not None else torch.optim.Adam(params, lr=self.lr)
-        for _ in range(self.m_steps):
-            opt.zero_grad()
-            if self.loss is not None:
-                loss = self.loss(self.module, x, w)
-            else:
-                loss = -(w * self.module.log_density(x)).sum()  # weighted negative log-likelihood
-            loss.backward()
-            opt.step()
+        autocast_dev = "cuda" if str(dev).startswith("cuda") else "cpu"
+        use_bf16 = self.precision == "bf16"
+        for _ in range(self.m_steps):  # m_steps passes over the data (full-batch when batch_size is None)
+            perm = torch.randperm(n) if bs < n else torch.arange(n)
+            for k in range(0, n, bs):
+                idx = perm[k : k + bs]
+                xb = tuple(xt[idx].to(dev) for xt in xs)
+                wb = w[idx].to(dev)
+                opt.zero_grad()
+                with torch.autocast(device_type=autocast_dev, dtype=torch.bfloat16, enabled=use_bf16):
+                    if self.loss is not None:
+                        loss = self.loss(self.module, *xb, wb)
+                    else:
+                        # tuple default: log_density(*fields) -- a single field unpacks to log_density(x),
+                        # identical to before; a conditional bare module's log_density(x, y, ...) just works.
+                        loss = -(wb * self.module.log_density(*xb)).sum()  # weighted negative log-likelihood
+                loss.backward()
+                opt.step()
         return self._leaf()
 
 

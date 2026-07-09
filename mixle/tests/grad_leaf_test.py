@@ -151,5 +151,122 @@ class ControlStoryTest(unittest.TestCase):
         self.assertAlmostEqual(float(fitted.module.mu.detach()[0]), 2.0, delta=0.5)
 
 
+class DeviceResolutionTest(unittest.TestCase):
+    """A4 upgrade #2: ``device`` defaults to ``None`` and resolves explicit > active engine > CUDA-if-
+    available > cpu -- the same priority as ``neural_leaf.NeuralGaussian``, reused rather than reinvented."""
+
+    def test_explicit_then_active_engine_then_implicit_default(self):
+        from mixle.engines.base import using_active_engine
+        from mixle.models.grad_leaf import _resolve_device
+
+        self.assertEqual(_resolve_device("cpu", torch), torch.device("cpu"))  # explicit always wins
+
+        class _Eng:
+            device = "meta"  # a device valid on any host, so the test needs no GPU
+
+        with using_active_engine(_Eng()):
+            self.assertEqual(_resolve_device(None, torch), torch.device("meta"))
+
+        # outside a fit there is no active engine, so the implicit CUDA-if-available/cpu default applies
+        self.assertNotEqual(str(_resolve_device(None, torch)), "meta")
+
+    def test_grad_leaf_device_defaults_to_none_and_still_fits_on_cpu(self):
+        # the constructor default changed from the hardcoded "cpu" to None -- unchanged observable
+        # behavior off an active engine and off CUDA (this sandbox has neither).
+        fitted = optimize(_data(1.0, 1.0, 100, seed=20), DiagGauss(1), max_its=5, out=None)
+        self.assertIsNone(GradLeaf(DiagGauss(1)).device)
+        self.assertTrue(np.isfinite(fitted.log_density(1.0)))
+
+
+class MinibatchTest(unittest.TestCase):
+    """A4 upgrade #1: ``batch_size=None`` (default) is full-batch, unchanged; an explicit ``batch_size``
+    trains on minibatches within each M-step -- needed for a dataset that won't fit in one batch."""
+
+    def test_batch_size_none_is_bitwise_unchanged(self):
+        data = _data(1.5, 1.0, 200, seed=9)
+        m1, m2 = DiagGauss(1), DiagGauss(1)
+        m2.load_state_dict(m1.state_dict())
+        a = optimize(data, GradLeaf(m1), max_its=3, out=None)
+        b = optimize(data, GradLeaf(m2, batch_size=None), max_its=3, out=None)
+        np.testing.assert_array_equal(
+            a.seq_log_density(np.asarray(data)[:, None]), b.seq_log_density(np.asarray(data)[:, None])
+        )
+
+    def test_minibatch_reaches_the_same_optimum_as_full_batch(self):
+        # a convex fixture (diagonal Gaussian in its own parameters) has one optimum -- minibatch SGD
+        # should reach essentially the same place as full-batch, just via a noisier path.
+        #
+        # Per the roadmap card: "minibatch held-out log-density within 0.05 of full-batch" -- the
+        # PER-POINT held-out log-density, not raw parameter distance (a different, looser metric an
+        # earlier version of this test checked instead). `seq_log_density(held)` returns a length-1
+        # array holding the TOTAL (summed, not averaged) joint log-density of the whole held-out
+        # batch -- `np.mean()` on that is a no-op, so naively comparing its raw output against a
+        # per-point tolerance compares SUMS against a bound meant for per-point values, off by a
+        # factor of `len(held)`. Divide by `len(held)` explicitly to get the actual per-point mean the
+        # card means. Also seed torch globally before each optimize() call: minibatch shuffling uses
+        # torch's global RNG (`torch.randperm(n)` in grad_leaf.py's estimate(), unseeded per call), so
+        # without pinning it this comparison is non-deterministic run to run.
+        torch.manual_seed(0)
+        data = _data(3.0, 0.75, 2000, seed=10)
+        held = _data(3.0, 0.75, 2000, seed=99)
+        torch.manual_seed(0)
+        full = optimize(data, GradLeaf(DiagGauss(1), m_steps=150, lr=0.02), max_its=1, out=None)
+        torch.manual_seed(0)
+        mini = optimize(data, GradLeaf(DiagGauss(1), m_steps=150, lr=0.02, batch_size=64), max_its=1, out=None)
+        full_held = float(full.seq_log_density(held)[0]) / len(held)
+        mini_held = float(mini.seq_log_density(held)[0]) / len(held)
+        self.assertLess(abs(full_held - mini_held), 0.05)
+
+    def test_minibatch_handles_a_dataset_larger_than_a_single_batch_many_times_over(self):
+        # batch_size far smaller than n (simulating a dataset that would not fit in one memory-budgeted
+        # batch): must still run to completion and land near the true mean.
+        data = _data(-2.0, 1.0, 5000, seed=11)
+        fitted = optimize(data, GradLeaf(DiagGauss(1), m_steps=40, lr=0.05, batch_size=32), max_its=1, out=None)
+        self.assertAlmostEqual(float(fitted.module.mu.detach()[0]), -2.0, delta=0.25)
+
+
+class TupleDefaultLossTest(unittest.TestCase):
+    """A4 upgrade #4: the default M-step objective is ``module.log_density(*fields)`` -- a single-field
+    (unconditional) module is unaffected (``*fields`` unpacks to the one positional arg it always got);
+    a CONDITIONAL bare module (``log_density(x, y)``) now just works off tuple observations, no hook."""
+
+    def test_single_field_default_loss_is_unchanged(self):
+        # covered bitwise by BareModuleTest above, but pin it explicitly here too: fields[0]-only and
+        # log_density(*fields) with one field are the exact same call.
+        data = _data(0.5, 1.0, 150, seed=12)
+        m1, m2 = DiagGauss(1), DiagGauss(1)
+        m2.load_state_dict(m1.state_dict())
+        a = optimize(data, GradLeaf(m1), max_its=3, out=None)
+        b = optimize(data, GradLeaf(m2), max_its=3, out=None)
+        self.assertEqual(float(a.module.mu.detach()[0]), float(b.module.mu.detach()[0]))
+
+    def test_conditional_bare_module_fits_via_tuple_default_loss(self):
+        class CondGauss(torch.nn.Module):
+            """p(y | x) = N(y; w*x + b, sigma^2) -- a conditional density with a two-arg log_density,
+            no different from any other bare module the bridge accepts."""
+
+            def __init__(self):
+                super().__init__()
+                self.w = torch.nn.Parameter(torch.zeros(1))
+                self.b = torch.nn.Parameter(torch.zeros(1))
+                self.log_sigma = torch.nn.Parameter(torch.zeros(1))
+
+            def log_density(self, x, y):
+                mean = x * self.w + self.b
+                return torch.distributions.Normal(mean, torch.exp(self.log_sigma)).log_prob(y).sum(-1)
+
+        rng = np.random.RandomState(13)
+        x = rng.normal(0.0, 1.0, 400)
+        y = 2.0 * x + 1.0 + rng.normal(0.0, 0.1, 400)
+        data = [(float(xi), float(yi)) for xi, yi in zip(x, y)]
+
+        module = CondGauss()
+        fitted = optimize(data, GradLeaf(module, m_steps=300, lr=0.05), max_its=1, out=None)
+
+        self.assertIsInstance(fitted, GradLeaf)
+        self.assertAlmostEqual(float(fitted.module.w.detach()[0]), 2.0, delta=0.2)
+        self.assertAlmostEqual(float(fitted.module.b.detach()[0]), 1.0, delta=0.2)
+
+
 if __name__ == "__main__":
     unittest.main()
