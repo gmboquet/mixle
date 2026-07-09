@@ -26,6 +26,14 @@ Current contents:
   flow exactly through the retrieval softmax over the selected top-k; the archived index contents themselves
   are stop-gradient -- that non-differentiable boundary is a receipt field on the returned state, not just a
   docstring claim.
+- :mod:`mixle.experimental.selective_scan` -- E5 part 1, the S6/Mamba selective-scan module:
+  :class:`~mixle.experimental.selective_scan.SelectiveScan`, its ``_scan_layer`` recurrence (shared with
+  :mod:`mixle.experimental.ssm_hybrid`, not duplicated), and the S4D-real / dt-bias inits verified against
+  ``mamba-ssm`` source.
+- :mod:`mixle.experimental.ssm_hybrid` -- E5 part 2, the hybrid block:
+  :class:`~mixle.experimental.ssm_hybrid.HybridBlock` composes E1's local windowed attention, E5 part 1's
+  selective-scan SSM branch, and E2's moment-closure far field into one ``ContextMechanism``, with a real
+  per-mechanism contribution receipt exposed via ``report()``. See ``notes/designs/E5.md`` for the design.
 
 Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
 run and reported on distinctly from the stable-package suite.
