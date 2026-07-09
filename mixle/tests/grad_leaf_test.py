@@ -195,13 +195,27 @@ class MinibatchTest(unittest.TestCase):
     def test_minibatch_reaches_the_same_optimum_as_full_batch(self):
         # a convex fixture (diagonal Gaussian in its own parameters) has one optimum -- minibatch SGD
         # should reach essentially the same place as full-batch, just via a noisier path.
+        #
+        # Per the roadmap card: "minibatch held-out log-density within 0.05 of full-batch" -- the
+        # PER-POINT held-out log-density, not raw parameter distance (a different, looser metric an
+        # earlier version of this test checked instead). `seq_log_density(held)` returns a length-1
+        # array holding the TOTAL (summed, not averaged) joint log-density of the whole held-out
+        # batch -- `np.mean()` on that is a no-op, so naively comparing its raw output against a
+        # per-point tolerance compares SUMS against a bound meant for per-point values, off by a
+        # factor of `len(held)`. Divide by `len(held)` explicitly to get the actual per-point mean the
+        # card means. Also seed torch globally before each optimize() call: minibatch shuffling uses
+        # torch's global RNG (`torch.randperm(n)` in grad_leaf.py's estimate(), unseeded per call), so
+        # without pinning it this comparison is non-deterministic run to run.
+        torch.manual_seed(0)
         data = _data(3.0, 0.75, 2000, seed=10)
+        held = _data(3.0, 0.75, 2000, seed=99)
+        torch.manual_seed(0)
         full = optimize(data, GradLeaf(DiagGauss(1), m_steps=150, lr=0.02), max_its=1, out=None)
+        torch.manual_seed(0)
         mini = optimize(data, GradLeaf(DiagGauss(1), m_steps=150, lr=0.02, batch_size=64), max_its=1, out=None)
-        self.assertAlmostEqual(float(full.module.mu.detach()[0]), float(mini.module.mu.detach()[0]), delta=0.15)
-        self.assertAlmostEqual(
-            float(full.module.log_sigma.detach()[0]), float(mini.module.log_sigma.detach()[0]), delta=0.15
-        )
+        full_held = float(full.seq_log_density(held)[0]) / len(held)
+        mini_held = float(mini.seq_log_density(held)[0]) / len(held)
+        self.assertLess(abs(full_held - mini_held), 0.05)
 
     def test_minibatch_handles_a_dataset_larger_than_a_single_batch_many_times_over(self):
         # batch_size far smaller than n (simulating a dataset that would not fit in one memory-budgeted
