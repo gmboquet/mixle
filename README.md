@@ -14,9 +14,11 @@
 data.** Behind a one-line API — hand it raw data and it selects and fits a model; hand it a structure and it
 fits that — is a complete probabilistic-modeling stack: around 90 distributions, mixtures and hidden Markov
 models, automatic model selection, Bayesian inference from EM to NUTS, design-of-experiments optimization,
-and calibrated, monitored deployment. It is a serious statistics library at its core, with one idea that
-ties it together: a classical distribution, a neural network, and a latent-variable model are the same kind
-of object, so they compose freely and one `optimize(...)` call fits the whole thing.
+and calibrated, monitored deployment. It stays efficient and easy to distribute: the same model runs on any
+engine — NumPy, Numba, GPU — and scales across any backend — Spark, Dask, Ray, MPI — by changing a single
+argument, with no rewrite. It is a serious statistics library at its core, with one idea that ties it
+together: a classical distribution, a neural network, and a latent-variable model are the same kind of
+object, so they compose freely and one `optimize(...)` call fits the whole thing.
 
 Lab-grade AI, without the lab. Three things people reach for it for:
 
@@ -28,8 +30,7 @@ Lab-grade AI, without the lab. Three things people reach for it for:
   safe to put in front of users.
 
 mixle handles what you actually have — numbers, text, categories, mixed and missing values, directional and
-angular data, rankings, graphs — the same way, and scales from a laptop to a cluster with one `backend=`
-argument.
+angular data, rankings, graphs — all modeled the same way.
 
 Fitting follows from the structure, not a flag: closed-form where a part has a closed form, gradient descent
 where it is a neural network, EM where there are latent variables, all inside one loop. The deeper machinery
