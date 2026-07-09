@@ -39,6 +39,7 @@ class FeatureEmbedding:
         self._module: Any = None
 
     def module(self) -> Any:
+        """Build or return the Torch feature-embedding module."""
         if self._module is None:
             import torch.nn as nn
 

@@ -36,6 +36,7 @@ class Freshness:
     age_s: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable freshness verdict."""
         return {"item_id": self.item_id, "fresh": self.fresh, "signals": self.signals, "age_s": round(self.age_s, 1)}
 
 

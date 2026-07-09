@@ -65,6 +65,7 @@ class ChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
     """
 
     def compute_capabilities(self):
+        """Describe backend support shared by the tree's component distributions."""
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
         children = list(self.marginal_dists)
@@ -76,6 +77,7 @@ class ChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def compute_declaration(self):
+        """Return a composite compute declaration for tree marginals and conditionals."""
         from mixle.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
 
         children = []
@@ -297,6 +299,7 @@ class ChowLiuTreeSampler(DistributionSampler):
         ]
 
     def sample(self, size: int | None = None) -> tuple[Any, ...] | list[tuple[Any, ...]]:
+        """Draw one tuple, or ``size`` iid tuples, from the tree."""
         if size is not None:
             return [self.sample() for _ in range(int(size))]
 
@@ -360,6 +363,7 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
         return estimate.marginal_dists[child]
 
     def update(self, x: Sequence[Any], weight: float, estimate: ChowLiuTreeDistribution | None) -> None:
+        """Accumulate marginals, pair counts, and conditional child statistics for one tuple."""
         if len(x) != self.num_features:
             raise ValueError("Observation length does not match ChowLiuTreeEstimator.")
 
@@ -391,6 +395,7 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
                 acc.update(xx[child], weight, prev)
 
     def initialize(self, x: Sequence[Any], weight: float, rng: RandomState) -> None:
+        """Initialize all marginal and conditional accumulators from one tuple."""
         if len(x) != self.num_features:
             raise ValueError("Observation length does not match ChowLiuTreeEstimator.")
 
@@ -420,14 +425,17 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_update(
         self, x: Sequence[Sequence[Any]], weights: np.ndarray, estimate: ChowLiuTreeDistribution | None
     ) -> None:
+        """Accumulate a batch of tuple observations with corresponding weights."""
         for value, weight in zip(x, weights):
             self.update(value, float(weight), estimate)
 
     def seq_initialize(self, x: Sequence[Sequence[Any]], weights: np.ndarray, rng: RandomState) -> None:
+        """Initialize from a batch of tuple observations and weights."""
         for value, weight in zip(x, weights):
             self.initialize(value, float(weight), rng)
 
     def combine(self, suff_stat: SS) -> "ChowLiuTreeAccumulator":
+        """Merge another Chow-Liu sufficient-statistic value."""
         total_weight, num_features, marginal_counts, marginal_values, joint_counts, marginal_stats, cond_stats = (
             suff_stat
         )
@@ -454,6 +462,7 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> SS:
+        """Return serialized statistics for structure learning and conditional M-steps."""
         return (
             self.total_weight,
             self.num_features,
@@ -469,6 +478,7 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
         )
 
     def from_value(self, x: SS) -> "ChowLiuTreeAccumulator":
+        """Replace this accumulator from a serialized Chow-Liu statistic value."""
         total_weight, num_features, marginal_counts, marginal_values, joint_counts, marginal_stats, cond_stats = x
         if num_features != self.num_features:
             raise ValueError("Cannot load Chow-Liu statistics with different feature counts.")
@@ -491,6 +501,7 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def scale(self, c: float) -> "ChowLiuTreeAccumulator":
+        """Scale all weight-linear statistics by ``c``."""
         self.total_weight *= c
         self.marginal_counts = [{key: count * c for key, count in counts.items()} for counts in self.marginal_counts]
         self.joint_counts = {
@@ -505,6 +516,7 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed tree, marginal, and conditional statistics into ``stats_dict``."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -517,6 +529,7 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
                 acc.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace keyed tree, marginal, and conditional statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
         for acc in self.marginal_accumulators:
@@ -526,6 +539,7 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
                 acc.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "ChowLiuTreeDataEncoder":
+        """Return the tuple encoder compatible with this accumulator."""
         return ChowLiuTreeDataEncoder()
 
 
@@ -540,6 +554,7 @@ class ChowLiuTreeAccumulatorFactory(StatisticAccumulatorFactory):
         self.name = name
 
     def make(self) -> ChowLiuTreeAccumulator:
+        """Create a fresh Chow-Liu tree accumulator."""
         return ChowLiuTreeAccumulator(self.estimators, keys=self.keys, name=self.name)
 
 
@@ -580,6 +595,7 @@ class ChowLiuTreeEstimator(ParameterEstimator):
             raise ValueError("default_policy must be 'marginal' or 'none'.")
 
     def accumulator_factory(self) -> ChowLiuTreeAccumulatorFactory:
+        """Return an accumulator factory for Chow-Liu structure and parameter statistics."""
         return ChowLiuTreeAccumulatorFactory(self.estimators, keys=self.keys, name=self.name)
 
     @staticmethod
@@ -661,6 +677,7 @@ class ChowLiuTreeEstimator(ParameterEstimator):
         return parents, feature_order
 
     def estimate(self, nobs: float | None, suff_stat: SS) -> ChowLiuTreeDistribution:
+        """Estimate the Chow-Liu tree structure and all node distributions."""
         total_weight, num_features, marginal_counts, marginal_values, joint_counts, marginal_stats, cond_stats = (
             suff_stat
         )
@@ -710,4 +727,5 @@ class ChowLiuTreeDataEncoder(DataSequenceEncoder):
         return isinstance(other, ChowLiuTreeDataEncoder)
 
     def seq_encode(self, x: Sequence[Sequence[Any]]) -> tuple[tuple[Any, ...], ...]:
+        """Encode observations as immutable feature tuples."""
         return tuple(tuple(u) for u in x)

@@ -1,9 +1,9 @@
-"""``rank_design_families`` -- the persistent what-works prior over structural design families (CARD DESIGN-a).
+"""Persistent what-works prior over structural design families.
 
 :class:`~mixle.task.edge.DesignModel` already ledgers every evaluated design point with an arbitrary
 tag dict, so a caller can tag each accepted structural recipe with which FAMILY it belongs to (a
-quotient leaf vs a plain head, a richer factorization vs a simpler one -- workstream A5/REFINE-a/
-IMAGINE-a's structural choices, and D8's capability-conditioned recipes). This module is the thin
+quotient leaf vs a plain head, a richer factorization vs a simpler one, or
+capability-conditioned recipes). This module is the thin
 query layered on that existing ledger: rank the families seen so far by their mean recorded quality,
 so the NEXT round's structural-search proposal starts from a sharper prior instead of from scratch --
 "what has actually worked" persisted across rounds and design searches, not re-derived each time.

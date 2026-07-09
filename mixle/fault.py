@@ -1,17 +1,18 @@
-"""Degradation policy (workstream J: FAULT-a) -- named failure modes, each flagged on the receipt.
+"""Degradation policy with named failure modes for receipts.
 
-A subsystem failure must never silently serve a worse answer as if nothing happened. This module is the
-shared fault boundary every degraded path goes through: :func:`with_fallback` runs the primary path and, on
-any exception, runs a named fallback instead -- the result is either NOT degraded (primary succeeded) or
-degraded under an explicit, named mode with the triggering reason attached. :func:`abstain_on_timeout` and
-:func:`route_past` are the same discipline specialized to two more named modes.
+Subsystem failures should not silently serve degraded answers as ordinary
+successes. :func:`with_fallback` runs a primary path and, on exception, runs a
+named fallback. The result records whether the primary path succeeded or which
+degradation mode produced the fallback value. :func:`abstain_on_timeout` and
+:func:`route_past` apply the same receipt discipline to timeout abstention and
+multi-tier routing.
 
-The four named modes (per the card): ``teacher_down`` (fall back to captured+store-only reasoning -- see
-:meth:`mixle.system.System.answer`), ``store_down`` (reason without accumulated knowledge -- see
-:meth:`mixle.system.System.ingest`), ``oracle_timeout`` (abstain/escalate rather than guess), and
-``model_error`` (route past the failing tier to the next one). The last two are validated here as standalone
-primitives: neither an oracle nor a multi-tier local-model router is wired into :class:`~mixle.system.System`
-yet, so there is nothing live to attach them to without inventing an integration this card doesn't own.
+The named modes are ``teacher_down`` (fall back to captured or store-only
+reasoning; see :meth:`mixle.system.System.answer`), ``store_down`` (reason
+without accumulated knowledge; see :meth:`mixle.system.System.ingest`),
+``oracle_timeout`` (abstain or escalate rather than guess), and ``model_error``
+(route past the failing tier to the next one). The timeout and routing helpers
+are reusable fault-boundary primitives.
 """
 
 from __future__ import annotations
@@ -31,17 +32,15 @@ class DegradedResult:
     reason: str | None = None
 
     def to_receipt_fields(self) -> dict[str, Any]:
-        """The ``degraded_mode``/``degraded_reason`` fields a caller merges onto its own receipt dict."""
+        """Return ``degraded_mode`` and ``degraded_reason`` receipt fields."""
         return {"degraded_mode": self.mode, "degraded_reason": self.reason}
 
 
 def with_fallback(fn: Callable[[], Any], fallback: Callable[[Exception], Any], *, mode: str) -> DegradedResult:
     """Run ``fn()``; on any exception, run ``fallback(exc)`` instead and flag the result under ``mode``.
 
-    Either ``fn()`` succeeds and the result is NOT degraded, or the fallback runs and the result IS flagged
-    with ``mode`` and the triggering exception's message as ``reason`` -- never a silent, unflagged
-    "somehow it still worked" path. If ``fallback`` itself raises, that exception propagates: a fallback that
-    cannot produce anything is a real failure to report, not something to paper over with a second guess.
+    If ``fallback`` itself raises, that exception propagates. A fallback that
+    cannot produce a value is a real failure, not a second implicit fallback.
     """
     try:
         return DegradedResult(value=fn(), degraded=False)
@@ -51,7 +50,7 @@ def with_fallback(fn: Callable[[], Any], fallback: Callable[[Exception], Any], *
 
 def abstain_on_timeout(fn: Callable[[], Any], *, timeout_error: type[BaseException] = TimeoutError) -> DegradedResult:
     """``oracle_timeout`` mode: run ``fn()``; if it raises ``timeout_error``, abstain (``value=None``) rather
-    than guess. Any OTHER exception propagates -- only a timeout is a license to abstain, not any failure."""
+    than guess. Other exceptions propagate."""
     try:
         return DegradedResult(value=fn(), degraded=False)
     except timeout_error as exc:
@@ -60,8 +59,8 @@ def abstain_on_timeout(fn: Callable[[], Any], *, timeout_error: type[BaseExcepti
 
 def route_past(tiers: Sequence[Callable[[], Any]], *, names: Sequence[str] | None = None) -> DegradedResult:
     """``model_error`` mode: try each tier in order; a raising tier is skipped (not fatal) in favor of the
-    next. Degraded (flagged with which tier(s) failed) unless the FIRST tier answers cleanly. Raises the
-    last tier's exception if every tier fails -- there is no further fallback to route past."""
+    next. The result is degraded unless the first tier answers cleanly. Raises
+    the last tier's exception if every tier fails."""
     names = list(names) if names is not None else [f"tier{i}" for i in range(len(tiers))]
     failed: list[str] = []
     last_exc: Exception | None = None
@@ -75,4 +74,4 @@ def route_past(tiers: Sequence[Callable[[], Any]], *, names: Sequence[str] | Non
         if not failed:
             return DegradedResult(value=value, degraded=False)
         return DegradedResult(value=value, degraded=True, mode="model_error", reason=f"routed past {failed}")
-    raise last_exc  # every tier failed -- nothing left to route past to
+    raise last_exc  # every tier failed

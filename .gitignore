@@ -43,6 +43,7 @@ pip-delete-this-directory.txt
 .venv/
 .DS_Store
 .claude/
+.worktrees/
 
 # Downloaded example datasets
 /data/

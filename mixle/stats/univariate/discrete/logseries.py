@@ -1,9 +1,6 @@
-"""Create, estimate, and sample from a logarithmic (log-series) distribution on positive integers.
+"""Logarithmic (log-series) distributions over positive integers.
 
-Defines the LogSeriesDistribution, LogSeriesSampler, LogSeriesAccumulatorFactory, LogSeriesAccumulator,
-LogSeriesEstimator, and the LogSeriesDataEncoder classes for use with mixle.
-
-Data type: (int): a positive integer k >= 1. The LogSeriesDistribution with shape p in (0, 1) has
+Observations are positive integers ``k >= 1``. A log-series distribution with shape ``p in (0, 1)`` has
 log-mass
 
         log(P(k; p)) = k*log(p) - log(k) - log(-log(1 - p)),    k = 1, 2, ...,
@@ -63,12 +60,14 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated log-series kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for log-series distributions."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -157,7 +156,7 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of LogSeriesDistribution object."""
+        """Return a constructor-style representation of the log-series distribution."""
         return "LogSeriesDistribution(%s, name=%s, keys=%s)" % (repr(self.p), repr(self.name), repr(self.keys))
 
     def density(self, x: int) -> float:
@@ -285,36 +284,44 @@ class LogSeriesAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: int, weight: float, estimate: LogSeriesDistribution | None) -> None:
+        """Accumulate weighted count and total for one positive integer."""
         if int(x) < 1:
             raise ValueError("LogSeriesDistribution has support k >= 1.")
         self.count += weight
         self.sum += float(x) * weight
 
     def initialize(self, x: int, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: LogSeriesDistribution | None
     ) -> None:
+        """Accumulate weighted count and total from encoded observations."""
         self.count += np.sum(weights, dtype=np.float64)
         self.sum += np.dot(x[0], weights)
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float]) -> "LogSeriesAccumulator":
+        """Merge another log-series sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.sum += suff_stat[1]
         return self
 
     def value(self) -> tuple[float, float]:
+        """Return accumulated count and integer total."""
         return self.count, self.sum
 
     def from_value(self, x: tuple[float, float]) -> "LogSeriesAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.count, self.sum = x
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -322,10 +329,12 @@ class LogSeriesAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "LogSeriesDataEncoder":
+        """Return the encoder used by this accumulator."""
         return LogSeriesDataEncoder()
 
 
@@ -336,6 +345,7 @@ class LogSeriesAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> LogSeriesAccumulator:
+        """Create a fresh log-series accumulator."""
         return LogSeriesAccumulator(keys=self.keys)
 
 
@@ -355,9 +365,11 @@ class LogSeriesEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> LogSeriesAccumulatorFactory:
+        """Return an accumulator factory for log-series count statistics."""
         return LogSeriesAccumulatorFactory(keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> LogSeriesDistribution:
+        """Estimate the shape parameter by inverting the weighted mean."""
         count, total = suff_stat
         if self.pseudo_count is not None and self.suff_stat is not None:
             total += self.pseudo_count * self.suff_stat
@@ -378,6 +390,7 @@ class LogSeriesDataEncoder(DataSequenceEncoder):
         return isinstance(other, LogSeriesDataEncoder)
 
     def seq_encode(self, x: Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
+        """Encode observations as integer values and log-values."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and (np.any(rv < 1.0) or np.any(rv != np.floor(rv)) or np.any(~np.isfinite(rv))):
             raise ValueError("LogSeriesDistribution has support on the positive integers k >= 1.")

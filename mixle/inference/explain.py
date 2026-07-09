@@ -1,7 +1,8 @@
-"""``explain`` -- exact per-part attribution of a model's score for one observation, and
-``explain_margin``/``explain_margin_mixture`` -- exact per-part attribution of a DECISION MARGIN between
-two named hypotheses (workstream H1 of the 0.6.3 frontier-capability plan: the answer-with-receipts
-evidence ledger).
+"""Exact per-part attribution for scores and decision margins.
+
+``explain`` decomposes a model's score for one observation.
+``explain_margin`` and ``explain_margin_mixture`` decompose the decision margin
+between two named hypotheses for evidence ledgers and receipts.
 
 Because mixle models are *generative and structured*, a prediction's score decomposes exactly — no
 surrogate models, no sampling approximations:
@@ -9,13 +10,13 @@ surrogate models, no sampling approximations:
   * a Composite / Record factorizes over fields:      ``log p(x) = sum_i log p_i(x_i)``
   * a learned Bayesian network factorizes over nodes: ``log p(x) = sum_i log P(x_i | parents)``
   * a Mixture adds the latent view: per-component responsibilities, then the winner's field breakdown
-    -- PLUS an explicit ``correction`` term for the logsumexp normalizer, since a mixture's total
+    -- plus an explicit ``correction`` term for the logsumexp normalizer, since a mixture's total
     log-density is not a sum of any single component's parts (the one place these structures are not
     purely additive). The ledger always satisfies ``sum(v for _, v in parts) + correction == total``
     to machine precision -- that identity is the point, not an approximation of it.
 
 ``explain(model, x)`` returns those parts with their exact log-likelihood contributions, sorted so the
-most *suspicious* part (lowest contribution) is first — "WHICH field makes this record unlikely" is read
+most *suspicious* part (lowest contribution) is first: "which field makes this record unlikely" is read
 straight off the model rather than estimated::
 
     ex = explain(model, record)
@@ -31,9 +32,9 @@ decision margin between two named hypotheses -- into the same kind of per-factor
     differ between them contributes exactly 0, so a single corrupted field is visible as the one part
     that does not collapse to 0.
   * Mixture used as a generative classifier (``explain_margin_mixture``): ``answer``/``runner_up`` are
-    component indices (e.g. class labels) at the SAME observed ``x``; the margin is
+    component indices (e.g. class labels) at the same observed ``x``; the margin is
     ``(log_w[a] + log p_a(x)) - (log_w[b] + log p_b(x))`` -- the mixture's logsumexp normalizer cancels
-    EXACTLY in this subtraction, so the margin ledger needs no correction term (it is computed and
+    exactly in this subtraction, so the margin ledger needs no correction term (it is computed and
     asserted at 0.0, not assumed).
 """
 
@@ -63,6 +64,7 @@ class Explanation:
     component: int | None = None  # the most responsible component (mixtures)
 
     def most_anomalous(self, k: int = 3) -> list[tuple[str, float]]:
+        """Return the top contribution terms by anomaly score order."""
         return self.parts[: int(k)]
 
     def ledger_sum(self) -> float:
@@ -70,9 +72,11 @@ class Explanation:
         return float(sum(v for _, v in self.parts)) + self.correction
 
     def is_exact(self, atol: float = 1e-9) -> bool:
+        """Return whether ledger parts plus correction reconstruct the total."""
         return abs(self.ledger_sum() - self.total) <= atol
 
     def summary(self) -> str:
+        """Render a human-readable anomaly ledger summary."""
         lines = [f"log p(x) = {self.total:.3f}"]
         if self.responsibilities is not None:
             probs = ", ".join(f"{p:.3f}" for p in self.responsibilities)
@@ -103,7 +107,7 @@ def explain(model: Any, x: Any) -> Explanation:
         return Explanation(total, sorted(parts, key=lambda p: p[1]))
 
     # mixture: latent posterior, then the winning component's own breakdown when it is a composite.
-    # The winner's raw (prior + field) score is NOT the mixture's true total (that is a logsumexp over
+    # The winner's raw (prior + field) score is not the mixture's true total (that is a logsumexp over
     # every component) -- the gap is the explicit, named correction term, not an omission.
     if hasattr(model, "components") and hasattr(model, "posterior"):
         resp = np.asarray(model.posterior(x), dtype=np.float64).reshape(-1)
@@ -172,7 +176,7 @@ def explain_margin_mixture(model: Any, x: Any, answer: int, runner_up: int) -> E
     ``answer``/``runner_up`` are component indices (e.g. class labels) of a Mixture used as a generative
     classifier: the margin is ``(log_w[answer] + log p_answer(x)) - (log_w[runner_up] + log p_runner_up(x))``.
     The mixture's logsumexp normalizer -- the same term :func:`explain` must name as a correction for the
-    absolute ``log p(x)`` -- cancels EXACTLY in this subtraction, so the margin ledger needs no correction
+    absolute ``log p(x)`` -- cancels exactly in this subtraction, so the margin ledger needs no correction
     (computed and asserted at 0.0, not assumed away).
     """
     a_idx, r_idx = int(answer), int(runner_up)
@@ -190,25 +194,26 @@ def explain_margin_mixture(model: Any, x: Any, answer: int, runner_up: int) -> E
     return Explanation(total, sorted(parts, key=lambda p: p[1]), correction=correction)
 
 
-# --- diagnose: ledger -> FaultReport (workstream H5, the refinement loop's critic role) ------------
+# --- diagnose: ledger -> FaultReport for refinement-loop criticism --------------------------------
 
 _FIX_VOCAB = frozenset({"add_edge", "upgrade_leaf", "split_region", "add_factor"})
 
-# Below these sizes there isn't enough data to estimate a scale (MAD) or a co-occurrence rate at all --
-# a background of 1-2 points can have a MAD of exactly 0, which the 1e-9 floor turns into a z-score in
-# the billions from pure numerical noise; a single case can only ever show 0% or 100% co-occurrence,
-# which is not evidence of anything "more than chance." Below either floor, diagnose() reports the
-# honest "not enough data" result rather than a spurious maximum-confidence finding.
+# Below these sizes there is not enough data to estimate a scale (MAD) or
+# co-occurrence rate. ``diagnose`` reports an insufficient-data result instead
+# of a high-confidence finding from numerical noise or a single case.
 _MIN_BACKGROUND = 4
 _MIN_CASES_FOR_COOCCURRENCE = 3
 
 
 @dataclass
 class FaultReport:
-    """A structural diagnosis built ONLY from :func:`explain` ledgers over failing cases -- no model
-    opinion. ``dominant`` names the structural element(s) most responsible (empty when nothing rises
-    above ordinary case-to-case variability); ``suggested_fix`` is one of :data:`_FIX_VOCAB` (empty
-    when nothing is dominant); ``evidence`` is every element ranked by its adverse contribution."""
+    """Structural diagnosis built from :func:`explain` ledgers over failing cases.
+
+    ``dominant`` names the structural element most responsible, when one rises
+    above ordinary case-to-case variability. ``suggested_fix`` is one of
+    :data:`_FIX_VOCAB` or empty. ``evidence`` ranks elements by adverse
+    contribution.
+    """
 
     dominant: str
     evidence: list[tuple[str, float]] = field(default_factory=list)
@@ -224,8 +229,7 @@ def diagnose(
     min_z: float = 1.0,
     co_occurrence_threshold: float = 0.5,
 ) -> FaultReport:
-    """Aggregate :func:`explain` ledgers over ``cases`` (failing / low-margin / miscalibrated examples)
-    into a :class:`FaultReport` naming the structural element most responsible.
+    """Aggregate :func:`explain` ledgers into a structural fault report.
 
     Each case's per-part contributions are compared to ``background`` (a reference sample of typical
     cases; defaults to ``cases`` themselves, though a real, separately-supplied background is needed to
@@ -233,14 +237,12 @@ def diagnose(
     cancels a shift common to all of it) via a robust z-score (median/MAD per part name), so "adverse"
     is relative to that part's own normal variability, not a raw log-density magnitude.
 
-    A single part scoring far from baseline is NOT, by itself, evidence of a structural defect --
-    ordinary tail draws look surprising even under a well-specified model. The one closed-vocabulary
-    fault this function actively detects is a missing dependency: two parts that are BOTH adverse on
-    (almost) exactly the same cases far more than chance predicts -- the signature of an unmodeled edge
-    between them, ranked by exact ledger numbers, never guessed. When no such co-anomalous pair is
-    found, the honest report is empty/low-severity, not a forced guess at ``upgrade_leaf`` (that
-    single-part detector, and ``split_region``/``add_factor``, are real, separate follow-up work --
-    see the module's diagnose_test.py and the KNOW-a/DIAGNOSE-a cards).
+    A single part scoring far from baseline is not, by itself, evidence of a
+    structural defect. The closed-vocabulary fault this function actively
+    detects is a missing dependency: two parts that are adverse on the same
+    cases more often than chance predicts, indicating a possible unmodeled
+    edge. When no such co-anomalous pair is found, the report remains
+    empty/low-severity rather than guessing a fix.
     """
     bg = list(background) if background is not None else list(cases)
     if len(bg) < _MIN_BACKGROUND or not cases:

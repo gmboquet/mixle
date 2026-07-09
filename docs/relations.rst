@@ -19,7 +19,12 @@ The common surface is deliberately small:
 Every result is a ``Solution(value, objective)``. ``value`` is the structured
 object itself; ``objective`` is the cost or score used for ranking.
 
-Why Relations Belong In Mixle
+Callers should keep the objective definition with the solution. For many
+workflows, the same structured value can be ranked by probability, cost,
+penalty, reward, or a calibrated score-to-cost transform. The result is only
+auditable when that transform is named.
+
+Why Relations Belong in Mixle
 -----------------------------
 
 Heterogeneous probabilistic systems frequently need structured decisions:
@@ -33,6 +38,11 @@ Heterogeneous probabilistic systems frequently need structured decisions:
 Treating those as relations keeps the ranking and feasibility logic explicit.
 The probabilistic model can score evidence, while the relation layer can
 enumerate the structured objects that satisfy the constraint.
+
+This separation is useful during review. A poor decision can come from the
+model scores, from score-to-cost conversion, from the feasible-set definition,
+or from the policy that consumes the top alternatives. Relations keep those
+failure modes visible instead of hiding them in one opaque decision function.
 
 Assignment
 ----------
@@ -55,7 +65,11 @@ Use this when a model produces a cost matrix and the downstream decision must
 be one-to-one: entity resolution, worker-task assignment, latent component
 matching, or alignment across modalities.
 
-Paths And Viterbi
+Validate matrix orientation and units before solving. A transposed cost matrix
+or a probability treated as a cost can produce a perfectly feasible assignment
+that is semantically wrong.
+
+Paths and Viterbi
 -----------------
 
 ``ShortestPath`` and ``ViterbiPath`` expose best-first path enumeration.
@@ -72,6 +86,10 @@ The distinction from a normal sampler is important. A relation enumerator is
 ranked by objective. It is the right tool when you need the best alternatives,
 not random alternatives.
 
+When path ambiguity matters, store more than the best path. The margin between
+the top paths often explains whether a decoded state sequence is stable enough
+for interpretation.
+
 Edit-Distance Neighborhoods
 ---------------------------
 
@@ -86,7 +104,11 @@ This supports workflows like:
 Because the iterator is lazy, callers can request only the first few neighbors
 or stop at a distance threshold.
 
-Spanning Trees And Graph Relations
+Record the distance metric and stopping rule when local neighborhoods are used
+as evidence. Edit neighborhoods are sensitive to the alphabet, tokenization,
+and allowed operations.
+
+Spanning Trees and Graph Relations
 ----------------------------------
 
 ``SpanningTree`` ranks spanning trees by edge objective. Additional graph
@@ -101,7 +123,10 @@ helpers include:
 These are useful when a probabilistic model estimates local scores but the
 valid output has a global graph constraint.
 
-Regression And MILP Helpers
+Graph constraints should be checked on small fixtures before they are connected
+to model scores. Feasibility bugs are easiest to see on hand-verifiable graphs.
+
+Regression and MILP Helpers
 ---------------------------
 
 ``BestSubsetRegression`` ranks feature subsets. The module also includes
@@ -125,7 +150,11 @@ This is a decision layer, not a probabilistic estimator. It pairs naturally
 with Mixle when preference scores are model outputs but the final assignment
 must satisfy a stable matching constraint.
 
-Relations And Probability
+Model-estimated preferences should be calibrated or at least stress-tested
+before they are treated as a matching policy. Stability is a property of the
+declared preferences, not proof that the preferences themselves are correct.
+
+Relations and Probability
 -------------------------
 
 Relations do not replace distributions. They complement them:
@@ -153,3 +182,17 @@ more than ranked feasibility. Use :doc:`enumeration` when the object is a
 probability distribution with enumerable support. Use ``mixle.relations`` when
 the object is a constrained structured space with an objective.
 
+Release Evidence
+----------------
+
+For relation-backed workflows, preserve:
+
+* the relation type and versioned objective definition;
+* input score or cost arrays before any transformation;
+* feasibility checks on at least one hand-verifiable case;
+* the selected solution and top alternatives when ambiguity matters;
+* score gaps or objective margins for near ties; and
+* the policy that consumes infeasible, tied, or no-solution outcomes.
+
+That evidence keeps a feasible output from being mistaken for a validated
+modeling decision.

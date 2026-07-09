@@ -8,7 +8,7 @@ the streaming estimators, :func:`mixle.utils.automatic.get_estimator`), and the 
 (:func:`mixle.inference.decision.bayes_action`) are all pre-existing. ``evolve`` wires them into a
 single anti-regression loop.
 
-Phase 1 surface:
+Core surface:
 
 * **measure** -- :class:`Objective` + ``nll`` / ``log_score`` / ``crps`` / ``interval`` / ``calibration``
   / ``decision_regret`` builders.
@@ -18,7 +18,7 @@ Phase 1 surface:
 * **drive** -- :func:`improve` + :class:`ImprovementResult`, :func:`auto_select`, and the
   :class:`EvolutionLedger` telemetry.
 
-Phase 2-3 surface:
+Search and population surface:
 
 * **search** -- :func:`search` over a typed :class:`Space` (:class:`Real` / :class:`Integer` /
   :class:`Categorical`), ``method='evolutionary'`` / ``'bandit'`` / ``'bo'``, returning a :class:`SearchResult`.
@@ -123,7 +123,7 @@ __all__ = [
     "default_operators",
     # telemetry
     "EvolutionLedger",
-    # Phase 2-3: search over a typed space + the meta-search that learns which operators help
+    # Search over a typed space + the meta-search that learns which operators help.
     "search",
     "SearchResult",
     "Space",

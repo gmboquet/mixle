@@ -1,7 +1,4 @@
-"""Create, estimate, and sample from a labeled latent Dirichlet allocation (LabeledLDA) model.
-
-Defines the LabeledLDADistribution, LabeledLDASampler, LabeledLDAEstimatorAccumulator, LabeledLDAEstimatorAccumulatorFactory,
-LabeledLDAEstimator, and the LabeledLDADataEncoder classes for use with mixle.
+"""Labeled latent Dirichlet allocation for documents with observed label sets.
 
 Data type: Tuple[Sequence[Tuple[T, float]], Sequence[int]]. Each observation is a document given as a bag of
 (value, count) pairs together with a list of label (neighborhood) indices selecting rows of the 'alphas' matrix.
@@ -49,14 +46,14 @@ from mixle.utils.vector import row_choice
 
 
 class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
-    """LabeledLDADistribution object defining a labeled LDA model for documents with label sets.
+    """Labeled LDA model for documents with label sets.
 
     Compatible with data type Tuple[Sequence[Tuple[T, float]], Sequence[int]], where T is the data type of
     the topic distributions.
     """
 
     def __init__(self, topics, alphas, set_dist=None, len_dist=None, gamma_threshold=1.0e-8, max_gamma_iter=100):
-        """LabeledLDADistribution object.
+        """Create a labeled LDA distribution.
 
         Args:
                 topics (Sequence[SequenceEncodableProbabilityDistribution]): Topic distributions, all having
@@ -89,7 +86,7 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
         self.max_gamma_iter = int(max_gamma_iter)
 
     def __str__(self):
-        """Returns string representation of LabeledLDADistribution instance."""
+        """Return a constructor-style representation of the distribution."""
         return "LabeledLDADistribution([%s], [%s])" % (
             ",".join([str(u) for u in self.topics]),
             ",".join(map(str, self.alphas.flatten())),
@@ -109,6 +106,7 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
         return exp(self.log_density(x))
 
     def density_semantics(self):
+        """Return density semantics for the labeled-LDA variational bound."""
         from mixle.stats.compute.pdist import DensitySemantics
 
         return DensitySemantics.LOWER_BOUND  # per-document variational ELBO, not the exact marginal
@@ -337,7 +335,7 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def sampler(self, seed=None):
-        """Create an LabeledLDASampler object with seed passed.
+        """Create a sampler for labeled LDA documents.
 
         Note: Requires 'set_dist' and 'len_dist' to be set.
 
@@ -345,19 +343,19 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
                 seed (Optional[int]): Set seed for random sampling.
 
         Returns:
-                LabeledLDASampler object.
+                LabeledLDASampler: Sampler bound to this distribution.
 
         """
         return LabeledLDASampler(self, seed)
 
     def estimator(self, pseudo_count=None):
-        """Create an LabeledLDAEstimator for estimating models like this object instance.
+        """Create an estimator initialized from this labeled LDA distribution.
 
         Args:
                 pseudo_count (Optional[float]): Used to re-weight sufficient statistics in estimation.
 
         Returns:
-                LabeledLDAEstimator object.
+                LabeledLDAEstimator: Estimator configured with matching topic estimators.
 
         """
         estimators = [u.estimator(pseudo_count=pseudo_count) for u in self.topics]
@@ -369,25 +367,25 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def dist_to_encoder(self):
-        """Returns LabeledLDADataEncoder object for encoding sequences of iid LabeledLDA observations."""
+        """Return a data encoder for iid labeled LDA observations."""
         return LabeledLDADataEncoder(encoder=self.topics[0].dist_to_encoder())
 
 
 class LabeledLDASampler(DistributionSampler):
-    """LabeledLDASampler object for sampling labeled documents from an LabeledLDADistribution.
+    """Sample labeled documents from a LabeledLDA distribution.
 
     Requires 'dist.set_dist' (label sets) and 'dist.len_dist' (document lengths) to be set.
     """
 
     def __init__(self, dist, seed=None):
-        """LabeledLDASampler object.
+        """Create a sampler for a labeled LDA distribution.
 
         Args:
                 dist (LabeledLDADistribution): LabeledLDADistribution instance to sample from.
                 seed (Optional[int]): Set seed on random number generator for sampling.
 
         Attributes:
-                rng (RandomState): RandomState object with seed set for sampling.
+                rng (RandomState): Random state initialized from ``seed`` when supplied.
                 dist (LabeledLDADistribution): LabeledLDADistribution instance to sample from.
                 nTopics (int): Number of topic distributions.
                 compSamplers (List[DistributionSampler]): Samplers for the topic distributions.
@@ -453,7 +451,7 @@ class LabeledLDALabelSetStats:
     """
 
     def __init__(self, stats=None):
-        """LabeledLDALabelSetStats object.
+        """Create grouped label-set statistics for labeled LDA.
 
         Args:
                 stats (Optional[Dict[Tuple[int, ...], List]]): Optional mapping from label-set tuples to
@@ -527,7 +525,7 @@ class LabeledLDALabelSetStats:
         return rv
 
     def __str__(self):
-        """Returns string representation of LabeledLDALabelSetStats instance."""
+        """Return a compact representation of the label-set statistics."""
         return "LabeledLDALabelSetStats(%s)" % (str(self.stats))
 
 
@@ -551,7 +549,7 @@ def doc_label_sets(nbx, nbcnt):
 
 
 class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
-    """LabeledLDAEstimatorAccumulator object for aggregating sufficient statistics from labeled documents.
+    """Aggregate sufficient statistics from labeled LDA documents.
 
     Tracks per-label-set expected log topic weights and document counts ('set_stats'), per-label
     weighted document counts ('doc_counts'), label-allocated topic counts ('topic_counts'), and the topic
@@ -559,17 +557,17 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
     """
 
     def __init__(self, accumulators, num_alphas, keys=(None, None), prev_alpha=None):
-        """LabeledLDAEstimatorAccumulator object.
+        """Create an accumulator for labeled LDA variational EM statistics.
 
         Args:
-                accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Accumulator objects for the topic
+                accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Accumulators for the topic
                         distributions.
                 num_alphas (int): Number of label rows in the alphas matrix.
-                keys (Tuple[Optional[str], Optional[str]]): Set keys for alpha statistics and topic accumulators.
+                keys (Tuple[Optional[str], Optional[str]]): Optional keys for alpha statistics and topic accumulators.
                 prev_alpha (Optional[np.ndarray]): Optional previous alphas matrix (num_alphas by num_topics).
 
         Attributes:
-                accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Accumulator objects for the topic
+                accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Accumulators for the topic
                         distributions.
                 num_topics (int): Number of topic distributions.
                 num_alphas (int): Number of label rows in the alphas matrix.
@@ -580,11 +578,11 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
                 alpha_key (Optional[str]): Key for alpha statistics.
                 topics_key (Optional[str]): Key for topic accumulators.
 
-                _init_rng (bool): True if RandomState objects have been initialized for seq_initialize.
+                _init_rng (bool): True if random states have been initialized for seq_initialize.
                 _rng_theta (Optional[RandomState]): RandomState for topic weight draws.
                 _rng_idx (Optional[RandomState]): RandomState for per-value topic assignment draws.
                 _rng_w (Optional[RandomState]): RandomState for per-value weight smoothing draws.
-                _rng_topics (Optional[List[RandomState]]): RandomState objects for the topic accumulators.
+                _rng_topics (Optional[List[RandomState]]): Random states for the topic accumulators.
 
         """
 
@@ -608,7 +606,7 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self._track_ll = False
         self._seq_ll = 0.0
 
-        # protected for seq_initialize consistency.
+        # Initialized lazily for seq_initialize consistency.
         self._init_rng = False
         self._rng_theta = None
         self._rng_idx = None
@@ -637,7 +635,7 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """Set RandomState member variables used by seq_initialize.
 
         Args:
-                rng (RandomState): RandomState object used to seed member RandomState objects.
+                rng (RandomState): Random state used to seed the accumulator initialization streams.
 
         Returns:
                 None.
@@ -735,7 +733,7 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         Args:
                 x: Encoded sequence of iid LabeledLDA observations (see LabeledLDADataEncoder.seq_encode()).
                 weights (np.ndarray): Numpy array of weights for the documents.
-                rng (RandomState): Used to seed member RandomState objects on first call.
+                rng (RandomState): Random state used to seed member random states on first call.
 
         Returns:
                 None.
@@ -930,13 +928,13 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         )
 
     def from_value(self, x):
-        """Set the sufficient statistics of the accumulator instance to the value x.
+        """Restore accumulator state from a sufficient-statistics tuple.
 
         Args:
                 x: Tuple of sufficient statistics (see 'value()' for details).
 
         Returns:
-                LabeledLDAEstimatorAccumulator object.
+                LabeledLDAEstimatorAccumulator: This accumulator after restoration.
 
         """
 
@@ -951,7 +949,7 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict):
-        """Merge the sufficient statistics of the accumulator instance into stats_dict for matching keys.
+        """Merge this accumulator into keyed sufficient statistics.
 
         Args:
                 stats_dict (Dict[str, Any]): Dictionary mapping keys to sufficient statistics.
@@ -983,7 +981,7 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             u.key_merge(stats_dict)
 
     def key_replace(self, stats_dict):
-        """Replace the sufficient statistics of the accumulator instance with values in stats_dict for matching keys.
+        """Replace this accumulator's statistics from matching keyed values.
 
         Args:
                 stats_dict (Dict[str, Any]): Dictionary mapping keys to sufficient statistics.
@@ -1009,22 +1007,21 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             u.key_replace(stats_dict)
 
     def acc_to_encoder(self):
-        """Returns LabeledLDADataEncoder object for encoding sequences of iid LabeledLDA observations."""
+        """Return a data encoder built from the topic accumulators."""
         return LabeledLDADataEncoder(encoder=self.accumulators[0].acc_to_encoder())
 
 
 class LabeledLDAEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
-    """LabeledLDAEstimatorAccumulatorFactory object for creating LabeledLDAEstimatorAccumulator objects."""
+    """Factory for labeled LDA estimator accumulators."""
 
     def __init__(self, factories, dim, num_alphas, keys, prev_alpha):
-        """LabeledLDAEstimatorAccumulatorFactory object.
+        """Create a factory for labeled LDA estimator accumulators.
 
         Args:
-                factories (Sequence[StatisticAccumulatorFactory]): StatisticAccumulatorFactory objects for the
-                        topic distributions.
+                factories (Sequence[StatisticAccumulatorFactory]): Factories for the topic accumulators.
                 dim (int): Number of topic distributions.
                 num_alphas (int): Number of label rows in the alphas matrix.
-                keys (Tuple[Optional[str], Optional[str]]): Set keys for alpha statistics and topic accumulators.
+                keys (Tuple[Optional[str], Optional[str]]): Optional keys for alpha statistics and topic accumulators.
                 prev_alpha (Optional[np.ndarray]): Optional previous alphas matrix.
 
         """
@@ -1035,14 +1032,14 @@ class LabeledLDAEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
         self.prev_alpha = prev_alpha
 
     def make(self):
-        """Returns an LabeledLDAEstimatorAccumulator object."""
+        """Return a new labeled LDA estimator accumulator."""
         return LabeledLDAEstimatorAccumulator(
             [self.factories[i].make() for i in range(self.dim)], self.num_alphas, self.keys, self.prev_alpha
         )
 
 
 class LabeledLDAEstimator(ParameterEstimator):
-    """LabeledLDAEstimator object for estimating LabeledLDADistribution objects from aggregated sufficient statistics."""
+    """Estimate labeled LDA distributions from aggregated sufficient statistics."""
 
     def __init__(
         self,
@@ -1056,21 +1053,21 @@ class LabeledLDAEstimator(ParameterEstimator):
         alpha_threshold=1.0e-8,
         max_gamma_iter=100,
     ):
-        """LabeledLDAEstimator object.
+        """Create an estimator for labeled LDA distributions.
 
         Args:
-                estimators (Sequence[ParameterEstimator]): ParameterEstimator objects for the topic distributions.
+                estimators (Sequence[ParameterEstimator]): Estimators for the topic distributions.
                 num_alphas (int): Number of label rows in the alphas matrix.
                 suff_stat (Optional[Any]): Kept for consistency with ParameterEstimator.
                 pseudo_count (Optional[Tuple[float, float]]): Optional pseudo counts for the alpha updates.
-                keys (Tuple[Optional[str], Optional[str]]): Set keys for alpha statistics and topic accumulators.
+                keys (Tuple[Optional[str], Optional[str]]): Optional keys for alpha statistics and topic accumulators.
                 fixed_alpha (Optional[np.ndarray]): If passed, the alphas matrix is fixed to this value.
                 gamma_threshold (float): Convergence threshold for the per-document variational gamma updates.
                 alpha_threshold (float): Convergence threshold for the alpha fixed-point updates.
 
         Attributes:
                 num_topics (int): Number of topic distributions.
-                estimators (Sequence[ParameterEstimator]): ParameterEstimator objects for the topic distributions.
+                estimators (Sequence[ParameterEstimator]): Estimators for the topic distributions.
                 pseudo_count (Optional[Tuple[float, float]]): Optional pseudo counts for the alpha updates.
                 num_alphas (int): Number of label rows in the alphas matrix.
                 suff_stat (Optional[Any]): Kept for consistency with ParameterEstimator.
@@ -1093,7 +1090,7 @@ class LabeledLDAEstimator(ParameterEstimator):
         self.max_gamma_iter = int(max_gamma_iter)
 
     def accumulator_factory(self):
-        """Returns an LabeledLDAEstimatorAccumulatorFactory object."""
+        """Return an accumulator factory configured from this estimator."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         return LabeledLDAEstimatorAccumulatorFactory(
             est_factories, self.num_topics, self.num_alphas, self.keys, self.fixed_alpha
@@ -1104,9 +1101,9 @@ class LabeledLDAEstimator(ParameterEstimator):
         return self.accumulator_factory()
 
     def estimate(self, nobs, suff_stat):
-        """Estimate an LabeledLDADistribution from aggregated sufficient statistics 'suff_stat'.
+        """Estimate a labeled LDA distribution from aggregated sufficient statistics.
 
-        Sufficient statistics in arg 'suff_stat' are a Tuple containing:
+        ``suff_stat`` is a tuple containing:
                 suff_stat[0] (Optional[np.ndarray]): Previous alphas matrix.
                 suff_stat[1] (LabeledLDALabelSetStats): Per-label-set expected log topic weights and counts.
                 suff_stat[2] (Union[float, np.ndarray]): Per-label weighted document counts.
@@ -1123,7 +1120,7 @@ class LabeledLDAEstimator(ParameterEstimator):
                 suff_stat: See above for details.
 
         Returns:
-                LabeledLDADistribution object.
+                LabeledLDADistribution: Estimated distribution.
 
         """
 
@@ -1171,32 +1168,32 @@ class LabeledLDAEstimator(ParameterEstimator):
 
 
 class LabeledLDADataEncoder(DataSequenceEncoder):
-    """LabeledLDADataEncoder object for encoding sequences of iid LabeledLDA observations (labeled documents)."""
+    """Encode iid labeled LDA observations for vectorized scoring."""
 
     def __init__(self, encoder):
-        """LabeledLDADataEncoder object.
+        """Create an encoder for labeled LDA documents.
 
         Args:
-                encoder (DataSequenceEncoder): DataSequenceEncoder of type T for the document values.
+                encoder (DataSequenceEncoder): Encoder of type ``T`` for document values.
 
         Attributes:
-                encoder (DataSequenceEncoder): DataSequenceEncoder of type T for the document values.
+                encoder (DataSequenceEncoder): Encoder of type ``T`` for document values.
 
         """
         self.encoder = encoder
 
     def __str__(self):
-        """Returns string representation of LabeledLDADataEncoder object instance."""
+        """Return a constructor-style representation of the encoder."""
         return "LabeledLDADataEncoder(encoder=" + str(self.encoder) + ")"
 
     def __eq__(self, other):
-        """Check if other is equivalent to LabeledLDADataEncoder object instance.
+        """Return whether another encoder is equivalent to this encoder.
 
         Args:
-                other (object): Object to compare to LabeledLDADataEncoder object instance.
+                other (object): Object to compare.
 
         Returns:
-                True if other is an LabeledLDADataEncoder with an equivalent value encoder, else False.
+                True if other is a LabeledLDADataEncoder with an equivalent value encoder, else False.
 
         """
         if isinstance(other, LabeledLDADataEncoder):
@@ -1606,6 +1603,6 @@ def seq_posterior(estimate, x):
     return log_density_gamma, final_gammas, alphas_loc, per_topic_log_densities
 
 
-# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+# --- Backward-compatible API naming aliases ---
 LabeledLDAAccumulator = LabeledLDAEstimatorAccumulator
 LabeledLDAAccumulatorFactory = LabeledLDAEstimatorAccumulatorFactory

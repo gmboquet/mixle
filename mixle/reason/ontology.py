@@ -39,12 +39,14 @@ class Ontology:
 
     # -- construction (chainable) ------------------------------------------------------------------
     def add_class(self, name: str, parent: str | None = None) -> Ontology:
+        """Add an ontology class, optionally under a known parent."""
         if parent is not None and parent not in self.classes:
             raise ValueError(f"unknown parent class {parent!r}")
         self.classes[name] = parent
         return self
 
     def add_relation(self, name: str, domain: str, range_: str, *axioms: str) -> Ontology:
+        """Add a relation with domain, range, and optional ontology axioms."""
         for c in (domain, range_):
             if c not in self.classes:
                 raise ValueError(f"unknown class {c!r}; add_class it first")
@@ -56,6 +58,7 @@ class Ontology:
         return self
 
     def add_disjoint(self, a: str, b: str) -> Ontology:
+        """Declare two classes mutually exclusive."""
         self.disjoint.append((a, b))
         return self
 
@@ -222,9 +225,11 @@ class ConstrainedDecode:
     n_samples: int
 
     def asserted(self) -> list[Any]:
+        """Return facts that passed constraints and confidence floor."""
         return [t for t, _ in self.facts]
 
     def as_dict(self) -> dict[str, Any]:
+        """Return constrained decoding results as JSON-compatible data."""
         return {
             "facts": [{"triple": list(t), "confidence": round(c, 4)} for t, c in self.facts],
             "rejected": self.rejected,
@@ -243,14 +248,14 @@ def constrained_decode(
     floor: float = 0.5,
     calibrator: Any = None,
 ) -> ConstrainedDecode:
-    """Ontology-constrained decoding (D2): an LLM may only assert schema-consistent, confident facts.
+    """Decode only schema-consistent facts above a confidence floor.
 
     Samples ``llm`` (a :class:`~mixle.reason.graph_llm.GraphLLM`) ``n`` times, masks every sampled
-    graph through :meth:`Ontology.filter_triples` (violating triples are REJECTED with named reasons --
-    the typed-grammar mask applied post-parse), then marginalizes the constrained graphs into a
+    graph through :meth:`Ontology.filter_triples` (violating triples are rejected with named reasons),
+    then marginalizes the constrained graphs into a
     :class:`~mixle.reason.graph_llm.GraphDistribution` and keeps only facts whose edge marginal clears
     ``floor`` -- the calibrated confidence floor (pass a fitted ``calibrator`` from
-    :func:`~mixle.reason.graph_llm.fit_fact_calibrator` to apply the floor on CALIBRATED truth
+    :func:`~mixle.reason.graph_llm.fit_fact_calibrator` to apply the floor on calibrated truth
     probability rather than the raw marginal). Consistent-but-underconfident facts are reported as
     withheld, never silently dropped: the decode says what it refused to assert and why.
     """

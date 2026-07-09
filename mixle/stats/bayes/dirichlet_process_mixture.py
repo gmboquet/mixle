@@ -138,7 +138,7 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
         name: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = default_prior,
     ) -> None:
-        """DirichletProcessMixtureDistribution object.
+        """Create a finite direct-assignment Dirichlet-process mixture approximation.
 
         Args:
             components: List of K component distributions (each carrying its
@@ -149,7 +149,7 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
                 parameters gamma_k on the stick fractions.
             component_priors: List of the K component priors used as the
                 variational factors q(theta_k) in the ELBO.
-            name (Optional[str]): Name of object.
+            name (Optional[str]): Optional distribution name.
             prior: Gamma hyper-prior (or hyper-posterior) on alpha.
 
         """
@@ -305,6 +305,7 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
         return (np.log(np.sum(np.exp(ll - ml), axis=1, keepdims=True)) + ml).flatten()
 
     def density_semantics(self):
+        """Return exact-or-approximate density semantics joined from component models."""
         from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
 
         children = list(self.components)
@@ -334,7 +335,7 @@ class DirichletProcessMixtureSampler(DistributionSampler):
     """Draws samples from a DirichletProcessMixtureDistribution."""
 
     def __init__(self, dist: DirichletProcessMixtureDistribution, seed: int | None = None) -> None:
-        """DirichletProcessMixtureSampler object.
+        """Create a sampler for the finite DP-mixture approximation.
 
         Args:
             dist (DirichletProcessMixtureDistribution): Distribution to sample from.
@@ -381,7 +382,7 @@ class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         accumulators: Sequence[SequenceEncodableStatisticAccumulator],
         keys: tuple[str | None, str | None] = (None, None),
     ) -> None:
-        """DirichletProcessMixtureAccumulator object.
+        """Create an accumulator for DP-mixture sufficient statistics.
 
         Args:
             accumulators: List of K component accumulators.
@@ -492,6 +493,7 @@ class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def scale(self, c: float) -> "DirichletProcessMixtureAccumulator":
+        """Scale linear DP mixture sufficient statistics while preserving metadata."""
         # Scale only the linear count statistics (and the component accumulators); ``a`` (the alpha
         # hyper-posterior) and ``prev_nw`` are non-linear scalar metadata that must stay untouched --
         # the inherited default would multiply them and corrupt the state.
@@ -554,12 +556,12 @@ class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class DirichletProcessMixtureAccumulatorFactory(StatisticAccumulatorFactory):
-    """Factory that creates DirichletProcessMixtureAccumulator objects."""
+    """Factory for DP-mixture sufficient-statistic accumulators."""
 
     def __init__(
         self, factories: Sequence[StatisticAccumulatorFactory], dim: int, keys: tuple[str | None, str | None]
     ) -> None:
-        """DirichletProcessMixtureAccumulatorFactory object.
+        """Create a DP-mixture accumulator factory.
 
         Args:
             factories: List of K component accumulator factories.
@@ -588,7 +590,7 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
         pseudo_count: float | None = None,
         keys: tuple[str | None, str | None] = (None, None),
     ) -> None:
-        """DirichletProcessMixtureEstimator object.
+        """Create an estimator for the finite DP-mixture approximation.
 
         Args:
             estimators: List of K component estimators (each carrying its own
@@ -676,7 +678,7 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
                 ``DirichletProcessMixtureAccumulator.value()``.
 
         Returns:
-            DirichletProcessMixtureDistribution object.
+            Fitted Dirichlet-process mixture approximation.
 
         """
         num_components = self.num_components
@@ -744,7 +746,7 @@ class DirichletProcessMixtureDataEncoder(DataSequenceEncoder):
     """Encodes observations with the shared component encoding."""
 
     def __init__(self, encoder: DataSequenceEncoder) -> None:
-        """DirichletProcessMixtureDataEncoder object.
+        """Create a data encoder for DP-mixture observations.
 
         Args:
             encoder (DataSequenceEncoder): Encoder for the component distributions.

@@ -5,7 +5,7 @@ uncertain well locations, picked stratigraphic depths, one noisy proxy against a
 squares is *biased*: input noise attenuates the slope toward zero (regression dilution). The
 errors-in-variables model ``y = a + b x* + e_y``, ``x = x* + e_x`` corrects this. With a known noise
 variance ratio it is Deming regression (total least squares when the ratio is 1); it also recovers the
-latent true predictor values ``x*`` (the denoised positions). Part of the earth-science/UQ work (Phase 6).
+latent true predictor values ``x*`` (the denoised positions).
 """
 
 from __future__ import annotations

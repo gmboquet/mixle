@@ -1,7 +1,7 @@
-"""Durable, portable artifacts for small task models -- the contract mixle's JSON serialization can't carry.
+"""Durable, portable artifacts for local task models.
 
 ``mixle.utils.serialization`` round-trips pure probabilistic models as registry-keyed JSON, but a task model
-is usually torch-backed (a distilled tiny transformer, an MLP head), and its parameters are *weights*, not a
+is usually torch-backed (a distilled Transformer, an MLP head), and its parameters are *weights*, not a
 JSON-serializable state. Worse, the causal LM ties ``head.weight = tok.weight``; a naive tensor dump rejects the
 shared storage. This module is the missing piece: a self-describing **directory** that pairs
 
@@ -94,6 +94,7 @@ class TaskManifest:
     created_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the strict-JSON manifest representation written to ``manifest.json``."""
         d = {
             "artifact_type": "mixle.task",
             "schema_version": self.schema_version,
@@ -110,6 +111,7 @@ class TaskManifest:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TaskManifest:
+        """Parse a manifest dictionary into a :class:`TaskManifest`."""
         return cls(
             payload=d["payload"],
             builder=d.get("builder"),
@@ -123,7 +125,7 @@ class TaskManifest:
 
 
 def read_manifest(path: str) -> TaskManifest:
-    """Read just the manifest of an artifact directory (cheap: no weights loaded)."""
+    """Read only the manifest of an artifact directory without loading weights."""
     with open(os.path.join(path, MANIFEST_NAME)) as f:
         return TaskManifest.from_dict(json.load(f))
 

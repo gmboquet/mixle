@@ -1,18 +1,13 @@
-"""A sequential-exploration world with synthetic ground truth (workstream C's acceptance anchor,
-CARD EXPLORE-a's functional substance, and the substrate C2-a's outcome-trained decomposer and
-PROBE-a's probing-policy spike both build on).
+"""A sequential-exploration world with synthetic ground truth.
 
-The canonical EXPLORE-a card names a richer, geology-flavored world in the sibling ``mixle-demos``
-repo (``mixle_demos/exploration_world.py``, over the Red-Ridge synthetic generator). That repo had a
-concurrent, uncommitted, in-progress session's own work mid-edit in its shared checkout (no worktree
-isolation there) when this was written, so touching it risked clobbering that work. This module is a
-self-contained, dependency-free re-implementation of the SAME functional contract, inside mixle core,
-so C2-a and PROBE-a are not blocked waiting on that repo: hidden true targets, a menu of typed actions
-with costs, ``step(action) -> observation`` revealing noisy evidence, budget-exhaustion episode end,
-and ``score()`` = targets correctly identified. Seeded/deterministic, whole episode well under 1s.
+This module provides a compact, dependency-free exploration environment inside
+core Mixle: hidden true targets, typed actions with costs,
+``step(action) -> observation`` revealing noisy evidence, budget-exhaustion
+episode end, and ``score()`` equal to targets correctly identified. It is
+seeded, deterministic, and small enough for fast task-policy tests.
 
     world = ExplorationWorld(n_cells=30, n_targets=4, budget=40, seed=0)
-    obs = world.step({"type": "survey", "cell": 3})   # cheap: sharpens that cell's prospectivity read
+    obs = world.step({"type": "survey", "cell": 3})   # low-cost: sharpens that cell's prospectivity read
     obs = world.step({"type": "drill", "cell": 3})     # costly: reveals ground truth, scores if correct
     world.score()                                       # targets correctly identified so far
     world.done                                          # budget exhausted
@@ -112,6 +107,8 @@ class ExplorationWorld:
 
 @dataclass
 class EpisodeResult:
+    """Score, action count, and trace captured from one exploration episode."""
+
     score: int
     n_actions: int
     trace: list[dict[str, Any]] = field(default_factory=list)
@@ -132,6 +129,7 @@ def run_episode(policy, *, n_cells: int, n_targets: int, budget: int, seed: int)
 
 
 def random_policy(world: ExplorationWorld) -> dict[str, Any] | None:
+    """Choose a random currently valid action from the world's action menu."""
     menu = world.action_menu()
     if not menu:
         return None
@@ -145,8 +143,8 @@ _SURVEYED_ENOUGH_THRESHOLD = 0.65  # comfortably above one survey's exact result
 
 
 def greedy_prospectivity_policy(world: ExplorationWorld) -> dict[str, Any] | None:
-    """Survey every undrilled cell once (cheap information), then drill highest-read-prospectivity
-    cells first -- the fixed heuristic baseline REFINE-a/PROBE-a-style spikes compare against."""
+    """Survey every undrilled cell once (low-cost information), then drill highest-read-prospectivity
+    cells first -- a fixed heuristic baseline for learned or diagnosis-directed policies."""
     undrilled = [c for c in range(world.n_cells) if not world._drilled[c]]
     if not undrilled:
         return None

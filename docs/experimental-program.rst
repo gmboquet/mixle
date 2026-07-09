@@ -17,6 +17,19 @@ For new code, prefer:
 The compatibility module ``mixle.program`` re-exports the experimental program
 API so older imports continue to work.
 
+When to Use It
+--------------
+
+Use the program surface when the optimization procedure is the object being
+studied: alternating objectives, replay buffers, continual-learning penalties,
+or adaptation routines that do not yet have a stable Mixle estimator or task
+abstraction.
+
+Do not use it merely because a model has trainable parameters. If the goal is
+ordinary fitting, scoring, calibration, serving, or artifact management, the
+stable estimator, PPL, model, and task APIs provide clearer contracts and
+better documentation.
+
 Core Idea
 ---------
 
@@ -50,6 +63,11 @@ The surface can express useful research patterns, but it depends heavily on
 closures. That is why stable Mixle workflows favor declarative estimators, PPL
 expressions, and task solvers when possible.
 
+The closure-oriented design also means reproducibility is the caller's
+responsibility. Record the data iterator, optimizer settings, random seeds,
+parameter selection policy, and any external module state needed to rerun the
+program.
+
 Parameter Helpers
 -----------------
 
@@ -69,6 +87,11 @@ The module includes helpers for selecting and adapting trainable parameters:
 
 These helpers are useful when experimenting with neural leaves or adaptation
 methods that are not yet expressed as stable Mixle model objects.
+
+Check parameter selections before training. Substring-based selection is
+convenient for experiments, but a renamed layer can silently change what is
+updated. For release-like work, print or persist the selected parameter names
+with the experiment record.
 
 Examples
 --------
@@ -127,7 +150,20 @@ The module also contains experimental support for:
 ``gail`` and ``maxent_irl``
     Imitation-learning and inverse-reinforcement-learning experiments.
 
-Status And Stability
+Operational Cautions
+--------------------
+
+Program-based workflows can be powerful, but they have fewer structural
+guarantees than estimator-based workflows. Before depending on a program result:
+
+* run a deterministic smoke test with a fixed seed;
+* record optimizer settings and parameter selections;
+* evaluate on data that was not used to tune the move schedule;
+* compare against the closest stable Mixle workflow when one exists;
+* keep program artifacts separate from production artifacts unless a promotion
+  review accepts the experimental dependency.
+
+Status and Stability
 --------------------
 
 This API is explicitly experimental:
@@ -135,7 +171,7 @@ This API is explicitly experimental:
 * names and call signatures may change;
 * behavior may move into ``mixle.ppl``, ``mixle.task``, or a more mature
   ``mixle.models`` surface;
-* examples should be treated as research scaffolding, not deployment guidance;
+* examples should be treated as exploratory workflows, not deployment guidance;
 * production artifacts should prefer stable estimator and inference interfaces
   whenever possible.
 

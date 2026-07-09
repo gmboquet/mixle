@@ -35,12 +35,15 @@ class NumericFormat:
     bits_per_value = 64.0
 
     def quantize(self, x: Any) -> Any:  # pragma: no cover - overridden
+        """Encode values into the format's storage representation."""
         raise NotImplementedError
 
     def dequantize(self, q: Any) -> np.ndarray:  # pragma: no cover - overridden
+        """Decode stored values back to float64."""
         raise NotImplementedError
 
     def round_trip(self, x: Any) -> np.ndarray:
+        """Quantize and immediately dequantize values."""
         return self.dequantize(self.quantize(x))
 
     def measured_max_abs_error(self, x: Any) -> float:
@@ -75,9 +78,11 @@ class FloatFormat(NumericFormat):
 
     @property
     def max_rel_error(self) -> float:
+        """Return the nominal worst-case relative rounding error."""
         return 2.0 ** -(self.mantissa_bits + 1)
 
     def quantize(self, x: Any) -> np.ndarray:
+        """Round values to this floating mantissa precision."""
         x = np.asarray(x, dtype=np.float64)
         if self.mantissa_bits >= 52:
             return x.copy()  # float64 already carries 52 mantissa bits
@@ -88,6 +93,7 @@ class FloatFormat(NumericFormat):
         return np.ldexp(np.round(m * scale) / scale, e)
 
     def dequantize(self, q: Any) -> np.ndarray:
+        """Decode quantized floating values to float64."""
         return np.asarray(q, dtype=np.float64)
 
 
@@ -110,15 +116,18 @@ class FixedPointFormat(NumericFormat):
 
     @property
     def max_abs_error(self) -> float:  # type: ignore[override]
+        """Return the fixed-point half-step absolute error bound."""
         return 2.0 ** -(self.frac_bits + 1)
 
     def quantize(self, x: Any) -> np.ndarray:
+        """Encode values as clipped scaled integers."""
         x = np.asarray(x, dtype=np.float64)
         scaled = np.round(x * self._scale)
         np.clip(scaled, -self._limit, self._limit - 1, out=scaled)
         return scaled.astype(self._store_dtype)
 
     def dequantize(self, q: Any) -> np.ndarray:
+        """Decode scaled integers back to float64 values."""
         return np.asarray(q, dtype=np.float64) / self._scale
 
 
@@ -160,12 +169,14 @@ class CodebookFormat(NumericFormat):
         return cls(centers)
 
     def quantize(self, x: Any) -> np.ndarray:
+        """Map values to nearest codebook indices."""
         x = np.asarray(x, dtype=np.float64)
         edges = (self.codebook[:-1] + self.codebook[1:]) / 2.0
         idx = np.searchsorted(edges, x)  # nearest code by the sorted-codebook midpoints
         return idx.astype(self._idx_dtype)
 
     def dequantize(self, q: Any) -> np.ndarray:
+        """Map codebook indices back to representative values."""
         return self.codebook[np.asarray(q, dtype=np.intp)]
 
     def _pack_bits(self) -> int:

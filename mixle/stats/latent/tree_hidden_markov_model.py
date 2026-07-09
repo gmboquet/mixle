@@ -1,8 +1,4 @@
-"""Create, estimate, and sample from a hidden Markov model on a rooted tree.
-
-Defines the TreeHiddenMarkovModelDistribution, TreeHiddenMarkovSampler, TreeHiddenMarkovAccumulatorFactory,
-TreeHiddenMarkovAccumulator, TreeHiddenMarkovEstimator, and the TreeHiddenMarkovDataEncoder classes for use
-with mixle.
+"""Hidden Markov models whose latent states live on rooted trees.
 
 Data type: Sequence[Tuple[Tuple[int, int], T]]. A single observation is a rooted tree given as a sequence
 of ((node_id, parent_id), emission) tuples, where node_id is an integer in 0,1,...,n-1, the root node has
@@ -103,6 +99,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
     """
 
     def compute_capabilities(self):
+        """Declare generated-compute support from emission and length children."""
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
         if self.use_numba:
@@ -111,6 +108,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
         return DistributionCapabilities(engine_ready=intersect_engine_ready(children), kernel_status="generic_latent")
 
     def compute_declaration(self):
+        """Return the generated-compute declaration for the tree HMM."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ParameterSpec,
@@ -168,7 +166,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             len_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for the number of children
                 a node in the tree will have. Must have support on non-negative integers.
             terminal_level (int): Level of tree to terminate sampling. Default to 10.
-            name (Optional[str]): Assign a name to object instance.
+            name (Optional[str]): Optional distribution name.
             use_numba (bool): If true Numba is used for vectorized calculations.
 
         Note on terminal *states*: the absorbing-hidden-state ``terminal_states`` supported by the
@@ -239,7 +237,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
         return p_level
 
     def __str__(self) -> str:
-        """Returns string representation of TreeHiddenMarkovModelDistribution object."""
+        """Return a constructor-style representation of the distribution."""
         s1 = ",".join(map(str, self.topics))
         s2 = repr(list(self.w))
         s3 = repr([list(u) for u in self.transitions])
@@ -702,6 +700,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             return [state_tracker[tz[i] : tz[i + 1]] for i in range(len(tz) - 1)]
 
     def density_semantics(self):
+        """Return exact-or-approximate density semantics joined from child models."""
         from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
 
         children = list(self.topics) + ([] if self.len_dist is None else [self.len_dist])
@@ -709,13 +708,13 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
         return join_density_semantics(sems) if sems else DensitySemantics.EXACT
 
     def sampler(self, seed: int | None = None) -> "TreeHiddenMarkovSampler":
-        """Create a TreeHiddenMarkovSampler object from parameters of distribution instance.
+        """Create a sampler for this tree hidden Markov distribution.
 
         Args:
             seed (Optional[int]): Used to set seed in random sampler.
 
         Returns:
-            TreeHiddenMarkovSampler object.
+            TreeHiddenMarkovSampler: Sampler bound to this distribution.
 
         Raises:
             Exception: If len_dist is a NullDistribution (a length distribution with support on the
@@ -761,7 +760,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
         )
 
     def dist_to_encoder(self) -> "TreeHiddenMarkovDataEncoder":
-        """Returns TreeHiddenMarkovDataEncoder object for encoding sequences of iid Tree HMM observations."""
+        """Return a data encoder for iid tree HMM observations."""
         emission_encoder = self.topics[0].dist_to_encoder()
         len_encoder = self.len_dist.dist_to_encoder()
 
@@ -774,7 +773,7 @@ class TreeHiddenMarkovSampler(DistributionSampler):
     """Sampler for the TreeHiddenMarkovModelDistribution. Draws rooted trees of state-emitted observations."""
 
     def __init__(self, dist: "TreeHiddenMarkovModelDistribution", seed: int | None = None) -> None:
-        """TreeHiddenMarkovSampler object.
+        """Create a sampler for a tree hidden Markov model.
 
         Args:
             dist (TreeHiddenMarkovModelDistribution): Distribution to sample from. Must have a len_dist
@@ -922,7 +921,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         name: str | None = None,
         use_numba: bool = True,
     ) -> None:
-        """TreeHiddenMarkovAccumulator object.
+        """Create an accumulator for tree-HMM sufficient statistics.
 
         Args:
             accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Accumulator for the emission
@@ -931,7 +930,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 number-of-children distribution. Defaults to NullAccumulator.
             keys (Tuple[Optional[str], Optional[str], Optional[str]]): Keys for merging the initial state
                 counts, transition counts, and state (emission) accumulators respectively.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional accumulator name.
             use_numba (bool): If True, encoders created from this accumulator use the numba encoding.
 
         Attributes:
@@ -944,7 +943,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             init_key (Optional[str]): Key for merging initial state counts.
             trans_key (Optional[str]): Key for merging transition counts.
             state_key (Optional[str]): Key for merging emission accumulators.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional accumulator name.
             use_numba (bool): If True, encoders created from this accumulator use the numba encoding.
 
         """
@@ -1516,6 +1515,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def scale(self, c: float) -> "TreeHiddenMarkovAccumulator":
+        """Scale all accumulated tree-HMM sufficient statistics in place."""
         self.init_counts *= c
         self.state_counts *= c
         self.trans_counts *= c
@@ -1588,7 +1588,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         return None
 
     def acc_to_encoder(self) -> "TreeHiddenMarkovDataEncoder":
-        """Returns a TreeHiddenMarkovDataEncoder object for encoding sequences of tree HMM observations."""
+        """Return a data encoder built from the emission and length accumulators."""
         emission_encoder = self.accumulators[0].acc_to_encoder()
         len_encoder = self.len_accumulator.acc_to_encoder()
 
@@ -1598,7 +1598,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class TreeHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
-    """Factory for creating TreeHiddenMarkovAccumulator objects."""
+    """Factory for tree hidden Markov accumulators."""
 
     def __init__(
         self,
@@ -1608,7 +1608,7 @@ class TreeHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
         name: str | None = None,
         use_numba: bool = True,
     ) -> None:
-        """TreeHiddenMarkovAccumulatorFactory object.
+        """Create a factory for tree hidden Markov accumulators.
 
         Args:
             factories (Sequence[StatisticAccumulatorFactory]): Factory for the emission accumulator of
@@ -1617,7 +1617,7 @@ class TreeHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
                 Defaults to NullAccumulatorFactory.
             keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Keys for merging the
                 initial state counts, transition counts, and state (emission) accumulators respectively.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional accumulator name.
             use_numba (bool): If True, created accumulators use the numba encoding.
 
         """
@@ -1628,7 +1628,7 @@ class TreeHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
         self.use_numba = use_numba
 
     def make(self) -> "TreeHiddenMarkovAccumulator":
-        """Returns a new TreeHiddenMarkovAccumulator object."""
+        """Return a new tree hidden Markov accumulator."""
         len_acc = self.len_factory.make() if self.len_factory is not None else None
         return TreeHiddenMarkovAccumulator(
             [self.factories[i].make() for i in range(len(self.factories))],
@@ -1651,7 +1651,7 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         use_numba: bool = True,
     ) -> None:
-        """TreeHiddenMarkovEstimator object.
+        """Create an estimator for a tree hidden Markov model.
 
         Args:
             estimators (List[ParameterEstimator]): Estimator for the emission distribution of each hidden
@@ -1660,7 +1660,7 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
                 distribution. Defaults to NullEstimator.
             pseudo_count (Optional[Tuple[Optional[float], Optional[float]]]): Pseudo-counts used to smooth
                 the initial state weights and the transition matrix rows respectively.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional name assigned to estimated distributions.
             keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Keys for merging the
                 initial state counts, transition counts, and state (emission) accumulators respectively.
             use_numba (bool): If True, the estimated distribution and accumulators use the numba encoding.
@@ -1675,7 +1675,7 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
         self.use_numba = use_numba
 
     def accumulator_factory(self) -> TreeHiddenMarkovAccumulatorFactory:
-        """Returns a TreeHiddenMarkovAccumulatorFactory for creating TreeHiddenMarkovAccumulator objects."""
+        """Return an accumulator factory configured from this estimator."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
         len_factory = self.len_estimator.accumulator_factory()
         return TreeHiddenMarkovAccumulatorFactory(
@@ -1700,7 +1700,7 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
                 counts, emission sufficient statistics per state, and length sufficient statistics.
 
         Returns:
-            TreeHiddenMarkovModelDistribution object.
+            TreeHiddenMarkovModelDistribution: Estimated distribution.
 
         """
         num_states, init_counts, state_counts, trans_counts, topic_ss, len_ss = suff_stat
@@ -1746,7 +1746,7 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
         len_encoder: DataSequenceEncoder | None = NullDataEncoder(),
         use_numba: bool = True,
     ) -> None:
-        """TreeHiddenMarkovDataEncoder object.
+        """Create an encoder for tree HMM observations.
 
         Args:
             emission_encoder (DataSequenceEncoder): Encoder for the node emissions (data type T).
@@ -1761,14 +1761,14 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
         self.use_numba = use_numba
 
     def __str__(self) -> str:
-        """Returns string representation of TreeHiddenMarkovDataEncoder object."""
+        """Return a constructor-style representation of the encoder."""
         s1 = repr(self.emission_encoder)
         s2 = repr(self.len_encoder)
         s3 = repr(self.use_numba)
         return "TreeHiddenMarkovDataEncoder(emission_encoder=%s, len_encoder=%s, use_numba=%s)" % (s1, s2, s3)
 
     def __eq__(self, other: object) -> bool:
-        """Checks if other object is a TreeHiddenMarkovDataEncoder with matching length encoder.
+        """Return true when ``other`` is a tree-HMM encoder with a matching length encoder.
 
         Args:
             other (object): Object to compare against.
@@ -2563,7 +2563,7 @@ def _register_tree_hmm_engine_kernel():
 _register_tree_hmm_engine_kernel()
 
 
-# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+# --- Backward-compatible API naming aliases ---
 TreeHiddenMarkovModelAccumulator = TreeHiddenMarkovAccumulator
 TreeHiddenMarkovModelAccumulatorFactory = TreeHiddenMarkovAccumulatorFactory
 TreeHiddenMarkovModelDataEncoder = TreeHiddenMarkovDataEncoder

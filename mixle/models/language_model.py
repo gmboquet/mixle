@@ -1,4 +1,4 @@
-"""``LM`` -- a declarative autoregressive language model tying the frontier-LLM stack into one usable object.
+"""``LM`` -- a declarative autoregressive language model with fit, generation, and scoring helpers.
 
 A causal Transformer trained on a token stream::
 
@@ -12,7 +12,7 @@ A causal Transformer trained on a token stream::
 ``distributed=True`` it dispatches through ``StreamingTokenEncodedData`` (per-rank shard, in-backward all-reduce,
 FSDP2/ZeRO-3 + bf16 + DCP on CUDA). ``fit_pairs`` is the SFT stage: dense all-position teacher forcing on
 ``(prompt, completion)`` pairs with the loss masked to completions -- the shape needed to distill verified
-trajectories (e.g. execution-checked ``page -> parser code`` pairs from a data factory) into a tiny model.
+trajectories into a compact model.
 The rest of the multi-stage pipeline (CPT-with-EWC, DPO) is ``mixle.models.continual`` / ``mixle.models.dpo_leaf``.
 """
 

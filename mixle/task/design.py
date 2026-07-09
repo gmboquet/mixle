@@ -111,6 +111,7 @@ class DesignedModel:
     note: str = ""
 
     def fit(self, data: Sequence[Any], **kwargs: Any) -> Any:
+        """Fit the designed estimator with ``mixle.inference.optimize``."""
         from mixle.inference import optimize
 
         return optimize(list(data), self.estimator, **kwargs)
@@ -126,7 +127,7 @@ def design_model(
     """Ask ``llm`` to design a model for ``data``; build, fit-validate, and fall back to the heuristic on failure.
 
     The LLM sees a compact :func:`data_profile` and returns a JSON spec; the spec is built into a real estimator
-    and fit on a sample to prove it works. Any failure (no LLM, bad JSON, off-allowlist family, fit error) yields
+    and fit on a sample to prove it works. Any failure (no LLM, invalid JSON, off-allowlist family, fit error) yields
     the heuristic :func:`mixle.task.recommend.recommend_model` estimator when ``fallback`` is set.
     """
     profile = data_profile(data)

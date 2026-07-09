@@ -1,12 +1,11 @@
-"""``CapabilitySuite`` / ``capture_profile`` -- a distilled student's behavioral spec, never one aggregate number.
+"""Behavioral capability profiles for distilled students.
 
 Two students can share the same clean-holdout accuracy and still differ wildly on what they capture: one
 degrades gracefully under typos, the other collapses; one honors the teacher's case-insensitivity, the other
 doesn't. A capability suite names the input distribution's corruptions (severity levels), invariances
 (meaning-preserving rewrites the teacher is expected to honor), and edge-case probes; :func:`capture_profile`
-runs both the student and the teacher through all three and reports a JSON-serializable profile -- deliberately
-with no single pass/fail scalar, so a caller (D4's disagreement map, a release gate) decides what "close enough"
-means for its own use.
+runs both the student and the teacher through all three and reports a JSON-serializable profile. The
+profile intentionally leaves pass/fail policy to the caller.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ class CapabilitySuite:
     order is the intended severity order (mild first) so callers can read the profile's ordering directly.
     ``invariances`` maps a name to a meaning-preserving rewrite (case jitter, whitespace, a synonym swap) --
     a well-behaved model's prediction should not change under it. ``probes`` are fixed edge-case inputs whose
-    raw predictions are recorded (no ground truth assumed).
+    raw predictions are recorded without assuming ground truth.
     """
 
     corruptions: dict[str, Callable[[str], str]] = field(default_factory=dict)
@@ -65,12 +64,8 @@ def _predict(model: Any, texts: list[str]) -> list[Any]:
     """Batch-predict labels from ``model``, which may be a ``CalibratedTaskModel``, a ``TaskModel``-like object
     exposing ``batch``, or a bare ``teacher(texts) -> labels`` / ``teacher(text) -> label`` callable.
 
-    Checks ``batch`` before ``task``: a bare ``TaskModel``'s own ``task`` attribute is a plain
-    descriptive string, not a nested model, so checking ``task`` first misfires
-    (``AttributeError: 'str' object has no attribute 'batch'``) on any model not wrapped in
-    ``CalibratedTaskModel`` -- e.g. a :func:`~mixle.task.extract.distill_extractor` student, whose
-    adapter has no ``proba_batch`` and so can never be calibration-wrapped. ``CalibratedTaskModel``
-    itself exposes no ``batch``, so this order still falls through to ``model.task.batch`` for it.
+    Checks ``batch`` before ``task`` so bare ``TaskModel`` instances and
+    ``CalibratedTaskModel`` wrappers both use the appropriate batch interface.
     """
     if hasattr(model, "batch"):
         return list(model.batch(texts))
@@ -110,7 +105,7 @@ def _escalation_rate(decisions: Sequence[Any]) -> float:
 
 
 def capture_profile(student: Any, teacher: Any, texts: Sequence[str], suite: CapabilitySuite) -> dict[str, Any]:
-    """Run ``student`` and ``teacher`` through ``suite`` over ``texts`` and report the capture profile.
+    """Run ``student`` and ``teacher`` through ``suite`` and return a profile.
 
     Returns a plain, ``json.dumps``-safe dict:
 

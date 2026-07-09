@@ -1,11 +1,12 @@
-"""Disagreement gate (workstream D5, CARD D4-a): escalate where the student has historically diverged
-from the teacher -- not just where inputs look statistically atypical
+"""Disagreement gate: escalate where the student has historically diverged from the teacher.
+
+This is distinct from escalating only where inputs look statistically atypical
 (:class:`~mixle.task.density.DensityGate`) or where the conformal set itself is ambiguous
 (:class:`~mixle.task.calibrate.CalibratedTaskModel`).
 
-:func:`fit_disagreement_gate` turns a set of ``(text, student_label, teacher_label)`` triples into a small
-binary ``agree``/``disagree`` classifier over the student's OWN feature space (reusing
-:func:`~mixle.task.distill.distill_from_labels` -- the disagreement gate is itself a tiny distilled student,
+:func:`fit_disagreement_gate` turns a set of ``(text, student_label, teacher_label)`` triples into a compact
+binary ``agree``/``disagree`` classifier over the student's own feature space (reusing
+:func:`~mixle.task.distill.distill_from_labels` -- the disagreement gate is itself a distilled student,
 just of a different target). The resulting :class:`DisagreementGate` exposes ``ood_mask`` with the exact
 same duck-typed shape as :class:`~mixle.task.density.DensityGate`, so it plugs into
 ``CalibratedTaskModel(..., density_gate=...)`` directly -- or unions with a real density gate via
@@ -52,6 +53,7 @@ class DisagreementGate:
         return prob[:, idx]
 
     def is_ood(self, text: str) -> bool:
+        """Return whether one input is predicted to disagree with the teacher."""
         return bool(self.disagreement_proba([text])[0] > self.threshold)
 
     def ood_mask(self, texts: Sequence[str]) -> np.ndarray:
@@ -74,7 +76,7 @@ def fit_disagreement_gate(
 ) -> DisagreementGate:
     """Fit a :class:`DisagreementGate` from a labeled sample: run ``student`` on ``texts``, label each
     example ``"disagree"`` where it differs from ``teacher_labels`` and ``"agree"`` otherwise, and distill a
-    tiny binary classifier of that target over the SAME hashed n-gram feature family the student itself
+    compact binary classifier of that target over the same hashed n-gram feature family the student itself
     uses (a different, wider/deeper recipe is fine -- what matters is the classifier learns a decision
     surface over the input text, not that it matches the student's exact recipe).
     """
@@ -105,5 +107,6 @@ class UnionGate:
         self.gates = gates
 
     def ood_mask(self, texts: Sequence[str]) -> np.ndarray:
+        """Return the elementwise OR of all constituent gate masks."""
         masks = [np.asarray(g.ood_mask(texts), dtype=bool) for g in self.gates]
         return np.logical_or.reduce(masks) if masks else np.zeros(len(texts), dtype=bool)

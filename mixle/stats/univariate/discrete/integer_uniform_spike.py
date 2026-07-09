@@ -1,12 +1,7 @@
-r"""Evaluate, estimate, and sample from a uniform distribution over integers in range [min_val, max_val] with a spike
-  placed on the integer value k.
+r"""Integer-valued uniform distributions with extra mass at one spike value.
 
-Defines the IntegerUniformSpikeDistribution, IntegerUniformSpikeSampler, IntegerUniformSpikeAccumulatorFactory,
-IntegerUniformSpikeAccumulator, IntegerUniformSpikeEstimator, and the IntegerUniformSpikeDataEncoder classes for use
-with mixle.
-
-Data type: (int): The IntegerUniformSpikeDistribution with a range [min_val, max_val] = [a,b], and spike placed
-on integer value k with probability p, is given by
+Observations are integers in ``[min_val, max_val]``. The distribution assigns probability ``p`` to the
+spike value ``k`` and spreads the remaining mass uniformly over the other values:
 
     P(x_i = k) = p,
     P(x_i = x) = (1-p)/(b-a), x in [a,b] \ {k},
@@ -34,16 +29,18 @@ from mixle.stats.compute.pdist import (
 
 
 class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
-    """IntegerUniformSpikeDistribution object: uniform over an integer range with a spike of mass p at k."""
+    """Uniform integer distribution with extra probability mass at one value."""
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare backend support for integer-uniform-spike generated kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic_table")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the generated-compute declaration for the integer uniform spike."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -64,14 +61,14 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def __init__(self, k: int, num_vals: int, p: float, min_val: int | None = 0, name: str | None = None) -> None:
-        """IntegerUniformSpikeDistribution object for creating a uniform integer distribution with a spike on k.
+        """Create a uniform integer distribution with a spike at ``k``.
 
         Args:
             k (int): Integer value to place spike on. Must be within [min_val,min_val+num_vals)
             num_vals (int): Number of integers in the range.
             p (float): Probability of drawing k. (1-p)/(num_vals-1) to draw any other integer in range.
             min_val (Optional[int]): Defaults to 0. Set bottom of integer range.
-            name (Optional[str]): Set name for object.
+            name (Optional[str]): Optional distribution name.
 
         Attributes:
             p (float): Probability of drawing from k.
@@ -81,7 +78,7 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
             log_p (float): Log of p.
             log_1p (float): Log of 1-p
             num_vals (int): Total number of integers in range.
-            name (Optional[str]): Name for object instance.
+            name (Optional[str]): Optional distribution name.
 
         """
         self.p = p
@@ -298,7 +295,7 @@ class IntegerUniformSpikeEnumerator(DistributionEnumerator):
     """
 
     def __init__(self, dist: IntegerUniformSpikeDistribution) -> None:
-        """IntegerUniformSpikeEnumerator object.
+        """Create an enumerator for the finite support.
 
         Args:
             dist (IntegerUniformSpikeDistribution): Distribution whose support is enumerated.
@@ -324,7 +321,7 @@ class IntegerUniformSpikeEnumerator(DistributionEnumerator):
 
 
 class IntegerUniformSpikeSampler(DistributionSampler):
-    """IntegerUniformSpikeSampler object for sampling from an IntegerUniformSpikeDistribution.
+    """Sampler for an integer-uniform-spike distribution.
 
     Attributes:
         dist (IntegerUniformSpikeDistribution): Distribution to sample from.
@@ -334,7 +331,7 @@ class IntegerUniformSpikeSampler(DistributionSampler):
     """
 
     def __init__(self, dist: "IntegerUniformSpikeDistribution", seed: int | None = None) -> None:
-        """IntegerUniformSpikeSampler object.
+        """Create a sampler for an integer-uniform-spike distribution.
 
         Args:
             dist (IntegerUniformSpikeDistribution): Distribution to sample from.
@@ -375,7 +372,7 @@ class IntegerUniformSpikeSampler(DistributionSampler):
 
 
 class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
-    """IntegerUniformSpikeAccumulator object for accumulating weighted integer counts over a growing range.
+    """Accumulator for weighted integer counts over a growing range.
 
     Attributes:
         min_val (Optional[int]): Smallest integer observed (or configured) so far.
@@ -383,20 +380,20 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
         count_vec (Optional[np.ndarray]): Weighted counts for each integer in [min_val, max_val].
         count (float): Total weighted observation count.
         key (Optional[str]): Key for merging sufficient statistics across accumulators.
-        name (Optional[str]): Name for object instance.
+        name (Optional[str]): Optional accumulator name.
 
     """
 
     def __init__(
         self, min_val: int | None, max_val: int | None, keys: str | None = None, name: str | None = None
     ) -> None:
-        """IntegerUniformSpikeAccumulator object.
+        """Create an accumulator for integer-uniform-spike sufficient statistics.
 
         Args:
             min_val (Optional[int]): Smallest integer value in the range, if known.
             max_val (Optional[int]): Largest integer value in the range, if known.
             keys (Optional[str]): Set key for merging sufficient statistics.
-            name (Optional[str]): Set name for object instance.
+            name (Optional[str]): Optional accumulator name.
 
         """
         self.min_val = min_val
@@ -607,19 +604,19 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class IntegerUniformSpikeAccumulatorFactory(StatisticAccumulatorFactory):
-    """IntegerUniformSpikeAccumulatorFactory object for creating IntegerUniformSpikeAccumulator objects.
+    """Factory for integer-uniform-spike accumulators.
 
     Args:
         min_val (Optional[int]): Smallest integer value in the range, if known.
         max_val (Optional[int]): Largest integer value in the range, if known.
         keys (Optional[str]): Set key for merging sufficient statistics.
-        name (Optional[str]): Set name for object instance.
+        name (Optional[str]): Optional name assigned to created accumulators.
 
     Attributes:
         min_val (Optional[int]): Smallest integer value in the range, if known.
         max_val (Optional[int]): Largest integer value in the range, if known.
         keys (Optional[str]): Key for merging sufficient statistics.
-        name (Optional[str]): Name for object instance.
+        name (Optional[str]): Optional name assigned to created accumulators.
 
     """
 
@@ -636,14 +633,14 @@ class IntegerUniformSpikeAccumulatorFactory(StatisticAccumulatorFactory):
         self.name = name
 
     def make(self) -> "IntegerUniformSpikeAccumulator":
-        """Returns a new IntegerUniformSpikeAccumulator object."""
+        """Return a fresh integer-uniform-spike accumulator."""
         return IntegerUniformSpikeAccumulator(
             min_val=self.min_val, max_val=self.max_val, keys=self.keys, name=self.name
         )
 
 
 class IntegerUniformSpikeEstimator(ParameterEstimator):
-    """IntegerUniformSpikeEstimator object for estimating IntegerUniformSpikeDistribution objects from counts."""
+    """Estimator for integer-uniform-spike distributions from weighted counts."""
 
     def __init__(
         self,
@@ -654,22 +651,22 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """IntegerUniformSpikeEstimator object instance for estimating IntegerUniformSpikeDistribution objects.
+        """Estimator for an integer-uniform-spike distribution.
 
         Args:
             min_val (Optional[int]): Smallest integer value in the range.
             pseudo_count (Optional[float]): Regularize value k.
             suff_stat (Optional[Tuple[int, Optional[float]]]): Tuple of k to regularize and optional value of p for k.
-            name (Optional[str]): Set name for object instance.
-            keys (Optional[str]): Set keys for object instance.
+            name (Optional[str]): Optional name assigned to the estimated distribution.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
             pseudo_count (Optional[float]): Regularize value k.
             min_val (int): Smallest integer value in the range. Defaults to 0.
             max_val (int): Set to the min val plus number of values - 1.
             suff_stat (Optional[Tuple[int, Optional[float]]]): Tuple of k to regularize and optional value of p for k.
-            name (Optional[str]): Set name for object instance.
-            keys (Optional[str]): Set keys for object instance.
+            name (Optional[str]): Optional name assigned to the estimated distribution.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
         self.pseudo_count = pseudo_count
@@ -782,10 +779,10 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
 
 
 class IntegerUniformSpikeDataEncoder(DataSequenceEncoder):
-    """IntegerUniformSpikeDataEncoder object for encoding sequences of iid integer observations."""
+    """Data encoder for iid integer-uniform-spike observations."""
 
     def __str__(self) -> str:
-        """Returns string representation of IntegerUniformSpikeDataEncoder object."""
+        """Return the integer-uniform-spike encoder's display name."""
         return "IntegerUniformSpikeDataEncoder"
 
     def __eq__(self, other: object) -> bool:

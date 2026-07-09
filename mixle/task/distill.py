@@ -1,11 +1,12 @@
-"""Distill a big teacher into a tiny local TaskModel: ``teacher`` labels data, a small student learns to match.
+"""Distill a teacher callable into a local :class:`TaskModel`.
 
-The vision in one function. The teacher is *any* callable that labels text -- a frontier LM behind an endpoint,
-a slow rule, a human-curated map -- exercised once over an unlabeled corpus. The student is a small classifier
-over dependency-free hashed n-gram features (:class:`~mixle.task.model.HashedNGram`), trained to reproduce the
-teacher's labels, and returned as a :class:`~mixle.task.model.TaskModel` you save and call locally at a fraction
-of the teacher's cost. ``agreement`` measures how faithfully the student mimics the teacher on held-out text --
-the number :func:`~mixle.task.tune.tune_recipe` optimizes when it searches student recipes with ``mixle.doe``.
+The teacher can be any callable that labels text: an LLM endpoint, a slow rule,
+or a human-reviewed map. The student is a compact classifier over
+dependency-free hashed n-gram features (:class:`~mixle.task.model.HashedNGram`),
+trained to reproduce the teacher's labels and returned as a durable
+:class:`~mixle.task.model.TaskModel`. ``agreement`` measures held-out fidelity
+to the teacher and is the objective :func:`~mixle.task.tune.tune_recipe`
+optimizes when it searches student recipes with ``mixle.doe``.
 
 Only the student fit needs torch; the teacher is opaque. ``distill`` is deterministic given ``seed``.
 
@@ -84,7 +85,7 @@ def distill(
     device: str = "cpu",
     n_jobs: int = 1,
 ) -> TaskModel:
-    """Label ``texts`` with ``teacher``, fit a small student to match, and return a callable :class:`TaskModel`.
+    """Label ``texts`` with ``teacher``, fit a local student, and return a callable :class:`TaskModel`.
 
     ``n``/``dim`` size the hashed n-gram featurizer; ``hidden`` the student MLP. ``labels`` fixes the label set
     (else inferred from the teacher's outputs). The student's train-set agreement with the teacher is recorded
@@ -418,7 +419,7 @@ def distill_structured(
     task: str = "",
     n_jobs: int = 1,
 ) -> TaskModel:
-    """Distill a teacher into a tiny **structured probabilistic** classifier -- a learned Bayesian network, not an MLP.
+    """Distill a teacher into a structured probabilistic classifier -- a learned Bayesian network, not an MLP.
 
     The teacher labels ``records``; :func:`mixle.inference.structure.learn_structure` then discovers the dependency
     forest over the joint ``(field_1, ..., field_m, label)`` and fits it. The student classifies by the generative
@@ -577,7 +578,7 @@ _ES_MIN_DELTA = 1e-3
 
 
 def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, seed, device):
-    """Train a small MLP classifier on features ``x`` and integer labels ``y``; return ``(module, config, steps_run)``.
+    """Train an MLP classifier on features ``x`` and integer labels ``y``; return ``(module, config, steps_run)``.
 
     Wraps the module in a :class:`~mixle.models.NeuralCategorical` leaf and fits it through the ordinary
     :func:`~mixle.inference.optimize` entry point -- the same declare-a-leaf/call-optimize path every other

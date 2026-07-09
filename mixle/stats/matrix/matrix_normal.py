@@ -114,6 +114,7 @@ class MatrixNormalSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> np.ndarray:
+        """Draw one matrix or a batch of independent matrix-normal samples."""
         d = self.dist
         n = 1 if size is None else int(size)
         z = self.rng.randn(n, d.n, d.p)
@@ -134,15 +135,18 @@ class MatrixNormalAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: np.ndarray, weight: float, estimate: MatrixNormalDistribution | None) -> None:
+        """Accumulate weighted mean and row-blocked second moments for one matrix."""
         xx = np.asarray(x, dtype=np.float64)
         self.sum_x += weight * xx
         self.t += weight * np.einsum("ac,bd->abcd", xx, xx, optimize=True)
         self.count += weight
 
     def initialize(self, x: np.ndarray, weight: float, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics with one weighted matrix."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: MatrixNormalDistribution | None) -> None:
+        """Accumulate weighted mean and block moments for encoded matrices."""
         xx = np.asarray(x, dtype=np.float64)
         w = np.asarray(weights, dtype=np.float64)
         xw = xx * w[:, None, None]
@@ -151,18 +155,22 @@ class MatrixNormalAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += float(w.sum())
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics from encoded matrices."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, float]) -> "MatrixNormalAccumulator":
+        """Merge serialized matrix-normal sufficient statistics into this accumulator."""
         self.sum_x += suff_stat[0]
         self.t += suff_stat[1]
         self.count += suff_stat[2]
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, float]:
+        """Return the weighted sum, block second moment, and total weight."""
         return self.sum_x.copy(), self.t.copy(), self.count
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray, float]) -> "MatrixNormalAccumulator":
+        """Restore the accumulator from serialized matrix-normal statistics."""
         self.sum_x = np.asarray(x[0], dtype=np.float64).copy()
         self.t = np.asarray(x[1], dtype=np.float64).copy()
         self.count = float(x[2])
@@ -170,6 +178,7 @@ class MatrixNormalAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into a keyed statistics dictionary."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -177,10 +186,12 @@ class MatrixNormalAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from a keyed statistics dictionary."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "MatrixNormalDataEncoder":
+        """Return an encoder compatible with matrix-normal vectorized updates."""
         return MatrixNormalDataEncoder()
 
 
@@ -194,6 +205,7 @@ class MatrixNormalAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> MatrixNormalAccumulator:
+        """Create an empty matrix-normal accumulator."""
         return MatrixNormalAccumulator(self.n, self.p, name=self.name, keys=self.keys)
 
 
@@ -211,9 +223,11 @@ class MatrixNormalEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> MatrixNormalAccumulatorFactory:
+        """Return a factory for matrix-normal sufficient-statistic accumulators."""
         return MatrixNormalAccumulatorFactory(self.n, self.p, name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, float]) -> MatrixNormalDistribution:
+        """Estimate the mean and covariance factors using flip-flop updates."""
         sum_x, t, count = suff_stat
         n, p = self.n, self.p
         if count <= 0.0:
@@ -250,4 +264,5 @@ class MatrixNormalDataEncoder(DataSequenceEncoder):
         return isinstance(other, MatrixNormalDataEncoder)
 
     def seq_encode(self, x: Sequence[np.ndarray]) -> np.ndarray:
+        """Encode matrices as a floating-point stack for vectorized evaluation."""
         return np.asarray(x, dtype=np.float64)

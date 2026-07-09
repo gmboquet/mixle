@@ -1,4 +1,4 @@
-"""Create, estimate, and sample from a two-parameter Weibull distribution.
+"""Two-parameter Weibull distributions over positive real values.
 
 Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
@@ -57,12 +57,14 @@ class WeibullDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated Weibull kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch", "jax"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for Weibull distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -250,6 +252,7 @@ class WeibullSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one sample or an array of iid samples."""
         return self.dist.scale * self.rng.weibull(self.dist.shape, size=size)
 
 
@@ -264,6 +267,7 @@ class WeibullAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: WeibullDistribution | None) -> None:
+        """Accumulate weighted first and second moments for one observation."""
         if x < 0.0:
             raise ValueError("WeibullDistribution requires observations x >= 0.")
         self.sum += x * weight
@@ -271,35 +275,42 @@ class WeibullAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: WeibullDistribution | None
     ) -> None:
+        """Accumulate weighted first and second moments from encoded data."""
         xx, _ = x
         self.sum += np.dot(xx, weights)
         self.sum2 += np.dot(xx * xx, weights)
         self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "WeibullAccumulator":
+        """Merge another Weibull sufficient-statistic tuple."""
         self.sum += suff_stat[0]
         self.sum2 += suff_stat[1]
         self.count += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return accumulated sum, second moment sum, and count."""
         return self.sum, self.sum2, self.count
 
     def from_value(self, x: tuple[float, float, float]) -> "WeibullAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.sum = x[0]
         self.sum2 = x[1]
         self.count = x[2]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -307,10 +318,12 @@ class WeibullAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "WeibullDataEncoder":
+        """Return the encoder used by this accumulator."""
         return WeibullDataEncoder()
 
 
@@ -322,6 +335,7 @@ class WeibullAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> WeibullAccumulator:
+        """Create a fresh Weibull accumulator."""
         return WeibullAccumulator(name=self.name, keys=self.keys)
 
 
@@ -347,9 +361,11 @@ class WeibullEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> WeibullAccumulatorFactory:
+        """Return an accumulator factory for Weibull moment statistics."""
         return WeibullAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> WeibullDistribution:
+        """Estimate shape and scale by matching weighted moments."""
         sum_x, sum_x2, count = suff_stat
         if self.pseudo_count is not None and self.suff_stat is not None:
             mean0, second0 = self.suff_stat
@@ -377,6 +393,7 @@ class WeibullDataEncoder(DataSequenceEncoder):
         return isinstance(other, WeibullDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+        """Encode observations as values and log-values."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and (np.any(rv < 0.0) or np.any(np.isnan(rv))):
             raise ValueError("WeibullDistribution requires observations x >= 0.")

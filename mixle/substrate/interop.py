@@ -61,6 +61,7 @@ class ExternalModel:
 
     @property
     def max_entropy(self) -> float:
+        """Semantic-entropy cutoff used to decide whether answers are trusted."""
         return float(self._uq.payload.get("max_entropy", float("inf")))
 
     def answer(self, prompt: Any) -> ExternalAnswer:
@@ -75,6 +76,7 @@ class ExternalModel:
         )
 
     def confident(self, prompt: Any) -> bool:
+        """Return whether the external model is calibrated-confident on ``prompt``."""
         return self._uq.confident(prompt, n=self.samples)
 
 
@@ -86,9 +88,9 @@ def external_action(
     description: str = "",
     trust_uncertain: bool = False,
 ) -> Any:
-    """A reasoner DELEGATE action backed by a UQ-wrapped external model (see module docstring).
+    """A reasoner delegate action backed by a UQ-wrapped external model (see module docstring).
 
-    By default (``trust_uncertain=False``) the action contributes evidence ONLY when the external model
+    By default (``trust_uncertain=False``) the action contributes evidence only when the external model
     is confident about the query; an uncertain external answer yields no fragment, so the reasoner treats
     it as no answer rather than a guess. The fragment carries the model's entropy so the trace records how
     sure the external source was. Cost defaults high -- external calls are the escalation of last resort."""

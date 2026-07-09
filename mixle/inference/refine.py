@@ -1,11 +1,9 @@
-"""REFINE-a: diagnosis-directed correction vs blind structure search (research spike, workstream A5 +
-the refinement loop).
+"""Diagnosis-directed correction compared with blind structure search.
 
-Kill criterion (stated before running the comparison, per the card): if diagnosis-directed correction
-does not reach the SAME held-out target in FEWER trials than blind structure search (`learn_bayesian_network`
-run with no diagnosis, over growing prefixes of data) on the planted-fault benchmark, this is a negative
-result -- record it in `notes/refine-directed-negative.md` and keep blind search; the critic did not earn
-its place.
+If diagnosis-directed correction does not reach the same held-out target in
+fewer trials than blind structure search (``learn_bayesian_network`` run with no
+diagnosis, over growing prefixes of data) on the planted-fault benchmark, keep
+blind search as the baseline.
 
 Only the `add_edge` fix is translated to a concrete structural edit here, because that is the only fix
 `mixle.inference.explain.diagnose` actually detects today (`upgrade_leaf`/`split_region`/`add_factor` are
@@ -36,7 +34,7 @@ def held_out_log_likelihood(model: Any, data: Sequence[tuple]) -> float:
 def apply_add_edge_fix(
     model: HeterogeneousBayesianNetwork, fault: FaultReport, data: Sequence[tuple]
 ) -> HeterogeneousBayesianNetwork | None:
-    """Apply ONLY the fix ``diagnose`` actually named: add a linear-Gaussian edge between the two fields
+    """Apply only the fix ``diagnose`` actually named: add a linear-Gaussian edge between the two fields
     in ``fault.dominant`` (parsed from its ``"field[i]|...field[j]|..."`` shape), refit that one factor on
     ``data``, and return the corrected network -- every other factor is left untouched.
 
@@ -74,7 +72,7 @@ def directed_correction(
 ) -> TrialsToTarget:
     """One diagnosis, one targeted edit, one verification.
 
-    Costs exactly 1 trial if ``diagnose`` names an actionable fix AND it verifiably improves held-out
+    Costs exactly 1 trial if ``diagnose`` names an actionable fix and it verifiably improves held-out
     score over the original model; costs 0 (unreached) if the fix isn't actionable or doesn't verify --
     a correction that does not improve held-out is a failed diagnosis, logged as such, never silently
     kept anyway.

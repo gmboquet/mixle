@@ -32,12 +32,12 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
     a symmetric Dirichlet of unspecified dimension."""
 
     def __init__(self, alpha: dict[Any, float] | float, name: str | None = None) -> None:
-        """DictDirichletDistribution object.
+        """Create a Dirichlet distribution over keyed probability maps.
 
         Args:
             alpha: Concentration parameters. Either a dict {value: a_k} of positive reals or a single
                 positive scalar (symmetric Dirichlet, dimension inferred from each observation).
-            name (Optional[str]): Name of object.
+            name (Optional[str]): Optional distribution name.
 
         """
         self.name = name
@@ -184,7 +184,7 @@ class DictDirichletSampler(DistributionSampler):
 
 
 class DictDirichletDataEncoder(DataSequenceEncoder):
-    """Trivial encoder for sequences of probability maps (passes the list through)."""
+    """Pass-through encoder for sequences of probability maps."""
 
     def __str__(self) -> str:
         return "DictDirichletDataEncoder"
@@ -193,4 +193,5 @@ class DictDirichletDataEncoder(DataSequenceEncoder):
         return isinstance(other, DictDirichletDataEncoder)
 
     def seq_encode(self, x: Any) -> list:
+        """Encode dictionary-Dirichlet observations as a list payload."""
         return list(x)

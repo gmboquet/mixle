@@ -1,16 +1,11 @@
-"""Create, estimate, and sample from a mixture over a dirac delta at v and a length distribution.
+"""Dirac-length mixture distributions for integer observations.
 
-Defines the DiracLengthMixtureDistribution, DiracLengthMixtureSampler, DiracLengthMixtureAccumulatorFactory,
-DiracLengthMixtureAccumulator, DiracLengthMixtureEstimator, and the DiracLengthMixtureDataEncoder classes for use with
-mixle.
+The model mixes a learned length distribution ``P_1`` with a point mass at
+integer value ``v``:
 
-The DiracLengthMixtureDistribution is defined by the density of the form,
+``P(Y) = p * P_1(Y) + (1 - p) * Delta_v(Y)``.
 
-P(Y) = p*P_1(Y) + (1-p)*Delta_{v}(Y),
-
-where P_1() is a length distribution with support on non-negative integers, or a subset of them, and Delta_{v}(x) = 1
-if x = v, else 0.
-
+``P_1`` must have support on non-negative integers, or a subset of them.
 """
 
 from collections.abc import Sequence
@@ -39,21 +34,22 @@ key_type = tuple[str, str] | tuple[None, None]
 
 
 class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
-    """DiracLengthMixtureDistribution object defined by a length distribution, choice of dirac value, and p.
+    """Mixture between a fixed length and a learned length distribution.
 
     Args:
         p (float): Probability of being drawn from length distribution. Must be between 0 and 1.
         len_dist (SequenceEncodableProbabilityDistribution): Distribution with support on non-negative integers.
-        name (Optional[str]): Set name for object instance.
+        name (Optional[str]): Optional distribution name.
 
     Attributes:
         p (float): Probability of being drawn from length distribution. Must be between 0 and 1.
         len_dist (SequenceEncodableProbabilityDistribution): Distribution with support on non-negative integers.
-        name (Optional[str]): Name for object instance.
+        name (Optional[str]): Optional distribution name.
 
     """
 
     def compute_capabilities(self):
+        """Declare generated-compute support inherited from the length distribution."""
         from mixle.stats.compute.capabilities import DistributionCapabilities, capabilities_for
 
         child = capabilities_for(self.len_dist)
@@ -62,6 +58,7 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def compute_declaration(self):
+        """Return the generated-compute declaration for the Dirac-length mixture."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ParameterSpec,
@@ -469,7 +466,7 @@ class DiracLengthMixtureEnumerator(DistributionEnumerator):
     """
 
     def __init__(self, dist: DiracLengthMixtureDistribution) -> None:
-        """DiracLengthMixtureEnumerator object.
+        """Create an enumerator for Dirac-length mixture values.
 
         Args:
             dist (DiracLengthMixtureDistribution): Distribution whose support is enumerated.
@@ -492,7 +489,7 @@ class DiracLengthMixtureEnumerator(DistributionEnumerator):
 
 
 class DiracLengthMixtureSampler(DistributionSampler):
-    """DiracLengthMixtureSampler object for sampling from a DiracLengthMixtureDistribution."""
+    """Sampler for a Dirac-length mixture distribution."""
 
     def __init__(self, dist: DiracLengthMixtureDistribution, seed: int | None = None) -> None:
         """DiracLengthMixtureSampler used to generate samples.
@@ -542,13 +539,13 @@ class DiracLengthMixtureSampler(DistributionSampler):
 
 
 class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
-    """DiracLengthMixtureAccumulator object for accumulating component counts and length-distribution statistics.
+    """Accumulate component counts and length-distribution statistics.
 
     Args:
         accumulator (SequenceEncodableStatisticAccumulator): Accumulator for the length distribution.
         v (int): Dirac location.
         keys (Tuple[Optional[str], Optional[str]]): Keys for the mixture weights and component statistics.
-        name (Optional[str]): Set name for object instance.
+        name (Optional[str]): Optional accumulator name.
 
     Attributes:
         accumulator (SequenceEncodableStatisticAccumulator): Accumulator for the length distribution.
@@ -556,7 +553,7 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         weight_key (Optional[str]): Key for merging mixture weight counts.
         comp_key (Optional[str]): Key for merging component sufficient statistics.
         v (int): Dirac location.
-        name (Optional[str]): Name for object instance.
+        name (Optional[str]): Optional accumulator name.
 
     """
 
@@ -655,7 +652,7 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update_engine(self, x, weights, estimate, engine):
         """Engine-resident E-step: the length-distribution scoring (the heavy term) runs through the
-        active engine; the cheap two-component (length vs. Dirac) responsibility bookkeeping mirrors
+        active engine; the low-overhead two-component (length vs. Dirac) responsibility bookkeeping mirrors
         the host seq_update exactly.
         """
         from mixle.stats.compute.backend import backend_seq_log_density
@@ -829,19 +826,19 @@ class DiracLengthMixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
 
 class DiracLengthMixtureAccumulatorFactory(StatisticAccumulatorFactory):
-    """DiracLengthMixtureAccumulatorFactory object for creating DiracLengthMixtureAccumulator objects.
+    """Factory for Dirac-length mixture accumulators.
 
     Args:
         factory (StatisticAccumulatorFactory): Accumulator factory for the length distribution.
         v (int): Dirac location.
         keys (Tuple[Optional[str], Optional[str]]): Keys for the mixture weights and component statistics.
-        name (Optional[str]): Set name for object instance.
+        name (Optional[str]): Optional accumulator name.
 
     Attributes:
         factory (StatisticAccumulatorFactory): Accumulator factory for the length distribution.
         v (int): Dirac location.
         keys (Tuple[Optional[str], Optional[str]]): Keys for the mixture weights and component statistics.
-        name (Optional[str]): Name for object instance.
+        name (Optional[str]): Optional accumulator name.
 
     """
 
@@ -863,7 +860,7 @@ class DiracLengthMixtureAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class DiracLengthMixtureEstimator(ParameterEstimator):
-    """DiracLengthMixtureEstimator object for estimating DiracLengthMixtureDistribution objects.
+    """Estimate Dirac-length mixture distributions.
 
     Args:
         estimator (ParameterEstimator): Estimator for the length distribution.
@@ -871,7 +868,7 @@ class DiracLengthMixtureEstimator(ParameterEstimator):
         fixed_p (Optional[float]): Hold the length-distribution weight p fixed at this value.
         suff_stat (Optional[float]): Prior value of p used with pseudo_count for regularization.
         pseudo_count (Optional[float]): Used to inflate the component count statistics.
-        name (Optional[str]): Set name for object instance.
+        name (Optional[str]): Optional name assigned to estimated distributions.
         keys (Tuple[Optional[str], Optional[str]]): Keys for the mixture weights and component statistics.
 
     Attributes:
@@ -880,7 +877,7 @@ class DiracLengthMixtureEstimator(ParameterEstimator):
         pseudo_count (Optional[float]): Used to inflate the component count statistics.
         suff_stat (Optional[float]): Prior value of p used with pseudo_count for regularization.
         keys (Tuple[Optional[str], Optional[str]]): Keys for the mixture weights and component statistics.
-        name (Optional[str]): Name for object instance.
+        name (Optional[str]): Optional name assigned to estimated distributions.
         fixed_p_vec (Optional[np.ndarray]): Fixed component weights [p, 1-p] when fixed_p is given.
 
     """
@@ -949,7 +946,7 @@ class DiracLengthMixtureEstimator(ParameterEstimator):
 
 
 class DiracLengthMixtureDataEncoder(DataSequenceEncoder):
-    """DiracLengthMixtureDataEncoder object for encoding sequences of iid integer observations.
+    """Data encoder for iid integer observations under a Dirac-length mixture.
 
     Args:
         encoder (DataSequenceEncoder): Encoder for the length distribution.
@@ -966,7 +963,7 @@ class DiracLengthMixtureDataEncoder(DataSequenceEncoder):
         self.v = v
 
     def __str__(self) -> str:
-        """Returns string representation of DiracLengthMixtureDataEncoder object."""
+        """Return a constructor-style representation of the encoder."""
         return "DiracMixtureDataEncoder(encoder=%s, v=%s)" % (repr(self.encoder), repr(self.v))
 
     def __eq__(self, other: object) -> bool:

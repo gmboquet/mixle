@@ -292,6 +292,7 @@ def _fill_slots(model: Any, path: tuple, enc: Any, ctx: _Ctx) -> None:
 
 
 def fused_nested_seq_log_density(model: Any, enc: Any) -> np.ndarray:
+    """Score encoded observations with the nested scalar fused kernel."""
     built = analyze_nested(model)
     if built is None:
         raise ValueError("%s is not a fusible nested scalar tree." % type(model).__name__)
@@ -313,6 +314,7 @@ def _node_value(node: Any, accs: dict) -> Any:
 
 
 def fused_nested_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool = False) -> Any:
+    """Accumulate nested scalar sufficient statistics with the fused E-step kernel."""
     built = analyze_nested(model)
     if built is None:
         raise ValueError("%s is not a fusible nested scalar tree." % type(model).__name__)
@@ -338,4 +340,5 @@ def fused_nested_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll
 
 
 def fusible_nested(model: Any) -> bool:
+    """Return whether ``model`` can use nested scalar fusion."""
     return analyze_nested(model) is not None

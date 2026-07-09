@@ -1,7 +1,4 @@
-""" "Create, estimate, and sample from a MultinomialDistribution.
-
-Defines the MultinomialDistribution, MultinomialSampler, MultinomialAccumulatorFactory, MultinomialAccumulator,
-MultinomialEstimator, and the MultinomialDataEncoder classes for use with mixle.
+"""Categorical multinomial models over sparse value-count observations.
 
 Let P_dist(V_k) be a distribution for a countable set of discrete observations of values V_k of type T. Denote
 
@@ -63,12 +60,14 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
     """Multinomial distribution over count vectors."""
 
     def compute_capabilities(self):
+        """Declare generated-compute support inherited from value and length children."""
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
         children = (self.dist,) if supports(self.len_dist, Neutral) else (self.dist, self.len_dist)
         return DistributionCapabilities(engine_ready=intersect_engine_ready(children), kernel_status="generic_table")
 
     def compute_declaration(self):
+        """Return the generated-compute declaration for the categorical multinomial."""
         from mixle.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
 
         value = declaration_for(self.dist)
@@ -120,20 +119,19 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         len_normalized: bool = False,
         name: str | None = None,
     ) -> None:
-        """MultinomialDistribution object for multinomial distribution over support of 'dist' with optional
-            distribution for number of trials 'len_dist'.
+        """Create a sparse multinomial distribution over the support of ``dist``.
 
         Args:
-            dist (SequenceEncodableProbabilityDistribution): Distribution with at most a countable support.
-            len_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for the number of trials.
-            len_normalized (bool): Take geometric mean of the density of observation.
-            name (Optional[str]): Set name to object instance.
+            dist: Distribution over individual trial values.
+            len_dist: Optional distribution over the total number of trials.
+            len_normalized: Whether to score the geometric mean per trial.
+            name: Optional diagnostic name.
 
         Attributes:
-            dist (SequenceEncodableProbabilityDistribution): Distribution with at most a countable support.
-            len_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for the number of trials.
-            len_normalized (bool): Take geometric mean of the density of observation.
-            name (Optional[str]): Set name to object instance.
+            dist: Distribution over individual trial values.
+            len_dist: Distribution over trial count.
+            len_normalized: Whether log-density is normalized by total count.
+            name: Optional diagnostic name.
 
         """
         self.dist = dist
@@ -142,7 +140,7 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
 
     def __str__(self) -> str:
-        """Return string representation of object instance."""
+        """Return a readable distribution summary."""
         s1 = str(self.dist)
         s2 = str(self.len_dist)
         s3 = repr(self.len_normalized)
@@ -369,13 +367,13 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         return super().to_fisher(**kwargs)
 
     def sampler(self, seed: int | None = None) -> MultinomialSampler:
-        """Create a MultinomialSampler object from MultinomialDistribution object instance.
+        """Return a sampler for iid multinomial bags.
 
         Args:
-            seed (Optional[int]): Set the seed for sampling from MultinomialDistribution.
+            seed: Optional random seed.
 
         Returns:
-            MultinomialSampler object.
+            A configured ``MultinomialSampler``.
 
         """
         if supports(self.len_dist, Neutral):
@@ -385,13 +383,13 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         return MultinomialSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> MultinomialEstimator:
-        """Create an MultinomialEstimator object from an MultinomialDistribution object instance.
+        """Return an estimator initialized from the value and length models.
 
         Args:
-            pseudo_count (Optional[float]): Re-weight member sufficient statistics when estimating from aggregated data.
+            pseudo_count: Optional smoothing count for child estimators.
 
         Returns:
-            MultinomialEstimator object.
+            A configured ``MultinomialEstimator``.
 
         """
         len_est = self.len_dist.estimator(pseudo_count=pseudo_count)
@@ -399,7 +397,7 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
         return MultinomialEstimator(dist_est, len_estimator=len_est, len_normalized=self.len_normalized, name=self.name)
 
     def dist_to_encoder(self) -> MultinomialDataEncoder:
-        """Create a MultinomialDataEncoder object from object instance."""
+        """Return an encoder for sparse multinomial observations."""
         return MultinomialDataEncoder(encoder=self.dist.dist_to_encoder(), len_encoder=self.len_dist.dist_to_encoder())
 
     def enumerator(self) -> MultinomialEnumerator:
@@ -426,7 +424,7 @@ class MultisetProductEnumerator:
         combine: Callable[[tuple[tuple[Any, int], ...]], Any] = list,
         offset: float = 0.0,
     ) -> None:
-        """MultisetProductEnumerator object.
+        """Create an enumerator for multiset product supports.
 
         Args:
             stream (BufferedStream): Buffered (value, log_prob) stream sorted by descending log_prob.
@@ -493,7 +491,7 @@ class MultinomialEnumerator(DistributionEnumerator):
     """Enumerates multinomial observations (lists of (value, count) pairs) in descending probability order."""
 
     def __init__(self, dist: MultinomialDistribution) -> None:
-        """MultinomialEnumerator object.
+        """Create an enumerator for multinomial outcomes.
 
         Trial counts are pulled lazily from the length distribution's enumerator; each count n
         contributes the size-n multisets over the (shared, buffered) category enumeration,
@@ -529,18 +527,20 @@ class MultinomialEnumerator(DistributionEnumerator):
 
 
 class MultinomialSampler(DistributionSampler):
+    """Draw sparse value-count observations from a categorical multinomial."""
+
     def __init__(self, dist: MultinomialDistribution, seed: int | None = None) -> None:
-        """MultinomialSampler object for sampling from multinomial distribution.
+        """Create a sampler for a categorical multinomial distribution.
 
         Args:
-            dist (MultinomialDistribution): An instance of a MultinomialDistribution object.
+            dist (MultinomialDistribution): Distribution to sample from.
             seed (Optional[int]): Set the seed for sampling.
 
         Attributes:
-             dist (MultinomialDistribution): An instance of a MultinomialDistribution object.
-             rng (RandomState): RandomState with seed set if passed.
-             dist_sampler (DistributionSampler): DistributionSampler object for sampling category values.
-             len_sampler (DistributionSampler): DistributionSampler object for sampling number of trials in multinomial.
+             dist (MultinomialDistribution): Distribution to sample from.
+             rng (RandomState): Random state initialized from ``seed`` when supplied.
+             dist_sampler (DistributionSampler): Sampler for category values.
+             len_sampler (DistributionSampler): Sampler for the number of trials.
 
         """
         self.dist = dist
@@ -576,6 +576,8 @@ class MultinomialSampler(DistributionSampler):
 
 
 class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulate value and trial-count statistics for categorical multinomial data."""
+
     def __init__(
         self,
         accumulator: SequenceEncodableStatisticAccumulator,
@@ -583,25 +585,25 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         len_accumulator: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
         keys: str | None = None,
     ) -> None:
-        """MultinomialAccumulator object for accumulating sufficient statistics from observed data.
+        """Create an accumulator for multinomial sufficient statistics.
 
         Args:
-            accumulator (SequenceEncodableStatisticAccumulator): Accumulator object for category values.
+            accumulator (SequenceEncodableStatisticAccumulator): Accumulator for category values.
             len_normalized (bool): Take geometric mean of density.
-            len_accumulator (Optional[SequenceEncodableStatisticAccumulator]): Optional accumulator object for the
+            len_accumulator (Optional[SequenceEncodableStatisticAccumulator]): Optional accumulator for the
                 number of trials in each observation.
             keys (Optional[str]): Set keys for merging sufficient statistics with objects containing matching keys.
 
         Attributes:
-            accumulator (SequenceEncodableStatisticAccumulator): Accumulator object for category values.
+            accumulator (SequenceEncodableStatisticAccumulator): Accumulator for category values.
             len_normalized (bool): Take geometric mean of density.
-            len_accumulator (SequenceEncodableStatisticAccumulator): Accumulator object for the number of trials in
+            len_accumulator (SequenceEncodableStatisticAccumulator): Accumulator for the number of trials in
                 each observation, defaults to the NullAccumulator.
             keys (Optional[str]): Set keys for merging sufficient statistics with objects containing matching keys.
 
-            _init_rng (bool): True if RandomState objects have been initialized
+            _init_rng (bool): True if random states have been initialized.
             _len_rng (Optional[RandomState]): RandomState for initializing length accumulator.
-            _acc_rng (Optional[RandomState): List of RandomState objects for initializing category accumulator.
+            _acc_rng (Optional[RandomState]): Random states for initializing category accumulators.
 
         """
         self.accumulator = accumulator
@@ -615,15 +617,12 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self._acc_rng: RandomState | None = None
 
     def update(self, x: Sequence[tuple[T, float]], weight: float, estimate: MultinomialDistribution | None) -> None:
-        """Update the sufficient statistics of MultinomialAccumulator object instance with single obseration x.
+        """Update sufficient statistics from one weighted sparse multinomial observation.
 
         Args:
-            x (Sequence[Tuple[T, float]]): A single observation of multinomial distribution.
-            weight (float): Observation weight.
-            estimate (Optional[MultinomialDistribution]): Optional previous estimate for multinomial distribution.
-
-        Returns:
-            None.
+            x: Sparse observation as ``[(value, count), ...]``.
+            weight: Observation weight.
+            estimate: Optional previous multinomial estimate.
 
         """
         xx = [u[0] for u in x]
@@ -650,10 +649,7 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """Set RandomState member variables for initialize and seq_initialize consistency.
 
         Args:
-            rng (RandomState): RandomState object used to set member RandomState objects.
-
-        Returns:
-            None.
+            rng: Random state used to seed child initializers.
 
         """
         rng_seeds = rng.randint(maxrandint, size=2)
@@ -667,7 +663,7 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         Args:
             x (Sequence[Tuple[T, float]]): A single observation of multinomial distribution.
             weight (float): Observation weight.
-            rng (Optional[RandomState]): RandomState object for initializing random number generator.
+            rng (Optional[RandomState]): Random state for initialization.
 
         Returns:
 
@@ -752,7 +748,7 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         Args:
             x: See above for details.
             weights (np.ndarray): Numpy array of observation weights.
-            rng (RandomState): RandomState object for setting seed.
+            rng (RandomState): Random state for initialization.
 
         Returns:
             None.
@@ -770,14 +766,13 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.len_accumulator.seq_initialize(enc_nseq, weights * enc_ww, self._len_rng)
 
     def combine(self, suff_stat: tuple[SS1, SS2 | None]) -> MultinomialAccumulator:
-        """Combine the sufficient statistics of object instance with aggregated sufficient statistics in 'suff_stat'.
+        """Merge aggregated multinomial sufficient statistics into this accumulator.
 
         Args:
-            suff_stat (Tuple[SS1, Optional[SS2]]): Contains sufficient statistics for value distribution (SS1) and
-                sufficient statistic for length distribution (SS2).
+            suff_stat: Tuple containing value-model and length-model sufficient statistics.
 
         Returns:
-            MultinomialAccumulator object.
+            This accumulator.
 
         """
         self.accumulator.combine(suff_stat[0])
@@ -786,18 +781,17 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[Any, Any | None]:
-        """Return object instance sufficient statistics as Tuple[SS1, Optional[SS2]]."""
+        """Return sufficient statistics as ``(value_stats, length_stats)``."""
         return self.accumulator.value(), self.len_accumulator.value()
 
     def from_value(self, x: tuple[SS1, SS2 | None]) -> MultinomialAccumulator:
-        """Set object instance sufficient statistics to arg 'x'.
+        """Replace this accumulator's sufficient statistics.
 
         Args:
-            x (Tuple[SS1, Optional[SS2]]): Contains sufficient statistics for value distribution (SS1) and
-                sufficient statistic for length distribution (SS2).
+            x: Tuple containing value-model and length-model sufficient statistics.
 
         Returns:
-            MultinomialAccumulator object.
+            This accumulator.
 
         """
         self.accumulator.from_value(x[0])
@@ -812,13 +806,10 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge the sufficient statistics of object instance with matching keys of stats_dict.
+        """Merge this accumulator into ``stats_dict`` under configured keys.
 
         Args:
-            stats_dict (Dict[str, Any]): Maps keys to sufficient statistics.
-
-        Returns:
-            None.
+            stats_dict: Mapping from merge keys to sufficient statistics.
 
         """
         if self.keys is not None:
@@ -831,13 +822,10 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.len_accumulator.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace the sufficient statistics of object instance with matching keys in stats_dict.
+        """Replace sufficient statistics from matching keys in ``stats_dict``.
 
         Args:
-            stats_dict (Dict[str, Any]): Maps keys to sufficient statistics.
-
-        Returns:
-            None.
+            stats_dict: Mapping from merge keys to sufficient statistics.
 
         """
         if self.keys is not None:
@@ -848,13 +836,15 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.len_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> MultinomialDataEncoder:
-        """Create a MultinomialDataEncoder object from object instance."""
+        """Return an encoder compatible with sparse multinomial observations."""
         return MultinomialDataEncoder(
             encoder=self.accumulator.acc_to_encoder(), len_encoder=self.len_accumulator.acc_to_encoder()
         )
 
 
 class MultinomialAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create categorical multinomial accumulators and child accumulators."""
+
     def __init__(
         self,
         est_factory: StatisticAccumulatorFactory,
@@ -862,7 +852,7 @@ class MultinomialAccumulatorFactory(StatisticAccumulatorFactory):
         len_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
         keys: str | None = None,
     ) -> None:
-        """MultinomialAccumulatorFactory object for creating MultinomialAccumulator objects.
+        """Factory for multinomial accumulators.
 
         Args:
             est_factory (StatisticAccumulatorFactory): StatisticAccumulatorFactory for the value distribution.
@@ -883,7 +873,7 @@ class MultinomialAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> MultinomialAccumulator:
-        """Returns MultinomialAccumulator object."""
+        """Return a fresh multinomial accumulator."""
         len_acc = self.len_factory.make()
         return MultinomialAccumulator(
             self.est_factory.make(), self.len_normalized, len_accumulator=len_acc, keys=self.keys
@@ -891,6 +881,8 @@ class MultinomialAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class MultinomialEstimator(ParameterEstimator):
+    """Estimate a categorical multinomial from value and length sufficient statistics."""
+
     def __init__(
         self,
         estimator: ParameterEstimator,
@@ -900,25 +892,23 @@ class MultinomialEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """MultinomialEstimator object for estimating MultinomialDistribution objects from aggregated data.
+        """Create an estimator for sparse multinomial sufficient statistics.
 
         Args:
-            estimator (ParameterEstimator): ParameterEstimator for distribution of values.
-            len_estimator (Optional[ParameterEstimator]): Optional ParameterEstimator for the number of trials.
-            len_dist (Optional[SequenceEncodableProbabilityDistribution]): Set distribution for the number of trials.
-            len_normalized (Optional[bool]): Take geometric mean of density.
-            name (Optional[str]): Set name to object instance.
-            keys (Optional[str]): Set keys to object instance for merging sufficient statistics.
+            estimator: Estimator for the value distribution.
+            len_estimator: Optional estimator for the number of trials.
+            len_dist: Fixed trial-count distribution, if it should not be estimated.
+            len_normalized: Whether to score the geometric mean per trial.
+            name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
 
         Attributes:
-            estimator (ParameterEstimator): ParameterEstimator for distribution of values.
-            len_estimator (ParameterEstimator): ParameterEstimator for the number of trials, defaults to
-                the NullEstimator if None is passed.
-            len_dist (Optional[SequenceEncodableProbabilityDistribution]): If None, distribution for number of trials
-                will be estimated from 'len_estimator'.
-            len_normalized (Optional[bool]): Take geometric mean of density.
-            name (Optional[str]): Name of object instance.
-            keys (Optional[str]): Keys of object instance for merging sufficient statistics.
+            estimator: Estimator for the value distribution.
+            len_estimator: Estimator for trial count.
+            len_dist: Fixed trial-count distribution, if supplied.
+            len_normalized: Whether log-density is normalized by total count.
+            name: Optional diagnostic name.
+            keys: Optional sufficient-statistic key.
 
         """
         self.estimator = estimator
@@ -929,7 +919,7 @@ class MultinomialEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self) -> MultinomialAccumulatorFactory:
-        """Create MultinomialAccumulatorFactory object from MultinomialEstimator object instance."""
+        """Return an accumulator factory matching this estimator."""
         est_factory = self.estimator.accumulator_factory()
         len_factory = self.len_estimator.accumulator_factory()
         return MultinomialAccumulatorFactory(
@@ -937,15 +927,14 @@ class MultinomialEstimator(ParameterEstimator):
         )
 
     def estimate(self, nobs: float | None, suff_stat: tuple[SS1, SS2 | None]) -> MultinomialDistribution:
-        """Estimate a MultinomialDistribution object from aggregated data contained in arg 'suff_stat'.
+        """Estimate a multinomial distribution from aggregated sufficient statistics.
 
         Args:
-            nobs (Optional[float]): Number of observations used in aggregation of 'suff_stat'.
-            suff_stat (Tuple[SS1, Optional[SS2]]): Tuple of sufficient statistics for distribution of values and
-                trial distribution.
+            nobs: Number of observations represented by ``suff_stat``.
+            suff_stat: Tuple of value-model and trial-count sufficient statistics.
 
         Returns:
-            MultinomialDistribution object.
+            A fitted multinomial distribution.
 
         """
         len_dist = self.len_estimator.estimate(nobs, suff_stat[1]) if self.len_dist is None else self.len_dist
@@ -954,35 +943,35 @@ class MultinomialEstimator(ParameterEstimator):
 
 
 class MultinomialDataEncoder(DataSequenceEncoder):
-    def __init__(self, encoder: DataSequenceEncoder, len_encoder: DataSequenceEncoder) -> None:
-        """MultinomialDataEncoder object for encoding sequences of iid multinomial observations.
+    """Encode sparse categorical multinomial observations for vectorized scoring."""
 
-        Note: Arg encoders[0] must encoder data type T of multinomial, and encoders[1] must have support on the
-        positive integers.
+    def __init__(self, encoder: DataSequenceEncoder, len_encoder: DataSequenceEncoder) -> None:
+        """Create an encoder for sparse multinomial observations.
+
+        ``encoder`` handles individual trial values and ``len_encoder`` handles
+        total trial counts.
 
         Args:
-            encoder (DataSequenceEncoder): DataSequenceEncoder corresponding to the
-                multinomial value encoder. Must be data type T.
-            len_encoder (DataSequenceEncoder): DataSequenceEncoder corresponding to the trial size of the multinomial.
-
+            encoder: Encoder for individual trial values.
+            len_encoder: Encoder for total trial count.
 
         Attributes:
-             encoder (DataSequenceEncoder): DataSequenceEncoder corresponding to the
-                multinomial value encoder. Must be data type T.
-            len_encoder (DataSequenceEncoder): DataSequenceEncoder corresponding to the trial size of the multinomial.
+            encoder: Encoder for individual trial values.
+            len_encoder: Encoder for total trial count.
 
         """
         self.encoder = encoder
         self.len_encoder = len_encoder
 
     def __eq__(self, other: object) -> bool:
-        """Check if other is equivalent to MultinomialDataEncoder object instance.
+        """Return whether ``other`` uses the same length encoder.
 
         Args:
-            other (object): Object to compare.
+            other: Object to compare.
 
         Returns:
-            True if encoder for distribution and length distribution match MultinomialDataEncoder object instance.
+            ``True`` when ``other`` is a ``MultinomialDataEncoder`` with an
+            equivalent length encoder.
 
         """
         if isinstance(other, MultinomialDataEncoder):
@@ -991,13 +980,13 @@ class MultinomialDataEncoder(DataSequenceEncoder):
             return False
 
     def __str__(self) -> str:
-        """Return string representation of object instance."""
+        """Return a readable encoder summary."""
         return "MultinomialDataEncoder(len_encoder=" + str(self.len_encoder) + ")"
 
     def seq_encode(self, x: Sequence[Sequence[tuple[T, float]]]):
-        """Encode a sequence of iid observations of multinomial distribution for use with vectorized functions.
+        """Encode iid multinomial observations for vectorized ``seq_*`` methods.
 
-        Returns a tuple of size 7 containing:
+        The returned tuple contains:
             rv1 (ndarray[int]): Observation index of sequence values.
             rv2 (ndarray[float]): Trial size for each observation.
             rv3 (ndarray[float]): Non-zero trial size indices.

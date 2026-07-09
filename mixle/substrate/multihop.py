@@ -42,15 +42,18 @@ class HopChain:
 
     @property
     def items(self) -> list[SubstrateItem]:
+        """Retrieved items in hop-chain order."""
         return [s.item for s in self.steps]
 
     def by_depth(self) -> dict[int, list[SubstrateItem]]:
+        """Group retrieved items by hop depth."""
         out: dict[int, list[SubstrateItem]] = {}
         for s in self.steps:
             out.setdefault(s.depth, []).append(s.item)
         return out
 
     def max_depth(self) -> int:
+        """Return the deepest hop reached by the chain."""
         return max((s.depth for s in self.steps), default=0)
 
     def path_to(self, item_id: str) -> list[SubstrateItem]:
@@ -66,6 +69,7 @@ class HopChain:
         return list(reversed(chain))
 
     def provenance(self) -> list[dict[str, Any]]:
+        """Return compact provenance records for every hop step."""
         return [
             {
                 "id": s.item.id,
@@ -79,6 +83,7 @@ class HopChain:
         ]
 
     def to_context(self, task: str | None = None, **assemble_kw: Any) -> Any:
+        """Assemble the hop-chain items into a context packet."""
         from mixle.substrate.context import assemble_context
 
         shard = Substrate()

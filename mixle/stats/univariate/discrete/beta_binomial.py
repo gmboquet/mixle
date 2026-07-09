@@ -91,6 +91,7 @@ class BetaBinomialSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> int | np.ndarray:
+        """Draw one count or an array of iid counts."""
         d = self.dist
         p = self.rng.beta(d.a, d.b, size=size)
         return self.rng.binomial(d.n, p)
@@ -107,36 +108,44 @@ class BetaBinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: int, weight: float, estimate: BetaBinomialDistribution | None) -> None:
+        """Accumulate weighted first and second moments for one count."""
         self.sum += weight * x
         self.sum2 += weight * x * x
         self.count += weight
 
     def initialize(self, x: int, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one count."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: BetaBinomialDistribution | None) -> None:
+        """Accumulate weighted moments from encoded counts."""
         xx = np.asarray(x, dtype=np.float64)
         self.sum += float(np.dot(xx, weights))
         self.sum2 += float(np.dot(xx * xx, weights))
         self.count += float(np.sum(weights))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded counts."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "BetaBinomialAccumulator":
+        """Merge another beta-binomial sufficient-statistic tuple."""
         self.sum += suff_stat[0]
         self.sum2 += suff_stat[1]
         self.count += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return accumulated sum, second moment sum, and count."""
         return self.sum, self.sum2, self.count
 
     def from_value(self, x: tuple[float, float, float]) -> "BetaBinomialAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.sum, self.sum2, self.count = float(x[0]), float(x[1]), float(x[2])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -144,10 +153,12 @@ class BetaBinomialAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "BetaBinomialDataEncoder":
+        """Return the encoder used by this accumulator."""
         return BetaBinomialDataEncoder()
 
 
@@ -159,6 +170,7 @@ class BetaBinomialAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> BetaBinomialAccumulator:
+        """Create a fresh beta-binomial accumulator."""
         return BetaBinomialAccumulator(name=self.name, keys=self.keys)
 
 
@@ -180,9 +192,11 @@ class BetaBinomialEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> BetaBinomialAccumulatorFactory:
+        """Return an accumulator factory for beta-binomial moments."""
         return BetaBinomialAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> BetaBinomialDistribution:
+        """Estimate beta-binomial shape parameters from weighted moments."""
         sum_x, sum_x2, count = suff_stat
         n = self.n
         if count <= 0.0 or n == 0:
@@ -211,4 +225,5 @@ class BetaBinomialDataEncoder(DataSequenceEncoder):
         return isinstance(other, BetaBinomialDataEncoder)
 
     def seq_encode(self, x: Sequence[int]) -> np.ndarray:
+        """Encode counts as a floating-point array."""
         return np.asarray(x, dtype=np.float64)

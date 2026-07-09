@@ -1,9 +1,9 @@
-"""Verified structural proposal at a capacity ceiling (CARD IMAGINE-a, research spike, workstream A5).
+"""Verified structural proposal at a capacity ceiling.
 
-The plan's furthest-out claim: when the capacity ladder (D2) reports "no rung in the current model
-class meets target" -- more parameters within the SAME structural family cannot close the gap -- a
-proposal step generates a NEW structural candidate (a richer family, e.g. a mixture where the current
-class is a single component) outside what was tried. Every proposal is VERIFIED on held-out data
+When a capacity ladder reports that no rung in the current model class meets a
+target, a proposal step can generate a new structural candidate (a richer
+family, e.g. a mixture where the current class is a single component) outside
+what was tried. Every proposal is verified on held-out data
 before adoption (a proposal that improves train but not held-out is rejected as overfitting), and
 every proposal must name a genuine new INFORMATION SOURCE -- a structural capability the starting
 class provably lacks -- never adopted on train-improvement alone: a richer family with more free
@@ -13,11 +13,11 @@ gain. A proposal naming no new information source is rejected regardless of any 
     ceiling = ceiling_report(current_class_held_out, target)          # "no rung meets target"
     verdict = propose_structure(candidates, train, held_out, target)  # verified-or-rejected, each
 
-Acceptance (per the card): on a task with a known paradigm-shift fix (a capability the starting class
-provably cannot represent but a specific richer structure can), the proposer finds a verified
+On a task with a known paradigm-shift fix (a capability the starting class
+provably cannot represent but a specific richer structure can), the proposer should find a verified
 structure that breaks the ceiling; a candidate with NO new information source is correctly rejected
 even where it would improve held-out. Treat a negative result (no verified candidate breaks the
-ceiling) as an expected, publishable outcome -- this is a research spike, not a guaranteed win.
+ceiling) as an expected outcome, not a failure to hide.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from typing import Any
 @dataclass
 class CeilingReport:
     """Whether the CURRENT structural class meets ``target`` on held-out data -- the capacity
-    ladder's verdict (D2), computed once before any new structure is proposed."""
+    ladder's verdict, computed once before any new structure is proposed."""
 
     held_out_score: float
     target: float
@@ -38,6 +38,7 @@ class CeilingReport:
 
 
 def ceiling_report(held_out_score: float, target: float) -> CeilingReport:
+    """Return whether held-out score reaches the requested target."""
     return CeilingReport(held_out_score=held_out_score, target=target, met=held_out_score >= target)
 
 
@@ -46,7 +47,7 @@ class StructuralCandidate:
     """One proposed richer structure. ``new_information`` MUST name the specific capability the
     starting class provably lacks (e.g. "2-component mixture: represents a bimodal posterior a single
     Gaussian cannot") -- empty/``None`` means "no new information source" and the candidate is
-    rejected regardless of any measured improvement, per the card's own gate."""
+    rejected regardless of any measured improvement."""
 
     name: str
     fit: Callable[[Sequence[Any]], Any]  # train data -> fitted model with .log_density / .score
@@ -55,6 +56,8 @@ class StructuralCandidate:
 
 @dataclass
 class ProposalVerdict:
+    """Evaluation verdict for one proposed structural candidate."""
+
     name: str
     accepted: bool
     train_score: float
@@ -64,9 +67,11 @@ class ProposalVerdict:
 
 @dataclass
 class ImagineResult:
+    """Capacity ceiling result plus candidate verdicts from structural imagination."""
+
     ceiling: CeilingReport
     verdicts: list[ProposalVerdict] = field(default_factory=list)
-    breaks_ceiling: str | None = None  # name of the FIRST verified candidate that reaches target, if any
+    breaks_ceiling: str | None = None  # name of the first verified candidate that reaches target, if any
 
 
 def _mean_log_density(model: Any, data: Sequence[Any]) -> float:
@@ -81,8 +86,8 @@ def propose_structure(
     held_out: Sequence[Any],
     ceiling: CeilingReport,
 ) -> ImagineResult:
-    """Fit and verify each candidate in order. A candidate is accepted only if (a) it names a genuine
-    new information source AND (b) it improves held-out score over the ceiling's own held-out score
+    """Fit and verify each candidate in order. A candidate is accepted only if it names a genuine
+    new information source and improves held-out score over the ceiling's own held-out score
     (never train alone, since a richer family can always fit train better without a real capability
     gain). The first accepted candidate that also reaches ``ceiling.target`` breaks the ceiling."""
     result = ImagineResult(ceiling=ceiling)

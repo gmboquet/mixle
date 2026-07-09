@@ -117,6 +117,7 @@ DictRecordEstimator = _estimator_provider(False).DictRecordEstimator
 
 
 def get_optional_estimator(est: ParameterEstimator, missing_value: Any | None = None, use_bstats: bool = False):
+    """Wrap an estimator with an optional/missing-value model."""
     return _estimator_provider(use_bstats).OptionalEstimator(est, missing_value=missing_value)
 
 
@@ -143,6 +144,7 @@ def get_sequence_estimator(
     emp_suff_stat: bool = True,
     use_bstats: bool = False,
 ) -> "ParameterEstimator":
+    """Return a sequence estimator with an optional empirical length model."""
     len_est = None
     if len_dict:
         len_est = get_length_estimator(len_dict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
@@ -168,20 +170,24 @@ def get_set_estimator(
 
 
 def get_ignored_estimator(use_bstats: bool = False) -> "ParameterEstimator":
+    """Return the estimator used for ignored or non-modelable fields."""
     return _estimator_provider(use_bstats).IgnoredEstimator()
 
 
 def get_composite_estimator(ests: Sequence[ParameterEstimator], use_bstats: bool = False) -> "ParameterEstimator":
+    """Return a composite estimator over an ordered list of field estimators."""
     return _estimator_provider(use_bstats).CompositeEstimator(ests)
 
 
 def get_dict_record_estimator(keys: Sequence[Any], ests: Sequence[ParameterEstimator]) -> "ParameterEstimator":
+    """Return a record estimator keyed by dictionary field names."""
     return DictRecordEstimator(keys, ests)
 
 
 def get_categorical_estimator(
     vdict: dict[T, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
 ) -> "ParameterEstimator":
+    """Return a categorical estimator from observed value counts."""
     provider = _estimator_provider(use_bstats)
     if use_bstats:
         return provider.CategoricalEstimator(prior=_categorical_default_prior(vdict))
@@ -212,6 +218,7 @@ def _dense_integer_support(vdict: dict[Any, float]) -> bool:
 def get_integer_categorical_estimator(
     vdict: dict[int, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
 ) -> "ParameterEstimator":
+    """Return an integer-categorical estimator over the observed dense support."""
     min_val, max_val, width = _integer_range(vdict)
 
     if use_bstats:
@@ -236,6 +243,7 @@ def get_integer_categorical_estimator(
 def get_poisson_estimator(
     vdict: dict[int, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
 ) -> "ParameterEstimator":
+    """Return a Poisson count estimator from empirical integer counts."""
 
     if use_bstats:
         return _estimator_provider(True).PoissonEstimator(prior=_poisson_default_prior())
@@ -269,6 +277,7 @@ def get_gaussian_estimator(
     emp_suff_stat: bool = True,
     use_bstats: bool = False,
 ) -> "ParameterEstimator":
+    """Return a univariate Gaussian estimator from weighted numeric values."""
 
     if emp_suff_stat:
         ss_0 = 0.0
@@ -414,12 +423,13 @@ def get_gaussian_mixture_estimator(
 
 
 def get_multivariate_gaussian_estimator(dim: int, use_bstats: bool = False) -> "ParameterEstimator":
+    """Return a multivariate Gaussian estimator for vectors of dimension ``dim``."""
     if use_bstats:
         return _estimator_provider(True).MultivariateGaussianEstimator(dim=dim, prior=_mvn_default_prior(dim))
     return _estimator_provider(False).MultivariateGaussianEstimator(dim=dim)
 
 
-# --- modality-fingerprint routing (workstream A1) ---------------------------------------------------------
+# --- modality-fingerprint routing ---------------------------------------------------------
 #
 # A fixed-length numeric vector is not always "low-dimensional tabular numeric": at moderate-to-high
 # dimension it is much more often an embedding (a frozen encoder's output, a pooled feature vector) than

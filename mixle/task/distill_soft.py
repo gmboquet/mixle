@@ -1,19 +1,20 @@
-"""Soft-label distillation from a frontier teacher's PROBABILITIES, not just its argmax label.
+"""Soft-label distillation from a teacher probability distribution.
 
-:mod:`mixle.task.distill` distills a frontier teacher's *hard* labels into a tiny student. That throws
-away the teacher's "dark knowledge" -- the relative probability it put on the runner-up classes, which
-says *how* confident it was and *which* wrong answers were plausible. When the teacher can expose a
-probability (or top-k logprob) vector per example -- as modern LLM APIs do -- matching that full
-distribution transfers strictly more than matching the argmax.
+:mod:`mixle.task.distill` distills hard teacher labels into a local student.
+This module uses the richer case where the teacher exposes a probability or
+top-k log-probability vector for each example. Matching that distribution
+preserves runner-up class information and confidence structure that hard labels
+discard.
 
-This is the frontier-label analog of the temperature-softened Hinton distillation in
-:mod:`mixle.task.distill_methods` (which needs a torch teacher exposing logits): here the teacher is any
-callable returning a per-example probability vector, and the student is the same small hashed-n-gram MLP
-:mod:`mixle.task.distill` trains, but fit to the teacher's SOFT targets by temperature-scaled KL
-(optionally mixed with the hard-label loss). The result is an ordinary :class:`~mixle.task.model.TaskModel`
-whose ``proba_batch`` matches the teacher's calibrated distribution, not just its top-1 -- so it drops into
-:class:`~mixle.task.calibrate.CalibratedTaskModel` / :class:`~mixle.task.router.Router` like any student,
-but carries better-calibrated confidence into the routing decision.
+This is the frontier-label analogue of temperature-softened Hinton
+distillation in :mod:`mixle.task.distill_methods`, without requiring a torch
+teacher that exposes logits. The teacher is any callable returning a per-example
+probability vector. The student is the compact hashed-n-gram MLP used by
+:mod:`mixle.task.distill`, trained against soft targets with temperature-scaled
+KL and optionally mixed with hard-label loss. The result is a
+:class:`~mixle.task.model.TaskModel` whose ``proba_batch`` approximates the
+teacher's calibrated distribution and can be calibrated or routed like any
+other student.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ _EPS = 1e-12
 
 
 def _as_prob_matrix(rows: Sequence[Any], n_labels: int | None) -> np.ndarray:
-    """Coerce teacher output to an ``(N, C)`` row-stochastic matrix (renormalize; clip tiny negatives)."""
+    """Coerce teacher output to an ``(N, C)`` row-stochastic matrix; renormalize and clip small negatives."""
     p = np.atleast_2d(np.asarray(rows, dtype=np.float64))
     if p.ndim != 2:
         raise ValueError("teacher_probs must be a 2-D (N, C) array of per-example class probabilities.")
@@ -58,15 +59,16 @@ def distill_from_soft_labels(
     task: str = "",
     device: str = "cpu",
 ) -> TaskModel:
-    """Fit a student to a teacher's per-example SOFT distribution ``teacher_probs`` over ``labels``.
+    """Fit a student to per-example teacher probabilities over ``labels``.
 
     ``teacher_probs`` is ``(N, C)`` with rows summing to 1 (renormalized if not), column ``j`` the
     teacher's probability of ``labels[j]``. The student minimizes the temperature-softened
     ``T^2 * KL(teacher || student)`` (Hinton's scaling, so the soft gradients keep magnitude as ``T``
-    grows), optionally mixed with ``hard_weight`` times the hard cross-entropy against the teacher's
-    argmax. ``temperature > 1`` softens both sides so the runner-up structure (the dark knowledge) drives
-    the fit. Deterministic given ``seed``; returns a :class:`TaskModel` whose ``proba_batch`` approximates
-    the teacher's distribution, not just its top-1.
+    grows), optionally mixed with ``hard_weight`` times the hard cross-entropy
+    against the teacher's argmax. ``temperature > 1`` softens both sides so
+    runner-up structure influences the fit. The result is deterministic given
+    ``seed`` and returns a :class:`TaskModel` whose ``proba_batch``
+    approximates the teacher's full distribution.
     """
     import torch
 
@@ -147,7 +149,7 @@ def distill_soft(
 
 def soft_agreement(student: TaskModel, teacher_probs: Sequence[Any], texts: Sequence[str]) -> float:
     """Mean KL divergence ``KL(teacher || student)`` over ``texts`` -- how faithfully the student matches
-    the teacher's full SOFT distribution (0 = identical), the soft-distillation analog of
+    the teacher's full soft distribution (0 = identical), the soft-distillation analog of
     :func:`mixle.task.distill.agreement`. Lower is better; use it to compare soft vs hard students."""
     p_teacher = _as_prob_matrix(teacher_probs, None)
     p_student = np.asarray(student.adapter.proba_batch(student.model, [str(t) for t in texts]), dtype=np.float64)

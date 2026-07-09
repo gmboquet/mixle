@@ -4,6 +4,10 @@ Cookbook
 These recipes answer the questions that come up when you are writing code
 against ``mixle`` rather than reading about it.
 
+Treat the recipes as starting points. Before moving one into production, add a
+held-out score, route explanation, missing-data policy, and artifact reload
+check that match the risk of the workflow.
+
 Fit a scalar family
 -------------------
 
@@ -74,11 +78,15 @@ Let mixle infer an estimator
    init = initialize(data, est, rng=1)
    model = estimate(data, est, prev_estimate=init)
 
+Print or persist the inferred estimator before relying on it. For a fuller
+field-by-field explanation, use ``recommend_model`` from the next recipe and
+store low-confidence fields with the artifact.
+
 Use multiple starts for a mixture
 ---------------------------------
 
 Latent models can settle into local optima. Prefer ``best_of`` when the model is
-small enough to restart cheaply.
+small enough for multiple restarts.
 
 .. code-block:: python
 
@@ -145,6 +153,9 @@ Recommend a model from data
        print(field.path, field.family, field.runner_up, field.gap_bits)
    model = rec.fit(rows, max_its=30, out=None)
 
+Keep the recommendation report with the model. A low ``gap_bits`` value means
+the family choice is fragile and should be reviewed, not hidden inside the fit.
+
 Distill an LLM labeler
 ----------------------
 
@@ -167,6 +178,9 @@ Serve a calibrated cascade
    cascade = Cascade(calibrated, teacher, cost=CostModel(c_frontier=0.01, c_local=0.00001))
    predictions = cascade.serve(requests)
    print(cascade.report())
+
+Before replacing a teacher, run a scorecard on held-out or shadow traffic and
+check rare labels separately.
 
 Replace an existing task function
 ---------------------------------
@@ -252,7 +266,7 @@ Route across several task tiers
    from mixle.task import Router
 
    router = Router.from_solutions(
-       [tiny_solution, small_solution],
+       [low_cost_solution, compact_solution],
        teacher=frontier_teacher,
        costs=[0.0001, 0.001, 0.03],
    )
@@ -370,3 +384,19 @@ Create a durable production fit
 
    model, header = fit_with_provenance(data, estimator, seed=1)
    print(header.dataset_hash, header.model_hash)
+
+Verify a saved task artifact
+----------------------------
+
+.. code-block:: python
+
+   from mixle.task import TaskModel
+
+   local_model.save("student-artifact")
+   restored = TaskModel.load("student-artifact")
+   assert restored(example) == local_model(example)
+
+Use the documented ``save``/``load`` helpers for the artifact family you are
+serving. The point of the recipe is the check: a model is not ready for service
+until a fresh object can reproduce representative scoring or prediction
+behavior.

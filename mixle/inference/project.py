@@ -141,7 +141,7 @@ def _runnalls_cost(wi: float, mi: np.ndarray, ci: np.ndarray, wj: float, mj: np.
     """Runnalls' KL dissimilarity for merging components i and j (the upper bound on KL increase).
 
     ``B(i,j) = ½[(wi+wj) ln|Σij| - wi ln|Σi| - wj ln|Σj|]`` with ``Σij`` the moment-matched merge. It is
-    ≥ 0, zero iff the two components are identical, and cheap -- three log-determinants per pair.
+    ≥ 0, zero iff the two components are identical, and inexpensive -- three log-determinants per pair.
     """
     wij = wi + wj
     _, cov = _moment_match(np.array([wi, wj]), np.stack([mi, mj]), np.stack([ci, cj]))
@@ -205,8 +205,8 @@ def moment_project(teacher: Any, target: Any = None, *, exact: bool = True, **sa
     If ``teacher`` is a Gaussian mixture and ``target`` is ``None`` (or a single Gaussian family), the
     projection is the closed-form :func:`collapse_mixture` -- no samples, machine-precision. Otherwise
     (or when ``exact=False``) it delegates to :func:`mixle.ops.project`, the sampling M-projection onto
-    ``target``'s family. This gives one entry point that is exact where the structure allows and honest
-    (sampling, clearly) where it does not.
+    ``target``'s family. This gives one entry point that is exact where the structure allows and explicit
+    about sampling where it does not.
     """
     if exact and target is None:
         try:

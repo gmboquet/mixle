@@ -30,6 +30,7 @@ class LineageReport:
     visited: int = 0  # distinct ancestors reached (cycle-safe count)
 
     def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable lineage report."""
         return {
             "item_id": self.item_id,
             "intact": self.intact,
@@ -86,10 +87,10 @@ def verify_lineage(substrate: Substrate, item_id: str, *, max_depth: int = 20) -
 
 
 def audit_substrate(substrate: Substrate, *, scope: str | None = None) -> dict[str, Any]:
-    """A knowledge-integrity sweep: how many items have intact lineage, and every broken one named.
+    """A knowledge-integrity sweep: how many items have intact lineage, and every invalid link named.
 
     Returns ``{n_items, n_intact, n_broken, broken: [{item_id, dangling}, ...]}`` -- the store's trust
-    surface at a glance, so a broken provenance edge surfaces as a finding rather than a silent lie."""
+    surface at a glance, so an invalid provenance edge surfaces as a finding rather than an unreported inconsistency."""
     items = substrate.all(scope=scope)
     broken: list[dict[str, Any]] = []
     for it in items:

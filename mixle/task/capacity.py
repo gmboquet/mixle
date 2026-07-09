@@ -5,8 +5,8 @@ Distillation (:mod:`mixle.task.distill`) and recipe search (:mod:`mixle.task.tun
 student's representation *family* is fixed (hashed n-grams) and search knobs within it. Some teachers
 need a richer family -- a rule that generalizes across synonyms a hashed n-gram featurizer cannot see, for
 instance. :func:`capacity_ladder` climbs a small ordered set of representation families ("rungs"), measures
-each rung's held-out agreement with the teacher, and returns the smallest rung that meets a target -- or an
-honest "not capturable at these rungs" with every rung's measured ceiling attached, never an exception.
+each rung's held-out agreement with the teacher, and returns the smallest rung that meets a target -- or a
+measured "not capturable at these rungs" outcome with every rung's ceiling attached, never an exception.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import numpy as np
 from mixle.task.distill import _fit_mlp, _split_for_calibration, agreement, distill_from_labels
 from mixle.task.model import HashedNGram, TaskModel, _ClassifierIO
 
-#: the two rungs this card builds; later rungs are recognized names that may be stubs in this environment.
+#: the two rungs this module can fit; later rungs are recognized but may be unavailable in this environment.
 DEFAULT_RUNGS: tuple[str, ...] = ("hashed_ngram", "embedding_head")
 
 #: every rung name this module understands, in increasing-capacity order (used by :func:`climb_to`).
@@ -46,6 +46,7 @@ class WordEmbeddingFeaturizer:
         self._fallback = HashedNGram(n=3, dim=self.dim, seed=self.seed)
 
     def transform(self, texts: list[str]) -> np.ndarray:
+        """Map texts to normalized embedding features with hashed fallback rows."""
         out = np.zeros((len(texts), self.dim), dtype=np.float32)
         for i, t in enumerate(texts):
             words = str(t).lower().split()
@@ -55,10 +56,12 @@ class WordEmbeddingFeaturizer:
         return out / np.where(norms > 0, norms, 1.0)
 
     def to_spec(self) -> dict[str, Any]:
+        """Serialize embedding vectors and fallback hashing settings."""
         return {"vectors": {k: v.tolist() for k, v in self.vectors.items()}, "dim": self.dim, "seed": self.seed}
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> WordEmbeddingFeaturizer:
+        """Reconstruct the embedding featurizer from an artifact spec."""
         return cls(spec["vectors"], spec["dim"], spec["seed"])
 
 
@@ -91,7 +94,7 @@ class LadderResult:
     winner: str | None
 
     def ceiling(self, rung: str) -> float | None:
-        """The measured score of ``rung``, or ``None`` if it was not built (e.g. a stub rung in this environment)."""
+        """The measured score of ``rung``, or ``None`` if that rung was unavailable in this environment."""
         for r in self.rungs:
             if r.rung == rung:
                 return r.score
@@ -132,7 +135,7 @@ def capacity_ladder(
     this environment: they are skipped with a note, never raised as an error.
 
     Returns a :class:`LadderResult` with every rung's measured score and either the smallest rung meeting
-    ``target`` or ``winner=None`` with every built rung's ceiling attached -- "target unmet" is a valid, honest
+    ``target`` or ``winner=None`` with every built rung's ceiling attached -- "target unmet" is a valid
     result, never an exception.
     """
     texts = [str(t) for t in texts]

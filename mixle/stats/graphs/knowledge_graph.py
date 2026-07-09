@@ -1,9 +1,4 @@
-"""Create, estimate, and sample from a knowledge-graph embedding distribution.
-
-Defines KnowledgeGraphDistribution, KnowledgeGraphSampler, KnowledgeGraphAccumulatorFactory,
-KnowledgeGraphAccumulator, KnowledgeGraphEstimator, and KnowledgeGraphDataEncoder for use with the
-regular mixle estimation framework (``optimize`` / ``seq_log_density`` / the PPL surface), like
-the other graph distributions.
+"""Knowledge-graph embedding distributions for integer triple observations.
 
 Data type: a triple ``(h, r, t)`` of integer indices -- head entity, relation, tail entity. The model
 embeds each entity and relation in ``dim`` dimensions and scores a triple by the DistMult bilinear form
@@ -184,10 +179,12 @@ class KnowledgeGraphDistribution(SequenceEncodableProbabilityDistribution):
         return KnowledgeGraphPattern(self, pattern, candidates=candidates, known=known, beam=beam)
 
     def log_density(self, x: Sequence[int]) -> float:
+        """Return ``log p(t | h, r)`` for one integer triple."""
         h, r, t = int(x[0]), int(x[1]), int(x[2])
         return float(self.tail_log_posterior(h, r)[t])
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return vectorized tail log-probabilities for encoded triples."""
         x = np.asarray(x, dtype=int)
         out = np.empty(x.shape[0], dtype=float)
         for n in range(x.shape[0]):
@@ -195,14 +192,17 @@ class KnowledgeGraphDistribution(SequenceEncodableProbabilityDistribution):
         return out
 
     def sampler(self, seed: int | None = None) -> "KnowledgeGraphSampler":
+        """Return a sampler for observed triples."""
         return KnowledgeGraphSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "KnowledgeGraphEstimator":
+        """Return a DistMult embedding estimator for this entity/relation shape."""
         return KnowledgeGraphEstimator(
             self.num_entities, self.num_relations, dim=self.dim, name=self.name, keys=self.keys
         )
 
     def dist_to_encoder(self) -> "KnowledgeGraphDataEncoder":
+        """Return the triple encoder used by vectorized methods."""
         return KnowledgeGraphDataEncoder()
 
 
@@ -214,6 +214,7 @@ class KnowledgeGraphSampler(DistributionSampler):
         self.rng = RandomState(seed)
 
     def sample(self, size: int | None = None) -> Any:
+        """Draw one triple or ``size`` iid triples."""
         sz = 1 if size is None else size
         out = []
         for _ in range(sz):
@@ -241,15 +242,19 @@ class KnowledgeGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = 0.0
 
     def update(self, x: Sequence[int], weight: float, estimate: KnowledgeGraphDistribution | None) -> None:
+        """Store one weighted triple for embedding training."""
         self.seq_update(np.asarray([x], dtype=int), np.asarray([weight], dtype=float), estimate)
 
     def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
+        """Store one weighted triple during initialization."""
         self.update(x, weight, None)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Store encoded triples during initialization."""
         self.seq_update(x, weights, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: KnowledgeGraphDistribution | None) -> None:
+        """Store encoded triples and weights for embedding training."""
         self.triples.append(np.asarray(x, dtype=int))
         self.weights.append(np.asarray(weights, dtype=float))
         self.count += float(np.sum(weights))
@@ -260,6 +265,7 @@ class KnowledgeGraphAccumulator(SequenceEncodableStatisticAccumulator):
         return np.concatenate(self.triples, axis=0), np.concatenate(self.weights)
 
     def combine(self, suff_stat: tuple) -> "KnowledgeGraphAccumulator":
+        """Merge stored triples and weights from another accumulator value."""
         count, triples, weights = suff_stat
         self.count += count
         if len(triples):
@@ -268,16 +274,19 @@ class KnowledgeGraphAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple:
+        """Return total weight, stacked triples, and stacked weights."""
         triples, weights = self._stacked()
         return self.count, triples, weights
 
     def from_value(self, x: tuple) -> "KnowledgeGraphAccumulator":
+        """Restore stored triples and weights from ``value`` output."""
         self.count = x[0]
         self.triples = [np.asarray(x[1], dtype=int)] if len(x[1]) else []
         self.weights = [np.asarray(x[2], dtype=float)] if len(x[1]) else []
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -285,10 +294,12 @@ class KnowledgeGraphAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "KnowledgeGraphDataEncoder":
+        """Return the encoder compatible with stored triples."""
         return KnowledgeGraphDataEncoder()
 
 
@@ -299,6 +310,7 @@ class KnowledgeGraphAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> KnowledgeGraphAccumulator:
+        """Create an empty knowledge-graph accumulator."""
         return KnowledgeGraphAccumulator(keys=self.keys)
 
 
@@ -351,6 +363,7 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> KnowledgeGraphAccumulatorFactory:
+        """Return a factory for stored-triple accumulators."""
         return KnowledgeGraphAccumulatorFactory(keys=self.keys)
 
     def _project(self, entity: np.ndarray) -> np.ndarray:
@@ -383,6 +396,7 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         np.add.at(gr, r, w * E[other] * (E[target] - ebar))
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> KnowledgeGraphDistribution:
+        """Fit DistMult embeddings from stored triples and weights."""
         _count, triples, weights = suff_stat
         rng = RandomState(self.seed)
         nE, nR, d = self.num_entities, self.num_relations, self.dim
@@ -432,6 +446,7 @@ class KnowledgeGraphDataEncoder(DataSequenceEncoder):
         return isinstance(other, KnowledgeGraphDataEncoder)
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray:
+        """Validate and encode triples as an ``(N, 3)`` integer array."""
         rv = np.asarray([list(row) for row in x], dtype=int)
         if rv.ndim != 2 or rv.shape[1] != 3 or rv.shape[0] == 0:
             raise ValueError("KnowledgeGraphDistribution requires a non-empty sequence of (h, r, t) triples.")

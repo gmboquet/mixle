@@ -126,9 +126,11 @@ class ExtractionIO:
         return out
 
     def predict(self, module: Any, text: str) -> dict[str, str]:
+        """Extract fields from a single text record."""
         return self.predict_batch(module, [text])[0]
 
     def predict_batch(self, module: Any, texts: list[str]) -> list[dict[str, str]]:
+        """Extract fields from a batch of text records."""
         import torch
 
         spans_per = [tokenize(t) for t in texts]
@@ -166,10 +168,12 @@ class ExtractionIO:
 
     # --- persistence ---
     def to_spec(self) -> dict[str, Any]:
+        """Serialize the extraction vocabulary, fields, and maximum sequence length."""
         return {"kind": self.kind, "vocab": self.vocab, "fields": self.fields, "max_len": self.max_len}
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> ExtractionIO:
+        """Reconstruct extraction IO from an artifact spec."""
         return cls(spec["vocab"], spec["fields"], max_len=spec.get("max_len", 128))
 
 
@@ -216,7 +220,7 @@ def distill_extractor(
     device: str = "cpu",
     task: str = "",
 ) -> TaskModel:
-    """Distill a teacher's extractions into a tiny sequence tagger; return ``model(text) -> {field: value}``."""
+    """Distill a teacher's extractions into a local sequence tagger; return ``model(text) -> {field: value}``."""
     import torch
 
     texts = [str(t) for t in texts]

@@ -1,6 +1,9 @@
-"""Load SequenceEncodableProbabilityDistribution, DistributionSampler, ParameterEstimator,
-and DataSequenceEncoder objects for the distributions in pyps.stats. This module also loads functions used to
-estimate Distributions from data sets.
+"""Public statistical modeling surface for Mixle.
+
+This package re-exports the core distribution, sampler, estimator, accumulator,
+encoder, compute, and serialization APIs used by higher-level inference
+surfaces. Prefer these imports for release-facing examples unless a narrative
+guide points to a narrower implementation module.
 """
 
 from __future__ import annotations

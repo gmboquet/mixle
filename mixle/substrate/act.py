@@ -69,10 +69,12 @@ class Investigation:
 
     @property
     def evidence(self) -> list[str]:
+        """Flatten all evidence fragments collected by the investigation."""
         return [f for s in self.steps for f in s.fragments]
 
     @property
     def spent(self) -> float:
+        """Total action cost spent by the investigation."""
         return sum(s.cost for s in self.steps)
 
     def trace(self) -> list[dict[str, Any]]:
@@ -80,6 +82,7 @@ class Investigation:
         return [{"action": s.action, "kind": s.kind, "n_fragments": len(s.fragments)} for s in self.steps]
 
     def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable investigation summary."""
         return {
             "question": self.question,
             "answer": self.answer,
@@ -166,7 +169,7 @@ def investigate(
             continue
         try:
             fragments = [str(f) for f in action.run(question) if str(f).strip()]
-        except Exception:  # noqa: BLE001 - one broken action must not sink the whole investigation
+        except Exception:  # noqa: BLE001 - one failed action must not stop the whole investigation
             fragments = []
         spent += action.cost
         steps.append(
@@ -227,11 +230,11 @@ def retrieve_action(
     cost: float = 1.0,
     min_score: float = 0.0,
 ) -> Action:
-    """A RETRIEVE action over a :class:`~mixle.substrate.Substrate` (the always-available floor action).
+    """A retrieve action over a :class:`~mixle.substrate.Substrate` (the always-available floor action).
 
-    ``min_score`` filters out weak matches: a tiny embedder returns SOMETHING for every query, so a
+    ``min_score`` filters out weak matches: a small embedder returns a result for every query, so a
     positive floor keeps genuinely-irrelevant items from becoming false evidence. It defaults to 0.0
-    (keep everything) but a small positive value makes retrieval honest on a noisy index."""
+    (keep everything) but a small positive value makes retrieval conservative on a noisy index."""
 
     def _run(question: str) -> list[str]:
         from mixle.substrate.retrieve import retrieve

@@ -1,8 +1,4 @@
-"""Create, estimate, and sample from a Pitman-Yor process distribution over set partitions.
-
-Defines the PitmanYorProcessDistribution, PitmanYorProcessSampler, PitmanYorProcessAccumulatorFactory,
-PitmanYorProcessAccumulator, PitmanYorProcessEstimator, and the PitmanYorProcessDataEncoder classes for
-use with mixle.
+"""Pitman-Yor process distributions over exchangeable set partitions.
 
 Data type: List[int] (a partition of n elements given as a cluster-label vector; ``x[i]`` is the
 cluster id of element i, e.g. ``[0, 0, 1, 0, 2, 1]`` partitions six elements into blocks of sizes
@@ -62,6 +58,7 @@ class PitmanYorProcessDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Return compute-backend metadata for Pitman-Yor EPPF evaluation."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(
@@ -78,14 +75,14 @@ class PitmanYorProcessDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """PitmanYorProcessDistribution object.
+        """Create a Pitman-Yor process partition distribution.
 
         Args:
             alpha (float): Concentration parameter; requires alpha > -discount.
             discount (float): Discount parameter in [0, 1). discount = 0 gives the Dirichlet process.
             num_elements (Optional[int]): Number of elements a draw partitions (sampling only). The
                 density is defined for partitions of any size.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional distribution name.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
@@ -100,7 +97,7 @@ class PitmanYorProcessDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of PitmanYorProcessDistribution object."""
+        """Return a constructor-style representation of the Pitman-Yor process distribution."""
         return "PitmanYorProcessDistribution(alpha=%s, discount=%s, num_elements=%s, name=%s, keys=%s)" % (
             repr(self.alpha),
             repr(self.discount),
@@ -217,23 +214,28 @@ class PitmanYorProcessAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += weight
 
     def update(self, x: Sequence[int], weight: float, estimate: PitmanYorProcessDistribution | None) -> None:
+        """Accumulate exact EPPF histograms for one partition."""
         self._accumulate(_block_sizes(x), weight)
 
     def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics with one weighted partition."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: Sequence[np.ndarray], weights: np.ndarray, estimate: PitmanYorProcessDistribution | None
     ) -> None:
+        """Accumulate exact EPPF histograms from encoded block-size arrays."""
         for sizes, w in zip(x, weights):
             self._accumulate(sizes, float(w))
 
     def seq_initialize(self, x: Sequence[np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics from encoded partitions."""
         self.seq_update(x, weights, None)
 
     def combine(
         self, suff_stat: tuple[float, dict[int, float], dict[int, float], dict[int, float]]
     ) -> "PitmanYorProcessAccumulator":
+        """Merge serialized Pitman-Yor histogram statistics into this accumulator."""
         self.count += suff_stat[0]
         _merge_hist(self.a_hist, suff_stat[1])
         _merge_hist(self.b_hist, suff_stat[2])
@@ -241,15 +243,18 @@ class PitmanYorProcessAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, dict[int, float], dict[int, float], dict[int, float]]:
+        """Return the observation weight and exact EPPF histogram statistics."""
         return self.count, dict(self.a_hist), dict(self.b_hist), dict(self.d_hist)
 
     def from_value(
         self, x: tuple[float, dict[int, float], dict[int, float], dict[int, float]]
     ) -> "PitmanYorProcessAccumulator":
+        """Restore the accumulator from serialized histogram statistics."""
         self.count, self.a_hist, self.b_hist, self.d_hist = x[0], dict(x[1]), dict(x[2]), dict(x[3])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into a keyed statistics dictionary."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -257,10 +262,12 @@ class PitmanYorProcessAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from a keyed statistics dictionary."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "PitmanYorProcessDataEncoder":
+        """Return an encoder that converts partitions to block-size arrays."""
         return PitmanYorProcessDataEncoder()
 
 
@@ -271,6 +278,7 @@ class PitmanYorProcessAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> PitmanYorProcessAccumulator:
+        """Create an empty Pitman-Yor process accumulator."""
         return PitmanYorProcessAccumulator(keys=self.keys)
 
 
@@ -294,6 +302,7 @@ class PitmanYorProcessEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> PitmanYorProcessAccumulatorFactory:
+        """Return a factory for Pitman-Yor sufficient-statistic accumulators."""
         return PitmanYorProcessAccumulatorFactory(keys=self.keys)
 
     @staticmethod
@@ -342,6 +351,7 @@ class PitmanYorProcessEstimator(ParameterEstimator):
         return 0.5 * (lo + hi)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, dict, dict, dict]) -> PitmanYorProcessDistribution:
+        """Estimate the concentration and optional discount from EPPF histograms."""
         count, a_hist, b_hist, d_hist = suff_stat
         if count <= 0.0:
             return PitmanYorProcessDistribution(1.0, self.discount, name=self.name, keys=self.keys)
@@ -369,4 +379,5 @@ class PitmanYorProcessDataEncoder(DataSequenceEncoder):
         return isinstance(other, PitmanYorProcessDataEncoder)
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> list[np.ndarray]:
+        """Encode cluster-label vectors as sorted block-size arrays."""
         return [_block_sizes(row) for row in x]

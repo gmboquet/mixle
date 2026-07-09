@@ -50,6 +50,7 @@ class ExtractorHarness:
         return self.teacher(text)
 
     def report(self) -> dict[str, Any]:
+        """Return extraction holdout quality and fallback metrics."""
         return {
             "holdout_f1": round(self.holdout_f1, 4),
             "requests": self.n_requests,
@@ -58,6 +59,7 @@ class ExtractorHarness:
         }
 
     def save(self, path: str) -> str:
+        """Persist the wrapped extraction model artifact."""
         return self.model.save(path)
 
 
@@ -189,7 +191,9 @@ class MatcherHarness:
 
     @property
     def holdout_agreement(self) -> float:
+        """Return held-out agreement of the pairwise matcher solution."""
         return self.solution.holdout_agreement
 
     def report(self) -> dict[str, Any]:
+        """Return the underlying matcher solution report."""
         return self.solution.report()

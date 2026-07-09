@@ -1,9 +1,7 @@
-"""Create, estimate, and sample from a Gumbel (extreme value type I, maxima) distribution.
+"""Gumbel distributions for extreme-value maxima.
 
-Defines the GumbelDistribution, GumbelSampler, GumbelAccumulatorFactory, GumbelAccumulator,
-GumbelEstimator, and the GumbelDataEncoder classes for use with mixle.
-
-Data type: (float): The GumbelDistribution with location loc (mu) and scale beta > 0 has log-density
+Observations are real-valued floats. A Gumbel distribution with location ``loc`` (``mu``) and scale
+``beta > 0`` has log-density
 
         log(f(x; mu, beta)) = -log(beta) - z - exp(-z),   z = (x - mu) / beta,
 
@@ -42,12 +40,14 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated Gumbel kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for Gumbel distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -90,7 +90,7 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of GumbelDistribution object."""
+        """Return a constructor-style representation of the Gumbel distribution."""
         return "GumbelDistribution(loc=%s, scale=%s, name=%s, keys=%s)" % (
             repr(self.loc),
             repr(self.scale),
@@ -228,36 +228,44 @@ class GumbelAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: GumbelDistribution | None) -> None:
+        """Accumulate weighted first and second moments for one observation."""
         xx = float(x)
         self.sum += xx * weight
         self.sum2 += xx * xx * weight
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: GumbelDistribution | None) -> None:
+        """Accumulate weighted first and second moments from encoded data."""
         self.sum += np.dot(x, weights)
         self.sum2 += np.dot(x * x, weights)
         self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "GumbelAccumulator":
+        """Merge another Gumbel sufficient-statistic tuple."""
         self.sum += suff_stat[0]
         self.sum2 += suff_stat[1]
         self.count += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return accumulated sum, second moment sum, and count."""
         return self.sum, self.sum2, self.count
 
     def from_value(self, x: tuple[float, float, float]) -> "GumbelAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.sum, self.sum2, self.count = x
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -265,10 +273,12 @@ class GumbelAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "GumbelDataEncoder":
+        """Return the encoder used by this accumulator."""
         return GumbelDataEncoder()
 
 
@@ -279,6 +289,7 @@ class GumbelAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> GumbelAccumulator:
+        """Create a fresh Gumbel accumulator."""
         return GumbelAccumulator(keys=self.keys)
 
 
@@ -304,9 +315,11 @@ class GumbelEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> GumbelAccumulatorFactory:
+        """Return an accumulator factory for Gumbel moment statistics."""
         return GumbelAccumulatorFactory(keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> GumbelDistribution:
+        """Estimate location and scale from weighted moments."""
         sum_x, sum_x2, count = suff_stat
         if self.pseudo_count is not None and self.suff_stat is not None:
             loc0, scale0 = self.suff_stat
@@ -336,6 +349,7 @@ class GumbelDataEncoder(DataSequenceEncoder):
         return isinstance(other, GumbelDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
+        """Encode observations as a floating-point array."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and np.any(np.isnan(rv)):
             raise ValueError("GumbelDistribution requires real-valued observations.")

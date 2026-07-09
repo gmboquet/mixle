@@ -1,4 +1,9 @@
-"""Inverse Gaussian (Wald) continuous candidate -- positive, right-skewed first-passage-time law."""
+"""Automatic detector for positive inverse-Gaussian continuous data.
+
+The detector fits the Wald first-passage-time law, scores it with a BIC-style
+penalty, and exposes the estimator factory used by automatic distribution
+selection.
+"""
 
 import math
 

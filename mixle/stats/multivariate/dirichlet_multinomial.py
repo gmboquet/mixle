@@ -96,6 +96,7 @@ class DirichletMultinomialSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> np.ndarray:
+        """Draw one count vector or a stack of iid count vectors."""
         d = self.dist
         n_draws = 1 if size is None else int(size)
         p = self.rng.dirichlet(d.alpha, size=n_draws)
@@ -115,15 +116,18 @@ class DirichletMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: np.ndarray, weight: float, estimate: DirichletMultinomialDistribution | None) -> None:
+        """Accumulate Minka recurrence statistics for one count vector."""
         xx = np.asarray(x, dtype=int)
         for k in range(self.dim):
             self.c[k, : xx[k]] += weight  # j = 0 .. x_k-1
         self.count += weight
 
     def initialize(self, x: np.ndarray, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one count vector."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
+        """Accumulate Minka recurrence statistics from encoded count vectors."""
         xx = np.asarray(x, dtype=int)
         w = np.asarray(weights, dtype=np.float64)
         for k in range(self.dim):
@@ -133,23 +137,28 @@ class DirichletMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += float(w.sum())
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded count vectors."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[np.ndarray, float]) -> "DirichletMultinomialAccumulator":
+        """Merge another Dirichlet-multinomial sufficient-statistic tuple."""
         self.c += suff_stat[0]
         self.count += suff_stat[1]
         return self
 
     def value(self) -> tuple[np.ndarray, float]:
+        """Return cumulative recurrence counts and total weight."""
         return self.c.copy(), self.count
 
     def from_value(self, x: tuple[np.ndarray, float]) -> "DirichletMultinomialAccumulator":
+        """Replace accumulator contents from recurrence statistics."""
         self.c = np.asarray(x[0], dtype=np.float64).copy()
         self.count = float(x[1])
         self.dim, self.n = self.c.shape[0], self.c.shape[1]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -157,10 +166,12 @@ class DirichletMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "DirichletMultinomialDataEncoder":
+        """Return the encoder used by this accumulator."""
         return DirichletMultinomialDataEncoder()
 
 
@@ -174,6 +185,7 @@ class DirichletMultinomialAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> DirichletMultinomialAccumulator:
+        """Create a fresh Dirichlet-multinomial accumulator."""
         return DirichletMultinomialAccumulator(self.dim, self.n, name=self.name, keys=self.keys)
 
 
@@ -197,9 +209,11 @@ class DirichletMultinomialEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> DirichletMultinomialAccumulatorFactory:
+        """Return an accumulator factory for Dirichlet-multinomial statistics."""
         return DirichletMultinomialAccumulatorFactory(self.dim, self.n, name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, float]) -> DirichletMultinomialDistribution:
+        """Estimate concentration parameters by Minka's fixed-point update."""
         c, count = suff_stat
         if count <= 0.0 or self.n == 0:
             return DirichletMultinomialDistribution(np.ones(self.dim), self.n, name=self.name, keys=self.keys)
@@ -228,4 +242,5 @@ class DirichletMultinomialDataEncoder(DataSequenceEncoder):
         return isinstance(other, DirichletMultinomialDataEncoder)
 
     def seq_encode(self, x: Sequence[np.ndarray]) -> np.ndarray:
+        """Encode count vectors as a floating-point matrix."""
         return np.asarray(x, dtype=np.float64)

@@ -1,4 +1,4 @@
-Utilities And Parallelism
+Utilities and Parallelism
 =========================
 
 ``mixle.utils`` contains support code that is important to real applications:
@@ -38,6 +38,11 @@ The probability-distribution base class delegates ``to_dict``, ``from_dict``,
 metadata that should survive process boundaries. Use pickle only when you need
 full Python object fidelity and trust the environment.
 
+Serialized payloads are part of the public contract once they are written to
+disk. Keep stable type identifiers, avoid local callables in release artifacts,
+and test a load round trip from a clean process before claiming artifact
+durability.
+
 Optional Dependencies
 ---------------------
 
@@ -46,7 +51,11 @@ Backends such as Spark, Dask, MPI, Ray, Torch, JAX, and database connectors
 should call through optional dependency helpers so users get actionable errors
 instead of import failures from deep inside a stack.
 
-Evaluation And Metrics
+Optional dependency failures should name the extra or package the user needs.
+They should not fire during base import, Sphinx builds, or workflows that do
+not request the optional surface.
+
+Evaluation and Metrics
 ----------------------
 
 ``mixle.utils.evaluation`` and ``mixle.utils.metrics`` collect lightweight
@@ -84,6 +93,10 @@ Use these tools for inspection and exploratory analysis. For deployment
 decisions, validate with held-out likelihood, task metrics, calibration, and
 monitoring rather than relying on a visualization alone.
 
+Visual inspection artifacts should record the model, affinity, embedding
+settings, and sampled rows used to produce them. A plot without that context is
+not reproducible evidence.
+
 Encoded-Data Parallelism
 ------------------------
 
@@ -108,11 +121,15 @@ Backend handles preserve the same high-level sequence-driver contract: they
 support operations such as log-density sums and sufficient-statistic folding
 without changing model code.
 
-Resource And Calibration Catalogs
+Run a local encoded-data parity check before trusting a new backend handle.
+The same data and estimator should produce matching counts, log-density sums,
+and sufficient-statistic updates within the expected numeric tolerance.
+
+Resource and Calibration Catalogs
 ---------------------------------
 
 The planner module includes calibration records and catalogs for keeping
-runtime estimates honest:
+runtime estimates explicit:
 
 ``DeviceSpec``
     Describes a local CPU, GPU, worker, or accelerator target.
@@ -126,6 +143,9 @@ runtime estimates honest:
 Planning should be treated as an estimate until measured on the target system.
 Calibration records are how Mixle turns "this should fit" into "this shape has
 fit before under these resource constraints."
+
+Calibration records should expire or be revalidated when hardware, dependency
+versions, model shape, or encoded payload size changes materially.
 
 Model Parallelism
 -----------------
@@ -150,12 +170,16 @@ Use model parallelism when the model has large independent or nearly
 independent component work, such as mixture components, ensembles, or structured
 children that can be reduced safely.
 
+The reduction must be associative and semantically equivalent to the local
+estimator path. If a model shard changes the meaning of sufficient statistics,
+the model should not use this route.
+
 This is also the recommended fallback when Torch DTensor component sharding is
 not available. Torch versions before 2.5 expose incomplete DTensor strategies
 for the mixture operations Mixle needs, so ``TorchEngine`` rejects that path
 with guidance instead of letting a low-level distributed tensor error surface.
 
-Decomposition And Backend Modules
+Decomposition and Backend Modules
 ---------------------------------
 
 Parallel support is split into focused modules:
@@ -198,6 +222,18 @@ For durable workflows:
 * run scalar/vectorized parity checks before trusting a new backend;
 * use scorecards, drift monitors, and provenance records for deployed task
   models.
+
+Release Evidence
+----------------
+
+For utility and parallelism work, preserve:
+
+* serialization round-trip evidence from a clean process;
+* optional dependency guard behavior for base imports and missing extras;
+* backend parity checks for encoded data and accumulators;
+* resource calibration records with hardware and dependency versions;
+* explicit fallback behavior for unavailable distributed runtimes; and
+* artifact metadata for visualizations or diagnostic outputs.
 
 API Reference
 -------------

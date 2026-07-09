@@ -105,6 +105,7 @@ class InverseWishartSampler(DistributionSampler):
         )
 
     def sample(self, size: int | None = None) -> np.ndarray:
+        """Draw one or more inverse-Wishart SPD matrix samples."""
         w = self._wishart.sample(size=size)
         if size is None:
             return np.linalg.inv(w)
@@ -115,6 +116,7 @@ class InverseWishartAccumulator(_MeanScatterAccumulator):
     """Accumulate the weighted sum of matrices ``sum_i w_i X_i`` and the total weight."""
 
     def acc_to_encoder(self) -> "InverseWishartDataEncoder":
+        """Return the encoder compatible with the accumulated matrix statistics."""
         return InverseWishartDataEncoder()
 
 
@@ -127,6 +129,7 @@ class InverseWishartAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> InverseWishartAccumulator:
+        """Create an accumulator for weighted inverse-Wishart matrix observations."""
         return InverseWishartAccumulator(self.dim, name=self.name, keys=self.keys)
 
 
@@ -140,9 +143,11 @@ class InverseWishartEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> InverseWishartAccumulatorFactory:
+        """Return an accumulator factory for estimating the fixed-df scale matrix."""
         return InverseWishartAccumulatorFactory(self.dim, name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, float]) -> InverseWishartDistribution:
+        """Estimate the inverse-Wishart scale matrix from weighted matrix means."""
         sum_x, count = suff_stat
         factor = self.df - self.dim - 1.0
         if count <= 0.0 or factor <= 0.0:
@@ -162,4 +167,5 @@ class InverseWishartDataEncoder(DataSequenceEncoder):
         return isinstance(other, InverseWishartDataEncoder)
 
     def seq_encode(self, x: Sequence[np.ndarray]) -> np.ndarray:
+        """Encode a sequence of SPD matrices as a floating matrix stack."""
         return np.asarray(x, dtype=np.float64)

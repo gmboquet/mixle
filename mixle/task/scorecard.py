@@ -1,25 +1,25 @@
-"""``scorecard`` -- the receipts: tiny model vs frontier on YOUR task, measured, in one table.
+"""``scorecard`` measures a deployed task route against its teacher.
 
-The artifact that wins arguments. Point it at a deployed :class:`~mixle.task.solve.Solution` (or a
-Router), the teacher it replaces, and a held-out test set; it MEASURES — never projects — end-to-end
-accuracy against the teacher, local-answer agreement, escalation rate, wall-clock latency for both
-sides, artifact size, and (given per-request costs) realized $/1k::
+Point it at a deployed :class:`~mixle.task.solve.Solution` (or a Router), the
+teacher it replaces, and a held-out test set. The result measures end-to-end
+accuracy against the teacher, local-answer agreement, escalation rate,
+wall-clock latency for both sides, artifact size, and, when costs are supplied,
+realized dollars per thousand requests::
 
     card = scorecard(sol, teacher, test_inputs, student_cost=0.0001, teacher_cost=0.03)
     print(card.table())
 
     metric                     student      teacher
-    end-to-end accuracy         1.000          —      (escalations answered BY the teacher)
+    end-to-end accuracy         1.000          —      (escalations answered by the teacher)
     local agreement             0.964          —
     escalation rate             0.11           —
     p50 latency                 0.08 ms      2.1 ms
     artifact size               210 KB         —
     cost / 1k requests          $3.41        $30.00
 
-"End-to-end accuracy" counts escalated requests as correct-by-construction (the teacher answered
-them); "local agreement" is the student alone on the requests it chose to answer — both are reported
-so the honest story is visible: the system is never worse than the teacher, and here is exactly how
-much of the work the tiny model absorbed.
+"End-to-end accuracy" counts escalated requests as correct because the teacher
+answered them. "Local agreement" is the student alone on requests it chose to
+answer. Reporting both avoids hiding local-model errors behind the fallback.
 
 Every solve shape gets receipts, with agreement meaning that shape's own promise: classification =
 exact label match; :class:`~mixle.task.regress.RegressionSolution` = within the caller's ``tol``;
@@ -47,6 +47,8 @@ def _fmt_bytes(n: float) -> str:
 
 @dataclass
 class Scorecard:
+    """Evaluation summary for a distilled task service."""
+
     task: str
     n_test: int
     end_to_end_accuracy: float
@@ -60,9 +62,11 @@ class Scorecard:
     teacher_cost_per_1k: float | None
 
     def as_dict(self) -> dict[str, Any]:
+        """Return the scorecard fields as a plain dictionary."""
         return dict(self.__dict__)
 
     def table(self) -> str:
+        """Render a compact comparison table for local and teacher service metrics."""
         rows: list[tuple[str, str, str]] = [
             ("end-to-end accuracy", f"{self.end_to_end_accuracy:.3f}", "—"),
             ("local agreement", f"{self.local_agreement:.3f}", "—"),

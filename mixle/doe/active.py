@@ -5,7 +5,7 @@ a surrogate accurate everywhere, and **Bayesian optimal design** places them to 
 
 Active learning (GP surrogate):
 * :func:`alm_scores` -- Active Learning MacKay: the posterior predictive variance (pick the most
-  uncertain point). Cheap but myopic.
+  uncertain point). Low-cost but myopic.
 * :func:`alc_scores` -- Active Learning Cohn / IMSE: the *integrated* reduction in posterior variance a
   candidate would buy over a reference set -- the principled criterion.
 * :func:`active_learning_design` -- the sequential loop that grows an accurate surrogate.

@@ -1,4 +1,9 @@
-"""Exact conjugate posterior sampling for closed-form ``mixle.stats`` leaves."""
+"""Exact posterior sampling for conjugate ``mixle.stats`` leaves.
+
+The sampler uses each supported distribution's closed-form conjugate update to
+draw independent parameter samples, providing an analytic alternative to generic
+MCMC for Gaussian, count, and Bernoulli-family leaves.
+"""
 
 from __future__ import annotations
 

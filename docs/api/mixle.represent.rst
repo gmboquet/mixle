@@ -4,7 +4,6 @@ mixle.represent package
 .. automodule:: mixle.represent
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

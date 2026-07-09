@@ -1,20 +1,18 @@
-"""Reasoning as a belief walk across a chain of verified transports (workstream F3).
+"""Reasoning as a belief walk across a chain of verified transports.
 
-A multi-hop reasoning path (e.g. binding -> structure -> activity) transports a BELIEF at each hop,
-with uncertainty compounding honestly rather than assumed. This module composes a chain of fitted
-conditional transports (:func:`~mixle.reason.cycle_consistency.fit_cycle_transport`, the same MDN
-family CARD TRANSPORT-a's F0 gate proved usable and calibrated) by Monte Carlo forward simulation:
-draw a sample of the belief at hop 0, push it through hop 1's transport to get a sample at hop 1, and
-so on. The result is an empirical posterior over the final hop's variable whose spread reflects every
-intervening hop's genuine uncertainty -- not a point estimate chained through point estimates.
+A multi-hop reasoning path, such as ``binding -> structure -> activity``,
+transports a belief at each hop. This module composes fitted conditional
+transports from :func:`~mixle.reason.cycle_consistency.fit_cycle_transport` by
+Monte Carlo forward simulation: draw from the belief at hop 0, push the sample
+through hop 1's transport, and continue through the chain. The result is an
+empirical posterior over the final variable whose spread reflects uncertainty
+from every intervening hop.
 
-Per the plan, composition is gated on the F2 premise: a transport that has not itself been verified
-usable/calibrated on its own edge must not be composed into a walk -- an unverified edge silently
-corrupts every downstream calibration claim built on top of it. :func:`calibration_by_hop_count`
-checks calibration AS A FUNCTION OF HOP COUNT (a two-sided binomial test against nominal coverage,
-mirroring :mod:`mixle.task.solve`'s own use of the same test) rather than assuming it holds -- if
-composed calibration degrades faster than the per-hop errors alone would predict, that degradation
-curve is the thing to report, not a blind "uncertainty compounds honestly" claim.
+Composition is gated on the edge premise: a transport that has not been
+verified usable and calibrated on its own edge is refused before composition.
+:func:`coverage_by_hop_count` checks calibration by hop count with a two-sided
+binomial test against nominal coverage, so degradation across composed hops is
+measured rather than assumed.
 """
 
 from __future__ import annotations
@@ -29,10 +27,10 @@ from scipy.stats import binomtest
 
 @dataclass
 class HopTransport:
-    """One edge of the belief walk: a fitted conditional transport plus its own F2 premise verdict.
+    """One edge of the belief walk and its own calibration verdict.
 
-    ``premise_passed`` records whether THIS transport, on THIS edge, was independently verified usable
-    and calibrated (CARD F2-a) -- never assumed true because F0 passed on an unrelated toy problem.
+    ``premise_passed`` records whether this transport was independently
+    verified usable and calibrated on this edge.
     """
 
     name: str
@@ -40,6 +38,7 @@ class HopTransport:
     premise_passed: bool = True
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return the sampler for this hop's fitted transport."""
         return self.fit.sampler(seed)
 
 
@@ -52,13 +51,16 @@ class WalkResult:
 
     @property
     def mean(self) -> np.ndarray:
+        """Return posterior sample mean for the final hop."""
         return self.samples.mean(axis=0)
 
     @property
     def std(self) -> np.ndarray:
+        """Return posterior sample standard deviation for the final hop."""
         return self.samples.std(axis=0)
 
     def credible_interval(self, alpha: float = 0.1) -> tuple[np.ndarray, np.ndarray]:
+        """Return marginal credible interval bounds from walk samples."""
         lo = np.quantile(self.samples, alpha / 2.0, axis=0)
         hi = np.quantile(self.samples, 1.0 - alpha / 2.0, axis=0)
         return lo, hi
@@ -67,10 +69,9 @@ class WalkResult:
 def belief_walk(hops: Sequence[HopTransport], x0: Any, *, n_draws: int = 200, seed: int = 0) -> WalkResult:
     """Propagate a belief forward through a chain of hops, starting from a single value ``x0``.
 
-    Each hop's transport is applied by drawing ``n_draws`` independent samples of the CURRENT belief
-    and pushing each through the hop's ``sample_given`` -- the empirical spread at the end is the
-    walk's honestly-compounded uncertainty. Raises if any hop's ``premise_passed`` is ``False``:
-    composing an unverified edge is refused rather than silently producing an uncheckable posterior.
+    Each hop's transport is applied by drawing ``n_draws`` samples of the
+    current belief and pushing each through the hop's ``sample_given`` method.
+    Raises if any hop's ``premise_passed`` flag is ``False``.
     """
     unverified = [h.name for h in hops if not h.premise_passed]
     if unverified:
@@ -94,14 +95,12 @@ def coverage_by_hop_count(
     n_draws: int = 150,
     seed: int = 0,
 ) -> dict[int, dict[str, float]]:
-    """Calibration AS A FUNCTION OF HOP COUNT: for ``k = 1 .. len(hops)``, walk the first ``k`` hops
-    for every test point in ``x0_test`` and check the empirical credible-interval coverage of
-    ``true_final[k]`` (the true value at hop ``k`` for the SAME test points) against the nominal
-    ``1 - alpha`` rate, via a two-sided binomial test.
+    """Return empirical calibration by hop count.
 
-    Returns ``{k: {"coverage": observed_rate, "p_value": ..., "consistent_with_nominal": bool}}`` --
-    the degradation curve the card requires, measured, never assumed. ``true_final`` must supply the
-    ground truth at every hop count checked (e.g. from a known generative process on held-out data).
+    For ``k = 1 .. len(hops)``, walks the first ``k`` hops for every test point
+    in ``x0_test`` and checks credible-interval coverage of ``true_final[k]``
+    against the nominal ``1 - alpha`` rate with a two-sided binomial test.
+    ``true_final`` must supply ground truth for each checked hop count.
     """
     out: dict[int, dict[str, float]] = {}
     for k in range(1, len(hops) + 1):

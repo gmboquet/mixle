@@ -95,6 +95,7 @@ class HeterogeneousEncoder:
         return stream, np.asarray(tags, dtype=np.int64)
 
     def encode_numpy(self, record: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+        """Encode a heterogeneous record and return NumPy token stream plus modality ids."""
         import torch
 
         with torch.no_grad():

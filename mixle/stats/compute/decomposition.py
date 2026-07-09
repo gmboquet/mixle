@@ -11,8 +11,6 @@ is strictly opt-in: any node that does not override ``decomposition()`` reports
 :meth:`Decomposition.atomic` (replicated, not split), so the contract never disturbs the existing
 data-parallel-with-replicated-model path. The cross-shard reduction is always the same additive
 ``combine()`` monoid the accumulators already implement -- this introduces no new reduction algebra.
-
-See ``~/codex/notes/model-parallel-design.md`` (component C1) for the full design.
 """
 
 from __future__ import annotations

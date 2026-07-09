@@ -4,7 +4,6 @@ mixle.inference package
 .. automodule:: mixle.inference
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Subpackages
 -----------
@@ -21,6 +20,7 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.inference._advi
    mixle.inference.backends
    mixle.inference.bayesian_network
    mixle.inference.belief
@@ -59,6 +59,8 @@ Submodules
    mixle.inference.precision_plan
    mixle.inference.priors
    mixle.inference.project
+   mixle.inference.receipt
+   mixle.inference.refine
    mixle.inference.reproduce
    mixle.inference.resampling
    mixle.inference.robust
@@ -69,8 +71,10 @@ Submodules
    mixle.inference.spark_executor
    mixle.inference.streaming
    mixle.inference.structure
+   mixle.inference.structure_embedded
    mixle.inference.survival
    mixle.inference.synthesize
    mixle.inference.target
+   mixle.inference.torsion
    mixle.inference.uncertainty
    mixle.inference.uq

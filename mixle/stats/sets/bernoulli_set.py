@@ -1,8 +1,4 @@
-"""Create, estimate, and sample from a Bernoulli set distribution.
-
-Defines the BernoulliSetDistribution, BernoulliSetSampler, BernoulliSetAccumulatorFactory,
-BernoulliSetAccumulator, BernoulliSetEstimator, BernoulliSetDataEncoder, and the BernoulliSetEnumerator
-classes for use with mixle.
+"""Bernoulli set distributions over finite hashable supports.
 
 Data type: Sequence[Any]: An observation is a set (any iterable of distinct hashable values) drawn from a
 finite support S = {s_1,s_2,....,s_N}. Let x be a random subset of S. Each element s_k is included in x
@@ -47,12 +43,14 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare backend support for Bernoulli-set generated kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic_table")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the generated-compute declaration for the Bernoulli set."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -80,17 +78,17 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         prior: SequenceEncodableProbabilityDistribution | None = None,
         posteriors: dict[Any, tuple[float, float]] | None = None,
     ) -> None:
-        """BernoulliSetDistribution object for creating a Bernoulli set distribution.
+        """Create a Bernoulli set distribution.
 
         Args:
             pmap (Dict[Any, float]): Maps values to probabilities.
             min_prob (float): Minimum probability for numerical stability in log prob calculations.
-            name (Optional[str]): Set name to object instance.
-            keys (Optional[str]): Set keys for object instance.
+            name (Optional[str]): Optional distribution name.
+            keys (Optional[str]): Optional key for sharing sufficient statistics.
 
         Attributes:
-            key (Optional[str]): Keys for object instance.
-            name (Optional[str]): Name to object instance.
+            key (Optional[str]): Key for sharing sufficient statistics.
+            name (Optional[str]): Optional distribution name.
             pmap (Dict[Any, float]): Maps elements in support to probabilities.
             required (Set): An observation must contain this subset of elements. Else, return probability 0.0.
             nlog_sum (float): Normalizing term for computing numerically stable likelihood.
@@ -227,7 +225,7 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def __str__(self) -> str:
-        """Returns string representation of BernoulliSetDistribution object."""
+        """Return a constructor-style representation of the distribution."""
         s1 = repr(sorted(self.pmap.items(), key=lambda t: t[0]))
         s2 = repr(self.min_prob)
         s3 = repr(self.name)
@@ -316,7 +314,7 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def backend_stacked_params(cls, dists: Sequence["BernoulliSetDistribution"], engine: Any) -> dict[str, Any]:
-        """Return stacked Bernoulli-set parameters for shared object support."""
+        """Return stacked Bernoulli-set parameters for shared label support."""
         labels = tuple(dists[0].pmap.keys())
         min_prob = float(dists[0].min_prob)
         if any(tuple(dist.pmap.keys()) != labels or float(dist.min_prob) != min_prob for dist in dists):
@@ -386,13 +384,13 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def sampler(self, seed: int | None = None) -> "BernoulliSetSampler":
-        """Create a BernoulliSetSampler object from parameters of BernoulliSetDistribution instance.
+        """Create a sampler for this Bernoulli set distribution.
 
         Args:
             seed (Optional[int]): Used to set seed in random sampler.
 
         Returns:
-            BernoulliSetSampler object.
+            BernoulliSetSampler: Sampler bound to this distribution.
 
         """
         return BernoulliSetSampler(self, seed)
@@ -404,7 +402,7 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
             pseudo_count (Optional[float]): Used to re-weight the distribution's pmap in estimation.
 
         Returns:
-            BernoulliSetEstimator object.
+            BernoulliSetEstimator: Estimator configured with this distribution's prior settings.
 
         """
         if pseudo_count is None:
@@ -419,7 +417,7 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
             )
 
     def dist_to_encoder(self) -> "BernoulliSetDataEncoder":
-        """Returns a BernoulliSetDataEncoder object for encoding sequences of data."""
+        """Return a data encoder for Bernoulli set observations."""
         return BernoulliSetDataEncoder()
 
     def enumerator(self) -> "BernoulliSetEnumerator":
@@ -477,18 +475,18 @@ class BernoulliSetEnumerator(DistributionEnumerator):
 
 
 class BernoulliSetSampler(DistributionSampler):
-    """BernoulliSetSampler object for drawing random sets from a BernoulliSetDistribution instance."""
+    """Draw random sets from a BernoulliSetDistribution."""
 
     def __init__(self, dist: BernoulliSetDistribution, seed: int | None = None) -> None:
-        """BernoulliSetSampler object for generating samples from BernoulliSetDistribution object instance.
+        """Create a sampler for a Bernoulli set distribution.
 
         Args:
-            dist (BernoulliSetDistribution): Object instance to sample from.
+            dist (BernoulliSetDistribution): Distribution to sample from.
             seed (Optional[int]): Set seed for random number generator.
 
         Attributes:
-            rng (RandomState): RandomState object with seed set if passed in args.
-            dist (BernoulliSetDistribution): Object instance to sample from.
+            rng (RandomState): Random state initialized from ``seed`` when supplied.
+            dist (BernoulliSetDistribution): Distribution to sample from.
 
         """
         self.rng = RandomState(seed)
@@ -520,10 +518,10 @@ class BernoulliSetSampler(DistributionSampler):
 
 
 class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
-    """BernoulliSetAccumulator object for aggregating per-element inclusion counts from observed sets."""
+    """Accumulator for per-element inclusion counts from observed sets."""
 
     def __init__(self, keys: str | None = None) -> None:
-        """BernoulliSetAccumulator object for aggreating sufficient statistics from observed data.
+        """Create an accumulator for Bernoulli-set sufficient statistics.
 
         Args:
             keys (Optional[str]): Set keys for merging sufficient statistics.
@@ -691,15 +689,15 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
                 self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "BernoulliSetDataEncoder":
-        """Returns a BernoulliSetDataEncoder object for encoding sequences of data."""
+        """Return a data encoder for Bernoulli set observations."""
         return BernoulliSetDataEncoder()
 
 
 class BernoulliSetAccumulatorFactory(StatisticAccumulatorFactory):
-    """BernoulliSetAccumulatorFactory object for creating BernoulliSetAccumulator objects."""
+    """Factory for Bernoulli set accumulators."""
 
     def __init__(self, keys: str | None = None) -> None:
-        """BernoulliSetAccumulatorFactory object for creating instances of BernoulliSetAccumulator objects.
+        """Create a factory for Bernoulli set accumulators.
 
         Args:
             keys (Optional[str]): Keys for merging sufficient statistics.
@@ -711,12 +709,12 @@ class BernoulliSetAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> "BernoulliSetAccumulator":
-        """Returns a new BernoulliSetAccumulator object."""
+        """Return a new Bernoulli set accumulator."""
         return BernoulliSetAccumulator(self.keys)
 
 
 class BernoulliSetEstimator(ParameterEstimator):
-    """BernoulliSetEstimator object for estimating a BernoulliSetDistribution from aggregated sufficient statistics."""
+    """Estimate Bernoulli set distributions from aggregated sufficient statistics."""
 
     def __init__(
         self,
@@ -727,21 +725,21 @@ class BernoulliSetEstimator(ParameterEstimator):
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
-        """BernoulliSetEstimator object for estimating Bernoulli set distribution from aggregated sufficient statistics.
+        """Create an estimator for Bernoulli set distributions.
 
         Args:
             min_prob (float): Minimum probability for elements estimated with prob = 0.
-            pseudo_count (Optional[float]): Used to re-weight suff_stats in estimation.
+            pseudo_count (Optional[float]): Prior mass used to smooth inclusion probabilities during estimation.
             suff_stat (Optional[Dict[Any, float]]): Optional dictionary containing value to probability mapping.
-            name (Optional[str]): Set name for object instance.
-            keys (Optional[str]): Set key for merging sufficient statistics.
+            name (Optional[str]): Optional name assigned to estimated distributions.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
             min_prob (float): Minimum probability for elements estimated with prob = 0.
-            pseudo_count (Optional[float]): Used to re-weight suff_stats in estimation.
+            pseudo_count (Optional[float]): Prior mass used to smooth inclusion probabilities during estimation.
             suff_stat (Optional[Dict[Any, float]]): Optional dictionary containing value to probability mapping.
-            name (Optional[str]): Set name for object instance.
-            keys (Optional[str]): Set key for merging sufficient statistics.
+            name (Optional[str]): Optional name assigned to estimated distributions.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
         self.pseudo_count = pseudo_count
@@ -753,7 +751,7 @@ class BernoulliSetEstimator(ParameterEstimator):
         self.has_conj_prior = isinstance(prior, BetaDistribution)
 
     def accumulator_factory(self) -> "BernoulliSetAccumulatorFactory":
-        """Returns a BernoulliSetAccumulatorFactory for creating BernoulliSetAccumulator objects."""
+        """Return an accumulator factory configured from this estimator."""
         return BernoulliSetAccumulatorFactory(self.keys)
 
     def model_log_density(self, model: "BernoulliSetDistribution") -> float:
@@ -836,9 +834,9 @@ class BernoulliSetDataEncoder(DataSequenceEncoder):
         return isinstance(other, BernoulliSetDataEncoder)
 
     def seq_encode(self, x: Sequence[Sequence[Any]]) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
-        """Encode a sequence of iid observations for use with vectorized functions.
+        """Encode iid Bernoulli-set observations for vectorized ``seq_*`` methods.
 
-        Return value 'rv' is a Tuple of length 4 containing:
+        The returned tuple contains:
             rv[0] (int): Number of observed sets.
             rv[1] (np.ndarray): Numpy array of integer indices for flattened array of values.
             rv[2] (np.ndarray): Numpy array of unique values. (dtype is object).

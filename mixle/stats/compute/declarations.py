@@ -1,4 +1,9 @@
-"""Declarative metadata for distribution parameters and sufficient statistics."""
+"""Declarative metadata for generated distribution scoring and fitting kernels.
+
+Declarations describe parameters, constraints, sufficient statistics, and
+exponential-family structure so generic backend code can generate safe scalar,
+stacked, and optional Numba scoring paths.
+"""
 
 from __future__ import annotations
 

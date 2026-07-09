@@ -1,10 +1,6 @@
-"""Create, estimate, and sample from a half-normal distribution (folded normal at 0).
+"""Half-normal distributions over non-negative real values.
 
-Defines the HalfNormalDistribution, HalfNormalSampler, HalfNormalAccumulatorFactory,
-HalfNormalAccumulator, HalfNormalEstimator, and the HalfNormalDataEncoder classes for use with
-mixle.
-
-Data type: (float): The HalfNormalDistribution with scale sigma > 0.0 has log-density
+Observations are floats ``x >= 0``. A half-normal distribution with scale ``sigma > 0`` has log-density
 
         log(f(x; sigma)) = 0.5*log(2/pi) - log(sigma) - x**2 / (2*sigma**2),    for x >= 0.0,
 
@@ -49,12 +45,14 @@ class HalfNormalDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated half-normal kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for half-normal distributions."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -121,7 +119,7 @@ class HalfNormalDistribution(SequenceEncodableProbabilityDistribution):
         Attributes:
             sigma (float): Positive real-valued scale parameter.
             log_sigma (float): Cached log(sigma).
-            name (Optional[str]): Name of object instance.
+            name (Optional[str]): Optional distribution name.
             keys (Optional[str]): Key for merging sufficient statistics.
 
         """
@@ -133,7 +131,7 @@ class HalfNormalDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of HalfNormalDistribution object."""
+        """Return a constructor-style representation of the half-normal distribution."""
         return "HalfNormalDistribution(%s, name=%s, keys=%s)" % (
             repr(self.sigma),
             repr(self.name),
@@ -269,38 +267,46 @@ class HalfNormalAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: HalfNormalDistribution | None) -> None:
+        """Accumulate weighted squared observations for one non-negative sample."""
         if x < 0.0 or not np.isfinite(x):
             raise ValueError("HalfNormalDistribution has support x >= 0.")
         self.count += weight
         self.sum2 += x * x * weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: HalfNormalDistribution | None
     ) -> None:
+        """Accumulate weighted squared observations from encoded data."""
         _, sq_vals = x
         self.sum2 += np.dot(sq_vals, weights)
         self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float]) -> "HalfNormalAccumulator":
+        """Merge another half-normal sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.sum2 += suff_stat[1]
         return self
 
     def value(self) -> tuple[float, float]:
+        """Return count and squared-observation sum."""
         return self.count, self.sum2
 
     def from_value(self, x: tuple[float, float]) -> "HalfNormalAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.count = x[0]
         self.sum2 = x[1]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -308,10 +314,12 @@ class HalfNormalAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "HalfNormalDataEncoder":
+        """Return the encoder used by this accumulator."""
         return HalfNormalDataEncoder()
 
 
@@ -322,6 +330,7 @@ class HalfNormalAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> HalfNormalAccumulator:
+        """Create a fresh half-normal accumulator."""
         return HalfNormalAccumulator(keys=self.keys)
 
 
@@ -335,7 +344,7 @@ class HalfNormalEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """HalfNormalEstimator object.
+        """Create an estimator for half-normal scale parameters.
 
         Args:
             pseudo_count (Optional[float]): Re-weight the prior second moment in ``suff_stat`` when
@@ -351,9 +360,11 @@ class HalfNormalEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> HalfNormalAccumulatorFactory:
+        """Return an accumulator factory for half-normal statistics."""
         return HalfNormalAccumulatorFactory(keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> HalfNormalDistribution:
+        """Estimate the half-normal scale from weighted squared observations."""
         count, sum2 = suff_stat
         if self.pseudo_count is not None and self.suff_stat is not None:
             sum2 += self.pseudo_count * self.suff_stat
@@ -376,6 +387,7 @@ class HalfNormalDataEncoder(DataSequenceEncoder):
         return isinstance(other, HalfNormalDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+        """Encode observations as values and squared values."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and (np.any(rv < 0.0) or np.any(np.isnan(rv))):
             raise ValueError("HalfNormalDistribution has support x >= 0.")

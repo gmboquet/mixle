@@ -53,7 +53,7 @@ def read_remote(
                 data = fh.read()
                 tmp = io.StringIO(data if isinstance(data, str) else data.decode())
                 reader = {"csv": text_source.read_csv, "json": text_source.read_json}.get(fmt, text_source.read_jsonl)
-                # text readers take a path; for a stream we re-implement the tiny read here
+                # text readers take a path; for a stream we re-implement the small read here
                 if fmt == "csv":
                     import csv
 

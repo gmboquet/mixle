@@ -1,11 +1,13 @@
-"""``compose`` -- chain two models/teachers ``a: x -> y`` and ``b: y -> z`` into one callable ``x -> z``,
-carrying a per-stage evidence ledger (the shared composition primitive workstream D10/AMPLIFY-a's
-"2-teacher composition" and workstream F's belief walks build on; built once here, reused there).
+"""Compose two models or teachers while carrying a per-stage ledger.
+
+``compose`` chains two models/teachers ``a: x -> y`` and ``b: y -> z`` into one
+callable ``x -> z`` while preserving a per-stage evidence ledger that can be
+reused by composition and belief-walk workflows.
 
 ``a`` and ``b`` are any callables -- a :class:`~mixle.task.model.TaskModel`, a
 :class:`~mixle.task.calibrate.CalibratedTaskModel`, a teacher LLM, or a plain function. A stage that
 additionally exposes ``.score(input) -> float`` (a log-confidence or log-density) contributes that
-number to the ledger; a stage without one contributes ``0.0`` (honest "unscored", never fabricated).
+number to the ledger; a stage without one contributes ``0.0`` ("unscored", never fabricated).
 The ledger is purely additive by construction -- ``ComposedAnswer.check()`` asserts
 ``sum(contributions) == total_contribution`` exactly, the same identity
 :mod:`mixle.inference.explain` uses for a single model's evidence.
@@ -65,6 +67,7 @@ class ComposedModel:
         return self.b(self.a(x))
 
     def answer(self, x: Any) -> ComposedAnswer:
+        """Return the composed answer with each stage's contribution record."""
         y = self.a(x)
         z = self.b(y)
         contribution_a = _stage_contribution(self.a, x)

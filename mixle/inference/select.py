@@ -102,7 +102,7 @@ def select_best(
     result.margin = margin
 
     # A simple conformal / bootstrap band: a z-scaled estimate of the score spread. With only a handful
-    # of scalar scores, the honest, distribution-free spread estimate is the sample standard deviation
+    # of scalar scores, the distribution-free spread estimate is the sample standard deviation
     # of the scores (the conformity scores); the winner is "confident" when its lead clears z * that
     # spread, z = Phi^{-1}(1 - alpha/2). This reuses no per-item resampling because each candidate
     # contributes exactly one score -- bootstrap over a length-N score vector reduces to the same SE.

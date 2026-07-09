@@ -1,4 +1,4 @@
-"""Create, estimate, and sample from a continuous uniform distribution.
+"""Continuous uniform distributions over bounded intervals.
 
 Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
@@ -25,12 +25,14 @@ class UniformDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated uniform kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for uniform distributions."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -173,6 +175,7 @@ class UniformSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one sample or an array of iid samples."""
         return self.rng.uniform(self.dist.low, self.dist.high, size=size)
 
 
@@ -187,15 +190,18 @@ class UniformAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: UniformDistribution | None) -> None:
+        """Accumulate support bounds and count from one weighted observation."""
         if weight > 0.0:
             self.count += weight
             self.min_val = min(self.min_val, x)
             self.max_val = max(self.max_val, x)
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: UniformDistribution | None) -> None:
+        """Accumulate support bounds and count from encoded observations."""
         mask = weights > 0.0
         if np.any(mask):
             self.count += np.sum(weights[mask], dtype=np.float64)
@@ -219,18 +225,22 @@ class UniformAccumulator(SequenceEncodableStatisticAccumulator):
             self.max_val = max(self.max_val, float(np.max(xv)))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "UniformAccumulator":
+        """Merge another uniform sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.min_val = min(self.min_val, suff_stat[1])
         self.max_val = max(self.max_val, suff_stat[2])
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return count and observed support bounds."""
         return self.count, self.min_val, self.max_val
 
     def from_value(self, x: tuple[float, float, float]) -> "UniformAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.count = x[0]
         self.min_val = x[1]
         self.max_val = x[2]
@@ -242,6 +252,7 @@ class UniformAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -249,10 +260,12 @@ class UniformAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "UniformDataEncoder":
+        """Return the encoder used by this accumulator."""
         return UniformDataEncoder()
 
 
@@ -264,6 +277,7 @@ class UniformAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> UniformAccumulator:
+        """Create a fresh uniform accumulator."""
         return UniformAccumulator(name=self.name, keys=self.keys)
 
 
@@ -285,9 +299,11 @@ class UniformEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> UniformAccumulatorFactory:
+        """Return an accumulator factory for uniform support statistics."""
         return UniformAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> UniformDistribution:
+        """Estimate support endpoints from observed weighted bounds."""
         count, low, high = suff_stat
         if count <= 0.0:
             low, high = self.suff_stat if self.suff_stat is not None else (0.0, 1.0)
@@ -311,6 +327,7 @@ class UniformDataEncoder(DataSequenceEncoder):
         return isinstance(other, UniformDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
+        """Encode observations as a floating-point array."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and np.any(np.isnan(rv)):
             raise ValueError("UniformDistribution requires finite or infinite real-valued observations.")

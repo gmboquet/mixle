@@ -1,4 +1,9 @@
-"""Torch neural-network objective helpers."""
+"""Torch neural-network wrappers trained through Mixle objective utilities.
+
+The wrappers expose Gaussian regression and categorical classification models
+with consistent log-likelihood objectives, convergence diagnostics, precision
+handling, and prediction helpers.
+"""
 
 from __future__ import annotations
 
@@ -339,9 +344,9 @@ def make_monotonic_mlp(
     class _NonNegativeLinear(torch.nn.Module):
         def __init__(self, in_features: int, out_features: int) -> None:
             super().__init__()
-            # softplus(0) = log(2) =~ 0.69, NOT ~0 -- a naive small-mean raw_weight init would put every
+            # softplus(0) = log(2) =~ 0.69, not ~0. A naive small-mean raw_weight init would put every
             # effective weight near 0.69 rather than near 0, exploding the signal through depth. Instead
-            # init the EFFECTIVE weight at a normal fan-in scale, then invert softplus to get raw_weight.
+            # initialize the effective weight at a normal fan-in scale, then invert softplus to get raw_weight.
             fan_in = max(in_features, 1)
             target = torch.empty(out_features, in_features).uniform_(1e-3, 1.0 / fan_in**0.5)
             self.raw_weight = torch.nn.Parameter(target + torch.log(-torch.expm1(-target)))  # softplus^-1
@@ -378,7 +383,7 @@ def make_deep_set(
     *,
     pooling: str = "mean",
 ) -> Any:
-    """A Deep Sets network (Zaheer et al. 2017): invariant to any permutation of the SET axis, by construction.
+    """A Deep Sets network (Zaheer et al. 2017): invariant to any permutation of the set axis, by construction.
 
     Input shape ``(..., set_size, element_dim)``: a per-element MLP ``phi`` (shared weights, applied
     identically to every element -- ``torch.nn.Linear`` already broadcasts over all leading dims, so
@@ -386,13 +391,13 @@ def make_deep_set(
     a permutation-invariant pool (``pooling="mean"``/``"sum"``/``"max"``, taken over the set axis)
     aggregates the codes into one order-independent summary; a second MLP ``rho`` maps the summary to the
     output. Because ``phi`` is applied identically per element and the pool is a symmetric function, the
-    output is EXACTLY unchanged by any permutation of the set axis -- true for any weights, trained or not,
+    output is exactly unchanged by any permutation of the set axis -- true for any weights, trained or not,
     unlike e.g. training on many random orderings and hoping the network learns invariance.
 
     The returned module is a plain ``torch.nn.Module``, trainable with any ordinary Torch optimizer loop
-    over ``(set_size, element_dim)``-shaped inputs. NOTE: :class:`~mixle.models.neural_leaf.NeuralGaussian`'s
+    over ``(set_size, element_dim)``-shaped inputs. Note: :class:`~mixle.models.neural_leaf.NeuralGaussian`'s
     accumulator flattens each observation to a 1-D feature vector (``reshape(n, -1)``) before the M-step,
-    which destroys the set axis this module needs -- so it is NOT a drop-in wrapper for set-shaped data as
+    which destroys the set axis this module needs -- so it is not a drop-in wrapper for set-shaped data as
     :func:`make_mlp`/:func:`make_monotonic_mlp` are for flat feature vectors. Use this module directly with
     a custom training loop (or through a wrapper that preserves the set axis) for a fixed set size.
     """

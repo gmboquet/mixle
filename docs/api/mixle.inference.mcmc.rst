@@ -4,7 +4,6 @@ mixle.inference.mcmc package
 .. automodule:: mixle.inference.mcmc
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

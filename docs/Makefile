@@ -15,7 +15,7 @@ clean:
 	rm -rf "$(BUILDDIR)"
 
 apidoc:
-	$(SPHINXAPIDOC) -f -e -M -o api ../mixle ../mixle/tests '*/__pycache__/*' '*/_*.py'
+	$(SPHINXAPIDOC) -f -e -M -P -o api ../mixle ../mixle/tests '*/__pycache__/*'
 
 html:
 	@$(SPHINXBUILD) -M html "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS)

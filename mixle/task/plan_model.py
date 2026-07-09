@@ -1,4 +1,4 @@
-"""``fit_plan_model`` -- plans as fitted models over harvested agent traces (CARD C1-a).
+"""Fit plans as models over harvested agent traces.
 
 A plan is the ordered sequence of tool NAMES an agent called for a request. Fitting a Markov chain
 over those sequences (via the ordinary ``optimize`` entry point every mixle model goes through, not a
@@ -50,7 +50,7 @@ class PlanModel:
 
         The underlying sampler draws a length from ``len_dist`` first, then walks the chain; once the
         walk reaches an absorbing state (no fitted outgoing transition -- typically the tool that
-        always ends a workflow), the remaining, unreachable slots come back as ``None``. Truncate
+        always ends a workflow), the remaining, unreachable slots are returned as ``None``. Truncate
         there rather than exposing that padding: only known, actually-reached tool names are emitted.
         """
         rng = rng if rng is not None else np.random.RandomState()
@@ -81,11 +81,11 @@ def fit_plan_model(
     declare-an-estimator/call-optimize path every other mixle model uses, not hand-rolled counting.
 
     ``init_p`` defaults to ``1.0`` (use every trace for the init pass), not ``optimize``'s own
-    ``init_p=0.1`` default: that Bernoulli-subsamples observations for a cheap init estimate, sized
+    ``init_p=0.1`` default: that Bernoulli-subsamples observations for a low-cost init estimate, sized
     for large corpora, but a trace corpus here is typically tens to a few hundred sequences -- with
     that few, a 10% subsample has a real chance of drawing ZERO sequences, which crashes
     ``MarkovChainEstimator.estimate1`` (``all_keys`` ends up empty, dividing by zero). Using the full
-    corpus for this small an init pass is cheap and simply correct; override down only for corpora
+    corpus for this small an init pass is low-overhead and more reliable; override down only for corpora
     large enough that subsampling actually matters.
     """
     from mixle.inference import optimize

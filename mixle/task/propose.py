@@ -1,10 +1,8 @@
-"""Budgeted propose-verify-retrain loop over a discrete structured design space (workstream I2/I3).
+"""Budgeted propose-verify-retrain loop over a discrete structured design space.
 
-:mod:`mixle.doe.oracle` narrowed workstream I's design-test-learn loop to continuous/low-dimensional
-candidate spaces (:func:`~mixle.doe.oracle.optimize_under_oracle`, a Bayesian-optimization proposal
-model) and explicitly deferred structured/discrete spaces (a protein sequence, a program) as follow-up.
-This module is that deferred slice: a proposal DISTRIBUTION over short fixed-length symbol sequences --
-one :class:`~mixle.stats.univariate.discrete.categorical.CategoricalDistribution` per position -- that
+This module handles structured and discrete candidates such as short protein-like sequences or compact
+program sketches. It uses a proposal distribution over short fixed-length symbol sequences, with one
+:class:`~mixle.stats.univariate.discrete.categorical.CategoricalDistribution` per position, then
 samples K candidates per round, verifies every one against a
 :class:`~mixle.doe.oracle.VerifiableOracle`, keeps the verifiably-better ones, and refits the proposal
 on the winners (reweighted MLE through the shared :func:`mixle.inference.optimize` EM driver -- no
@@ -104,6 +102,7 @@ class ProposeVerifyResult:
 
     @property
     def oracle_calls(self) -> int:
+        """Return the total number of candidate evaluations sent to the oracle."""
         return sum(len(r.candidates) for r in self.rounds)
 
     def all_candidates(self) -> list[tuple[tuple, OracleResult]]:
@@ -123,15 +122,17 @@ def propose_verify_retrain(
     keep_frac: float = 0.25,
     seed: int | None = None,
 ) -> ProposeVerifyResult:
-    """The I2/I3 loop: sample ``k_per_round`` candidates from ``proposal``, verify every one with
-    ``oracle``, keep the top ``keep_frac`` by oracle score, refit ``proposal`` on the kept winners
-    (weighted by score), repeat for ``rounds`` rounds -- an oracle-call budget of exactly
-    ``k_per_round * rounds``. ``oracle=None`` raises immediately (the one hard precondition this
-    workstream enforces at every entry point, never a fabricated candidate)."""
+    """Sample, verify, keep, and refit under a fixed oracle-call budget.
+
+    Each round draws ``k_per_round`` candidates from ``proposal``, verifies every one with ``oracle``,
+    keeps the top ``keep_frac`` by oracle score, and refits ``proposal`` on the kept winners weighted
+    by score. The exact oracle-call budget is ``k_per_round * rounds``. ``oracle=None`` raises
+    immediately because this routine requires a verifiable objective rather than fabricating one.
+    """
     if oracle is None:
         raise ValueError(
             "no verifiable objective; cannot optimize. propose_verify_retrain requires a "
-            "VerifiableOracle -- this is the workstream's one hard precondition, not a missing default."
+            "VerifiableOracle -- this is a hard precondition, not a missing default."
         )
     if not 0.0 < keep_frac <= 1.0:
         raise ValueError("keep_frac must be in (0, 1].")

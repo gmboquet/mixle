@@ -1,13 +1,13 @@
-"""A streaming, non-buffering transformer-LM leaf -- the keystone that removes the host-RAM materialization wall.
+"""A streaming, non-buffering transformer-LM leaf for avoiding host-RAM materialization.
 
-Where ``NeuralCategorical`` buffers the whole shard in the accumulator and news a fresh optimizer every M-step,
-this **inverts the EM abstraction**: the M-step OWNS a long-lived module + optimizer, and the accumulator's
-``seq_update`` IS one train step on a streamed micro-batch. ``value()`` returns ``(loss_sum, tokens)`` -- two
-floats, telemetry only, NEVER the corpus -- and ``estimate()`` is a no-op that wraps the live module.
+Where ``NeuralCategorical`` buffers the whole shard in the accumulator and creates a fresh optimizer every
+M-step, this leaf keeps a long-lived module and optimizer in the M-step. The accumulator's ``seq_update``
+is one train step on a streamed micro-batch. ``value()`` returns ``(loss_sum, tokens)`` -- two telemetry
+floats rather than the corpus -- and ``estimate()`` is a no-op that wraps the live module.
 
 This deliberately voids the sufficient-statistic algebra (``value``/``combine`` are telemetry, not a foldable
-statistic): a sanctioned non-leaf carve-out (like ``NeuralGaussian.sample()`` raising), NOT an ABC change. It is the
-single-process prerequisite for the distributed (FSDP2) neural handle: each rank keeps its streamed shard
+statistic): a sanctioned non-leaf carve-out (like ``NeuralGaussian.sample()`` raising), not an ABC change. It is the
+single-process prerequisite for the distributed neural handle: each rank keeps its streamed shard
 resident and the only cross-rank collective becomes the in-backward gradient reduce-scatter, never a
 gather-suff-stats-to-root.
 """
@@ -74,9 +74,11 @@ class StreamingTransformer(SequenceEncodableProbabilityDistribution):
         return "StreamingTransformer()"
 
     def log_density(self, xy: Any) -> float:
+        """Return the next-token log probability for one ``(context, token)`` pair."""
         return float(self.seq_log_density((np.atleast_2d(xy[0]), [int(xy[1])]))[0])
 
     def predict(self, x: Any) -> np.ndarray:
+        """Return argmax next-token predictions for one or more contexts."""
         torch = _torch()
         self.module.to(self.device)
         with torch.no_grad():
@@ -84,9 +86,11 @@ class StreamingTransformer(SequenceEncodableProbabilityDistribution):
         return logits.argmax(1).cpu().numpy()
 
     def sampler(self, seed: int | None = None) -> StreamingTransformerSampler:
+        """Return the sampler for the conditional next-token model."""
         return StreamingTransformerSampler(self, seed)
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
+        """Return per-row next-token log probabilities for encoded context/token pairs."""
         torch = _torch()
         x, y = enc
         self.module.to(self.device)
@@ -100,9 +104,11 @@ class StreamingTransformer(SequenceEncodableProbabilityDistribution):
         return logp[np.arange(len(y)), y]
 
     def estimator(self, pseudo_count: float | None = None) -> StreamingTransformerEstimator:
+        """Return the streaming estimator that trains the live module in accumulator updates."""
         return StreamingTransformerEstimator(self.module, device=self.device)
 
     def dist_to_encoder(self) -> StreamingTokenEncoder:
+        """Return the encoder for context/token training pairs."""
         return StreamingTokenEncoder()
 
     # --- serialization: persist the module (as portable bytes); registered below so a mixture holding this
@@ -117,23 +123,30 @@ class StreamingTransformer(SequenceEncodableProbabilityDistribution):
         self.module = decode_module(state["module"])
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the module bytes and device for registry-based round trips."""
         return {"module": encode_module(self.module), "device": self.device}
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> StreamingTransformer:
+        """Rebuild a :class:`StreamingTransformer` from :meth:`to_dict` output."""
         return cls(decode_module(payload["module"]), device=payload["device"])
 
 
 class StreamingTransformerSampler(DistributionSampler):
+    """Sampler facade for a conditional next-token transformer leaf."""
+
     def __init__(self, dist: StreamingTransformer, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
+        """Raise because contexts are required for transformer generation."""
         raise NotImplementedError("StreamingTransformer is a conditional next-token model; feed contexts to generate.")
 
 
 class StreamingTokenEncoder(DataSequenceEncoder):
+    """Encode context/token pairs for streaming transformer scoring and training."""
+
     def __str__(self) -> str:
         return "StreamingTokenEncoder"
 
@@ -141,6 +154,7 @@ class StreamingTokenEncoder(DataSequenceEncoder):
         return isinstance(other, StreamingTokenEncoder)
 
     def seq_encode(self, data: list) -> tuple[np.ndarray, np.ndarray]:
+        """Convert ``(context, token)`` pairs into batched context and integer-token arrays."""
         x = np.array([np.atleast_1d(np.asarray(d[0], dtype=float)) for d in data])
         y = np.array([int(d[1]) for d in data], dtype=int)
         return (x, y)
@@ -160,6 +174,7 @@ class StreamingTransformerAccumulator(SequenceEncodableStatisticAccumulator):
         self.last_loss = float("nan")
 
     def seq_update(self, enc: Any, weights: Any, estimate: Any) -> None:
+        """Run one optimizer step on an encoded micro-batch."""
         torch = _torch()
         x, y = enc
         xt = torch.as_tensor(np.asarray(x), dtype=torch.float32).to(self.device)
@@ -181,51 +196,65 @@ class StreamingTransformerAccumulator(SequenceEncodableStatisticAccumulator):
         self.tokens += int(len(yt))
 
     def update(self, x: Any, weight: float, estimate: Any) -> None:
+        """Train on one weighted context/token pair through :meth:`seq_update`."""
         self.seq_update((np.atleast_2d(x[0]), [int(x[1])]), [float(weight)], estimate)
 
     def initialize(self, x: Any, weight: float, rng: Any) -> None:
+        """No-op initialization hook for the streaming training path."""
         pass  # streaming: no separate initialization pass
 
     def seq_initialize(self, enc: Any, weights: Any, rng: Any) -> None:
+        """No-op batch initialization hook for the streaming training path."""
         pass
 
     def combine(self, other: Any) -> StreamingTransformerAccumulator:
+        """Merge telemetry from another streaming accumulator."""
         ls, t = other
         self.loss_sum += float(ls)
         self.tokens += int(t)
         return self
 
     def value(self) -> tuple[float, int]:
+        """Return ``(loss_sum, token_count)`` telemetry without storing the corpus."""
         return (self.loss_sum, self.tokens)  # two floats -- never the corpus
 
     def from_value(self, v: tuple) -> StreamingTransformerAccumulator:
+        """Restore telemetry counters from a value tuple."""
         self.loss_sum, self.tokens = float(v[0]), int(v[1])
         return self
 
     def acc_to_encoder(self) -> StreamingTokenEncoder:
+        """Return the encoder expected by this accumulator."""
         return StreamingTokenEncoder()
 
 
 class StreamingTransformerAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for streaming transformer accumulators sharing a live module."""
+
     def __init__(self, module: Any, lr: float, device: str) -> None:
         self.module = module
         self.lr = lr
         self.device = device
 
     def make(self) -> StreamingTransformerAccumulator:
+        """Create a fresh accumulator around the shared live module."""
         return StreamingTransformerAccumulator(self.module, self.lr, self.device)
 
 
 class StreamingTransformerEstimator(ParameterEstimator):
+    """Estimator whose accumulator trains a live streaming transformer module in place."""
+
     def __init__(self, module: Any, lr: float = 3e-3, device: str = "cpu") -> None:
         self.module = module
         self.lr = lr
         self.device = device
 
     def accumulator_factory(self) -> StreamingTransformerAccumulatorFactory:
+        """Return an accumulator factory for streamed context/token micro-batches."""
         return StreamingTransformerAccumulatorFactory(self.module, self.lr, self.device)
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> StreamingTransformer:
+        """Return the live module wrapped as a fitted streaming transformer leaf."""
         # suff_stat = (loss_sum, tokens) telemetry; the module was already trained in place by seq_update -- no-op.
         return StreamingTransformer(self.module, self.device)
 

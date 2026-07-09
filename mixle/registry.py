@@ -1,11 +1,12 @@
 """``Registry`` -- a local directory + index of fitted task models, queryable by capability and fingerprint.
 
-Workstream J2: the library catalog the orchestrator/router read from and the capture/accumulation flywheels
-(D9, ACCUM-a) write into. Deliberately a directory + a JSON index, not a server: every entry is a saved
+The registry is the local library catalog that orchestrators, routers, capture
+flows, and accumulation workflows can read from or write into. Deliberately a
+directory plus a JSON index, not a server: every entry is a saved
 :class:`~mixle.task.model.TaskModel` or :class:`~mixle.task.calibrate.CalibratedTaskModel` artifact directory
 (see :mod:`mixle.task.artifact`) plus a small index record naming its capabilities, task fingerprint
 (:func:`~mixle.task.edge.task_fingerprint`), and capture profile. ``find_for`` answers "do I already have
-something for this task"; ``tier_stack`` turns a matching capability into a cheapest-first tier list -- the
+something for this task"; ``tier_stack`` turns a matching capability into an ascending-cost tier list -- the
 shape :class:`~mixle.task.router.Router` consumes directly (``Router(tiers=stack)``), with the frontier
 appended last as the router's own fallback tier.
 """
@@ -39,6 +40,7 @@ class RegistryEntry:
     cost: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the registry entry into JSON-compatible fields."""
         return {
             "entry_id": self.entry_id,
             "path": self.path,
@@ -51,6 +53,7 @@ class RegistryEntry:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> RegistryEntry:
+        """Create a registry entry from a JSON index record."""
         return cls(
             entry_id=d["entry_id"],
             path=d["path"],
@@ -164,7 +167,7 @@ class Registry:
         costs: Sequence[float] | None = None,
         names: Sequence[str] | None = None,
     ) -> list[tuple[str, Any, float]]:
-        """Cheapest-first ``(name, model, cost)`` tiers for capability ``task``, ``frontier`` appended last.
+        """Ascending-cost ``(name, model, cost)`` tiers for capability ``task``, ``frontier`` appended last.
 
         Matching entries are loaded (:meth:`load`) and ordered by their registered ``cost``. The result is
         exactly the shape :class:`~mixle.task.router.Router` takes as ``tiers=``: each non-final tier exposes

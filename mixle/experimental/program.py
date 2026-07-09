@@ -129,10 +129,12 @@ class Move:
 
 
 def minimize(objective: Callable[[], Any], over: Iterable, lr: float | None = None) -> Move:
+    """Create a gradient move that minimizes ``objective`` over the provided parameters."""
     return Move(objective, over, +1.0, lr)
 
 
 def maximize(objective: Callable[[], Any], over: Iterable, lr: float | None = None) -> Move:
+    """Create a gradient move that maximizes ``objective`` over the provided parameters."""
     return Move(objective, over, -1.0, lr)
 
 
@@ -155,6 +157,7 @@ class EMMove:
 
     @property
     def model(self) -> Any:
+        """Current fitted model carried by the EM move."""
         return self._state.model
 
     def _step(self) -> None:
@@ -172,6 +175,8 @@ def em(estimator: Any, data: Sequence, init: Any) -> EMMove:
 # Combinators: a Program is a schedule of moves run once each per round.
 # ---------------------------------------------------------------------------------------------------------
 class Program:
+    """Ordered schedule of optimization or EM moves."""
+
     def __init__(self, moves: Sequence) -> None:
         self.moves = list(moves)
 
@@ -212,6 +217,8 @@ def weighted(terms: Sequence[tuple], over: Iterable) -> Program:
 # Constraints: a Lagrange multiplier is the "dual player" -- constrained optimization is a min-max game.
 # ---------------------------------------------------------------------------------------------------------
 class Constraint:
+    """Scalar inequality constraint represented for primal-dual optimization."""
+
     def __init__(self, g: Callable[[], Any], bound: float = 0.0, kind: str = "<=") -> None:
         if kind not in ("<=", ">="):
             raise ValueError("constraint kind must be '<=' or '>='")
@@ -220,6 +227,7 @@ class Constraint:
         self.kind = kind
 
     def violation(self) -> Any:
+        """Return the signed constraint violation optimized by the dual player."""
         return (self.g() - self.bound) if self.kind == "<=" else (self.bound - self.g())
 
 
@@ -340,6 +348,7 @@ class Stream:
         self.index = -1
 
     def advance(self) -> None:
+        """Advance to the next chunk and mark the stream done at exhaustion."""
         try:
             self.current = next(self._it)
             self.index += 1
@@ -355,12 +364,14 @@ class ReplayBuffer:
         self.items: list = []
 
     def add(self, item: Any) -> ReplayBuffer:
+        """Append a chunk and evict the oldest item when capacity is exceeded."""
         self.items.append(item)
         if len(self.items) > self.capacity:
             self.items.pop(0)
         return self
 
     def all(self) -> list:
+        """Return a snapshot list of buffered replay chunks."""
         return list(self.items)
 
 
@@ -545,6 +556,7 @@ class StreamingEMMove:
 
     @property
     def model(self) -> Any:
+        """Current model carried across streaming EM chunks."""
         return self._state.model
 
     def _step(self) -> None:

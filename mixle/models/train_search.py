@@ -1,14 +1,17 @@
-"""DoE for training LLMs -- multi-fidelity Bayesian optimization of the training recipe, budget as the fidelity.
+"""Design-of-experiments helpers for language-model training recipes.
 
-Training a language model is the expensive-objective, cheap-proxy setting multi-fidelity BO is built for: a short
-run (few steps / a data subset) is a noisy, cheap estimate of the full run's loss. :func:`tune_training` wraps
-``mixle.doe.multi_fidelity_minimize`` so the search spends cheap low-budget runs to locate good recipes and
-reserves full-budget runs to refine -- reaching a good recipe for a fraction of the compute of grid search.
+Training a language model is an expensive-objective, low-fidelity-proxy
+setting: a short run over fewer steps or a data subset is a noisy estimate of
+the full run's loss. :func:`tune_training` wraps
+``mixle.doe.multi_fidelity_minimize`` so the search uses low-budget runs to
+locate promising recipes and reserves full-budget runs to refine them.
 
-The objective is *your* training callback ``train(recipe, budget) -> held-out loss`` (``budget in (0, 1]`` is the
-fraction of full training), so it scales from a tiny local model to a real pretraining loop unchanged --
-:func:`lm_train_fn` gives a ready callback that trains a mixle :class:`~mixle.models.language_model.LM`.
-:func:`extrapolate_learning_curve` predicts a full-budget loss from a partial run's curve, for early stopping.
+The objective is a caller-supplied training callback
+``train(recipe, budget) -> held-out loss`` where ``budget in (0, 1]`` is the
+fraction of full training. :func:`lm_train_fn` provides a callback for
+:class:`~mixle.models.language_model.LM`, and
+:func:`extrapolate_learning_curve` predicts full-budget loss from a partial
+run's curve for early stopping.
 """
 
 from __future__ import annotations
@@ -30,12 +33,15 @@ class TrainingSpace:
     batch_choices: Sequence[int] = (16, 32, 64, 128)
 
     def dims(self) -> int:
+        """Return the dimensionality of the unit-cube recipe search space."""
         return 4
 
     def bounds(self) -> list[tuple[float, float]]:
+        """Return unit-cube bounds for the DOE optimizer."""
         return [(0.0, 1.0)] * self.dims()
 
     def decode(self, point: np.ndarray) -> dict[str, Any]:
+        """Decode a unit-cube point into concrete LM training hyperparameters."""
         p = np.clip(np.asarray(point, dtype=np.float64), 0.0, 1.0)
         return {
             "d_model": int(
@@ -68,11 +74,11 @@ def tune_training(
     n_init: int | None = None,
     seed: int = 0,
 ) -> TrainingSearchResult:
-    """Multi-fidelity BO of the training recipe; ``train(recipe, budget)`` returns held-out loss (lower is better).
+    """Run multi-fidelity BO over a training recipe.
 
-    ``fidelities`` are the training-budget fractions the search may run at (cheap first). Returns the recipe with
-    the best full-budget loss and the full BO history. Scale the objective by swapping ``train`` for a real
-    launcher -- the search machinery is identical.
+    ``train(recipe, budget)`` returns held-out loss, where lower is better.
+    ``fidelities`` are the training-budget fractions the search may run at.
+    Returns the recipe with the best full-budget loss and the full BO history.
     """
     from mixle.doe import multi_fidelity_minimize
 
@@ -97,10 +103,10 @@ def lm_train_fn(
     max_epochs: int = 3,
     device: str = "cpu",
 ) -> Callable[[dict[str, Any], float], float]:
-    """A ready training callback ``(recipe, budget) -> held-out nats/token`` that trains a real mixle ``LM``.
+    """Return a training callback ``(recipe, budget) -> held-out nats/token`` for ``LM``.
 
-    ``budget in (0, 1]`` scales the number of epochs (the cheap-fidelity axis is training length); a real
-    pretraining loop would scale steps or the token subset the same way.
+    ``budget in (0, 1]`` scales the number of epochs. A larger pretraining loop
+    can use the same convention to scale steps or token subsets.
     """
     from mixle.models.language_model import LM
 
@@ -127,9 +133,9 @@ def lm_train_fn(
 def extrapolate_learning_curve(steps: Sequence[float], losses: Sequence[float], *, at: float) -> float:
     """Predict the loss at budget/step ``at`` from a partial run's ``(steps, losses)`` via a power-law fit.
 
-    Fits ``loss(t) = a + b * t^(-c)`` (the standard learning-curve form) and evaluates it at ``at`` -- so a cheap
-    partial run can estimate the full-budget loss for early stopping. Falls back to the last observed loss if the
-    fit fails.
+    Fits ``loss(t) = a + b * t^(-c)`` and evaluates it at ``at`` so a partial
+    run can estimate the full-budget loss for early stopping. Falls back to the
+    last observed loss if the fit fails.
     """
     t = np.asarray(steps, dtype=np.float64)
     y = np.asarray(losses, dtype=np.float64)

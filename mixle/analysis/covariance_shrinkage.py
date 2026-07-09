@@ -74,9 +74,11 @@ class LedoitWolfEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> LedoitWolfAccumulatorFactory:
+        """Return an accumulator factory for streaming Ledoit-Wolf sufficient statistics."""
         return LedoitWolfAccumulatorFactory(self.dim, self.keys, self.name)
 
     def estimate(self, nobs, suff_stat) -> MultivariateGaussianDistribution:
+        """Estimate a Gaussian distribution from accumulated Ledoit-Wolf sufficient statistics."""
         s1, s2, s3, s4, n = suff_stat
         mean, _cov, shrunk, delta = _shrink(np.asarray(s1), np.asarray(s2), np.asarray(s3), float(s4), float(n))
         dist = MultivariateGaussianDistribution(mean, shrunk, name=self.name)
@@ -108,6 +110,7 @@ class LedoitWolfAccumulator(SequenceEncodableStatisticAccumulator):
             self.s3 = np.zeros(dim)
 
     def update(self, x: np.ndarray, weight: float, estimate=None) -> None:
+        """Add one weighted observation to the streaming covariance-shrinkage statistics."""
         x = np.asarray(x, dtype=float)
         self._ensure(len(x))
         sq = float(x @ x)
@@ -118,9 +121,11 @@ class LedoitWolfAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += weight
 
     def initialize(self, x: np.ndarray, weight: float, rng: RandomState | None) -> None:
+        """Initialize the accumulator from one observation using the standard update path."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate=None) -> None:
+        """Add a batch of weighted observations to the streaming sufficient statistics."""
         x = np.asarray(x, dtype=float)
         self._ensure(x.shape[1])
         sq = np.einsum("ij,ij->i", x, x)  # ||x_t||^2 per row
@@ -132,9 +137,11 @@ class LedoitWolfAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += float(weights.sum())
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the accumulator from a weighted batch using the standard batch update path."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat) -> LedoitWolfAccumulator:
+        """Merge sufficient statistics from another Ledoit-Wolf accumulator."""
         s1, s2, s3, s4, count = suff_stat
         if s1 is None:
             return self
@@ -150,22 +157,28 @@ class LedoitWolfAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self):
+        """Return the accumulated ``(sum_x, sum_xx, sum_x_norm2, sum_norm4, count)`` tuple."""
         return self.s1, self.s2, self.s3, self.s4, self.count
 
     def from_value(self, x) -> LedoitWolfAccumulator:
+        """Restore accumulator state from a value tuple produced by :meth:`value`."""
         self.s1, self.s2, self.s3, self.s4, self.count = x
         self.dim = None if x[0] is None else len(x[0])
         return self
 
     def acc_to_encoder(self) -> MultivariateGaussianDataEncoder:
+        """Return the encoder expected by this accumulator."""
         return MultivariateGaussianDataEncoder(dim=self.dim)
 
 
 class LedoitWolfAccumulatorFactory(StatisticAccumulatorFactory):
+    """Factory for Ledoit-Wolf accumulators with fixed dimensional metadata."""
+
     def __init__(self, dim: int | None = None, keys: str | None = None, name: str | None = None):
         self.dim = dim
         self.keys = keys
         self.name = name
 
     def make(self) -> LedoitWolfAccumulator:
+        """Create a fresh accumulator instance."""
         return LedoitWolfAccumulator(self.dim, self.keys, self.name)

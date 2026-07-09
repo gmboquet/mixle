@@ -56,6 +56,7 @@ class SoftmaxGate:
 
     @classmethod
     def zeros(cls, n_classes: int, n_features: int) -> SoftmaxGate:
+        """Create a zero-logit gate with uniform initial class probabilities."""
         return cls(np.zeros((n_classes, n_features)), np.zeros(n_classes))
 
     def log_prob_batch(self, z: np.ndarray) -> np.ndarray:
@@ -66,6 +67,7 @@ class SoftmaxGate:
         return logits - logsumexp
 
     def fit(self, z: np.ndarray, resp: np.ndarray, *, steps: int = 200, lr: float = 0.1) -> SoftmaxGate:
+        """Fit a softmax gate to responsibility-weighted soft targets."""
         z = np.asarray(z, dtype=np.float64)
         r = np.asarray(resp, dtype=np.float64)
         n = max(len(z), 1)
@@ -113,6 +115,7 @@ class GatedMixtureDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def log_density(self, x: tuple[Any, Any]) -> float:
+        """Return ``log p(y | z)`` for one covariate/response pair."""
         z, y = x
         gate_lp = self.gate.log_prob_batch(np.atleast_2d(np.asarray(z, dtype=np.float64)))[0]
         comp_lp = np.array([gate_lp[k] + float(self.components[k].log_density(y)) for k in range(self.num_components)])
@@ -120,6 +123,7 @@ class GatedMixtureDistribution(SequenceEncodableProbabilityDistribution):
         return float(m + np.log(np.exp(comp_lp - m).sum())) if np.isfinite(m) else float("-inf")
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
+        """Return vectorized conditional log-densities for encoded ``(z, y)`` pairs."""
         z_arr, comp_encs = enc
         gate_lp = self.gate.log_prob_batch(z_arr)  # (n, K)
         ll_mat = np.full((z_arr.shape[0], self.num_components), -np.inf, dtype=np.float64)
@@ -134,6 +138,7 @@ class GatedMixtureDistribution(SequenceEncodableProbabilityDistribution):
         return out
 
     def posterior(self, x: tuple[Any, Any]) -> np.ndarray:
+        """Return posterior expert responsibilities for one ``(z, y)`` observation."""
         z, y = x
         gate_lp = self.gate.log_prob_batch(np.atleast_2d(np.asarray(z, dtype=np.float64)))[0]
         lp = np.array([gate_lp[k] + float(self.components[k].log_density(y)) for k in range(self.num_components)])
@@ -144,14 +149,17 @@ class GatedMixtureDistribution(SequenceEncodableProbabilityDistribution):
         return p / p.sum()
 
     def sampler(self, seed: int | None = None) -> GatedMixtureSampler:
+        """Return a conditional sampler that requires a covariate ``z``."""
         return GatedMixtureSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> GatedMixtureEstimator:
+        """Return an EM estimator for experts and the covariate-dependent gate."""
         return GatedMixtureEstimator(
             [c.estimator() for c in self.components], self.gate, name=self.name, keys=self.keys
         )
 
     def dist_to_encoder(self) -> GatedMixtureDataEncoder:
+        """Return the encoder for covariates plus expert response encodings."""
         return GatedMixtureDataEncoder([c.dist_to_encoder() for c in self.components])
 
 
@@ -164,11 +172,13 @@ class GatedMixtureSampler(DistributionSampler):
         self._comp_samplers = [c.sampler(seed) for c in dist.components]
 
     def sample_given(self, z: Any) -> Any:
+        """Sample a response from the gated mixture conditional on covariate ``z``."""
         gate_p = np.exp(self.dist.gate.log_prob_batch(np.atleast_2d(np.asarray(z, dtype=np.float64)))[0])
         k = int(self.rng.choice(self.dist.num_components, p=gate_p / gate_p.sum()))
         return self._comp_samplers[k].sample()
 
     def sample(self, size: int | None = None) -> Any:
+        """Raise because unconditional sampling requires caller-supplied covariates."""
         raise NotImplementedError("GatedMixture is conditional p(y|z); use sampler().sample_given(z).")
 
 
@@ -185,6 +195,7 @@ class GatedMixtureDataEncoder(DataSequenceEncoder):
         return isinstance(other, GatedMixtureDataEncoder) and self.component_encoders == other.component_encoders
 
     def seq_encode(self, data: Sequence[tuple[Any, Any]]) -> tuple[np.ndarray, tuple[Any, ...]]:
+        """Encode covariates as a dense matrix and responses for every expert."""
         z = np.asarray([np.atleast_1d(np.asarray(row[0], dtype=np.float64)) for row in data], dtype=np.float64)
         ys = [row[1] for row in data]
         comp_encs = tuple(enc.seq_encode(ys) for enc in self.component_encoders)
@@ -225,6 +236,7 @@ class GatedMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         return z_arr, r
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: GatedMixtureDistribution | None) -> None:
+        """Update expert accumulators and gate buffers from encoded observations."""
         z_arr, r = self._responsibilities(enc, weights, estimate)
         _, comp_encs = enc
         for k in range(self.num_components):
@@ -235,6 +247,7 @@ class GatedMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self._resp.append(r)
 
     def seq_initialize(self, enc: Any, weights: np.ndarray, rng: np.random.RandomState) -> None:
+        """Initialize expert accumulators with random responsibility allocations."""
         z_arr, comp_encs = enc
         n = z_arr.shape[0]
         r = rng.dirichlet(np.ones(self.num_components), size=n) * np.asarray(weights, dtype=np.float64)[:, None]
@@ -244,14 +257,17 @@ class GatedMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self._resp.append(r)
 
     def update(self, x: tuple[Any, Any], weight: float, estimate: GatedMixtureDistribution | None) -> None:
+        """Update from one weighted ``(z, y)`` observation."""
         enc = GatedMixtureDataEncoder([a.acc_to_encoder() for a in self.component_accumulators]).seq_encode([x])
         self.seq_update(enc, np.asarray([weight], dtype=np.float64), estimate)
 
     def initialize(self, x: tuple[Any, Any], weight: float, rng: np.random.RandomState) -> None:
+        """Initialize from one weighted ``(z, y)`` observation."""
         enc = GatedMixtureDataEncoder([a.acc_to_encoder() for a in self.component_accumulators]).seq_encode([x])
         self.seq_initialize(enc, np.asarray([weight], dtype=np.float64), rng)
 
     def combine(self, suff_stat: tuple[tuple[Any, ...], np.ndarray, np.ndarray]) -> GatedMixtureAccumulator:
+        """Merge expert sufficient statistics and buffered gate training data."""
         comp_stats, z, r = suff_stat
         for k in range(self.num_components):
             self.component_accumulators[k].combine(comp_stats[k])
@@ -261,12 +277,14 @@ class GatedMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[tuple[Any, ...], np.ndarray, np.ndarray]:
+        """Return expert statistics, buffered covariates, and responsibility targets."""
         comp_vals = tuple(a.value() for a in self.component_accumulators)
         z = np.concatenate(self._z, axis=0) if self._z else np.zeros((0, 0))
         r = np.concatenate(self._resp, axis=0) if self._resp else np.zeros((0, self.num_components))
         return comp_vals, z, r
 
     def from_value(self, x: tuple[tuple[Any, ...], np.ndarray, np.ndarray]) -> GatedMixtureAccumulator:
+        """Restore expert statistics and gate training buffers."""
         comp_vals, z, r = x
         for k in range(self.num_components):
             self.component_accumulators[k].from_value(comp_vals[k])
@@ -275,26 +293,32 @@ class GatedMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Delegate keyed merges to expert accumulators."""
         for a in self.component_accumulators:
             if hasattr(a, "key_merge"):
                 a.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Delegate keyed replacements to expert accumulators."""
         for a in self.component_accumulators:
             if hasattr(a, "key_replace"):
                 a.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> GatedMixtureDataEncoder:
+        """Return the encoder composed from expert accumulator encoders."""
         return GatedMixtureDataEncoder([a.acc_to_encoder() for a in self.component_accumulators])
 
 
 class GatedMixtureAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create accumulators for gated-mixture EM."""
+
     def __init__(self, component_factories: Sequence[Any], num_components: int, keys: str | None = None) -> None:
         self.component_factories = list(component_factories)
         self.num_components = num_components
         self.keys = keys
 
     def make(self) -> GatedMixtureAccumulator:
+        """Create an empty gated-mixture accumulator."""
         return GatedMixtureAccumulator(
             [f.make() for f in self.component_factories], self.num_components, keys=self.keys
         )
@@ -321,6 +345,7 @@ class GatedMixtureEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> GatedMixtureAccumulatorFactory:
+        """Return a factory for gated-mixture sufficient-statistic accumulators."""
         return GatedMixtureAccumulatorFactory(
             [e.accumulator_factory() for e in self.component_estimators], self.num_components, keys=self.keys
         )
@@ -328,6 +353,7 @@ class GatedMixtureEstimator(ParameterEstimator):
     def estimate(
         self, nobs: float | None, suff_stat: tuple[tuple[Any, ...], np.ndarray, np.ndarray]
     ) -> GatedMixtureDistribution:
+        """Estimate experts from responsibility-weighted stats and refit the gate."""
         comp_stats, z, r = suff_stat
         components = [self.component_estimators[k].estimate(nobs, comp_stats[k]) for k in range(self.num_components)]
         if len(z) and hasattr(self.gate, "fit"):

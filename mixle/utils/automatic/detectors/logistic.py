@@ -1,4 +1,9 @@
-"""Logistic continuous candidate -- symmetric, heavier tails than Gaussian, lighter peak than Laplace."""
+"""Automatic detector for the logistic continuous family.
+
+The logistic candidate is a symmetric real-line alternative with heavier tails than a Gaussian and a less
+singular peak than a Laplace distribution. Its support gate accepts any finite real-valued sample; the
+likelihood score and two-parameter BIC penalty decide whether its tail shape is justified.
+"""
 
 import math
 
@@ -10,7 +15,7 @@ from mixle.utils.automatic.detectors import Detector, register
 def _applies(arr: np.ndarray) -> bool:
     if arr.size == 0:
         return False
-    return bool(np.all(np.isfinite(arr)))  # any real-valued data
+    return bool(np.all(np.isfinite(arr)))
 
 
 def _fit(arr: np.ndarray):

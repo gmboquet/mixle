@@ -111,6 +111,7 @@ class ChineseRestaurantProcessSampler(DistributionSampler):
         return labels
 
     def sample(self, size: int | None = None):
+        """Draw one partition or a list of independent partitions."""
         if size is None:
             return self._one()
         return [self._one() for _ in range(int(size))]
@@ -126,33 +127,41 @@ class ChineseRestaurantProcessAccumulator(SequenceEncodableStatisticAccumulator)
         self.keys = keys
 
     def update(self, x: np.ndarray, weight: float, estimate: Any) -> None:
+        """Accumulate the weighted block count for one partition."""
         self.sum_k += weight * _block_sizes(x).shape[0]
         self.count += weight
 
     def initialize(self, x: np.ndarray, weight: float, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics with one weighted partition."""
         self.update(x, weight, None)
 
     def seq_update(self, x: list[np.ndarray], weights: np.ndarray, estimate: Any) -> None:
+        """Accumulate weighted block counts for encoded partition label vectors."""
         for z, w in zip(x, np.asarray(weights, dtype=np.float64)):
             self.sum_k += float(w) * _block_sizes(z).shape[0]
             self.count += float(w)
 
     def seq_initialize(self, x: list[np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics from encoded partitions."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float]) -> "ChineseRestaurantProcessAccumulator":
+        """Merge serialized block-count statistics into this accumulator."""
         self.sum_k += suff_stat[0]
         self.count += suff_stat[1]
         return self
 
     def value(self) -> tuple[float, float]:
+        """Return the total weighted block count and observation weight."""
         return self.sum_k, self.count
 
     def from_value(self, x: tuple[float, float]) -> "ChineseRestaurantProcessAccumulator":
+        """Restore the accumulator from serialized block-count statistics."""
         self.sum_k, self.count = float(x[0]), float(x[1])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into a keyed statistics dictionary."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -160,10 +169,12 @@ class ChineseRestaurantProcessAccumulator(SequenceEncodableStatisticAccumulator)
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from a keyed statistics dictionary."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "ChineseRestaurantProcessDataEncoder":
+        """Return an encoder for CRP partition label vectors."""
         return ChineseRestaurantProcessDataEncoder()
 
 
@@ -175,6 +186,7 @@ class ChineseRestaurantProcessAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> ChineseRestaurantProcessAccumulator:
+        """Create an empty CRP accumulator."""
         return ChineseRestaurantProcessAccumulator(name=self.name, keys=self.keys)
 
 
@@ -196,12 +208,14 @@ class ChineseRestaurantProcessEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> ChineseRestaurantProcessAccumulatorFactory:
+        """Return a factory for CRP sufficient-statistic accumulators."""
         return ChineseRestaurantProcessAccumulatorFactory(name=self.name, keys=self.keys)
 
     def _expected_blocks(self, alpha: float) -> float:
         return alpha * float(digamma(alpha + self.n) - digamma(alpha))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> ChineseRestaurantProcessDistribution:
+        """Estimate the CRP concentration from the observed mean block count."""
         sum_k, count = suff_stat
         if count <= 0.0:
             return ChineseRestaurantProcessDistribution(1.0, self.n, name=self.name, keys=self.keys)
@@ -233,4 +247,5 @@ class ChineseRestaurantProcessDataEncoder(DataSequenceEncoder):
         return isinstance(other, ChineseRestaurantProcessDataEncoder)
 
     def seq_encode(self, x: Sequence[np.ndarray]) -> list[np.ndarray]:
+        """Encode partition label vectors as integer arrays without relabeling them."""
         return [np.asarray(z, dtype=np.int64) for z in x]

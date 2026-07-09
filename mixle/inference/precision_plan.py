@@ -1,8 +1,8 @@
-"""Automatic precision allocation -- look at the data AND the computation, pick the minimal safe precision.
+"""Automatic precision allocation from both data and computation.
 
 The control loop that makes "preserve accuracy with minimal compute" the *default*: a fit samples its data
 and inspects its model, and where the data is well-conditioned and the model's leaves are float32-safe it
-runs the reduced-precision fused kernel; otherwise it stays in float64. Accumulation is ALWAYS float64 (the
+runs the reduced-precision fused kernel; otherwise it stays in float64. Accumulation is always float64 (the
 fused kernels promote the reduction), so the result never drifts regardless of the compute band -- the only
 question this answers is how cheaply each row can be *scored*. Consulted by ``optimize(precision="minimal")``.
 
@@ -47,6 +47,7 @@ class PrecisionPlan:
     rationale: str
 
     def reduced(self) -> bool:
+        """Return whether the plan uses lower-than-float64 compute precision."""
         return np.dtype(self.compute_dtype) != np.float64
 
 

@@ -1,10 +1,9 @@
-"""Learned non-myopic probing policy vs myopic EIG (CARD PROBE-a, workstream C7, research spike).
+"""Learned non-myopic probing policy versus myopic expected information gain.
 
-Kill criterion, stated before running (per the card): if the learned non-myopic policy does not beat
-myopic EIG on solve-rate at matched oracle budget in the exploration world (averaged over >= 20 seeds,
-held-out world families), record the negative result and KEEP myopic. Myopic is often near-optimal;
-this spike exists to find where delayed/combinatorial payoff makes it fail, not to add a learned
-policy for its own sake.
+The head-to-head comparison is deliberately conservative. If the learned non-myopic policy does not
+beat myopic EIG on solve-rate at matched oracle budget in the exploration world, the result should be
+treated as evidence to keep the simpler myopic policy. Myopic is often near-optimal; the learned path
+is useful only when delayed or combinatorial payoff makes one-step EIG miss valuable probes.
 
 Two policies compared head-to-head, same action menu, same budget:
 
@@ -14,16 +13,16 @@ Two policies compared head-to-head, same action menu, same budget:
   "borderline-ness" (how close to the decision boundary between target/non-target reads) governs how
   much resolving it is actually worth -- a read far from the boundary is already confidently
   classified, so probing it teaches little.
-* the outcome-trained decomposer's plan model (:mod:`~mixle.task.outcome_decomposer`, CARD C2-a) --
-  trained via expert iteration against VERIFIER-GROUNDED reward (terminal world score, no learned
+* the outcome-trained decomposer's plan model (:mod:`~mixle.task.outcome_decomposer`) --
+  trained via expert iteration against verifier-grounded reward (terminal world score, no learned
   reward model): propose whole action-type sequences, execute, keep the verifiably-successful ones,
-  refit, iterate. Optimizing for a WHOLE sequence's terminal score (rather than one greedy step) is
+  refit, iterate. Optimizing for a whole sequence's terminal score (rather than one greedy step) is
   the non-myopic half of this comparison -- it can trade an immediately-worse-looking step for a
   better final outcome, which pure one-step EIG structurally cannot.
 
-    directed = train_outcome_decomposer(...)                    # CARD C2-a, already built
+    directed = train_outcome_decomposer(...)
     result = head_to_head_probe(directed.plan_model, held_out_seeds=range(...), ...)
-    result.non_myopic_wins                                       # the card's own decision
+    result.non_myopic_wins
 """
 
 from __future__ import annotations
@@ -81,6 +80,8 @@ def myopic_eig_policy(world: ExplorationWorld) -> dict | None:
 
 @dataclass
 class ProbeHeadToHead:
+    """Held-out comparison between the non-myopic probe policy and a myopic baseline."""
+
     non_myopic_score: float
     myopic_score: float
     non_myopic_wins: bool
@@ -94,8 +95,8 @@ def head_to_head_probe(
     n_targets: int,
     budget: int,
 ) -> ProbeHeadToHead:
-    """Compare the non-myopic (outcome-trained) plan model against the myopic EIG policy on the SAME
-    held-out seeds at matched budget -- the card's own kill-criterion computation."""
+    """Compare the non-myopic (outcome-trained) plan model against the myopic EIG policy on the same
+    held-out seeds at matched budget."""
     non_myopic_score = evaluate_plan_model(
         plan_model, seeds=held_out_seeds, n_cells=n_cells, n_targets=n_targets, budget=budget
     )

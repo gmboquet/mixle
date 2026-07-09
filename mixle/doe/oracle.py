@@ -1,4 +1,4 @@
-"""``VerifiableOracle`` -- the honesty boundary for de novo optimization (workstream I).
+"""Verifiable oracle boundary for de novo optimization.
 
 Given a design goal for which there is no data yet but there IS a way to check a candidate (a
 simulator, an executable test, held-out truth, an assay), :func:`optimize_under_oracle` proposes
@@ -8,17 +8,17 @@ account of what verified it.
 
 The one hard precondition, checked before anything else: there must be a verifiable oracle.
 :class:`VerifiableOracle` rejects a "self-graded by a model" tier at CONSTRUCTION -- that is the banned
-reward this whole workstream exists to forbid -- and :func:`optimize_under_oracle` refuses to run at all
-without one (``oracle=None`` -> the honest "no verifiable objective; cannot optimize" refusal, never a
+reward this boundary exists to forbid -- and :func:`optimize_under_oracle` refuses to run at all
+without one (``oracle=None`` -> the explicit "no verifiable objective; cannot optimize" refusal, never a
 fabricated candidate).
 
 This is a first, deliberately narrow slice: continuous/low-dimensional candidate spaces only, using the
 GP Bayesian-optimization loop already in :mod:`mixle.doe` (:class:`~mixle.doe.optimizer.BayesianOptimizer`)
-as the proposal model, proven here against a cheap closed-form oracle before any domain oracle exists (the
-plan's own stated build order). NOT in this slice: structured/discrete candidate spaces (a protein
+as the proposal model, validated here against a low-cost closed-form oracle before any domain oracle exists.
+Not in this slice: structured/discrete candidate spaces (a protein
 sequence, a program), amortizing the oracle into a calibrated surrogate, the shared expected-information-
-gain acquisition with workstreams C5/F6, and full workstream-H receipt objects -- each is a real, separate
-piece of machinery and is left as explicit follow-up rather than half-built here.
+gain acquisition, and full receipt objects -- each is a separate surface and is
+left explicit rather than half-built here.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ import numpy as np
 from mixle.doe.designs import Bounds
 from mixle.fault import abstain_on_timeout
 
-# The declared verifiability tiers, weakest to strongest. "self_graded" is deliberately NOT here: a
+# The declared verifiability tiers, weakest to strongest. "self_graded" is deliberately excluded: a
 # model grading its own candidates is the banned reward, rejected at VerifiableOracle construction.
 VERIFIABILITY_TIERS = frozenset({"executable", "simulation", "held_out_truth", "real_measurement"})
 
@@ -68,7 +68,7 @@ class VerifiableOracle:
             raise ValueError(
                 f"VerifiableOracle tier {self.tier!r} is not a recognized verifiability tier "
                 f"{sorted(VERIFIABILITY_TIERS)}; in particular, an oracle 'self-graded by a model' is "
-                "the banned reward this workstream forbids, and is rejected at construction."
+                "the banned reward this boundary forbids, and is rejected at construction."
             )
 
     def __call__(self, candidate: Any) -> OracleResult:
@@ -125,15 +125,18 @@ class DesignRun:
 
     @property
     def oracle_calls(self) -> int:
+        """Return the number of candidates scored by the oracle."""
         return len(self.history)
 
     @property
     def best(self) -> DesignCandidate:
+        """Return the highest-scoring candidate in the run history."""
         if not self.history:
             raise ValueError("no candidates were proposed; the run history is empty.")
         return max(self.history, key=lambda c: c.result.score)
 
     def scores(self) -> np.ndarray:
+        """Return the run's oracle scores in chronological order."""
         return np.asarray([c.result.score for c in self.history], dtype=float)
 
     def report(self) -> dict[str, Any]:
@@ -161,18 +164,20 @@ def optimize_under_oracle(
     seed: Any = None,
     **bo_kwargs: Any,
 ) -> DesignRun:
-    """The I1-I3 design loop: propose K candidates, verify each with ``oracle``, keep the receipted
-    history, refit the proposal model on every observation, repeat under an ``n_init + n_iter`` budget.
+    """Run a propose-verify-refit design loop under a fixed oracle budget.
 
-    ``oracle=None`` raises immediately with the honest refusal ("no verifiable objective; cannot
-    optimize") -- the workstream's one hard precondition, checked before any candidate is proposed.
+    The loop proposes candidates, verifies each one with ``oracle``, keeps the receipted history,
+    refits the proposal model on every observation, and repeats under an ``n_init + n_iter`` budget.
+
+    ``oracle=None`` raises immediately with the explicit refusal ("no verifiable objective; cannot
+    optimize") -- the hard precondition checked before any candidate is proposed.
     Continuous/low-dimensional ``bounds`` only (see module docstring); the proposal model is
     :class:`~mixle.doe.optimizer.BayesianOptimizer`, maximizing the oracle's score.
     """
     if oracle is None:
         raise ValueError(
             "no verifiable objective; cannot optimize. optimize_under_oracle requires a "
-            "VerifiableOracle -- this is the workstream's one hard precondition, not a missing default."
+            "VerifiableOracle -- this is a hard precondition, not a missing default."
         )
     from mixle.doe.optimizer import BayesianOptimizer
 

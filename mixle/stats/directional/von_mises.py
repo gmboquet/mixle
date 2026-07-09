@@ -1,10 +1,7 @@
-"""Create, estimate, and sample from a von Mises distribution on the circle (angular data).
+"""Von Mises distributions for circular angular data.
 
-Defines the VonMisesDistribution, VonMisesSampler, VonMisesAccumulatorFactory, VonMisesAccumulator,
-VonMisesEstimator, and the VonMisesDataEncoder classes for use with mixle.
-
-Data type: (float): an angle in radians. The VonMisesDistribution with mean direction mu and
-concentration kappa >= 0 has log-density
+Observations are angles in radians. A Von Mises distribution with mean direction ``mu`` and
+concentration ``kappa >= 0`` has log-density
 
         log(f(theta; mu, kappa)) = kappa * cos(theta - mu) - log(2*pi*I_0(kappa)),
 
@@ -90,12 +87,14 @@ class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated von Mises kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for von Mises distributions."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -193,7 +192,7 @@ class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of VonMisesDistribution object."""
+        """Return a constructor-style representation of the von Mises distribution."""
         return "VonMisesDistribution(%s, %s, name=%s, keys=%s)" % (
             repr(self.mu),
             repr(self.kappa),
@@ -300,38 +299,46 @@ class VonMisesAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: VonMisesDistribution | None) -> None:
+        """Accumulate one weighted circular moment contribution."""
         self.count += weight
         self.sum_cos += math.cos(float(x)) * weight
         self.sum_sin += math.sin(float(x)) * weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one angle."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: VonMisesDistribution | None
     ) -> None:
+        """Accumulate circular moments from encoded cos/sin values."""
         cos_t, sin_t = x
         self.count += np.sum(weights, dtype=np.float64)
         self.sum_cos += np.dot(cos_t, weights)
         self.sum_sin += np.dot(sin_t, weights)
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded angles."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "VonMisesAccumulator":
+        """Merge another von Mises sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.sum_cos += suff_stat[1]
         self.sum_sin += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return count, cosine sum, and sine sum."""
         return self.count, self.sum_cos, self.sum_sin
 
     def from_value(self, x: tuple[float, float, float]) -> "VonMisesAccumulator":
+        """Replace accumulator contents from circular-moment statistics."""
         self.count, self.sum_cos, self.sum_sin = x
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -339,10 +346,12 @@ class VonMisesAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "VonMisesDataEncoder":
+        """Return the encoder used by this accumulator."""
         return VonMisesDataEncoder()
 
 
@@ -353,6 +362,7 @@ class VonMisesAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> VonMisesAccumulator:
+        """Create a fresh von Mises accumulator."""
         return VonMisesAccumulator(keys=self.keys)
 
 
@@ -376,9 +386,11 @@ class VonMisesEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> VonMisesAccumulatorFactory:
+        """Return an accumulator factory for von Mises circular moments."""
         return VonMisesAccumulatorFactory(keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> VonMisesDistribution:
+        """Estimate mean direction and concentration from weighted circular moments."""
         count, sum_cos, sum_sin = suff_stat
         if self.pseudo_count is not None and self.suff_stat is not None:
             mean_cos0, mean_sin0 = self.suff_stat
@@ -407,6 +419,7 @@ class VonMisesDataEncoder(DataSequenceEncoder):
         return isinstance(other, VonMisesDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+        """Encode angles as cosine and sine arrays."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and np.any(~np.isfinite(rv)):
             raise ValueError("VonMisesDistribution requires finite angle observations.")

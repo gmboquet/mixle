@@ -1,19 +1,15 @@
-"""Task-sufficient projection ``pi_T`` (workstream F4): compress a mixture belief for one receiver's
-task, keeping only the distinctions that task's readout can tell apart.
+"""Task-sufficient projection ``pi_T`` for receiver-specific beliefs.
 
-Cross-context in this plan is a *task-sufficient projection*, not a compressed blob: a
-:class:`~mixle.reason.modality.ModalityView` carries a full structured belief (workstream F1); a
-receiver with task ``T`` should get the smallest view of that belief that still answers ``T`` --
-different receivers, different projections of the *same* belief. This module builds that operator on
-mixle's existing closed-form projection tools (:mod:`mixle.inference.project`: exact Gaussian mixture
-collapse, Runnalls reduction) rather than a new compression scheme: components of the belief that
-``task`` cannot distinguish are exactly moment-matched into one Gaussian (nothing task-relevant is
-lost, because the task never looked at what distinguished them); components ``task`` *can* distinguish
-are kept apart.
+A :class:`~mixle.reason.modality.ModalityView` can carry a full structured
+belief, while a receiver for task ``T`` may need only the smallest projection
+that preserves the distinctions relevant to that task. This module builds that
+operator on existing closed-form projection tools from
+:mod:`mixle.inference.project`: components that ``task`` cannot distinguish
+are moment-matched into one Gaussian, while components the task can
+distinguish are kept separate.
 
-This is deliberately not generic compression -- a projection built for a different task is not expected
-to serve this one well (see ``task_projection_test.py``'s mismatched-projection control), and that gap is
-the falsifiable claim this operator has to earn.
+This is task-specific projection rather than generic compression. A projection
+built for one task should be validated before being reused for another.
 """
 
 from __future__ import annotations
@@ -30,10 +26,11 @@ from mixle.stats.latent.mixture import MixtureDistribution
 
 @dataclass
 class TaskReadout:
-    """A receiver's task ``T``, reduced to the one thing a projection needs: which components of a
-    belief it can tell apart. ``label(mean)`` maps a mixture component's mean to a discrete readout
-    value (e.g. a predicted class); components sharing a readout are indistinguishable *for this task*
-    and can be losslessly (for ``T``) merged, components with different readouts must stay separate.
+    """Task readout used to decide which mixture components can be merged.
+
+    ``label(mean)`` maps a component mean to a discrete readout value. Components
+    sharing a readout are indistinguishable for this task and may be merged;
+    components with different readouts remain separate.
     """
 
     name: str
@@ -43,12 +40,10 @@ class TaskReadout:
 def task_sufficient_projection(mixture: Any, task: TaskReadout) -> MixtureDistribution:
     """``pi_T(mixture)``: collapse ``mixture``'s components into groups sharing ``task.label``.
 
-    Groups components by ``task.label(component_mean)``; within a group (size > 1), the components are
-    exactly moment-matched (:func:`~mixle.inference.project.collapse_mixture`, closed form -- no
-    samples) onto one Gaussian. Groups of size 1 pass through unchanged. Returns a
-    :class:`~mixle.stats.latent.mixture.MixtureDistribution` with at most as many components as
-    ``mixture`` had distinct task labels -- far smaller when many components share a label, and never
-    larger than the input.
+    Components are grouped by ``task.label(component_mean)``. Groups with more
+    than one component are moment-matched by
+    :func:`~mixle.inference.project.collapse_mixture`; singleton groups pass
+    through unchanged. The result never has more components than the input.
     """
     w = np.asarray(mixture.w, dtype=float)
     means = _component_means(mixture)
@@ -63,13 +58,10 @@ def task_sufficient_projection(mixture: Any, task: TaskReadout) -> MixtureDistri
 
 
 def read_out(mixture: Any, task: TaskReadout, x: Any) -> Hashable:
-    """The receiver's decision for observation ``x``: ``task.label`` of whichever component of
-    ``mixture`` has the highest posterior responsibility for ``x``.
+    """Return the task label of the component most responsible for ``x``.
 
-    This is how a receiver consumes a belief -- projected or full -- that it did not itself choose the
-    component grouping of: it reads off the task's own label from the winning component's mean, so a
-    projection built for a *different* task is scored fairly (and, when it discarded information ``T``
-    needed, honestly worse) rather than being handed an answer key.
+    The same readout applies to a full or projected belief, so a projection can
+    be evaluated by the task labels it preserves.
     """
     w = np.asarray(mixture.w, dtype=float)
     means = _component_means(mixture)

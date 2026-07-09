@@ -203,6 +203,7 @@ class MultivariateHawkesProcessSampler(DistributionSampler):
         return events
 
     def sample(self, size: int | None = None):
+        """Draw one marked-event realization, or ``size`` iid realizations."""
         if size is None:
             return self._sample_one()
         return [self._sample_one() for _ in range(int(size))]
@@ -260,20 +261,25 @@ class MultivariateHawkesProcessAccumulator(SequenceEncodableStatisticAccumulator
             self.mass[j] += weight * float(np.sum(contrib[marks == j]))
 
     def update(self, x: Any, weight: float, estimate: MultivariateHawkesProcessDistribution | None) -> None:
+        """Accumulate branching EM statistics for one marked-event realization."""
         self._accumulate(x, weight, estimate)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize branching statistics for one marked-event realization."""
         self._accumulate(x, weight, None)
 
     def seq_update(self, x: list[Any], weights: np.ndarray, estimate: MultivariateHawkesProcessDistribution) -> None:
+        """Accumulate branching EM statistics from encoded realizations."""
         for ev, wt in zip(x, np.asarray(weights, dtype=np.float64)):
             self._accumulate(ev, float(wt), estimate)
 
     def seq_initialize(self, x: list[Any], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize branching statistics from encoded realizations."""
         for ev, wt in zip(x, np.asarray(weights, dtype=np.float64)):
             self._accumulate(ev, float(wt), None)
 
     def combine(self, suff_stat: tuple) -> "MultivariateHawkesProcessAccumulator":
+        """Merge another multivariate-Hawkes sufficient-statistic tuple."""
         s0, g, wd, mass, tw = suff_stat
         self.s0 += s0
         self.g += g
@@ -283,9 +289,11 @@ class MultivariateHawkesProcessAccumulator(SequenceEncodableStatisticAccumulator
         return self
 
     def value(self) -> tuple:
+        """Return immigrant, offspring, delay, mass, and window statistics."""
         return self.s0.copy(), self.g.copy(), self.w_delay, self.mass.copy(), self.total_window
 
     def from_value(self, x: tuple) -> "MultivariateHawkesProcessAccumulator":
+        """Replace accumulator contents from branching sufficient statistics."""
         s0, g, wd, mass, tw = x
         self.s0 = np.asarray(s0, dtype=np.float64).copy()
         self.g = np.asarray(g, dtype=np.float64).copy()
@@ -296,6 +304,7 @@ class MultivariateHawkesProcessAccumulator(SequenceEncodableStatisticAccumulator
         return self
 
     def scale(self, c: float) -> "MultivariateHawkesProcessAccumulator":
+        """Scale all weight-linear sufficient statistics by ``c``."""
         self.s0 *= c
         self.g *= c
         self.w_delay *= c
@@ -304,6 +313,7 @@ class MultivariateHawkesProcessAccumulator(SequenceEncodableStatisticAccumulator
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -311,10 +321,12 @@ class MultivariateHawkesProcessAccumulator(SequenceEncodableStatisticAccumulator
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "MultivariateHawkesProcessDataEncoder":
+        """Return the marked-event encoder used by this accumulator."""
         return MultivariateHawkesProcessDataEncoder(self.window, self.dim)
 
 
@@ -328,6 +340,7 @@ class MultivariateHawkesProcessAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> MultivariateHawkesProcessAccumulator:
+        """Create a fresh multivariate-Hawkes accumulator."""
         return MultivariateHawkesProcessAccumulator(self.dim, self.window, name=self.name, keys=self.keys)
 
 
@@ -341,9 +354,11 @@ class MultivariateHawkesProcessEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> MultivariateHawkesProcessAccumulatorFactory:
+        """Return an accumulator factory for branching EM statistics."""
         return MultivariateHawkesProcessAccumulatorFactory(self.dim, self.window, name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> MultivariateHawkesProcessDistribution:
+        """Estimate baseline, excitation, and decay from branching statistics."""
         s0, g, w_delay, mass, total_window = suff_stat
         mu = np.maximum(s0, _MIN) / max(total_window, _MIN)
         beta = max(float(g.sum()), _MIN) / max(w_delay, _MIN)  # offspring count / delay-weighted
@@ -374,6 +389,7 @@ class MultivariateHawkesProcessDataEncoder(DataSequenceEncoder):
         )
 
     def seq_encode(self, x: Sequence[Any]) -> list[Any]:
+        """Validate and normalize marked-event realizations."""
         out = []
         for events in x:
             times, marks = _split(events)

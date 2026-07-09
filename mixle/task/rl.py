@@ -1,9 +1,9 @@
 """Reinforcement learning: tabular Q-learning over a discrete MDP with a KNOWN reward.
 
-This is the classical value-based counterpart the plan's expert-iteration cards (C2-a
-``outcome_decomposer``, PROBE-a ``probe_policy``) deliberately avoided: those optimize a WHOLE
-action sequence's terminal, oracle-verified score by propose/filter/refit, with no per-step value
-estimate. This module is the other end of the design space -- a per-step Bellman backup,
+This is the classical value-based counterpart to sequence-level optimization routines such as
+``outcome_decomposer`` and ``probe_policy``: those optimize a whole action sequence's terminal,
+oracle-verified score by propose/filter/refit, with no per-step value estimate. This module is the
+other end of the design space -- a per-step Bellman backup,
 ``Q(s, a) <- Q(s, a) + alpha * [r + gamma * max_a' Q(s', a') - Q(s, a)]`` -- for problems that ARE
 naturally modeled as a finite MDP with a known step reward. It composes with :mod:`mixle.task.irl`
 (the complementary direction: reward FROM demonstrations, not policy from a known reward) via the
@@ -49,16 +49,20 @@ class GridWorld:
 
     @property
     def n_states(self) -> int:
+        """Return the number of states in the square grid."""
         return self.size * self.size
 
     def state_index(self, state: State) -> int:
+        """Map a ``(row, column)`` state to its row-major integer index."""
         return state[0] * self.size + state[1]
 
     def index_state(self, index: int) -> State:
+        """Map a row-major integer state index back to ``(row, column)``."""
         r, c = divmod(index, self.size)
         return (r, c)
 
     def states(self) -> list[State]:
+        """Return every grid state in row-major order."""
         return [(r, c) for r in range(self.size) for c in range(self.size)]
 
     def transition(self, state: State, action: Action) -> State:
@@ -71,11 +75,13 @@ class GridWorld:
         return (nr, nc)
 
     def reset(self, start: State = (0, 0)) -> State:
+        """Reset the environment to ``start`` and return the initial state."""
         self._state = start
         self._steps = 0
         return self._state
 
     def step(self, action: Action) -> tuple[State, float, bool]:
+        """Apply one action and return ``(next_state, reward, done)``."""
         self._state = self.transition(self._state, action)
         self._steps += 1
         at_goal = self._state == self.goal
@@ -111,6 +117,7 @@ class QLearningResult:
     rewards_per_episode: list[float]
 
     def greedy_action_index(self, state_index: int) -> int:
+        """Return the index of the highest-valued action for ``state_index``."""
         return int(np.argmax(self.q_table[state_index]))
 
     def greedy_policy(self, env: GridWorld) -> dict[State, Action]:

@@ -1,18 +1,19 @@
-"""``Router`` -- calibrated N-tier model routing: tiny models first, the frontier only when necessary.
+"""Calibrated N-tier model routing.
 
-The multi-tier generalization of :class:`~mixle.task.cascade.Cascade`, and the honest version of "LLM
-routing": each tier is a calibrated task model that answers **only** when its conformal set is a
-confident singleton and (if gated) the input is in-distribution — otherwise the request falls through
-to the next tier, ending at the frontier/teacher, which always answers. Routing decisions carry
-coverage guarantees, not learned vibes; the report carries realized cost, not projections::
+``Router`` generalizes :class:`~mixle.task.cascade.Cascade` from one local tier
+plus a teacher to several calibrated tiers. Each local tier answers only when
+its conformal set is a confident singleton and, if a density gate is configured,
+the input is in distribution. Otherwise the request falls through to the next
+tier, ending at a teacher/frontier callable that always answers. Reports carry
+realized traffic and cost::
 
-    router = Router.from_solutions([tiny, small], teacher=frontier, costs=[0.0001, 0.001, 0.03])
-    router(x)                     # answered by the cheapest tier that is SURE
-    router.report()               # per-tier traffic, realized $/req, savings vs frontier-only
+    router = Router.from_solutions([fast, accurate], teacher=frontier, costs=[0.0001, 0.001, 0.03])
+    router(x)                     # answered by the lowest-cost confident tier
+    router.report()               # per-tier traffic, realized $/req, savings vs all-teacher serving
     router.harvested()            # the frontier's answers on hard inputs = training data for the tiers
 
-Every request the frontier answers is a teacher-labeled example exactly where the local tiers were
-unsure — feed ``harvested()`` back through ``solve(prelabeled=...)`` and the routing gets cheaper.
+Every request the teacher answers is harvested as targeted training data for
+the lower-cost tiers.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 
 @dataclass
 class TierStats:
+    """Traffic counter and request cost for one router tier."""
+
     name: str
     cost_per_request: float
     answered: int = 0
@@ -35,23 +38,26 @@ class TierStats:
 
 @dataclass
 class RouterStats:
+    """Mutable accounting for routed requests, harvested labels, and degraded tier calls."""
+
     tiers: list[TierStats] = field(default_factory=list)
     harvested_inputs: list[Any] = field(default_factory=list)
     harvested_labels: list[Any] = field(default_factory=list)
-    degraded: list[DegradedResult] = field(default_factory=list)  # FAULT-a model_error events, in order
+    degraded: list[DegradedResult] = field(default_factory=list)  # model_error events, in order
 
     @property
     def n_requests(self) -> int:
+        """Return the total number of requests answered across all tiers."""
         return int(sum(t.answered for t in self.tiers))
 
 
 class Router:
-    """Route each request to the cheapest tier whose calibrated model is confident; the last tier always answers."""
+    """Route each request to the lowest-cost tier whose calibrated model is confident."""
 
     def __init__(self, tiers: list[tuple[str, Any, float]]) -> None:
-        """``tiers``: ``(name, model_or_callable, cost_per_request)`` cheapest-first. Every tier except the
-        last must expose ``decide(x)`` (a :class:`CalibratedTaskModel` / loaded Solution model) returning a
-        label or ``ESCALATE``; the last tier is the fallback answerer (any callable — the frontier/teacher)."""
+        """``tiers``: ``(name, model_or_callable, cost_per_request)`` in ascending cost order. Every tier except the
+        last must expose ``decide(x)`` returning a label or ``ESCALATE``; the
+        last tier is the fallback teacher/frontier callable."""
         if len(tiers) < 2:
             raise ValueError("Router needs at least one calibrated tier plus the final fallback tier")
         for name, model, _ in tiers[:-1]:
@@ -66,7 +72,7 @@ class Router:
     def from_solutions(
         cls, solutions: list, teacher: Any, *, costs: list[float], names: list[str] | None = None
     ) -> Router:
-        """Build from :class:`~mixle.task.solve.Solution` objects (cheapest-first) + the frontier callable.
+        """Build from :class:`~mixle.task.solve.Solution` objects ordered by cost plus the teacher callable.
 
         ``costs`` has one entry per solution plus one for the teacher (per-request)."""
         if len(costs) != len(solutions) + 1:
@@ -79,10 +85,10 @@ class Router:
         return cls(tiers)
 
     def __call__(self, x: Any) -> Any:
-        """Answer with the cheapest confident tier; the final tier's answers are harvested as labels.
+        """Answer with the lowest-cost confident tier; the final tier's answers are harvested as labels.
 
-        FAULT-a ``model_error``: a tier whose ``decide(x)`` raises is routed PAST -- flagged in
-        ``stats.degraded`` -- rather than crashing the request; the next tier gets the chance to answer.
+        If a tier's ``decide(x)`` raises, the router records a ``model_error``
+        in ``stats.degraded`` and gives the next tier a chance to answer.
         """
         for i, (name, model, _) in enumerate(self.tiers[:-1]):
             try:
@@ -107,14 +113,15 @@ class Router:
         return label
 
     def serve(self, xs: Any) -> list[Any]:
+        """Route a batch of requests and return the tier-selected answers."""
         return [self(x) for x in xs]
 
     def harvested(self) -> tuple[list[Any], list[Any]]:
-        """The frontier-answered ``(inputs, labels)`` — targeted training data for the cheaper tiers."""
+        """Return teacher-answered ``(inputs, labels)`` for retraining lower-cost tiers."""
         return list(self.stats.harvested_inputs), list(self.stats.harvested_labels)
 
     def report(self) -> dict[str, Any]:
-        """Per-tier traffic and REALIZED economics vs sending everything to the final tier."""
+        """Return per-tier traffic and realized economics."""
         n = self.stats.n_requests
         frontier_cost = self.tiers[-1][2]
         realized = float(sum(t.answered * t.cost_per_request for t in self.stats.tiers))
@@ -138,6 +145,7 @@ class Router:
         }
 
     def summary(self) -> str:
+        """Render a compact human-readable traffic and cost summary."""
         r = self.report()
         lines = [
             f"routed {r['requests']} requests @ ${r['cost_per_request']:.5f}/req "
@@ -155,31 +163,29 @@ def _sorted_by_cost(tiers: list[tuple[str, Any, float]]) -> list[tuple[str, Any,
 
 
 def route_stack(solutions: list, teacher: Any, *, costs: list[float]) -> Router:
-    """Convenience: :meth:`Router.from_solutions` with tiers sorted cheapest-first by cost."""
+    """Convenience: :meth:`Router.from_solutions` with tiers sorted by ascending cost."""
     order = np.argsort(np.asarray(costs[:-1], dtype=np.float64))
     sols = [solutions[i] for i in order]
     cs = [float(costs[i]) for i in order] + [float(costs[-1])]
     return Router.from_solutions(sols, teacher, costs=cs)
 
 
-# Below this many calibration points, escalation_rate can only land on a handful of coarse values
-# (e.g. 2 points -> only 0.0/0.5/1.0 are possible) -- not enough resolution to distinguish "genuinely
-# dropped escalation" from "which 2 of 8 points happened to land in calibration," which flips
-# accepted/rejected on nothing but the random train/cal split at the old n_harvested>=8 floor.
+# Below this many calibration points, escalation rate has too little resolution
+# to distinguish a real drop from a random train/calibration split artifact.
 _MIN_CAL_FOR_MEANINGFUL_MEASUREMENT = 10
 
 
 @dataclass
 class HarvestResolveResult:
-    """What :func:`resolve_from_harvest` found and did -- a receipt, not a bare boolean.
+    """Receipt from :func:`resolve_from_harvest`.
 
     ``escalation_before`` is exactly 1.0: every harvested input, by definition, escalated all the way
-    to the frontier under the current router. ``escalation_after`` is the NEW tier's own calibrated
+    to the teacher under the current router. ``escalation_after`` is the new tier's own calibrated
     escalation rate on a held-out split of that same harvested set; ``escalation_drop`` is the
     difference. ``router`` is the new stack with the tier inserted (``None`` when nothing was
-    accepted -- either too little harvested data to fit and calibrate honestly, or the new tier does
+    accepted because there is too little harvested data to fit/calibrate or the new tier does
     not escalate measurably less often than always-escalate, in which case it buys nothing and is
-    correctly rejected rather than inserted for no gain).
+    rejected).
     """
 
     accepted: bool
@@ -203,17 +209,13 @@ def resolve_from_harvest(
     distill_kw: dict[str, Any] | None = None,
     seed: int = 0,
 ) -> HarvestResolveResult:
-    """The multi-tier re-solve loop: train a NEW tier from ``router``'s harvested frontier labels and
-    insert it just before the frontier -- the :class:`~mixle.task.solve.Solution.improve` idea
-    generalized from one cascade to a whole router stack.
+    """Train a new router tier from harvested teacher labels.
 
-    Every harvested input escalated all the way through the existing tiers (that is what "harvested"
-    means), so the honest baseline escalation rate on that set is 1.0. A new tier is fit and calibrated
-    on a held-out split of the SAME harvested set (never re-calling the frontier -- the labels are
-    already real teacher answers); it is inserted only if its OWN calibrated escalation rate on that
-    held-out split drops by at least ``min_drop`` below 1.0 -- i.e. it demonstrably intercepts a real
-    share of what used to always escalate. Too little harvested data, or a tier that still escalates
-    almost everything, is an honest no-op (``accepted=False``, ``router=None``), never a forced insert.
+    Every harvested input escalated through the existing tiers, so the baseline
+    escalation rate on that set is 1.0. A new tier is fit and calibrated on a
+    held-out split of the same harvested set without re-calling the teacher. It
+    is inserted only if its calibrated escalation rate drops by at least
+    ``min_drop`` below 1.0 on that split.
     """
     from mixle.task.distill import agreement
     from mixle.task.solve import _fit_gate, _fit_student

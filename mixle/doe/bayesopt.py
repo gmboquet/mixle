@@ -121,7 +121,7 @@ def thompson_sampling(
     Returns a merit (maximized over candidates) equal to the drawn value when maximizing and its
     negation when minimizing, so the selected point is the optimum of the *sampled* objective. A
     randomized, exploration-aware acquisition -- repeated proposals explore competing optima in
-    proportion to posterior probability, with no exploration knob to tune. This is the cheap *marginal*
+    proportion to posterior probability, with no exploration knob to tune. This is the low-cost *marginal*
     variant (independent per-candidate draws, ignoring the GP's cross-candidate correlation); pass an
     ``rng`` (via ``acq_kwargs``) for reproducible proposals. ``best`` is ignored.
     """

@@ -242,6 +242,7 @@ class LaplacePosterior:
         self.acceptance_rate = None
 
     def sample(self, n: int = 1, rng=None):
+        """Draw model samples from the Laplace Gaussian approximation."""
         rng = rng or np.random.RandomState()
         zs = rng.standard_normal((int(n), len(self.u_mode)))
         draws = self.u_mode[None, :] + zs @ self._chol.T
@@ -249,6 +250,7 @@ class LaplacePosterior:
         return models[0] if n == 1 else models
 
     def summary(self) -> dict:
+        """Return Laplace approximation metadata."""
         return {"n_params": int(len(self.u_mode)), "posterior": "laplace (unconstrained Gaussian)"}
 
 

@@ -8,8 +8,8 @@ with ``.fit(data)``; query with ``.sample`` / ``.log_prob`` / ``.posterior``.
     m = Normal(free, free).fit(data)
     m.sample(100)
 
-The 86 ``mixle.stats`` distribution classes are untouched; this is a thin, optional
-dialect. See notes/ppl-syntax-spec.md.
+The ``mixle.stats`` distribution classes are untouched; this is a thin, optional
+dialect over the existing model, estimator, and inference contracts.
 
 Layout: the modeling surface and constraints are in :mod:`mixle.ppl.core`; the dialect
 constructors (``Normal``/``Gamma``/``Markov``/…) in :mod:`mixle.ppl.distributions`; the

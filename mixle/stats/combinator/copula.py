@@ -84,6 +84,7 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
         return np.clip(u, _CLIP, 1.0 - _CLIP)
 
     def density(self, x: Sequence[float]) -> float:
+        """Return the joint density at one raw observation."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: Sequence[float]) -> float:
@@ -102,9 +103,11 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
         return rv + np.asarray(self.copula.seq_log_density(cop_enc), dtype=np.float64)
 
     def sampler(self, seed: int | None = None) -> CopulaSampler:
+        """Return a sampler that draws copula scores and inverts the marginals."""
         return CopulaSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> CopulaEstimator:
+        """Return an IFM estimator for marginals followed by the copula core."""
         return CopulaEstimator(
             [m.estimator() for m in self.marginals],
             self.copula.estimator(),
@@ -114,6 +117,7 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def dist_to_encoder(self) -> CopulaDataEncoder:
+        """Return an encoder that preserves marginal encodings and raw columns."""
         return CopulaDataEncoder([m.dist_to_encoder() for m in self.marginals])
 
 
@@ -149,6 +153,7 @@ class CopulaSampler(DistributionSampler):
         return 0.5 * (lo + hi)
 
     def sample(self, size: int | None = None) -> Any:
+        """Draw one joint observation or ``size`` iid observations."""
         n = 1 if size is None else int(size)
         u = np.atleast_2d(self._cop_sampler.sample(n)).reshape(n, self.dist.dim)
         out = [
@@ -176,6 +181,7 @@ class CopulaDataEncoder(DataSequenceEncoder):
         return isinstance(other, CopulaDataEncoder) and self.marginal_encoders == other.marginal_encoders
 
     def seq_encode(self, x: Sequence[Sequence[float]]) -> tuple[tuple[Any, ...], np.ndarray]:
+        """Encode each marginal column while retaining raw columns for PIT recomputation."""
         cols = np.asarray([[float(row[i]) for i in range(self.dim)] for row in x], dtype=np.float64)
         marg_encs = tuple(self.marginal_encoders[i].seq_encode(cols[:, i].tolist()) for i in range(self.dim))
         return marg_encs, cols
@@ -197,6 +203,7 @@ class CopulaAccumulator(SequenceEncodableStatisticAccumulator):
         self._w: list[np.ndarray] = []
 
     def update(self, x: Sequence[float], weight: float, estimate: CopulaDistribution | None) -> None:
+        """Update marginal accumulators and buffer one raw observation for IFM copula fitting."""
         marg_est = estimate.marginals if estimate is not None else [None] * self.dim
         for i in range(self.dim):
             self.marginal_accumulators[i].update(x[i], weight, marg_est[i])
@@ -204,12 +211,14 @@ class CopulaAccumulator(SequenceEncodableStatisticAccumulator):
         self._w.append(np.asarray([float(weight)], dtype=np.float64))
 
     def initialize(self, x: Sequence[float], weight: float, rng: np.random.RandomState | None) -> None:
+        """Initialize marginal accumulators and buffer one raw observation."""
         for i in range(self.dim):
             self.marginal_accumulators[i].initialize(x[i], weight, rng)
         self._cols.append(np.asarray([float(x[i]) for i in range(self.dim)], dtype=np.float64).reshape(1, self.dim))
         self._w.append(np.asarray([float(weight)], dtype=np.float64))
 
     def seq_update(self, enc: Any, weights: np.ndarray, estimate: CopulaDistribution | None) -> None:
+        """Update marginal accumulators and buffer encoded raw columns for IFM."""
         marg_encs, raw_cols = enc
         marg_est = estimate.marginals if estimate is not None else [None] * self.dim
         for i in range(self.dim):
@@ -218,6 +227,7 @@ class CopulaAccumulator(SequenceEncodableStatisticAccumulator):
         self._w.append(np.asarray(weights, dtype=np.float64).ravel())
 
     def seq_initialize(self, enc: Any, weights: np.ndarray, rng: np.random.RandomState | None) -> None:
+        """Initialize marginal accumulators and buffer encoded raw columns."""
         marg_encs, raw_cols = enc
         for i in range(self.dim):
             self.marginal_accumulators[i].seq_initialize(marg_encs[i], weights, rng)
@@ -225,6 +235,7 @@ class CopulaAccumulator(SequenceEncodableStatisticAccumulator):
         self._w.append(np.asarray(weights, dtype=np.float64).ravel())
 
     def combine(self, suff_stat: tuple[tuple[Any, ...], np.ndarray, np.ndarray]) -> CopulaAccumulator:
+        """Merge marginal sufficient statistics and buffered raw columns."""
         marg_stats, cols, w = suff_stat
         for i in range(self.dim):
             self.marginal_accumulators[i].combine(marg_stats[i])
@@ -234,12 +245,14 @@ class CopulaAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[tuple[Any, ...], np.ndarray, np.ndarray]:
+        """Return marginal stats, buffered raw columns, and buffered weights."""
         marg_vals = tuple(acc.value() for acc in self.marginal_accumulators)
         cols = np.concatenate(self._cols, axis=0) if self._cols else np.zeros((0, self.dim))
         w = np.concatenate(self._w) if self._w else np.zeros((0,))
         return marg_vals, cols, w
 
     def from_value(self, x: tuple[tuple[Any, ...], np.ndarray, np.ndarray]) -> CopulaAccumulator:
+        """Restore marginal stats and raw-column buffers from ``value`` output."""
         marg_vals, cols, w = x
         for i in range(self.dim):
             self.marginal_accumulators[i].from_value(marg_vals[i])
@@ -249,26 +262,32 @@ class CopulaAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Delegate keyed merges to marginal accumulators."""
         for acc in self.marginal_accumulators:
             if hasattr(acc, "key_merge"):
                 acc.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Delegate keyed replacements to marginal accumulators."""
         for acc in self.marginal_accumulators:
             if hasattr(acc, "key_replace"):
                 acc.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> CopulaDataEncoder:
+        """Return an encoder composed from the marginal accumulator encoders."""
         return CopulaDataEncoder([acc.acc_to_encoder() for acc in self.marginal_accumulators])
 
 
 class CopulaAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create accumulators for IFM copula estimation."""
+
     def __init__(self, marginal_factories: Sequence[Any], dim: int, keys: str | None = None) -> None:
         self.marginal_factories = list(marginal_factories)
         self.dim = dim
         self.keys = keys
 
     def make(self) -> CopulaAccumulator:
+        """Create an empty copula accumulator."""
         return CopulaAccumulator([f.make() for f in self.marginal_factories], self.dim, keys=self.keys)
 
 
@@ -290,6 +309,7 @@ class CopulaEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> CopulaAccumulatorFactory:
+        """Return a factory for IFM copula sufficient-statistic accumulators."""
         return CopulaAccumulatorFactory(
             [e.accumulator_factory() for e in self.marginal_estimators], self.dim, keys=self.keys
         )
@@ -297,6 +317,7 @@ class CopulaEstimator(ParameterEstimator):
     def estimate(
         self, nobs: float | None, suff_stat: tuple[tuple[Any, ...], np.ndarray, np.ndarray]
     ) -> CopulaDistribution:
+        """Estimate marginals, transform buffered data by PIT, and estimate the copula core."""
         marg_stats, cols, w = suff_stat
         marginals = [self.marginal_estimators[i].estimate(nobs, marg_stats[i]) for i in range(self.dim)]
 

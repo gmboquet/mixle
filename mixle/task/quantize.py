@@ -117,6 +117,7 @@ class QuantizedMLP:
                 raise ValueError(f"weight magnitude exceeds the int{self.bits} range [-{qmax}, {qmax}]")
 
     def logits(self, feats: np.ndarray) -> np.ndarray:
+        """Compute dequantized logits for a feature matrix."""
         x = np.asarray(feats, dtype=np.float32)
         last = len(self.layers) - 1
         for i, (w, s, b) in enumerate(self.layers):
@@ -137,6 +138,7 @@ class QuantizedMLP:
 
     # -- artifact arrays payload --
     def to_arrays(self) -> dict[str, np.ndarray]:
+        """Serialize the quantized layers into artifact-ready NumPy arrays."""
         out: dict[str, np.ndarray] = {
             "n_layers": np.asarray(len(self.layers), dtype=np.int64),
             "bits": np.asarray(self.bits, dtype=np.int64),
@@ -153,6 +155,7 @@ class QuantizedMLP:
 
     @classmethod
     def from_arrays(cls, arrays: dict[str, np.ndarray]) -> QuantizedMLP:
+        """Reconstruct a quantized MLP from artifact array payloads."""
         k = int(np.asarray(arrays["n_layers"]).reshape(()))
         bits = int(np.asarray(arrays.get("bits", 8)).reshape(()))
         layers = []
@@ -170,11 +173,13 @@ class QuantizedClassifierIO(_ClassifierIO):
     kind = "quantized_classifier"
 
     def logits_batch(self, model: Any, raw_inputs: list[Any]) -> np.ndarray:
+        """Featurize raw inputs and return quantized-model logits."""
         if not raw_inputs:  # empty batch: (0, K), skip the forward (reshape can't infer -1 at size 0)
             return np.empty((0, len(self.labels)), dtype=np.float32)
         return np.asarray(model.logits(self.features(raw_inputs))).reshape(len(raw_inputs), -1)
 
     def to_spec(self) -> dict[str, Any]:
+        """Serialize the quantized classifier IO adapter."""
         fam = "text" if isinstance(self.featurizer, HashedNGram) else "record"
         return {
             "kind": self.kind,
@@ -185,6 +190,7 @@ class QuantizedClassifierIO(_ClassifierIO):
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> QuantizedClassifierIO:
+        """Reconstruct the quantized classifier IO adapter from a spec."""
         feat_cls = HashedNGram if spec.get("featurizer_kind", "text") == "text" else HashedRecord
         return cls(feat_cls.from_spec(spec["featurizer"]), spec["labels"])
 
@@ -387,6 +393,7 @@ class LNSStructuredClassifierIO(StructuredClassifierIO):
 
     # -- the classifier contract on integers ------------------------------------------------------
     def logits_batch(self, model: Any, raw_inputs: list[Any]) -> np.ndarray:
+        """Return floating logit values decoded from integer log-space scores."""
         z = self.int_logits_batch(model, raw_inputs).astype(np.float64) * self.step
         z[z <= _LOG_ZERO_INT // 2 * self.step] = -np.inf
         return z
@@ -407,10 +414,12 @@ class LNSStructuredClassifierIO(StructuredClassifierIO):
         return p / p.sum(axis=1, keepdims=True)
 
     def predict_batch(self, model: Any, raw_inputs: list[Any]) -> list[str]:
+        """Return integer-logit argmax labels for a batch of raw inputs."""
         idx = self.int_logits_batch(model, raw_inputs).argmax(axis=1)  # pure integer decision
         return [self.labels[i] for i in idx]
 
     def to_spec(self) -> dict[str, Any]:
+        """Serialize the LNS structured-classifier adapter."""
         spec = super().to_spec()
         spec["kind"] = self.kind
         spec["step"] = self.step
@@ -418,6 +427,7 @@ class LNSStructuredClassifierIO(StructuredClassifierIO):
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> LNSStructuredClassifierIO:
+        """Reconstruct the LNS structured-classifier adapter from a spec."""
         return cls(spec.get("field_keys"), spec["label_index"], spec["labels"], step=spec.get("step", 1e-2))
 
 
@@ -433,7 +443,7 @@ def lns_classifier(student: TaskModel, *, step: float = 1e-2) -> TaskModel:
     integer add/max/LUT arithmetic (:class:`LNSStructuredClassifierIO`). ``step`` trades fidelity for
     integer width; the dequantized scores match the float classifier within ~``1.5 * step`` per fold.
     This is compute quantization (transcendental-free combination), not weight compression -- pair it
-    with the structured student's already-tiny JSON payload.
+    with the structured student's already compact JSON payload.
     """
     if not isinstance(student.adapter, StructuredClassifierIO) or student.payload != "json":
         raise ValueError("lns_classifier expects a structured student (from distill_structured)")

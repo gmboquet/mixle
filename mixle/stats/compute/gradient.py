@@ -1,4 +1,8 @@
-"""Gradient-fitting state objects owned by distribution-layer hooks."""
+"""Gradient-fitting utilities shared by distribution-layer Torch hooks.
+
+The helpers normalize prior specifications, collect child-prior structures, and
+provide small state objects used by generic differentiable M-step routines.
+"""
 
 from __future__ import annotations
 

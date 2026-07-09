@@ -4,7 +4,6 @@ mixle.evolve package
 .. automodule:: mixle.evolve
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

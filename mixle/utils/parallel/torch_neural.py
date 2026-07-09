@@ -165,11 +165,13 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         return StreamingTransformerLeaf(module, device)  # consistent across ranks -- no gather, no broadcast
 
     def pysp_seq_initialize(self, estimator: Any, rng: Any, p: float) -> Any:
+        """Return an initial streaming transformer leaf without distributed fitting."""
         from mixle.models.streaming_transformer_leaf import StreamingTransformerLeaf
 
         return StreamingTransformerLeaf(estimator.module, getattr(estimator, "device", "cpu"))
 
     def close(self) -> None:
+        """Destroy the owned process group, if this handle created one."""
         if self._owns_pg and self.dist.is_initialized():
             self.dist.destroy_process_group()
             self._owns_pg = False

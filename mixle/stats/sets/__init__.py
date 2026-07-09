@@ -1,1 +1,6 @@
-"""mixle.stats.sets -- sets distribution modules (see mixle.stats for the public API)."""
+"""Set-valued distribution namespace.
+
+This package groups probability families over unordered collections while the
+consolidated imports remain available from ``mixle.stats`` for the main public
+API.
+"""

@@ -1,34 +1,17 @@
-"""Create, estimate, and sample from a hidden association model.
+"""Hidden association models over grouped-count set pairs.
 
-Defines the HiddenAssociationDistribution, HiddenAssociationSampler, HiddenAssociationAccumulatorFactory,
-HiddenAssociationAccumulator, HiddenAssociationEstimator, and the HiddenAssociationDataEncoder classes for use with
-mixle.
+An observation is a pair ``(given_counts, emitted_counts)`` where each side is
+a list of ``(value, count)`` entries. The first side defines an empirical
+mixture over latent values, and the second side is generated from a conditional
+emission model marginalized over that empirical mixture.
 
-Consider a set of value V = {v_1,v_2,...,v_K} with data type T. Let the given density be discrete probability density
-over the values in V,
+For grouped counts ``x`` and emissions ``y``, the model scores:
 
-        P_g(X_i = v_k) = p_g(k), for k = 1,2,....,K
+    log p(x, y) = log p_given(x) + log p_len(|y|)
+        + sum_y count_y log sum_x empirical_x cond(y | x)
 
-where sum_k p_g(k) = 1.0. Consider M samples from P_g() denoted x = (x_1,x_2,...,x_M). We then introduce the latent
-variable U, where
-
-    p_k(x) = p_mat(U = v_k | x) = (# of x_1,...,x_M that are = to v_k) / M, for k = 1,2,...,K.
-
-We then draw N a positive integer N from distribution P_len(), then draw N samples from the density above to get
-z = (z_1, z_2, ...., z_N). Last we sample from the conditional distribution defined for P_c(Y = v_k | z_i) to obtain
-y = (y_1,...,y_N).
-
-The log_density is given by,
-
-    log(p_mat(x,y)) = sum_{i=1}^{N} log(sum_{k=1}^{K} p_k(x)*P_c(y_i|v_k)) + log(P_g(x)) + log(P_len(N)).
-
-Note: That in this model we consider grouped-counts. So the given data type is
-
-    x: Tuple[List[Tuple[T, float]], List[Tuple[T, float]]] = [x[0], x[1]],
-
-where x[0] = [(value, count)] for the unique values of x_mat = (X_1,X_2,...,X_M) in V, and x[1] = [(value, count)] for
-the unique values of Y = (Y_1,...,Y_N) in V as well.
-
+This representation keeps repeated values compact while preserving the same
+distributional contract as iid samples expanded by count.
 """
 
 import math
@@ -84,26 +67,22 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: tuple[str | None, str | None] | None = (None, None),
     ) -> None:
-        """HiddenAssociationDistribution object for specifying hidden association models.
+        """Create a hidden association distribution.
 
         Args:
-            cond_dist (ConditionalDistribution): ConditionalDistribution defining distributions conditioned on the
-                number of states.
-            given_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for the previous set. Must
-                be compatible with Tuple[T, float].
-            len_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for the length of the observed
-                emission. (Second set output).
-            name (Optional[str]): Name for object instance.
-            keys (Optional[Tuple[Optional[str], Optional[str]]]): Keys for weights and transitions.
+            cond_dist: Conditional emission distribution for emitted values
+                given latent/given values.
+            given_dist: Distribution for grouped counts on the given side.
+            len_dist: Distribution for the total emitted count.
+            name: Optional diagnostic name.
+            keys: Optional merge keys for child sufficient statistics.
 
         Attributes:
-            cond_dist (ConditionalDistribution): ConditionalDistribution defining distributions conditioned on the
-                number of states.
-            given_dist (SequenceEncodableProbabilityDistribution): Distribution for the previous set. Defaults to
-                NullDistribution.
-            len_dist (SequenceEncodableProbabilityDistribution): Distribution for the length of the observed emission.
-            name (Optional[str]): Name for object instance.
-            keys (Tuple[Optional[str], Optional[str]]): Keys for weights and transitions.
+            cond_dist: Conditional emission distribution.
+            given_dist: Distribution for the given grouped counts.
+            len_dist: Distribution for emitted count.
+            name: Optional diagnostic name.
+            keys: Optional sufficient-statistic merge keys.
 
         """
         self.cond_dist = cond_dist
@@ -122,6 +101,7 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def compute_declaration(self):
+        """Return the generated-compute declaration for hidden association."""
         from mixle.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
 
         conditional = declaration_for(self.cond_dist)
@@ -151,7 +131,7 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def __str__(self) -> str:
-        """Returns string representation of HiddenAssociationDistribution object."""
+        """Return a readable distribution summary."""
         s1 = repr(self.cond_dist)
         s2 = repr(self.given_dist)
         s3 = repr(self.len_dist)
@@ -303,27 +283,27 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
         return HiddenAssociationEnumerator(self)
 
     def sampler(self, seed: int | None = None) -> "HiddenAssociationSampler":
-        """Create a HiddenAssociationSampler object from this distribution.
+        """Return a sampler for iid grouped-count pairs.
 
         Requires non-null given_dist and len_dist.
 
         Args:
-            seed (Optional[int]): Used to set seed in random sampler.
+            seed: Optional random seed.
 
         Returns:
-            HiddenAssociationSampler object.
+            A configured ``HiddenAssociationSampler``.
 
         """
         return HiddenAssociationSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "HiddenAssociationEstimator":
-        """Create a HiddenAssociationEstimator from the component distributions' estimators.
+        """Return an estimator built from the child estimators.
 
         Args:
-            pseudo_count (Optional[float]): Unused (kept for protocol consistency).
+            pseudo_count: Unused; accepted for protocol consistency.
 
         Returns:
-            HiddenAssociationEstimator object.
+            A configured ``HiddenAssociationEstimator``.
 
         """
         return HiddenAssociationEstimator(
@@ -334,11 +314,13 @@ class HiddenAssociationDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def dist_to_encoder(self) -> "HiddenAssociationDataEncoder":
-        """Returns a HiddenAssociationDataEncoder object for encoding sequences of data."""
+        """Return an encoder for grouped-count hidden-association observations."""
         return HiddenAssociationDataEncoder()
 
 
 class HiddenAssociationEnumerator(DistributionEnumerator):
+    """Enumerate hidden-association support pairs in best-first order."""
+
     def __init__(self, dist: "HiddenAssociationDistribution") -> None:
         """Conditional-product enumeration of ``(S1, S2)`` (S1 from given_dist, S2 from q(.|S1)).
 
@@ -371,19 +353,19 @@ class HiddenAssociationEnumerator(DistributionEnumerator):
 
 
 class HiddenAssociationSampler(DistributionSampler):
-    """HiddenAssociationSampler object for drawing grouped-count set pairs from a HiddenAssociationDistribution."""
+    """Sampler for grouped-count set pairs from a hidden-association distribution."""
 
     def __init__(self, dist: HiddenAssociationDistribution, seed: int | None = None) -> None:
-        """HiddenAssociationSampler object for sampling from a HiddenAssociationDistribution instance.
+        """Create a sampler for a hidden-association distribution.
 
         Args:
-            dist (HiddenAssociationDistribution): Object instance to sample from. Must have non-null
-                given_dist and len_dist.
+            dist (HiddenAssociationDistribution): Distribution to sample from. Must have non-null
+                ``given_dist`` and ``len_dist``.
             seed (Optional[int]): Seed for random number generator.
 
         Attributes:
-            rng (RandomState): RandomState object with seed set if passed in args.
-            dist (HiddenAssociationDistribution): Object instance to sample from.
+            rng (RandomState): Random state initialized from ``seed`` when supplied.
+            dist (HiddenAssociationDistribution): Distribution to sample from.
             cond_sampler (ConditionalSampler): Sampler for the conditional emission distribution.
             idx_sampler (RandomState): RandomState for drawing latent given-value indices.
             len_sampler (DistributionSampler): Sampler for the number of emitted values.
@@ -462,7 +444,7 @@ class HiddenAssociationSampler(DistributionSampler):
 
 
 class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
-    """HiddenAssociationAccumulator object for accumulating sufficient statistics from observed set pairs."""
+    """Accumulator for hidden-association sufficient statistics."""
 
     def __init__(
         self,
@@ -472,23 +454,22 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         name: str | None = None,
         keys: tuple[str | None, str | None] | None = (None, None),
     ) -> None:
-        """HiddenAssociationAccumulator object for accumulating sufficient statistics from observed data.
+        """Create an accumulator for hidden-association sufficient statistics.
 
         Args:
-            cond_acc (ConditionalDistributionAccumulator): Accumulator for the conditional emission distribution.
-            given_acc (Optional[SequenceEncodableStatisticAccumulator]): Accumulator for the given set.
-            size_acc (Optional[SequenceEncodableStatisticAccumulator]): Accumulator for the emission count.
-            name (Optional[str]): Name for object instance.
-            keys (Optional[Tuple[Optional[str], Optional[str]]]): Keys for weights and transitions.
+            cond_acc: Accumulator for the conditional emission distribution.
+            given_acc: Accumulator for the given grouped counts.
+            size_acc: Accumulator for the emitted count.
+            name: Optional diagnostic name.
+            keys: Optional merge keys for child sufficient statistics.
 
         Attributes:
-            cond_accumulator (ConditionalDistributionAccumulator): Accumulator for the conditional emission
-                distribution.
-            given_accumulator (SequenceEncodableStatisticAccumulator): Accumulator for the given set.
-            size_accumulator (SequenceEncodableStatisticAccumulator): Accumulator for the emission count.
-            init_key (Optional[str]): Key for the initial-state statistics.
-            trans_key (Optional[str]): Key for the transition statistics.
-            name (Optional[str]): Name for object instance.
+            cond_accumulator: Accumulator for conditional emissions.
+            given_accumulator: Accumulator for given grouped counts.
+            size_accumulator: Accumulator for emitted count.
+            init_key: Merge key for given-side statistics.
+            trans_key: Merge key for conditional statistics.
+            name: Optional diagnostic name.
 
         """
         self.cond_accumulator = cond_acc
@@ -770,12 +751,12 @@ class HiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator):
         self.size_accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "HiddenAssociationDataEncoder":
-        """Returns a HiddenAssociationDataEncoder object for encoding sequences of data."""
+        """Return an encoder compatible with hidden-association observations."""
         return HiddenAssociationDataEncoder()
 
 
 class HiddenAssociationAccumulatorFactory(StatisticAccumulatorFactory):
-    """HiddenAssociationAccumulatorFactory object for creating HiddenAssociationAccumulator objects."""
+    """Factory for hidden-association accumulators."""
 
     def __init__(
         self,
@@ -785,23 +766,21 @@ class HiddenAssociationAccumulatorFactory(StatisticAccumulatorFactory):
         name: str | None = None,
         keys: tuple[str | None, str | None] | None = (None, None),
     ) -> None:
-        """HiddenAssociationAccumulatorFactory for creating HiddenAssociationAccumulator objects.
+        """Create an accumulator factory.
 
         Args:
-            cond_factory (ConditionalDistributionAccumulatorFactory): Factory for the conditional emission
-                accumulator.
-            given_factory (Optional[StatisticAccumulatorFactory]): Factory for the given-set accumulator.
-            len_factory (Optional[StatisticAccumulatorFactory]): Factory for the emission-count accumulator.
-            name (Optional[str]): Name for object instance.
-            keys (Optional[Tuple[Optional[str], Optional[str]]]): Keys for weights and transitions.
+            cond_factory: Factory for the conditional emission accumulator.
+            given_factory: Factory for the given grouped-count accumulator.
+            len_factory: Factory for the emitted-count accumulator.
+            name: Optional diagnostic name.
+            keys: Optional merge keys for child sufficient statistics.
 
         Attributes:
-            cond_factory (ConditionalDistributionAccumulatorFactory): Factory for the conditional emission
-                accumulator.
-            given_factory (StatisticAccumulatorFactory): Factory for the given-set accumulator.
-            len_factory (StatisticAccumulatorFactory): Factory for the emission-count accumulator.
-            keys (Tuple[Optional[str], Optional[str]]): Keys for weights and transitions.
-            name (Optional[str]): Name for object instance.
+            cond_factory: Factory for conditional emissions.
+            given_factory: Factory for given grouped counts.
+            len_factory: Factory for emitted counts.
+            keys: Optional sufficient-statistic merge keys.
+            name: Optional diagnostic name.
 
         """
         self.cond_factory = cond_factory
@@ -811,15 +790,14 @@ class HiddenAssociationAccumulatorFactory(StatisticAccumulatorFactory):
         self.name = name
 
     def make(self) -> "HiddenAssociationAccumulator":
-        """Returns a new HiddenAssociationAccumulator object."""
+        """Return a fresh hidden-association accumulator."""
         return HiddenAssociationAccumulator(
             self.cond_factory.make(), self.given_factory.make(), self.len_factory.make(), self.name, self.keys
         )
 
 
 class HiddenAssociationEstimator(ParameterEstimator):
-    """HiddenAssociationEstimator object for estimating a HiddenAssociationDistribution from aggregated
-    sufficient statistics."""
+    """Estimator for hidden association distributions."""
 
     def __init__(
         self,
@@ -830,27 +808,23 @@ class HiddenAssociationEstimator(ParameterEstimator):
         name: str | None = None,
         keys: tuple[str | None, str | None] | None = (None, None),
     ) -> None:
-        """HiddenAssociationEstimator for estimating HiddenAssociationDistribution from sufficient statistics.
+        """Create an estimator for hidden-association sufficient statistics.
 
         Args:
-            cond_estimator (ConditionalDistributionEstimator): Estimator for the conditional emission of values in
-                set 2 given states.
-            given_estimator (Optional[ParameterEstimator]): Estimator for the given values. Should be compatible with
-                Tuple[T, float] where T is the type for the values.
-            len_estimator (Optional[ParameterEstimator]): Estimator for the length of the observed set 2 values.
-            pseudo_count (Optional[float]): Kept for consistency.
-            name (Optional[str]): Set name for object instance.
-            keys (Optional[Tuple[Optional[str], Optional[str]]]): Set keys for weights and transitions.
+            cond_estimator: Estimator for conditional emissions.
+            given_estimator: Estimator for the given grouped counts.
+            len_estimator: Estimator for emitted count.
+            pseudo_count: Unused; accepted for protocol consistency.
+            name: Optional diagnostic name.
+            keys: Optional merge keys for child sufficient statistics.
 
         Attributes:
-            cond_estimator (ConditionalDistributionEstimator): Estimator for the conditional emission of values in
-                set 2 given states.
-            given_estimator (ParameterEstimator): Estimator for the given values. Should be compatible with
-                Tuple[T, float] where T is the type for the values.
-            len_estimator (ParameterEstimator): Estimator for the length of the observed set 2 values.
-            pseudo_count (Optional[float]): Kept for consistency.
-            name (Optional[str]): Set name for object instance.
-            keys (Optional[Tuple[Optional[str], Optional[str]]]): Set keys for weights and transitions.
+            cond_estimator: Estimator for conditional emissions.
+            given_estimator: Estimator for given grouped counts.
+            len_estimator: Estimator for emitted count.
+            pseudo_count: Parameter retained for estimator protocol compatibility.
+            name: Optional diagnostic name.
+            keys: Optional sufficient-statistic merge keys.
 
         """
         self.keys = keys if keys is not None else (None, None)
@@ -861,7 +835,7 @@ class HiddenAssociationEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self) -> "HiddenAssociationAccumulatorFactory":
-        """Returns a HiddenAssociationAccumulatorFactory for creating HiddenAssociationAccumulator objects."""
+        """Return an accumulator factory matching this estimator."""
         len_factory = self.len_estimator.accumulator_factory()
         given_factory = self.given_estimator.accumulator_factory()
         cond_factory = self.cond_estimator.accumulator_factory()
@@ -898,14 +872,14 @@ class HiddenAssociationEstimator(ParameterEstimator):
 
 
 class HiddenAssociationDataEncoder(DataSequenceEncoder):
-    """HiddenAssociationDataEncoder object for encoding sequences of iid grouped-count set pair observations."""
+    """Encode grouped-count hidden-association observations."""
 
     def __str__(self) -> str:
-        """Returns string representation of HiddenAssociationDataEncoder object."""
+        """Return a readable encoder summary."""
         return "HiddenAssociationDataEncoder"
 
     def __eq__(self, other) -> bool:
-        """Checks if other object is an equivalent HiddenAssociationDataEncoder."""
+        """Return whether ``other`` is a hidden-association data encoder."""
         return isinstance(other, HiddenAssociationDataEncoder)
 
     def seq_encode(

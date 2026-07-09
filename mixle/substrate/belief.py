@@ -11,8 +11,9 @@ Anti-laundering is the load-bearing property: evidence that resolves back to the
 another belief that has no independent (non-model-assertion) support of its own, contributes ZERO --
 a claim cannot bootstrap high credence by citing itself or an equally ungrounded peer.
 
-This is the write side of workstream E (harvest / credence assimilation / traceable history); the read
-side is :mod:`mixle.substrate.retrieve`. See ``notes/0.6.3-execution-playbook.md`` CARD KNOW-a.
+This is the write side of the knowledge substrate: harvest, credence
+assimilation, and traceable history. The retrieval side is
+:mod:`mixle.substrate.retrieve`.
 """
 
 from __future__ import annotations
@@ -26,9 +27,10 @@ from typing import Any
 
 from mixle.substrate.core import Substrate, SubstrateItem
 
-# The weakest evidence tier: a model asserting something about itself, with no external check. Kept
-# outside mixle.doe.oracle.VERIFIABILITY_TIERS because "a model graded itself" is exactly the tier that
-# workstream I rejects for de novo optimization -- here it is not rejected, only capped low.
+# The weakest evidence tier: a model asserting something about itself, with no
+# external check. This is intentionally kept outside
+# mixle.doe.oracle.VERIFIABILITY_TIERS; here it is allowed only as low-capped
+# evidence, never as strong verification.
 MODEL_ASSERTION = "model_assertion"
 
 # Evidence-tier strength, weakest to strongest: a model's own assertion moves credence the least; a
@@ -42,7 +44,7 @@ _TIER_STRENGTH: dict[str, float] = {
     "real_measurement": 1.0,
 }
 
-# A belief supported ONLY by model-assertion-tier evidence can never rise above this credence -- the
+# A belief supported only by model-assertion-tier evidence can never rise above this credence -- the
 # cap that keeps a model from bootstrapping high confidence in something it merely asserted.
 MODEL_ASSERTION_CAP = 0.5
 

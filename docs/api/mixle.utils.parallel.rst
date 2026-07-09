@@ -4,7 +4,6 @@ mixle.utils.parallel package
 .. automodule:: mixle.utils.parallel
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

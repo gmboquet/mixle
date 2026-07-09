@@ -1,14 +1,14 @@
-"""Capture profiles for structured-output students (workstream D6): extraction and generative-text.
+"""Capture profiles for structured-output students: extraction and generative text.
 
 :func:`~mixle.task.capability.capture_profile` scores agreement by exact match on a scalar label -- the
 right notion for a classifier, but the wrong one for a field extractor: a student that gets 3 of 4 fields
 right under a typo corruption is not "wrong", and exact-match agreement would report it identically to a
 student that got every field wrong. This module extends the same :class:`~mixle.task.capability.CapabilitySuite`
-machinery (corruptions, invariances -- reused, not reinvented) with EXECUTABLE verifiers suited to
+machinery (corruptions, invariances -- reused, not reinvented) with executable verifiers suited to
 structured output:
 
 * extraction students (:func:`~mixle.task.extract.distill_extractor`, adapter ``ExtractionIO``): scored by
-  micro-averaged field-level F1 against a fixed gold reference (the teacher's own extraction on the CLEAN
+  micro-averaged field-level F1 against a fixed gold reference (the teacher's own extraction on the clean
   text -- corruption is a nuisance perturbation of the input, not a change to the true answer), plus a
   schema-validity check (every expected field present, every value actually grounded in -- a substring of
   -- the text it was extracted from). Both are checkable by code, never by eyeballing output.
@@ -75,16 +75,16 @@ def extractive_capture_profile(
 ) -> dict[str, Any]:
     """The extraction-student capture profile: F1-against-gold and schema validity, not exact-match agreement.
 
-    ``gold`` is the teacher's own extraction on the CLEAN ``texts`` -- the true answer a corruption should
+    ``gold`` is the teacher's own extraction on the clean ``texts`` -- the true answer a corruption should
     not change. Reports, JSON-serializable:
 
     * ``"clean_f1"`` -- student F1 against gold on clean text (teacher's own clean F1 against its own gold
       is trivially 1.0 and omitted);
-    * ``"corruptions"`` -- per corruption name, ``{"student_f1", "teacher_f1"}`` against the SAME fixed
+    * ``"corruptions"`` -- per corruption name, ``{"student_f1", "teacher_f1"}`` against the same fixed
       gold -- both sides scored against the same ground truth, so a comparison is meaningful;
     * ``"invariances"`` -- per invariance name, ``{"student_f1", "teacher_f1"}`` between each side's clean
       prediction and its prediction on the rewritten text (1.0 = perfectly invariant);
-    * ``"schema_validity"`` -- ``{"student", "teacher"}`` fraction of CLEAN-text extractions that are
+    * ``"schema_validity"`` -- ``{"student", "teacher"}`` fraction of clean-text extractions that are
       complete and grounded (:func:`validate_extraction_schema`) -- an executable check, never eyeballed;
     * ``"abstention"`` -- as in :func:`~mixle.task.capability.capture_profile`, if either side exposes a
       decision API.

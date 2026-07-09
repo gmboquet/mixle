@@ -30,7 +30,7 @@ There are five common entry points:
        optional calibration, uncertainty, and exchangeability diagnostics
    * - raw data plus an LLM designer
      - ``design_model(data, llm)``
-     - ask for an allowlisted spec, build it, fit-validate it, fallback if bad
+     - ask for an allowlisted spec, build it, fit-validate it, and fall back on failure
 
 Explicit Estimator
 ------------------
@@ -93,6 +93,9 @@ Or use the shorthand:
 
 Automatic typing is useful for exploration and baselines. For production, keep
 the returned estimator or use ``recommend_model`` so the decision is visible.
+Do not treat automatic typing as data cleaning. Missing-value handling, field
+dropping, and dependency choices should be visible in the returned estimator,
+profile, recommendation report, or artifact provenance.
 
 Certified Artifact Creation
 ---------------------------
@@ -142,12 +145,32 @@ The recommendation includes:
 * a ready estimator;
 * per-field family choices;
 * a runner-up family when there is a real alternative;
-* a bit-gap showing how decisive the choice was;
+* a bit-gap showing how clear the choice was;
 * low-confidence fields where more data would sharpen the model;
 * pairwise dependency hints that argue for joint modeling.
 
 Use ``rec.low_confidence_fields()`` to find the columns where the model choice
 is still fragile.
+
+Promotion Evidence
+------------------
+
+An automatically proposed model is ready to promote only after it has evidence
+outside the fitting pass. For a production-facing workflow, keep:
+
+* the profile or recommendation report that selected the estimator;
+* field-level runner-up families and score gaps;
+* any warnings about ignored fields, missingness, or dependency hints;
+* a held-out likelihood, calibration, or task metric against a simpler
+  baseline;
+* the exact estimator or model specification used for the promoted run;
+* the random seed, split definition, and optional dependency versions needed to
+  repeat the fit.
+
+Small score gaps, dense dependency hints, and fields with high missingness are
+not failures by themselves. They are review items. A mature workflow either
+uses domain knowledge to make those choices explicit or collects more data
+before allowing the automatic recommendation to become the deployed model.
 
 LLM-Designed Models
 -------------------
@@ -177,6 +200,12 @@ Allowed specs include scalar families, composites, and mixtures:
 If parsing, building, or fit-validation fails, the result falls back to
 ``recommend_model`` when ``fallback=True``.
 
+The returned ``source`` and ``note`` fields are part of the contract. A model
+whose source is ``"fallback"`` should be documented as an automatic-profile
+model, not as an LLM-designed model. If the LLM proposal is accepted, keep the
+allowlisted JSON spec and the fit-validation result with the artifact so the
+design can be reproduced without replaying an LLM conversation.
+
 PPL Route Selection
 -------------------
 
@@ -193,6 +222,12 @@ Common route families include conjugate updates, EM, MAP, Laplace, variational
 inference, MCMC, HMC, NUTS, ensembles, and hierarchical routes. Use
 ``explain_fit`` when available, or ``mixle.describe`` on the lowered/fitted
 object, to inspect what the automatic route selected.
+
+Record the route explanation when a PPL fit becomes an artifact. The important
+distinction is whether ``auto`` produced an analytic update, an EM fixed point,
+a point-estimate MAP route, or a posterior-bearing route. Those outcomes have
+different uncertainty and reproducibility implications even when they share the
+same model expression.
 
 Objectives
 ----------
@@ -252,6 +287,6 @@ Failure Modes to Watch
    * - automatic route lacks a capability
      - call ``mixle.describe(model)`` and choose a model that supports it
 
-The intended workflow is exploratory but auditable: let mixle propose a shape,
-look at the confidence and capabilities, then make the important choices
-explicit once the model matters.
+A good workflow is exploratory but auditable: let mixle propose a shape, look
+at the confidence and capabilities, then make the important choices explicit
+once the model matters.

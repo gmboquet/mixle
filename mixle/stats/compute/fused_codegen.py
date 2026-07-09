@@ -3,7 +3,7 @@
 The generated-numba kernels in :mod:`declarations` lower one leaf at a time: each leaf materializes its
 sufficient statistic in numpy and runs its own row loop, so a composite or mixture pays a Python<->C
 boundary crossing and an intermediate allocation *per factor and per component*. For a deep model of
-cheap leaves that overhead dominates -- numpy itself is multi-pass for the same reason.
+low-cost leaves that overhead dominates -- numpy itself is multi-pass for the same reason.
 
 This module instead emits a SINGLE ``@njit`` function for the whole model structure: one pass over the
 rows with the composite sum and the mixture log-sum-exp in nopython registers, no per-factor allocation.
@@ -100,6 +100,7 @@ _TEMPLATES: list[LeafTemplate] = []
 
 
 def register_leaf_template(t: LeafTemplate) -> None:
+    """Register a leaf template for fused scoring and E-step generation."""
     _TEMPLATES.append(t)
 
 
@@ -730,6 +731,7 @@ class FusedPlan:
 
     @property
     def has_matrix(self) -> bool:
+        """Whether any leaf in the fused plan requires matrix BLAS handling."""
         return any(t.kind == "matrix" for t in self.leaf_templates)
 
 
@@ -779,6 +781,7 @@ def analyze(model: Any) -> FusedPlan | None:
 
 
 def fusible(model: Any) -> bool:
+    """Return whether ``model`` can use a fused scoring kernel."""
     if analyze(model) is not None:
         return True
     from mixle.stats.compute.fused_nested import fusible_nested  # nested scalar trees (Mixture-of-Mixture, ...)
@@ -787,7 +790,7 @@ def fusible(model: Any) -> bool:
 
 
 def _dummy(t: LeafTemplate) -> Any:
-    """A throwaway leaf instance to read this template's parameter names (kept tiny and family-specific)."""
+    """A throwaway leaf instance to read this template's parameter names (kept small and family-specific)."""
     import mixle.stats as stats
 
     return {
@@ -1081,6 +1084,7 @@ def fused_seq_log_density(model: Any, enc: Any, compute_dtype: Any = None) -> np
 
 # --- fused E-step (score + responsibilities + per-leaf weighted sufficient statistics, one njit) ----
 def fusible_estep(model: Any) -> bool:
+    """Return whether ``model`` can use a fused E-step accumulation kernel."""
     plan = analyze(model)
     if plan is None:
         from mixle.stats.compute.fused_nested import fusible_nested  # nested scalar trees fit the E-step too
@@ -1213,12 +1217,15 @@ class FusedKernel:
         self.last_ll: float | None = None  # data LL of the last accumulate() pass (posterior normalizer)
 
     def encode(self, data: Any) -> Any:
+        """Encode raw data through the distribution's sequence encoder."""
         return self.dist.dist_to_encoder().seq_encode(data)
 
     def score(self, enc: Any) -> np.ndarray:
+        """Score encoded data with the fused log-density kernel."""
         return fused_seq_log_density(self.dist, getattr(enc, "engine_payload", enc), self.compute_dtype)
 
     def accumulate(self, enc: Any, weights: Any) -> Any:
+        """Accumulate weighted sufficient statistics with the fused E-step kernel."""
         w = np.asarray(self.engine.to_numpy(weights) if hasattr(self.engine, "to_numpy") else weights, dtype=np.float64)
         suff, self.last_ll = fused_accumulate(
             self.dist, getattr(enc, "engine_payload", enc), w, return_ll=True, compute_dtype=self.compute_dtype
@@ -1226,6 +1233,7 @@ class FusedKernel:
         return suff
 
     def refresh(self, dist: Any) -> None:
+        """Refresh the kernel wrapper with a newly estimated distribution."""
         self.dist = dist
 
 
@@ -1248,6 +1256,7 @@ class FusedKernelFactory:
         return self._fallback
 
     def build(self, dist: Any, engine: Any, estimator: Any = None) -> Any:
+        """Build a fused kernel when supported, otherwise delegate to the fallback factory."""
         ok = fusible_estep(dist) if estimator is not None else fusible(dist)
         if getattr(engine, "supports_numba", False) and ok:
             return FusedKernel(dist, engine, estimator=estimator)

@@ -1,4 +1,9 @@
-"""Distribution capability metadata for engine and planner decisions."""
+"""Distribution capability metadata for engine and planner decisions.
+
+The registry records which distribution families can execute on each compute
+engine, which kernels are generic or specialized, and why some families remain
+intentionally NumPy-only.
+"""
 
 from __future__ import annotations
 

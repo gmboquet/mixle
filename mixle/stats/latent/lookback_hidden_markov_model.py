@@ -1,8 +1,4 @@
-"""Evaluate, estimate, and sample from a lookback hidden Markov model (typed rewrite).
-
-Defines the LookbackHiddenMarkovModelDistribution, LookbackHiddenMarkovModelSampler,
-LookbackHiddenMarkovModelEstimatorAccumulator, LookbackHiddenMarkovModelEstimatorAccumulatorFactory,
-LookbackHiddenMarkovModelEstimator, and the LookbackHiddenMarkovModelDataEncoder classes for use with mixle.
+"""Lookback hidden Markov models with emissions conditioned on recent observations.
 
 A lookback hidden Markov model is a hidden Markov model whose emission distributions condition on the
 previous ``lag`` observations: with hidden states Z(t) following a Markov chain with initial state
@@ -86,7 +82,7 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
         weights: np.ndarray = MISSING,
         terminal_states: set[int] | Sequence[int] | None = None,
     ) -> None:
-        """LookbackHiddenMarkovModelDistribution object for sequences with lagged emission dependence.
+        """Distribution for sequences with lagged hidden-state emission dependence.
 
         Args:
             topics (Sequence[SequenceEncodableProbabilityDistribution]): Per-state emission
@@ -101,7 +97,7 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
             len_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution for the
                 number of hidden positions (len(x) - lag + 1 when lag > 0, len(x) when lag == 0).
                 Defaults to NullDistribution.
-            name (Optional[str]): Assign string name to object instance.
+            name (Optional[str]): Optional distribution name.
 
         Attributes:
             topics (Sequence[SequenceEncodableProbabilityDistribution]): Per-state emission distributions.
@@ -113,7 +109,7 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
             log_w (np.ndarray): Log of w.
             transitions (np.ndarray): Transition matrix with shape (num_states, num_states).
             len_dist (SequenceEncodableProbabilityDistribution): Length distribution.
-            name (Optional[str]): Name of object instance.
+            name (Optional[str]): Optional distribution name.
 
         """
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
@@ -156,7 +152,7 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
         return terminal_forward_loglik(self.log_w, self.log_transitions, self._windowed_log_b(x), self._terminal_mask)
 
     def __str__(self) -> str:
-        """Returns string representation of LookbackHiddenMarkovModelDistribution object."""
+        """Return a constructor-style representation of the distribution."""
         s1 = ",".join(map(str, self.topics))
         s2 = repr(list(self.w))
         s3 = repr([list(u) for u in self.transitions])
@@ -435,6 +431,7 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
         return [alphas[tz[i] : tz[i + 1], :] for i in range(len(tz) - 1)]
 
     def density_semantics(self):
+        """Return exact-or-approximate density semantics joined from child models."""
         from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
 
         children = list(self.topics) + ([] if self.len_dist is None else [self.len_dist])
@@ -533,6 +530,7 @@ class LookbackTerminalDataEncoder(DataSequenceEncoder):
         return isinstance(other, LookbackTerminalDataEncoder)
 
     def seq_encode(self, x):
+        """Encode terminal-aware lookback HMM sequences as lists."""
         return [list(s) for s in x]
 
 
@@ -540,7 +538,7 @@ class LookbackHiddenMarkovModelSampler(DistributionSampler):
     """Sampler for LookbackHiddenMarkovModelDistribution. Requires non-null init_dist and len_dist."""
 
     def __init__(self, dist: LookbackHiddenMarkovModelDistribution, seed: int | None = None) -> None:
-        """LookbackHiddenMarkovModelSampler object.
+        """Create a sampler for a lookback hidden Markov model.
 
         Args:
             dist (LookbackHiddenMarkovModelDistribution): Distribution to sample from (init_dist and
@@ -625,7 +623,7 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
         keys=(None, None, None),
         terminal_states=None,
     ):
-        """LookbackHiddenMarkovModelEstimatorAccumulator object.
+        """Create an accumulator for lookback-HMM sufficient statistics.
 
         Args:
             seq_accumulators (Sequence[SequenceEncodableStatisticAccumulator]): Per-state accumulators
@@ -1013,6 +1011,7 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
         return self
 
     def scale(self, c: float) -> "LookbackHiddenMarkovModelEstimatorAccumulator":
+        """Scale all accumulated lookback-HMM sufficient statistics in place."""
         self.init_counts *= c
         self.state_counts *= c
         self.trans_counts *= c
@@ -1101,7 +1100,7 @@ class LookbackHiddenMarkovModelEstimatorAccumulatorFactory(StatisticAccumulatorF
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         terminal_states=None,
     ):
-        """LookbackHiddenMarkovModelEstimatorAccumulatorFactory object.
+        """Create a factory for lookback-HMM accumulators.
 
         Args:
             lag (int): Number of preceding observations each emission conditions on.
@@ -1161,7 +1160,7 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         terminal_states=None,
     ):
-        """LookbackHiddenMarkovModelEstimator object.
+        """Create an estimator for a lookback hidden Markov model.
 
         Args:
             estimators (Sequence[ParameterEstimator]): Per-state estimators for the emission window
@@ -1276,7 +1275,7 @@ class LookbackHiddenMarkovModelDataEncoder(DataSequenceEncoder):
         len_encoder: DataSequenceEncoder | None = NullDataEncoder(),
         init_encoder: DataSequenceEncoder | None = NullDataEncoder(),
     ) -> None:
-        """LookbackHiddenMarkovModelDataEncoder object.
+        """Create an encoder for lookback-HMM sequences.
 
         Args:
             encoder (DataSequenceEncoder): Encoder for length-(lag+1) emission windows.
@@ -1293,7 +1292,7 @@ class LookbackHiddenMarkovModelDataEncoder(DataSequenceEncoder):
         self.init_encoder = init_encoder if init_encoder is not None else NullDataEncoder()
 
     def __str__(self) -> str:
-        """Returns string representation of LookbackHiddenMarkovModelDataEncoder object."""
+        """Return a constructor-style representation of the encoder."""
         s = "LookbackHiddenMarkovModelDataEncoder(encoder=" + str(self.encoder) + ",lag=" + str(self.lag)
         s += ",len_encoder=" + str(self.len_encoder) + ",init_encoder=" + str(self.init_encoder) + ")"
         return s
@@ -1380,6 +1379,6 @@ class LookbackHiddenMarkovModelDataEncoder(DataSequenceEncoder):
         return (ids, idi, ims, imi, sz, xss, xsi), len_enc
 
 
-# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+# --- Backward-compatible API naming aliases ---
 LookbackHiddenMarkovModelAccumulator = LookbackHiddenMarkovModelEstimatorAccumulator
 LookbackHiddenMarkovModelAccumulatorFactory = LookbackHiddenMarkovModelEstimatorAccumulatorFactory

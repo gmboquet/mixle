@@ -295,10 +295,12 @@ class GraphDataEncoder(DataSequenceEncoder):
         )
 
     def seq_encode(self, x: Sequence[Any]) -> tuple[GraphObservation, ...]:
+        """Encode graph-like observations into graph observation records."""
         fallback = None if self.fallback_assignments is None else np.asarray(self.fallback_assignments, dtype=np.int64)
         return tuple(_extract_observation(u, directed=self.directed, fallback_assignments=fallback) for u in x)
 
     def nbytes(self, x: Any) -> int:
+        """Return approximate encoded byte size for graph observations."""
         total = 0
         for obs in x:
             total += int(obs.adjacency.nbytes)

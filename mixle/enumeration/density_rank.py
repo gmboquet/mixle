@@ -7,7 +7,7 @@ For an observation ``x``, two natural "where does x sit" queries are:
   - **cumulative probability**: the total probability mass of all observations at least as
     probable as ``x`` -- ``G(x) = P_{Y~p}(p(Y) >= p(x)) = sum_{y: p(y) >= p(x)} p(y)``.
 
-Both are exact and cheap for the *head* of the distribution (the most-probable values) via the
+Both are exact and efficient for the *head* of the distribution (the most-probable values) via the
 existing best-first ``enumerator()``: walk descending until the score drops below ``p(x)``, summing
 mass and counting. But for an ``x`` deep in the tail the head is astronomically large, so exact
 enumeration is infeasible -- and there a single Monte-Carlo pass is reliable, because ``G(x)`` is
@@ -188,7 +188,7 @@ def truncated_sum_bound(dist: Any, k: int) -> TruncatedSumBound:
     Enumerates the ``k`` most probable outcomes (descending), so any un-enumerated outcome has
     probability ``<= p_k`` (the smallest enumerated). With the support cardinality ``N =
     dist.support_size()`` the un-enumerated mass is then bounded by ``(N - k) * p_k`` -- a finite,
-    cheap upper bound on the truncated tail that uses only ``k`` evaluations and the support size. If
+    low-overhead upper bound on the truncated tail that uses only ``k`` evaluations and the support size. If
     the enumerator is exhausted within ``k`` the bounds are exact (the tail is zero). Requires an
     enumerable family; raises EnumerationError otherwise.
 
@@ -494,8 +494,8 @@ class MarginalSeekResult:
     Two regimes pin it exactly (``exact``): a decomposable / provably-disjoint family (no displacement,
     no over-count -> the structural count IS the distinct rank), or a shallow index whose whole prefix
     fits the resolve budget (unranked and de-duplicated against the true ``log_density``). Otherwise the
-    bracket is the honest, provable envelope -- the #P-hard core (de-duplicating an arbitrarily deep
-    overlapping prefix) is exactly what cannot be done cheaply.
+    bracket is the certified, provable envelope -- the #P-hard core (de-duplicating an arbitrarily deep
+    overlapping prefix) is exactly what cannot be done efficiently.
 
     Attributes:
         value: the observation at tropical descending ``index``.

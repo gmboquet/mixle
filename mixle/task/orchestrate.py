@@ -1,17 +1,15 @@
 """``orchestrate`` -- the minimal controller loop: plan a step, execute it against a world, re-plan on
-a failed/atypical step, stop on low confidence or budget exhaustion (workstream C3, built on C1's
-decomposition models and H2's :class:`~mixle.task.replay.ExecutionTrace`).
+a failed or atypical step, and stop on low confidence, world completion, or budget exhaustion.
 
 ``plan_model`` is any ``(request, history) -> step | None`` callable -- a :class:`~mixle.task.plan.Planner`
 step, a :class:`~mixle.task.sft_plan.GenerativePlanner` decode, or a test double; ``None`` (or a step whose
 ``tool`` is ``None``/``"__stop__"``) means STOP. ``world`` is kept behind the :class:`World` protocol
-rather than importing the EXPLORE-a environment directly -- any object with ``step``/``done``/``score``
-plugs in, including the future EXPLORE-a world and, later, an F modality-graph binding.
+rather than importing a concrete environment directly. Any object with ``step``/``done``/``score``
+can plug in.
 
 Every executed (or failed) step is appended to the returned trace as a
 :class:`~mixle.task.replay.TraceStep`, so :func:`mixle.task.replay.replay` can later re-run the same
-episode against the same ``world.step`` for a bit-identical-replay check (H2's contract, reused here
-rather than reinvented).
+episode against the same ``world.step`` for a bit-identical-replay check.
 """
 
 from __future__ import annotations
@@ -28,17 +26,26 @@ _NO_TOOL_KEY = object()  # distinguishes an EXPLICIT tool=None from a schema wit
 
 @runtime_checkable
 class World(Protocol):
-    """The minimal environment contract ``orchestrate`` needs -- matches EXPLORE-a's
-    ``step``/episode-budget/``score`` shape without importing it."""
+    """The minimal environment contract ``orchestrate`` needs."""
 
-    def step(self, action: dict[str, Any]) -> Any: ...
+    def step(self, action: dict[str, Any]) -> Any:
+        """Apply one action and return the environment's step result."""
+        ...
+
     @property
-    def done(self) -> bool: ...
-    def score(self) -> Any: ...
+    def done(self) -> bool:
+        """Whether the environment has reached a terminal state."""
+        ...
+
+    def score(self) -> Any:
+        """Return the environment's current score or outcome metric."""
+        ...
 
 
 @dataclass
 class OrchestrationResult:
+    """Final answer, execution trace, and stop reason from an orchestration run."""
+
     answer: Any
     trace: ExecutionTrace
     stopped_reason: str  # "plan_stop" | "budget_exhausted" | "world_done" | "low_confidence" | "replan_failed"
@@ -46,7 +53,7 @@ class OrchestrationResult:
 
 def _is_stop(step: dict[str, Any] | None) -> bool:
     """A step is STOP only when it is ``None`` or has an EXPLICIT ``tool`` key set to a stop value.
-    A step whose schema has no ``"tool"`` key at all (e.g. EXPLORE-a's ``{"type": ..., "cell": ...}``)
+    A step whose schema has no ``"tool"`` key at all (for example ``{"type": ..., "cell": ...}``)
     is a real action, not a stop -- ``dict.get("tool")`` alone can't tell those apart, since a missing
     key and an explicit ``tool=None`` both return ``None``."""
     return step is None or step.get("tool", _NO_TOOL_KEY) in _STOP_TOOLS
@@ -54,7 +61,7 @@ def _is_stop(step: dict[str, Any] | None) -> bool:
 
 def _tool_name(step: dict[str, Any]) -> str:
     """The identifier :class:`~mixle.task.replay.TraceStep` records for this step: ``"tool"`` when the
-    schema has one (the common case), else ``"type"`` (EXPLORE-a's action-kind field) -- rather than a
+    schema has one (the common case), else ``"type"`` for action-kind schemas -- rather than a
     bare ``step["tool"]`` KeyError far from the real cause when a world uses neither."""
     if "tool" in step:
         return step["tool"]

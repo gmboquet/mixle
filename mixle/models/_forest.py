@@ -194,6 +194,7 @@ class NativeRandomForest:
         self.classes_: np.ndarray | None = None
 
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> NativeRandomForest:
+        """Fit the bagged tree ensemble from a weighted design matrix and target vector."""
         X = np.asarray(X, dtype=float)
         n, d = X.shape
         w = np.ones(n) if sample_weight is None else np.asarray(sample_weight, dtype=float)
@@ -220,6 +221,7 @@ class NativeRandomForest:
         return self
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """Return class probabilities averaged over all fitted trees."""
         X = np.asarray(X, dtype=float)
         acc = np.zeros((len(X), len(self.classes_)))
         buf = np.zeros((len(X), len(self.classes_)))
@@ -230,10 +232,12 @@ class NativeRandomForest:
         return acc / len(self.trees)
 
     def predict_log_proba(self, X: np.ndarray) -> np.ndarray:
+        """Return log class probabilities, preserving ``-inf`` for impossible classes."""
         with np.errstate(divide="ignore"):
             return np.log(self.predict_proba(X))
 
     def predict(self, X: np.ndarray) -> np.ndarray:
+        """Return class labels for classification or mean predictions for regression."""
         X = np.asarray(X, dtype=float)
         if self.task == "classification":
             return self.classes_[np.argmax(self.predict_proba(X), axis=1)]

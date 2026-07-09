@@ -3,9 +3,9 @@
 A forecast is *calibrated* when its stated probabilities match observed frequencies: events given
 70% should happen ~70% of the time, and 90% intervals should contain the truth ~90% of the time. This
 is distinct from *sharpness* (how concentrated the forecast is) and from *accuracy* -- a forecaster
-can be perfectly calibrated and useless (always predict the base rate), so calibration is a necessary,
-not sufficient, condition that you check separately. These diagnostics are model-free: they look only
-at predicted probabilities/intervals and what happened.
+can be perfectly calibrated while carrying little decision value (for example, always predicting the
+base rate), so calibration is a necessary, not sufficient, condition that you check separately. These
+diagnostics are model-free: they look only at predicted probabilities/intervals and what happened.
 
 Three families, by forecast type:
 
@@ -20,7 +20,7 @@ Three families, by forecast type:
     :func:`coverage_curve` (empirical-vs-nominal coverage across a grid of levels).
 
 Several functions take ``ci=True`` to attach a nonparametric bootstrap confidence band, so a
-reliability diagram or ECE comes with honest error bars rather than a bare point estimate.
+reliability diagram or ECE comes with uncertainty bands rather than a bare point estimate.
 """
 
 from __future__ import annotations

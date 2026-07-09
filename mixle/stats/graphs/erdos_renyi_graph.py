@@ -1,4 +1,4 @@
-"""Create, estimate, and sample from an Erdos-Renyi graph distribution.
+"""Erdos-Renyi graph distributions for binary graph observations.
 
 Data type: a binary graph observation represented as a square adjacency matrix,
 a NetworkX-like graph, or a mapping accepted by ``GraphDataEncoder``.
@@ -37,12 +37,14 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Return backend capabilities for Bernoulli graph scoring."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic_object")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured declaration for the Erdos-Renyi graph family."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec, StatisticSpec
 
         return DistributionDeclaration(
@@ -93,22 +95,27 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def from_model(cls, model: Any) -> "ErdosRenyiGraphDistribution":
+        """Create a distribution wrapper from an Erdos-Renyi model."""
         return cls(model.p, directed=model.directed, self_loops=model.self_loops, name=getattr(model, "name", None))
 
     def to_model(self) -> Any:
+        """Convert this distribution to the corresponding random-graph model."""
         from mixle.models.random_graph import ErdosRenyiGraphModel
 
         return ErdosRenyiGraphModel(self.p, directed=self.directed, self_loops=self.self_loops, name=self.name)
 
     def density(self, x: Any) -> float:
+        """Return the probability mass of one graph observation."""
         return math.exp(self.log_density(x))
 
     def log_density(self, x: Any) -> float:
+        """Return the Bernoulli edge log probability of one graph."""
         obs = _extract_observation(x, directed=self.directed)
         total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
         return _bernoulli_log_likelihood(successes, total, self.p)
 
     def seq_log_density(self, x: Sequence[GraphObservation]) -> np.ndarray:
+        """Score a batch of graph observations."""
         # Extract (opportunities, successes) per graph once (ragged adjacency forces the per-graph
         # extraction), then score the whole batch with one vectorized Bernoulli log-likelihood instead
         # of a Python log_density call per graph.
@@ -144,9 +151,11 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         return successes * engine.asarray(math.log(p)) + (total - successes) * engine.asarray(math.log1p(-p))
 
     def edge_probability(self, i: int | None = None, j: int | None = None, context: Any | None = None) -> float:
+        """Return the common edge probability ``p``."""
         return self.p
 
     def edge_marginals(self, num_nodes: int | None = None) -> np.ndarray:
+        """Return the matrix of marginal edge probabilities for ``num_nodes``."""
         n = self.num_nodes if num_nodes is None else int(num_nodes)
         if n is None:
             raise ValueError("num_nodes is required when distribution.num_nodes is None.")
@@ -156,12 +165,14 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         return mat
 
     def posterior(self, x: Any) -> dict[str, float]:
+        """Return edge opportunities, observed edge count, and fitted probability for ``x``."""
         total, successes = _edge_counts(
             _extract_observation(x, directed=self.directed).adjacency, self.directed, self.self_loops
         )
         return {"edge_opportunities": total, "edge_count": successes, "p": self.p}
 
     def sampler(self, seed: int | None = None) -> "ErdosRenyiGraphSampler":
+        """Return a sampler for Erdos-Renyi graph observations."""
         return ErdosRenyiGraphSampler(self, seed)
 
     def enumerator(self) -> DistributionEnumerator:
@@ -178,6 +189,7 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         return ErdosRenyiGraphEnumerator(self)
 
     def estimator(self, pseudo_count: float | None = None) -> "ErdosRenyiGraphEstimator":
+        """Return the edge-count estimator for this graph family."""
         return ErdosRenyiGraphEstimator(
             directed=self.directed,
             self_loops=self.self_loops,
@@ -189,10 +201,13 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def dist_to_encoder(self) -> GraphDataEncoder:
+        """Return the graph encoder used by vectorized scoring and fitting."""
         return GraphDataEncoder(directed=self.directed)
 
 
 class ErdosRenyiGraphEnumerator(DistributionEnumerator):
+    """Enumerator over finite Erdos-Renyi binary graph support."""
+
     def __init__(self, dist: ErdosRenyiGraphDistribution) -> None:
         """Best-first enumeration of binary graphs over independent edge factors.
 
@@ -225,6 +240,7 @@ class ErdosRenyiGraphEnumerator(DistributionEnumerator):
         self._product = ProductEnumerator(streams, combine=combine)
 
     def __next__(self) -> tuple[np.ndarray, float]:
+        """Return the next adjacency matrix and its log probability."""
         return next(self._product)
 
 
@@ -236,6 +252,7 @@ class ErdosRenyiGraphSampler(DistributionSampler):
         self.rng = RandomState(seed)
 
     def sample_graph(self, num_nodes: int | None = None) -> np.ndarray:
+        """Draw one binary graph adjacency matrix."""
         n = self.dist.num_nodes if num_nodes is None else int(num_nodes)
         if n is None:
             raise ValueError("num_nodes is required when distribution.num_nodes is None.")
@@ -255,6 +272,7 @@ class ErdosRenyiGraphSampler(DistributionSampler):
         return mat
 
     def sample(self, size: int | None = None, num_nodes: int | None = None) -> np.ndarray | list[np.ndarray]:
+        """Draw one graph or a list of graphs."""
         if size is None:
             return self.sample_graph(num_nodes=num_nodes)
         return [self.sample_graph(num_nodes=num_nodes) for _ in range(int(size))]
@@ -274,39 +292,47 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: Any, weight: float, estimate: ErdosRenyiGraphDistribution | None) -> None:
+        """Accumulate weighted edge opportunities and successes from one graph."""
         obs = _extract_observation(x, directed=self.directed)
         total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
         self.edge_opportunities += float(weight) * total
         self.edge_count += float(weight) * successes
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize sufficient statistics from one weighted graph."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: Sequence[GraphObservation], weights: np.ndarray, estimate: ErdosRenyiGraphDistribution | None
     ) -> None:
+        """Accumulate weighted edge counts from a batch of graphs."""
         for obs, weight in zip(x, weights):
             total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
             self.edge_opportunities += float(weight) * total
             self.edge_count += float(weight) * successes
 
     def seq_initialize(self, x: Sequence[GraphObservation], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize sufficient statistics from a weighted graph batch."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float]) -> "ErdosRenyiGraphAccumulator":
+        """Merge serialized edge-count sufficient statistics."""
         self.edge_opportunities += suff_stat[0]
         self.edge_count += suff_stat[1]
         return self
 
     def value(self) -> tuple[float, float]:
+        """Return serialized edge-count sufficient statistics."""
         return self.edge_opportunities, self.edge_count
 
     def from_value(self, x: tuple[float, float]) -> "ErdosRenyiGraphAccumulator":
+        """Restore accumulator state from serialized edge counts."""
         self.edge_opportunities = float(x[0])
         self.edge_count = float(x[1])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge tied edge-count statistics into ``stats_dict``."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -314,10 +340,12 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace tied edge-count statistics from ``stats_dict``."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> GraphDataEncoder:
+        """Return the encoder associated with this accumulator."""
         return GraphDataEncoder(directed=self.directed)
 
 
@@ -333,6 +361,7 @@ class ErdosRenyiGraphAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> ErdosRenyiGraphAccumulator:
+        """Create a fresh Erdos-Renyi graph accumulator."""
         return ErdosRenyiGraphAccumulator(
             directed=self.directed, self_loops=self.self_loops, name=self.name, keys=self.keys
         )
@@ -360,11 +389,13 @@ class ErdosRenyiGraphEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> ErdosRenyiGraphAccumulatorFactory:
+        """Return the accumulator factory used by this estimator."""
         return ErdosRenyiGraphAccumulatorFactory(
             directed=self.directed, self_loops=self.self_loops, name=self.name, keys=self.keys
         )
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> ErdosRenyiGraphDistribution:
+        """Estimate the Bernoulli edge probability from edge-count statistics."""
         total, successes = suff_stat
         if self.pseudo_count is not None:
             successes += float(self.pseudo_count) * float(self.prior_p)

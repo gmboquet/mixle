@@ -8,7 +8,7 @@ the whole contract surface has one home:
         Surrogate, EMStrategy
 
 The light contracts (the object cast + the capability protocols) are imported eagerly; the heavier
-subsystem roles are resolved lazily (PEP 562 ``__getattr__``) so this stays a cheap leaf import with no
+subsystem roles are resolved lazily (PEP 562 ``__getattr__``) so this stays a lightweight leaf import with no
 cycles. See ``docs/ARCHITECTURE.md``.
 """
 

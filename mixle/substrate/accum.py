@@ -1,9 +1,11 @@
-"""The knowledge-accumulation flywheel (workstream ACCUM-a): measure whether adding calibrated
-knowledge to the belief store (:mod:`mixle.substrate.belief`, workstream E/KNOW-a) improves answers on
-a held-out question set, WITH NO MODEL RETRAINING -- the third self-improvement mode (distillation
-improves the student, accumulation improves what the student/teacher can retrieve).
+"""Measure whether accumulated calibrated knowledge improves held-out answers.
 
-Two guards keep the measurement honest:
+The knowledge-accumulation flywheel measures whether adding calibrated
+knowledge to the belief store (:mod:`mixle.substrate.belief`) improves answers
+on a held-out question set, with no model retraining. Distillation improves the
+student model; accumulation improves what the student or teacher can retrieve.
+
+Two guards keep the measurement grounded:
 
   * **attribution** -- the improvement must disappear when the newly-assimilated items are withheld
     from retrieval, proving the gain came from the store growing rather than anything else (timing,
@@ -11,7 +13,7 @@ Two guards keep the measurement honest:
   * **credence weighting** -- retrieval goes through
     :func:`mixle.substrate.belief.retrieve_beliefs`, which ranks by ``relevance * credence`` and can be
     hard-thresholded with ``min_credence``; a batch of low-credence (e.g. pure ``MODEL_ASSERTION``)
-    knowledge must NOT inflate the measured improvement -- it is down-weighted, never treated as
+    knowledge must not inflate the measured improvement -- it is down-weighted, never treated as
     ground truth.
 """
 
@@ -35,12 +37,16 @@ class QAItem:
 
 @dataclass
 class FlywheelMeasurement:
+    """Held-out answer quality and grounding rate for one flywheel measurement."""
+
     solve_rate: float
     grounded_fraction: float  # fraction of questions where retrieval returned at least one belief
 
 
 @dataclass
 class FlywheelReport:
+    """Before/after/withheld flywheel measurements with an attribution check."""
+
     before: FlywheelMeasurement
     after: FlywheelMeasurement
     withheld: FlywheelMeasurement  # measured after assimilation, but with the new items excluded from retrieval

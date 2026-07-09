@@ -22,6 +22,7 @@ class FieldType:
     numpy_dtype: Any = np.float64
 
     def coerce(self, value: Any) -> Any:
+        """Return ``value`` in the Python representation expected by the corresponding encoder."""
         return value
 
     def __repr__(self) -> str:
@@ -34,15 +35,17 @@ class Real(FieldType):
     numpy_dtype = np.float64
 
     def coerce(self, value: Any) -> float:
+        """Coerce ``value`` to a Python ``float``."""
         return float(value)
 
 
 class Count(FieldType):
-    """A non-negative integer count."""
+    """An integer count logical type."""
 
     numpy_dtype = np.int64
 
     def coerce(self, value: Any) -> int:
+        """Coerce ``value`` to a Python ``int``."""
         return int(value)
 
 
@@ -67,6 +70,7 @@ class Boolean(FieldType):
             if s in _BOOLEAN_TRUE_STRINGS:
                 return True
             raise ValueError("cannot coerce string %r to Boolean" % value)
+        """Coerce ``value`` to a Python ``bool``."""
         return bool(value)
 
 
@@ -76,6 +80,7 @@ class Text(FieldType):
     numpy_dtype = np.object_
 
     def coerce(self, value: Any) -> str:
+        """Coerce ``value`` to ``str``."""
         return str(value)
 
 
@@ -87,6 +92,7 @@ class Categorical(FieldType):
     numpy_dtype: Any = np.object_
 
     def coerce(self, value: Any) -> Any:
+        """Return ``value`` after validating membership in ``categories`` when categories are fixed."""
         if self.categories is not None and value not in self.categories:
             raise ValueError("value %r is not one of the categories %r" % (value, self.categories))
         return value
@@ -100,6 +106,7 @@ class Vector(FieldType):
     numpy_dtype: Any = np.float64
 
     def coerce(self, value: Any) -> np.ndarray:
+        """Coerce ``value`` to a one-dimensional ``float64`` array and validate ``dim`` when set."""
         arr = np.asarray(value, dtype=np.float64)
         if self.dim is not None and arr.shape != (self.dim,):
             raise ValueError("expected a length-%d vector, got shape %s" % (self.dim, arr.shape))
@@ -112,6 +119,7 @@ class Timestamp(FieldType):
     numpy_dtype = np.dtype("datetime64[ns]")
 
     def coerce(self, value: Any) -> Any:
+        """Coerce ``value`` to ``numpy.datetime64`` unless it already has that representation."""
         return np.datetime64(value) if not isinstance(value, np.datetime64) else value
 
 
@@ -123,9 +131,11 @@ class Optional(FieldType):
 
     @property
     def numpy_dtype(self) -> Any:
+        """Return the NumPy dtype of the wrapped field type."""
         return self.inner.numpy_dtype
 
     def coerce(self, value: Any) -> Any:
+        """Pass missing ``None`` through; otherwise delegate coercion to ``inner``."""
         return None if value is None else self.inner.coerce(value)
 
 
@@ -137,6 +147,7 @@ class Nested(FieldType):
     numpy_dtype: Any = np.object_
 
     def coerce(self, value: Any) -> Any:
+        """Conform a nested record with this field's child schema."""
         return self.schema.conform_record(value)
 
 
@@ -156,6 +167,7 @@ class Schema:
 
     @property
     def names(self) -> tuple[str, ...]:
+        """Return field names in schema order."""
         return tuple(f.name for f in self.fields)
 
     def conform_record(self, record: Any) -> Any:

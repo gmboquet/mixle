@@ -4,7 +4,6 @@ mixle.utils.hvis package
 .. automodule:: mixle.utils.hvis
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

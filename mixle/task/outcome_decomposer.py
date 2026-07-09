@@ -1,15 +1,17 @@
-"""Outcome-trained decomposer (CARD C2-a, workstream C2): propose candidate plans by sampling C1-a's
-fitted :class:`~mixle.task.plan_model.PlanModel`, execute them in the :mod:`~mixle.task.explore_world`
-world, keep verifiably-successful traces (score above a quantile of that round's own scores), refit
-the plan model on successes, iterate a few rounds. Training signal is world score ONLY -- verifiable
+"""Outcome-trained decomposer for exploration plans.
+
+Candidate plans are proposed by sampling a fitted :class:`~mixle.task.plan_model.PlanModel`, executing
+them in the :mod:`~mixle.task.explore_world`
+    world, keep verifiably successful traces (score above a quantile of that round's own scores), refit
+    the plan model on successes, iterate a few rounds. Training signal is only world score -- verifiable
 by construction, never a proxy or a teacher's opinion.
 
     decomposer = train_outcome_decomposer(seed_worlds=40, n_cells=20, n_targets=3, budget=30)
     decomposer.plan_model.sample(rng)          # a plan shaped by what actually worked, not just imitation
-    evaluate_decomposer(decomposer, ...)       # mean score on held-out seeds, for the acceptance check
+    evaluate_decomposer(decomposer, ...)       # mean score on held-out seeds
 
-Acceptance (per the card): beats both the imitation-only model (round 0, before any outcome
-refitting) and the greedy heuristic on HELD-OUT world seeds at matched budget.
+For a useful deployment, compare the outcome-refit model with both the imitation-only model (round 0,
+before any outcome refitting) and the greedy heuristic on held-out world seeds at matched budget.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ def _as_traces(type_sequences: list[list[str]]) -> list[AgentTrace]:
 
 def imitation_traces(policy, *, n_worlds: int, n_cells: int, n_targets: int, budget: int, seed_offset: int = 0):
     """Run ``policy`` over ``n_worlds`` seeded episodes and return each episode's ACCEPTED action-type
-    sequence -- the round-0 imitation corpus C1-a's plan model fits on."""
+    sequence used to fit the round-0 imitation model."""
     out = []
     for i in range(n_worlds):
         result = run_episode(policy, n_cells=n_cells, n_targets=n_targets, budget=budget, seed=seed_offset + i)
@@ -38,10 +40,10 @@ def imitation_traces(policy, *, n_worlds: int, n_cells: int, n_targets: int, bud
 
 
 def execute_plan(plan_types: list[str], *, n_cells: int, n_targets: int, budget: int, seed: int) -> int:
-    """Execute a plan (a sequence of action TYPES, e.g. ``["survey", "survey", "drill", ...]``) in a
+    """Execute a plan (a sequence of action types, e.g. ``["survey", "survey", "drill", ...]``) in a
     fresh seeded world: at each step, "survey" targets the undrilled cell with the noisiest current
     read (most to gain), "drill" targets the undrilled cell with the highest current prospectivity
-    read -- the plan model decides the ORDER/MIX of action types, this fixed rule decides WHICH cell,
+    read -- the plan model decides the order and mix of action types; this fixed rule decides which cell,
     the same division of labor the plan/tool-name abstraction uses everywhere else in this plan.
     Returns the world's final score."""
     world = ExplorationWorld(n_cells=n_cells, n_targets=n_targets, budget=budget, seed=seed)
@@ -63,6 +65,8 @@ def execute_plan(plan_types: list[str], *, n_cells: int, n_targets: int, budget:
 
 @dataclass
 class RoundStats:
+    """Candidate-generation statistics for one outcome-decomposition round."""
+
     round: int
     mean_score: float
     n_candidates: int
@@ -71,6 +75,8 @@ class RoundStats:
 
 @dataclass
 class OutcomeTrainedDecomposer:
+    """Outcome-trained plan model, baseline imitation model, and per-round statistics."""
+
     plan_model: PlanModel
     imitation_model: PlanModel  # round-0, kept for the acceptance comparison
     rounds: list[RoundStats] = field(default_factory=list)
@@ -87,6 +93,7 @@ def train_outcome_decomposer(
     rounds: int = 3,
     seed: int = 0,
 ) -> OutcomeTrainedDecomposer:
+    """Train a plan model by sampling, executing, keeping high-outcome plans, and refitting."""
     rng = np.random.RandomState(seed)
     imitation = imitation_traces(
         greedy_prospectivity_policy, n_worlds=seed_worlds, n_cells=n_cells, n_targets=n_targets, budget=budget
@@ -123,6 +130,7 @@ def evaluate_plan_model(
 
 
 def evaluate_greedy_heuristic(*, seeds, n_cells: int, n_targets: int, budget: int) -> float:
+    """Return the mean score of the built-in greedy policy across held-out seeds."""
     scores = [
         run_episode(greedy_prospectivity_policy, n_cells=n_cells, n_targets=n_targets, budget=budget, seed=s).score
         for s in seeds

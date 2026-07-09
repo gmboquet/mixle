@@ -4,7 +4,7 @@ An embedding turns a categorical value -- a word/token, a country, a product id 
 This is a declarative handle for one such embedding table of shape ``(num_categories, dim)``: it builds a single
 ``nn.Embedding`` lazily and returns that same module to every model that references it, so passing the *same*
 instance to several models ties their vectors and trains them jointly (the neural analogue of the PPL's ``name=``
-tying for scalar latents). A word embedding shared across the language-model experts of a mixture is the headline
+tying for scalar latents). A word embedding shared across the language-model experts of a mixture is the primary
 case, but the primitive embeds any categorical field.
 
 Pass a :class:`CategoricalEmbedding` as ``embedding=`` to :class:`mixle.models.StreamingTransformerLeaf`

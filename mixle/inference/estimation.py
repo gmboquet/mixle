@@ -75,7 +75,7 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState 
     For flat tuple records the independent :class:`CompositeDistribution` the automatic detector
     produces is a Naive-Bayes assumption — the one heterogeneous data most often violates. This
     discovers the cross-field dependency graph (:func:`mixle.inference.learn_bayesian_network`) and
-    returns it ONLY when it beats the independent composite by BIC on the same data; anything else —
+    returns it only when it beats the independent composite by BIC on the same data; anything else —
     no edges found, non-record data, too few rows, or any failure at all — returns ``None`` and the
     historical composite path proceeds untouched, so the default is never worse.
     """
@@ -736,7 +736,7 @@ def optimize(
             resume with ``prev_estimate=``. Called on every iteration regardless of ``print_iter``.
         structure (str): ``'auto'`` (default) makes the tagline literal for flat tuple records fit
             with no estimator: the cross-field dependency graph is discovered
-            (:func:`mixle.inference.learn_bayesian_network`) and returned WHEN it beats the
+            (:func:`mixle.inference.learn_bayesian_network`) and returned when it beats the
             independent composite by BIC — otherwise (no edges, non-record data, or any failure)
             the historical automatic-composite path proceeds untouched. ``'off'`` restores the
             unconditional historical behavior. Only consulted when ``estimator`` is ``None`` and no

@@ -1,11 +1,14 @@
-"""Generative objective -- fit the embedding (and its codebook) to *model* the data, so tokenization is inferred.
+"""Generative objective for fitting embeddings and optional codebooks.
 
-The self-supervised half of "fit to the objective": rather than tune the encoder to a label, train it to
-*reconstruct* its input -- an autoencoder over units. The shared-space vector must retain enough to rebuild the
-unit, so the representation is a generative one (no collapse). Turn on a :class:`~mixle.represent.quantize.VectorQuantizer`
-and it becomes a VQ-VAE: encode -> quantize (straight-through) -> decode, with the codebook periodically refit on
-the current embeddings. Now the *vocabulary* is chosen to best reconstruct the data -- tokenization inferred under
-a generative objective, exactly the thing a hardcoded BPE cannot do.
+Rather than tune the encoder to a label, train it to reconstruct its input as
+an autoencoder over units. The shared-space vector must retain enough
+information to rebuild the unit, so the representation has an explicit
+generative objective. Add a
+:class:`~mixle.represent.quantize.VectorQuantizer` and the model becomes a
+VQ-VAE: encode -> quantize (straight-through) -> decode, with the codebook
+periodically refit on the current embeddings. The learned vocabulary is then
+selected by reconstruction quality instead of being fixed by a tokenizer chosen
+outside the model.
 
 ``fit_autoencoder`` returns the trained encoder + decoder (+ codebook) and the reconstruction-loss history. It is
 modality-agnostic: feed it the unit-feature array from any continuous segmenter (patches, windows, atoms, ...).
@@ -24,7 +27,7 @@ from mixle.represent.quantize import VectorQuantizer
 
 @dataclass
 class AutoencoderResult:
-    """A generatively-trained representation: the encoder, its decoder, an optional codebook, and the loss curve."""
+    """A reconstruction-trained representation with encoder, decoder, optional codebook, and loss curve."""
 
     encoder: FeatureEmbedding
     decoder: Any
@@ -32,6 +35,7 @@ class AutoencoderResult:
     losses: list[float] = field(default_factory=list)
 
     def encode(self, units: np.ndarray) -> np.ndarray:
+        """Encode units through the trained autoencoder encoder."""
         import torch
 
         with torch.no_grad():
@@ -50,12 +54,13 @@ def fit_autoencoder(
     commitment: float = 0.25,
     seed: int = 0,
 ) -> AutoencoderResult:
-    """Train an encoder+decoder to reconstruct ``units`` ``(N, in_features)``; optionally through a VQ bottleneck.
+    """Train an encoder+decoder to reconstruct ``units`` ``(N, in_features)`` with an optional VQ bottleneck.
 
-    Without ``quantizer`` this is a plain autoencoder (the encoder becomes a generative representation). With one,
-    it is a VQ-VAE: the encoder's vectors are quantized (straight-through) before decoding and the codebook is
-    refit every ``refit_codebook_every`` epochs on the current embeddings, so the learned vocabulary adapts to the
-    representation. ``commitment`` weights the VQ codebook-commitment term.
+    Without ``quantizer`` this is a standard autoencoder. With one, it is a
+    VQ-VAE: the encoder's vectors are quantized (straight-through) before
+    decoding and the codebook is refit every ``refit_codebook_every`` epochs on
+    the current embeddings. ``commitment`` weights the VQ codebook-commitment
+    term.
     """
     import torch
     import torch.nn as nn
@@ -81,7 +86,7 @@ def fit_autoencoder(
         z = enc(x)  # (N, dim)
         if quantizer is not None:
             if quantizer.codebook is None or (epoch % max(1, refit_codebook_every) == 0):
-                quantizer.fit(z.detach().cpu().numpy())  # refit the vocabulary on the current embeddings
+                quantizer.fit(z.detach().cpu().numpy())  # refit the codebook on the current embeddings
             zq = quantizer.straight_through(z)
             recon = decoder(zq)
             commit = commitment * torch.mean(

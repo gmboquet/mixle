@@ -1,25 +1,22 @@
-"""A trainable cross-modal reasoning model: learn a shared latent from many modalities, unsupervised.
+"""Trainable cross-modal reasoning model with a shared latent.
 
-This is the piece that makes the reasoning stack *trained* rather than assembled. The amortized
-encoder (:mod:`mixle.reason.encoder`) needs ``(x, z)`` pairs -- you must already know the latent.
-Here the latent is **never observed**: the model learns per-modality encoders and decoders *jointly,
-through a shared latent*, from unlabeled multimodal records, by maximizing a Product-of-Experts
-variational lower bound (a multimodal VAE / MVAE).
+This module learns per-modality encoders and decoders jointly from unlabeled
+multimodal records. The latent is not observed; training maximizes a
+Product-of-Experts variational lower bound for a multimodal VAE-style model.
 
-* Each modality ``m`` has an encoder ``q_m(z | x_m) = N(mu_m, diag(sig_m^2))`` -- a Gaussian *expert*.
+* Each modality ``m`` has an encoder ``q_m(z | x_m) = N(mu_m, diag(sig_m^2))``.
 * The belief given any *subset* of modalities is the **product of experts** with the prior:
-  precisions add, so more modalities => a sharper belief. This is exactly
-  :meth:`mixle.inference.belief.GaussianBelief.fuse`, now *learned* rather than hand-specified.
+  precisions add, so more modalities produce a sharper belief. This matches
+  :meth:`mixle.inference.belief.GaussianBelief.fuse` with learned experts.
 * Each modality has a decoder ``p(x_m | z)``; training reconstructs every modality from the fused
-  latent (with modality-subset subsampling, so inference works from any subset -- one modality, all,
-  or anything between).
+  latent. Modality-subset subsampling lets inference work from one modality,
+  all modalities, or any subset between them.
 
 After training: ``belief(obs)`` returns ``q(z | available modalities)`` as a
-:class:`~mixle.inference.belief.GaussianBelief` (so it flows into :func:`mixle.reason.reason`,
-:func:`mixle.inference.decompose_uncertainty`, conformal calibration, ...); ``predict(obs, target)``
-generates a *missing* modality from the ones you have. Uncertainty is native: the belief is a
-distribution, sharpened by each modality in proportion to how much that modality's encoder trusts
-its own reading.
+:class:`~mixle.inference.belief.GaussianBelief`, and ``predict(obs, target)``
+generates a missing modality from the available ones. Uncertainty remains part
+of the object: the returned belief is a distribution, sharpened by each
+modality in proportion to its learned precision.
 
 Torch is imported lazily; :mod:`mixle.reason` exposes this via a deferred attribute.
 """
@@ -74,7 +71,7 @@ class CrossModalModel:
         self._conformal: dict[str, tuple[float, np.ndarray, float]] = {}  # target -> (alpha, scale, q)
 
     def add_modality(self, name: str, in_dim: int, *, hidden: tuple[int, ...] = (64,)) -> CrossModalModel:
-        """Register a modality with its encoder ``q(z|x)`` and decoder ``p(x|z)`` (both learned)."""
+        """Register a modality with learned encoder ``q(z|x)`` and decoder ``p(x|z)``."""
         self._mods[name] = _Modality(name, int(in_dim), self.latent_dim, tuple(hidden), _torch())
         return self
 
@@ -111,7 +108,7 @@ class CrossModalModel:
         beta: float = 0.5,
         subsample: bool = True,
     ) -> CrossModalModel:
-        """Train encoders + decoders jointly on unlabeled multimodal ``data`` by the PoE-ELBO.
+        """Train encoders and decoders jointly on unlabeled multimodal data.
 
         ``data`` maps each registered modality name to an ``(N, in_dim)`` array (all modalities share
         the same ``N`` rows -- row ``i`` is one record's several views). ``beta`` weights the KL rate;
@@ -237,4 +234,5 @@ class CrossModalModel:
 
     @property
     def modalities(self) -> Sequence[str]:
+        """Return modality names known to the cross-modal model."""
         return list(self._mods)

@@ -1,4 +1,4 @@
-"""``PINNRegression`` -- a physics-informed neural network as a mixle conditional-density model.
+"""``PINNRegression`` -- a physics-informed neural network as a Mixle conditional-density model.
 
 A :class:`~mixle.models.neural_leaf.NeuralGaussian` fits ``p(y | x) = N(y; module(x), noise^2 I)`` from labeled
 ``(x, y)`` pairs alone. ``PINNRegression`` is the same model plus a **residual penalty**: at every M-step it also
@@ -16,8 +16,10 @@ is the data-fit Gaussian NLL only -- the model never claims the residual penalty
 model. :func:`mixle.inference.planning.certify` already caps a bare gradient-fit model like this at
 ``STATIONARY`` (no global-optimum claim), so ``penalized=`` adds nothing for a standalone fit; pass
 ``certify(structure, penalized="PINN residual")`` when this model is composed as one block of a larger
-structure that otherwise contains closed-form EM blocks, so those blocks are honestly downgraded too
-(mirroring how :func:`mixle.ppl.core.ode_residual`'s soft-constraint fits are certified).
+structure that otherwise contains closed-form EM blocks, so the composite
+certificate records the residual-penalized training step as a gradient-based
+block (mirroring how :func:`mixle.ppl.core.ode_residual`'s soft-constraint fits
+are certified).
 
 Requires torch. ``residual_fn(module, collocation_points) -> tensor`` computes the residual using
 ``torch.autograd.grad`` on the module's output w.r.t. ``collocation_points`` (which arrive with
@@ -102,6 +104,7 @@ class PINNRegression(NeuralGaussian):
         return "PINNRegression(noise=%.3g, residual_weight=%.3g)" % (self.noise, self.residual_weight)
 
     def estimator(self, pseudo_count: float | None = None) -> PINNRegressionEstimator:
+        """Return the estimator that combines weighted data fit with residual collocation penalties."""
         return PINNRegressionEstimator(
             self.module,
             self.residual_fn,
@@ -117,6 +120,7 @@ class PINNRegression(NeuralGaussian):
         )
 
     def dist_to_encoder(self) -> NeuralGaussianEncoder:
+        """Return the neural-Gaussian encoder for ``(x, y)`` observation pairs."""
         return NeuralGaussianEncoder()
 
     # --- serialization: same module-as-bytes pattern as NeuralGaussian, plus the residual_fn/domain/PINN
@@ -135,6 +139,7 @@ class PINNRegression(NeuralGaussian):
         self.domain = (np.asarray(state["domain"][0], dtype=float), np.asarray(state["domain"][1], dtype=float))
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the module, residual function reference, domain, and PINN hyperparameters."""
         return {
             "noise": self.noise,
             "m_steps": self.m_steps,
@@ -151,6 +156,7 @@ class PINNRegression(NeuralGaussian):
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> PINNRegression:
+        """Rebuild a :class:`PINNRegression` from :meth:`to_dict` output."""
         return cls(
             decode_module(payload["module"]),
             _decode_residual_fn(payload["residual_fn"]),
@@ -199,6 +205,9 @@ class PINNRegressionEstimator(NeuralGaussianEstimator):
 
     def accumulator_factory(self) -> DataBufferAccumulatorFactory:
         return DataBufferAccumulatorFactory(NeuralGaussianEncoder(), n_fields=2)
+    def accumulator_factory(self) -> NeuralGaussianAccumulatorFactory:
+        """Return the neural-Gaussian accumulator factory for weighted observation pairs."""
+        return NeuralGaussianAccumulatorFactory()
 
     def _sample_collocation(self, dev: Any, torch: Any) -> Any:
         low, high = self.domain
@@ -207,6 +216,7 @@ class PINNRegressionEstimator(NeuralGaussianEstimator):
         return torch.as_tensor(pts, dtype=torch.float32, device=dev).requires_grad_(True)
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> PINNRegression:
+        """Run the data-plus-residual M-step and return the updated PINN leaf."""
         torch = _torch()
         xs, ys, ws = suff_stat
         has_data = len(xs) > 0
