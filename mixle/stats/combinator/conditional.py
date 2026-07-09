@@ -34,6 +34,7 @@ from mixle.stats.combinator.null_dist import (
 )
 from mixle.stats.compute.pdist import (
     ConditionalSampler,
+    ContractError,
     DataSequenceEncoder,
     DistributionEnumerator,
     DistributionSampler,
@@ -43,6 +44,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
     child_enumerator,
+    prefix_contract_error,
 )
 
 T0 = TypeVar("T0")
@@ -1323,9 +1325,50 @@ class ConditionalDistributionEstimator(ParameterEstimator):
             ConditionalDistribution object.
 
         """
-        default_dist = self.default_estimator.estimate(None, suff_stat[1])
-        given_dist = self.given_estimator.estimate(None, suff_stat[2])
-        dist_map = {k: self.estimator_map[k].estimate(None, v) for k, v in suff_stat[0].items()}
+        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 3:
+            raise ContractError(
+                "ConditionalDistributionEstimator.estimate(suff_stat)",
+                "a 3-tuple (dist_map_suff_stats, default_suff_stat, given_suff_stat)",
+                "%s%s"
+                % (
+                    type(suff_stat).__name__,
+                    " of length %d" % len(suff_stat) if isinstance(suff_stat, (tuple, list)) else "",
+                ),
+                "pass the 3-tuple produced by ConditionalDistributionAccumulator.value(), not a bare "
+                "component sufficient statistic.",
+            )
+        if not isinstance(suff_stat[0], dict):
+            raise ContractError(
+                "ConditionalDistributionEstimator.estimate(suff_stat[0])",
+                "a dict mapping each conditioning value to its sufficient statistic",
+                "%s" % type(suff_stat[0]).__name__,
+                "suff_stat[0] must be the dict-of-sufficient-statistics produced by "
+                "ConditionalDistributionAccumulator.value(), keyed by conditioning value.",
+            )
+
+        try:
+            default_dist = self.default_estimator.estimate(None, suff_stat[1])
+        except ContractError as e:
+            raise prefix_contract_error("ConditionalDistribution.default_dist", e) from None
+        try:
+            given_dist = self.given_estimator.estimate(None, suff_stat[2])
+        except ContractError as e:
+            raise prefix_contract_error("ConditionalDistribution.given_dist", e) from None
+
+        dist_map = {}
+        for k, v in suff_stat[0].items():
+            if k not in self.estimator_map:
+                raise ContractError(
+                    "ConditionalDistributionEstimator.estimator_map[%r]" % (k,),
+                    "a conditioning value present in estimator_map",
+                    "conditioning value %r, not in estimator_map" % (k,),
+                    "suff_stat[0] carries a key not covered by this estimator's estimator_map -- "
+                    "check the accumulator/estimator pairing, or add %r to estimator_map." % (k,),
+                )
+            try:
+                dist_map[k] = self.estimator_map[k].estimate(None, v)
+            except ContractError as e:
+                raise prefix_contract_error("ConditionalDistribution.estimator_map[%r]" % (k,), e) from None
 
         return ConditionalDistribution(
             dist_map, default_dist=default_dist, given_dist=given_dist, name=self.name, keys=self.keys
@@ -1446,12 +1489,31 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
             Returns rv (see description for details)
 
         """
+        if not isinstance(x, (list, tuple, np.ndarray)):
+            raise ContractError(
+                "ConditionalDistribution.seq_encode",
+                "a sequence of (given, value) pairs",
+                "%s" % type(x).__name__,
+                "pass a list of 2-tuples, e.g. [(given0, value0), (given1, value1), ...].",
+            )
+
         cond_enc = dict()
 
         given_vals = []
 
         for i in range(len(x)):
             xx = x[i]
+            if not isinstance(xx, (tuple, list, np.ndarray)) or len(xx) != 2:
+                raise ContractError(
+                    "ConditionalDistribution.seq_encode (row %d)" % i,
+                    "a 2-tuple (given_value, observed_value)",
+                    "%s%s"
+                    % (
+                        type(xx).__name__,
+                        " of length %d" % len(xx) if isinstance(xx, (tuple, list, np.ndarray)) else "",
+                    ),
+                    "each row must be a (given, value) pair -- check row %d for a missing/extra field." % i,
+                )
             given_vals.append(xx[0])
             if xx[0] not in cond_enc:
                 cond_enc[xx[0]] = [[xx[1]], [i]]
@@ -1467,21 +1529,43 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
         idx_vals = []
 
         for u in cond_enc_items:
-            if self.null_default_encoder:
-                if u[0] in self.encoder_map:
-                    eobs_vals.append(self.encoder_map[u[0]].seq_encode(u[1][0]))
+            field_path = "ConditionalDistribution.estimator_map[%r]" % (u[0],)
+            try:
+                if self.null_default_encoder:
+                    if u[0] in self.encoder_map:
+                        eobs_vals.append(self.encoder_map[u[0]].seq_encode(u[1][0]))
+                    else:
+                        # No encoder and no default for this conditioning value: append a
+                        # sentinel so eobs_vals stays aligned with cond_vals/idx_vals.
+                        # seq_log_density/seq_update guard on the cond key, so it is never
+                        # dereferenced (the group scores -inf / is skipped).
+                        eobs_vals.append(None)
                 else:
-                    # No encoder and no default for this conditioning value: append a
-                    # sentinel so eobs_vals stays aligned with cond_vals/idx_vals.
-                    # seq_log_density/seq_update guard on the cond key, so it is never
-                    # dereferenced (the group scores -inf / is skipped).
-                    eobs_vals.append(None)
-            else:
-                eobs_vals.append(self.encoder_map.get(u[0], self.default_encoder).seq_encode(u[1][0]))
+                    eobs_vals.append(self.encoder_map.get(u[0], self.default_encoder).seq_encode(u[1][0]))
+            except ContractError as e:
+                raise prefix_contract_error(field_path, e) from None
+            except (TypeError, ValueError, IndexError, KeyError) as e:
+                raise ContractError(
+                    field_path,
+                    "values compatible with the conditional distribution registered for given=%r" % (u[0],),
+                    "data that raised %s: %s" % (type(e).__name__, e),
+                    "check that every value observed under given=%r matches the data type expected "
+                    "by its conditional distribution." % (u[0],),
+                ) from e
 
             idx_vals.append(np.asarray(u[1][1]))
 
-        given_enc = self.given_encoder.seq_encode(given_vals)
+        try:
+            given_enc = self.given_encoder.seq_encode(given_vals)
+        except ContractError as e:
+            raise prefix_contract_error("ConditionalDistribution.given_dist", e) from None
+        except (TypeError, ValueError, IndexError, KeyError) as e:
+            raise ContractError(
+                "ConditionalDistribution.given_dist",
+                "given-values compatible with the given distribution's data type",
+                "data that raised %s: %s" % (type(e).__name__, e),
+                "check that every given-value matches the data type expected by given_dist (%s)." % self.given_encoder,
+            ) from e
 
         return len(x), cond_vals, tuple(eobs_vals), tuple(idx_vals), given_enc
 
