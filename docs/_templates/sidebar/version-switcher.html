@@ -1,0 +1,77 @@
+{# Furo has no host-agnostic version switcher of its own (its built-in one, rtd-versions.html, only
+   activates under actual Read the Docs hosting). This reads switcher.json -- a flat list this repo's
+   own docs/_root_templates/switcher.json renders once at the site root from sphinx-polyversion's
+   build data -- so it works the same for every version, including tags built before this file existed. #}
+<div id="version-switcher" class="version-switcher">
+  <button type="button" class="version-switcher__button" aria-haspopup="listbox" aria-expanded="false">
+    <span>{{ version }}</span>
+  </button>
+  <ul class="version-switcher__menu" role="listbox" hidden></ul>
+</div>
+<script>
+(function () {
+  var root = "{{ pathto('', 1) }}../";
+  var container = document.getElementById("version-switcher");
+  var button = container.querySelector(".version-switcher__button");
+  var menu = container.querySelector(".version-switcher__menu");
+
+  fetch(root + "switcher.json")
+    .then(function (r) { return r.ok ? r.json() : []; })
+    .then(function (versions) {
+      if (!versions.length) { return; }
+      versions.forEach(function (v) {
+        var li = document.createElement("li");
+        var a = document.createElement("a");
+        a.href = root + v.name + "/index.html";
+        a.textContent = v.name + (v.type === "BRANCH" ? " (dev)" : "");
+        li.setAttribute("role", "option");
+        li.appendChild(a);
+        menu.appendChild(li);
+      });
+      button.addEventListener("click", function () {
+        var open = !menu.hidden;
+        menu.hidden = open;
+        button.setAttribute("aria-expanded", String(!open));
+      });
+    })
+    .catch(function () {});
+})();
+</script>
+<style>
+.version-switcher { position: relative; margin: 0.5rem var(--sidebar-item-spacing-horizontal); }
+.version-switcher__button {
+  width: 100%;
+  padding: 0.4rem 0.6rem;
+  font-size: var(--sidebar-item-font-size);
+  color: var(--color-sidebar-link-text);
+  background: var(--color-sidebar-item-background);
+  border: 1px solid var(--color-sidebar-search-border);
+  border-radius: 0.3rem;
+  cursor: pointer;
+  text-align: left;
+}
+.version-switcher__button:hover { background: var(--color-sidebar-item-background--hover); }
+.version-switcher__menu {
+  position: absolute;
+  z-index: 10;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 0.2rem 0 0;
+  padding: 0.2rem 0;
+  list-style: none;
+  background: var(--color-sidebar-background);
+  border: 1px solid var(--color-sidebar-search-border);
+  border-radius: 0.3rem;
+  max-height: 16rem;
+  overflow-y: auto;
+}
+.version-switcher__menu li a {
+  display: block;
+  padding: 0.3rem 0.6rem;
+  color: var(--color-sidebar-link-text);
+  text-decoration: none;
+  font-size: var(--sidebar-item-font-size);
+}
+.version-switcher__menu li a:hover { background: var(--color-sidebar-item-background--hover); }
+</style>
