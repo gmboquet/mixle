@@ -7,40 +7,34 @@
 
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
-![tests](https://img.shields.io/badge/tests-2700%2B-brightgreen)
+![tests](https://img.shields.io/badge/tests-5000%2B-brightgreen)
 [![docs](https://img.shields.io/badge/docs-gmboquet.github.io%2Fmixle-blue)](https://gmboquet.github.io/mixle/)
 
 **mixle is a Python library for specifying, training, deploying, and maintaining models of heterogeneous
-data.** Behind a one-line API — hand it raw data and it selects and fits a model; hand it a structure and it
-fits that — is a complete probabilistic-modeling stack: around 90 distributions, mixtures and hidden Markov
-models, automatic model selection, Bayesian inference from EM to NUTS, design-of-experiments optimization,
-and calibrated, monitored deployment. It stays efficient and easy to distribute: the same model runs on any
-engine — NumPy, Numba, GPU — and scales across any backend — Spark, Dask, Ray, MPI — by changing a single
-argument, with no rewrite. It is a serious statistics library at its core, with one idea that ties it
-together: a classical distribution, a neural network, and a latent-variable model are the same kind of
-object, so they compose freely and one `optimize(...)` call fits the whole thing.
+data.** Hand it raw data and it selects and fits a model; hand it a structure and it fits that. Underneath is
+a full probabilistic-modeling stack — around 90 distributions, mixtures and hidden Markov models, automatic
+model selection, Bayesian inference from EM to NUTS, design-of-experiments optimization, and calibrated,
+monitored deployment — held together by one idea: a classical distribution, a neural network, and a
+latent-variable model are the same kind of object, so they compose freely and a single `optimize(...)` call
+fits the whole thing.
 
-Lab-grade AI, without the lab. Three things people reach for it for:
+Fitting follows from the structure, not a flag — closed form where a part has one, gradient descent for a
+neural leaf, EM for latent variables, all in one loop. The same model runs on any engine (NumPy, Numba, GPU)
+and scales across any backend (Spark, Dask, Ray, MPI) by changing one argument — no rewrite. It models what
+you actually have — numbers, text, categories, mixed and missing values, directional and angular data,
+rankings, graphs — all the same way.
 
-- **Less code.** No training loops, no batching or convergence boilerplate, no glue: point `optimize` at
+**Lab-grade AI, without the lab.** Three reasons people reach for it:
+
+- **Less code.** No training loops, no batching or convergence boilerplate, no glue — point `optimize` at
   your data or your PyTorch module and it does the heavy lifting.
 - **Lower cost.** Distill a slow, expensive model — a frontier LLM, an API, a rule — into a tiny local one
-  that answers the easy cases itself and escalates only the hard ones, and reports what it saved.
-- **Honest uncertainty.** It is calibrated to know when it is unsure and defer rather than guess, so it is
-  safe to put in front of users.
+  that answers the easy cases itself and escalates only the hard ones.
+- **Honest uncertainty.** It is calibrated to know when it is unsure and defer rather than guess — safe to
+  put in front of users.
 
-mixle handles what you actually have — numbers, text, categories, mixed and missing values, directional and
-angular data, rankings, graphs — all modeled the same way.
-
-Fitting follows from the structure, not a flag: closed-form where a part has a closed form, gradient descent
-where it is a neural network, EM where there are latent variables, all inside one loop. The deeper machinery
-is there when you want it, but you rarely need it to get started.
-
-**Full documentation:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) — guides, the model
-catalog, and the API reference.
-
-Release-branch notes live in [CHANGELOG.md](CHANGELOG.md) and
-[`docs/release-notes.rst`](docs/release-notes.rst).
+**Docs:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) · **Release notes:**
+[CHANGELOG.md](CHANGELOG.md)
 
 ## Contents
 
@@ -51,32 +45,23 @@ Release-branch notes live in [CHANGELOG.md](CHANGELOG.md) and
 
 ## Installation
 
-Python 3.10+ (developed on 3.12). On PyPI as `mixle`; the import name is `mixle`. CI tests Linux
-x86_64; macOS (incl. Apple Silicon) is the primary day-to-day dev platform and works in practice, but
-isn't CI-gated. Windows is untested and unclaimed.
+Python 3.10+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64; macOS (incl. Apple Silicon)
+is the day-to-day dev platform and works in practice but isn't CI-gated; Windows is untested.
 
 ```sh
-pip install mixle          # base (numpy, scipy, mpmath): every family, fit locally
-pip install "mixle[all]"   # numba, torch, distributed backends, and the core data connectors
+pip install mixle          # base (numpy, scipy, mpmath): every distribution, fit locally
+pip install "mixle[all]"   # + numba, torch, the distributed backends, and core data connectors
 ```
 
-The base install fits every distribution locally. Acceleration and scale-out are opt-in extras:
+Everything past the base is opt-in — install any subset, e.g. `pip install "mixle[torch,spark]"`:
 
-| Extra                                                    | Adds                                                          |
-| -------------------------------------------------------- | ------------------------------------------------------------- |
-| `numba`                                                  | JIT-compiled hot paths (falls back to pure NumPy when absent) |
-| `torch`                                                  | GPU / autograd engine                                         |
-| `jax`                                                    | JAX engine + NUTS sampling backend                            |
-| `spark` · `dask` · `ray` · `lightning` · `mpi`           | distributed estimation backends                               |
-| `pandas` · `arrow` · `sql` · `mongo` · `hadoop` · `data` · `arrays` | data-source connectors                              |
-| `gmpy2`                                                  | GMP-FFT big-integer multiply for count-DP ranking             |
-| `umap`                                                   | model-based UMAP embeddings                                   |
-| `sympy` · `sage`                                         | symbolic / closed-form export                                 |
-| `grammar`                                                | graph-grammar models (networkx)                               |
+- **Acceleration** — `numba` (JIT hot paths, falls back to NumPy), `torch` (GPU / autograd), `jax` (JAX engine + NUTS)
+- **Scale-out** — `spark` · `dask` · `ray` · `lightning` · `mpi`
+- **Data sources** — `pandas` · `arrow` · `sql` · `mongo` · `hadoop` · `arrays`
+- **Other** — `gmpy2` (fast exact ranking) · `umap` (embeddings) · `sympy` · `sage` (symbolic export) · `grammar` (graph grammars)
 
-`[all]` bundles `numba`, `torch`, `spark`/`dask`/`ray`/`lightning`/`mpi`, and `pandas`/`arrow`/`sql`;
-`jax`, `gmpy2`, `sympy`/`sage`, and `mongo`/`hadoop`/`arrays` install separately, e.g. `pip install
-"mixle[jax]"` — narrower extras that most installs do not need.
+`[all]` covers `numba`, `torch`, the scale-out backends, and `pandas`/`arrow`/`sql`; `jax`, `gmpy2`,
+`sympy`/`sage`, and `mongo`/`hadoop`/`arrays` install separately.
 
 Development: `git clone … && pip install -e ".[all]"`.
 
