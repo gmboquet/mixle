@@ -70,7 +70,7 @@ that require finite support.
    dist = GaussianDistribution(0.0, 1.0)
    finite = quantize(dist, bits=8)
 
-   top = finite.enumerator().top(5)
+   top = finite.enumerator().top_k(5)
 
 Use quantization when you need a bridge from continuous uncertainty to
 enumeration, top-k search, discrete decision policies, or compact artifacts.
