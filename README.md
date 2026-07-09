@@ -122,25 +122,24 @@ Freeze submodules, swap the optimizer, or distribute the fit with `backend=`; pa
 training loop is checked by a test, not claimed here.
 
 **Compose to any depth; one call fits the whole thing.** You hand it estimators, not fitted
-distributions — you don't know the parameters yet, and that's the point. Real observations arrive in
-several channels at once; a composite models each channel with its own family — here a two-cluster
-Gaussian mixture on one, the neural density from above on the other — and a single `optimize` learns
-them together.
+distributions — you don't know the parameters yet, and that's the point. Nest them and a single
+`optimize` learns every level together: here, a hidden Markov model whose two states emit through
+different learned models — a Gaussian mixture, and the neural density from above.
 
 ```python
-from mixle.stats import GaussianEstimator, MixtureEstimator, CompositeEstimator
+from mixle.stats import GaussianEstimator, MixtureEstimator, HiddenMarkovEstimator
 from mixle.models import GradEstimator
 
-# each record is a pair (x0, x1); nothing below fixes a parameter
-model = optimize(pairs, CompositeEstimator([
-    MixtureEstimator([GaussianEstimator(), GaussianEstimator()]),  # channel 0: a two-cluster mixture
-    GradEstimator(my_module),                                      # channel 1: a neural density
+# sequences: a list of observation series; nothing below fixes a parameter
+model = optimize(sequences, HiddenMarkovEstimator([
+    MixtureEstimator([GaussianEstimator(), GaussianEstimator()]),  # one state: a two-cluster mixture
+    GradEstimator(my_module),                                      # the other: a neural density
 ]))
 ```
 
-One call, each part fit by the right M-step: EM for the mixture, gradient descent for the neural leaf.
-Every node is an estimator, so this whole tree is itself just a node — drop it into a mixture, or make it
-the emission of a hidden Markov model, and the call at the top never changes.
+One call, each part fit by the right M-step: Baum-Welch for the Markov dynamics, EM for the mixture
+inside a state, gradient descent for the neural leaf. Every node is an estimator, so the tree nests as
+deep as the model does — the call at the top never changes.
 
 ## Engines & orchestration
 
@@ -165,87 +164,65 @@ optimize(..., backend="spark")    # distributed: mp · dask · mpi · ray · lig
 ## Enumeration & ranking
 
 Discrete and structured models **enumerate their support in descending-probability order** and answer
-exact **rank / cumulative-probability** queries — even when the support is enormous or unbounded.
-This works on a real neural LM and on a model you just fit:
+exact **rank / cumulative-probability** queries — even when the support is enormous or unbounded. This
+works on a real neural LM and on a model you just fit.
 
 ```python
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from mixle.enumeration import AutoregressiveEnumerable
 
-name      = "HuggingFaceTB/SmolLM2-135M"
+name = "HuggingFaceTB/SmolLM2-135M"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm       = AutoModelForCausalLM.from_pretrained(name).eval()
-prompt    = tokenizer("The capital of France is", return_tensors="pt").input_ids
+llm = AutoModelForCausalLM.from_pretrained(name).eval()
+prompt = tokenizer("The capital of France is", return_tensors="pt").input_ids
 
 @torch.no_grad()
 def next_logprobs(continuation):   # tokens so far -> [(token_id, log_prob), ...]
-    ids = (torch.cat([prompt, torch.tensor([continuation], dtype=torch.long)], 1)
-           if continuation else prompt)
+    ids = torch.cat([prompt, torch.tensor([continuation])], 1) if continuation else prompt
     return list(enumerate(torch.log_softmax(llm(ids).logits[0, -1], -1).tolist()))
 
-# branch_cap tames the 49K-token vocab
-continuations = AutoregressiveEnumerable(next_logprobs, max_len=3, branch_cap=8)
-
-continuations.top_k(3)      # -> [' located in the', ' the city of', ' the capital of']
-continuations.unrank(100)   # 100th-most-probable, no generation -> ' in the country'
-
-answer = continuations.unrank(5)[0]   # the ' Paris, the' continuation
-continuations.rank(answer)  # inverse -> rank=6, cumulative_prob=0.114 (exact)
+continuations = AutoregressiveEnumerable(next_logprobs, max_len=3, branch_cap=8)   # tames the 49K-token vocab
+continuations.top_k(3)                          # -> [' located in the', ' the city of', ' the capital of']
+continuations.rank(continuations.unrank(5)[0])  # inverse of unrank -> rank=6, cumulative_prob=0.114 (exact)
 ```
 
-The same operations work on a fitted latent model. Here an HMM learns *when to stop* from an absorbing
-terminal state, and its EOL-terminated support is enumerated in descending probability:
+The same operations work on a model you just fit — here an HMM learns *when to stop* from an absorbing
+terminal state, and its EOL-terminated support enumerates in descending probability:
 
 ```python
 from mixle.inference import optimize
 from mixle.stats import HiddenMarkovEstimator, CategoricalEstimator
 
-# your sequences, each ending in an EOL token
-sequences = [["team", "meet", "buy", "<EOL>"],
-             ["now", "now", "<EOL>"],
-             ["meet", "meet", "<EOL>"],
-             ...]
+sequences = [["team", "meet", "buy", "<EOL>"], ["now", "now", "<EOL>"], ...]   # each ends in an EOL token
+model = optimize(sequences, HiddenMarkovEstimator([CategoricalEstimator()] * 3, terminal_states={2}))
 
-# fit a 3-state HMM by EM; state 2 is terminal, so the model learns WHEN to
-# stop — its emission converges to "<EOL>" and the length becomes a learned
-# stopping time (no separate len_dist)
-model = optimize(sequences,
-    HiddenMarkovEstimator([CategoricalEstimator()] * 3, terminal_states={2}))
-
-emitted = model.enumerator()
-# most probable EOL-terminated sequences:
-emitted.top_k(3)          # -> [('buy <EOL>', -2.09), ('meet <EOL>', -2.12), ...]
-emitted.from_index(3, 6)  # stream ranks 3..5 without materializing 0..2
+model.enumerator().top_k(3)   # most probable EOL-terminated sequences -> [('buy <EOL>', -2.09), ('meet <EOL>', -2.12), ...]
 ```
 
 - **Decomposable families** (Composite / Record / Sequence / MarkovChain): rank ↔ value is an exact
-  count-DP at any depth (`count_dp_rank`, `count_dp_seek`); budget-bounded quantized indexes
-  (`count_budget_index`) seek the most-probable region of an infinite support (the `gmpy2` extra uses
-  GMP's FFT multiply for the big-integer convolution).
+  count-DP at any depth; budget-bounded quantized indexes seek any rank of an infinite support directly,
+  without materializing what comes before it.
 - **Non-decomposable families** (mixtures, HMMs): exact marginal rank is provably hard, so they return
-  the Viterbi bound or a certified Monte-Carlo estimate (`density_rank`, with a standard error) — never
-  a silent approximation.
+  the Viterbi bound or a certified Monte-Carlo estimate — never a silent approximation.
 - **Continuous families** realize the same operations through `cdf(x)` / `quantile(q)`.
 
 ## Probabilistic programming (`mixle.ppl`)
 
 A concise dialect over the same distributions. **One rule:** any parameter slot is a value, the token
-`free` (estimate it), or another distribution (a prior).
+`free` (estimate it), another distribution (a prior), or an expression over latents and data columns.
 
 ```python
 from mixle.ppl import Normal, Mix, Markov, Field, free
 
-data = [-2.1, 1.9, -1.8, 2.3, -2.0, 2.1]   # reals from two clusters
+data = [-2.1, 1.9, -1.8, 2.3, -2.0, 2.1]           # reals from two clusters
 seqs = [[0.1, 5.1, 4.9], [4.8, 5.0], [0.0, 0.2]]   # variable-length sequences
-Normal(free, free).fit(data)               # estimate mean + standard deviation
-Normal(Normal(0, 10), 1.0).fit(data)       # a prior on the mean (hierarchical)
-Mix([Normal(free, free), Normal(free, free)]).fit(data)   # two-cluster mixture
-Markov(Normal(free, free), states=2).fit(seqs)   # a 2-state Gaussian HMM
 
-# a slot can be an expression over named latents or data columns:
-Normal(free * Field("x") + free * Field("z") + free, free).fit(
-    ..., given={"x": ..., "z": ...})   # a regression
+Normal(free, free).fit(data)                             # estimate mean + standard deviation
+Normal(Normal(0, 10), 1.0).fit(data)                      # a prior on the mean
+Mix([Normal(free, free), Normal(free, free)]).fit(data)   # two-cluster mixture
+Markov(Normal(free, free), states=2).fit(seqs)            # a 2-state Gaussian HMM
+Normal(free * Field("x") + free * Field("z") + free, free).fit(..., given={"x": ..., "z": ...})  # regression
 ```
 
 - **`how=`** picks the inference route from the model's structure (`conjugate | em | map | laplace | vi |
