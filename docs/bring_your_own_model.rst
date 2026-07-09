@@ -137,11 +137,9 @@ calibrate a conformal accept-or-abstain threshold over them.
 
 .. note::
 
-   ``CalibratedGenerator`` (``mixle.task.calibrated_generator``) is landing
-   in PR #126 (``calibrated-generator``) and is not yet on the release
-   branch this page is built from. The pattern above reflects its current
-   shape on that branch; check the PR's merge status before depending on
-   the exact import path.
+   ``CalibratedGenerator`` (``mixle.task.calibrated_generator``) is not yet
+   re-exported from ``mixle.task``'s public surface -- import it directly
+   from its module until it is.
 
 4. Route: Cheap mixle-Native Model First, Expensive External Model Only When Needed
 ---------------------------------------------------------------------------------------
@@ -214,8 +212,7 @@ enters mixle:
      - you want to keep training the checkpoint itself, inside a mixle
        model/estimation loop, not just query it
 
-``examples/peft_lora_grad_leaf.py`` (PR #129, ``peft-lora-example``, open at
-time of writing) is the concrete receipt for the second pattern: a real
+``examples/peft_lora_grad_leaf.py`` is the concrete receipt for the second pattern: a real
 ``hf-internal-testing/tiny-random-gpt2`` checkpoint, LoRA-wrapped with
 ``peft.get_peft_model``, dropped into ``GradLeaf`` unchanged and fine-tuned
 via mixle's ordinary M-step. That is genuinely different work from this
@@ -265,9 +262,8 @@ reader should run these directly rather than trust the prose above:
      - ``mixle/tests/task_calibrate_test.py``
    * - 3. Calibrated generation
      - ``CalibratedGenerator`` gives conformal accept-or-abstain coverage
-       over sampled candidates (PR #126, open)
-     - ``mixle/tests/task_calibrated_generator_test.py`` (on branch
-       ``calibrated-generator``)
+       over sampled candidates
+     - ``mixle/tests/task_calibrated_generator_test.py``
    * - 4. Cascade
      - one calibrated tier plus teacher fallback; realized cost and harvest
      - ``mixle/tests/task_cascade_test.py``

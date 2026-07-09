@@ -23,10 +23,8 @@ observations.
      - fields are ordered by position.
    * - ``RecordDistribution`` / ``RecordEstimator``
      - named record
-     - fields are dictionaries or schema-backed records.
-   * - ``DictRecordDistribution`` / ``DictRecordEstimator``
-     - dictionary record
-     - dictionary shape should be explicit.
+     - fields are dictionaries or schema-backed records; dictionary shape
+       should be explicit.
    * - ``SequenceDistribution`` / ``SequenceEstimator``
      - variable-length sequence
      - elements share a family and length may be modeled.
@@ -36,7 +34,7 @@ observations.
    * - ``SelectDistribution`` / ``SelectEstimator``
      - dispatch by type or field
      - different subfamilies apply to different observed cases.
-   * - ``ConditionalDistribution`` / ``ConditionalEstimator``
+   * - ``ConditionalDistribution`` / ``ConditionalDistributionEstimator``
      - conditional relation
      - a distribution depends on observed covariates.
    * - ``TransformDistribution`` / ``TransformEstimator``
@@ -111,10 +109,11 @@ Multivariate and Matrix Families
    * - ``GaussianCopulaDistribution`` / ``GaussianCopulaEstimator``
      - vector with copula dependence
      - separate marginal behavior from Gaussian dependence.
-   * - ``CompositionDistribution``
+   * - ``AitchisonNormalDistribution`` / ``AitchisonNormalEstimator``
      - compositional vector
-     - parts constrained to a whole.
-   * - ``CategoricalMultinomialDistribution`` / ``MultinomialDistribution``
+     - parts constrained to a whole, modeled via the Aitchison logratio
+       transform.
+   * - ``MultinomialDistribution`` / ``MultinomialEstimator``
      - finite-count vector
      - category counts from repeated trials.
    * - ``IntegerMultinomialDistribution`` / ``IntegerMultinomialEstimator``
@@ -195,7 +194,9 @@ The sequence package covers explicit Markov structure over observed states:
 
 * ``MarkovChainDistribution`` and ``MarkovChainEstimator``;
 * ``IntegerMarkovChainDistribution`` and ``IntegerMarkovChainEstimator``;
-* ``MarkovTransform`` and ``SparseMarkovTransform`` families.
+* ``MarkovTransformDistribution`` and ``MarkovTransformEstimator``;
+* ``SparseMarkovAssociationDistribution`` and
+  ``SparseMarkovAssociationEstimator``.
 
 Use these when the observation is an observed-state sequence. Use
 :doc:`hmms-latent` when the state path is hidden.

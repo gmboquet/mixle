@@ -16,9 +16,11 @@ Mixture families introduce hidden component assignments:
 * ``HeterogeneousMixtureDistribution`` and ``HeterogeneousMixtureEstimator``;
 * ``HierarchicalMixtureDistribution`` and ``HierarchicalMixtureEstimator``;
 * ``JointMixtureDistribution`` and ``JointMixtureEstimator``;
-* ``SparseMixture`` variants;
 * ``SemiSupervisedMixtureDistribution`` and ``SemiSupervisedMixtureEstimator``;
-* ``DiracLengthMixtureDistribution`` and ``DiracLengthMixtureEstimator``.
+* ``DiracLengthMixtureDistribution`` and ``DiracLengthMixtureEstimator``;
+* ``sparse_mixture_score`` for certified top-k tail-bound scoring over an
+  existing mixture (a diagnostic utility, not a standalone distribution
+  family).
 
 Use mixtures when observations plausibly come from several regimes but the
 regime label is not observed. Use :func:`mixle.inference.best_of` or
@@ -34,7 +36,7 @@ Hidden-State Sequence Models
 
 Hidden-state models introduce a latent path over a sequence:
 
-* ``HiddenMarkovModelDistribution`` and ``HiddenMarkovModelEstimator``;
+* ``HiddenMarkovModelDistribution`` and ``HiddenMarkovEstimator``;
 * ``QuantizedHiddenMarkovModelDistribution`` and quantized HMM estimators;
 * ``SegmentalHiddenMarkovModelDistribution`` and segmental estimators;
 * ``LookbackHiddenMarkovModel`` families;
