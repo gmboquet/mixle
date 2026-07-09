@@ -1,9 +1,9 @@
 """Backward-compatible keyword-argument aliasing for distribution and estimator constructors.
 
-The distribution API is migrating toward descriptive public argument names (see
-``notes/distribution_api_naming_accounting.md``). To keep existing code working while the
-preferred spellings become canonical, constructors accept both the legacy name and the preferred
-name and reconcile them with :func:`coalesce_alias`.
+Some distribution constructors keep legacy positional names while also accepting descriptive public
+keyword aliases. To keep existing code working while preferred spellings become canonical,
+constructors accept both the legacy name and the preferred name and reconcile them with
+:func:`coalesce_alias`.
 
 Usage::
 

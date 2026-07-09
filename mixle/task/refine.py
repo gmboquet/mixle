@@ -1,18 +1,14 @@
-"""Diagnosis-directed correction vs blind structure search on a planted-fault benchmark (workstream
-A5 + the refinement loop's REFINE-a spike).
+"""Diagnosis-directed correction versus blind structure search.
 
-``diagnose`` (H5, workstream H) turns failing cases into a :class:`~mixle.inference.explain.FaultReport`
-naming a structural element and a suggested fix; the open question this module answers is whether
-ACTING on that diagnosis reaches a held-out target in fewer trials than blind structure search over the
-same edit space. Every candidate edge -- diagnosed or blindly tried -- is refit from the SAME training
-data and VERIFIED against held-out data before being accepted; a candidate that does not clear the
-held-out bar is a recorded failed trial, never silently kept.
+``diagnose`` turns failing cases into a :class:`~mixle.inference.explain.FaultReport` naming a
+structural element and a suggested fix. This module compares acting on that diagnosis with blind
+search over the same edit space. Every candidate edge, whether diagnosed or blindly tried, is refit
+from the same training data and verified against held-out data before acceptance. A candidate that
+does not clear the held-out bar is recorded as a failed trial rather than silently kept.
 
-Kill criterion, stated before any comparison is run (per the plan): if diagnosis-directed correction
-does not reach the held-out target in fewer trials than blind search on the planted-fault benchmark,
-that is the honest, recorded negative result, and blind search is kept -- the critic (``diagnose``) has
-not earned its place. See ``notes/refine-directed-negative.md`` for the recording convention if this
-kill criterion is ever hit on a different benchmark than the one exercised by this module's tests.
+The comparison is intentionally conservative: if diagnosis-directed correction does not reach the
+held-out target in fewer trials than blind search on the planted-fault benchmark, the recorded result
+shows that the diagnosis did not justify using the directed refinement path for that case.
 """
 
 from __future__ import annotations
@@ -37,8 +33,7 @@ def _mean_log_density(model: HeterogeneousBayesianNetwork, data: Sequence[tuple]
 
 
 def fit_independent_baseline(train_data: Sequence[tuple]) -> HeterogeneousBayesianNetwork:
-    """Fit a fully independent (no-edge) network -- the planted fault when two fields are actually
-    correlated: one marginal Gaussian per field, MLE-fit from ``train_data``."""
+    """Fit an independent network with one marginal Gaussian per field."""
     cols = _columns(train_data)
     factors = []
     for i, col in enumerate(cols):
@@ -50,9 +45,11 @@ def fit_independent_baseline(train_data: Sequence[tuple]) -> HeterogeneousBayesi
 def apply_edge(
     model: HeterogeneousBayesianNetwork, edge: tuple[int, int], train_data: Sequence[tuple]
 ) -> HeterogeneousBayesianNetwork:
-    """Refit ONLY the named edge's child factor as a linear-Gaussian conditional on the named parent,
-    from the SAME training data, leaving every other factor untouched -- "apply ONLY the suggested
-    fix," literally: no other structural change rides along."""
+    """Refit the named child factor as a linear-Gaussian conditional.
+
+    Every other factor is kept unchanged, so the returned model represents only
+    the proposed edge edit.
+    """
     parent, child = edge
     cols = _columns(train_data)
     new_factor = _LinearGaussianFactor.fit(child, [parent], cols, discrete={})
@@ -62,13 +59,17 @@ def apply_edge(
 
 @dataclass
 class EditTrial:
+    """Held-out result for one proposed graph edit."""
+
     edge: tuple[int, int]
     held_out_score: float
-    verified: bool  # cleared the held-out target, not just "improved a bit"
+    verified: bool  # cleared the held-out target
 
 
 @dataclass
 class SearchOutcome:
+    """Final refinement state plus the verified edit-search history."""
+
     trials: int
     found_edge: tuple[int, int] | None
     final_model: HeterogeneousBayesianNetwork
@@ -109,7 +110,7 @@ def diagnosis_directed_correction(
     background: Sequence[tuple] | None = None,
     target: float,
 ) -> SearchOutcome:
-    """Diagnose the fault from ``failing_cases``, apply ONLY its suggested edge (trying both parent-child
+    """Diagnose the fault from ``failing_cases``, apply only its suggested edge (trying both parent-child
     orientations of the named pair, since ``diagnose`` reports an undirected co-anomaly), and verify held-out
     improvement before accepting -- one trial if the diagnosis names the right pair and orientation,
     honestly more (or a refusal) if it does not."""
@@ -140,9 +141,7 @@ def blind_structure_search(
     *,
     target: float,
 ) -> SearchOutcome:
-    """Try each candidate edge in ``edit_space``'s given order, verifying held-out improvement before
-    accepting -- the same verification discipline as :func:`diagnosis_directed_correction`, just without
-    a diagnosis telling it where to look first."""
+    """Try candidate edges in order and accept only verified held-out gains."""
     history: list[EditTrial] = []
     for edge in edit_space:
         trial = _try_edge(model, edge, train_data, held_out, target=target)

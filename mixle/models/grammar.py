@@ -1,4 +1,9 @@
-"""Grammar-learning experiment helpers."""
+"""Probabilistic context-free grammar fitting and parse inspection helpers.
+
+The module wraps induced heterogeneous PCFG estimators with fit diagnostics,
+likelihood evaluation, Viterbi parse reconstruction, and rule-table extraction
+for small grammar-learning experiments.
+"""
 
 from __future__ import annotations
 

@@ -1,13 +1,7 @@
-"""Evaluate, estimate, and sample from an exponentially-modified Gaussian (EMG) distribution.
+"""Exponentially-modified Gaussian distributions over real values.
 
-Defines the ExponentiallyModifiedGaussianDistribution, ExponentiallyModifiedGaussianSampler,
-ExponentiallyModifiedGaussianAccumulatorFactory, ExponentiallyModifiedGaussianAccumulator,
-ExponentiallyModifiedGaussianEstimator, and ExponentiallyModifiedGaussianDataEncoder classes
-for use with mixle.
-
-Data type: (float): The EMG models ``X = N(mu, sigma2) + Exp(rate=lam)`` -- a Gaussian convolved
-    with a (positive-shifting) exponential, giving a positively right-skewed real-valued density.
-    Its stable log-density is
+Observations are real-valued floats. The EMG models ``X = N(mu, sigma2) + Exp(rate=lam)`` -- a Gaussian
+    convolved with a positive-shifting exponential, giving a right-skewed density. Its stable log-density is
 
         log f(x) = log(lam/2) - 0.5*u^2 + log(erfcx(z)),
 
@@ -82,7 +76,7 @@ class ExponentiallyModifiedGaussianDistribution(SequenceEncodableProbabilityDist
         self.log_lam_half = math.log(self.lam / 2.0)
 
     def __str__(self) -> str:
-        """Returns string representation of ExponentiallyModifiedGaussianDistribution object."""
+        """Return a constructor-style representation of the exponentially modified Gaussian distribution."""
         return "ExponentiallyModifiedGaussianDistribution(%s, %s, %s, name=%s, keys=%s)" % (
             repr(self.mu),
             repr(self.sigma2),
@@ -121,6 +115,7 @@ class ExponentiallyModifiedGaussianDistribution(SequenceEncodableProbabilityDist
     # evaluation while estimation statistics remain exactly the legacy path. ---
     @classmethod
     def compute_capabilities(cls):
+        """Declare NumPy/Torch scoring capabilities for EMG log-density kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
@@ -163,11 +158,13 @@ class ExponentiallyModifiedGaussianDistribution(SequenceEncodableProbabilityDist
         return ExponentiallyModifiedGaussianEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "ExponentiallyModifiedGaussianDataEncoder":
-        """Returns an ExponentiallyModifiedGaussianDataEncoder object."""
+        """Return the encoder for exponentially modified Gaussian observations."""
         return ExponentiallyModifiedGaussianDataEncoder()
 
 
 class ExponentiallyModifiedGaussianSampler(DistributionSampler):
+    """Sample an EMG by adding independent Gaussian and exponential draws."""
+
     def __init__(self, dist: ExponentiallyModifiedGaussianDistribution, seed: int | None = None) -> None:
         """Sampler: draw a Gaussian and add an independent Exponential.
 
@@ -188,6 +185,8 @@ class ExponentiallyModifiedGaussianSampler(DistributionSampler):
 
 
 class ExponentiallyModifiedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulate weighted central moments for method-of-moments EMG estimation."""
+
     def __init__(self, keys: str | None = None, name: str | None = None) -> None:
         """Accumulate the first three (weighted) central moments needed for the MoM fit.
 
@@ -228,17 +227,21 @@ class ExponentiallyModifiedGaussianAccumulator(SequenceEncodableStatisticAccumul
         self.count = count
 
     def update(self, x: float, weight: float, estimate: Optional["ExponentiallyModifiedGaussianDistribution"]) -> None:
+        """Update weighted central moments from one observation."""
         self._merge(float(weight), float(x), 0.0, 0.0)
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize weighted central moments from one observation."""
         self.update(x, weight, None)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize weighted central moments from encoded observations."""
         self.seq_update(x, weights, None)
 
     def seq_update(
         self, x: np.ndarray, weights: np.ndarray, estimate: ExponentiallyModifiedGaussianDistribution | None
     ) -> None:
+        """Update weighted central moments from encoded observations."""
         xx = np.asarray(x, dtype=np.float64)
         ww = np.asarray(weights, dtype=np.float64)
         c_b = float(ww.sum())
@@ -251,17 +254,21 @@ class ExponentiallyModifiedGaussianAccumulator(SequenceEncodableStatisticAccumul
         self._merge(c_b, mean_b, m2_b, m3_b)
 
     def combine(self, suff_stat: tuple[float, float, float, float]) -> "ExponentiallyModifiedGaussianAccumulator":
+        """Merge another accumulator's central-moment summary."""
         self._merge(float(suff_stat[0]), float(suff_stat[1]), float(suff_stat[2]), float(suff_stat[3]))
         return self
 
     def value(self) -> tuple[float, float, float, float]:
+        """Return count, mean, second central moment, and third central moment."""
         return self.count, self.mean, self.m2, self.m3
 
     def from_value(self, x: tuple[float, float, float, float]) -> "ExponentiallyModifiedGaussianAccumulator":
+        """Restore count and central-moment state from ``value`` output."""
         self.count, self.mean, self.m2, self.m3 = float(x[0]), float(x[1]), float(x[2]), float(x[3])
         return self
 
     def scale(self, c: float) -> "ExponentiallyModifiedGaussianAccumulator":
+        """Scale the weighted moment summary by a constant."""
         # Scaling all weights by c multiplies the total weight and the central-moment sums by c;
         # the mean is invariant.
         self.count *= c
@@ -270,6 +277,7 @@ class ExponentiallyModifiedGaussianAccumulator(SequenceEncodableStatisticAccumul
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -277,23 +285,30 @@ class ExponentiallyModifiedGaussianAccumulator(SequenceEncodableStatisticAccumul
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "ExponentiallyModifiedGaussianDataEncoder":
+        """Return the encoder compatible with EMG moment statistics."""
         return ExponentiallyModifiedGaussianDataEncoder()
 
 
 class ExponentiallyModifiedGaussianAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create EMG central-moment accumulators."""
+
     def __init__(self, name: str | None = None, keys: str | None = None) -> None:
         self.keys = keys
         self.name = name
 
     def make(self) -> "ExponentiallyModifiedGaussianAccumulator":
+        """Create an empty EMG accumulator."""
         return ExponentiallyModifiedGaussianAccumulator(name=self.name, keys=self.keys)
 
 
 class ExponentiallyModifiedGaussianEstimator(ParameterEstimator):
+    """Estimate EMG parameters from weighted central moments."""
+
     def __init__(
         self,
         name: str | None = None,
@@ -312,6 +327,7 @@ class ExponentiallyModifiedGaussianEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> "ExponentiallyModifiedGaussianAccumulatorFactory":
+        """Return a factory for EMG central-moment accumulators."""
         return ExponentiallyModifiedGaussianAccumulatorFactory(self.name, self.keys)
 
     def estimate(
@@ -363,6 +379,7 @@ class ExponentiallyModifiedGaussianDataEncoder(DataSequenceEncoder):
         return isinstance(other, ExponentiallyModifiedGaussianDataEncoder)
 
     def seq_encode(self, x: list[float] | np.ndarray) -> np.ndarray:
+        """Validate and encode EMG observations as a finite float array."""
         rv = np.asarray(x, dtype=float)
         if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
             raise Exception("ExponentiallyModifiedGaussianDistribution requires support x in (-inf, inf).")

@@ -6,7 +6,7 @@ field -- and modeling it is worth a great deal of likelihood (a blatant category
 600 rows). No mainstream tool discovers that structure across *arbitrary* families: Stan/PyMC make you write it,
 sklearn/pomegranate mixtures assume independence, bnlearn/pgmpy are discrete-or-Gaussian only.
 
-This module closes the gap. Dependence is detected the mixle way -- **by modeling it**: fit ``P(child)`` vs
+This module closes the gap. Dependence is detected by modeling it: fit ``P(child)`` vs
 ``P(child | parent)`` and compare description length (:func:`dependency_gain`). The winning edges are assembled
 into a :class:`DependencyTreeDistribution` -- a directed forest over the record where each field is either a
 marginal or a per-parent-value conditional (a real :class:`~mixle.stats.combinator.conditional.ConditionalDistribution`
@@ -111,19 +111,23 @@ class LinearGaussianEdge:
         self.a, self.b, self.sigma2 = float(a), float(b), max(float(sigma2), 1e-12)
 
     def log_density(self, x: tuple) -> float:
+        """Evaluate ``log p(child | parent)`` for one parent-child pair."""
         parent, child = x
         resid = float(child) - (self.a + self.b * float(parent))
         return float(-0.5 * np.log(2.0 * np.pi * self.sigma2) - 0.5 * resid * resid / self.sigma2)
 
     def dist_to_encoder(self) -> Any:
+        """Return the encoder for parent-child pairs."""
         return _EdgeEncoder()
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
+        """Evaluate log densities for encoded parent-child pairs."""
         parent, child = encoded
         resid = np.asarray(child, dtype=float) - (self.a + self.b * np.asarray(parent, dtype=float))
         return -0.5 * np.log(2.0 * np.pi * self.sigma2) - 0.5 * resid * resid / self.sigma2
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return a sampler for the linear Gaussian edge."""
         return _LinearGaussianEdgeSampler(self, seed)
 
     def __str__(self) -> str:
@@ -241,19 +245,23 @@ class GLMEdge:
         return self._inv(self.beta[0] + self.beta[1] * np.asarray(parent, dtype=float))
 
     def log_density(self, x: tuple) -> float:
+        """Evaluate ``log p(child | parent)`` for one GLM edge pair."""
         parent, child = x
         return float(_family_logpmf(self.family, [float(child)], self._mu(np.array([float(parent)])), self.phi)[0])
 
     def dist_to_encoder(self) -> Any:
+        """Return the encoder for parent-child pairs."""
         return _EdgeEncoder()
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
+        """Evaluate log densities for encoded GLM edge pairs."""
         parent, child = encoded
         return _family_logpmf(
             self.family, np.asarray(child, dtype=float), self._mu(np.asarray(parent, dtype=float)), self.phi
         )
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return a sampler for the GLM edge."""
         return _GLMEdgeSampler(self, seed)
 
     def __str__(self) -> str:
@@ -344,7 +352,7 @@ def _safe_log_density(fac: Any, value: Any) -> float:
 
     Field factors are chosen automatically from the *training* column, so a support-restricted family
     (Weibull, Gamma, ...) can be picked from a slice that happened to satisfy its support; scoring new
-    data outside that support must then report ``log 0 = -inf`` (the model's honest answer), not raise.
+    data outside that support must then report ``log 0 = -inf`` (the model's support semantics), not raise.
     """
     try:
         ld = float(fac.log_density(value))
@@ -394,6 +402,7 @@ class DependencyTreeDistribution:
         return f"DependencyTreeDistribution(fields={len(self.parents)}, edges=[{', '.join(edges) or 'none'}])"
 
     def log_density(self, x: tuple) -> float:
+        """Evaluate the dependency-tree joint log density for one record."""
         total = 0.0
         for i, parent in enumerate(self.parents):
             if parent is None:
@@ -403,6 +412,7 @@ class DependencyTreeDistribution:
         return total
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
+        """Evaluate dependency-tree joint log density for encoded records."""
         cols, n = encoded
         out = np.zeros(n, dtype=np.float64)
         for i, parent in enumerate(self.parents):
@@ -415,9 +425,11 @@ class DependencyTreeDistribution:
         return out
 
     def dist_to_encoder(self) -> Any:
+        """Return the encoder for dependency-tree record batches."""
         return _DependencyEncoder(len(self.parents))
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return a sampler for the dependency tree."""
         return _DependencyTreeSampler(self, seed)
 
     def edges(self) -> list[tuple[int, int]]:
@@ -491,16 +503,19 @@ class MixtureOfDependencyTrees:
         return np.stack([c.seq_log_density(encoded) for c in self.components], axis=1)  # (n, K)
 
     def log_density(self, x: tuple) -> float:
+        """Evaluate mixture log density for one dependency-tree record."""
         from scipy.special import logsumexp
 
         return float(logsumexp(self.log_weights + np.array([c.log_density(x) for c in self.components])))
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
+        """Evaluate mixture log density for encoded dependency-tree records."""
         from scipy.special import logsumexp
 
         return logsumexp(self._component_ll(encoded) + self.log_weights[None, :], axis=1)
 
     def dist_to_encoder(self) -> Any:
+        """Return the record encoder shared by all tree components."""
         return _DependencyEncoder(len(self.components[0].parents))
 
     def responsibilities(self, data: Sequence[tuple]) -> np.ndarray:
@@ -512,10 +527,12 @@ class MixtureOfDependencyTrees:
         return r / r.sum(axis=1, keepdims=True)
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return a sampler for the mixture of dependency trees."""
         return _MixtureTreeSampler(self, seed)
 
     @property
     def n_components(self) -> int:
+        """Return the number of mixture components."""
         return len(self.components)
 
 
@@ -545,7 +562,7 @@ def learn_mixture_structure(
     max_its: int = 30,
     field_estimators: Sequence[Any] | None = None,
 ) -> MixtureOfDependencyTrees:
-    """Fit a :class:`MixtureOfDependencyTrees` by hard EM -- discover clusters AND each cluster's dependency graph.
+    """Fit a :class:`MixtureOfDependencyTrees` by hard EM: discover clusters and each cluster's dependency graph.
 
     Each iteration re-learns a dependency forest per cluster on its currently-assigned points (M-step), then
     reassigns every record to its most-probable cluster (E-step), until assignments stabilize. Runs ``restarts``
@@ -558,6 +575,8 @@ def learn_mixture_structure(
     the detector models a multimodal column with a Gaussian MIXTURE, which lets ONE cluster absorb what the
     caller intended as two -- with per-field families pinned to unimodal models, regimes that differ in level
     must separate into different components to score well.
+    random initializations and returns the highest-likelihood fit. Empty or very small clusters are re-seeded so a
+    component never collapses.
     """
     data = list(data)
     n = len(data)
@@ -869,8 +888,8 @@ def _quantile_binner(column: Sequence[Any], n_bins: int) -> _QuantileBinner:
 def _clone(estimator: Any) -> Any:
     """A fresh, independent copy of an estimator template so structure-search candidates never share state.
 
-    Was ``eval(str(estimator))``, but most estimators have the default ``<object at 0x...>`` repr, so that
-    silently raised and fell back to sharing the SAME object -- safe only because estimators are stateless
+    The older ``eval(str(estimator))`` path failed for estimators with the default ``<object at 0x...>`` repr
+    and fell back to sharing the same object -- safe only because estimators are stateless
     templates. ``deepcopy`` gives real isolation with no source-level eval; the fallback keeps the old
     same-object behavior for any estimator that can't be copied (e.g. one holding an uncopyable handle)."""
     try:
@@ -880,7 +899,7 @@ def _clone(estimator: Any) -> Any:
 
 
 def _num_free_params(dist: Any) -> int:
-    """A rough parameter count for the BIC penalty (used only to scale the complexity term).
+    """An approximate parameter count for the BIC penalty (used only to scale the complexity term).
 
     Composes over :class:`~mixle.stats.combinator.composite.CompositeDistribution` (sums each field's
     own count) rather than falling through to a flat constant -- a composite of any size used to score
@@ -898,9 +917,8 @@ def _num_free_params(dist: Any) -> int:
     location+scale pair (Gaussian's mean+variance) and an overcount for these. NegativeBinomialDistribution
     is a deliberate exception: it has both ``r`` and ``p`` attributes, and ``NegativeBinomialEstimator``
     fits both by default (``estimate_r=True``), so it counts 2 even though ``p`` alone would otherwise
-    match the single-scalar bucket below. Any other leaf family (Weibull, Gumbel, Beta, ...) still falls
-    through to the historical flat-2 fallback; genuinely counting every exotic detector family's
-    parameters is future work, not something this fix's audit confirmed as broken.
+    match the single-scalar bucket below. Other leaf families (Weibull, Gumbel, Beta, ...) use the
+    conservative flat-2 fallback unless they expose a more specific parameter-count hook.
     """
     name = type(dist).__name__
     if name == "CompositeDistribution":

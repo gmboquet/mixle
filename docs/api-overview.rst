@@ -1,8 +1,39 @@
 API Overview
 ============
 
-The generated reference under :doc:`api/modules` is exhaustive. This page is the
-human map: where to import the thing you are probably looking for.
+The generated reference under :doc:`api/modules` documents the broad public
+module surface. This page is the human map for common imports and workflows.
+
+Use this page and the narrative guides as the stable public entry points. The
+generated reference includes public modules and selected implementation modules
+so release reviewers can audit what the branch ships. Names with a leading
+underscore, generated kernel modules, and low-level helper modules are not
+public compatibility promises unless a guide page or package ``__init__``
+explicitly promotes them.
+
+Public Surface Contract
+-----------------------
+
+For public examples and release-facing applications, prefer imports from these
+front doors:
+
+* ``mixle.inference`` for fitting, creation, certification, simulation,
+  synthesis, uncertainty dispatch, and production wrappers;
+* ``mixle.stats`` for distributions, estimators, combinators, mixtures, HMMs,
+  Bayesian families, and structured probability models;
+* ``mixle.ppl`` for expression-style model declarations that lower back to the
+  ordinary stats and inference surfaces;
+* ``mixle.doe`` for design generators, Bayesian optimization, active learning,
+  sensitivity analysis, propagation, calibration, and distillation selectors;
+* ``mixle.task`` for teacher/student distillation and calibrated local task
+  replacement; and
+* ``mixle.reason`` / ``mixle.substrate`` for local reasoning, evidence, and
+  uncertainty workflows.
+
+Import directly from implementation modules when you need a specific class or
+when a narrative page points there. Treat generated API pages as reference and
+audit material; the narrative pages define the supported workflow semantics,
+missing-data behavior, route evidence, and release expectations.
 
 Fit a model
 -----------
@@ -554,3 +585,22 @@ Work with data sources
 
 The data layer is optional. Plain Python sequences remain accepted by the
 encoder contract.
+
+Generated Reference Scope
+-------------------------
+
+The Sphinx API reference is regenerated from the package tree with
+``make -C docs apidoc``. It should be treated as an inspection surface, not as
+the recommended import map. For application code:
+
+* prefer package-level exports such as ``mixle.stats``, ``mixle.inference``,
+  ``mixle.task``, ``mixle.doe``, and ``mixle.ppl`` when they exist;
+* use implementation submodules when a guide names them directly or when you
+  need a specific advanced surface; and
+* avoid depending on private modules solely because they appear in generated
+  autodoc output.
+
+When a new module is added to the package, regenerate the API pages and include
+the changed ``docs/api/*.rst`` source files in the documentation PR. The built
+HTML under ``docs/_build`` remains local build output and should not be
+committed.

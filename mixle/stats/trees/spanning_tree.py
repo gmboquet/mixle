@@ -1,8 +1,4 @@
-"""Create, estimate, sample, and enumerate a weighted spanning-tree distribution over a labeled graph.
-
-Defines the SpanningTreeDistribution, SpanningTreeEnumerator, SpanningTreeSampler,
-SpanningTreeAccumulatorFactory, SpanningTreeAccumulator, SpanningTreeEstimator, and the
-SpanningTreeDataEncoder classes for use with mixle.
+"""Weighted spanning-tree distributions over labeled graphs.
 
 Data type: a spanning tree of n labeled nodes given as a sequence of n-1 undirected edges, each an
 ``(i, j)`` pair (e.g. ``[(0, 1), (1, 2), (1, 3)]``). Unlike ChowLiuTree (a tree-structured distribution
@@ -87,6 +83,7 @@ class SpanningTreeDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for weighted spanning-tree operations."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(
@@ -101,12 +98,12 @@ class SpanningTreeDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """SpanningTreeDistribution object.
+        """Create a distribution over spanning trees.
 
         Args:
             weights (Union[Sequence[Sequence[float]], np.ndarray]): Symmetric n-by-n matrix of
                 non-negative edge weights (zero diagonal). Positive entries are the candidate edges.
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional distribution name.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
@@ -133,7 +130,7 @@ class SpanningTreeDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of SpanningTreeDistribution object."""
+        """Return a constructor-style representation of the distribution."""
         return "SpanningTreeDistribution(%s, name=%s, keys=%s)" % (
             repr([[float(v) for v in row] for row in self.weights]),
             repr(self.name),
@@ -250,39 +247,47 @@ class SpanningTreeAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: Sequence[Sequence[int]], weight: float, estimate: SpanningTreeDistribution | None) -> None:
+        """Accumulate weighted edge appearances for one spanning tree."""
         edges = _canonical_edges(x, self.dim)
         self.edge_counts[edges[:, 0], edges[:, 1]] += weight
         self.edge_counts[edges[:, 1], edges[:, 0]] += weight
         self.count += weight
 
     def initialize(self, x: Sequence[Sequence[int]], weight: float, rng: RandomState | None) -> None:
+        """Initialize edge-count statistics from one spanning tree."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: Sequence[np.ndarray], weights: np.ndarray, estimate: SpanningTreeDistribution | None
     ) -> None:
+        """Accumulate edge appearances from encoded spanning trees."""
         for edges, w in zip(x, weights):
             self.edge_counts[edges[:, 0], edges[:, 1]] += w
             self.edge_counts[edges[:, 1], edges[:, 0]] += w
         self.count += float(np.sum(weights, dtype=np.float64))
 
     def seq_initialize(self, x: Sequence[np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize edge-count statistics from encoded spanning trees."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, np.ndarray]) -> "SpanningTreeAccumulator":
+        """Merge another spanning-tree sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.edge_counts += suff_stat[1]
         return self
 
     def value(self) -> tuple[float, np.ndarray]:
+        """Return total tree weight and symmetric edge-count matrix."""
         return self.count, self.edge_counts
 
     def from_value(self, x: tuple[float, np.ndarray]) -> "SpanningTreeAccumulator":
+        """Replace accumulator contents from edge-count statistics."""
         self.count, self.edge_counts = x[0], np.asarray(x[1])
         self.dim = self.edge_counts.shape[0]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -290,10 +295,12 @@ class SpanningTreeAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "SpanningTreeDataEncoder":
+        """Return the encoder used by this accumulator."""
         return SpanningTreeDataEncoder(dim=self.dim)
 
 
@@ -305,6 +312,7 @@ class SpanningTreeAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> SpanningTreeAccumulator:
+        """Create a fresh spanning-tree accumulator."""
         return SpanningTreeAccumulator(dim=self.dim, keys=self.keys)
 
 
@@ -334,9 +342,11 @@ class SpanningTreeEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> SpanningTreeAccumulatorFactory:
+        """Return an accumulator factory for spanning-tree edge counts."""
         return SpanningTreeAccumulatorFactory(dim=self.dim, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray]) -> SpanningTreeDistribution:
+        """Estimate edge weights by matching target edge marginals."""
         count, edge_counts = suff_stat
         n = self.dim
         candidate = (edge_counts + edge_counts.T) > 0.0
@@ -376,6 +386,7 @@ class SpanningTreeDataEncoder(DataSequenceEncoder):
         return isinstance(other, SpanningTreeDataEncoder)
 
     def seq_encode(self, x: Sequence[Sequence[Sequence[int]]]) -> list[np.ndarray]:
+        """Encode spanning trees as canonical sorted edge arrays."""
         dim = self.dim
         if dim is None:
             dim = max(int(np.max(np.asarray(tree))) for tree in x) + 1

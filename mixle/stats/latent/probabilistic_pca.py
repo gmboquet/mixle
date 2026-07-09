@@ -1,10 +1,7 @@
-"""Create, estimate, and sample from a Probabilistic PCA (PPCA) latent-factor model.
+"""Probabilistic PCA latent-factor distributions and estimators.
 
-Defines the ProbabilisticPCADistribution, ProbabilisticPCASampler, ProbabilisticPCAAccumulatorFactory,
-ProbabilisticPCAAccumulator, ProbabilisticPCAEstimator, and the ProbabilisticPCADataEncoder classes for
-use with mixle.
-
-Data type: np.ndarray[float] (a length-d real vector).
+Observations are length-``d`` real vectors represented as ``np.ndarray`` or a
+compatible sequence of floats.
 
 Probabilistic PCA is the latent linear-Gaussian model
 
@@ -47,6 +44,7 @@ class ProbabilisticPCADistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Return compute-backend metadata for PPCA scoring."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
@@ -59,23 +57,23 @@ class ProbabilisticPCADistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """ProbabilisticPCADistribution object.
+        """Create a probabilistic PCA distribution.
 
         Args:
-            w (Union[Sequence[Sequence[float]], np.ndarray]): d-by-q factor-loading matrix W.
-            mu (Union[Sequence[float], np.ndarray]): Length-d mean vector.
-            sigma2 (float): Positive isotropic noise variance.
-            name (Optional[str]): Optional name for object instance.
-            keys (Optional[str]): Optional key for merging sufficient statistics.
+            w: ``d`` by ``q`` factor-loading matrix.
+            mu: Length-``d`` mean vector.
+            sigma2: Positive isotropic noise variance.
+            name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
 
         Attributes:
-            w (np.ndarray): Factor-loading matrix (d, q).
-            mu (np.ndarray): Mean vector (d,).
-            sigma2 (float): Noise variance.
-            dim (int): Observation dimension d.
-            latent_dim (int): Number of factors q.
-            inv_covar (np.ndarray): Cached C^{-1} (d, d) via Woodbury.
-            log_det (float): Cached log|C|.
+            w: Factor-loading matrix.
+            mu: Mean vector.
+            sigma2: Isotropic noise variance.
+            dim: Observation dimension.
+            latent_dim: Number of latent factors.
+            inv_covar: Cached covariance inverse via Woodbury.
+            log_det: Cached covariance log-determinant.
 
         """
         w = np.asarray(w, dtype=float)
@@ -101,7 +99,7 @@ class ProbabilisticPCADistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of ProbabilisticPCADistribution object."""
+        """Return a readable distribution summary."""
         return "ProbabilisticPCADistribution(%s, %s, %s, name=%s, keys=%s)" % (
             repr([[float(v) for v in row] for row in self.w]),
             repr([float(v) for v in self.mu]),
@@ -186,6 +184,7 @@ class ProbabilisticPCAAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum2 = np.zeros((self.dim, self.dim))
 
     def update(self, x: np.ndarray, weight: float, estimate: ProbabilisticPCADistribution | None) -> None:
+        """Accumulate weighted count, sum, and second moment for one vector."""
         xx = np.asarray(x, dtype=float)
         self._ensure_dim(len(xx))
         self.count += weight
@@ -193,18 +192,22 @@ class ProbabilisticPCAAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 += weight * np.outer(xx, xx)
 
     def initialize(self, x: np.ndarray, weight: float, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics with one weighted vector."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: ProbabilisticPCADistribution | None) -> None:
+        """Accumulate weighted count, sum, and second moment for encoded vectors."""
         self._ensure_dim(x.shape[1])
         self.count += float(np.sum(weights, dtype=np.float64))
         self.sum += x.T @ weights
         self.sum2 += (x * weights[:, None]).T @ x
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics from encoded vectors."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, np.ndarray | None, np.ndarray | None]) -> "ProbabilisticPCAAccumulator":
+        """Merge serialized PPCA sufficient statistics into this accumulator."""
         count, s, s2 = suff_stat
         if s is not None:
             self._ensure_dim(len(s))
@@ -214,14 +217,17 @@ class ProbabilisticPCAAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, np.ndarray | None, np.ndarray | None]:
+        """Return the total weight, weighted sum, and weighted second moment."""
         return self.count, self.sum, self.sum2
 
     def from_value(self, x: tuple[float, np.ndarray | None, np.ndarray | None]) -> "ProbabilisticPCAAccumulator":
+        """Restore the accumulator from serialized PPCA sufficient statistics."""
         self.count, self.sum, self.sum2 = x
         self.dim = None if x[1] is None else len(x[1])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into a keyed statistics dictionary."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -229,10 +235,12 @@ class ProbabilisticPCAAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from a keyed statistics dictionary."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "ProbabilisticPCADataEncoder":
+        """Return an encoder compatible with PPCA vector observations."""
         return ProbabilisticPCADataEncoder()
 
 
@@ -244,6 +252,7 @@ class ProbabilisticPCAAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> ProbabilisticPCAAccumulator:
+        """Create an empty PPCA accumulator."""
         return ProbabilisticPCAAccumulator(dim=self.dim, keys=self.keys)
 
 
@@ -267,11 +276,13 @@ class ProbabilisticPCAEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> ProbabilisticPCAAccumulatorFactory:
+        """Return a factory for PPCA sufficient-statistic accumulators."""
         return ProbabilisticPCAAccumulatorFactory(dim=self.dim, keys=self.keys)
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[float, np.ndarray | None, np.ndarray | None]
     ) -> ProbabilisticPCADistribution:
+        """Estimate PPCA parameters from weighted first and second moments."""
         count, s, s2 = suff_stat
         if s is None or count <= 0.0:
             d = self.dim if self.dim is not None else self.latent_dim
@@ -310,6 +321,7 @@ class ProbabilisticPCADataEncoder(DataSequenceEncoder):
         return isinstance(other, ProbabilisticPCADataEncoder)
 
     def seq_encode(self, x: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
+        """Validate and encode observations as a two-dimensional float array."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.ndim != 2:
             rv = rv.reshape((len(x), -1))

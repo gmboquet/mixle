@@ -1,4 +1,9 @@
-"""Fixed invertible-transform wrapper for sequence-encodable distributions."""
+"""Invertible-transform wrappers for sequence-encodable distributions.
+
+The module implements identity, affine, exponential, logit, and custom
+transforms plus the distribution, sampler, accumulator, and encoder plumbing
+needed to apply them inside Mixle combinators.
+"""
 
 import math
 from collections.abc import Sequence
@@ -42,15 +47,19 @@ class IdentityTransform:
         return isinstance(other, IdentityTransform)
 
     def forward(self, x: Any) -> Any:
+        """Return ``x`` unchanged."""
         return x
 
     def inverse(self, y: Any) -> Any:
+        """Return ``y`` unchanged."""
         return y
 
     def log_abs_det_inverse_jacobian(self, y: Any) -> float:
+        """Return the log absolute inverse-Jacobian determinant."""
         return 0.0
 
     def invalid_inverse_value(self) -> float:
+        """Return a safe child-space fill value for invalid inverses."""
         return 0.0
 
 
@@ -73,15 +82,19 @@ class AffineTransform:
         return isinstance(other, AffineTransform) and self.loc == other.loc and self.scale == other.scale
 
     def forward(self, x: Any) -> Any:
+        """Apply the affine map to a child-space value."""
         return self.loc + self.scale * x
 
     def inverse(self, y: Any) -> Any:
+        """Map a transformed-space value back to child space."""
         return (y - self.loc) / self.scale
 
     def log_abs_det_inverse_jacobian(self, y: Any) -> float:
+        """Return the constant affine inverse-Jacobian correction."""
         return self._log_abs_inv
 
     def invalid_inverse_value(self) -> float:
+        """Return a safe child-space fill value for invalid inverses."""
         return 0.0
 
 
@@ -97,19 +110,23 @@ class ExpTransform:
         return isinstance(other, ExpTransform)
 
     def forward(self, x: Any) -> Any:
+        """Map a real value to the positive scale."""
         return np.exp(x)
 
     def inverse(self, y: Any) -> Any:
+        """Map a positive transformed value back to the real line."""
         if y <= 0.0:
             raise ValueError("ExpTransform inverse requires y > 0.")
         return math.log(y)
 
     def log_abs_det_inverse_jacobian(self, y: Any) -> float:
+        """Return the log inverse-Jacobian correction for ``log(y)``."""
         if y <= 0.0:
             raise ValueError("ExpTransform inverse requires y > 0.")
         return -math.log(y)
 
     def invalid_inverse_value(self) -> float:
+        """Return a safe child-space fill value for invalid inverses."""
         return 0.0
 
 
@@ -125,17 +142,21 @@ class LogTransform:
         return isinstance(other, LogTransform)
 
     def forward(self, x: Any) -> Any:
+        """Map a positive child value to the real line."""
         if x <= 0.0:
             raise ValueError("LogTransform forward requires x > 0.")
         return math.log(x)
 
     def inverse(self, y: Any) -> Any:
+        """Map a real transformed value back to the positive scale."""
         return math.exp(y)
 
     def log_abs_det_inverse_jacobian(self, y: Any) -> float:
+        """Return the log inverse-Jacobian correction for ``exp(y)``."""
         return float(y)
 
     def invalid_inverse_value(self) -> float:
+        """Return a safe positive child-space fill value for invalid inverses."""
         return 1.0
 
 
@@ -151,22 +172,26 @@ class LogitTransform:
         return isinstance(other, LogitTransform)
 
     def forward(self, x: Any) -> Any:
+        """Map a real value into the open unit interval."""
         if x >= 0.0:
             return 1.0 / (1.0 + math.exp(-x))
         ex = math.exp(x)
         return ex / (1.0 + ex)
 
     def inverse(self, y: Any) -> Any:
+        """Map a unit-interval value back to the real line."""
         if y <= 0.0 or y >= 1.0:
             raise ValueError("LogitTransform inverse requires 0 < y < 1.")
         return math.log(y) - math.log1p(-y)
 
     def log_abs_det_inverse_jacobian(self, y: Any) -> float:
+        """Return the log inverse-Jacobian correction for the logit map."""
         if y <= 0.0 or y >= 1.0:
             raise ValueError("LogitTransform inverse requires 0 < y < 1.")
         return -math.log(y) - math.log1p(-y)
 
     def invalid_inverse_value(self) -> float:
+        """Return a safe child-space fill value for invalid inverses."""
         return 0.0
 
 
@@ -194,6 +219,7 @@ class TransformDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def compute_capabilities(self):
+        """Return capabilities delegated from the child distribution where safe."""
         from mixle.stats.compute.capabilities import (
             DistributionCapabilities,
             capabilities_for,
@@ -210,6 +236,7 @@ class TransformDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def compute_declaration(self):
+        """Return a declaration describing this distribution as a transformed child."""
         from mixle.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
 
         child = declaration_for(self.dist)
@@ -372,6 +399,7 @@ class TransformSampler(DistributionSampler):
         self.child_sampler = dist.dist.sampler(seed=self.new_seed())
 
     def sample(self, size: int | None = None):
+        """Draw child samples and map them through the transform."""
         x = self.child_sampler.sample(size=size)
         if size is None:
             return self.dist.transform.forward(x)
@@ -394,6 +422,7 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
         self.name = name
 
     def update(self, x: Any, weight: float, estimate: TransformDistribution | None) -> None:
+        """Accumulate one inverse-transformed observation when it is valid."""
         try:
             inv = self.transform.inverse(x)
         except Exception:
@@ -403,6 +432,7 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_update(
         self, x: tuple[Any, np.ndarray, np.ndarray], weights: np.ndarray, estimate: TransformDistribution | None
     ) -> None:
+        """Accumulate a batch using validity-masked child weights."""
         child_enc, _, valid = x
         self.accumulator.seq_update(
             child_enc, weights * valid.astype(float), None if estimate is None else estimate.dist
@@ -425,6 +455,7 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
         child_seq_update(self.accumulator, child_enc, w, None if estimate is None else estimate.dist, engine)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize from one inverse-transformed observation when it is valid."""
         try:
             inv = self.transform.inverse(x)
         except Exception:
@@ -434,31 +465,39 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(
         self, x: tuple[Any, np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None
     ) -> None:
+        """Initialize from a validity-masked encoded batch."""
         child_enc, _, valid = x
         self.accumulator.seq_initialize(child_enc, weights * valid.astype(float), rng)
 
     def combine(self, suff_stat: Any) -> "TransformAccumulator":
+        """Merge child sufficient statistics."""
         self.accumulator.combine(suff_stat)
         return self
 
     def value(self) -> Any:
+        """Return the child accumulator's serialized sufficient statistics."""
         return self.accumulator.value()
 
     def from_value(self, x: Any) -> "TransformAccumulator":
+        """Restore the child accumulator from serialized sufficient statistics."""
         self.accumulator.from_value(x)
         return self
 
     def scale(self, c: float) -> "TransformAccumulator":
+        """Scale delegated sufficient statistics by ``c``."""
         self.accumulator.scale(c)
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Delegate keyed statistic merging to the child accumulator."""
         self.accumulator.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Delegate keyed statistic replacement to the child accumulator."""
         self.accumulator.key_replace(stats_dict)
 
     def acc_to_encoder(self) -> "TransformDataEncoder":
+        """Return the encoder associated with this accumulator."""
         return TransformDataEncoder(
             self.accumulator.acc_to_encoder(), self.transform, density_correction=self.density_correction
         )
@@ -480,6 +519,7 @@ class TransformAccumulatorFactory(StatisticAccumulatorFactory):
         self.name = name
 
     def make(self) -> TransformAccumulator:
+        """Create a fresh transform accumulator."""
         return TransformAccumulator(
             self.factory.make(), self.transform, density_correction=self.density_correction, name=self.name
         )
@@ -503,6 +543,7 @@ class TransformEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> TransformAccumulatorFactory:
+        """Return the accumulator factory for inverse-transformed observations."""
         return TransformAccumulatorFactory(
             self.estimator.accumulator_factory(),
             self.transform,
@@ -511,6 +552,7 @@ class TransformEstimator(ParameterEstimator):
         )
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> TransformDistribution:
+        """Estimate the child distribution and wrap it with the fixed transform."""
         return TransformDistribution(
             self.estimator.estimate(nobs, suff_stat),
             transform=self.transform,
@@ -544,6 +586,7 @@ class TransformDataEncoder(DataSequenceEncoder):
         )
 
     def seq_encode(self, x: Sequence[Any]) -> tuple[Any, np.ndarray, np.ndarray]:
+        """Encode observations as inverse child values, Jacobians, and validity flags."""
         inv_values = []
         valid = np.ones(len(x), dtype=bool)
         log_jac = np.zeros(len(x), dtype=np.float64)

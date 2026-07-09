@@ -66,8 +66,9 @@ def neural_fit(
 ) -> NeuralResult:
     """Fit a neural-headed conditional RV. ``data`` is the response ``y``; ``given`` carries the covariates.
 
-    ``epochs`` is the number of passes; ``batch_size`` (None = full batch) + ``device`` ("mps"/"cuda") let a
-    conv net train on a real image set on the GPU. The input keeps its natural shape -- (N, D) or (N, C, H, W).
+    ``epochs`` is the number of passes; ``batch_size`` (None = full batch) and ``device`` ("mps"/"cuda") let a
+    conv net train on image tensors on the selected device. The input keeps its natural shape -- (N, D) or
+    (N, C, H, W).
 
     Multi-stage pipeline (one module across stages):
     ``init=`` continues a previous fit's module (CPT/SFT) instead of building a fresh one; ``weights=`` are

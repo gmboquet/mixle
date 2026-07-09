@@ -253,7 +253,7 @@ from mixle.inference.resampling import (
     wild_bootstrap,
 )
 
-# robust / sandwich covariance for M-estimators and regression (honest SEs under misspecification)
+# robust / sandwich covariance for M-estimators and regression (misspecification-robust SEs)
 from mixle.inference.robust import (
     cluster_robust_covariance,
     newey_west_covariance,
@@ -445,7 +445,7 @@ __all__ = [
     # uq() -- one verb, method auto-selected (Laplace / conformal / semantic entropy)
     "uq",
     "UQResult",
-    # calibration as a post-condition of fitting (is the model's uncertainty honest on holdout?)
+    # calibration as a post-condition of fitting (is the model's uncertainty calibrated on holdout?)
     "calibration_report",
     "CalibrationReport",
     # placement planning -- the local-vs-pool axis of the estimation plan
@@ -497,7 +497,7 @@ __all__ = [
     "Receipt",
     "VerificationReport",
     "verify_receipt",
-    # REFINE-a: diagnosis-directed correction vs blind structure search (workstream A5 research spike)
+    # diagnosis-directed correction vs blind structure search
     "TrialsToTarget",
     "apply_add_edge_fix",
     "blind_search_trials_to_target",

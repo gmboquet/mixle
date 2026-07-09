@@ -74,11 +74,11 @@ def jit_seq_log_density(model: Any, engine: Any = None) -> JittedScorer:
 
 
 # ---------------------------------------------------------------------------------------------------
-# A2 bullet 1: the EM STEP itself compiled to one XLA program, reused across iterations.
+# A2 bullet 1: the EM step itself compiled to one XLA program, reused across iterations.
 #
 # For a finite mixture of same-family scalar exponential-family leaves, both the E-step (component
 # log-densities + responsibilities) and the closed-form weighted M-step are pure array ops, so the whole
-# EM step lowers to a single jax.jit program with the PARAMETERS as traced inputs -- so the SAME compiled
+# EM step lowers to a single jax.jit program with the parameters as traced inputs, so the same compiled
 # program is reused as the parameters update each iteration (the NumPyro 'compile once' trick for EM).
 # Each family entry: read params off a leaf, score a component (reusing the engine-neutral backend
 # density), the closed-form weighted M-step, and rebuild a fitted leaf. Extend the registry to add a
@@ -153,7 +153,7 @@ def jit_em_mixture(model: Any, data: Any, *, max_its: int = 100, engine: Any = N
     loop stays on-device). Returns a fitted ``MixtureDistribution``, bit-close to the host EM from the
     same start (it is the same EM update). Raises ``NotImplementedError`` for unsupported structure.
 
-    SPEED -- measured, honest: the payoff is **GPU/TPU and large scale**, where XLA parallelizes the
+    SPEED -- measured scope: the payoff is **GPU/TPU and large scale**, where XLA parallelizes the
     E-step over millions of points and many components. On an **Apple M4 GPU (via jax-metal)** this kernel
     runs **~21x faster than mixle's vectorized NumPy EM** (K=10, N=1e6, 50 iters: 156 ms vs 3254 ms) with
     identical estimates, and ~12x faster than the same jitted loop on CPU. **On CPU it is *not* a speedup**

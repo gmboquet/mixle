@@ -52,6 +52,7 @@ class LearnedSegmenter(Segmenter):
         return self
 
     def segment(self, raw: Any) -> np.ndarray:
+        """Segment raw input using fitted HMM state assignments."""
         if self.hmm is None:
             raise RuntimeError("call fit(...) before segment(...)")
         atoms = self.atomic.segment(raw)

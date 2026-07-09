@@ -54,6 +54,7 @@ class Embedder:
 
     @property
     def dim(self) -> int:
+        """Return embedding dimensionality."""
         return int(self.corpus_vectors.shape[1])
 
     def _units(self, items: list) -> np.ndarray:
@@ -75,6 +76,7 @@ class Embedder:
         return [(int(i), float(sims[i])) for i in order]
 
     def save(self, path: str) -> str:
+        """Persist the embedder and fitted corpus vectors."""
         out = Path(path)
         out.mkdir(parents=True, exist_ok=True)
         with open(out / "embedder.pkl", "wb") as f:
@@ -103,6 +105,7 @@ class Embedder:
 
     @classmethod
     def load(cls, path: str) -> Embedder:
+        """Load an embedder previously saved with :meth:`save`."""
         with open(Path(path) / "embedder.pkl", "rb") as f:
             d = pickle.load(f)
         return cls(d["featurizer"], d["result"], d["kind"], d["corpus_vectors"])

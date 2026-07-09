@@ -1,21 +1,17 @@
-"""Torsion / twisted composition (workstream A4, research spike): mixture components that glue to ONE
-shared base density via a declared group action, instead of each independently learning a density from
-scratch on its own slice of data.
+"""Twisted composition for mixture components with a shared base density.
 
-The plan's framing: "compositions whose local statistical factors glue with a non-trivial twist -- character/
-phase twists in periodic or sequential data, mixture components sharing a base density modulo a group
-element -- so structure that factors locally does not trivialize globally." Concretely: :class:`CyclicGroup`
+Mixture components can share one base density modulo a declared group action,
+instead of each independently learning a density from scratch on its own slice
+of data. Concretely, :class:`CyclicGroup`
 acts on a periodic coordinate by rotation of its ``(cos, sin)`` embedding (an exact, Jacobian-1 change of
 variables, so a fitted embedding density scores identically whichever group element aligned a point into it);
 :func:`fit_twisted_mixture` pools every group's data into ONE shared base density after undoing each group's
 twist, so the shared density is fit on the union -- effectively ``|groups|`` times the data for the same
 parameter count as fitting one group alone.
 
-Kill criterion (stated up front, per the plan's non-goals): if the twisted (shared-base) model does not beat
-independently-fit per-group models at matched per-component capacity on held-out per-group log-likelihood in
-the small-sample regime, this is a negative result -- record it in ``notes/a4-torsion-negative.md`` and keep
-the untwisted, independent-per-group baseline as the default. This module ships either way; a negative verdict
-means "don't reach for this by default," not "delete the machinery."
+Use this as an experimental modeling option. If the shared-base model does not
+beat independently fit per-group models at matched per-component capacity on
+held-out per-group log likelihood, keep the independent baseline as the default.
 """
 
 from __future__ import annotations

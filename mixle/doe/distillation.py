@@ -21,7 +21,14 @@ from mixle.doe.designs import _as_rng
 
 @dataclass(frozen=True)
 class DistillationDesign:
-    """A selected distillation/training batch plus coverage diagnostics."""
+    """Selected pool indices and diagnostics for a distillation design.
+
+    ``indices`` point into the exact candidate pool supplied to the selector.
+    ``scores`` are the sequential merits assigned to the chosen candidates.
+    ``candidate_scores`` preserves the base uncertainty/preference score before
+    diversity, coverage, and cost terms are applied. ``metadata`` records the
+    target coverage and weights needed to audit or reproduce the design.
+    """
 
     indices: np.ndarray
     scores: np.ndarray

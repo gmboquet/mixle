@@ -34,7 +34,7 @@ decision workflows around fitted models:
 Read :doc:`reasoning-ecosystem`, :doc:`reasoning-systems`, and
 :doc:`production`.
 
-Certified Creation, Simulation, And Reproducibility
+Certified Creation, Simulation, and Reproducibility
 ---------------------------------------------------
 
 The inference layer now includes higher-level artifact workflows in addition to
@@ -59,7 +59,7 @@ ordinary fitting:
 Read :doc:`inference`, :doc:`quickstart`, :doc:`uncertainty`, and
 :doc:`lifecycle`.
 
-Data, Structure, And Process Families
+Data, Structure, and Process Families
 -------------------------------------
 
 0.6.2 adds several modeling and diagnostics surfaces:
@@ -84,7 +84,7 @@ Data, Structure, And Process Families
 Read :doc:`data`, :doc:`representation`, :doc:`reasoning-systems`,
 :doc:`processes`, :doc:`stats-structured`, and :doc:`hmms-latent`.
 
-Neural And Task Surfaces
+Neural and Task Surfaces
 ------------------------
 
 The neural and task layers gained more durable, explicit behavior:
@@ -104,7 +104,7 @@ The neural and task layers gained more durable, explicit behavior:
 
 Read :doc:`neural-llm`, :doc:`task-distillation`, and :doc:`task-serving`.
 
-Engines, Placement, And Operational Hardening
+Engines, Placement, and Operational Hardening
 ---------------------------------------------
 
 0.6.2 also tightens lower-level execution and production behavior:

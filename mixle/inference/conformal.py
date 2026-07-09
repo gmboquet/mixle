@@ -269,7 +269,7 @@ def conformal_label_sets(
     Calibrates a LAC threshold (:func:`conformal_label_threshold`) on the held-out true-class scores, then
     admits every class whose score clears it. The returned boolean mask has guaranteed marginal coverage: the
     true label is in the set with probability ``>= 1 - alpha``. A *singleton* set is a confident prediction; an
-    *empty or multi-label* set is an honest "I'm not sure" -- the signal a cost-aware cascade escalates on.
+    *empty or multi-label* set is an explicit abstention -- the signal a cost-aware cascade escalates on.
 
     Args:
         cal_prob_true: ``(n,)`` score assigned to the true class of each calibration point.

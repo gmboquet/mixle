@@ -1,14 +1,15 @@
-"""Sound error tracing via interval arithmetic -- the "logic" that lets mixle preserve accuracy with
-minimal compute.
+"""Sound error tracing via interval arithmetic.
 
 An :class:`Interval` carries ``[lo, hi]`` enclosing a true value. Every operation rounds the bounds
 *outward* (one ULP via :func:`numpy.nextafter`), so the enclosure provably contains the exact result
 despite float64 round-off -- the interval *certifies* the numerical error rather than hoping it is small.
-The width is a guaranteed error bound; a precision-allocation pass reads it to pick the cheapest format
+The width is a guaranteed error bound; a precision-allocation pass reads it to pick the lowest-cost format
 that keeps the width under a target (pair with :func:`mixle.engines.formats.min_float_mantissa_bits`).
 
-Interval arithmetic is sound but pessimistic (it ignores correlations between operands); affine arithmetic
-tightens it and is the natural follow-up. This is the vectorized, dependency-free core.
+Interval arithmetic is sound but pessimistic because it ignores correlations
+between operands. Affine arithmetic can tighten the bound when that extra
+complexity is justified. This module provides the vectorized, dependency-free
+core.
 """
 
 from __future__ import annotations
@@ -49,8 +50,7 @@ class Interval:
 
     @classmethod
     def from_quantized(cls, original: Any, fmt: Any) -> Interval:
-        """Enclose ``original`` given only its round-trip through ``fmt`` -- i.e. bound the value a
-        consumer of the quantized data is uncertain about, using the format's relative-error bound."""
+        """Enclose ``original`` using the quantized format's error bound."""
         q = np.asarray(fmt.round_trip(original), dtype=np.float64)
         rel = float(getattr(fmt, "max_rel_error", None) or 0.0)
         if rel <= 0.0:  # codecs without an analytic relative bound: use the measured absolute error
@@ -65,12 +65,15 @@ class Interval:
         return _up(self.hi - self.lo)
 
     def max_width(self) -> float:
+        """Return the largest interval width."""
         return float(np.max(self.width())) if self.lo.size else 0.0
 
     def midpoint(self) -> np.ndarray:
+        """Return interval midpoints."""
         return self.lo + 0.5 * (self.hi - self.lo)
 
     def contains(self, value: Any) -> np.ndarray:
+        """Return a boolean mask for values inside the interval."""
         v = np.asarray(value, dtype=np.float64)
         return (self.lo <= v) & (v <= self.hi)
 
@@ -90,13 +93,13 @@ class Interval:
 
 
 def sum_error_bound(x: Any) -> float:
-    """Certified bound on the float64 error of ``sum(x)`` -- vectorized, no per-element loop.
+    """Return a certified bound on the float64 error of ``sum(x)``.
 
     The standard a-priori bound ``|fl(sum) - sum| <= gamma_{n-1} * sum|x_i|`` with
     ``gamma_k = k*u / (1 - k*u)`` and ``u = 2**-53``. It is sound for any summation order. A bound that
     is large *relative to* ``|sum x|`` means the sum is ill-conditioned (cancellation) and warrants the
     double-double :func:`mixle.engines.extended.dd_sum`; a tight one means float64 already suffices and
-    no extra compute is justified -- the logic that spends precision only where it is needed.
+    no extra compute is justified.
     """
     x = np.asarray(x, dtype=np.float64).ravel()
     if x.size < 2:
@@ -108,14 +111,14 @@ def sum_error_bound(x: Any) -> float:
 
 
 def sum_enclosure(x: Any) -> Interval:
-    """Sound interval enclosing the true ``sum(x)``: ``[fl_sum - bound, fl_sum + bound]``, outward-rounded."""
+    """Return an outward-rounded interval enclosing the true ``sum(x)``."""
     s = np.float64(np.sum(np.asarray(x, dtype=np.float64)))
     b = np.float64(sum_error_bound(x))
     return Interval(_down(s - b), _up(s + b))
 
 
 def float64_sum_is_accurate(x: Any, target_rel_error: float = 1e-12) -> bool:
-    """Whether a float64 sum of ``x`` is already accurate to ``target_rel_error`` (else use ``dd_sum``).
+    """Return whether float64 summation is accurate to ``target_rel_error``.
 
     Reads the certified bound relative to the magnitude of the result -- precision allocation in one call.
     """

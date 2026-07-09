@@ -1,11 +1,10 @@
-"""Create, estimate, and sample from a gamma distribution with shape k and scale theta.
+"""Gamma distributions, estimators, accumulators, samplers, and encoders.
 
-Defines the GammaDistribution, GammaSampler, GammaAccumulatorFactory, GammaAccumulator, GammaEstimator,
-and the GammaDataEncoder classes for use with mixle.
+For positive real-valued observations, ``GammaDistribution(k, theta)`` uses
+shape ``k > 0`` and scale ``theta > 0`` with log-density:
 
-Data type: (float): The GammaDistribution with shape k > 0.0 and scale theta > 0.0, has log-density
-    log(f(x;k,theta)) = -gammaln(k) - k*log(theta) + (k-1) * log(x) - x / theta, for x > 0.0, else -np.inf
-
+    log(f(x;k,theta)) = -gammaln(k) - k*log(theta) + (k-1) * log(x) - x / theta.
+Values outside the positive support score ``-inf``.
 
 
 Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
@@ -36,6 +35,8 @@ _MAX_GAMMA_SHAPE = 1.0e12
 
 
 class GammaFisherView(FixedFisherView):
+    """Expose Gamma sufficient statistics for Fisher-information utilities."""
+
     def __init__(self, dist: Any) -> None:
         super().__init__(dist, [("count",), ("sum_log",), ("sum",)])
 
@@ -74,12 +75,14 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare backend support for generated Gamma density kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch", "jax"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the generated-compute declaration for the Gamma distribution."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -143,18 +146,18 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         return engine.where(vals > 0.0, vals * 0.0, engine.asarray(-np.inf))
 
     def __init__(self, k: float, theta: float, name: str | None = None) -> None:
-        """GammaDistribution for shape k and scale theta.
+        """Create a Gamma distribution.
 
         Args:
-            k (float): Positive real-valued number.
-            theta (float): Positive real-valued number.
-            name (Optional[str]): Assign a name to GammaDistribution instance.
+            k: Positive finite shape parameter.
+            theta: Positive finite scale parameter.
+            name: Optional diagnostic name.
 
         Attributes:
-            k (float): Positive real-valued number.
-            theta (float): Positive real-valued number.
-            name (Optional[str]): Assign a name to GammaDistribution instance.
-            log_const (float): Normalizing constant of gamma distribution.
+            k: Shape parameter.
+            theta: Scale parameter.
+            name: Optional diagnostic name.
+            log_const: Log normalizing constant.
 
         """
         if k <= 0.0 or not np.isfinite(k):
@@ -167,7 +170,7 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
 
     def __str__(self) -> str:
-        """Return string representation of GammaDistribution object."""
+        """Return a readable distribution summary."""
         return "GammaDistribution(%s, %s, name=%s)" % (repr(self.k), repr(self.theta), repr(self.name))
 
     def get_parameters(self) -> tuple[float, float]:
@@ -195,7 +198,7 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def entropy(self) -> float:
-        """Returns the differential entropy in nats."""
+        """Return the differential entropy in nats."""
         return float(self.k + np.log(self.theta) + gammaln(self.k) + (1 - self.k) * digamma(self.k))
 
     def density(self, x: float) -> float:
@@ -346,26 +349,26 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         return float((self.k - 1.0) * self.theta) if self.k >= 1.0 else 0.0
 
     def sampler(self, seed: int | None = None) -> "GammaSampler":
-        """Create a GammaSampler object from GammaDistribution.
+        """Return a sampler for iid draws from this distribution.
 
         Args:
-            seed (Optional[int]): Set seed on random number generator.
+            seed: Optional seed for the sampler's random state.
 
         Returns:
-            GammaSampler object.
+            A configured ``GammaSampler``.
 
         """
         return GammaSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "GammaEstimator":
-        """Creates GammaEstimator object from GammaDistribution instance.
+        """Return an estimator initialized from this distribution's shape.
 
         Args:
-            pseudo_count (Optional[float]): Re-weight the sufficient statistics of GammaDistribution instance if not
-                None.
+            pseudo_count: Optional smoothing count applied to the current
+                distribution moments.
 
         Returns:
-            GammaEstimator object.
+            A ``GammaEstimator``.
 
         """
         if pseudo_count is None:
@@ -375,22 +378,24 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
             return GammaEstimator(pseudo_count=(pseudo_count, pseudo_count), suff_stat=suff_stat, name=self.name)
 
     def dist_to_encoder(self) -> "GammaDataEncoder":
-        """Returns GammaDataEncoder object for encoding sequence of GammaDistribution observations."""
+        """Return an encoder for iid Gamma observations."""
         return GammaDataEncoder()
 
 
 class GammaSampler(DistributionSampler):
+    """Draw independent samples from a :class:`GammaDistribution`."""
+
     def __init__(self, dist: "GammaDistribution", seed: int | None = None) -> None:
-        """GammaSampler object used to draw samples from GammaDistribution.
+        """Create a sampler bound to ``dist``.
 
         Args:
-            dist (GammaDistribution): GammaDistribution to sample from.
-            seed (Optional[int]): Used to set seed on random number generator used in sampling.
+            dist: Distribution to sample from.
+            seed: Optional seed for the sampler's random state.
 
         Attributes:
-            rng (RandomState): RandomState with seed set for sampling.
-            dist (GammaDistribution): GammaDistribution to sample from.
-            seed (Optional[int]): Used to set seed on random number generator used in sampling.
+            rng: Random state used for draws.
+            dist: Distribution being sampled.
+            seed: Seed used to initialize the random state.
 
 
         """
@@ -399,31 +404,32 @@ class GammaSampler(DistributionSampler):
         self.seed = seed
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
-        """Draw 'size'-iid observations from GammaSampler.
+        """Draw iid observations from the Gamma distribution.
 
         Args:
-            size (Optional[int]): Number of iid samples to draw from GammaSampler.
+            size: Number of iid samples to draw. ``None`` returns a scalar sample.
 
         Returns:
-            Single sample (float) if size is None, else a numpy array of floats containing iid samples from
-            GammaDistribution.
+            A scalar draw when ``size`` is ``None``; otherwise an array of draws.
 
         """
         return self.rng.gamma(shape=self.dist.k, scale=self.dist.theta, size=size)
 
 
 class GammaAccumulator(SequenceEncodableStatisticAccumulator):
+    """Accumulate weighted count, sum, and log-sum statistics for Gamma estimation."""
+
     def __init__(self, keys: str | None = None) -> None:
-        """GammaAccumulator object used to accumulate sufficient statistics from observations.
+        """Create an accumulator for Gamma sufficient statistics.
 
         Args:
-            keys (Optional[str]): GammaAccumulator objects with same key merge sufficient statistics.
+            keys: Optional key for merging sufficient statistics.
 
         Attributes:
-            count (float): Number of observations accumulated.
-            sum (float): Weighted-sum of observations accumulated.
-            sum_of_logs (float): log weighted sum of weighted log(observations).
-            key (Optional[str]): GammaAccumulator objects with same key merge sufficient statistics.
+            count: Sum of observation weights.
+            sum: Weighted sum of observations.
+            sum_of_logs: Weighted sum of log-observations.
+            keys: Optional sufficient-statistic key.
 
         """
         self.count = zero
@@ -434,7 +440,7 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         """Initialize sufficient statistics of GammaAccumulator with weighted observation.
 
-        Note: Just calls update.
+        This delegates to :meth:`update`.
 
         Args:
             x (float): Positive real-valued observation of gamma.
@@ -450,7 +456,7 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
         """Vectorized initialization of GammaAccumulator sufficient statistics with weighted observations.
 
-        Note: Just calls seq_update().
+        This delegates to :meth:`seq_update`.
 
         Args:
             x (Tuple[ndarray, ndarray]): Tuple of Numpy array of observations and log(observations).
@@ -516,7 +522,7 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, float, float]:
-        """Returns Tuple[float, float, float] containing sufficient statistics of GammaAccumulator."""
+        """Return ``(count, sum, sum_of_logs)`` sufficient statistics."""
         return self.count, self.sum, self.sum_of_logs
 
     def from_value(self, x: tuple[float, float, float]) -> "GammaAccumulator":
@@ -536,7 +542,7 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge sufficient statistics of object instance with suff stats containing matching keys.
+        """Merge sufficient statistics from ``stats_dict`` when this accumulator's key is present.
 
         Args:
             stats_dict (Dict[str, Any]): Dict mapping keys to sufficient statistics.
@@ -556,7 +562,7 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = (self.count, self.sum, self.sum_of_logs)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Set sufficient statistics of object instance to suff_stats with matching keys.
+        """Replace sufficient statistics from ``suff_stats`` when this accumulator's key is present.
 
         Args:
             stats_dict (Dict[str, Any]): Dict mapping keys to sufficient statistics.
@@ -573,29 +579,33 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
                 self.sum_of_logs = x2
 
     def acc_to_encoder(self) -> "GammaDataEncoder":
-        """Return GammaDataEncoder for encoding sequence of data."""
+        """Return an encoder compatible with Gamma observations."""
         return GammaDataEncoder()
 
 
 class GammaAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create Gamma accumulators with a shared optional merge key."""
+
     def __init__(self, keys: str | None = None) -> None:
-        """GammaAccumulatorFactory object for creating GammaAccumulator objects.
+        """Create an accumulator factory.
 
         Args:
-            keys (Optional[str]): Used for merging sufficient statistics of GammaAccumulator.
+            keys: Optional key for merging sufficient statistics.
 
         Attributes:
-            keys (Optional[str]): Used for merging sufficient statistics of GammaAccumulator.
+            keys: Optional sufficient-statistic key.
 
         """
         self.keys = keys
 
     def make(self) -> "GammaAccumulator":
-        """Returns GammaAccumulator object with keys passed."""
+        """Return a fresh Gamma accumulator."""
         return GammaAccumulator(keys=self.keys)
 
 
 class GammaEstimator(ParameterEstimator):
+    """Estimate Gamma shape and scale parameters from sufficient statistics."""
+
     def __init__(
         self,
         pseudo_count: tuple[float, float] = (0.0, 0.0),
@@ -604,21 +614,21 @@ class GammaEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """GammaEstimator object used for estimating GammaDistribution from aggregated data.
+        """Create an estimator for Gamma sufficient statistics.
 
         Args:
-            pseudo_count (Tuple[float, float]): Values used to re-weight member instances of sufficient statistics.
-            suff_stat (Tuple[float, float]):  shape 'k' and scale 'theta'.
-            threshold (float): Threshold used for estimating the shape of gamma.
-            name (Optional[str]): Assign a name to GammaEstimator.
-            keys (Optional[str]): Assign keys to GammaEstimator for combining sufficient statistics.
+            pseudo_count: Smoothing weights for the mean and log-mean statistics.
+            suff_stat: Prior mean and log-mean statistics used with ``pseudo_count``.
+            threshold: Convergence threshold for shape estimation.
+            name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
 
         Attributes:
-            pseudo_count (Tuple[float, float]): Values used to re-weight member instances of sufficient statistics.
-            suff_stat (Tuple[float, float]):  shape 'k' and scale 'theta'.
-            threshold (float): Threshold used for estimating the shape of gamma.
-            name (Optional[str]): Assign a name to GammaEstimator.
-            keys (Optional[str]): Assign keys to GammaEstimator for combining sufficient statistics.
+            pseudo_count: Smoothing weights for sufficient statistics.
+            suff_stat: Prior sufficient statistics.
+            threshold: Shape-estimation convergence threshold.
+            name: Optional diagnostic name.
+            keys: Optional sufficient-statistic key.
 
         """
         self.pseudo_count = pseudo_count
@@ -628,23 +638,20 @@ class GammaEstimator(ParameterEstimator):
         self.name = name
 
     def accumulator_factory(self) -> "GammaAccumulatorFactory":
-        """Create GammaAccumulatorFactory with keys passed."""
+        """Return an accumulator factory matching this estimator."""
         return GammaAccumulatorFactory(keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> "GammaDistribution":
-        """Obtain GammaDistribution from aggregated sufficient statistics of observed data.
+        """Estimate a Gamma distribution from aggregated sufficient statistics.
 
-        Takes sufficient statistic aggregated from observed data:
-            suff_stat[0]: weighted sum of observations
-            suff_stat[1]: weighted sum of log-observations
-            suff_stat[2]: weighted observation count.
+        The tuple is interpreted as ``(count, sum, sum_of_logs)``.
 
         Args:
-            nobs (Optional[float]): Not used. Kept for consistency with ParameterEstimator.
-            suff_stat: See description above for details.
+            nobs: Unused; accepted for the ``ParameterEstimator`` interface.
+            suff_stat: Aggregated Gamma sufficient statistics.
 
         Returns:
-            GammaDistribution object.
+            A fitted Gamma distribution.
 
         """
         pc1, pc2 = self.pseudo_count
@@ -731,14 +738,14 @@ class GammaEstimator(ParameterEstimator):
 
 
 class GammaDataEncoder(DataSequenceEncoder):
-    """GammaDataEncoder object for encoding sequences of iid Gamma observations with data type float."""
+    """Encoder for iid positive Gamma observations."""
 
     def __str__(self) -> str:
-        """Return string representation of GammaDataEncoder."""
+        """Return a readable encoder summary."""
         return "GammaDataEncoder"
 
     def __eq__(self, other: object) -> bool:
-        """Check if object is instance of GammaDataEncoder.
+        """Return true when ``other`` is a gamma data encoder.
 
         Args:
             other (object): An object to check for equality.

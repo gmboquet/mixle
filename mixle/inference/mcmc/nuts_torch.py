@@ -10,7 +10,7 @@ leapfrog step instead of being rebuilt (and round-tripped through numpy) per gra
 
 Intended for **GPU and large autodiff targets**, where staying on-device with a compiled target
 pays off. On CPU this is typically *slower* than the numpy sampler (per-op torch dispatch + the
-tree's host syncs dominate when the target is cheap), so on CPU prefer the numpy / numba / jax
+tree's host syncs dominate when the target is low-cost), so on CPU prefer the numpy / numba / jax
 backends. The value here is autodiff without re-tracing the graph every call, plus GPU execution.
 """
 

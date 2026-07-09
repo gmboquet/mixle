@@ -27,6 +27,9 @@ there when you want it, but you rarely need it to get started.
 📖 **Full documentation:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) — guides, the model
 catalog, and the API reference.
 
+Release-branch notes live in [CHANGELOG.md](CHANGELOG.md) and
+[`docs/release-notes.rst`](docs/release-notes.rst).
+
 ## Contents
 
 [Installation](#installation) · [Quickstart](#quickstart) · [Engines & orchestration](#engines--orchestration) ·
@@ -45,24 +48,24 @@ pip install "mixle[all]"   # acceleration, scale-out, and connectors
 
 The base install fits every distribution locally. Acceleration and scale-out are opt-in extras:
 
-| Extra | Adds |
-| --- | --- |
-| `numba` | JIT-compiled hot paths (falls back to pure NumPy when absent) |
-| `torch` | GPU / autograd engine |
-| `spark` · `dask` · `mpi` | distributed estimation backends |
-| `pandas` · `arrow` · `sql` · `mongo` · `hadoop` · `data` | data-source connectors |
-| `gmpy2` | GMP-FFT big-integer multiply for count-DP ranking |
-| `umap` | model-based UMAP embeddings |
-| `sympy` · `sage` | symbolic / closed-form export |
-| `grammar` | graph-grammar models (networkx) |
+| Extra                                                    | Adds                                                          |
+| -------------------------------------------------------- | ------------------------------------------------------------- |
+| `numba`                                                  | JIT-compiled hot paths (falls back to pure NumPy when absent) |
+| `torch`                                                  | GPU / autograd engine                                         |
+| `spark` · `dask` · `mpi`                                 | distributed estimation backends                               |
+| `pandas` · `arrow` · `sql` · `mongo` · `hadoop` · `data` | data-source connectors                                        |
+| `gmpy2`                                                  | GMP-FFT big-integer multiply for count-DP ranking             |
+| `umap`                                                   | model-based UMAP embeddings                                   |
+| `sympy` · `sage`                                         | symbolic / closed-form export                                 |
+| `grammar`                                                | graph-grammar models (networkx)                               |
 
 Development: `git clone … && pip install -e ".[all]"`.
 
 ## Quickstart
 
 **Both worlds, blended — frontier quality at a fraction of the cost.** Distill a slow, expensive teacher
-(a frontier LLM, a human, a rule) into a tiny local model, then serve a *cascade*: a **neural** student
-answers when a **classical** conformal gate says it is confident, and only the hard cases escalate to the
+(a frontier LLM, a human, a rule) into a compact local model, then serve a *cascade*: a **neural** student
+answers when a **classical** conformal gate says it is confident, and only uncertain cases escalate to the
 teacher.
 
 ```python
@@ -74,7 +77,7 @@ def teacher(texts):
 # `train` to distill on, `cal` to calibrate, `stream` to serve (e.g. spam vs ham)
 train, cal, stream = ..., ..., ...
 
-# distill the teacher into a tiny local model (~33K-param MLP over hashed
+# distill the teacher into a compact local model (~33K-param MLP over hashed
 # n-grams, ~130 KB), calibrate WHEN to trust it, then serve a cascade
 student = distill(teacher, train, n=4, dim=512, hidden=[64], epochs=250,
                   task="spam vs ham")
@@ -85,8 +88,8 @@ cascade.serve(stream)   # frontier-quality answers, ~92% handled locally
 cascade.report()        # -> ~8% escalated; ~$2.76 saved / 300 reqs vs frontier
 ```
 
-The tiny model handles the easy majority and defers the hard cases, so the blend matches the teacher while
-running the large model on a fraction of requests. The same pattern distills tool-callers, extractors, and
+The compact model handles high-confidence requests locally and escalates uncertain cases, so the blend matches
+the teacher while running the large model on a fraction of requests. The same pattern distills tool-callers, extractors, and
 structured classifiers (`mixle.task`).
 
 **Your torch module just fits — the training code you didn't write.** Any module exposing
@@ -382,4 +385,3 @@ Contributions, issues, and discussion are welcome — open a PR or an issue.
 ## License
 
 MIT — see [LICENSE](https://github.com/gmboquet/mixle/blob/main/LICENSE).
-

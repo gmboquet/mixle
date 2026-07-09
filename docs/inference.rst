@@ -88,6 +88,42 @@ At a high level, ``optimize``:
 The same outer loop supports closed-form leaves, mixtures, HMMs, variational
 families, MAP objectives, neural leaves, and distributed encoded data.
 
+Inspect the fitted route when the model will be reused. A useful run record
+contains the estimator shape, objective, convergence trace or final score,
+validation score when supplied, random seed, backend/engine, and any fallback
+or warning emitted by automatic inference.
+
+Fitted-Model Evidence
+---------------------
+
+Treat a fitted object as a statistical claim plus evidence. The minimum
+evidence depends on the route:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Route
+     - Evidence to keep with the model
+   * - Closed-form estimator
+     - Estimator class, sufficient-statistic totals, fitted parameters, and a
+       small score fixture.
+   * - EM or latent-variable estimator
+     - Initialization, objective trace, component/state diagnostics, finite
+       responsibilities, and validation score when available.
+   * - MAP or gradient MLE
+     - Objective, optimizer status, parameter constraints, seed, and gradient
+       or curvature diagnostics when available.
+   * - Bayesian posterior route
+     - Prior specification, posterior summary or draws, convergence
+       diagnostics, and posterior-predictive checks.
+   * - Neural or external engine route
+     - Backend, device, precision, training settings, seed, and reload/rescore
+       evidence.
+
+Generated API pages can name the functions, but they cannot prove that a fit
+is trustworthy. Keep the route evidence with notebooks, examples, release
+artifacts, and production handoffs.
+
 Certified Creation
 ------------------
 
@@ -117,6 +153,41 @@ It carries:
 
 Use ``optimize`` when you need direct control over the estimator route. Use
 ``create`` when the artifact boundary and post-conditions matter.
+
+Numerical Safety
+----------------
+
+Inference routes should fail loudly when the requested model cannot score the
+observations. Non-finite observations are not repaired by the fit loop. Use an
+explicit missing-data wrapper, PPL ``missing="marginalize"``, or an upstream
+field transformation only when that is the intended statistical contract.
+
+For latent models, monitor responsibilities, component weights, and validation
+score across iterations. If a component collapses or a score becomes
+non-finite, prefer a different initialization, stronger prior, simpler family,
+or an explicit missing-data policy over accepting the fit.
+
+Input Ownership and Missingness
+-------------------------------
+
+The inference loop may build encoded chunks, backend arrays, or standardized
+working buffers. Those buffers are allowed to adapt data for computation. The
+input object supplied by the caller is not the place where missingness is
+repaired.
+
+Use one of these explicit contracts:
+
+* strict routes reject non-finite observations before fitting;
+* missing-data wrappers marginalize or model absence while leaving caller data
+  unchanged;
+* PPL routes use ``missing="marginalize"`` only when ``NaN`` means "integrate
+  this value out";
+* preprocessing pipelines that impute or transform data return a new dataset
+  and record the transformation.
+
+This is especially important for NumPy arrays passed to repeated fits. A route
+that silently fills ``NaN`` in place can make a later model appear stable while
+changing the experiment.
 
 Common Fit Knobs
 ----------------
@@ -238,7 +309,7 @@ route or should fall back to a numerical approximation.
 For gradient objectives, see ``mixle.inference.gradient_fit`` and
 ``mixle.inference.target``.
 
-Certificates And Placement
+Certificates and Placement
 --------------------------
 
 ``certify`` classifies the fitted model's estimation blocks along an ordered
@@ -291,7 +362,7 @@ posterior forward as the next batch's prior.
 Use streaming when the dataset is naturally batched, too large for one pass, or
 needs recursive updating.
 
-Simulation And Verified Synthesis
+Simulation and Verified Synthesis
 ---------------------------------
 
 ``simulate`` packages a fitted generative model as a data generator. For
@@ -350,6 +421,10 @@ same parameters are recovered.
 
 Fingerprints round floating-point values to a fixed precision before hashing,
 so last-bit platform noise does not invalidate an otherwise equivalent fit.
+
+Receipts are strongest when they are paired with a small prediction or
+log-density fixture. The fingerprint says the parameters round-trip; the
+fixture says the fitted object still behaves the same after reload.
 
 Uncertainty Dispatch
 --------------------

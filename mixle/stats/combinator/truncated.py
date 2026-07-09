@@ -247,23 +247,28 @@ class TruncatedAccumulator(SingleChildAccumulator):
         self.keys = keys
 
     def update(self, x: Any, weight: float, estimate: TruncatedDistribution | None) -> None:
+        """Accumulate one in-support observation through the base accumulator."""
         self.base_accumulator.update(x, weight, None if estimate is None else estimate.base)
 
     def seq_update(
         self, x: tuple[Any, np.ndarray], weights: np.ndarray, estimate: TruncatedDistribution | None
     ) -> None:
+        """Accumulate encoded observations, zeroing weights outside the retained support."""
         base_enc, allowed_mask = x
         w = np.asarray(weights, dtype=np.float64) * allowed_mask.astype(np.float64)
         self.base_accumulator.seq_update(base_enc, w, None if estimate is None else estimate.base)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize the base accumulator from one retained observation."""
         self.base_accumulator.initialize(x, weight, rng)
 
     def seq_initialize(self, x: tuple[Any, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize from encoded observations, zeroing weights outside the retained support."""
         base_enc, allowed_mask = x
         self.base_accumulator.seq_initialize(base_enc, np.asarray(weights, dtype=np.float64) * allowed_mask, rng)
 
     def acc_to_encoder(self) -> "DataSequenceEncoder":
+        """Return the base encoder used by the delegated accumulator."""
         return self.base_accumulator.acc_to_encoder()
 
 
@@ -275,6 +280,7 @@ class TruncatedAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> TruncatedAccumulator:
+        """Create an empty truncated-data accumulator."""
         return TruncatedAccumulator(self.base_factory.make(), keys=self.keys)
 
 
@@ -296,9 +302,11 @@ class TruncatedEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> TruncatedAccumulatorFactory:
+        """Return a factory for truncated-data sufficient-statistic accumulators."""
         return TruncatedAccumulatorFactory(self.base_estimator.accumulator_factory(), keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> TruncatedDistribution:
+        """Estimate the base distribution and re-apply the fixed truncation."""
         base = self.base_estimator.estimate(nobs, suff_stat)
         return TruncatedDistribution(
             base, allowed=self.allowed, forbidden=self.forbidden, name=self.name, keys=self.keys

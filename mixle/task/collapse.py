@@ -1,19 +1,16 @@
 """``collapse_monitor`` -- the shared collapse-detection utility for self-improvement loops.
 
-Every self-improvement round (an amplification round in AMPLIFY-a, a probing-policy episode in
-PROBE-a, a diagnosis-directed correction in REFINE-a) claims to be getting better. This is the ONE
-check that claim must pass, built once and reused rather than reimplemented per loop: across rounds,
-the held-out VERIFIED score must be non-decreasing, and the proposal diversity must not be shrinking
--- a loop that improves its score by collapsing onto a few candidates (mode collapse) is not a genuine
-improvement, it is overfitting to the verifier.
+Every self-improvement round claims to be getting better. This shared check evaluates that claim
+without each loop reimplementing collapse detection: across rounds, the held-out verified score must
+be non-decreasing, and the proposal diversity must not be shrinking. A loop that improves its score by
+collapsing onto a few candidates is overfitting to the verifier, not genuinely improving.
 
     verdict = collapse_monitor(history)
     verdict.ok                 # True iff both checks hold across every round
     verdict.reason             # None, or "score_decreased" / "diversity_shrunk" (which check failed)
 
 ``history`` is one entry per round: a dict with the round's held-out verified score and its pool of
-candidates (or a precomputed diversity number). Reused verbatim by AMPLIFY-a, PROBE-a, and REFINE-a --
-none of them reimplement this.
+candidates, or a precomputed diversity number.
 """
 
 from __future__ import annotations
@@ -61,7 +58,7 @@ def collapse_monitor(
     score_tol: float = 0.0,
     diversity_tol: float = 0.0,
 ) -> CollapseVerdict:
-    """Check a self-improvement round history for collapse: score non-decreasing AND diversity not shrinking.
+    """Check a self-improvement round history for collapse: score non-decreasing and diversity not shrinking.
 
     Each entry of ``history`` supplies the round's held-out verified score under ``score_key`` and either
     its candidate pool under ``candidates_key`` (diversity computed via ``diversity_fn``) or, when

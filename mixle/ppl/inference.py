@@ -152,14 +152,17 @@ class Posterior:
         raise KeyError(f"no sampled parameter matching {param!r}")
 
     def samples(self, param=None) -> np.ndarray:
+        """Return posterior samples for all parameters or one selected parameter."""
         if param is None:
             return self._samples
         return self._samples[:, self._col(param)]
 
     def mean(self, param=None):
+        """Return posterior means for all parameters or one selected parameter."""
         return self.samples(param).mean(axis=0)
 
     def summary(self) -> dict:
+        """Return parameter summaries and any available convergence diagnostics."""
         out = {}
         for k, s in enumerate(self._slots):
             col = self._samples[:, k]
@@ -1417,6 +1420,7 @@ def mcmc_fit(
     potentials=None,
     missing: str = "error",
 ) -> RandomVariable:
+    """Fit a PPL model with adaptive random-walk Metropolis-Hastings."""
     from mixle.inference.mcmc import AdaptiveRandomWalkProposal, metropolis_hastings
 
     if rng is None:
@@ -1566,11 +1570,14 @@ def nuts_fit(
 
 
 def sample_fit(rv: RandomVariable, data, **kw) -> RandomVariable:
-    """Draw the parameter posterior with an automatically chosen sampler (``how='sample'``) — so
-    the user doesn't pick among mcmc/hmc/nuts/ensemble. Low/medium-dimensional models use the
-    affine-invariant ``ensemble`` (highest ESS/sec, handles constraints by rejection); larger
-    models use ``nuts`` (auto-tuned HMC for correlated, higher-dimensional posteriors). Takes the
-    common knobs (draws, burn, thin, rng, chains, parallel, constraints, penalty)."""
+    """Draw the parameter posterior with an automatically chosen sampler.
+
+    ``how='sample'`` selects among MCMC, HMC, NUTS, and ensemble samplers.
+    Low- and medium-dimensional models use the affine-invariant ensemble
+    sampler; larger models use NUTS for correlated, higher-dimensional
+    posteriors. Common controls include ``draws``, ``burn``, ``thin``,
+    ``rng``, ``chains``, ``parallel``, ``constraints``, and ``penalty``.
+    """
     d = len(_target_parts(rv, data)[1])
     return ensemble_fit(rv, data, **kw) if d <= 12 else nuts_fit(rv, data, **kw)
 
@@ -1578,14 +1585,15 @@ def sample_fit(rv: RandomVariable, data, **kw) -> RandomVariable:
 def map_fit(
     rv: RandomVariable, data, *, rng=None, constraints=None, penalty=None, potentials=None, missing="error"
 ) -> RandomVariable:
+    """Fit a PPL model by maximum a posteriori optimization."""
     from scipy.optimize import minimize
 
     from mixle.ppl import autograd as _ag
 
     g = None if potentials is not None else _ag.grad_target(rv, data, missing=missing)
     if g is None and constraints is None and penalty is None and potentials is None and not _ag.torch_available():
-        # Honest fallback: with no Torch we lose the analytic-gradient L-BFGS path and drop to a slower
-        # derivative-free optimizer. Tell the user once rather than silently degrading.
+        # Without Torch, the analytic-gradient L-BFGS path is unavailable and MAP uses a derivative-free
+        # optimizer. Warn once rather than letting callers infer the route from timing.
         import warnings as _warnings
 
         _warnings.warn(
@@ -1632,7 +1640,7 @@ def map_fit(
     return RandomVariable._bound(build(vals), name=rv._name)
 
 
-# ----------------------------------------------------- Laplace: a cheap Gaussian posterior at the MAP
+# ----------------------------------------------------- Laplace: a local Gaussian posterior at the MAP
 class _LaplaceRaw:
     """Minimal raw-result holder so a Laplace fit flows through the shared :func:`_finalize` path."""
 
@@ -1678,7 +1686,7 @@ def _psd_cov(prec):
 
 
 def laplace_fit(rv: RandomVariable, data, *, rng=None, draws: int = 2000, missing="error", **_) -> RandomVariable:
-    """Gaussian (Laplace) posterior approximation at the MAP -- the cheap uncertainty rung above ``map``.
+    """Gaussian (Laplace) posterior approximation at the MAP.
 
     Finds the posterior mode, takes the Gaussian whose precision is the Hessian of the negative joint
     log-density there, and draws from it in the unconstrained space (so positivity/simplex supports are
@@ -1839,17 +1847,20 @@ class ConjugatePosterior:
         raise KeyError(f"no conjugate parameter matching {param!r}")
 
     def samples(self, param=None, n: int = 4000, rng=None):
+        """Draw samples from the exact conjugate posterior."""
         rng = rng or np.random.RandomState()
         if param is None:
             return {nm: e["sample"](n, rng) for nm, e in self.post.items()}
         return self._entry(param)["sample"](n, rng)
 
     def mean(self, param=None):
+        """Return posterior means for all conjugate parameters or one parameter."""
         if param is None:
             return {nm: e["mean"] for nm, e in self.post.items()}
         return self._entry(param)["mean"]
 
     def summary(self) -> dict:
+        """Return conjugate posterior family, hyperparameters, and posterior means."""
         return {nm: {"mean": e["mean"], "posterior": e["name"], "hyper": e["hyper"]} for nm, e in self.post.items()}
 
 
@@ -2234,6 +2245,7 @@ def _stats_conjugate_fit(rv: RandomVariable, data, *, prior_override=None):
 
 
 def conjugate_fit(rv: RandomVariable, data, *, prior=None, **_) -> RandomVariable:
+    """Fit a registered conjugate PPL model and attach its exact posterior."""
     if _is_all_free_normal(rv):  # Normal(free, free) -> Normal-Inverse-Gamma (mean + variance unknown)
         return _nig_conjugate_fit(rv, data, **(prior or {}))
     spec = conjugate_spec(rv)
@@ -2346,9 +2358,11 @@ class ConjugateMixturePosterior:
         self.predictive = None
 
     def mean(self, param=None):
+        """Return the posterior mixture mean for the conjugate parameter."""
         return float(np.sum(self.weights * np.array([e["mean"] for e in self.entries])))
 
     def samples(self, param=None, n: int = 4000, rng=None):
+        """Draw posterior samples by first sampling a conjugate prior component."""
         rng = rng or np.random.RandomState()
         comp = rng.choice(len(self.entries), size=n, p=self.weights)
         out = np.empty(n)
@@ -2360,6 +2374,7 @@ class ConjugateMixturePosterior:
         return out
 
     def summary(self) -> dict:
+        """Return posterior mixture weights, component summaries, and mean."""
         return {
             "posterior": "mixture",
             "weights": self.weights.tolist(),
@@ -2405,6 +2420,7 @@ def conjugate_mixture_spec(rv: RandomVariable):
 
 
 def conjugate_mixture_fit(rv: RandomVariable, data) -> RandomVariable:
+    """Fit a likelihood with a mixture of conjugate priors exactly."""
     spec = conjugate_mixture_spec(rv)
     if spec is None:
         raise NotImplementedError("model is not a mixture of registered conjugate priors.")
@@ -2450,10 +2466,12 @@ class HierarchicalPosterior:
         self.acceptance_rate = None
 
     def samples(self, param=None):
+        """Return the per-group posterior means for the random effects."""
         # per-group posterior mean (the random effects)
         return self.group_means
 
     def summary(self) -> dict:
+        """Return fitted hyperparameters and per-group posterior means."""
         return {"hyper": self.hyper, "n_groups": int(self.group_means.size), "group_means": self.group_means}
 
 
@@ -2606,9 +2624,11 @@ class IndexedPosterior:
         self.acceptance_rate = None
 
     def samples(self, param=None):
+        """Return the fitted latent vector for the indexed-latent result."""
         return self.group_means
 
     def summary(self) -> dict:
+        """Return fitted latent vectors and scalar parameter estimates."""
         out = {"latents": self.latents, "scalars": self.scalars}
         if self.group_means is not None:
             out["group_means"] = self.group_means

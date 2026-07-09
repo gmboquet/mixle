@@ -4,7 +4,6 @@ mixle.utils.automatic.detectors package
 .. automodule:: mixle.utils.automatic.detectors
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

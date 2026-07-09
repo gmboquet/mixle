@@ -1,23 +1,21 @@
-"""Knowledge-graph-producing LLM: UQ on the *information*, by marginalizing over graphs.
+"""Knowledge-graph-producing LLM uncertainty by marginalizing over graphs.
 
-The likelihood an LLM emits is over *strings*; the thing we care about is the likelihood of the
-*information*. Bridging them needs ``P(meaning) = sum over strings with that meaning of P(string)`` --
-but "same meaning" over free text is fuzzy and its equivalence class is unbounded.
-
-Have the model emit a **knowledge graph** (a set of triples) instead of prose and the difficulty
-dissolves: the information *is* the generated object, and "same meaning" becomes **exact graph
-equality** -- a computable equivalence, no embeddings or entailment needed. Then the answer to any
-query is obtained by **marginalizing over the graphs (subgraphs) that produce it**::
+An LLM's raw likelihood is over strings, but many applications care about the
+information asserted by those strings. This module has the model emit a
+knowledge graph, represented as a set of triples, so equivalent information can
+be canonicalized by exact graph equality. Answers are then obtained by
+marginalizing over the graphs that produce them::
 
     P(outcome = c) = sum over graphs G with outcome(G) = c  of  P(G)
 
-and the reliability of a single fact is its **edge marginal** ``P(triple in G)`` -- exactly a
-knowledge-graph edge posterior (feed it to :class:`mixle.inference.ProbabilityCalibrator` to calibrate
-against truth; the per-graph samples are an ensemble, so BALD-style epistemic splits apply too).
+The reliability of a single fact is its edge marginal ``P(triple in G)``. Feed
+those marginals to :class:`mixle.inference.ProbabilityCalibrator` to calibrate
+against labeled truth when such labels are available.
 
-``GraphLLM`` wraps any ``generate(prompt) -> str`` plus a ``parse(str) -> triples``; it samples the
-model, canonicalizes each generation to a graph, and marginalizes -- by Monte-Carlo counting, or by
-summing sequence likelihoods when ``log_probs`` are supplied (the correct, lower-variance estimator).
+``GraphLLM`` wraps any ``generate(prompt) -> str`` callable plus a
+``parse(str) -> triples`` callable. It samples the model, canonicalizes each
+generation to a graph, and marginalizes by Monte Carlo counting or by summing
+sequence likelihoods when ``log_probs`` are supplied.
 """
 
 from __future__ import annotations
@@ -35,13 +33,13 @@ Triple = tuple  # (subject, relation, object) or any fixed-arity fact tuple
 
 
 def canonical_graph(triples: Iterable[Any]) -> frozenset:
-    """Canonical form of a graph: the frozenset of its triples (order-independent, dedup, hashable)."""
+    """Return an order-independent, deduplicated graph representation."""
     return frozenset(tuple(t) for t in triples)
 
 
 @dataclass(frozen=True)
 class GraphDistribution:
-    """A distribution over knowledge graphs -- the LLM's belief about the *information*.
+    """A distribution over knowledge graphs.
 
     ``graphs`` are the distinct canonical graphs observed; ``probs[i] = P(graphs[i])`` is the string
     distribution marginalized onto graphs (so it sums to 1 over distinct graphs). Every query is
@@ -52,7 +50,7 @@ class GraphDistribution:
     probs: np.ndarray
 
     def marginalize(self, outcome: Callable[[frozenset], Hashable]) -> list[tuple[Any, float]]:
-        """``P(outcome = c) = sum_{G : outcome(G) = c} P(G)`` -- marginalize over subgraphs.
+        """Return ``P(outcome = c) = sum_{G : outcome(G) = c} P(G)``.
 
         ``outcome`` maps a graph to a hashable value (a fact's object, a boolean property, an
         aggregate). Returns ``[(value, probability), ...]`` sorted by descending probability.
@@ -64,13 +62,13 @@ class GraphDistribution:
         return sorted(mass.items(), key=lambda kv: -kv[1])
 
     def entropy(self, outcome: Callable[[frozenset], Hashable]) -> float:
-        """Entropy (nats) of the marginal ``P(outcome = .)`` -- the model's uncertainty about that query."""
+        """Return entropy in nats of the marginal outcome distribution."""
         p = np.array([q for _, q in self.marginalize(outcome)], dtype=float)
         p = p[p > 0.0]
         return float(-np.sum(p * np.log(p)))
 
     def edge_marginals(self) -> dict[Triple, float]:
-        """``P(triple in G)`` for every triple -- the per-fact reliability (a KG edge posterior)."""
+        """Return ``P(triple in G)`` for every asserted triple."""
         out: dict[Triple, float] = {}
         for g, p in zip(self.graphs, self.probs):
             for t in g:
@@ -83,13 +81,13 @@ class GraphDistribution:
         return float(sum(p for g, p in zip(self.graphs, self.probs) if t in g))
 
     def calibrated_edge_marginals(self, calibrator: ProbabilityCalibrator) -> dict[Triple, float]:
-        """Edge marginals mapped through a fitted calibrator -> a *calibrated* ``P(fact is true)``.
+        """Map edge marginals through a fitted calibrator.
 
         A raw edge marginal is the model's internal assertion rate for a fact, not a probability that
         the fact is *true* -- a confidently-hallucinated fact has a high marginal yet is false. Fit the
         calibrator with :func:`fit_fact_calibrator` on labeled facts, then this reports, per fact, the
-        empirical truth rate at that marginal. (Its residual limit -- confident hallucinations that look
-        exactly like known facts -- is why an external check is needed; see the validation tests.)
+        empirical truth rate at that marginal. Confident hallucinations that
+        look exactly like known facts still require an external check.
         """
         m = self.edge_marginals()
         keys = list(m)
@@ -125,10 +123,10 @@ class GraphLLM:
     """Turn a ``generate(prompt) -> str`` LLM into a distribution over knowledge graphs.
 
     Args:
-        generate: ``callable(prompt) -> str`` -- one stochastic generation.
-        parse: ``callable(str) -> iterable[triple]`` -- extract the asserted facts (semantic parse /
-            structured-output decode). Generations that parse to the same triple-set are the *same
-            meaning* -- exact equality, no fuzzy matching.
+        generate: ``callable(prompt) -> str`` for one stochastic generation.
+        parse: ``callable(str) -> iterable[triple]`` to extract asserted facts.
+            Generations that parse to the same triple set are treated as the
+            same canonical graph.
         n: default number of samples per prompt.
     """
 
@@ -155,11 +153,11 @@ class GraphLLM:
         log_probs: Sequence[float] | None = None,
         graphs: Sequence[frozenset] | None = None,
     ) -> GraphDistribution:
-        """Sample, parse, and marginalize strings onto graphs -> a :class:`GraphDistribution`.
+        """Sample, parse, and marginalize strings onto graphs.
 
         Marginalization uses Monte-Carlo counting by default (``P(G)`` = fraction of samples that
         parse to ``G``); pass ``log_probs`` (one ``log P(string)`` per sample) to instead sum the
-        sequence likelihoods within each graph -- the lower-variance, estimator-correct form that
+        sequence likelihoods within each graph. This lower-variance estimator
         does not assume every string realizing a graph is equiprobable.
         """
         gs = list(graphs) if graphs is not None else self.sample_graphs(prompt, n)
@@ -200,10 +198,10 @@ def fit_fact_calibrator(
     *truth*, learned against ground-truth labels. Collect every ``(triple, marginal)`` the model
     asserts, label it with ``truth(triple)``, and fit a :class:`~mixle.inference.ProbabilityCalibrator`.
 
-    This does NOT rescue confident hallucination -- a fact the model reliably confabulates has a high
-    marginal indistinguishable from a genuinely-known one, so calibration lowers the *overall* fact-ECE
-    but cannot pull those specific facts down. Separating them needs a signal external to the model
-    (retrieval / a checker); the validation tests quantify both the gain and this residual.
+    This does not by itself identify confident hallucinations: a false fact the
+    model reliably emits can have a high marginal. Calibration can improve the
+    aggregate reliability curve, but separating those cases requires an
+    external signal such as retrieval or a checker.
     """
     scores, outcomes = [], []
     for d in distributions:

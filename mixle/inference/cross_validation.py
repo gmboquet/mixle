@@ -15,7 +15,7 @@ autocorrelated data. The fix is to make the fold boundaries respect the dependen
     block removed from train).
   * **spatial** -- :func:`spatial_block_kfold`: hold out contiguous spatial blocks, not scattered
     points.
-  * **nested** -- :func:`nested_kfold`: an inner CV inside each outer fold for honest tuned-model
+  * **nested** -- :func:`nested_kfold`: an inner CV inside each outer fold for tuned-model
     evaluation.
 
 Every generator returns a list of ``(train_index, test_index)`` integer-array pairs, so they are

@@ -17,7 +17,7 @@ This module trades that wall for a **mean-field approximation with an explicit c
   model -- one forward per step, V real step buckets at each depth -- apportioning the target offset
   among tokens by their envelope-estimated subtree counts. O(L) forwards per query, never Theta(count).
 
-Contract (honest): the returned sequences are real model outputs and every reported ``log_prob`` is the
+Contract: the returned sequences are real model outputs and every reported ``log_prob`` is the
 **exact** model log-probability; only the *rank coordinate* is approximate. For a prefix-independent
 (iid-step) model the envelope equals the true per-step histogram and everything here is exact (tested).
 For a context-dependent model the envelope is an estimate averaged over typical (ancestrally sampled)
@@ -165,7 +165,7 @@ class AREnvelopeIndex:
         self._suffix = suffix
 
     def ensure_bits(self, depth_bits: float) -> AREnvelopeIndex:
-        """Deepen the suffix tables to cover ``depth_bits`` (geometric, cheap: L capped convolutions)."""
+        """Deepen the suffix tables to cover ``depth_bits`` (geometric, low-overhead: L capped convolutions)."""
         needed = max(1, int(math.ceil(float(depth_bits) * self.quantizer.fine_per_bit())))
         if needed > self._budget_fb:
             self._budget_fb = max(needed, self._budget_fb * 2)
@@ -470,6 +470,7 @@ class LatticeEnvelopeIndex:
         self._suffix = suffix
 
     def ensure_bits(self, depth_bits: float) -> LatticeEnvelopeIndex:
+        """Ensure suffix envelopes are deep enough for the requested bit depth."""
         needed = max(1, int(math.ceil(float(depth_bits) * self.quantizer.fine_per_bit())))
         if needed > self._budget_fb:
             self._budget_fb = max(needed, self._budget_fb * 2)
@@ -555,6 +556,7 @@ class LatticeEnvelopeIndex:
         return prefix, float(self.model.log_density(prefix))
 
     def threshold(self, rank: int) -> float:
+        """Return the log-density threshold at a one-based rank."""
         if rank < 1:
             raise ValueError("rank must be >= 1")
         _seq, lp = self.unrank(rank - 1)

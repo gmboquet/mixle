@@ -1,7 +1,7 @@
 """Variational Message Passing (VMP) engine for mixle.ppl.
 
-A real message-passing engine for conjugate-exponential (Gaussian-Gamma) models
-(Winn & Bishop, 2005): each unobserved node carries a variational factor q in an
+A message-passing engine for conjugate-exponential (Gaussian-Gamma) models
+(Winn & Bishop, 2005). Each unobserved node carries a variational factor q in an
 exponential family, holds its *natural parameters*, and exchanges messages with the
 factors it touches —
 
@@ -31,24 +31,32 @@ _LOG2PI = math.log(2.0 * math.pi)
 
 # ----------------------------------------------------------------- nodes & constants
 class MeanConst:
+    """Constant mean term used where the graph expects a Gaussian mean node."""
+
     def __init__(self, v):
         self.v = float(v)
 
     def ex(self):
+        """Return ``E[x]`` for the constant mean."""
         return self.v
 
     def ex2(self):
+        """Return ``E[x^2]`` for the constant mean."""
         return self.v * self.v
 
 
 class PrecConst:
+    """Constant precision term used where the graph expects a precision node."""
+
     def __init__(self, v):
         self.v = float(v)
 
     def et(self):
+        """Return ``E[tau]`` for the constant precision."""
         return self.v
 
     def elogt(self):
+        """Return ``E[log tau]`` for the constant precision."""
         return math.log(self.v)
 
 
@@ -66,12 +74,15 @@ class GaussianVNode:
         self.m, self.s2 = prior_mean.ex(), 1.0 / prior_prec.et()
 
     def ex(self):
+        """Return the variational expectation ``E[x]``."""
         return self.m
 
     def ex2(self):
+        """Return the second moment ``E[x^2]`` under ``q(x)``."""
         return self.m * self.m + self.s2
 
     def update(self):
+        """Apply one coordinate-ascent natural-parameter update."""
         pt = self.prior_prec.et()
         e1 = pt * self.prior_mean.ex()
         e2 = -0.5 * pt
@@ -83,9 +94,11 @@ class GaussianVNode:
         self.m = e1 * self.s2
 
     def entropy(self):
+        """Return the entropy of the Gaussian variational factor."""
         return 0.5 * (_LOG2PI + 1.0 + math.log(self.s2))
 
     def cross_prior(self):
+        """Return ``E_q[log p(x | parent)]`` for the Gaussian prior factor."""
         pm, pt = self.prior_mean, self.prior_prec
         e_sq = self.ex2() - 2.0 * pm.ex() * self.ex() + pm.ex2()
         return 0.5 * (pt.elogt() - _LOG2PI) - 0.5 * pt.et() * e_sq
@@ -102,19 +115,24 @@ class GammaVNode:
         self.inbox = []
 
     def et(self):
+        """Return the expected precision ``E[tau]``."""
         return self.a / self.b
 
     def elogt(self):
+        """Return the expected log precision ``E[log tau]``."""
         return digamma(self.a) - math.log(self.b)
 
     def update(self):
+        """Apply one coordinate-ascent update from accumulated messages."""
         self.a = self.a0 + sum(msg()[0] for msg in self.inbox)
         self.b = self.b0 + sum(msg()[1] for msg in self.inbox)
 
     def entropy(self):
+        """Return the entropy of the Gamma variational factor."""
         return self.a - math.log(self.b) + gammaln(self.a) + (1.0 - self.a) * digamma(self.a)
 
     def cross_prior(self):
+        """Return ``E_q[log p(tau)]`` under the Gamma prior."""
         return self.a0 * math.log(self.b0) - gammaln(self.a0) + (self.a0 - 1.0) * self.elogt() - self.b0 * self.et()
 
 
@@ -129,12 +147,15 @@ class DirichletVNode:
         self.inbox = []
 
     def expected(self):  # E[pi]
+        """Return the simplex mean ``E[pi]``."""
         return self.alpha / self.alpha.sum()
 
     def expected_log(self):  # E[log pi_k]
+        """Return the vector ``E[log pi_k]``."""
         return digamma(self.alpha) - digamma(self.alpha.sum())
 
     def update(self):
+        """Apply one coordinate-ascent update from categorical count messages."""
         total = self.alpha0.copy()
         for msg in self.inbox:
             total = total + msg()  # accumulate expected counts (sharing!)
@@ -144,10 +165,12 @@ class DirichletVNode:
         return float(np.sum(gammaln(a)) - gammaln(a.sum()))
 
     def entropy(self):
+        """Return the entropy of the Dirichlet variational factor."""
         a, a0, K = self.alpha, self.alpha.sum(), self.alpha.size
         return self._log_beta(a) + (a0 - K) * digamma(a0) - float(np.sum((a - 1.0) * digamma(a)))
 
     def cross_prior(self):
+        """Return ``E_q[log p(pi)]`` under the Dirichlet prior."""
         return -self._log_beta(self.alpha0) + float(np.sum((self.alpha0 - 1.0) * self.expected_log()))
 
 
@@ -191,6 +214,8 @@ class _GraphFactor:
 
 # --------------------------------------------------------------------------- results
 class GraphResult:
+    """Fitted VMP graph with posterior accessors for graph node handles."""
+
     def __init__(self, node_of, elbo_trace):
         self._node_of = node_of  # id(rv) -> node
         self.elbo = elbo_trace[-1]
@@ -204,6 +229,7 @@ class GraphResult:
         return n
 
     def posterior(self, rv):
+        """Return posterior parameters for a latent handle in the fitted graph."""
         n = self._node(rv)
         if isinstance(n, GaussianVNode):
             return {"mean": n.m, "sd": math.sqrt(n.s2)}
@@ -212,6 +238,7 @@ class GraphResult:
         return {"shape": n.a, "rate": n.b, "mean": n.et()}
 
     def samples(self, rv, n: int = 4000, rng=None):
+        """Draw samples from the variational factor attached to ``rv``."""
         rng = rng or np.random.RandomState()
         node = self._node(rv)
         if isinstance(node, GaussianVNode):
@@ -241,6 +268,7 @@ class Graph:
         self._nodes = {}  # id(rv) -> node
 
     def observe(self, model, data) -> Graph:
+        """Add an observed likelihood factor and return ``self`` for chaining."""
         self._obs.append((model, data))
         return self
 
@@ -294,6 +322,7 @@ class Graph:
         raise NotImplementedError(f"graph observations of family {fam} are not supported.")
 
     def fit(self, *, max_its: int = 300, tol: float = 1e-8) -> GraphResult:
+        """Run coordinate-ascent VMP and return the fitted graph result."""
         factors = [self._make_factor(model, data) for model, data in self._obs]
         for f in factors:
             f.wire()
@@ -338,9 +367,11 @@ class _VMPFit:
         self.predictive = None
 
     def posterior(self, handle):
+        """Return posterior parameters for a latent handle in the wrapped graph."""
         return self._g.posterior(handle)
 
     def samples(self, param=None, n: int = 4000, rng=None):
+        """Draw samples for the named mean, precision, standard deviation, or raw handle."""
         rng = rng or np.random.RandomState()
         if param in ("mu", "mean", 0) and self._mean is not None:
             return rng.normal(self._mean.m, math.sqrt(self._mean.s2), n)
@@ -351,6 +382,7 @@ class _VMPFit:
         return self._g.samples(param, n=n, rng=rng)  # any node handle
 
     def summary(self) -> dict:
+        """Return mean, precision, ELBO, and iteration metadata for the fit."""
         return {"q_mu": self.q_mu, "q_tau": self.q_tau, "elbo": self.elbo, "iterations": int(self.elbo_trace.size)}
 
 
@@ -424,6 +456,8 @@ def _kmeanspp(x, k, rng):
 
 
 class MixtureVMPResult:
+    """Variational result for a scalar Gaussian mixture with discrete responsibilities."""
+
     def __init__(self, weights, comps, responsibilities, elbo_trace, normalizer_trace):
         self.weights = np.asarray(weights)  # E[pi]
         self.components = comps  # [{'mean','sd'}, ...]
@@ -436,6 +470,7 @@ class MixtureVMPResult:
         self.predictive = None
 
     def summary(self):
+        """Return mixture weights, component summaries, and objective metadata."""
         return {
             "weights": self.weights,
             "components": self.components,

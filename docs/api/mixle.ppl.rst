@@ -4,7 +4,6 @@ mixle.ppl package
 .. automodule:: mixle.ppl
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------
@@ -12,6 +11,9 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.ppl._grid
+   mixle.ppl._lowering
+   mixle.ppl._result
    mixle.ppl.autograd
    mixle.ppl.conformal
    mixle.ppl.core

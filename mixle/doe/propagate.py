@@ -3,7 +3,7 @@
 Given input uncertainty (a Gaussian or a sampler) and a model ``f``, report the induced uncertainty on
 the output -- mean, standard deviation, and quantiles. Monte Carlo is general; the unscented transform
 propagates the first two moments with ``2d+1`` deterministic sigma points (exact for a linear model, a
-good cheap approximation for mild nonlinearity). The back half of the UQ loop, after sensitivity.
+useful low-cost approximation for mild nonlinearity). The back half of the UQ loop, after sensitivity.
 """
 
 from __future__ import annotations

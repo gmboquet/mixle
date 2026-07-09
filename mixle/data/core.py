@@ -59,6 +59,7 @@ class MaterializedSource:
         self.schema = schema
 
     def records(self) -> Iterable[Any]:
+        """Return an iterator over the in-memory records without copying the underlying sequence."""
         return iter(self._data)
 
     def __len__(self) -> int:
@@ -76,6 +77,7 @@ class MaterializedSource:
         ]
 
     def encode(self, encoder: Any, num_chunks: int = 1, chunk_size: int | None = None) -> list[tuple[int, Any]]:
+        """Encode the materialized records through structure-aware partitioning."""
         return encode_partitions(self.materialize(), encoder, self.structure, num_chunks, chunk_size)
 
 
@@ -100,21 +102,25 @@ class LazySource:
         self._cache: list[Any] | None = None
 
     def materialize(self) -> list[Any]:
+        """Read records from the factory once, apply the schema if present, and cache the list."""
         if self._cache is None:
             records = list(self._factory())
             self._cache = self.schema.conform(records) if self.schema is not None else records
         return self._cache
 
     def records(self) -> Iterable[Any]:
+        """Return an iterator over the cached materialized records."""
         return iter(self.materialize())
 
     def __len__(self) -> int:
         return self._length if self._length is not None else len(self.materialize())
 
     def partition(self, n: int, *, by: Any = None) -> list[MaterializedSource]:
+        """Materialize and split into ``n`` structure-aware in-memory sources."""
         return MaterializedSource(self.materialize(), self.structure, self.schema).partition(n, by=by)
 
     def encode(self, encoder: Any, num_chunks: int = 1, chunk_size: int | None = None) -> list[tuple[int, Any]]:
+        """Materialize records and encode them through structure-aware partitioning."""
         return encode_partitions(self.materialize(), encoder, self.structure, num_chunks, chunk_size)
 
 

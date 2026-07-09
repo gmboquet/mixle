@@ -1,4 +1,8 @@
-"""Floating-point precision helpers for compute engines."""
+"""Floating-point precision normalization helpers for compute engines.
+
+The functions convert user-facing precision names into NumPy or Torch dtypes and
+reject storage-only quantization formats that are not valid compute precisions.
+"""
 
 from __future__ import annotations
 
@@ -25,10 +29,10 @@ _ALIASES = {
 }
 
 
-# Real quantization / sub-byte format names that are NOT a supported COMPUTE precision on the
-# NumPy/numba path: numba cannot compile below float32 and sub-byte formats have no native CPU
-# arithmetic, so they would need packed storage + GPU dequant kernels (see the quantization design).
-# We reject them with an actionable message instead of a cryptic ``np.dtype`` TypeError.
+# Quantization and sub-byte format names that are not supported compute precisions on the
+# NumPy/numba path. Numba cannot compile below float32 and sub-byte formats have no native CPU
+# arithmetic, so they require packed storage plus specialized dequantization kernels.
+# Reject them with an actionable message instead of a cryptic ``np.dtype`` TypeError.
 _UNSUPPORTED_LOW_PRECISION = frozenset(
     {
         "fp8", "float8", "e4m3", "e5m2",

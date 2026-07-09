@@ -61,6 +61,7 @@ class Hypergraph:
         self.hyperedges = [(label, tuple(att)) for label, att in hyperedges]
 
     def copy(self):
+        """Return a structural copy of the terminal graph and nonterminal hyperedges."""
         return Hypergraph(self.graph.copy(), list(self.hyperedges))
 
 
@@ -82,6 +83,7 @@ class HyperedgeReplacementRule:
 
     @property
     def rank(self) -> int:
+        """Return the arity of the left-hand-side nonterminal hyperedge."""
         return len(self.external)
 
     def __pysp_getstate__(self):
@@ -122,10 +124,12 @@ class HyperedgeReplacementGrammar:
         self.rule_list = []
 
     def add_rule(self, rule: HyperedgeReplacementRule) -> None:
+        """Add a production rule and refresh the flattened rule list."""
         self.rule_dict.setdefault(rule.lhs, []).append(rule)
         self.refresh_rules()
 
     def refresh_rules(self) -> None:
+        """Rebuild the flattened rule list and cached rule count."""
         self.rule_list = [rule for rules in self.rule_dict.values() for rule in rules]
         self.num_rules = len(self.rule_list)
 
@@ -410,9 +414,11 @@ class HyperedgeReplacementGrammarDistribution(SequenceEncodableProbabilityDistri
         return max(self.grammar.rule_dict, key=lambda s: sum(r.frequency for r in self.grammar.rule_dict[s]))
 
     def density_semantics(self):
+        """Return that graph densities are lower bounds when parsing is budget-truncated."""
         return DensitySemantics.LOWER_BOUND  # exact unless the parse budget truncates; see log_density(with_status)
 
     def density(self, x):
+        """Return the marginal probability of a graph under the grammar."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x, with_status=False):
@@ -423,23 +429,28 @@ class HyperedgeReplacementGrammarDistribution(SequenceEncodableProbabilityDistri
         return marginal_log_prob(x, self.grammar, start, with_status=with_status)
 
     def seq_encode(self, x):
+        """Return graph observations unchanged for sequence scoring."""
         return x
 
     def seq_log_density(self, x, with_status=False):
+        """Return vectorized graph log-likelihoods, optionally with exactness flags."""
         if not with_status:
             return np.asarray([self.log_density(xx) for xx in x])
         pairs = [self.log_density(xx, with_status=True) for xx in x]
         return np.asarray([v for v, _ in pairs]), np.asarray([e for _, e in pairs], dtype=bool)
 
     def sampler(self, seed=None):
+        """Return a derivation sampler for this grammar distribution."""
         return HyperedgeReplacementGrammarSampler(self.grammar, self.start_symbol, self.orig_n, seed)
 
     def estimator(self, pseudo_count=None):
+        """Return a Viterbi parse-count estimator for this grammar's rule frequencies."""
         return HyperedgeReplacementGrammarEstimator(
             grammar=self.grammar, start_symbol=self.start_symbol, pseudo_count=pseudo_count, name=self.name
         )
 
     def dist_to_encoder(self):
+        """Return the identity graph encoder used by vectorized methods."""
         return HyperedgeReplacementGrammarDataEncoder()
 
 
@@ -464,6 +475,7 @@ class HyperedgeReplacementGrammarSampler(DistributionSampler):
         return generate_graph(self.grammar, self.start_symbol, target_n=self.orig_n, rng=self.rng)
 
     def sample(self, size=None, *, batched=True):
+        """Draw one graph or a list of graphs by HRG derivation."""
         if size is None:
             return self._one()
         return [self._one() for _ in range(int(size))]
@@ -489,6 +501,7 @@ class HyperedgeReplacementGrammarAccumulator(SequenceEncodableStatisticAccumulat
         return self.structure, start
 
     def update(self, x, weight, estimate):
+        """Update Viterbi rule counts from one observed graph."""
         model_grammar, start = self._parse_model(estimate)
         if model_grammar is None or start is None:
             return
@@ -504,17 +517,21 @@ class HyperedgeReplacementGrammarAccumulator(SequenceEncodableStatisticAccumulat
         self.counts.refresh_rules()
 
     def initialize(self, x, weight, rng):
+        """Initialize rule counts from one observed graph."""
         self.update(x, weight, None)
 
     def seq_initialize(self, x, weights, rng):
+        """Initialize rule counts from a batch of observed graphs."""
         for i in range(len(x)):
             self.initialize(x[i], weights[i], rng)
 
     def seq_update(self, x, weights, estimate):
+        """Update Viterbi rule counts from a batch of observed graphs."""
         for i in range(len(x)):
             self.update(x[i], weights[i], estimate)
 
     def combine(self, suff_stat):
+        """Merge rule-frequency counts from another grammar accumulator value."""
         if suff_stat is None:
             return self
         if self.counts is None:
@@ -526,13 +543,16 @@ class HyperedgeReplacementGrammarAccumulator(SequenceEncodableStatisticAccumulat
         return self
 
     def value(self):
+        """Return the grammar-shaped rule-count accumulator."""
         return self.counts
 
     def from_value(self, x):
+        """Restore grammar-shaped rule counts from ``value`` output."""
         self.counts = x
         return self
 
     def key_merge(self, stats_dict):
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -540,10 +560,12 @@ class HyperedgeReplacementGrammarAccumulator(SequenceEncodableStatisticAccumulat
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict):
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self):
+        """Return the graph encoder compatible with this accumulator."""
         return HyperedgeReplacementGrammarDataEncoder()
 
 
@@ -556,6 +578,7 @@ class HyperedgeReplacementGrammarAccumulatorFactory(StatisticAccumulatorFactory)
         self.keys = keys
 
     def make(self):
+        """Create an empty HRG rule-count accumulator."""
         return HyperedgeReplacementGrammarAccumulator(
             grammar=self.grammar, start_symbol=self.start_symbol, keys=self.keys
         )
@@ -573,11 +596,13 @@ class HyperedgeReplacementGrammarEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self):
+        """Return a factory for HRG Viterbi rule-count accumulators."""
         return HyperedgeReplacementGrammarAccumulatorFactory(
             grammar=self.grammar, start_symbol=self.start_symbol, keys=self.keys
         )
 
     def estimate(self, nobs, suff_stat):
+        """Estimate rule frequencies from accumulated Viterbi parse counts."""
         grammar = suff_stat if suff_stat is not None else self.grammar
         if grammar is None:
             raise ValueError("HyperedgeReplacementGrammarEstimator needs a rule structure (grammar=...).")
@@ -598,4 +623,5 @@ class HyperedgeReplacementGrammarDataEncoder(DataSequenceEncoder):
         return isinstance(other, HyperedgeReplacementGrammarDataEncoder)
 
     def seq_encode(self, x):
+        """Return graph observations unchanged."""
         return x

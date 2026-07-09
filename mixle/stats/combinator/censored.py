@@ -180,10 +180,12 @@ class CensoredAccumulator(SingleChildAccumulator):
         self.keys = keys
 
     def update(self, x: Any, weight: float, estimate: CensoredDistribution | None) -> None:
+        """Accumulate one exact observation and ignore interval-censored observations."""
         if not _is_interval(x):
             self.base_accumulator.update(x, weight, None if estimate is None else estimate.base)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize from one exact observation and ignore censoring intervals."""
         if not _is_interval(x):
             self.base_accumulator.initialize(x, weight, rng)
 
@@ -193,6 +195,7 @@ class CensoredAccumulator(SingleChildAccumulator):
         weights: np.ndarray,
         estimate: CensoredDistribution | None,
     ) -> None:
+        """Accumulate exact rows from an encoded censored batch."""
         exact_enc, exact_idx, _lows, _highs, _cens_idx = x
         if len(exact_idx) > 0:
             w = np.asarray(weights, dtype=np.float64)[exact_idx]
@@ -204,12 +207,14 @@ class CensoredAccumulator(SingleChildAccumulator):
         weights: np.ndarray,
         rng: RandomState | None,
     ) -> None:
+        """Initialize from exact rows in an encoded censored batch."""
         exact_enc, exact_idx, _lows, _highs, _cens_idx = x
         if len(exact_idx) > 0:
             w = np.asarray(weights, dtype=np.float64)[exact_idx]
             self.base_accumulator.seq_initialize(exact_enc, w, rng)
 
     def acc_to_encoder(self) -> "DataSequenceEncoder":
+        """Return an encoder that separates exact observations from intervals."""
         return CensoredDataEncoder.from_base_encoder(self.base_accumulator.acc_to_encoder())
 
 
@@ -221,6 +226,7 @@ class CensoredAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> CensoredAccumulator:
+        """Create an empty censored-data accumulator."""
         return CensoredAccumulator(self.base_factory.make(), keys=self.keys)
 
 
@@ -238,9 +244,11 @@ class CensoredEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> CensoredAccumulatorFactory:
+        """Return a factory for censored-data sufficient-statistic accumulators."""
         return CensoredAccumulatorFactory(self.base_estimator.accumulator_factory(), keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> CensoredDistribution:
+        """Estimate the base distribution from exact-observation statistics."""
         base = self.base_estimator.estimate(nobs, suff_stat)
         return CensoredDistribution(base, name=self.name, keys=self.keys)
 
@@ -265,9 +273,11 @@ class CensoredDataEncoder(MaskedBaseEncoder):
 
     @classmethod
     def from_base_encoder(cls, base_encoder: DataSequenceEncoder) -> "CensoredDataEncoder":
+        """Create a censored encoder from an already configured base encoder."""
         return cls(base_encoder=base_encoder)
 
     def seq_encode(self, x: Sequence[Any]) -> tuple[Any, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Encode a batch into exact values, interval bounds, and row indices."""
         exact_vals: list[Any] = []
         exact_idx: list[int] = []
         lows: list[float] = []

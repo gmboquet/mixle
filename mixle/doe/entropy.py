@@ -3,7 +3,7 @@
 The improvement-based acquisitions (EI/PI/UCB) score a candidate by how much it might beat the current
 best. MES (Wang & Jegelka 2017) instead scores a candidate by how much evaluating it would reduce the
 *entropy of the global optimum value* ``y* = max f`` -- the mutual information ``I(y; y* | x)``. It is
-often more sample-efficient and is cheap: with a GP, ``I(y; y*|x)`` has a closed form per sampled
+often more sample-efficient and low-overhead: with a GP, ``I(y; y*|x)`` has a closed form per sampled
 ``y*`` (a truncated-Gaussian entropy), and plausible ``y*`` are drawn by fitting a Gumbel to the
 distribution of the maximum over a candidate set.
 

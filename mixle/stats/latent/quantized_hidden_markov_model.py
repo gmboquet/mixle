@@ -1,7 +1,4 @@
-"""Create, estimate, and sample from a quantized hidden Markov model.
-
-Defines the QuantizedHiddenMarkovModelDistribution and QuantizedHiddenMarkovEstimator classes for
-use with mixle.
+"""Quantized hidden Markov models with shared-base probability exponents.
 
 Data type: Sequence[T] where T is a categorical emission value drawn from a finite set of levels.
 
@@ -386,6 +383,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
     """Hidden Markov model distribution with quantized observation summaries."""
 
     def compute_declaration(self):
+        """Return the generated-compute declaration for the quantized HMM."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ParameterSpec,
@@ -459,7 +457,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
                 through estimator().
             len_dist (Optional[SequenceEncodableProbabilityDistribution]): Distribution with support
                 on non-negative integers for the sequence lengths.
-            name (Optional[str]): Set name to object instance.
+            name (Optional[str]): Optional distribution name.
             terminal_values (Optional[set]): Define terminating emission outputs of the HMM.
             use_numba (bool): If True, use numba package for encoding and vectorized operations.
 
@@ -536,7 +534,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
         )
 
     def __str__(self) -> str:
-        """Returns string representation of QuantizedHiddenMarkovModelDistribution instance."""
+        """Return a constructor-style representation of the distribution."""
         s_init = repr(None if self.initial_exponents is None else [int(u) for u in self.initial_exponents])
 
         return (
@@ -603,7 +601,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
         return super().to_fisher(**kwargs)
 
     def estimator(self, pseudo_count: float | None = None) -> "QuantizedHiddenMarkovEstimator":
-        """Create QuantizedHiddenMarkovEstimator matching this distribution's configuration.
+        """Return an estimator matching this quantized HMM configuration.
 
         Args:
             pseudo_count (Optional[float]): Per-cell pseudo count for the initial, transition, and
@@ -629,7 +627,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
         )
 
     def enumerator(self):
-        """Returns an exact descending-probability enumerator over observation sequences.
+        """Return an exact descending-probability enumerator over observation sequences.
 
         For the ordinary (length-distribution) case this is the quantized-HMM-specialized enumerator,
         which avoids constructing per-state categorical streams and uses the cached quantized emission
@@ -672,7 +670,7 @@ class QuantizedHiddenMarkovModelEnumerator(DistributionEnumerator):
     """Exact best-first enumerator specialized for QuantizedHiddenMarkovModelDistribution."""
 
     def __init__(self, dist: QuantizedHiddenMarkovModelDistribution) -> None:
-        """QuantizedHiddenMarkovModelEnumerator object.
+        """Create an enumerator for quantized HMM paths.
 
         Args:
             dist (QuantizedHiddenMarkovModelDistribution): Distribution whose support is enumerated.
@@ -769,6 +767,8 @@ class QuantizedHiddenMarkovModelEnumerator(DistributionEnumerator):
 
 
 class QuantizedHiddenMarkovEstimator(ParameterEstimator):
+    """Estimate quantized hidden Markov models from accumulated sufficient statistics."""
+
     def __init__(
         self,
         num_states: int,
@@ -810,7 +810,7 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
                 transition matrix).
             len_estimator (Optional[ParameterEstimator]): Optional ParameterEstimator for the
                 sequence length distribution.
-            name (Optional[str]): Set name to object instance.
+            name (Optional[str]): Optional name assigned to estimated distributions.
             keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Set keys for
                 initial states, transition counts, and emission accumulators.
             use_numba (Optional[bool]): If True, Numba is used for sequence encoding and vectorized functions. If
@@ -834,7 +834,7 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
             fixed_theta (Optional[float]): Fixed shared base, or None to optimize it.
             init_mode (str): Initial-state parameterization mode.
             len_estimator (ParameterEstimator): ParameterEstimator for the length distribution.
-            name (Optional[str]): Name for object instance.
+            name (Optional[str]): Optional name assigned to estimated distributions.
             keys (Tuple[Optional[str], Optional[str], Optional[str]]): Keys for initial states,
                 transition counts, and emission accumulators.
             use_numba (bool): If True, Numba is used for sequence encoding.
@@ -954,5 +954,5 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
         )
 
 
-# --- API naming aliases (notes/distribution_api_naming_accounting.md) ---
+# --- Backward-compatible API naming aliases ---
 QuantizedHiddenMarkovModelEstimator = QuantizedHiddenMarkovEstimator

@@ -1,4 +1,4 @@
-"""Create, estimate, and sample from a Rayleigh distribution.
+"""Rayleigh distributions over non-negative real values.
 
 Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
@@ -25,12 +25,14 @@ class RayleighDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated Rayleigh kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the structured compute declaration for Rayleigh distributions."""
         from mixle.stats.compute.declarations import (
             DistributionDeclaration,
             ExponentialFamilySpec,
@@ -210,6 +212,7 @@ class RayleighSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> float | np.ndarray:
+        """Draw one sample or an array of iid samples."""
         return self.rng.rayleigh(scale=self.dist.sigma, size=size)
 
 
@@ -223,12 +226,14 @@ class RayleighAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: RayleighDistribution | None) -> None:
+        """Accumulate weighted squared observations for one sample."""
         if x < 0.0:
             raise ValueError("RayleighDistribution requires observations x >= 0.")
         self.count += weight
         self.sum2 += x * x * weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(
@@ -237,28 +242,34 @@ class RayleighAccumulator(SequenceEncodableStatisticAccumulator):
         weights: np.ndarray,
         estimate: RayleighDistribution | None,
     ) -> None:
+        """Accumulate weighted squared observations from encoded data."""
         self.count += np.sum(weights, dtype=np.float64)
         self.sum2 += np.dot(x[1], weights)
 
     def seq_initialize(
         self, x: tuple[np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None
     ) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float]) -> "RayleighAccumulator":
+        """Merge another Rayleigh sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.sum2 += suff_stat[1]
         return self
 
     def value(self) -> tuple[float, float]:
+        """Return accumulated count and squared-observation sum."""
         return self.count, self.sum2
 
     def from_value(self, x: tuple[float, float]) -> "RayleighAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.count = x[0]
         self.sum2 = x[1]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -266,10 +277,12 @@ class RayleighAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "RayleighDataEncoder":
+        """Return the encoder used by this accumulator."""
         return RayleighDataEncoder()
 
 
@@ -281,6 +294,7 @@ class RayleighAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> RayleighAccumulator:
+        """Create a fresh Rayleigh accumulator."""
         return RayleighAccumulator(name=self.name, keys=self.keys)
 
 
@@ -302,9 +316,11 @@ class RayleighEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> RayleighAccumulatorFactory:
+        """Return an accumulator factory for Rayleigh sufficient statistics."""
         return RayleighAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> RayleighDistribution:
+        """Estimate the Rayleigh scale from weighted squared observations."""
         count, sum2 = suff_stat
         if self.pseudo_count is not None and self.suff_stat is not None:
             sum2 += self.pseudo_count * 2.0 * self.suff_stat * self.suff_stat
@@ -323,6 +339,7 @@ class RayleighDataEncoder(DataSequenceEncoder):
         return isinstance(other, RayleighDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Encode observations as values, squared values, and log-values."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and (np.any(rv < 0.0) or np.any(np.isnan(rv))):
             raise ValueError("RayleighDistribution requires observations x >= 0.")

@@ -1,8 +1,8 @@
-"""Real-teacher distillation smoke test: guard against a distiller that learns NOTHING.
+"""Real-teacher distillation smoke test: guard against a distiller that fails to learn.
 
 Most task tests use synthetic RNG teachers whose rule is trivially recoverable, so a broken distiller that
 just predicted the majority class could still pass. This test distills a teacher whose decision boundary a
-no-op student CANNOT fake, and asserts the student's held-out agreement clears a bar well above the
+no-op student cannot imitate, and asserts the student's held-out agreement clears a bar well above the
 majority-class baseline -- so a distiller that failed to learn fails the test.
 
 Primary path: a REAL sklearn ``LogisticRegression`` teacher over TF-IDF on the (offline-cached) 20-newsgroups

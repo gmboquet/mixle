@@ -4,7 +4,6 @@ mixle.analysis package
 .. automodule:: mixle.analysis
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

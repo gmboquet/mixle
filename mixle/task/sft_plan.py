@@ -70,7 +70,7 @@ def _parse_plan(text: str) -> list[dict] | None:
 
 
 class _CharCodec:
-    """A tiny char-level codec (pad=0, unk=1) built from the training corpus."""
+    """A compact char-level codec (pad=0, unk=1) built from the training corpus."""
 
     def __init__(self, corpus: Sequence[str]) -> None:
         chars = sorted(set("".join(corpus)) | {_EOS})
@@ -169,6 +169,7 @@ class GenerativePlanner:
         return {"plan": [dict(p) for p in want], "escalate": True}
 
     def report(self) -> dict[str, Any]:
+        """Return plan agreement, escalation, and harvested-trace metrics."""
         return {
             "plan_agreement": round(self.plan_agreement, 4),
             "requests": self.n_requests,
@@ -339,8 +340,8 @@ def score_plan(planner: GenerativePlanner, request: str, plan: Sequence[dict]) -
     confidence metric :func:`~mixle.task.constrained.constrained_plan_decode` computes for its own
     greedy path, generalized to any plan text. Higher (less negative) is more probable; a plan scoring
     below the planner's calibrated ``conf_floor`` is exactly the "low-probability plan" escalation
-    signal the workstream-C decomposition-as-a-modeled-object plan calls for -- computed explicitly
-    here rather than left implicit in the decode loop.
+    signal used by plan-quality checks, computed explicitly here rather than left implicit in the
+    decode loop.
     """
     import torch
 

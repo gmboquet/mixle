@@ -1,4 +1,9 @@
-"""Fixed point-mass distribution."""
+"""Fixed point-mass distribution and estimator support.
+
+This module implements a sequence-encodable Dirac distribution, including
+sampling, encoding, enumeration, backend scoring, and the estimator hooks needed
+for mixture and combinator use.
+"""
 
 from collections.abc import Sequence
 from typing import Any
@@ -35,12 +40,14 @@ class PointMassDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare generic NumPy/Torch scoring support for fixed atoms."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic")
 
     @classmethod
     def compute_declaration(cls):
+        """Return the declaration for a fixed non-estimated atom."""
         from mixle.stats.compute.declarations import DistributionDeclaration, ParameterSpec
 
         return DistributionDeclaration(
@@ -150,6 +157,7 @@ class PointMassSampler(DistributionSampler):
         self.dist = dist
 
     def sample(self, size: int | None = None) -> Any | Sequence[Any]:
+        """Return the fixed atom once or repeated ``size`` times."""
         if size is None:
             return self.dist.value
         return [self.dist.value for _ in range(int(size))]
@@ -163,40 +171,51 @@ class PointMassAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: Any, weight: float, estimate: PointMassDistribution | None) -> None:
+        """Ignore one observation because the atom is fixed."""
         pass
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: PointMassDistribution | None) -> None:
+        """Ignore encoded observations because the atom is fixed."""
         pass
 
     def seq_update_engine(
         self, x: np.ndarray, weights: Any, estimate: PointMassDistribution | None, engine: Any
     ) -> None:
+        """Ignore engine-resident observations because the atom is fixed."""
         # PointMass carries no free parameters: accumulation is a no-op on every engine.
         pass
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Ignore initialization observations because the atom is fixed."""
         pass
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Ignore encoded initialization observations because the atom is fixed."""
         pass
 
     def combine(self, suff_stat: Any) -> "PointMassAccumulator":
+        """Return this accumulator because fixed atoms have no sufficient statistics."""
         return self
 
     def value(self) -> None:
+        """Return ``None`` because fixed atoms have no sufficient statistics."""
         return None
 
     def from_value(self, x: Any) -> "PointMassAccumulator":
+        """Return this accumulator because there is no state to restore."""
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Register the key with empty statistics when configured."""
         if self.keys is not None and self.keys not in stats_dict:
             stats_dict[self.keys] = None
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Ignore keyed replacements because there is no accumulator state."""
         pass
 
     def acc_to_encoder(self) -> "PointMassDataEncoder":
+        """Return the equality-mask encoder for this atom."""
         return PointMassDataEncoder(self.atom)
 
 
@@ -208,6 +227,7 @@ class PointMassAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> PointMassAccumulator:
+        """Create an empty point-mass accumulator."""
         return PointMassAccumulator(self.value, keys=self.keys)
 
 
@@ -229,9 +249,11 @@ class PointMassEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> PointMassAccumulatorFactory:
+        """Return a factory for point-mass no-op accumulators."""
         return PointMassAccumulatorFactory(self.value, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: Any | None = None) -> PointMassDistribution:
+        """Return the configured point mass unchanged."""
         return PointMassDistribution(self.value, name=self.name, keys=self.keys)
 
 
@@ -248,4 +270,5 @@ class PointMassDataEncoder(DataSequenceEncoder):
         return isinstance(other, PointMassDataEncoder) and _same_value(other.value, self.value)
 
     def seq_encode(self, x: Sequence[Any]) -> np.ndarray:
+        """Encode observations as booleans indicating equality with the fixed atom."""
         return np.asarray([_same_value(v, self.value) for v in x], dtype=bool)

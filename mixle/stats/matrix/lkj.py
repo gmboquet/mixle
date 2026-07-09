@@ -136,6 +136,7 @@ class LKJSampler(DistributionSampler):
         return corr
 
     def sample(self, size: int | None = None) -> Any:
+        """Draw one correlation matrix or a list of independent correlation matrices."""
         if size is None:
             return self._batch(1)[0]
         return list(self._batch(int(size)))
@@ -151,35 +152,43 @@ class LKJAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: Any, weight: float, estimate: LKJDistribution | None) -> None:
+        """Accumulate the weighted log determinant for one correlation matrix."""
         sign, logdet = np.linalg.slogdet(np.asarray(x, dtype=np.float64))
         self.count += weight
         self.sum_log_det += weight * float(logdet)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics with one weighted matrix."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
+        """Accumulate weighted log determinants from encoded matrices."""
         log_det = np.asarray(x, dtype=np.float64)
         w = np.asarray(weights, dtype=np.float64)
         self.count += float(w.sum())
         self.sum_log_det += float(np.dot(w, log_det))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics from encoded log determinants."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float]) -> "LKJAccumulator":
+        """Merge serialized LKJ sufficient statistics into this accumulator."""
         self.count += suff_stat[0]
         self.sum_log_det += suff_stat[1]
         return self
 
     def value(self) -> tuple[float, float]:
+        """Return the total weight and weighted sum of log determinants."""
         return self.count, self.sum_log_det
 
     def from_value(self, x: tuple[float, float]) -> "LKJAccumulator":
+        """Restore the accumulator from serialized LKJ sufficient statistics."""
         self.count, self.sum_log_det = float(x[0]), float(x[1])
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into a keyed statistics dictionary."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -187,10 +196,12 @@ class LKJAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from a keyed statistics dictionary."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "LKJDataEncoder":
+        """Return an encoder that reduces correlation matrices to log determinants."""
         return LKJDataEncoder()
 
 
@@ -202,6 +213,7 @@ class LKJAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> LKJAccumulator:
+        """Create an empty LKJ accumulator."""
         return LKJAccumulator(name=self.name, keys=self.keys)
 
 
@@ -221,9 +233,11 @@ class LKJEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> LKJAccumulatorFactory:
+        """Return a factory for LKJ sufficient-statistic accumulators."""
         return LKJAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> LKJDistribution:
+        """Estimate the LKJ concentration from the mean log determinant."""
         from scipy.optimize import brentq
         from scipy.special import digamma
 
@@ -260,5 +274,6 @@ class LKJDataEncoder(DataSequenceEncoder):
         return isinstance(other, LKJDataEncoder)
 
     def seq_encode(self, x: Sequence[Any]) -> np.ndarray:
+        """Encode correlation matrices as their log determinants."""
         # batched slogdet over a stacked (n, d, d) array -- ~7x faster than a per-matrix Python loop
         return np.asarray(np.linalg.slogdet(np.asarray(x, dtype=np.float64))[1], dtype=np.float64)

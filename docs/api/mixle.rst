@@ -4,7 +4,6 @@ mixle package
 .. automodule:: mixle
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Subpackages
 -----------
@@ -40,9 +39,15 @@ Submodules
    mixle.capability
    mixle.contracts
    mixle.dist
+   mixle.fault
    mixle.lifecycle
+   mixle.meta
    mixle.ops
    mixle.process
    mixle.program
+   mixle.registry
    mixle.relations
    mixle.scientist
+   mixle.scorecard
+   mixle.spend
+   mixle.system

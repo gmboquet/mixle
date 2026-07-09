@@ -4,7 +4,7 @@ Exact GP regression costs O(n^3) in the number of training points, which caps th
 for continental grids or large survey sets. This fits a sparse GP with ``m << n`` inducing points via the
 Fully Independent Training Conditional (FITC) approximation (Snelson & Ghahramani, 2006), costing
 O(n m^2 + m^3) -- linear in ``n``. As ``m -> n`` (and the inducing points cover the data) it recovers the
-exact GP. Part of the earth-science/multiphysics/UQ plan (Phase 3, scalable inference).
+exact GP.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ class SparseGaussianProcessRegressor:
         self.Z = None
 
     def _place_inducing(self, x, rng):
-        """Pick inducing inputs: a random subset (cheap, effective) of the unique training inputs."""
+        """Pick inducing inputs as a random subset of the unique training inputs."""
         x = np.atleast_2d(x)
         m = min(self.n_inducing, x.shape[0])
         idx = rng.choice(x.shape[0], size=m, replace=False)

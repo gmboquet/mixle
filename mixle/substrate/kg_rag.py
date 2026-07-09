@@ -4,7 +4,7 @@ Text retrieval finds passages; a knowledge graph answers with *facts*. :func:`li
 entity-linking leaf: it maps a question's tokens onto the KG's entity inventory (longest-name-first, so
 "new york city" links before "york"). :func:`retrieve_triples` returns the facts about the linked
 entities -- filtered through an :class:`~mixle.reason.ontology.Ontology` when one is given, so a
-schema-violating triple in a dirty store is never served as evidence. :func:`kg_action` packages that as
+schema-violating triple in an unvalidated store is never served as evidence. :func:`kg_action` packages that as
 a reasoner :class:`~mixle.substrate.act.Action`, so ``investigate()`` / the :class:`Reasoner` can buy
 *typed* evidence: the fragment for ``(ada, lives_in, paris)`` reads ``ada lives_in paris``, citable and
 checkable against the graph rather than parsed back out of prose.
@@ -54,7 +54,7 @@ def retrieve_triples(
 
     Returns ``{entities, facts, rejected}`` -- ``facts`` are the triples touching a linked entity (head
     or tail), at most ``k``; when an ``ontology`` (+ entity ``types``) is supplied, schema-violating
-    triples are excluded and reported under ``rejected`` with named reasons, so a dirty store cannot
+    triples are excluded and reported under ``rejected`` with named reasons, so an unvalidated store cannot
     inject a type-invalid fact as evidence."""
     triple_list = [tuple(t) for t in triples]
     inventory = {t[0] for t in triple_list} | {t[2] for t in triple_list}

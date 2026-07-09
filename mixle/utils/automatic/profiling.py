@@ -118,6 +118,7 @@ class MarginalFieldProfile:
         return _bic_weights(self.model_scores_bits, self.observed_count)
 
     def summary(self) -> dict[str, Any]:
+        """Return a JSON-serializable summary of the marginal field evidence."""
         return {
             "path": format_path(self.path),
             "role": self.role,
@@ -172,6 +173,7 @@ class PairwiseDependencyHint:
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
+        """Return a JSON-serializable summary of the dependency hint."""
         return {
             "left": format_path(self.left),
             "right": format_path(self.right),
@@ -208,9 +210,11 @@ class StructureProfile:
     pairwise_pair_strategy: str = "none"
 
     def recommend(self) -> ParameterEstimator:
+        """Return the estimator selected by the structure-analysis pass."""
         return self.estimator
 
     def summary(self) -> dict[str, Any]:
+        """Return a JSON-serializable summary of the structure profile."""
         return {
             "total_rows": self.total_rows,
             "sampled_rows": self.sampled_rows,
@@ -229,6 +233,7 @@ class StructureProfile:
         }
 
     def explain(self) -> list[str]:
+        """Render human-readable explanation lines for field and dependency choices."""
         lines = []
         for field_profile in self.fields:
             bits = "" if field_profile.bits_per_obs is None else " (~%.3f bits/obs)" % field_profile.bits_per_obs
@@ -290,6 +295,7 @@ class StructureProfile:
 
 
 def format_path(path: tuple[Any, ...]) -> str:
+    """Format a tuple path as a compact JSONPath-like field reference."""
     if len(path) == 0:
         return "$"
     rv = "$"
@@ -1462,11 +1468,11 @@ def analyze_structure(
 
     Integer marginals are compared by BIC-style average code length. Pairwise
     hints report plug-in MI, finite-sample adjusted MI, and BIC edge gain.
-    Pairwise hints are deliberately unconditional and encoded through cheap
+    Pairwise hints are deliberately unconditional and encoded through low-overhead
     empirical/quantile codes. They are useful evidence, not proof of topology:
     latent classes or states can explain the same bit gains.
     Marginal validation is a bounded deterministic train/validation split over
-    scalar fields, meant as a cheap predictive sanity check on the BIC choice.
+    scalar fields, meant as a low-overhead predictive sanity check on the BIC choice.
     """
     rows = list(normalize_input(data))  # accept a DataFrame / RDD / DataSource, not only a bare list
     total_rows = len(rows)
@@ -1677,10 +1683,12 @@ class DatumNode:
             self.add_data(data)
 
     def add_data(self, x):
+        """Add an iterable of observations to the node profile."""
         for xx in x:
             self.add_datum(xx)
 
     def add_datum(self, x):
+        """Add one observation and update scalar/container child profiles."""
         self.count += 1
 
         if x is None:
@@ -1737,6 +1745,7 @@ class DatumNode:
     )
 
     def copy(self):
+        """Return a deep copy of this profiling node and its children."""
         rv = DatumNode(self.parent)
         rv.children = [u.copy() for u in self.children]
         rv.dict_children = {k: v.copy() for k, v in self.dict_children.items()}
@@ -1748,6 +1757,7 @@ class DatumNode:
         return rv
 
     def merge(self, x):
+        """Merge another compatible profiling node into this node."""
         old_dict_count = self.dict_count
         for c in self._COUNTERS:
             setattr(self, c, getattr(self, c) + getattr(x, c))
@@ -1902,7 +1912,7 @@ class DatumNode:
         if not self.children:
             # every observed sequence was empty (e.g. data = [[], [], []]) -- no element was ever
             # added, so there is no element type to merge. An empty DatumNode's own get_estimator()
-            # already resolves to "ignored" (typed == 0), the honest answer: the length model (built
+            # already resolves to "ignored" (typed == 0), the correct answer: the length model (built
             # separately from self.len_dict, e.g. {0: n}) still captures "always empty" correctly.
             return DatumNode()
         child = self.children[0].copy()
@@ -1911,6 +1921,7 @@ class DatumNode:
         return child
 
     def get_estimator(self, pseudo_count: float | None = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
+        """Infer and return an estimator for the profiled observations."""
         structured = self.tuple_count + self.seq_count + self.set_count + self.dict_count
         typed = self.count - self.none_count
         container_kinds = sum(u > 0 for u in (self.tuple_count, self.seq_count, self.set_count, self.dict_count))
@@ -2132,6 +2143,7 @@ def normalize_input(data, *, rdd_cap: int = 200000):
 
 
 def get_estimator(data, pseudo_count: float | None = 1.0, emp_suff_stat: bool = True, use_bstats: bool = False):
+    """Profile ``data`` and return the automatically selected estimator."""
     return DatumNode(data=normalize_input(data)).get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
 
@@ -2144,18 +2156,19 @@ def get_prototype(
     emp_suff_stat: bool = True,
     use_bstats: bool = False,
 ):
-    """Infer the model structure from raw ``data`` and return a prototype *distribution*.
+    """Infer a model structure and return an initialized prototype distribution.
 
-    Where :func:`get_estimator` returns the estimator (the thing you fit *with*), this returns a concrete,
-    *initialized-but-unfitted* distribution whose tree mirrors the detected families -- the thing you fit.
-    It is the "I just have data, show me the model" front door: inspect which families were chosen, tweak
-    them if you like, then ``optimize(data, prototype)`` (or ``prototype`` straight into ``fit``).
+    Where :func:`get_estimator` returns the estimator used for fitting, this
+    returns a concrete unfitted distribution whose tree mirrors the detected
+    families. Use it when the inferred model shape should be inspected,
+    customized, or passed to ``optimize(data, prototype)`` as a prototype.
 
         proto = get_prototype(records)     # see the inferred composite structure
         model = optimize(records, proto)   # fit it (or pass proto to fit(...))
 
-    ``seed`` makes the (lightly randomized) initialization reproducible; ``p`` is the per-observation
-    keep-probability of the vectorized initializer. Remaining kwargs mirror :func:`get_estimator`.
+    ``seed`` makes the randomized initialization reproducible; ``p`` is the
+    per-observation keep-probability of the vectorized initializer. Remaining
+    arguments mirror :func:`get_estimator`.
     """
     import numpy as np
 

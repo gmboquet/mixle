@@ -4,7 +4,6 @@ mixle.stats.graphs package
 .. automodule:: mixle.stats.graphs
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

@@ -1,8 +1,4 @@
-"""Create, estimate, and sample from a Random Dot Product Graph (RDPG) distribution.
-
-Defines the RandomDotProductGraphDistribution, RandomDotProductGraphSampler,
-RandomDotProductGraphAccumulatorFactory, RandomDotProductGraphAccumulator,
-RandomDotProductGraphEstimator, and reuses the shared GraphDataEncoder for use with mixle.
+"""Random dot-product graph distributions for binary undirected graphs.
 
 Data type: a binary undirected graph on n nodes (a square adjacency matrix, a NetworkX-like graph, or
 any mapping accepted by ``GraphDataEncoder``).
@@ -42,6 +38,7 @@ class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution
 
     @classmethod
     def compute_capabilities(cls):
+        """Return compute-backend metadata for RDPG log-density evaluation."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="generic_object")
@@ -52,12 +49,12 @@ class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        """RandomDotProductGraphDistribution object.
+        """Create a random dot-product graph distribution.
 
         Args:
             positions (Union[Sequence[Sequence[float]], np.ndarray]): n-by-d latent positions; node i
                 is row i. Edge probability between i and j is clip(<x_i, x_j>, 0, 1).
-            name (Optional[str]): Optional name for object instance.
+            name (Optional[str]): Optional distribution name.
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
@@ -84,7 +81,7 @@ class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution
         self.keys = keys
 
     def __str__(self) -> str:
-        """Return string representation of RandomDotProductGraphDistribution object."""
+        """Return a constructor-style representation of the random dot-product graph distribution."""
         return "RandomDotProductGraphDistribution(%s, name=%s, keys=%s)" % (
             repr([[float(v) for v in row] for row in self.positions]),
             repr(self.name),
@@ -147,6 +144,7 @@ class RandomDotProductGraphSampler(DistributionSampler):
         self.rng = RandomState(seed)
 
     def sample_graph(self) -> np.ndarray:
+        """Draw one symmetric binary adjacency matrix with no self-loops."""
         n = self.dist.num_nodes
         draws = (self.rng.rand(n, n) < self.dist.probs).astype(np.int8)
         upper = np.triu(draws, 1)
@@ -175,21 +173,26 @@ class RandomDotProductGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += weight
 
     def update(self, x: Any, weight: float, estimate: RandomDotProductGraphDistribution | None) -> None:
+        """Accumulate the weighted adjacency matrix for one graph observation."""
         self._add(_extract_observation(x).adjacency, weight)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics with one weighted graph."""
         self.update(x, weight, None)
 
     def seq_update(
         self, x: Sequence[GraphObservation], weights: np.ndarray, estimate: RandomDotProductGraphDistribution | None
     ) -> None:
+        """Accumulate weighted adjacency matrices for encoded graph observations."""
         for obs, w in zip(x, weights):
             self._add(_extract_observation(obs).adjacency, float(w))
 
     def seq_initialize(self, x: Sequence[GraphObservation], weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics from encoded graph observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, np.ndarray | None]) -> "RandomDotProductGraphAccumulator":
+        """Merge serialized adjacency-sum statistics into this accumulator."""
         count, adj_sum = suff_stat
         self.count += count
         if adj_sum is not None:
@@ -200,13 +203,16 @@ class RandomDotProductGraphAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, np.ndarray | None]:
+        """Return the total weight and weighted adjacency-matrix sum."""
         return self.count, self.adj_sum
 
     def from_value(self, x: tuple[float, np.ndarray | None]) -> "RandomDotProductGraphAccumulator":
+        """Restore the accumulator from serialized adjacency-sum statistics."""
         self.count, self.adj_sum = x[0], (None if x[1] is None else np.asarray(x[1], dtype=float))
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into a keyed statistics dictionary."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -214,10 +220,12 @@ class RandomDotProductGraphAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from a keyed statistics dictionary."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> GraphDataEncoder:
+        """Return the undirected graph encoder used by the accumulator."""
         return GraphDataEncoder(directed=False)
 
 
@@ -228,6 +236,7 @@ class RandomDotProductGraphAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> RandomDotProductGraphAccumulator:
+        """Create an empty RDPG accumulator."""
         return RandomDotProductGraphAccumulator(keys=self.keys)
 
 
@@ -247,11 +256,13 @@ class RandomDotProductGraphEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> RandomDotProductGraphAccumulatorFactory:
+        """Return a factory for RDPG sufficient-statistic accumulators."""
         return RandomDotProductGraphAccumulatorFactory(keys=self.keys)
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[float, np.ndarray | None]
     ) -> RandomDotProductGraphDistribution:
+        """Estimate latent positions from the mean adjacency matrix using ASE."""
         count, adj_sum = suff_stat
         if adj_sum is None or count <= 0.0:
             return RandomDotProductGraphDistribution(np.zeros((1, self.dim)), name=self.name, keys=self.keys)

@@ -584,7 +584,7 @@ class _LocalShard:
 class EncodedDataHandle:
     """Duck-typed orchestrator contract consumed by ``mixle.stats``.
 
-    Local, multiprocessing, MPI, Spark, dask, or future worker handles can
+    Local, multiprocessing, MPI, Spark, dask, or additional worker handles can
     implement these methods without sharing inheritance.  The base class exists
     to document the contract and to give local code a common type to return.
     """
@@ -622,18 +622,26 @@ class EncodedFold(Protocol):
 
     This formalizes the duck-typed orchestrator contract that the concrete
     :class:`EncodedDataHandle` base class documents.  Local, multiprocessing,
-    MPI, Spark, dask, Ray, Lightning, or future worker handles satisfy this
+    MPI, Spark, dask, Ray, Lightning, or additional worker handles satisfy this
     Protocol structurally without sharing inheritance.  Membership is decided by
     :func:`isinstance` against the four ``pysp_seq_*``/``pysp_stream_*`` methods.
     """
 
-    def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]: ...
+    def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
+        """Return total observation count and summed log-density for the encoded data."""
+        ...
 
-    def pysp_seq_estimate(self, estimator: Any, prev_estimate: Any) -> Any: ...
+    def pysp_seq_estimate(self, estimator: Any, prev_estimate: Any) -> Any:
+        """Estimate a model from encoded data and a previous estimate."""
+        ...
 
-    def pysp_seq_initialize(self, estimator: Any, rng: np.random.RandomState, p: float) -> Any: ...
+    def pysp_seq_initialize(self, estimator: Any, rng: np.random.RandomState, p: float) -> Any:
+        """Initialize an estimate from encoded data using Bernoulli subsampling."""
+        ...
 
-    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]: ...
+    def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
+        """Accumulate streaming sufficient statistics for encoded data."""
+        ...
 
 
 def is_encoded_data_handle(obj: Any) -> bool:

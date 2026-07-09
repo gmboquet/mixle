@@ -1,7 +1,4 @@
-"""Evaluate, estimate, and sample from a Skellam distribution (the difference of two Poissons).
-
-Defines the SkellamDistribution, SkellamSampler, SkellamAccumulatorFactory, SkellamAccumulator,
-SkellamEstimator, and SkellamDataEncoder classes for use with mixle.
+"""Skellam distributions for differences of independent Poisson counts.
 
 Data type (int): ``K = N1 - N2`` with ``N1 ~ Poisson(mu1)``, ``N2 ~ Poisson(mu2)`` independent, so
     ``K`` ranges over all integers (negative, zero, positive). Its log-mass is
@@ -74,7 +71,7 @@ class SkellamDistribution(SequenceEncodableProbabilityDistribution):
         self.two_sqrt_prod = 2.0 * math.sqrt(self.mu1 * self.mu2)
 
     def __str__(self) -> str:
-        """Returns string representation of SkellamDistribution object."""
+        """Return a constructor-style representation of the Skellam distribution."""
         return "SkellamDistribution(%s, %s, name=%s, keys=%s)" % (
             repr(self.mu1),
             repr(self.mu2),
@@ -125,6 +122,7 @@ class SkellamDistribution(SequenceEncodableProbabilityDistribution):
     # ``2*sqrt(mu1*mu2)`` in the hundreds want a float64 engine. ---
     @classmethod
     def compute_capabilities(cls):
+        """Describe backend support for generated Skellam scoring kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
@@ -186,7 +184,7 @@ class SkellamDistribution(SequenceEncodableProbabilityDistribution):
         return SkellamEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "SkellamDataEncoder":
-        """Returns a SkellamDataEncoder object."""
+        """Return the encoder for Skellam observations."""
         return SkellamDataEncoder()
 
 
@@ -216,6 +214,7 @@ class SkellamAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: int, weight: float, estimate: SkellamDistribution | None) -> None:
+        """Accumulate count, sum, and squared sum for one integer observation."""
         if not valid_integer(x, nonneg=False):
             raise ValueError("SkellamDistribution requires integer observations.")
         xw = float(x) * weight
@@ -224,9 +223,11 @@ class SkellamAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 += float(x) * xw
 
     def initialize(self, x: int, weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: SkellamDistribution | None) -> None:
+        """Accumulate count, sum, and squared sum from encoded observations."""
         xx = np.asarray(x, dtype=np.float64)
         ww = np.asarray(weights, dtype=np.float64)
         self.count += ww.sum()
@@ -234,28 +235,34 @@ class SkellamAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 += np.dot(xx * xx, ww)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "SkellamAccumulator":
+        """Merge another Skellam sufficient-statistic tuple."""
         self.count += suff_stat[0]
         self.sum += suff_stat[1]
         self.sum2 += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
+        """Return count, sum, and squared sum."""
         return self.count, self.sum, self.sum2
 
     def from_value(self, x: tuple[float, float, float]) -> "SkellamAccumulator":
+        """Replace accumulator contents from a sufficient-statistic tuple."""
         self.count, self.sum, self.sum2 = x
         return self
 
     def scale(self, c: float) -> "SkellamAccumulator":
+        """Scale all weight-linear sufficient statistics by ``c``."""
         self.count *= c
         self.sum *= c
         self.sum2 *= c
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 c, s, s2 = stats_dict[self.keys]
@@ -266,10 +273,12 @@ class SkellamAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = (self.count, self.sum, self.sum2)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from keyed statistics when available."""
         if self.keys is not None and self.keys in stats_dict:
             self.count, self.sum, self.sum2 = stats_dict[self.keys]
 
     def acc_to_encoder(self) -> "SkellamDataEncoder":
+        """Return the encoder used by this accumulator."""
         return SkellamDataEncoder()
 
 
@@ -281,6 +290,7 @@ class SkellamAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> "SkellamAccumulator":
+        """Create a fresh Skellam accumulator."""
         return SkellamAccumulator(name=self.name, keys=self.keys)
 
 
@@ -298,6 +308,7 @@ class SkellamEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> "SkellamAccumulatorFactory":
+        """Return an accumulator factory for Skellam moment statistics."""
         return SkellamAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> "SkellamDistribution":
@@ -325,6 +336,7 @@ class SkellamDataEncoder(DataSequenceEncoder):
         return isinstance(other, SkellamDataEncoder)
 
     def seq_encode(self, x: Sequence[int]) -> np.ndarray:
+        """Encode observations as a floating-point integer-valued array."""
         rv = np.asarray(x, dtype=np.float64)
         if rv.size and (np.any(np.isnan(rv)) or np.any(np.isinf(rv)) or np.any(np.floor(rv) != rv)):
             raise ValueError("SkellamDistribution requires integer observations.")
