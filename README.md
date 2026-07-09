@@ -235,7 +235,7 @@ Normal(free * Field("x") + free * Field("z") + free, free).fit(
 ## Package highlights
 
 - **Just pass data** — `optimize(data)` and `mixle.propose(data)` work out a model for you: they pick a
-  family per field, notice when fields depend on each other, and (new in 0.6.3) fit a copula or vine when
+  family per field, notice when fields depend on each other, and (new in 0.7.0) fit a copula or vine when
   continuous columns are correlated — heavy joint tails included.
 - **A torch module, fit for you** (`mixle.models`) — any module with a forward pass and an objective fits
   in one call (`optimize(x, module)`); freeze submodules, swap the optimizer, and get the raw module back —

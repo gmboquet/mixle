@@ -68,7 +68,7 @@ before it becomes a hard break, not just an entry in the changelog they might no
 3. **Remove in a later minor release**, with a `CHANGELOG.md` entry under `Removed` naming what was
    removed and what replaced it, and (if the removal is significant) a one-line migration note.
 4. **Exception:** a genuine security fix or a bug fix where the "working" behavior was itself unsafe
-   (e.g. the `Boolean.coerce` / `conform_record` silent-corruption fixes in 0.6.3) does not have to
+   (e.g. the `Boolean.coerce` / `conform_record` silent-corruption fixes in 0.7.0) does not have to
    follow this cycle — correctness and safety win over compatibility, but the change must still be
    called out clearly in `CHANGELOG.md` under `Fixed` so nobody is silently surprised.
 

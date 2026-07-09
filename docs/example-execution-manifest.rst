@@ -40,7 +40,7 @@ Release Execution Status
 ------------------------
 
 The 23 base-install ("Execute.") examples were run against the built
-``mixle-0.6.3`` wheel, installed into a bare venv (``pip install dist/mixle-0.6.3-py3-none-any.whl``,
+``mixle-0.7.0`` wheel, installed into a bare venv (``pip install dist/mixle-0.7.0-py3-none-any.whl``,
 no extras, no editable install, no ``PYTHONPATH``), each with a 90s budget:
 
 * **21 passed**: ``enumeration_example.py``, ``extensibility_seams_example.py``,

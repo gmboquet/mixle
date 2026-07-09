@@ -63,7 +63,7 @@ __all__ = [
 RETRIEVAL_MEMORY_UNAVAILABLE_PIECES: dict[str, str] = {
     "E2": (
         "moment-closure attention (roadmap E2) does not exist on any branch reachable from this worktree's "
-        "base (release/0.6.3-generic-capabilities -> chunked-recurrent-spine -> long-context-referee) as of "
+        "base (release/0.7.0 -> chunked-recurrent-spine -> long-context-referee) as of "
         "this writing -- it was being built in parallel on its own branch and never reached origin. The E6 "
         "card's acceptance criterion ('at a fraction of E2's state cost') cannot be checked against a real "
         "E2 measurement; this module instead reports RetrievalMemorySpine's own measured state bytes-per-"

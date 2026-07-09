@@ -1,5 +1,5 @@
 """explain_margin() / explain_margin_mixture(): exact per-part attribution of a DECISION MARGIN --
-log p(answer) - log p(runner_up) -- between two named hypotheses (workstream H1 of the 0.6.3
+log p(answer) - log p(runner_up) -- between two named hypotheses (workstream H1 of the 0.7.0
 frontier-capability plan: the answer-with-receipts evidence ledger).
 
 The ledger must sum to the margin at machine precision on every supported structure, and a deliberately

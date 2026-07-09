@@ -2,7 +2,7 @@
 
 This folder is the tracked, public record of what has to be true before a `mixle` version ships.
 
-- **`<version>.md`** (`0.6.3.md`, `0.6.4.md`, …) — one checklist per release, created when
+- **`<version>.md`** (`0.7.0.md`, `0.7.1.md`, …) — one checklist per release, created when
   preparation begins and updated in place *with evidence* as gates are verified. It stays in git
   history after the release ships, so anyone can see exactly what was checked, how, and when.
 - **`lessons-learned.md`** — a cumulative, cross-release record of what went wrong (or nearly did),
