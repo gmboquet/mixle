@@ -247,11 +247,20 @@ from mixle.inference.robust import (
     robust_standard_errors,
     sandwich_covariance,
 )
-from mixle.inference.scenario import FieldPosterior as ScenarioFieldPosterior
-from mixle.inference.scenario import Scenario as ScenarioSpec
-from mixle.inference.scenario import SimulationReceipt as ScenarioSimulationReceipt
-from mixle.inference.scenario import Simulator as ScenarioSimulator
-from mixle.inference.scenario import simulate as simulate_scenario
+
+# M2's scenario simulators (mixle.inference.scenario) eagerly import
+# mixle.stats.latent.hidden_markov -- importing that at THIS module's own top level creates a real
+# circular import through mixle.stats.bayes.dirichlet (mixle.stats -> ... -> mixle.inference ->
+# scenario -> mixle.stats.latent.hidden_markov -> mixle.stats.latent.mixture ->
+# mixle.stats.bayes.dirichlet, still mid-init). Exported lazily instead (see __getattr__ at the
+# bottom of this module), under aliases since these names differ from scenario.py's own.
+_SCENARIO_LAZY_NAMES = {
+    "simulate_scenario": "simulate",
+    "ScenarioSpec": "Scenario",
+    "ScenarioSimulator": "Simulator",
+    "ScenarioSimulationReceipt": "SimulationReceipt",
+    "ScenarioFieldPosterior": "FieldPosterior",
+}
 
 # proper scoring rules — fair currency for comparing probabilistic forecasts / interval methods
 from mixle.inference.scoring import (
@@ -696,5 +705,12 @@ def __getattr__(name: str):
         _condition_module = importlib.import_module("mixle.inference.condition")
         value = getattr(_condition_module, name)
         globals()[name] = value  # subsequent accesses skip __getattr__ entirely
+        return value
+    if name in _SCENARIO_LAZY_NAMES:
+        import importlib
+
+        _scenario_module = importlib.import_module("mixle.inference.scenario")
+        value = getattr(_scenario_module, _SCENARIO_LAZY_NAMES[name])
+        globals()[name] = value
         return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
