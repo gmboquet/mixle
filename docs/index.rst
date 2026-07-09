@@ -80,7 +80,7 @@ Infer a first model from raw data
     validation, and fallback behavior.
 
 Work with neural or language-model components
-    Read :doc:`neural-llm`, :doc:`representation`,
+    Read :doc:`neural-llm`, :doc:`torch-modules`, :doc:`representation`,
     :doc:`task-distillation`, :doc:`task-serving`, and
     :doc:`agentic-task-distillation`.
 
@@ -176,6 +176,7 @@ human map for finding the right import.
    :maxdepth: 2
 
    neural-llm
+   torch-modules
    automatic-inference
    models
    representation
