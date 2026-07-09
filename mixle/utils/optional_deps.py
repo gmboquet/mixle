@@ -33,6 +33,8 @@ __all__ = [
     "HAS_ZARR",
     "h5py",
     "HAS_H5PY",
+    "MPI",
+    "HAS_MPI4PY",
     "require",
 ]
 
@@ -109,3 +111,16 @@ try:
 except ImportError:
     h5py = None
     HAS_H5PY = False
+
+
+# mpi4py: the "mpi" distributed backend (mixle.utils.parallel.mpi) needs an actual MPI runtime to do
+# anything useful, so MPI is None and HAS_MPI4PY is False when missing rather than a no-op shim -- the
+# backend raises via require(...) at its entry points instead of silently pretending to coordinate
+# ranks. Install with: pip install mixle[mpi]
+try:
+    from mpi4py import MPI
+
+    HAS_MPI4PY = True
+except ImportError:
+    MPI = None
+    HAS_MPI4PY = False
