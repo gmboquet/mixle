@@ -13,8 +13,7 @@ One home for turning data into a fitted/posterior model. Every entry point is th
 Everything physically lives in this package: the estimation / EM / fit / objectives / Fisher machinery
 (``mixle.inference.{estimation,em,fit,objectives,fisher}``), the MCMC samplers (``mixle.inference.mcmc``),
 the engine-agnostic NUTS/ADVI target facade (``mixle.inference.target`` + ``.backends`` + ``.diagnostics``).
-Conjugate Bayes is re-exported from its canonical home ``mixle.stats.bayes``. ``mixle.infer`` remains as
-a deprecated shim onto this package.
+Conjugate Bayes is re-exported from its canonical home ``mixle.stats.bayes``.
 
 These imports are eager and cycle-free: the machinery's only ``mixle.stats`` dependency is the compute
 layer (``mixle.stats.compute.{pdist,sequence}``), never the ``mixle.stats`` package surface — the
