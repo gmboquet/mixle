@@ -28,12 +28,13 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
-from mixle.models.grad_leaf import DataBufferAccumulatorFactory
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
 )
 
 
@@ -296,8 +297,6 @@ class NeuralConditionalDensityEstimator(ParameterEstimator):
         self.device = device
         self.name = name
 
-    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
-        return DataBufferAccumulatorFactory(NeuralConditionalDensityEncoder(), n_fields=2)
     def accumulator_factory(self) -> NeuralConditionalDensityAccumulatorFactory:
         """Return an accumulator factory for weighted conditional-density batches."""
         return NeuralConditionalDensityAccumulatorFactory()

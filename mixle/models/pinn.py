@@ -45,9 +45,9 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import decode_module, encode_module
-from mixle.models.grad_leaf import DataBufferAccumulatorFactory
 from mixle.models.neural_leaf import (
     NeuralGaussian,
+    NeuralGaussianAccumulatorFactory,
     NeuralGaussianEncoder,
     NeuralGaussianEstimator,
     _resolve_device,
@@ -203,8 +203,6 @@ class PINNRegressionEstimator(NeuralGaussianEstimator):
         self.seed = int(seed)
         self._rng = np.random.RandomState(self.seed)
 
-    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
-        return DataBufferAccumulatorFactory(NeuralGaussianEncoder(), n_fields=2)
     def accumulator_factory(self) -> NeuralGaussianAccumulatorFactory:
         """Return the neural-Gaussian accumulator factory for weighted observation pairs."""
         return NeuralGaussianAccumulatorFactory()

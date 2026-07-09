@@ -15,7 +15,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 
 from mixle.models.transformer import build_causal_lm
 from mixle.utils.parallel.dcp_checkpoint import save_sharded

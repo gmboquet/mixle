@@ -24,12 +24,14 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
-from mixle.models.grad_leaf import DataBufferAccumulatorFactory, _resolve_device
+from mixle.models.grad_leaf import _resolve_device
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
 )
 
 
@@ -280,8 +282,6 @@ class NeuralGaussianEstimator(ParameterEstimator):
         self.name = name
         self.device = device
 
-    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
-        return DataBufferAccumulatorFactory(NeuralGaussianEncoder(), n_fields=2)
     def accumulator_factory(self) -> NeuralGaussianAccumulatorFactory:
         """Return an accumulator factory for weighted neural-regression batches."""
         return NeuralGaussianAccumulatorFactory()

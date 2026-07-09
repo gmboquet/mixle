@@ -65,8 +65,12 @@ from typing import Any
 import numpy as np
 
 from mixle.experimental.context_spine import ContextMechanism, train_tbptt
-from mixle.ppl.scaling_laws import FLOPS_PER_TOKEN_PARAM
 from mixle.task.bandit import ThompsonBernoulli
+
+# Same "6ND" FLOPs-per-token-per-param heuristic as mixle.ppl.scaling_laws.FLOPS_PER_TOKEN_PARAM,
+# duplicated (not imported) so this module doesn't import upward from mixle.ppl -- core modules
+# must stay ppl -> core, never the reverse (see ppl_separation_test.py).
+_FLOPS_PER_TOKEN_PARAM = 6.0
 
 try:
     import torch
@@ -276,7 +280,7 @@ def _n_params(mechanism: ContextMechanism) -> int:
 def _flops_for(mechanism: ContextMechanism, n_tokens: int) -> float:
     """``6 * n_params * n_tokens`` -- the same dense-Transformer FLOPs approximation
     :mod:`mixle.ppl.scaling_laws` uses for training-compute allocation (Kaplan et al. 2020)."""
-    return FLOPS_PER_TOKEN_PARAM * float(_n_params(mechanism)) * float(n_tokens)
+    return _FLOPS_PER_TOKEN_PARAM * float(_n_params(mechanism)) * float(n_tokens)
 
 
 def _state_bytes(state: Any) -> int:

@@ -95,8 +95,3 @@ happened when the branch is still a release candidate. Until tags, package
 metadata, built artifacts, and family manifests are aligned, use
 "release candidate", "release branch", or "pre-publication evidence" rather than
 phrases that imply a published package.
-
-Previous Releases
------------------
-
-See :doc:`previous-releases` for the previous documented release.

@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from mixle.experimental.context_spine import SlidingWindowState, _apply_rope, _rope_angles
+from mixle.experimental.context_spine import SlidingWindowState
 from mixle.experimental.graduation import REGISTRY, ExperimentalMechanism
 from mixle.experimental.moment_closure_attention import (
     ClusterBank,
@@ -32,7 +32,6 @@ from mixle.experimental.moment_closure_attention import (
     mgf_cluster_attention,
     update_cluster_bank,
 )
-from mixle.experimental.selective_scan import _dt_bias_init, _s4d_real_a_log_init, _scan_layer
 
 try:
     import torch
@@ -42,6 +41,10 @@ try:
     _HAS_TORCH = True
 except ImportError:  # pragma: no cover - torch is optional
     _HAS_TORCH = False
+
+if _HAS_TORCH:
+    from mixle.experimental.context_spine import _apply_rope, _rope_angles
+    from mixle.experimental.selective_scan import _dt_bias_init, _s4d_real_a_log_init, _scan_layer
 
 __all__ = ["HybridState", "HybridBlock"]
 
