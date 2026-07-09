@@ -96,7 +96,11 @@ class Router:
                 self.stats.tiers[i].answered += 1
                 return label
         _, teacher, _ = self.tiers[-1]
-        label = teacher(x)
+        # The frontier/teacher is a BATCHED callable (`texts -> [label]`, e.g. llm_labeler's shape) --
+        # calling it with a bare `x` (a single string) would iterate over its characters instead of
+        # treating it as one request. Wrap-and-unwrap the same way Cascade._teacher_label already does.
+        out = teacher([x])
+        label = out[0] if isinstance(out, (list, tuple)) else out
         self.stats.tiers[-1].answered += 1
         self.stats.harvested_inputs.append(x)
         self.stats.harvested_labels.append(label)

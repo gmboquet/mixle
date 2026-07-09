@@ -158,23 +158,31 @@ external teacher only when the local model is unsure:
    cascade.report()        # realized $/request saved vs. teacher-only
    cascade.harvested()     # (texts, labels) the teacher answered -- feed back into distill()
 
-``Router`` generalizes this to several calibrated tiers (tiny -> small ->
-... -> the external checkpoint as the final, always-answering fallback):
+``Router`` generalizes this to several calibrated tiers (cheapest first,
+... -> the external checkpoint as the final, always-answering fallback).
+Build it from ``(name, model, cost)`` tuples -- any tier before the last
+just needs a ``decide(x)`` method, exactly what ``calibrated`` above
+already has:
 
 .. code-block:: python
 
    from mixle.task import Router
 
-   router = Router.from_solutions(
-       [tiny_solution, small_solution],
-       teacher=teacher,          # the wrapped external checkpoint, last and most expensive
-       costs=[0.0001, 0.001, 0.03],
-       names=["tiny", "small", "external-checkpoint"],
-   )
+   router = Router([
+       ("local-checkpoint", calibrated, 0.0001),  # the calibrated student from step 3, above
+       ("external-checkpoint", teacher, 0.03),    # the wrapped external checkpoint, last and most expensive
+   ])
 
-   router(request)
+   router("free prize inside!!!")
    router.report()      # per-tier traffic and realized cost
    router.harvested()   # requests only the external model answered -- re-distill to shrink escalation
+
+A deeper stack (tiny -> small -> ... -> external) is the same shape with
+more tuples; :func:`~mixle.task.router.Router.from_solutions` is a
+convenience constructor for the case where each tier is a full
+:class:`~mixle.task.solve.Solution` (from :func:`~mixle.task.solve.solve`)
+rather than a bare calibrated model -- it reads each ``Solution``'s
+``.cascade.model`` for you.
 
 In both cases the external, HF/TRL-trained model never needs to change: it
 is the fallback tier, called exactly the same way it was called in step 1.
