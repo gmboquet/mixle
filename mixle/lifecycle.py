@@ -283,7 +283,9 @@ class Model:
         return forecast(self._require_fitted(), history, horizon, **kw)
 
     def do(self, interventions: dict, **kw: Any):
-        """Graph-surgery intervention — :func:`mixle.inference.do` (learned Bayesian networks)."""
+        """Graph-surgery intervention — :func:`mixle.inference.do` (M0's generic engine: dependency
+        trees, Bayesian networks, composites, mixtures; reduces to :func:`mixle.inference.bn_do`'s
+        exact behavior for a fitted ``HeterogeneousBayesianNetwork``)."""
         from mixle.inference import do
 
         return do(self._require_fitted(), interventions, **kw)

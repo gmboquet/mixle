@@ -24,6 +24,20 @@ def test_do_on_the_cause_moves_the_effect_exactly():
     assert abs(world.expectation(1, n=6000, seed=0) - 4.0) < 0.05  # E[Y | do(X=2)] = 2*2
 
 
+def test_package_level_do_reduces_to_bn_do_for_a_bayesian_network():
+    """mixle.inference.do is now M0's generic condition()/do() engine, not the BN-only causal.do
+    directly -- but for a HeterogeneousBayesianNetwork with flat (non-nested) evidence it dispatches
+    straight through to bn_do (mixle.inference.causal.do, still reachable under that name), so every
+    existing BN caller keeps working unmodified. Confirm both paths agree exactly, not just similarly."""
+    from mixle.inference import bn_do
+
+    net = _chain()
+    generic_world = do(net, {0: 2.0})
+    bn_world = bn_do(net, {0: 2.0})
+    assert type(generic_world) is type(bn_world)
+    assert abs(generic_world.expectation(1, n=6000, seed=7) - bn_world.expectation(1, n=6000, seed=7)) < 1e-10
+
+
 def test_do_on_the_effect_leaves_the_cause_at_its_marginal():
     net = _chain()
     # THE do-vs-conditioning signature: setting Y tells us nothing about X under intervention,
