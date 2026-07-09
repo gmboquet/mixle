@@ -55,6 +55,21 @@ pass across the automatic-inference and design-of-experiments subsystems.
   `explain()`'s decision-margin ledger; a stale `capacity.py` embedding-head rung mismatch; CI
   flakiness in EM's log-likelihood computation and a de-flaked mixture-of-trees test; Python
   3.10-specific abstention timing in the oracle-timeout path.
+- Release-verification pass (found via a fresh, non-editable venv install of the built wheel --
+  never caught by the dev environment, which has every optional extra installed): `import mixle`
+  was completely broken (a missing-import `NameError` at class-definition time in
+  `mixle.models.dpo_leaf` cascaded through `mixle.models.__init__`'s eager import chain into nearly
+  every module), plus the same missing-import/stale-duplicate-method pattern recurring across 7
+  sibling model files and `pinn.py`; 8 further modules importing torch-gated names unconditionally
+  at module level (undermining their own already-correct optional-torch guards); a real
+  `DPOAccumulator.value()` bug (weights returned as a list, not an array); a data-shape bug in
+  `zero_shot_bootstrap`'s generic neural-density fallback (a 24-dim row was split into 24 scalar
+  fields instead of one vector field); a stale test fixture double-wrapping `Registry.tier_stack`'s
+  frontier callable; a layering violation (`mixle.experimental.long_context_eval` importing upward
+  from `mixle.ppl`); and 2 more test files with the same unguarded-torch-import bug. Also: `numba`'s
+  `tbb` dependency floor made `pip install mixle[numba]`/`mixle[all]` uninstallable on Apple Silicon
+  (no arm64 wheels) -- now platform-gated; `ray` and `lightning` were used by real, documented
+  optional backends with no corresponding `pip install mixle[...]` extra -- both added.
 
 ### Changed
 
