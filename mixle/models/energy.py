@@ -24,12 +24,13 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
-from mixle.models.grad_leaf import DataBufferAccumulatorFactory
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
+    StatisticAccumulatorFactory,
 )
 
 
@@ -270,8 +271,6 @@ class EnergyModelEstimator(ParameterEstimator):
         self.device = device
         self.name = name
 
-    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
-        return DataBufferAccumulatorFactory(EnergyModelEncoder(), n_fields=1)
     def accumulator_factory(self) -> EnergyModelAccumulatorFactory:
         """Return an accumulator factory for weighted NCE batches."""
         return EnergyModelAccumulatorFactory()
