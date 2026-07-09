@@ -62,8 +62,8 @@ meaning plus a confidence and semantic entropy.
    def equivalent(a, b):
        return str(a).strip().lower() == str(b).strip().lower()
 
-   uq = LLMUncertainty(generate, equivalent=equivalent, n=20)
-   assessment = uq.assess("Which city is the Eiffel Tower in?")
+   llm_uq = LLMUncertainty(generate, equivalent=equivalent, n=20)
+   assessment = llm_uq.assess("Which city is the Eiffel Tower in?")
 
    print(assessment.answer)
    print(assessment.confidence)
@@ -90,7 +90,7 @@ normalized short answers. For prose, pass a domain-specific relation:
    def normalize_city(text):
        return re.sub(r"[^a-z]", "", text.lower())
 
-   uq = LLMUncertainty(
+   llm_uq = LLMUncertainty(
        generate,
        equivalent=lambda a, b: normalize_city(a) == normalize_city(b),
        n=20,
@@ -111,7 +111,7 @@ within each member.
 
 .. code-block:: python
 
-   dec = uq.decompose(
+   dec = llm_uq.decompose(
        [
            "Who discovered penicillin?",
            "Name the scientist credited with discovering penicillin.",
@@ -142,9 +142,9 @@ has empirical error at most ``alpha``.
        ("2 + 2?", "4"),
    ]
 
-   uq.calibrate(examples, alpha=0.1)
+   llm_uq.calibrate(examples, alpha=0.1)
 
-   answer = uq.answer("Capital of Japan?")
+   answer = llm_uq.answer("Capital of Japan?")
    if answer is None:
        escalate_to_human_or_frontier_model()
    else:
@@ -166,7 +166,7 @@ checks whether independent samples corroborate each claim.
 
 .. code-block:: python
 
-   info = uq.assess_claims(
+   info = llm_uq.assess_claims(
        "Summarize the contract renewal and include dates and parties.",
        threshold=0.6,
    )
@@ -184,7 +184,7 @@ For serious text, pass your own extractor or entailment-based corroborator:
 
 .. code-block:: python
 
-   info = uq.assess_claims(
+   info = llm_uq.assess_claims(
        prompt,
        extract=my_claim_extractor,
        corroborates=my_entailment_check,
