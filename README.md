@@ -75,130 +75,60 @@ Development: `git clone … && pip install -e ".[all]"`.
 
 ## Quickstart
 
-**Both worlds, blended — the teacher's quality at a fraction of the cost.** Distill a slow, expensive
-teacher (a frontier LLM, a human, a rule) into a compact local model, then serve a *cascade*: a **neural**
-student answers when a **classical** conformal gate says it is confident, and only uncertain cases escalate
-to the teacher.
+**Hand it data, get a model back.** No estimator, no configuration: mixle infers the model and fits it.
 
 ```python
-from mixle.task import distill, CalibratedTaskModel, Cascade, CostModel
-
-def teacher(texts):
-    ...   # a slow, expensive "frontier" model — an LLM, a human, a rule
-
-# `train` to distill on, `cal` to calibrate, `stream` to serve (e.g. spam vs ham)
-train, cal, stream = ..., ..., ...
-
-# distill the teacher into a compact local model (~33K-param MLP over hashed
-# n-grams, ~130 KB), calibrate WHEN to trust it, then serve a cascade
-student = distill(teacher, train, n=4, dim=512, hidden=[64], epochs=250,
-                  task="spam vs ham")
-gated   = CalibratedTaskModel(student, alpha=0.1).calibrate(cal, teacher(cal))
-cascade = Cascade(gated, teacher, cost=CostModel(c_local=0.0, c_frontier=0.01))
-
-cascade.serve(stream)   # matches the teacher, ~92% handled locally
-cascade.report()        # -> ~8% escalated; ~$2.76 saved / 300 reqs vs frontier
-```
-
-The compact model handles high-confidence requests locally and escalates uncertain cases, so the blend matches
-the teacher while running the large model on a fraction of requests. The same pattern distills tool-callers, extractors, and
-structured classifiers (`mixle.task`).
-
-**Your torch module just fits — the training code you didn't write.** Any module exposing
-`log_density(batch)` fits with one call: no training loop, no batching / eval / convergence boilerplate, no
-adapter classes. And the fitted module drops straight into a bigger model — mix it with classical pieces
-and one call fits them jointly.
-
-```python
-import torch
-from mixle.inference import optimize
-from mixle.stats import GammaDistribution, MixtureDistribution
-
-class Flow(torch.nn.Module):        # your module: forward and objective, nothing else
-    def log_density(self, x): ...   # (n, d) -> (n,)
-
-fitted = optimize(x, Flow())        # the loop, batching, eval, convergence — manufactured
-fitted.module                       # the raw torch module back — nothing is trapped
-
-# ...and it composes: a flow and a Gamma in ONE mixture, fit jointly in one
-# call (EM over the mixture; gradient for the flow, closed-form for the Gamma)
-mix = MixtureDistribution([fitted, GammaDistribution(2.0, 1.0)], [0.5, 0.5])
-```
-
-Control never leaves you: freeze submodules with `requires_grad_(False)` (the optimizer only sees
-trainable parameters — train a projection head against a frozen encoder, or a LoRA-style adapter over a
-frozen base), override the objective or optimizer as hooks (`GradLeaf(module, loss=..., optimizer=...)`),
-and parity with a hand-written torch loop is pinned by a test (`mixle/tests/torch_parity_test.py`), not
-claimed in prose. Scaling stays a flag: `optimize(..., backend=...)` distributes the fit across
-Spark/Dask/Ray/MPI; the transformer LM's `fit(token_ids, distributed=True, precision="bf16")` runs FSDP2
-(ZeRO-3) with DCP checkpoints under torchrun, and `build_causal_lm(..., gradient_checkpointing=True)`
-trades recompute for activation memory with gradients pinned identical by test. The receipts cover the
-manufactured loop and mixle's own leaves; frontier-scale multimodal stacks remain torch/DeepSpeed
-territory — bring the trained module back as a leaf.
-
-**Compose arbitrarily deep — and tie parameters across the structure.** A segmental HMM whose every state
-emits a *composite* segment (a two-mode mixture plus a phrase scored by a PCFG), with the mixture's first
-mode **coupled across states by `keys=`**. One `optimize` call fits the whole tree by EM:
-
-```python
-from mixle.stats import *
 from mixle.inference import optimize
 
-# each observation is a length-3 sequence of segments;
-# a segment = (a real "tone", a 2-token "phrase"):
-data = [
-    [(-2.61, [0.05, 1.81]), (2.13, [-0.26, -1.14]), (-1.01, [-1.33, 1.36])],
-    [(2.24, [4.90, 2.64]), (-2.33, [0.68, -0.50]), (1.29, [1.93, -1.04])],
-    ...   # 200 like these, from two latent segment types
-]
+records = [...]                  # your rows — any mix of numbers, text, categories, missing values
+model = optimize(records)        # mixle works out the model and fits it
 
-# fit by EM; keys="tone" ties the mixture's first mode across BOTH
-# states — a shared parameter, one gradient
-def emest():
-    return CompositeEstimator((
-        MixtureEstimator([GaussianEstimator(keys="tone"), GaussianEstimator()]),
-        HeterogeneousPCFGEstimator(
-            binary_rules={"S": [("A", "B", .5), ("B", "A", .5)]},
-            terminal_rules={"A": [(GaussianEstimator(), 1.)],
-                            "B": [(GaussianEstimator(), 1.)]}, start="S")))
-fit = optimize(data, SegmentalHiddenMarkovEstimator(
-    [emest(), emest()],
-    len_estimator=CategoricalDistribution({3: 1.0}).estimator()), max_its=15)
-
-fit.log_density(data[0])   # score the observation under the whole model
+model.log_density(records[0])    # score an observation
+model.sampler().sample(5)        # draw new ones
 ```
 
-**The whole lifecycle is one object.** `mixle.propose(data)` fits every proposer the library has on a
-train split, ranks them on held-out data, and returns the winner — then the verbs chain:
-
-```python
-data = ...    # your records — any mix of types
-
-# fit every proposer on a split, rank on held-out, keep the winner
-m = mixle.propose(data, fit=True)
-m.evaluate(...); m.sample(5); m.posterior(...); m.explain()
-m.deploy("artifacts/m")   # durable artifact; mixle.Model.load() restores it
-```
-
-**Replace a function with a model.** `solve()` closes the loop: the code currently doing the job labels
-the dataset, a small student trains, and the deployable answers locally only when a conformally
-calibrated, in-distribution decision is safe — otherwise it calls the original code:
+**Distill a slow, expensive model into a cheap one that knows when to defer.** Point `solve` at the
+function doing the job today — an LLM, an API, a rule — and it trains a small local model that answers the
+easy cases itself and escalates only the hard ones.
 
 ```python
 from mixle.task import solve
 
-route = ...     # the function doing the job today — a rule, an API, an LLM
-tickets = ...   # a list of representative inputs
+# teacher = the function doing the job now; inputs = representative examples
+assistant = solve(teacher, inputs)   # `teacher` labels once; a small local model learns from it
 
-# label with route(), train a student, conformally calibrate
-sol = solve(route, tickets, propose="auto")
-sol(tickets[0])   # drop-in: answers locally when SURE, else calls route()
-sol.improve()     # fold escalations back in; promote only if it verifies better
-sol.save("artifacts/router")
+assistant(x)            # answers locally when confident, calls `teacher` only when it is not
+assistant.report()      # how often it matched the teacher, and how much it deferred
+assistant.save("assistant/")
 ```
 
-The student defaults to a compact hashed-feature classifier; `solve(..., student="generative")` swaps in a
-generative distribution instead — interpretable and torch-free.
+You pay the expensive model on only a fraction of requests. The same pattern distills classifiers,
+extractors, and tool-callers, with conformal calibration, cascades, and a cost model underneath
+(`mixle.task`).
+
+**A PyTorch module fits in one line — the training code you did not write.** Any module exposing
+`log_density(x)` fits with one call: no loop, no batching, no eval or convergence boilerplate.
+
+```python
+from mixle.inference import optimize
+
+model = optimize(x, my_module)   # your nn.Module — trained
+model.module                     # the raw module back, nothing trapped
+```
+
+Freeze submodules, swap the optimizer, or distribute the fit with `backend=`; parity with a hand-written
+training loop is checked by a test, not claimed here.
+
+**Compose to any depth; one call fits the whole thing.** Nest mixtures, sequences, and hidden Markov models,
+and drop a neural leaf in wherever a classical one goes.
+
+```python
+from mixle.stats import GaussianDistribution, MixtureDistribution
+
+model = optimize(x, MixtureDistribution([GaussianDistribution(-2, 1), GaussianDistribution(2, 1)]))
+```
+
+Swap either component for a neural density, an HMM, or a PCFG — the call is the same.
 
 ## Engines & orchestration
 
