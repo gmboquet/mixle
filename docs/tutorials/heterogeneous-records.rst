@@ -47,6 +47,12 @@ The records below are intentionally small, but they show the shape:
        ("b", 5.1, [12, 8]),
    ]
 
+Before fitting, verify that this shape is stable across the dataset. Mixed
+record workflows usually fail because a field is sometimes missing, a scalar
+is sometimes wrapped in a list, or a category value appears with a different
+type. Normalize those cases before the estimator is built; the estimator should
+describe the intended data contract, not repair arbitrary input rows.
+
 3. Mirror the data shape with estimators
 ----------------------------------------
 
@@ -83,6 +89,11 @@ Mixtures can have local optima. For a real analysis, run several random starts
 with :func:`mixle.inference.best_of` or pass a validation set to the fitting
 workflow before interpreting the components.
 
+Use a held-out score or a repeatable initialization strategy when the result
+will be compared across runs. A mixture component should not be named or
+reported because it appeared in one fit; it should be stable enough to survive
+the validation protocol for the application.
+
 5. Query the fitted model
 -------------------------
 
@@ -94,6 +105,10 @@ workflow before interpreting the components.
 ``log_density`` returns one joint score for the whole record. Low probability
 can come from the category, the real value, the count sequence, the sequence
 length, or the mixture assignment implied by the record.
+
+When a record scores poorly, inspect each field under the fitted component
+structure before treating it as a global anomaly. In heterogeneous data, a
+single malformed field can dominate the joint score.
 
 6. Inspect posterior responsibility
 -----------------------------------
@@ -109,6 +124,11 @@ High responsibility for one component means the row is strongly associated
 with that latent type under the fitted model. Ambiguous rows are often more
 useful than the obvious ones when deciding whether the component structure is
 scientifically meaningful.
+
+Responsibilities are model-relative. They should be used to inspect the fitted
+latent structure, not as externally validated labels. If the clusters will
+drive decisions, check them against domain labels, downstream outcomes, or a
+separate stability analysis.
 
 7. Use dictionaries when fields are named
 -----------------------------------------
@@ -133,8 +153,8 @@ Tuple position is compact, but production records usually have names. Use
 
 The same fitting route applies; only the observation shape changes.
 
-What to change next
--------------------
+Production Checks
+-----------------
 
 * Replace ``CompositeEstimator`` with ``RecordEstimator`` if your observations
   are dictionaries.
@@ -145,3 +165,5 @@ What to change next
   parallel work.
 * Use :doc:`/capabilities-contracts` before relying on enumeration,
   conditioning, or exact posterior behavior.
+* Save the fitted schema, component count, initialization policy, validation
+  score, and any field-level preprocessing assumptions with the model artifact.

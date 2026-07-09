@@ -1,19 +1,19 @@
-"""Neural-network ops in the logarithmic number system -- the log-space parts of NNs as integer math.
+"""Neural-network operations in a logarithmic number system.
 
 Built on :class:`mixle.engines.lns.LogNumberSystem`. Two families of op benefit from LNS, both because
 they fight transcendentals (``exp``/``log``), not BLAS:
 
-* **softmax / cross-entropy / log-softmax** -- the normalizer is a ``logsumexp`` over logits (the LM head
+* **softmax / cross-entropy / log-softmax**: the normalizer is a ``logsumexp`` over logits (the LM head
   over the vocabulary, a classifier over classes, an attention/MoE-router softmax). The integer
   ``logsumexp`` replaces the ``exp``+``log`` with integer ``max`` + a LUT (~2x measured). The model's
   logits are quantized by the same log step; only softmax-back-to-linear still needs an ``exp``.
-* **sum-product circuits / probabilistic circuits** -- the *whole* forward pass is sums and products of
+* **sum-product circuits / probabilistic circuits**: the whole forward pass is sums and products of
   probabilities, so in LNS every product node is an integer ADD and every sum node an integer ``logadd``.
-  The entire network runs in integer log-space, not just the normalizer. This is the class of "neural"
-  model where LNS is a complete fit (and the one mixle's composable probabilistic models naturally express).
+  The entire network runs in integer log-space, not only the normalizer.
 
-These are inference/scoring ops (the gradient path stays in float autograd); LNS buys speed + a 32x-smaller
-integer representation where the math is log-space.
+These are inference and scoring operations. The gradient path stays in floating
+autograd, while LNS provides a compact integer representation for log-space
+math.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ def _lse_keepdims(lns: LogNumberSystem, k: np.ndarray, axis: int) -> np.ndarray:
 
 
 def log_softmax(logits: Any, lns: LogNumberSystem, axis: int = -1) -> np.ndarray:
-    """Log-softmax via the integer log-partition: ``(k - logsumexp_int(k)) * step``. Stays in log-space."""
+    """Compute log-softmax through the integer log-partition."""
     k = lns.quantize(logits)
     return (k - _lse_keepdims(lns, k, axis)).astype(np.float64) * lns.step
 
@@ -80,6 +80,7 @@ class SumProductCircuit:
         self.nodes = nodes
 
     def evaluate_lns(self, lns: LogNumberSystem, leaf_values: dict[Any, Any]) -> np.ndarray:
+        """Evaluate the circuit with log-number-system arithmetic."""
         vals: list[Any] = [None] * len(self.nodes)
         for i, node in enumerate(self.nodes):
             if node[0] == "leaf":
@@ -99,6 +100,7 @@ class SumProductCircuit:
         return lns.dequantize(vals[-1])
 
     def evaluate_float(self, leaf_values: dict[Any, Any]) -> np.ndarray:
+        """Evaluate the circuit with float64 reference arithmetic."""
         vals: list[Any] = [None] * len(self.nodes)
         for i, node in enumerate(self.nodes):
             if node[0] == "leaf":

@@ -1,20 +1,19 @@
-"""Harvest real agent-session traces -- turn what your agent already did into training data.
+"""Harvest stored agent-session traces for task distillation.
 
 The mixle-agent server persists every conversation (``~/.mixle-agent/conversations/*.json``) with the
-full message stream, including the ``tool_use`` blocks the frontier model emitted. Those are exactly the
-teacher traces the agentic distillers need -- no synthetic teacher, no labeling budget: the agent's own
-history teaches the tiny models::
+full message stream, including the ``tool_use`` blocks the frontier model emitted. Those traces can
+serve as deterministic teachers for agentic distillation workflows::
 
     traces = harvest_agent_traces()                       # or (dir=...) for a custom store
     tools  = traces.tool_specs()                           # ToolSpecs inferred from observed usage
     tc     = distill_tool_caller(traces.call_teacher(), traces.requests(), tools)
     gp     = sft_planner(traces.plan_teacher(), traces.requests(min_steps=1), tools)
 
-Each trace pairs a user request with the ordered tool calls the assistant made before the next user
-turn (its *plan*), plus the final text reply. Tool specs are inferred honestly from usage: a tool's
-argument set is the union of keys ever passed; ``required`` is the keys present in EVERY observed call.
-The teachers are lookup tables over the harvested requests -- they never call a model, so distilling
-from history is free and deterministic.
+Each trace pairs a user request with the ordered tool calls the assistant made
+before the next user turn, plus the final text reply. Tool specs are inferred
+from observed usage: a tool's argument set is the union of keys ever passed,
+and ``required`` is the keys present in every observed call. The teachers are
+lookup tables over harvested requests; they do not call a model.
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ _DEFAULT_DIR = Path.home() / ".mixle-agent" / "conversations"
 
 @dataclass
 class AgentTrace:
-    """One request -> what the agent did: the ordered tool calls and the final text reply."""
+    """One request, ordered tool calls, and final text reply."""
 
     request: str
     plan: list[dict]  # [{"tool": name, "args": {...}}, ...] in execution order
@@ -53,7 +52,7 @@ class AgentTraces:
         return [t.request for t in self.traces if len(t.plan) >= min_steps]
 
     def tool_specs(self) -> list[ToolSpec]:
-        """Infer ToolSpecs from observed usage: args = union of keys, required = keys in EVERY call."""
+        """Infer tool specs from observed argument usage."""
         seen: dict[str, list[dict]] = {}
         for t in self.traces:
             for step in t.plan:
@@ -70,7 +69,7 @@ class AgentTraces:
         return {t.request: t for t in self.traces}
 
     def call_teacher(self) -> Any:
-        """A ``distill_tool_caller`` teacher: request -> the FIRST tool call the agent made (or no-op)."""
+        """Return a ``distill_tool_caller`` teacher over the first tool call."""
         table = self._by_request()
 
         def teacher(r: Any) -> Any:
@@ -85,7 +84,7 @@ class AgentTraces:
         return teacher
 
     def plan_teacher(self) -> Any:
-        """A ``distill_planner`` / ``sft_planner`` teacher: request -> the agent's full tool-call plan."""
+        """Return a planner teacher over the full harvested tool-call plan."""
         table = self._by_request()
 
         def teacher(r: Any) -> Any:
@@ -110,7 +109,7 @@ def _tool_uses(message: dict) -> list[dict]:
 
 
 def parse_conversation(doc: dict) -> list[AgentTrace]:
-    """Split one stored conversation into traces: user request -> assistant tool calls until the next user turn."""
+    """Split one stored conversation into request-to-tool-plan traces."""
     out: list[AgentTrace] = []
     convo_id = str(doc.get("id", ""))
     messages = list(doc.get("messages", []))

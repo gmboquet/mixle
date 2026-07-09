@@ -1,4 +1,9 @@
-"""Knowledge-graph embedding helpers."""
+"""Dependency-free knowledge-graph embedding helpers based on TransE.
+
+The module provides a small NumPy implementation for scoring triples, generating
+negative samples, and fitting entity and relation embeddings with a margin
+ranking objective.
+"""
 
 from __future__ import annotations
 

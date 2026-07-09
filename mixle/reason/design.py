@@ -32,6 +32,7 @@ class AcquisitionPlan:
 
     @property
     def indices(self) -> list[int]:
+        """Return selected evidence item indices."""
         return [i for i, _f, _g, _c in self.items]
 
 

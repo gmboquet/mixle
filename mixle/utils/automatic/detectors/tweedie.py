@@ -76,7 +76,7 @@ def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
 
 
 def _cdf(arr: np.ndarray):
-    # No cheap closed-form Tweedie CDF (it is a compound Poisson-Gamma series); skip GoF here.
+    # No low-cost closed-form Tweedie CDF (it is a compound Poisson-Gamma series); skip GoF here.
     return None
 
 

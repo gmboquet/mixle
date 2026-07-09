@@ -1,11 +1,10 @@
 """Arbitrary-precision tail of the spectrum: fp128, fp256, fp512, fp1024, ... fp(any bits).
 
 The pure-numpy error-free-transform path (:mod:`mixle.engines.extended`) tops out near double-double
-(fp128) / quad-double (fp256); beyond that the renormalization cost explodes and MPFR *is* the compute
-(per the design review). This module is the correct backend for that tail, on gmpy2 (C-backed MPFR) with
-an mpmath fallback. It is honest about cost: gmpy2 is per-object, so array ops are an O(N) Python loop --
-correct but not fast. The fast version is a Cython batch wrapper that amortizes the per-object crossing
-(the designed follow-up); for fp <= 256 prefer the vectorized ``extended`` path.
+(fp128) / quad-double (fp256); beyond that the renormalization cost grows and MPFR becomes the practical
+compute backend. This module is the correct backend for that tail, on gmpy2 (C-backed MPFR) with an mpmath
+fallback. Cost note: gmpy2 is per-object, so array ops are an O(N) Python loop -- correct but not fast. For
+fp <= 256 prefer the vectorized ``extended`` path.
 
 So: spectrum coverage is complete (fp1..fp1024+), with the fast pure-numpy backends below fp256 and the
 correct MPFR backend above it.
@@ -95,13 +94,17 @@ class HighPrecisionFormat:
 
     @property
     def max_rel_error(self) -> float:
+        """Return the nominal relative error bound for the mantissa budget."""
         return 2.0 ** -(self.bits + 1)
 
     def quantize(self, x: Any) -> np.ndarray:
+        """Encode values with the configured high-precision mantissa."""
         return hp_array(x, self.bits)
 
     def dequantize(self, q: Any) -> np.ndarray:
+        """Decode high-precision values to float64."""
         return hp_to_float(q)
 
     def round_trip(self, x: Any) -> np.ndarray:
+        """Quantize and decode values through the high-precision format."""
         return self.dequantize(self.quantize(x))

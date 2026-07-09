@@ -25,6 +25,7 @@ from mixle.ppl.core import CompositeFamily, RandomVariable, free
 
 
 def torch_available() -> bool:
+    """Return whether Torch can be imported for analytic-gradient PPL routes."""
     try:
         import torch  # noqa: F401
     except Exception:
@@ -151,7 +152,7 @@ class GradTarget:
         self._scorers = _scorers()
         x_np = np.asarray(data, dtype=float)
         # missing='marginalize': a NaN observation is integrated out -> its per-point log-density is
-        # zeroed in the sum (weight 0). Replace the NaN with a safe dummy first so the scorer/data_terms
+        # zeroed in the sum (weight 0). Replace the NaN with a safe sentinel first so the scorer/data_terms
         # stay finite and no NaN poisons the gradient through the masked (zero-weight) branch.
         self._w = None
         if missing == "marginalize":
@@ -276,6 +277,7 @@ class GradTarget:
         return ll + plp + logj
 
     def log_target(self, u_np) -> float:
+        """Evaluate the joint log-target in unconstrained coordinates."""
         torch = self._torch
         with torch.no_grad():
             u = torch.tensor(np.asarray(u_np, dtype=float), dtype=torch.float64)
@@ -283,6 +285,7 @@ class GradTarget:
         return float(v) if math.isfinite(float(v)) else -1e300
 
     def value_and_grad(self, u_np) -> tuple[float, np.ndarray]:
+        """Return the joint log-target value and gradient at ``u_np``."""
         torch = self._torch
         u = torch.tensor(np.asarray(u_np, dtype=float), dtype=torch.float64, requires_grad=True)
         v = self._logtarget_tensor(u)
@@ -290,6 +293,7 @@ class GradTarget:
         return float(v.detach()), g.detach().numpy()
 
     def grad(self, u_np) -> np.ndarray:
+        """Return only the gradient of the joint log-target at ``u_np``."""
         return self.value_and_grad(u_np)[1]
 
     # -- ADVI: mean-field or full-rank Gaussian q, KL or tilted (Renyi-alpha) objective --------

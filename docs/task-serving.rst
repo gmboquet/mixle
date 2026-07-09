@@ -1,4 +1,4 @@
-Task Serving, Routing, And Edge Deployment
+Task Serving, Routing, and Edge Deployment
 ==========================================
 
 The :doc:`task-distillation` guide covers the basic teacher/student workflow:
@@ -68,6 +68,11 @@ Use this when the original code returns a scalar and the operational contract
 can be expressed as "local answers are acceptable within this tolerance." Keep
 ``tol`` tied to the business, scientific, or safety requirement rather than to
 the model's average error.
+
+When ``qhat`` is infinite because the calibration split is too small or too
+difficult, the artifact remains loadable but should behave as non-local until a
+better calibration set is available. Do not replace ``inf`` with a finite
+stand-in value in reports or manifests.
 
 Multi-Label Task Replacement
 ----------------------------
@@ -145,6 +150,24 @@ numeric field whose calibrated interval is too wide, or one under-calibrated
 field escalates the entire request to the teacher. That keeps the returned
 dictionary coherent instead of mixing trusted local fields with guessed ones.
 
+Input Integrity
+---------------
+
+Task wrappers do not make missing-data policy decisions for the application.
+The teacher still receives the raw request when a local model escalates, and
+the local feature adapters use their documented encodings rather than
+rewriting records into cleaned business objects. If ``None``, ``NaN``, an empty
+string, or a missing field is meaningful to the original task, include those
+cases in the training examples, calibration split, and scorecard segments.
+
+For numeric replacement, keep ``qhat=inf`` as evidence that the calibration
+split does not support local answers at the requested tolerance. For
+structured replacement, give every numeric field its own tolerance and check
+that missing or non-finite upstream values route the way the original teacher
+contract expects. Do not report a student as locally safe on a segment unless
+that segment was represented in calibration or explicitly routed to the
+teacher.
+
 Multi-Tier Routing
 ------------------
 
@@ -156,10 +179,10 @@ calibrated tiers.
    from mixle.task import Router
 
    router = Router.from_solutions(
-       [tiny_solution, small_solution],
+       [fast_solution, accurate_solution],
        teacher=frontier_teacher,
        costs=[0.0001, 0.001, 0.03],
-       names=["tiny", "small", "frontier"],
+       names=["fast", "accurate", "frontier"],
    )
 
    y = router(request)
@@ -170,13 +193,13 @@ is the teacher or frontier model and always answers. Requests answered by the
 teacher are harvested as targeted labels for the next solve round.
 
 Use ``route_stack`` when you already have several solutions and per-request
-costs and want the tiers sorted cheapest-first.
+costs and want the tiers sorted by ascending cost.
 
 Tool Calling
 ------------
 
 ``distill_tool_caller`` turns a teacher's function-calling behavior into a
-tiny local selector plus per-tool argument extractors.
+local selector plus per-tool argument extractors.
 
 .. code-block:: python
 
@@ -204,6 +227,10 @@ harvests the trace for later improvement.
 This is single-step tool calling. Use planning when a request needs multiple
 verified steps. See :doc:`agentic-task-distillation` for the full tool-calling
 and planning workflow.
+
+Tool traces should include both the teacher output and the validation result.
+That keeps malformed tool names, missing required arguments, and schema
+repairs visible instead of folding them into ordinary labels.
 
 Planning
 --------
@@ -235,7 +262,7 @@ Any uncertainty, malformed step, missing argument, execution failure, or
 maximum-step exhaustion escalates the whole request to the teacher. The planner
 does not return half-trusted plans as if they were local successes.
 
-Generative Planning And Traces
+Generative Planning and Traces
 ------------------------------
 
 ``sft_planner`` trains a small causal LM to write an entire serialized plan,
@@ -266,7 +293,7 @@ Key objects:
 * ``EdgeSpace`` describes candidate student families and training recipes.
 * ``DesignModel`` stores a surrogate over design choices and outcomes.
 * ``distill_for_edge`` searches for the best feasible student.
-* ``distill_designer`` compresses accumulated design knowledge into a tiny
+* ``distill_designer`` compresses accumulated design knowledge into a compact
   local model.
 
 .. code-block:: python
@@ -304,16 +331,16 @@ Quantized students use ``QuantizedMLP`` and ``QuantizedClassifierIO``. They
 store arrays rather than Torch modules and can qualify for ``torch_free``
 devices.
 
-Version 0.6.2 tightened this artifact path: int4 weights are packed in the
-arrays payload, extreme outlier weights can be clipped before quantization with
-``clip_percentile``, and empty batches return correctly shaped probability
-arrays instead of failing during reshape.
+The artifact path keeps int4 weights packed in the arrays payload, lets extreme
+outlier weights be clipped before quantization with ``clip_percentile``, and
+returns correctly shaped probability arrays for empty batches instead of failing
+during reshape.
 
 ``lns_classifier`` and ``LNSStructuredClassifierIO`` provide integer log-space
 execution for structured students where the model is a sum of factor
 log-densities.
 
-Harnesses For Existing Code
+Harnesses for Existing Code
 ---------------------------
 
 Harnesses package common replacement patterns:
@@ -357,6 +384,28 @@ replaces.
 The scorecard reports end-to-end accuracy, local agreement, escalation rate,
 latency, artifact size, and blended cost when costs are provided.
 
+Use segment scorecards before changing a route. At minimum, break out rare
+labels, high-cost requests, high-risk customer or study groups, and inputs that
+previously escalated. A lower average escalation rate is not a release win if
+the reduction comes from answering cases that should still be deferred.
+
+Route Evidence
+--------------
+
+For a serving change, record the exact route that handled each held-out
+request:
+
+* local tier name or teacher fallback;
+* conformal set size, regression interval width, or structured field that
+  caused escalation;
+* density-gate or OOD result when present;
+* teacher label used for end-to-end scoring;
+* artifact version and calibration ``alpha``.
+
+This evidence makes average metrics interpretable. Without route evidence, an
+improved cost number can hide a regression where the wrong tier absorbed a
+rare or high-risk segment.
+
 Artifacts
 ---------
 
@@ -378,7 +427,7 @@ Calibrated artifacts preserve non-finite conformal thresholds such as
 That keeps small or difficult calibration splits loadable without pretending
 the model is locally answerable.
 
-Economics And Route Planning
+Economics and Route Planning
 ----------------------------
 
 Economic helpers include:

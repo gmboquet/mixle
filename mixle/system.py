@@ -1,33 +1,28 @@
-"""``System`` -- the facade every subsystem eventually plugs into (workstream J1/J8).
+"""Facade for answering, ingesting knowledge, and improving a Mixle system.
 
-Three verbs, nothing else: ``answer`` (serve a query), ``ingest`` (turn a model output into stored,
-credence-weighted knowledge), ``improve`` (spend a budget making the system better). This is
-deliberately a THIN SHELL: in this card ``answer`` just routes straight to the configured teacher and
-wraps the reply in a minimal receipt; ``ingest`` writes what it can with whatever pieces already exist
-(the belief store from workstream E when it is importable, a plain substrate item otherwise -- never a
-hard import of a card that may not be built yet); ``improve`` honestly reports there is nothing to
-improve until an orchestrator/router/registry registers into it. Later cards (REG-a the registry,
-SPEND-a the budget ledger, FAULT-a degraded modes, SCORE-a the scorecard) extend these same three verbs
-rather than adding new ones.
+The facade exposes three verbs: ``answer`` serves a query, ``ingest`` stores a
+model output as credence-weighted knowledge, and ``improve`` spends a budget on
+measured improvement. The shell is deliberately thin: ``answer`` routes to the
+configured teacher and attaches a receipt, ``ingest`` writes through the
+available store boundary, and ``improve`` promotes harvested answers into an
+explicit captured cache.
 
-SPEND-a wires a real :class:`~mixle.spend.Spend` ledger into ``answer``: ``budget`` is a hard ceiling
-measured in :meth:`~mixle.spend.Spend.total_units` -- a request that cannot afford even the cheapest
-answer path is refused (with the shortfall named on the receipt), never silently served over budget.
-Every successful call's incremental spend is added to :attr:`System.total_spend`, and both the
-incremental and running totals ride on the receipt.
+The :class:`~mixle.spend.Spend` ledger treats ``budget`` as a hard ceiling
+measured in :meth:`~mixle.spend.Spend.total_units`. A request that cannot afford
+the minimum-cost answer path is refused with the shortfall named on the receipt.
+Successful calls add incremental spend to :attr:`System.total_spend`, and
+receipts carry both incremental and running totals.
 
-FAULT-a wires two named degraded modes (:mod:`mixle.fault`) into the same two verbs: ``answer`` falls
-back to captured+store-only reasoning when the teacher raises (``teacher_down``); ``ingest`` falls back
-to acknowledging-without-accumulating when the store write itself raises (``store_down``). Both flag
-``degraded_mode``/``degraded_reason`` on the returned receipt/report rather than silently serving worse.
+Named degraded modes from :mod:`mixle.fault` use the same verbs. ``answer`` can
+fall back to captured or store-only reasoning when the teacher raises
+(``teacher_down``), and ``ingest`` can acknowledge without accumulating when a
+store write raises (``store_down``). Both paths flag ``degraded_mode`` and
+``degraded_reason`` on the returned receipt or report.
 
-SEED-a closes the cold-start loop: every teacher-produced answer is harvested (query text -> reply);
-``improve`` promotes whatever has been harvested into a captured cache (nothing fancier -- this thin
-shell's "capture" is a verbatim lookup, not a trained model); ``answer`` checks the captured cache
-FIRST, before spending anything, so a repeat of the exact same query after an ``improve`` call is
-served free (``captured=True``, zero frontier calls) instead of re-querying the teacher. Capture only
-promotes after an explicit ``improve()`` -- a repeat query *before* ``improve`` still pays for a fresh
-teacher call, so the measured saving is attributable to ``improve``, not an implicit cache.
+The cold-start loop harvests teacher-produced answers. ``improve`` promotes the
+harvest into a verbatim captured cache; ``answer`` checks that cache before
+spending. Capture only promotes after an explicit ``improve()`` call, so
+measured savings are attributable to improvement rather than implicit caching.
 """
 
 from __future__ import annotations
@@ -44,12 +39,15 @@ from mixle.task.llm import LLM, OpenAICompatLLM
 
 @dataclass
 class SystemConfig:
-    """Everything a :class:`System` needs to run. Secrets (endpoints, keys) come from the environment,
-    never hardcoded -- see :meth:`from_env`."""
+    """Configuration required to run a :class:`System`.
+
+    Secrets such as endpoints and keys are read from the environment by
+    :meth:`from_env`; they are not hardcoded in the config object.
+    """
 
     teacher: LLM | Callable[..., str]
     registry_dir: str | None = None
-    store: Any = None  # a mixle.substrate.Substrate handle, or None (ingest/retrieval degrade honestly)
+    store: Any = None  # a mixle.substrate.Substrate handle, or None (ingest/retrieval return degraded receipts)
     default_budget: int = 1
     scope: str = "local"
 
@@ -59,7 +57,7 @@ class SystemConfig:
 
         Reads ``MIXLE_TEACHER_BASE_URL`` (required), ``MIXLE_TEACHER_MODEL`` (required), and the
         optional ``MIXLE_TEACHER_API_KEY``. Raises ``ValueError`` naming the missing variable rather
-        than silently constructing a broken teacher.
+        than silently constructing an unusable teacher.
         """
         base_url = os.environ.get("MIXLE_TEACHER_BASE_URL")
         model = os.environ.get("MIXLE_TEACHER_MODEL")
@@ -75,11 +73,10 @@ class SystemConfig:
 class Query:
     """The typed problem contract for :meth:`System.answer`.
 
-    ``task``/``expected_output`` align with the ``mixle-knowledge`` ``ContextPacket`` contract's
-    ``task``/``expected_output_schema`` fields (see :meth:`from_knowledge_dict`), so a caller who
-    already holds an assembled packet does not hand-build a ``Query`` field by field. ``scope`` has
-    no ``ContextPacket`` counterpart (that contract carries no such key) and stays a ``Query``-only
-    knob, not an invented alignment.
+    ``task`` and ``expected_output`` align with the ``mixle-knowledge``
+    ``ContextPacket`` contract's ``task`` and ``expected_output_schema`` fields
+    (see :meth:`from_knowledge_dict`). ``scope`` is a ``Query``-level routing
+    boundary and is not inferred from the packet.
     """
 
     text: str
@@ -90,14 +87,11 @@ class Query:
 
     @classmethod
     def from_knowledge_dict(cls, packet: dict[str, Any], *, scope: str = "local") -> Query:
-        """Build a ``Query`` directly from a mixle-knowledge-shaped ``ContextPacket`` dict -- the
-        exact dict :meth:`mixle.substrate.context.ContextPacket.to_knowledge_dict` emits, or the same
-        shape validated through ``mixle_knowledge.contracts.ContextPacket`` (workstream E1).
+        """Build a ``Query`` from a mixle-knowledge-shaped ``ContextPacket`` dict.
 
-        ``text`` comes from ``payload["rendered"]`` (the assembled context string a receiver actually
-        consumes); ``task``/``expected_output`` map directly from the packet's ``task``/
-        ``expected_output_schema``. ``scope`` is not a ``ContextPacket`` field, so it is passed
-        through as given rather than guessed from the packet.
+        ``text`` comes from ``payload["rendered"]``. ``task`` and
+        ``expected_output`` map from the packet's ``task`` and
+        ``expected_output_schema``. ``scope`` is supplied by the caller.
         """
         payload = packet.get("payload") or {}
         return cls(
@@ -139,7 +133,7 @@ class System:
         If the teacher call itself raises, this falls back to ``teacher_down`` degraded mode: answer from
         the store alone (a plain retrieval over ``config.store``) when one is configured and has anything
         relevant, flagging ``degraded_mode="teacher_down"`` on the receipt; if there is no store (or
-        nothing relevant in it), the failure is reported honestly (``status="failed"``), never masked as a
+        nothing relevant in it), the failure is reported explicitly (``status="failed"``), never masked as a
         normal answer.
         """
         cache_key = (query.text, query.task, query.scope)
@@ -207,21 +201,22 @@ class System:
             "spend": actual_cost.to_dict(),
             "total_spend": self.total_spend.to_dict(),
             "budget": requested,
-            "captured": False,  # no local model has captured this capability yet (workstream D)
+            "captured": False,  # no local model has captured this capability yet
             "task": query.task,
             **result.to_receipt_fields(),
         }
         return result.value, receipt
 
     def ingest(self, model_output: str, *, source: dict[str, Any]) -> dict[str, Any]:
-        """Turn a model output into stored knowledge. Uses the belief store (workstream E, KNOW-a) when
-        it is importable; otherwise degrades to a plain substrate item rather than hard-depending on a
-        card that may not be built yet.
+        """Turn a model output into stored knowledge.
 
-        If the store write itself raises (the store is down/unreachable, as opposed to KNOW-a simply not
-        being installed), this falls back to ``store_down`` degraded mode: the model output is
-        acknowledged but NOT accumulated, and the report is flagged ``degraded_mode="store_down"`` rather
-        than silently reporting success or losing the output without a trace.
+        Uses the belief store when it is importable; otherwise records a plain
+        substrate item rather than requiring optional knowledge-substrate
+        components.
+
+        If the store write raises, this falls back to ``store_down`` degraded
+        mode. The model output is acknowledged but not accumulated, and the
+        report is flagged with ``degraded_mode="store_down"``.
         """
         if self.config.store is None:
             return {"status": "no_store", "assimilated": False}
@@ -257,10 +252,10 @@ class System:
     def improve(self, budget: int) -> dict[str, Any]:
         """Promote every harvested (query, reply) pair from :meth:`answer` into the captured cache.
 
-        Honestly reports there is nothing to improve when nothing has been harvested yet (an orchestrator/
-        router/registry with a real training step is future work); otherwise this is the cold-start
-        capture step SEED-a measures: after this call, a repeat of any just-captured query is answered
-        for free (see :meth:`answer`).
+        Reports that there is nothing to improve when nothing has been
+        harvested yet. Otherwise this is the cold-start capture step: after
+        this call, a repeat of a captured query is answered from the local cache
+        (see :meth:`answer`).
         """
         if not self._harvest:
             return {

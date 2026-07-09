@@ -3,7 +3,7 @@
 GEV is the Fisher-Tippett-Gnedenko limit for normalized block maxima (floods, wind speeds, record
 losses). It is a flexible 3-parameter family (location, scale, shape) whose Gumbel sub-case (shape 0)
 spans all reals, so the support gate is any real-valued data; the 3-parameter BIC penalty keeps it
-from stealing the simpler symmetric Gaussian / monotone Exponential when those are the honest fit.
+from stealing the simpler symmetric Gaussian / monotone Exponential when those are the appropriate fit.
 """
 
 import math

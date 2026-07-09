@@ -1,4 +1,8 @@
-"""Torch implementation of the ComputeEngine protocol."""
+"""Torch implementation of the ``ComputeEngine`` protocol.
+
+The engine handles tensor placement, dtype policy, autograd support, optional
+compilation, and component sharding for resident scoring and estimation paths.
+"""
 
 from __future__ import annotations
 
@@ -400,8 +404,9 @@ def _dtensor_ops_supported() -> bool:
     """Whether this torch registers DTensor sharding strategies for the mixture E-step's ops.
 
     torch >= 2.5 does (logsumexp / isinf / ... verified bit-identical on 2.12); torch 2.0-2.4 do not,
-    so a component-sharded fit dies deep in the kernel. A version check (not a runtime probe, which
-    would need a live process group at engine construction) keeps the gate cheap and side-effect-free."""
+    so a component-sharded fit dies deep in the kernel. A version check (rather than a runtime probe,
+    which would need a live process group at engine construction) keeps the gate low-overhead and
+    side-effect-free."""
     try:
         major, minor = (int(p) for p in torch.__version__.split(".")[:2])
     except (ValueError, AttributeError):

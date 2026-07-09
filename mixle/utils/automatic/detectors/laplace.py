@@ -1,4 +1,9 @@
-"""Laplace (double-exponential) continuous candidate -- symmetric, heavier peak/tails than Gaussian."""
+"""Automatic detector for symmetric Laplace continuous data.
+
+The detector fits the median and mean absolute deviation, scores the
+double-exponential likelihood with a BIC-style penalty, and returns the matching
+Mixle estimator factory.
+"""
 
 import math
 

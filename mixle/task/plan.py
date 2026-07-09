@@ -1,15 +1,15 @@
-"""``distill_planner`` -- train tiny models to break a problem into steps and carry them out.
+"""``distill_planner`` trains local models to decompose requests into tool steps.
 
-Decomposition, the mixle way: a plan is an **autoregressive chain of calibrated tool calls ending in
-STOP**. The teacher (a frontier LLM, an agent loop, or a rule) shows plans for example requests; each
+The plan representation is an autoregressive chain of calibrated tool calls ending in
+``STOP``. The teacher (an LLM, an agent loop, or a rule) shows plans for example requests; each
 trace flattens into ``(context, next-call)`` pairs where the context is the request plus the steps taken
-so far -- and "predict the next call" is exactly the problem :mod:`~mixle.task.toolcall` already solves:
-a conformal selector for WHICH tool comes next (STOP is just another action) and a per-tool extractor for
+so far. "Predict the next call" is the problem :mod:`~mixle.task.toolcall` already solves:
+a conformal selector for which tool comes next (``STOP`` is just another action) and a per-tool extractor for
 its arguments, both reading the rendered context.
 
-The honesty contract extends step-wise: a step is emitted only when the selector is confident AND the
-required arguments extract AND (when an ``execute`` map is given) the call actually runs. Any failure
-escalates the WHOLE request to the teacher -- a half-executed guessed plan is never returned silently --
+The safety contract is stepwise: a step is emitted only when the selector is confident, the
+required arguments extract, and, when an ``execute`` map is given, the call actually runs. Any failure
+escalates the whole request to the teacher; a partially executed guessed plan is not returned as local success,
 and the escalation is harvested as a fresh trace for the next distillation round.
 
     teacher(request) -> [{"tool": ..., "args": {...}}, ...]      # the plan
@@ -17,8 +17,8 @@ and the escalation is harvested as a fresh trace for the next distillation round
     planner(request)                                             # {"plan", "escalate"}
     planner(request, execute={"lookup": fn, ...})                # + per-step "results", verified
 
-This is template-strength decomposition (the students are tiny); free-form novel planning still wants
-trace-SFT on the causal LM -- the same trace format feeds it when that rung lands.
+This is template-oriented decomposition. For free-form generated plans, use the
+trace-SFT planner on the same trace format.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def _render(request: str, steps: Sequence[dict]) -> str:
 
 @dataclass
 class Planner:
-    """A distilled decomposer: emit verified steps until STOP, or escalate the whole problem."""
+    """A distilled decomposer: emit verified steps until ``STOP``, or escalate the whole problem."""
 
     selector: Any
     extractors: dict[str, Any]
@@ -59,7 +59,7 @@ class Planner:
     def try_plan(self, request: str, *, execute: dict[str, Callable[..., Any]] | None = None) -> dict[str, Any] | None:
         """The local decomposition alone: a complete verified plan, or ``None`` (= must escalate).
 
-        No teacher, no stats — this is what a server without the frontier can run."""
+        This method does not call the teacher."""
         steps: list[dict] = []
         results: list[Any] = []
         for _ in range(self.max_steps):
@@ -97,6 +97,7 @@ class Planner:
         return out
 
     def report(self) -> dict[str, Any]:
+        """Return plan agreement, escalation, and harvested-trace metrics."""
         return {
             "plan_agreement": round(self.plan_agreement, 4),
             "requests": self.n_requests,

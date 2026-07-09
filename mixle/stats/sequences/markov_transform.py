@@ -1,8 +1,4 @@
-"""Create, estimate, and sample from a Markov transform model for pairs of count-sets producing a third.
-
-Defines the MarkovTransformDistribution, MarkovTransformSampler, MarkovTransformAccumulatorFactory,
-MarkovTransformAccumulator, MarkovTransformEstimator, and the MarkovTransformDataEncoder classes for use with
-mixle.
+"""Markov transform models for two source count bags producing a target bag.
 
 Data type: Tuple[List[Tuple[int, float]], List[Tuple[int, float]], List[Tuple[int, float]]]: An observation
 (S1, S2, S3) consists of three bags of integer values in {0,...,W-1}, each given as a list of (value, count)
@@ -40,10 +36,10 @@ from mixle.utils.optsutil import count_by_value
 
 
 class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
-    """MarkovTransformDistribution object modeling two count-sets transforming into a third count-set."""
+    """Distribution for two count sets transforming into a third count set."""
 
     def __init__(self, init_prob_vec, cond_prob_mat, alpha=0.0, len_dist=None):
-        """MarkovTransformDistribution object.
+        """Create a Markov-transform distribution.
 
         Args:
             init_prob_vec: Probability vector of length W for the values in S1 and S2.
@@ -67,7 +63,7 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
         self.alpha = alpha
 
     def __str__(self):
-        """Returns string representation of MarkovTransformDistribution object."""
+        """Return a constructor-style representation of the distribution."""
         s1 = ",".join(map(str, self.init_prob_vec))
         temp = self.cond_prob_mat.nonzero()
         tt = np.asarray(self.cond_prob_mat[temp[0], temp[1]]).flatten()
@@ -271,7 +267,7 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
         return rv, nn, vv
 
     def sampler(self, seed=None):
-        """Create a MarkovTransformSampler object from this instance.
+        """Create a sampler for this Markov transform.
 
         Requires len_dist to be set (it samples the total counts [n1, n2, n3]).
 
@@ -279,19 +275,19 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
             seed (Optional[int]): Used to set seed in random sampler.
 
         Returns:
-            MarkovTransformSampler object.
+            MarkovTransformSampler: Sampler bound to this distribution.
 
         """
         return MarkovTransformSampler(self, seed)
 
     def estimator(self, pseudo_count=None):
-        """Create a MarkovTransformEstimator object from this instance.
+        """Create an estimator initialized from this Markov transform.
 
         Args:
             pseudo_count (Optional[float]): Used to inflate sufficient statistics.
 
         Returns:
-            MarkovTransformEstimator object.
+            MarkovTransformEstimator: Estimator configured with matching count and length estimators.
 
         """
         len_estimator = None if self.len_dist is None else self.len_dist.estimator(pseudo_count)
@@ -300,16 +296,16 @@ class MarkovTransformDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def dist_to_encoder(self):
-        """Returns a MarkovTransformDataEncoder object for encoding sequences of data."""
+        """Return a data encoder for Markov-transform observations."""
         len_encoder = None if self.len_dist is None else self.len_dist.dist_to_encoder()
         return MarkovTransformDataEncoder(len_encoder=len_encoder)
 
 
 class MarkovTransformSampler(DistributionSampler):
-    """MarkovTransformSampler object for sampling observations from a MarkovTransformDistribution."""
+    """Sampler for observations from a Markov-transform distribution."""
 
     def __init__(self, dist: MarkovTransformDistribution, seed: int | None = None):
-        """MarkovTransformSampler object.
+        """Create a Markov-transform sampler.
 
         Args:
             dist (MarkovTransformDistribution): Distribution to sample from. Must have len_dist set.
@@ -368,10 +364,10 @@ class MarkovTransformSampler(DistributionSampler):
 
 
 class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableStatisticAccumulator):
-    """MarkovTransformAccumulator object for accumulating sufficient statistics of the Markov transform model."""
+    """Accumulator for Markov-transform sufficient statistics."""
 
     def __init__(self, num_vals, size_acc=None, keys=(None, None)):
-        """MarkovTransformAccumulator object.
+        """Create an accumulator for Markov-transform sufficient statistics.
 
         Args:
             num_vals (int): Number of possible values W.
@@ -662,16 +658,16 @@ class MarkovTransformAccumulator(InitTransKeyedAccumulator, SequenceEncodableSta
     # key_merge / key_replace: provided by InitTransKeyedAccumulator (shared two-key plumbing).
 
     def acc_to_encoder(self):
-        """Returns a MarkovTransformDataEncoder object for encoding sequences of data."""
+        """Return a data encoder built from the total-count accumulator."""
         len_encoder = None if self.size_accumulator is None else self.size_accumulator.acc_to_encoder()
         return MarkovTransformDataEncoder(len_encoder=len_encoder)
 
 
 class MarkovTransformAccumulatorFactory(StatisticAccumulatorFactory):
-    """MarkovTransformAccumulatorFactory object for creating MarkovTransformAccumulator objects."""
+    """Factory for Markov-transform accumulators."""
 
     def __init__(self, num_vals, len_factory, keys):
-        """MarkovTransformAccumulatorFactory object.
+        """Create a factory for Markov-transform accumulators.
 
         Args:
             num_vals (int): Number of possible values W.
@@ -689,7 +685,7 @@ class MarkovTransformAccumulatorFactory(StatisticAccumulatorFactory):
         self.num_vals = num_vals
 
     def make(self):
-        """Returns a new MarkovTransformAccumulator object."""
+        """Return a new Markov-transform accumulator."""
         if self.len_factory is None:
             return MarkovTransformAccumulator(self.num_vals, size_acc=None, keys=self.keys)
         else:
@@ -697,7 +693,7 @@ class MarkovTransformAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class MarkovTransformEstimator(ParameterEstimator):
-    """MarkovTransformEstimator object for estimating MarkovTransformDistribution objects from statistics."""
+    """Estimate Markov-transform distributions from sufficient statistics."""
 
     def __init__(
         self,
@@ -709,7 +705,7 @@ class MarkovTransformEstimator(ParameterEstimator):
         keys=(None, None),
         num_values=MISSING,
     ):
-        """MarkovTransformEstimator object.
+        """Create an estimator for a Markov-transform distribution.
 
         Args:
             num_vals (int): Number of possible values W.
@@ -736,7 +732,7 @@ class MarkovTransformEstimator(ParameterEstimator):
         self.alpha = alpha
 
     def accumulator_factory(self):
-        """Returns a MarkovTransformAccumulatorFactory object for this estimator."""
+        """Return an accumulator factory configured from this estimator."""
         len_factory = None if self.len_estimator is None else self.len_estimator.accumulator_factory()
         return MarkovTransformAccumulatorFactory(self.num_vals, len_factory, self.keys)
 
@@ -757,7 +753,7 @@ class MarkovTransformEstimator(ParameterEstimator):
             suff_stat: See above for details.
 
         Returns:
-            MarkovTransformDistribution object.
+            MarkovTransformDistribution: Estimated distribution.
 
         """
         init_count, trans_count, size_stats = suff_stat
@@ -776,10 +772,10 @@ class MarkovTransformEstimator(ParameterEstimator):
 
 
 class MarkovTransformDataEncoder(DataSequenceEncoder):
-    """MarkovTransformDataEncoder object for encoding sequences of Markov transform observations."""
+    """Encode Markov-transform observations for vectorized scoring."""
 
     def __init__(self, len_encoder=None):
-        """MarkovTransformDataEncoder object.
+        """Create an encoder for Markov-transform observations.
 
         Args:
             len_encoder (Optional[DataSequenceEncoder]): Encoder for the total counts [n1, n2, n3].
@@ -791,7 +787,7 @@ class MarkovTransformDataEncoder(DataSequenceEncoder):
         self.len_encoder = len_encoder
 
     def __str__(self):
-        """Returns string representation of MarkovTransformDataEncoder object."""
+        """Return a constructor-style representation of the encoder."""
         return "MarkovTransformDataEncoder(len_encoder=%s)" % (str(self.len_encoder))
 
     def __eq__(self, other):

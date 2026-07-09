@@ -1,19 +1,19 @@
-"""Speculative enumeration: build the index with a cheap DRAFT model, score results with the TARGET.
+"""Speculative enumeration: build the index with a low-cost DRAFT model, score results with the TARGET.
 
 Speculative decoding's economics applied to enumeration. Building any autoregressive index costs one
 forward per live prefix -- prohibitive when the model is a large transformer. But the *ordering* work
 (which sequences are near a rank/threshold) tolerates approximation, while the *scores* must be the real
-model's. So: let a cheap draft (an n-gram, a distilled student, a quantized twin) pay for the tree or
+model's. So: let a low-cost draft (an n-gram, a distilled student, a quantized twin) pay for the tree or
 envelope build, and touch the target only for the sequences a query actually returns -- one batched
 teacher-forcing forward for all of them (:meth:`AutoregressiveEnumerable.score_sequences`).
 
-Contract (honest): every returned ``log_prob`` is the **target's exact** score. The *order* is
+Contract: every returned ``log_prob`` is the **target's exact** score. The *order* is
 draft-approximate, repaired locally by window reranking: ``top_k(k)`` / ``slice`` pull
 ``k + rerank_window`` draft-ordered candidates, rescore them all with the target in one batch, and sort by
 target score. That is exact whenever no unpulled sequence out-scores the returned ones -- guaranteed if the
 draft-to-target log-prob gap is globally bounded by ``assumed_gap`` and the window edge clears it (the
 ``certified`` flag); without an assumed bound the observed ``gap`` diagnostic is reported and the
-certificate is honestly ``None``.
+certificate is reported as ``None``.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ class RescoredIndex:
 
     Args:
         draft_index: any index with ``unrank(i) -> (sequence, draft_log_prob)`` -- a
-            :class:`~mixle.enumeration.seek_index.SeekIndex` over a cheap
+            :class:`~mixle.enumeration.seek_index.SeekIndex` over a low-cost
             :class:`~mixle.enumeration.autoregressive.AutoregressiveEnumerable`, an
             :class:`~mixle.enumeration.envelope.AREnvelopeIndex`, or anything equivalent.
         target: the expensive model -- an :class:`AutoregressiveEnumerable` (its
@@ -134,7 +134,7 @@ class RescoredIndex:
     def unrank(self, i: int) -> tuple[tuple, float]:
         """The draft's rank-``i`` sequence with the TARGET's exact log-probability.
 
-        The rank coordinate is the draft's (no reranking): the cheap random-access primitive. Use
+        The rank coordinate is the draft's (no reranking): the low-cost random-access primitive. Use
         :meth:`top_k` / :meth:`slice` when local target-order matters.
         """
         seq, _draft_lp = self.draft_index.unrank(i)

@@ -16,8 +16,8 @@ once -- the property the tests check.
 
 Non-Gaussian belief states (mixture/HMM responsibilities, mean-field fields) already exist as
 ``LatentPosterior`` realizations in :mod:`mixle.stats.compute.posterior`; :func:`as_belief` adapts
-any object exposing ``mean``/``cov`` into this interface. Nonlinear/EKF and particle updates are
-future work (see notes/mixle-cross-modal-reasoning-design.md, Phase 2).
+any object exposing ``mean``/``cov`` into this interface. Nonlinear, extended-Kalman, and particle
+updates are outside this exact Gaussian belief implementation.
 """
 
 from __future__ import annotations
@@ -100,17 +100,21 @@ class CategoricalBelief(BeliefState):
 
     @classmethod
     def uniform(cls, k_or_labels: Any) -> CategoricalBelief:
+        """Create a uniform categorical belief over count or explicit labels."""
         labels = list(range(k_or_labels)) if isinstance(k_or_labels, int) else list(k_or_labels)
         return cls(np.full(len(labels), 1.0 / len(labels)), labels)
 
     def mean(self) -> np.ndarray:
+        """Return the categorical probability vector."""
         return self.probs.copy()
 
     def entropy(self) -> float:
+        """Return Shannon entropy of the categorical belief in nats."""
         p = self.probs[self.probs > 0]
         return float(-(p * np.log(p)).sum())
 
     def sample(self, n: int = 1, rng: Any = None) -> np.ndarray:
+        """Draw hypothesis indices according to the belief probabilities."""
         rng = rng if rng is not None else np.random.RandomState()
         return rng.choice(len(self.probs), size=n, p=self.probs)
 
@@ -150,16 +154,20 @@ class GaussianBelief(BeliefState):
 
     @property
     def dim(self) -> int:
+        """Return the latent dimensionality."""
         return self._dim
 
     def mean(self) -> np.ndarray:
+        """Return a copy of the Gaussian mean vector."""
         return self._mean.copy()
 
     def cov(self) -> np.ndarray:
+        """Return a copy of the Gaussian covariance matrix."""
         return self._cov.copy()
 
     def entropy(self) -> float:
-        # H[N(m,P)] = 0.5 (d log(2 pi e) + log|P|). Use the symmetric eigenvalues (clipped to a tiny
+        """Return differential entropy of the Gaussian belief in nats."""
+        # H[N(m,P)] = 0.5 (d log(2 pi e) + log|P|). Use the symmetric eigenvalues (clipped to a small
         # floor) rather than slogdet: eigvalsh is stable and warning-free for the wide dynamic range a
         # multi-modal latent produces (e.g. density ~1e2 alongside susceptibility ~1e-2).
         evals = np.clip(np.linalg.eigvalsh(self._cov), 1e-300, None)
@@ -167,6 +175,7 @@ class GaussianBelief(BeliefState):
         return float(0.5 * (self._dim * np.log(2.0 * np.pi * np.e) + logdet))
 
     def interval(self, level: float = 0.9) -> np.ndarray:
+        """Return marginal central intervals for each coordinate."""
         if not 0.0 < level < 1.0:
             raise ValueError("level must be in (0, 1)")
         z = float(ndtri(0.5 * (1.0 + level)))
@@ -174,6 +183,7 @@ class GaussianBelief(BeliefState):
         return np.stack([self._mean - half, self._mean + half], axis=1)
 
     def sample(self, n: int = 1, rng: Any = None) -> np.ndarray:
+        """Draw samples from the Gaussian belief."""
         return _as_rng(rng).multivariate_normal(self._mean, self._cov, size=int(n))
 
     def update(self, H: Any, y: Any, R: Any) -> GaussianBelief:
@@ -234,6 +244,7 @@ class GaussianBelief(BeliefState):
         return GaussianBelief(m_new, P_new)
 
     def marginal(self, indices: Any) -> GaussianBelief:
+        """Return the marginal Gaussian belief over selected coordinates."""
         idx = np.atleast_1d(np.asarray(indices, dtype=int))
         return GaussianBelief(self._mean[idx], self._cov[np.ix_(idx, idx)])
 

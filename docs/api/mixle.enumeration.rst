@@ -4,7 +4,6 @@ mixle.enumeration package
 .. automodule:: mixle.enumeration
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Subpackages
 -----------

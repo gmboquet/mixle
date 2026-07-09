@@ -4,7 +4,6 @@ mixle.stats.latent package
 .. automodule:: mixle.stats.latent
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------
@@ -12,8 +11,10 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.stats.latent._hidden_markov_numba_kernels
    mixle.stats.latent.chained_attention
    mixle.stats.latent.dirac_length
+   mixle.stats.latent.gated_mixture
    mixle.stats.latent.gaussian_mixture
    mixle.stats.latent.heterogeneous_mixture
    mixle.stats.latent.heterogeneous_pcfg

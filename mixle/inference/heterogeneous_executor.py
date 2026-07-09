@@ -2,13 +2,13 @@
 
 The actual substance of 'distributed through heterogeneous compute' is backend-agnostic: split the data
 into shards, run each shard's E-step (optionally at its own precision), and fold the fixed-size sufficient
-statistics with a k-way TREE of ``accumulator.combine()`` -- ``O(log W)`` depth, no single-root fan-in.
+statistics with a k-way tree of ``accumulator.combine()`` -- ``O(log W)`` depth, no single-root fan-in.
 ``combine`` is associative, so the tree result is bit-identical to a serial fold for integer/count
 statistics and within float reassociation otherwise.
 
 This module is the *executed, verifiable* core: a local executor that shards and tree-reduces in-process,
 exactly matching a serial fit. The Spark (``RDD.treeReduce``), MPI (``comm.reduce``), and torchrun
-transports are thin adapters that replace the local shard loop with cluster transport over the SAME
+transports are thin adapters that replace the local shard loop with cluster transport over the same
 combine-tree -- they need a cluster to exercise, but the algorithm they run is the one verified here.
 """
 

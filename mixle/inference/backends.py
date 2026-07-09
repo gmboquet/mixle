@@ -122,6 +122,6 @@ def _dispatch_target_kind(target: Any, explicit_kind: str | None) -> str | None:
 
 
 def _returns_torch(target: Any) -> bool:
-    # Intentionally conservative: we do NOT call the target here (it may be expensive / stateful),
+    # Intentionally conservative: we do not call the target here (it may be expensive / stateful),
     # so unannotated callables stay ``None`` and rely on backend= or the numpy default.
     return False

@@ -113,7 +113,7 @@ class BirthDeathSamplingDistribution(SequenceEncodableProbabilityDistribution):
         self._total_rate = self.birth_rate + self.death_rate + self.sampling_rate
 
     def __str__(self) -> str:
-        """Returns string representation of BirthDeathSamplingDistribution object."""
+        """Return a constructor-style representation of the birth-death sampling distribution."""
         return "BirthDeathSamplingDistribution(%s, %s, %s, initial_population=%s, horizon=%s, name=%s, keys=%s)" % (
             repr(self.birth_rate),
             repr(self.death_rate),
@@ -158,7 +158,7 @@ class BirthDeathSamplingDistribution(SequenceEncodableProbabilityDistribution):
         return BirthDeathSamplingEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "BirthDeathSamplingDataEncoder":
-        """Returns a BirthDeathSamplingDataEncoder object."""
+        """Return the encoder for birth-death samples."""
         return BirthDeathSamplingDataEncoder()
 
 
@@ -221,12 +221,15 @@ class BirthDeathSamplingAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += weight
 
     def update(self, x: Any, weight: float, estimate: BirthDeathSamplingDistribution | None) -> None:
+        """Accumulate weighted event counts and exposure for one trajectory."""
         self._add(x, weight)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics with one weighted trajectory."""
         self._add(x, weight)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any | None) -> None:
+        """Accumulate weighted event counts and exposure from encoded trajectories."""
         rows = np.asarray(x, dtype=np.float64)
         ww = np.asarray(weights, dtype=np.float64)
         self.births += float(np.dot(rows[:, 0], ww))
@@ -237,9 +240,11 @@ class BirthDeathSamplingAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += float(ww.sum())
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize the sufficient statistics from encoded trajectories."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, float, float, float, float, float]) -> "BirthDeathSamplingAccumulator":
+        """Merge serialized birth-death-sampling statistics into this accumulator."""
         self.births += suff_stat[0]
         self.deaths += suff_stat[1]
         self.samplings += suff_stat[2]
@@ -249,13 +254,16 @@ class BirthDeathSamplingAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, float, float, float, float, float]:
+        """Return event counts, exposure, trajectory count, and horizon total."""
         return self.births, self.deaths, self.samplings, self.integral, self.count, self.horizon_sum
 
     def from_value(self, x: tuple[float, float, float, float, float, float]) -> "BirthDeathSamplingAccumulator":
+        """Restore the accumulator from serialized birth-death-sampling statistics."""
         self.births, self.deaths, self.samplings, self.integral, self.count, self.horizon_sum = x
         return self
 
     def scale(self, c: float) -> "BirthDeathSamplingAccumulator":
+        """Scale accumulated sufficient statistics by a constant."""
         self.births *= c
         self.deaths *= c
         self.samplings *= c
@@ -265,6 +273,7 @@ class BirthDeathSamplingAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into a keyed statistics dictionary."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -272,10 +281,12 @@ class BirthDeathSamplingAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator from a keyed statistics dictionary."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "BirthDeathSamplingDataEncoder":
+        """Return an encoder for trajectory sufficient statistics."""
         return BirthDeathSamplingDataEncoder()
 
 
@@ -287,6 +298,7 @@ class BirthDeathSamplingAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> "BirthDeathSamplingAccumulator":
+        """Create an empty birth-death-sampling accumulator."""
         return BirthDeathSamplingAccumulator(name=self.name, keys=self.keys)
 
 
@@ -298,6 +310,7 @@ class BirthDeathSamplingEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> "BirthDeathSamplingAccumulatorFactory":
+        """Return a factory for birth-death-sampling sufficient-statistic accumulators."""
         return BirthDeathSamplingAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(
@@ -328,6 +341,7 @@ class BirthDeathSamplingDataEncoder(DataSequenceEncoder):
         return isinstance(other, BirthDeathSamplingDataEncoder)
 
     def seq_encode(self, x: Sequence[Any]) -> np.ndarray:
+        """Encode trajectories as sufficient-statistic rows."""
         rows = []
         for traj in x:
             nb, nd, ns, integral, sum_log_n = _trajectory_stats(traj)

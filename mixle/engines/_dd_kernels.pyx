@@ -3,7 +3,7 @@
 
 numpy exposes no fused-multiply-add, so the pure-numpy ``two_prod`` pays a ~6-op Veltkamp split per
 element. With ``libc.math.fma`` the exact product error is a SINGLE instruction (``fma(a, b, -a*b)``),
-so an accurate double-double dot/sum runs in one pass of cheap FMAs -- faster than the vectorized
+so an accurate double-double dot/sum runs in one pass of low-overhead FMAs -- faster than the vectorized
 multi-pass numpy version and exactly as accurate. Built optionally; mixle falls back to pure numpy when
 this is not compiled (so a compiler is never required to import the package).
 """

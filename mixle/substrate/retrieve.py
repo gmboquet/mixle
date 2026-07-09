@@ -24,18 +24,22 @@ class Retrieval:
     scores: list[float] = field(default_factory=list)
 
     def by_kind(self) -> dict[str, list[SubstrateItem]]:
+        """Group retrieved items by substrate kind."""
         out: dict[str, list[SubstrateItem]] = {}
         for it in self.items:
             out.setdefault(it.kind, []).append(it)
         return out
 
     def kinds(self) -> list[str]:
+        """Return the sorted substrate kinds present in the result."""
         return sorted(self.by_kind())
 
     def top(self, n: int) -> list[SubstrateItem]:
+        """Return the top ``n`` retrieved items."""
         return self.items[: int(n)]
 
     def provenance(self) -> list[dict[str, Any]]:
+        """Return compact provenance records for retrieved items."""
         return [
             {
                 "id": i.id,

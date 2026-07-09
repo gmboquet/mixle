@@ -4,7 +4,6 @@ mixle.inference.production package
 .. automodule:: mixle.inference.production
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------

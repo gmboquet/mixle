@@ -1,4 +1,4 @@
-"""``distill_tool_caller`` -- train a tiny model to do function calling, with the honesty contract.
+"""Distill single-step tool calling into a calibrated local model.
 
 Tool calling decomposes into two problems the task spine already solves, composed under one gate:
 
@@ -7,16 +7,14 @@ Tool calling decomposes into two problems the task spine already solves, compose
   * **the arguments** -- one token-level extractor per tool (:func:`~mixle.task.extract.distill_extractor`),
     distilled from the teacher's own argument fills.
 
-``teacher(request) -> {"tool": name, "args": {...}}`` (``{"tool": None}`` for no-op) is whatever does the
-job today -- a frontier LLM behind :mod:`mixle.task.llm`, an agent loop, or a rule. The returned
-:class:`ToolCaller` emits a call ONLY when the selector is conformally confident AND every required
-argument extracts; anything else escalates to the teacher -- a malformed or guessed call is never
-emitted silently. Escalations are harvested as traces for the next distillation round, exactly like
-``solve``.
+``teacher(request) -> {"tool": name, "args": {...}}`` (or ``{"tool": None}``)
+can be a frontier LLM behind :mod:`mixle.task.llm`, an agent loop, or a rule.
+The returned :class:`ToolCaller` emits a call only when the selector is
+conformally confident and every required argument extracts. Anything else
+escalates to the teacher and is harvested for the next distillation round.
 
-This covers single-step function calling. Multi-step planning / problem decomposition is NOT claimed
-here: that needs trace-SFT on the causal LM (the primitives exist -- ``LM.fit`` + the SFT loss-mask)
-and an execution-verified loop, and is tracked as its own rung.
+This covers single-step function calling. Multi-step planning is handled by the
+planner distillation surfaces.
 """
 
 from __future__ import annotations
@@ -41,12 +39,13 @@ class ToolSpec:
 
     @property
     def required_args(self) -> list[str]:
+        """Return required argument names, defaulting to all declared arguments."""
         return list(self.required) if self.required is not None else list(self.args)
 
 
 @dataclass
 class ToolCaller:
-    """A distilled function-caller: emit a call only when selection AND arguments are trustworthy."""
+    """Distilled function caller with calibrated selection and argument extraction."""
 
     selector: Solution
     extractors: dict[str, Any]
@@ -58,9 +57,10 @@ class ToolCaller:
     harvested: list[tuple[str, dict]] = field(default_factory=list)
 
     def try_local(self, request: str) -> dict[str, Any] | None:
-        """The local decision alone: a trustworthy call / no-op, or ``None`` (= must escalate).
+        """Return the local decision, or ``None`` when the request must escalate.
 
-        No teacher, no stats — this is what a server without the frontier can run."""
+        This method does not call the teacher.
+        """
         tool = self.selector.cascade.model.decide(request)
         if tool is not None and tool != _NO_TOOL and tool in self.extractors:
             args = self.extractors[tool](request)
@@ -84,6 +84,7 @@ class ToolCaller:
         return {"tool": out.get("tool"), "args": dict(out.get("args") or {}), "escalate": True}
 
     def report(self) -> dict[str, Any]:
+        """Return serving counts, escalation rate, and selector agreement diagnostics."""
         return {
             "selection_agreement": round(self.selection_agreement, 4),
             "requests": self.n_requests,
@@ -93,7 +94,7 @@ class ToolCaller:
         }
 
     def save(self, path: str) -> str:
-        """Persist selector + per-tool extractors + specs as one artifact directory; :meth:`load` restores."""
+        """Persist selector, per-tool extractors, and tool specs."""
         import json
         from pathlib import Path
 
@@ -147,7 +148,7 @@ def distill_tool_caller(
     selector_kw: dict | None = None,
     extractor_kw: dict | None = None,
 ) -> ToolCaller:
-    """Distill the teacher's function-calling into a tiny selector + per-tool argument extractors.
+    """Distill the teacher's function-calling into a local selector plus per-tool argument extractors.
 
     Args:
         teacher: ``teacher(request) -> {"tool": name-or-None, "args": {field: value}}`` — the frontier
@@ -166,7 +167,7 @@ def distill_tool_caller(
         if name is not None and name not in specs:
             raise ValueError(f"teacher used tool {name!r} that is not in the provided specs")
 
-    # 1) WHICH tool: a calibrated classification student over the request text.
+    # 1) Tool selection: a calibrated classification student over the request text.
     call_by_req = dict(zip(reqs, calls))
 
     def select_teacher(r: str) -> str:
@@ -176,7 +177,7 @@ def distill_tool_caller(
 
     selector = solve(select_teacher, reqs, seed=seed, **(selector_kw or {}))
 
-    # 2) THE arguments: one extractor per tool, trained on that tool's requests with the teacher's fills.
+    # 2) Arguments: one extractor per tool, trained on that tool's requests with the teacher's fills.
     extractors: dict[str, Any] = {}
     for name, spec in specs.items():
         rows = [(r, c) for r, c in zip(reqs, calls) if c.get("tool") == name]

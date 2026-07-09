@@ -655,7 +655,7 @@ def kernel_for(
 ) -> Kernel:
     """Build the best registered kernel for ``dist`` and ``engine``."""
     engine = NUMPY_ENGINE if engine is None else engine
-    # On a numba-capable engine, a composite/mixture of cheap leaves runs its whole E-step in ONE fused
+    # On a numba-capable engine, a composite/mixture of low-cost leaves runs its whole E-step in ONE fused
     # nopython pass (no per-leaf boundary crossings/allocations) -- ~1.5-2.7x over the per-leaf kernels.
     # Only engage where fusion actually helps (multi-factor or multi-component); single leaves and
     # BLAS-bound / untemplated leaves fall through to the registered factories unchanged.

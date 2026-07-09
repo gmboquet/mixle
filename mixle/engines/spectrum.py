@@ -1,4 +1,4 @@
-"""The precision spectrum's front door: route a computation to the CHEAPEST backend that is accurate.
+"""The precision spectrum's front door: route a computation to the lowest-cost accurate backend.
 
 Ties the spectrum together -- native float64, double-double (:mod:`mixle.engines.extended`), and the MPFR
 tail (:mod:`mixle.engines.highprec`) -- behind one call that reads the certified error bound
@@ -23,11 +23,11 @@ _U_DD = 2.0**-106  # double-double unit roundoff
 
 
 def accurate_sum(x: Any, target_rel_error: float = 1e-12) -> tuple[float, str]:
-    """Sum ``x`` to ``target_rel_error`` relative accuracy using the cheapest sufficient backend.
+    """Sum ``x`` to ``target_rel_error`` relative accuracy using the lowest-cost sufficient backend.
 
     Returns ``(value, backend)`` where ``backend`` is ``"float64"``, ``"dd"`` (double-double), or
-    ``"mpfr<bits>"``. Escalates only when the certified error bound says the cheaper backend cannot meet
-    the budget -- so the common (well-conditioned) case never leaves vectorized float64.
+    ``"mpfr<bits>"``. Escalates only when the certified error bound says the lower-cost backend cannot meet
+    the budget -- so the common well-conditioned case never leaves vectorized float64.
     """
     arr = np.asarray(x, dtype=np.float64).ravel()
     if arr.size == 0:

@@ -6,8 +6,8 @@ and returns next-token logits ``(batch, vocab)`` from the last position. So
 ``Categorical(logits=Transformer(out=V))`` is *exactly* next-token prediction ``p(token | context)``, fit by the
 standard ``estimate()`` loop whose cross-entropy is ``-log p`` -- no new training machinery.
 
-Attention is ``F.scaled_dot_product_attention`` (the FlashAttention dispatch on CUDA). At frontier scale the
-same module is what a vendored TorchTitan/Megatron trainer shards (FSDP2/TP/PP); here it runs single-process.
+Attention is ``F.scaled_dot_product_attention`` with CUDA FlashAttention dispatch when available. This module runs
+single-process here, while larger training stacks can shard the same architecture externally.
 
 The ``nn.Module`` subclasses are defined at MODULE level (not nested inside ``build_causal_lm``) so a trained
 LM pickles/saves: a function-local class has no importable qualname and ``torch.save``/``pickle`` cannot find it.

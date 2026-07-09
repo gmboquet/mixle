@@ -1,7 +1,7 @@
 """The meta-search that *learns which improvement operators help*: a bandit + a diversity population.
 
 The operator-choice problem is a **non-stationary bandit**: each step, pick an operator (arm), apply it
-through the Phase-1 propose+verify gate, observe the *verified* gate delta as reward (0 if the
+through the propose-and-verify gate, observe the *verified* gate delta as reward (0 if the
 challenger was rejected), and update the arm's value. Because the reward is the anti-regression
 verified delta, the policy cannot be fooled by overfit in-sample gains.
 
@@ -10,7 +10,7 @@ verified delta, the policy cannot be fooled by overfit in-sample gains.
   policy can follow a problem whose best operator changes over the run.
 * :class:`Population` -- a diversity-preserving population of model structures evolved by the bandit:
   select operators, apply them to parents, gate the challengers, reward the bandit, and keep the
-  verified-best plus a coarse-but-honest capability-diversity quota. ``run`` returns a
+  verified-best plus a coarse capability-diversity quota. ``run`` returns a
   :class:`~mixle.evolve.search.SearchResult`; ``champion`` is the incumbent.
 """
 
@@ -40,7 +40,7 @@ class _Arm:
     pulls: float = 0.0
     wins: float = 0.0  # count of verified-positive rewards (Thompson Beta successes)
     reward_sum: float = 0.0  # sum of (clipped) rewards
-    reward_sq: float = 0.0  # sum of squared rewards (for UCB variance, unused but kept honest)
+    reward_sq: float = 0.0  # sum of squared rewards, retained for UCB variance diagnostics
     cost_sum: float = 0.0
 
 
@@ -182,7 +182,7 @@ class _Member:
 
 
 # diversity now uses the real genotype distance (tree-edit over the model's compositional structure); the
-# ``caps`` fingerprint is kept as cheap cached metadata.
+# ``caps`` fingerprint is kept as low-cost cached metadata.
 
 
 class Population:

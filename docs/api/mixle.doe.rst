@@ -4,7 +4,6 @@ mixle.doe package
 .. automodule:: mixle.doe
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Submodules
 ----------
@@ -12,7 +11,9 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.doe._contracts
    mixle.doe.active
+   mixle.doe.amplify
    mixle.doe.analysis
    mixle.doe.batch
    mixle.doe.bayesopt
@@ -27,6 +28,8 @@ Submodules
    mixle.doe.multiobjective
    mixle.doe.optimal
    mixle.doe.optimizer
+   mixle.doe.oracle
    mixle.doe.propagate
+   mixle.doe.robust
    mixle.doe.sensitivity
    mixle.doe.trust_region

@@ -71,6 +71,7 @@ class ReproReceipt:
     param_fingerprint: str
 
     def as_dict(self) -> dict[str, Any]:
+        """Return the receipt as JSON-compatible data."""
         return {
             "data_fingerprint": self.data_fingerprint,
             "n": self.n,

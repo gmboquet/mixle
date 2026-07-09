@@ -247,7 +247,7 @@ def _best_first_union(
             else:
                 mh = -heads[0][0]
                 if btop >= mh + math.log(len(head_scores)) - tol:
-                    release = True  # cheap upper bound on the frontier certifies release
+                    release = True  # low-overhead upper bound on the frontier certifies release
                 elif btop < mh - tol:
                     release = False  # frontier (>= mh) strictly exceeds btop: cannot release yet
                 else:

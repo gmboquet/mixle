@@ -4,7 +4,6 @@ mixle.stats.univariate package
 .. automodule:: mixle.stats.univariate
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Subpackages
 -----------

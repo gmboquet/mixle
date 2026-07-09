@@ -95,6 +95,7 @@ class PowerLawHawkesDistribution(SequenceEncodableProbabilityDistribution):
         return self.A * self.c / (self.p - 1.0) * np.exp(self.alpha * mean_mark)
 
     def density(self, x) -> float:
+        """Return the realization likelihood as a density on event times."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x) -> float:
@@ -112,15 +113,19 @@ class PowerLawHawkesDistribution(SequenceEncodableProbabilityDistribution):
         return float(np.sum(np.log(lam)) - integral)
 
     def seq_log_density(self, x) -> np.ndarray:
+        """Return log-likelihoods for a batch of point-process realizations."""
         return np.array([self.log_density(r) for r in x])
 
     def sampler(self, seed: int | None = None) -> PowerLawHawkesSampler:
+        """Return a branching-process sampler for event catalogues."""
         return PowerLawHawkesSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> PowerLawHawkesEstimator:
+        """Return the maximum-likelihood estimator for realizations on this window."""
         return PowerLawHawkesEstimator(self.window, alpha_fixed=self.alpha if self.alpha == 0.0 else None)
 
     def dist_to_encoder(self) -> PowerLawHawkesDataEncoder:
+        """Return the pass-through realization encoder used by vectorized methods."""
         return PowerLawHawkesDataEncoder()
 
 
@@ -155,6 +160,7 @@ class PowerLawHawkesSampler(DistributionSampler):
         return np.asarray(times)[order], np.asarray(marks)[order]
 
     def sample(self, size: int | None = None):
+        """Draw one catalogue or a list of catalogues by the branching construction."""
         if size is None:
             return self._sample_one()
         return [self._sample_one() for _ in range(int(size))]
@@ -170,6 +176,7 @@ class PowerLawHawkesDataEncoder(DataSequenceEncoder):
         return isinstance(other, PowerLawHawkesDataEncoder)
 
     def seq_encode(self, x):
+        """Return the batch of realizations as a list."""
         return list(x)
 
 
@@ -183,9 +190,11 @@ class PowerLawHawkesEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self):
+        """Return a factory for raw-realization Hawkes accumulators."""
         return PowerLawHawkesAccumulatorFactory(self.window, self.alpha_fixed, name=self.name, keys=self.keys)
 
     def estimate(self, nobs, suff_stat) -> PowerLawHawkesDistribution:
+        """Fit Hawkes parameters by numerical maximum likelihood."""
         realizations, window, alpha_fixed = suff_stat
         unmarked = alpha_fixed is not None
         unpack = PowerLawHawkesDistribution._unpack
@@ -224,34 +233,43 @@ class PowerLawHawkesAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x, weight, estimate):
+        """Store one realization for maximum-likelihood fitting."""
         self.realizations.append(x)
 
     def initialize(self, x, weight, rng):
+        """Store one realization during initialization."""
         self.realizations.append(x)
 
     def seq_update(self, x, weights, estimate):
+        """Store a batch of realizations for maximum-likelihood fitting."""
         self.realizations.extend(x)
 
     def seq_initialize(self, x, weights, rng):
+        """Store a batch of realizations during initialization."""
         self.realizations.extend(x)
 
     def combine(self, suff_stat):
+        """Merge stored realization catalogues."""
         self.realizations.extend(suff_stat[0])
         return self
 
     def scale(self, c: float) -> PowerLawHawkesAccumulator:
+        """Leave raw catalogues unchanged because they are not weighted sufficient statistics."""
         # The accumulator stores raw realizations (no weighted sufficient statistics), so there is
         # nothing meaningful to rescale; keep it a safe no-op rather than corrupting the catalogue.
         return self
 
     def value(self):
+        """Return stored realizations with the shared window and alpha constraint."""
         return (self.realizations, self.window, self.alpha_fixed)
 
     def from_value(self, x):
+        """Restore stored realizations, window, and alpha constraint."""
         self.realizations, self.window, self.alpha_fixed = x
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge stored realizations into ``stats_dict`` under the configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].realizations.extend(self.realizations)
@@ -259,10 +277,12 @@ class PowerLawHawkesAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace stored realizations from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.realizations = stats_dict[self.keys].realizations
 
     def acc_to_encoder(self):
+        """Return the encoder compatible with raw Hawkes realizations."""
         return PowerLawHawkesDataEncoder()
 
 
@@ -276,4 +296,5 @@ class PowerLawHawkesAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> PowerLawHawkesAccumulator:
+        """Create an empty power-law Hawkes accumulator."""
         return PowerLawHawkesAccumulator(self.window, self.alpha_fixed, name=self.name, keys=self.keys)

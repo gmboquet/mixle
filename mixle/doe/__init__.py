@@ -7,8 +7,8 @@ bounded input space:
   classical factorial / fractional-factorial / Plackett-Burman / response-surface / mixture, and
   optimal designs (D/A/I/G/E/c criteria).
 * **Bayesian optimization** -- the single-point acquisitions (EI/PI/UCB/Thompson/knowledge-gradient),
-  plus the research frontier: rigorous Monte-Carlo q-EI and local-penalization *batch* design,
-  Max-value Entropy Search, trust-region BO (TuRBO) for high dimensions, constrained and
+  Monte-Carlo q-EI and local-penalization *batch* design, Max-value Entropy Search,
+  trust-region BO (TuRBO) for high dimensions, constrained and
   multi-objective BO, and cost-aware *multi-fidelity* BO.
 * **Active learning & optimal design** -- sequential design to learn a surrogate (ALM / ALC-IMSE) or
   model parameters (expected information gain, closed-form and nested-Monte-Carlo).

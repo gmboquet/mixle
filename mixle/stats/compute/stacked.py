@@ -1,4 +1,9 @@
-"""Stacked mixture kernels built from distribution-owned backend math."""
+"""Stacked mixture kernels built from distribution-owned backend math.
+
+The module prepares homogeneous component parameters, resident sufficient
+statistics, and generated or explicit stacked scoring routes for efficient
+mixture E-steps across supported compute engines.
+"""
 
 from __future__ import annotations
 

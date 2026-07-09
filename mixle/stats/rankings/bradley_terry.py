@@ -11,7 +11,7 @@ distribution over ordered pairs:
     p(winner, loser) = (1 / C(K, 2)) * sigmoid(log_w[winner] - log_w[loser]).
 
 Worths are identified up to a global scale, so ``log_w`` is stored centered (mean zero). Estimation is
-the Zermelo / minorization-maximization fixed point (Hunter 2004), a few cheap numba iterations over the
+the Zermelo / minorization-maximization fixed point (Hunter 2004), a few low-cost numba iterations over the
 ``K x K`` win-count matrix -- the sufficient statistic. Unlike :class:`PlackettLuceDistribution` (full
 orderings) this consumes pairwise data directly.
 
@@ -78,6 +78,7 @@ class BradleyTerryDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare the NumPy and numba execution path used by Bradley-Terry kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(
@@ -104,23 +105,29 @@ class BradleyTerryDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def density(self, x: tuple[int, int]) -> float:
+        """Return the probability of one ``(winner, loser)`` comparison."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: tuple[int, int]) -> float:
+        """Return the log-probability of one ``(winner, loser)`` comparison."""
         w, ell = int(x[0]), int(x[1])
         return self.log_w[w] - np.logaddexp(self.log_w[w], self.log_w[ell]) - self.log_pairs
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return vectorized log-probabilities for encoded pairwise comparisons."""
         w, ell = x[:, 0], x[:, 1]
         return self.log_w[w] - np.logaddexp(self.log_w[w], self.log_w[ell]) - self.log_pairs
 
     def sampler(self, seed: int | None = None) -> BradleyTerrySampler:
+        """Return a sampler for paired-comparison outcomes."""
         return BradleyTerrySampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> BradleyTerryEstimator:
+        """Return an MM estimator with this distribution's item count."""
         return BradleyTerryEstimator(dim=self.dim, pseudo_count=pseudo_count, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> BradleyTerryDataEncoder:
+        """Return the pairwise-comparison encoder used by vectorized methods."""
         return BradleyTerryDataEncoder(dim=self.dim)
 
 
@@ -138,6 +145,7 @@ class BradleyTerrySampler(DistributionSampler):
         return (int(i), int(j)) if self.rng.rand() < pi else (int(j), int(i))
 
     def sample(self, size: int | None = None) -> tuple[int, int] | list[tuple[int, int]]:
+        """Draw one comparison outcome or ``size`` iid comparison outcomes."""
         if size is None:
             return self._sample_one()
         return [self._sample_one() for _ in range(size)]
@@ -153,33 +161,41 @@ class BradleyTerryAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: tuple[int, int], weight: float, estimate: Any) -> None:
+        """Update the win-count matrix from one weighted comparison."""
         self.wins[int(x[0]), int(x[1])] += weight
         self.count += weight
 
     def initialize(self, x: tuple[int, int], weight: float, rng: RandomState | None) -> None:
+        """Initialize win counts from one weighted comparison."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
+        """Update win counts from encoded pairwise comparisons."""
         np.add.at(self.wins, (x[:, 0], x[:, 1]), weights)
         self.count += float(np.sum(weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize win counts from encoded pairwise comparisons."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat) -> BradleyTerryAccumulator:
+        """Merge observation count and win-count matrix statistics."""
         self.count += suff_stat[0]
         self.wins += suff_stat[1]
         return self
 
     def value(self):
+        """Return accumulated observation weight and win-count matrix."""
         return self.count, self.wins
 
     def from_value(self, x) -> BradleyTerryAccumulator:
+        """Restore accumulator state from ``value`` output."""
         self.count, self.wins = x[0], np.asarray(x[1])
         self.dim = self.wins.shape[0]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -187,19 +203,24 @@ class BradleyTerryAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> BradleyTerryDataEncoder:
+        """Return the encoder compatible with Bradley-Terry win-count statistics."""
         return BradleyTerryDataEncoder(dim=self.dim)
 
 
 class BradleyTerryAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create accumulators for Bradley-Terry win-count statistics."""
+
     def __init__(self, dim: int, keys: str | None = None) -> None:
         self.dim = dim
         self.keys = keys
 
     def make(self) -> BradleyTerryAccumulator:
+        """Create an empty Bradley-Terry accumulator."""
         return BradleyTerryAccumulator(dim=self.dim, keys=self.keys)
 
 
@@ -225,9 +246,11 @@ class BradleyTerryEstimator(ParameterEstimator):
         self.keys = keys
 
     def accumulator_factory(self) -> BradleyTerryAccumulatorFactory:
+        """Return a factory for Bradley-Terry sufficient-statistic accumulators."""
         return BradleyTerryAccumulatorFactory(dim=self.dim, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat) -> BradleyTerryDistribution:
+        """Estimate centered log-worths from accumulated win counts."""
         count, wins = suff_stat
         k = self.dim
         if count <= 0.0:
@@ -254,6 +277,7 @@ class BradleyTerryDataEncoder(DataSequenceEncoder):
         return isinstance(other, BradleyTerryDataEncoder)
 
     def seq_encode(self, x: Sequence[tuple[int, int]]) -> np.ndarray:
+        """Validate and encode ``(winner, loser)`` pairs as an integer matrix."""
         rv = np.asarray([list(p) for p in x], dtype=np.int64)
         if rv.ndim != 2 or rv.shape[1] != 2 or rv.shape[0] == 0:
             raise ValueError("BradleyTerryDistribution requires a non-empty sequence of (winner, loser) pairs.")

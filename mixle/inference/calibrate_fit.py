@@ -50,6 +50,7 @@ class CalibrationReport:
         return self.pit_error <= threshold
 
     def as_dict(self) -> dict[str, Any]:
+        """Return rounded calibration metrics as JSON-compatible data."""
         d = {
             "n": self.n,
             "mean_log_density": round(self.mean_log_density, 6),
@@ -82,7 +83,7 @@ def _scalar_cdf(model: Any) -> Any:
 def calibration_report(model: Any, data: Any) -> CalibrationReport:
     """The calibration of ``model`` on held-out ``data`` (see module docstring).
 
-    ``data`` should be data the model was NOT fitted on -- calibration measured on the training set is
+    ``data`` should be data the model was not fitted on -- calibration measured on the training set is
     optimistic. Runs the PIT test when the model has a scalar predictive CDF; always reports the
     held-out mean log-density.
     """

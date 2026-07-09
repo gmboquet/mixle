@@ -93,10 +93,11 @@ class FieldKernel:
     """A Gaussian field prior over an index grid, expressed as a precision matrix."""
 
     def precision(self, index: np.ndarray) -> np.ndarray:
+        """Return the prior precision matrix for the supplied field index grid."""
         raise NotImplementedError
 
     def covariance(self, index: np.ndarray) -> np.ndarray | None:
-        """The prior covariance matrix, when available cheaply (a kernel defined by its covariance). Used by
+        """The prior covariance matrix, when available directly (a kernel defined by its covariance). Used by
         the low-rank Gauss-Newton posterior to get field marginals without a dense precision inverse;
         ``None`` (the default) falls back to the dense path."""
         return None
@@ -116,6 +117,7 @@ class RandomWalk(FieldKernel):
     ridge: float | None = None
 
     def precision(self, index: np.ndarray) -> np.ndarray:
+        """Build the finite-difference precision matrix for the indexed random walk."""
         n = len(index)
         D = np.eye(n)
         for _ in range(self.order):
@@ -139,6 +141,7 @@ class RBF(FieldKernel):
     jitter: float = 1e-6
 
     def covariance(self, index: np.ndarray) -> np.ndarray:
+        """Return the RBF covariance matrix plus diagonal jitter for ``index``."""
         x = np.asarray(index, dtype=float)
         if x.ndim == 1:
             x = x[:, None]
@@ -147,6 +150,7 @@ class RBF(FieldKernel):
         return k + self.jitter * np.eye(len(x))
 
     def precision(self, index: np.ndarray) -> np.ndarray:
+        """Return the inverse of the jittered RBF covariance matrix."""
         return np.linalg.inv(self.covariance(index))
 
 
@@ -182,6 +186,7 @@ class AnisotropicRBF(FieldKernel):
         return x / r[: x.shape[1]]
 
     def covariance(self, index: np.ndarray) -> np.ndarray:
+        """Return the anisotropic RBF covariance matrix plus diagonal jitter."""
         x = np.asarray(index, dtype=float)
         if x.ndim == 1:
             x = x[:, None]
@@ -191,6 +196,7 @@ class AnisotropicRBF(FieldKernel):
         return k + self.jitter * np.eye(len(x))
 
     def precision(self, index: np.ndarray) -> np.ndarray:
+        """Return the inverse of the anisotropic RBF covariance matrix."""
         return np.linalg.inv(self.covariance(index))
 
 
@@ -254,11 +260,13 @@ class GreatCircleRBF(FieldKernel):
     radius: float = 1.0
 
     def covariance(self, index: np.ndarray) -> np.ndarray:
+        """Return the chordal-distance RBF covariance on spherical coordinates."""
         d2 = _chordal_sq(index, self.radius)
         k = rbf_from_scaled_sqdist(d2 / float(self.lengthscale) ** 2, float(self.amplitude))
         return k + self.jitter * np.eye(len(d2))
 
     def precision(self, index: np.ndarray) -> np.ndarray:
+        """Return the inverse of the spherical RBF covariance matrix."""
         return np.linalg.inv(self.covariance(index))
 
 
@@ -280,6 +288,7 @@ class GreatCircleMatern(FieldKernel):
     radius: float = 1.0
 
     def covariance(self, index: np.ndarray) -> np.ndarray:
+        """Return the chordal-distance Matern covariance on spherical coordinates."""
         r = np.sqrt(_chordal_sq(index, self.radius))
         ls, amp = float(self.lengthscale), float(self.amplitude)
         r_scaled = r / ls  # lengthscale-scaled chordal distance, shared by all three Matern smoothnesses
@@ -294,6 +303,7 @@ class GreatCircleMatern(FieldKernel):
         return k + self.jitter * np.eye(len(r))
 
     def precision(self, index: np.ndarray) -> np.ndarray:
+        """Return the inverse of the spherical Matern covariance matrix."""
         return np.linalg.inv(self.covariance(index))
 
 
@@ -306,12 +316,13 @@ class GaussianField:
     name: str = "field"
 
     def __post_init__(self):
+        """Normalize the index and cache the kernel precision and optional covariance."""
         self.index = np.asarray(self.index)
         self.dim = len(self.index)
         self.precision = np.asarray(self.kernel.precision(self.index), dtype=float)
         if self.precision.shape != (self.dim, self.dim):
             raise ValueError(f"kernel precision is {self.precision.shape}, expected {(self.dim, self.dim)}.")
-        cov = self.kernel.covariance(self.index)  # prior covariance, when the kernel provides it cheaply
+        cov = self.kernel.covariance(self.index)  # prior covariance, when the kernel provides it directly
         self.covariance = None if cov is None else np.asarray(cov, dtype=float)
 
 
@@ -384,9 +395,11 @@ class Proxy:
         return self
 
     def params(self) -> list[_ParamSpec]:
+        """Return free parameter specifications used by the joint field fit."""
         return []
 
     def loglik(self, field_t: Any, params: dict, torch) -> Any:
+        """Return this proxy's torch log-likelihood contribution."""
         raise NotImplementedError
 
     def residual(self, field_t: Any, params: dict, torch) -> Any:
@@ -430,9 +443,11 @@ class GaussianProxy(Proxy):
         )
 
     def params(self) -> list[_ParamSpec]:
+        """Return parameter specs for any free slope, intercept, or scale."""
         return [p for p in (self._slope_p, self._int_p, self._scale_p) if p is not None]
 
     def loglik(self, field_t, params, torch):
+        """Return the linear-Gaussian observation log-likelihood."""
         f = field_t if self.idx is None else field_t[torch.as_tensor(self.idx)]
         slope = params[self._slope_p.name] if self._slope_p else self._slope_v
         intercept = params[self._int_p.name] if self._int_p else self._int_v
@@ -443,6 +458,7 @@ class GaussianProxy(Proxy):
         return -0.5 * torch.sum(resid * resid) - len(self.y) * (log_scale + 0.5 * np.log(2 * np.pi))
 
     def residual(self, field_t, params, torch):
+        """Return standardized Gaussian residuals for Gauss-Newton covariance estimation."""
         f = field_t if self.idx is None else field_t[torch.as_tensor(self.idx)]
         slope = params[self._slope_p.name] if self._slope_p else self._slope_v
         intercept = params[self._int_p.name] if self._int_p else self._int_v
@@ -468,6 +484,7 @@ class LogisticNicheProxy(Proxy):
         self.S = self.P.shape[0]
 
     def params(self) -> list[_ParamSpec]:
+        """Return niche-location, niche-precision, and baseline parameter specifications."""
         return [
             _ParamSpec(f"{self.prefix}.mu", (self.S,), "real", np.zeros(self.S)),
             _ParamSpec(f"{self.prefix}.logkappa", (self.S,), "real", np.full(self.S, -1.0)),
@@ -475,6 +492,7 @@ class LogisticNicheProxy(Proxy):
         ]
 
     def loglik(self, field_t, params, torch):
+        """Return the Bernoulli niche-response log-likelihood with weak location regularization."""
         mu = params[f"{self.prefix}.mu"]
         kappa = torch.exp(torch.clamp(params[f"{self.prefix}.logkappa"], -4, 4))
         b = params[f"{self.prefix}.b"]
@@ -504,6 +522,7 @@ class PoissonProxy(Proxy):
         self.off = np.asarray(self.offset, dtype=float)
 
     def loglik(self, field_t, params, torch):
+        """Return the Cox-process Poisson log-likelihood up to the count-factorial constant."""
         f = field_t if self.idx is None else field_t[torch.as_tensor(self.idx)]
         log_rate = torch.as_tensor(self.off) + f
         c = torch.as_tensor(self.c)
@@ -520,6 +539,7 @@ class CustomProxy(Proxy):
     prefix: str = "custom"
 
     def params(self) -> list[_ParamSpec]:
+        """Return the custom parameter specifications declared by ``param_specs``."""
         out = []
         for name, support, init in self.param_specs:
             arr = np.asarray(init, dtype=float)
@@ -527,6 +547,7 @@ class CustomProxy(Proxy):
         return out
 
     def loglik(self, field_t, params, torch):
+        """Delegate log-likelihood evaluation to ``loglik_fn``."""
         return self.loglik_fn(field_t, params, torch)
 
 
@@ -555,6 +576,7 @@ class FieldPosterior:
     _marg_var: dict = _dc_field(default_factory=dict)  # node -> marginal variance (low-rank path, no full cov)
 
     def mean(self, node: str) -> np.ndarray:
+        """Return the posterior mean/MAP value for ``node`` in its natural parameter space."""
         return self.map_values[node]
 
     def _slice(self, node: str) -> slice:
@@ -579,6 +601,7 @@ class FieldPosterior:
         return (j[:, None] * self._cov[s, s]) * j[None, :]
 
     def sd(self, node: str) -> np.ndarray:
+        """Return posterior standard deviations for ``node`` in its natural parameter space."""
         if node in self._marg_var:  # low-rank (Woodbury) path: only marginal variances were formed
             j = self._jacobian(node)
             return np.sqrt(np.clip(self._marg_var[node], 1e-12, None)) * j
@@ -586,7 +609,7 @@ class FieldPosterior:
 
     def posterior(self, node: str, *, coupling: bool = True) -> tuple[np.ndarray, np.ndarray]:
         """``(mean, sd)`` for ``node`` in its natural space. ``coupling=True`` (default) marginalizes the
-        other nodes (the honest marginal); ``coupling=False`` fixes them at the MAP (additive information)."""
+        other nodes; ``coupling=False`` fixes them at the MAP for an additive-information diagnostic."""
         m = self.map_values[node]
         if coupling:
             sd = self.sd(node)
@@ -634,7 +657,7 @@ class FieldPosterior:
         Gaussian conditional of the remaining coordinates given the observed ones (e.g. draw the field
         consistent with a pinned measurement or a fixed proxy parameter). Conditioning couples nodes
         through the joint covariance, so it requires the full-covariance fit
-        (``how='laplace'``/``'gauss_newton'``); the fixed nodes come back at their given values.
+        (``how='laplace'``/``'gauss_newton'``); the fixed nodes retain their given values.
 
         Args:
             size: number of joint draws.
@@ -712,6 +735,7 @@ class FieldPosterior:
         return out
 
     def summary(self) -> dict:
+        """Return posterior means and standard deviations for every non-empty node."""
         out = {}
         for node in self._layout:
             m = np.atleast_1d(self.map_values[node])
@@ -1144,6 +1168,7 @@ class FieldModel:
     proxies: list
 
     def fit(self, *, how: str = "laplace", **kw) -> FieldPosterior:
+        """Fit the assembled field/proxy model with :func:`fit_field` and return its posterior."""
         return fit_field(self.field, self.proxies, how=how, **kw)
 
 

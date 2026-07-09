@@ -45,7 +45,9 @@ class EMStrategy(Protocol):
         model: SequenceEncodableProbabilityDistribution,
         engine: Any | None = ...,
         objective: Callable[[Any], float] | None = ...,
-    ) -> EMStepResult: ...
+    ) -> EMStepResult:
+        """Run one EM-style update and return the resulting model and objective metadata."""
+        ...
 
 
 class StandardEM:

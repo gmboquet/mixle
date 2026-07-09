@@ -154,8 +154,8 @@ Manual Map
 The foundational pages are :doc:`installation`, :doc:`quickstart`,
 :doc:`concepts`, :doc:`maturity`, and :doc:`package-map`. The tutorial index in
 :doc:`tutorials/index` provides task-sized walkthroughs. The generated
-reference under :doc:`api/modules` is exhaustive; :doc:`api-overview` is the
-human map for finding the right import.
+reference under :doc:`api/modules` covers the broad public module surface;
+:doc:`api-overview` is the human map for finding the right import.
 
 .. toctree::
    :caption: Start Here
@@ -193,6 +193,21 @@ human map for finding the right import.
    processes
    automatic-modeling-internals
    cookbook
+
+.. toctree::
+   :caption: Release And Validation
+   :hidden:
+   :maxdepth: 2
+
+   release-readiness
+   validation
+   support-policy
+   security-and-data
+   stability-and-missing-data
+   family-release
+   release-notes
+   previous-releases
+   changelog
 
 .. toctree::
    :caption: Reference Guides

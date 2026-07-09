@@ -86,6 +86,7 @@ class BinghamDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def density(self, x: Any) -> float:
+        """Return the Bingham density at one unit 3-vector."""
         return math.exp(self.log_density(x))
 
     def log_density(self, x: Any) -> float:
@@ -103,6 +104,7 @@ class BinghamDistribution(SequenceEncodableProbabilityDistribution):
     # accumulator stays host-side, so torch accelerates mixture E-step scoring with a bit-correct M-step. ---
     @classmethod
     def compute_capabilities(cls):
+        """Declare NumPy/Torch scoring capabilities for Bingham log-density kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(engine_ready=("numpy", "torch"), kernel_status="numba_adapter")
@@ -113,12 +115,15 @@ class BinghamDistribution(SequenceEncodableProbabilityDistribution):
         return -self._log_c + engine.matmul(p * p, engine.asarray(self.z))
 
     def sampler(self, seed: int | None = None) -> "BinghamSampler":
+        """Return an exact rejection sampler for this Bingham distribution."""
         return BinghamSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "BinghamEstimator":
+        """Return a maximum-likelihood estimator for Bingham orientation and concentration."""
         return BinghamEstimator(name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "BinghamDataEncoder":
+        """Return the unit-vector encoder used by vectorized methods."""
         return BinghamDataEncoder()
 
 
@@ -158,6 +163,7 @@ class BinghamSampler(DistributionSampler):
         return out
 
     def sample(self, size: int | None = None) -> Any:
+        """Draw one axial unit vector or ``size`` iid vectors."""
         if size is None:
             return self._batch(1)[0]
         return list(self._batch(int(size)))
@@ -173,36 +179,44 @@ class BinghamAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: Any, weight: float, estimate: BinghamDistribution | None) -> None:
+        """Update scatter statistics from one weighted unit vector."""
         v = np.asarray(x, dtype=np.float64)
         self.count += weight
         self.sum_xx += weight * np.outer(v, v)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
+        """Initialize scatter statistics from one weighted unit vector."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
+        """Update scatter statistics from encoded unit vectors."""
         v = np.asarray(x, dtype=np.float64)
         w = np.asarray(weights, dtype=np.float64)
         self.count += float(w.sum())
         self.sum_xx += (v * w[:, None]).T @ v
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize scatter statistics from encoded unit vectors."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat: tuple[float, np.ndarray]) -> "BinghamAccumulator":
+        """Merge weighted count and scatter statistics."""
         self.count += suff_stat[0]
         self.sum_xx += suff_stat[1]
         return self
 
     def value(self) -> tuple[float, np.ndarray]:
+        """Return weighted count and scatter matrix."""
         return self.count, self.sum_xx
 
     def from_value(self, x: tuple[float, np.ndarray]) -> "BinghamAccumulator":
+        """Restore weighted count and scatter matrix."""
         self.count = float(x[0])
         self.sum_xx = np.asarray(x[1], dtype=np.float64).copy()
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -210,10 +224,12 @@ class BinghamAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "BinghamDataEncoder":
+        """Return the encoder compatible with Bingham scatter statistics."""
         return BinghamDataEncoder()
 
 
@@ -225,6 +241,7 @@ class BinghamAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
 
     def make(self) -> BinghamAccumulator:
+        """Create an empty Bingham accumulator."""
         return BinghamAccumulator(name=self.name, keys=self.keys)
 
 
@@ -236,6 +253,7 @@ class BinghamEstimator(ParameterEstimator):
         self.keys = keys
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray]) -> BinghamDistribution:
+        """Estimate orientation and concentrations from scatter statistics."""
         from scipy.optimize import minimize
 
         count, sum_xx = suff_stat
@@ -257,6 +275,7 @@ class BinghamEstimator(ParameterEstimator):
         return BinghamDistribution(m, z, name=self.name, keys=self.keys)
 
     def accumulator_factory(self) -> BinghamAccumulatorFactory:
+        """Return a factory for Bingham sufficient-statistic accumulators."""
         return BinghamAccumulatorFactory(name=self.name, keys=self.keys)
 
 
@@ -270,5 +289,6 @@ class BinghamDataEncoder(DataSequenceEncoder):
         return isinstance(other, BinghamDataEncoder)
 
     def seq_encode(self, x: Sequence[Any]) -> np.ndarray:
+        """Normalize and encode axial observations as an ``(n, 3)`` array."""
         v = np.asarray(x, dtype=np.float64).reshape(-1, 3)
         return v / np.linalg.norm(v, axis=1, keepdims=True)

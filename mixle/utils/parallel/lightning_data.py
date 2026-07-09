@@ -91,15 +91,19 @@ class LightningEncodedData(EncodedDataHandle):
 
     # -- full-data orchestrator contract: delegate to the resident local handle ------------
     def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
+        """Delegate full-data log-density summation to the resident local handle."""
         return self._local.pysp_seq_log_density_sum(estimate)
 
     def pysp_seq_estimate(self, estimator: Any, prev_estimate: Any) -> Any:
+        """Delegate full-data estimation to the resident local handle."""
         return self._local.pysp_seq_estimate(estimator, prev_estimate)
 
     def pysp_seq_initialize(self, estimator: Any, rng: RandomState, p: float) -> Any:
+        """Delegate full-data initialization to the resident local handle."""
         return self._local.pysp_seq_initialize(estimator, rng, p)
 
     def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
+        """Delegate full-data streaming accumulation to the resident local handle."""
         return self._local.pysp_stream_accumulate(estimator, model)
 
     # -- Lightning-specific mini-batch iteration -------------------------------------------
@@ -135,4 +139,5 @@ class LightningEncodedData(EncodedDataHandle):
         return self.size
 
     def close(self) -> None:
+        """Release resources owned by the resident local handle."""
         self._local.close()

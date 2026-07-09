@@ -166,7 +166,7 @@ __all__ = [
     "DiscreteAR",
     "DPOModel",
     "EnergyModel",
-    # frozen-encoder + structured-head composition (workstream A1 modality routing)
+    # frozen-encoder + structured-head composition for modality routing
     "FeatureMapDensity",
     "FeatureMapEstimator",
     "feature_fn",

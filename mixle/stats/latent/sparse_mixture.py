@@ -1,8 +1,8 @@
 """Sparse mixture scoring with a CERTIFIED tail bound -- the DSA 'top-k + bound the rest' idea.
 
-DeepSeek Sparse Attention scores all candidates with a cheap indexer, keeps the top-k, computes the
+DeepSeek Sparse Attention scores all candidates with a low-cost indexer, keeps the top-k, computes the
 expensive thing only on those, and accepts a (bounded) error. The mixture analogue: each component has a
-cheap, x-independent upper bound ``log w_k + sup_x log p_k(x)`` (weight times peak density). Rank by it,
+low-cost, x-independent upper bound ``log w_k + sup_x log p_k(x)`` (weight times peak density). Rank by it,
 score the exact ``log w_k + log p_k(x)`` for only the top ``max_components``, and bound the dropped tail by
 the sum of the remaining upper bounds. That yields a *certified bracket* ``[lower, upper]`` provably
 containing the true ``log p(x)`` -- unlike DSA, the error is certified, not just hoped small.
@@ -76,7 +76,7 @@ class SparseScore:
 def sparse_mixture_score(mixture: Any, x: Any, max_components: int) -> SparseScore:
     """Score ``mixture.log_density(x)`` exactly on the top ``max_components`` and certify the rest.
 
-    Ranks components by the cheap upper bound ``log w_k + sup_k`` (x-independent), scores the exact
+    Ranks components by the low-cost upper bound ``log w_k + sup_k`` (x-independent), scores the exact
     contribution of only the top ones, and bounds the dropped tail by the remaining upper bounds. Returns
     a :class:`SparseScore` bracket. If any positive-weight component's density is unbounded
     (``log_density_sup`` is ``None``), falls back to exact full scoring (``lower == upper``, no speedup).

@@ -1,7 +1,7 @@
 """Rigorous batch (multi-point) Bayesian optimization for parallel experiment campaigns.
 
 The kriging-believer batch in :mod:`mixle.doe.bayesopt` fantasizes the posterior *mean* at each pick --
-cheap, but it discards the correlation between the batch points and the posterior uncertainty they
+low-cost, but it discards the correlation between the batch points and the posterior uncertainty they
 share, so it can place near-duplicate points. This module proposes batches under the *true joint* GP
 posterior:
 

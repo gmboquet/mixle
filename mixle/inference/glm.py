@@ -188,16 +188,20 @@ class GLMResult:
 
     @property
     def aic(self) -> float:
+        """Akaike information criterion for the fitted GLM."""
         return float(-2.0 * self.log_likelihood + 2.0 * self.coef.size)
 
     @property
     def bic(self) -> float:
+        """Bayesian information criterion for the fitted GLM."""
         return float(-2.0 * self.log_likelihood + np.log(self.fitted.size) * self.coef.size)
 
     def z_values(self) -> np.ndarray:
+        """Return Wald z statistics for fitted coefficients."""
         return self.coef / self.se
 
     def p_values(self) -> np.ndarray:
+        """Return two-sided normal-approximation p-values for coefficients."""
         return 2.0 * stats.norm.sf(np.abs(self.z_values()))
 
 
@@ -334,6 +338,7 @@ class PenalizedResult:
     n_iter: int
 
     def predict(self, x: np.ndarray) -> np.ndarray:
+        """Predict penalized-regression responses for design rows."""
         return np.atleast_2d(np.asarray(x, dtype=float)) @ self.coef + self.intercept
 
 
@@ -421,6 +426,7 @@ class RegressionFit:
     n_iter: int
 
     def predict(self, x: np.ndarray) -> np.ndarray:
+        """Predict fitted regression values for design rows."""
         return np.atleast_2d(np.asarray(x, dtype=float)) @ self.coef
 
 

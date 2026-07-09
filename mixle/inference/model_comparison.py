@@ -146,7 +146,7 @@ def compare_elpd(pointwise_a: np.ndarray, pointwise_b: np.ndarray) -> dict:
 
     Takes the per-observation ``elpd`` contributions (the ``pointwise`` arrays returned by
     :func:`mixle.ppl.diagnostics.psis_loo` / ``waic``) and returns the elpd difference with the standard
-    error of the *pointwise* difference -- the honest SE for model comparison (a difference within ~2 SE
+    error of the *pointwise* difference -- the standard-error estimate for model comparison (a difference within ~2 SE
     of zero is not decisive).
 
     Args:

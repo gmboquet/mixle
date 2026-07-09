@@ -4,7 +4,6 @@ mixle.stats package
 .. automodule:: mixle.stats
    :members:
    :show-inheritance:
-   :undoc-members:
 
 Subpackages
 -----------

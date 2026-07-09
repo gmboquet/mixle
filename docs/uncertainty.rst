@@ -74,6 +74,9 @@ High confidence means most samples fell into the same meaning cluster. High
 semantic entropy means the model is disagreeing with itself about the answer,
 not just rephrasing it.
 
+These quantities are decision signals, not truth guarantees. Use retrieval,
+tools, labels, or human review when factual correctness matters.
+
 Equivalence Matters
 -------------------
 
@@ -95,6 +98,9 @@ normalized short answers. For prose, pass a domain-specific relation:
 
 In production this relation might use canonicalization, embeddings, entailment,
 or a task-specific parser.
+
+Version the equivalence relation with the artifact. Changing it changes the
+clusters, confidence, entropy, and abstention threshold.
 
 Epistemic and Aleatoric Split
 -----------------------------
@@ -147,10 +153,14 @@ has empirical error at most ``alpha``.
 After calibration, ``answer`` returns ``None`` below the threshold. This is the
 important behavioral change: the LLM can abstain instead of hallucinating.
 
+Calibration examples should match the served prompt distribution. A threshold
+learned on short factual questions should not be reused for extraction,
+planning, or legal/scientific summaries without new evidence.
+
 Claim-Level Reliability
 -----------------------
 
-A response can have a stable headline answer and still contain one fabricated
+A response can have a stable main answer and still contain one fabricated
 detail. ``assess_claims`` takes one sampled response, extracts claims, and
 checks whether independent samples corroborate each claim.
 
@@ -264,6 +274,10 @@ the dynamics.
 Use ``block_selector`` from ``mixle.reason.core`` to observe a specific time
 block of the stacked trajectory.
 
+For mechanistic latents, record the dynamical law, process covariance,
+observation selector, and evidence times. Those assumptions define how one
+observation updates unobserved trajectory steps.
+
 Task Calibration
 ----------------
 
@@ -279,6 +293,10 @@ For local task models, uncertainty becomes an answer/escalate decision through
    y = cascade("new request")
 
 See :doc:`task-distillation` for the full serving workflow.
+
+Track answered accuracy and escalation rate together. A cascade that answers
+too often can be unsafe; a cascade that escalates everything may be correct but
+not useful.
 
 Related Reasoning Workflows
 ---------------------------
@@ -310,3 +328,15 @@ Choosing the Right Tool
      - ``reason``, ``Evidence``, ``Latent``
    * - Should a local task model escalate?
      - ``CalibratedTaskModel`` and ``Cascade``
+
+Release Evidence
+----------------
+
+For uncertainty workflows, preserve:
+
+* sample count, prompt template, model identifier, and sampling settings;
+* equivalence, claim extraction, and corroboration functions;
+* calibration examples, alpha, learned threshold, and abstention policy;
+* false-answer and unnecessary-abstention rates;
+* evidence model assumptions for cross-modal or mechanistic latents; and
+* cascade scorecards separating answered quality from escalation behavior.

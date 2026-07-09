@@ -120,10 +120,12 @@ class Header:
     created_at: str = ""
 
     def to_dict(self) -> dict:
+        """Return the provenance header as a plain dictionary."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> Header:
+        """Reconstruct a provenance header from a dictionary."""
         d = dict(d)
         d["schema"] = [tuple(x) for x in d.get("schema", [])]
         return cls(**{k: d.get(k) for k in cls.__dataclass_fields__})
@@ -296,7 +298,7 @@ def verify_lineage(header: Any) -> bool:
     Returns True when every iteration that recorded a ``model_hash`` names the previous such iteration's
     hash as its ``parent_hash`` (so iteration i+1 provably descends from i), and True vacuously when the
     trace carries no lineage (``fit_with_provenance(lineage=False)`` or a custom ``out``). Returns False
-    on the first broken link. Accepts a :class:`Header` or its ``to_dict``."""
+    on the first invalid link. Accepts a :class:`Header` or its ``to_dict``."""
     training = header.training if isinstance(header, Header) else dict(header or {}).get("training", {})
     prev: str | None = None
     for rec in training.get("convergence", []):

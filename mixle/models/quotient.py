@@ -15,8 +15,8 @@ Follows the declare-a-leaf/fit-via-``optimize()`` pattern used elsewhere in ``mi
 thin ``torch.nn.Module`` builders plus a ``group``/``declared_group()`` tag; fitting goes through
 ``NeuralCategorical(module).estimator()`` and ``mixle.inference.optimize`` exactly like any other softmax leaf.
 
-Requires torch. This is a research-spike module (workstream A3, CARD A3-a): see
-``notes/a3-quotient-negative.md`` for the measured comparison and the kill-criterion verdict.
+Requires torch. Treat this as an experimental modeling option and compare it
+against the unpooled baseline before making a release claim about benefit.
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ class TranslationQuotientLeaf:
     """``p(y | x) = softmax(module(x))`` for a conv->global-pool module, declaring the "translation" group.
 
     Thin wrapper around :class:`mixle.models.softmax_leaf.NeuralCategorical` that adds the group-declaration
-    part of the leaf contract this card asks for: ``leaf.group == "translation"`` (also exposed as
+    part of the leaf contract: ``leaf.group == "translation"`` (also exposed as
     ``leaf.declared_group()`` for callers that prefer a method). Fitting/serialization/log-density all
     delegate to the wrapped ``NeuralCategorical`` -- this class does not reimplement the leaf contract, it
     just tags a ``NeuralCategorical`` built from a pooled conv module with its symmetry group.
@@ -123,18 +123,23 @@ class TranslationQuotientLeaf:
         return self.group
 
     def log_density(self, xy: Any) -> float:
+        """Delegate ``log p(y | x)`` scoring to the wrapped neural-categorical leaf."""
         return self._leaf.log_density(xy)
 
     def seq_log_density(self, enc: Any) -> Any:
+        """Delegate vectorized conditional log-probability scoring to the wrapped leaf."""
         return self._leaf.seq_log_density(enc)
 
     def predict(self, x: Any) -> Any:
+        """Return class predictions from the wrapped neural-categorical leaf."""
         return self._leaf.predict(x)
 
     def estimator(self, pseudo_count: float | None = None) -> Any:
+        """Return the wrapped leaf's estimator."""
         return self._leaf.estimator(pseudo_count)
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return the wrapped leaf's conditional sampler."""
         return self._leaf.sampler(seed)
 
 
@@ -154,21 +159,27 @@ class UnpooledConvLeaf:
         self._leaf = NeuralCategorical(module, **neural_categorical_kwargs)
 
     def declared_group(self) -> str | None:
+        """Return ``None`` because this baseline declares no invariance group."""
         return self.group
 
     def log_density(self, xy: Any) -> float:
+        """Delegate ``log p(y | x)`` scoring to the wrapped neural-categorical leaf."""
         return self._leaf.log_density(xy)
 
     def seq_log_density(self, enc: Any) -> Any:
+        """Delegate vectorized conditional log-probability scoring to the wrapped leaf."""
         return self._leaf.seq_log_density(enc)
 
     def predict(self, x: Any) -> Any:
+        """Return class predictions from the wrapped neural-categorical leaf."""
         return self._leaf.predict(x)
 
     def estimator(self, pseudo_count: float | None = None) -> Any:
+        """Return the wrapped leaf's estimator."""
         return self._leaf.estimator(pseudo_count)
 
     def sampler(self, seed: int | None = None) -> Any:
+        """Return the wrapped leaf's conditional sampler."""
         return self._leaf.sampler(seed)
 
 

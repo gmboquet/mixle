@@ -74,7 +74,9 @@ class Summarizable(Protocol):
     method (every concrete result class is).
     """
 
-    def summary(self) -> dict: ...
+    def summary(self) -> dict:
+        """Return a dictionary summary of the fitted result."""
+        ...
 
 
 @runtime_checkable
@@ -85,4 +87,6 @@ class Sampleable(Protocol):
     the old ``hasattr(r, "samples")`` probe.
     """
 
-    def samples(self, param: Any = ..., *args: Any, **kwargs: Any) -> np.ndarray: ...
+    def samples(self, param: Any = ..., *args: Any, **kwargs: Any) -> np.ndarray:
+        """Return posterior samples for a parameter, latent, or default result target."""
+        ...

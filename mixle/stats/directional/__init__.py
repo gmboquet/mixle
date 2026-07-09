@@ -1,1 +1,5 @@
-"""mixle.stats.directional -- see mixle.stats for the public API."""
+"""Directional distribution namespace for circular and orientation-valued data.
+
+This package groups directional probability families while the consolidated
+imports remain available from ``mixle.stats`` for the main public API.
+"""

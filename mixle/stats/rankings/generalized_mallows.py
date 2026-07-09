@@ -289,6 +289,7 @@ class GeneralizedMallowsDistribution(SequenceEncodableProbabilityDistribution):
 
     @classmethod
     def compute_capabilities(cls):
+        """Declare the NumPy and numba execution path used by Mallows kernels."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(
@@ -349,19 +350,24 @@ class GeneralizedMallowsDistribution(SequenceEncodableProbabilityDistribution):
         return int(seq_distance_to_center(np.asarray(x, dtype=np.int64)[None, :], self.rank0, self.metric)[0])
 
     def density(self, x: Sequence[int]) -> float:
+        """Return the probability of one ordering under the Mallows model."""
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: Sequence[int]) -> float:
+        """Return the log-probability of one ordering."""
         return -self.theta * self.distance(x) - self.log_z
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
+        """Return vectorized log-probabilities for encoded orderings."""
         dist = seq_distance_to_center(x, self.rank0, self.metric)
         return -self.theta * dist - self.log_z
 
     def sampler(self, seed: int | None = None) -> GeneralizedMallowsSampler:
+        """Return a sampler for this Mallows distribution."""
         return GeneralizedMallowsSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> GeneralizedMallowsEstimator:
+        """Return a Mallows estimator with this metric and item count."""
         return GeneralizedMallowsEstimator(
             dim=self.dim,
             metric=self.metric,
@@ -374,6 +380,7 @@ class GeneralizedMallowsDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def dist_to_encoder(self) -> GeneralizedMallowsDataEncoder:
+        """Return the full-ranking encoder used by vectorized methods."""
         return GeneralizedMallowsDataEncoder(dim=self.dim)
 
 
@@ -404,6 +411,7 @@ class GeneralizedMallowsSampler(DistributionSampler):
         return out
 
     def sample(self, size: int | None = None) -> list[int] | list[list[int]]:
+        """Draw one ordering or ``size`` iid orderings."""
         k = 1 if size is None else size
         if self.dist.metric == "kendall":
             draws = self._sample_kendall(k)
@@ -439,12 +447,15 @@ class GeneralizedMallowsAccumulator(SequenceEncodableStatisticAccumulator):
             self._res_w.append(float(w))
 
     def update(self, x: Sequence[int], weight: float, estimate: Any) -> None:
+        """Update rank, precedence, and reservoir statistics from one ordering."""
         self.seq_update(np.asarray([x], dtype=int), np.asarray([weight], dtype=float), estimate)
 
     def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
+        """Initialize statistics from one weighted ordering."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
+        """Update rank, precedence, and reservoir statistics from encoded orderings."""
         n = self.dim
         r_idx, rp_idx = np.triu_indices(n, 1)
         ranks = np.arange(n)
@@ -455,9 +466,11 @@ class GeneralizedMallowsAccumulator(SequenceEncodableStatisticAccumulator):
         self.count += float(np.sum(weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
+        """Initialize statistics from encoded orderings."""
         self.seq_update(x, weights, None)
 
     def combine(self, suff_stat) -> GeneralizedMallowsAccumulator:
+        """Merge consensus statistics and reservoir samples from another accumulator."""
         count, rank_count, precede, res_x, res_w = suff_stat
         self.count += count
         self.rank_count += rank_count
@@ -469,6 +482,7 @@ class GeneralizedMallowsAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self):
+        """Return count, consensus matrices, and bounded reservoir contents."""
         return (
             self.count,
             self.rank_count,
@@ -478,6 +492,7 @@ class GeneralizedMallowsAccumulator(SequenceEncodableStatisticAccumulator):
         )
 
     def from_value(self, x) -> GeneralizedMallowsAccumulator:
+        """Restore accumulator state from ``value`` output."""
         self.count, self.rank_count, self.precede, res_x, res_w = x
         self.dim = self.rank_count.shape[0]
         self._res_x = [np.asarray(r, dtype=np.int64) for r in res_x]
@@ -485,6 +500,7 @@ class GeneralizedMallowsAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
+        """Merge this accumulator into ``stats_dict`` under its configured key."""
         if self.keys is not None:
             if self.keys in stats_dict:
                 stats_dict[self.keys].combine(self.value())
@@ -492,20 +508,25 @@ class GeneralizedMallowsAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys] = self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
+        """Replace this accumulator's state from keyed statistics when present."""
         if self.keys is not None and self.keys in stats_dict:
             self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> GeneralizedMallowsDataEncoder:
+        """Return the ranking encoder compatible with these sufficient statistics."""
         return GeneralizedMallowsDataEncoder(dim=self.dim)
 
 
 class GeneralizedMallowsAccumulatorFactory(StatisticAccumulatorFactory):
+    """Create accumulators for generalized Mallows consensus statistics."""
+
     def __init__(self, dim: int, reservoir: int = 10000, keys: str | None = None) -> None:
         self.dim = dim
         self.reservoir = reservoir
         self.keys = keys
 
     def make(self) -> GeneralizedMallowsAccumulator:
+        """Create an empty generalized Mallows accumulator."""
         return GeneralizedMallowsAccumulator(dim=self.dim, reservoir=self.reservoir, keys=self.keys)
 
 
@@ -541,9 +562,11 @@ class GeneralizedMallowsEstimator(ParameterEstimator):
         self.max_enum = int(max_enum)
 
     def accumulator_factory(self) -> GeneralizedMallowsAccumulatorFactory:
+        """Return a factory for Mallows sufficient-statistic accumulators."""
         return GeneralizedMallowsAccumulatorFactory(dim=self.dim, reservoir=self.reservoir, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat) -> GeneralizedMallowsDistribution:
+        """Estimate the central ordering and dispersion from accumulated rankings."""
         count, rank_count, precede, res_x, res_w = suff_stat
         n = self.dim
         kw = dict(
@@ -591,6 +614,7 @@ class GeneralizedMallowsDataEncoder(DataSequenceEncoder):
         return isinstance(other, GeneralizedMallowsDataEncoder)
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray:
+        """Validate and encode full orderings as a dense integer matrix."""
         rv = np.asarray([list(row) for row in x], dtype=np.int64)
         if rv.ndim != 2 or rv.shape[0] == 0:
             raise ValueError("GeneralizedMallowsDistribution requires a non-empty sequence of orderings.")

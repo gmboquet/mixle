@@ -61,17 +61,21 @@ class PlacementPlan:
 
     @property
     def pool_blocks(self) -> list[BlockPlacement]:
+        """Return blocks assigned to pool execution."""
         return [p for p in self.placements if p.placement == "pool"]
 
     @property
     def local_blocks(self) -> list[BlockPlacement]:
+        """Return blocks assigned to local execution."""
         return [p for p in self.placements if p.placement == "local"]
 
     @property
     def est_pool_cost(self) -> float:
+        """Return estimated total pool spend."""
         return float(sum(p.est_cost for p in self.pool_blocks))
 
     def as_dict(self) -> dict[str, Any]:
+        """Return the placement plan as JSON-compatible data."""
         return {
             "n_blocks": len(self.placements),
             "n_pool": len(self.pool_blocks),
@@ -90,6 +94,7 @@ class PlacementPlan:
         }
 
     def report(self) -> str:
+        """Render a human-readable placement report."""
         head = (
             f"PlacementPlan: {len(self.local_blocks)} local, {len(self.pool_blocks)} pool"
             f" (~${self.est_pool_cost:.2f} pool spend)"
