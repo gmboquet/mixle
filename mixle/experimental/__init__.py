@@ -15,6 +15,11 @@ Current contents:
 - :mod:`mixle.experimental.graduation` -- the bookkeeping ledger (:class:`~mixle.experimental.graduation.ExperimentalMechanism`,
   ``REGISTRY``) that later long-context mechanisms register against to track graduation eligibility. See
   ``mixle/experimental/README.md`` for the graduation contract itself.
+- :mod:`mixle.experimental.context_spine` -- E1, the chunked-recurrent training spine (TBPTT):
+  the :class:`~mixle.experimental.context_spine.ContextMechanism` protocol (``init_state``/``step``/``detach``),
+  the ``train_tbptt`` driver, and :class:`~mixle.experimental.context_spine.SlidingWindowSpine` -- the baseline
+  mechanism (RoPE + sliding-window attention with a stop-gradient carried KV cache, Transformer-XL style) every
+  later Track-E mechanism (E2-E6) is compared against. See ``notes/designs/E1.md`` for the design.
 
 Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
 run and reported on distinctly from the stable-package suite.
