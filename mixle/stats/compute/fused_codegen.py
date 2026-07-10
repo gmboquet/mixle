@@ -922,7 +922,7 @@ def _njit(src: str, fname: str) -> Callable:
             sys.modules[modname] = mod
             spec.loader.exec_module(mod)  # type: ignore[union-attr]
             return getattr(mod, fname)
-        except Exception:
+        except Exception:  # noqa: BLE001
             ns: dict[str, Any] = {"np": np}
             exec(src, ns)  # noqa: S102 -- generated from fixed templates, no user input
             return numba.njit(fastmath=True)(ns[fname])

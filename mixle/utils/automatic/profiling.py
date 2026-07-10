@@ -2126,7 +2126,7 @@ def normalize_input(data, *, rdd_cap: int = 200000):
 
             if isinstance(data, DataSource):
                 return list(data.records())
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
     if hasattr(data, "columns") and hasattr(data, "itertuples"):  # a pandas DataFrame (duck-typed)
         from mixle.data.sources.pandas_source import dataframe_records
@@ -2137,7 +2137,7 @@ def normalize_input(data, *, rdd_cap: int = 200000):
 
         if RDD_TYPES and isinstance(data, RDD_TYPES):  # a Spark RDD -> a bounded local sample
             return data.take(int(rdd_cap))
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     return data
 

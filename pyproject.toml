@@ -184,7 +184,7 @@ target-version = "py310"
 extend-exclude = ["examples"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP"]
+select = ["E", "F", "W", "I", "B", "UP", "BLE"]
 ignore = [
     "F403", # `from mixle.engines.arithmetic import *` is an intentional dispatch namespace
     "F405", #   (mixle.engines.arithmetic defines __all__); the star is deliberate, not accidental.
