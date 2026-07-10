@@ -202,6 +202,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
    release-readiness
    validation
    support-policy
+   backend-support
    security-and-data
    stability-and-missing-data
    family-release
