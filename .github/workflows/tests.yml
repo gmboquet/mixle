@@ -35,8 +35,14 @@ jobs:
         run: ruff format --check mixle
       - name: ruff check
         run: ruff check mixle
-      # mypy stays advisory until the type-checking backlog is addressed (config in pyproject.toml).
-      - name: mypy
+      # A curated typed-core is checked strictly and BLOCKING (worklist Y4.1): these modules are fully
+      # annotated and clean under disallow_untyped_defs (see the [[tool.mypy.overrides]] typed-core list in
+      # pyproject.toml). --follow-imports=skip keeps the check to these modules' own annotations so a
+      # dependency's or an untyped sibling's errors cannot leak in. The list grows as more modules qualify.
+      - name: mypy (typed core, blocking)
+        run: mypy --follow-imports=skip mixle/scorecard.py mixle/spend.py mixle/system.py mixle/registry.py
+      # The whole-tree mypy stays advisory until the rest of the type-checking backlog is addressed.
+      - name: mypy (whole tree, advisory)
         continue-on-error: true
         run: mypy
 
