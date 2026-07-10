@@ -1,5 +1,11 @@
 """2:4 structured sparsity, end to end (roadmap I4): training-time mask ramp + cuSPARSELt-format export.
 
+.. warning::
+
+   **Experimental frontier-training prototype.** The mask-ramp and export mechanics are exact and tested,
+   but the actual cuSPARSELt speedup needs a real CUDA device with that kernel; this is not a production
+   sparsity-training pipeline. Treat it as a prototype and measure end-to-end on your target hardware.
+
 Two pieces, glued by ONE borrowed primitive rather than two reimplementations:
 
 1. :class:`TwoFourSparsityRamp` -- a schedulable training-time mask ramp. It does not reinvent 2:4
