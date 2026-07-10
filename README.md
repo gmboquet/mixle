@@ -72,8 +72,11 @@ Development: `git clone … && pip install -e ".[all]"`.
 ```python
 from mixle.inference import optimize
 
-records = [...]                # your rows: numbers, text, categories, missing values
-model = optimize(records)      # mixle works out the model and fits it
+records = [                        # your rows: a number, a category, a flag — mixed, some missing
+    (1.9, "paid", True), (0.4, "free", False), (2.1, "paid", True),
+    (0.7, "free", False), (1.6, "paid", True), (0.3, "free", None),
+]
+model = optimize(records, out=None)   # mixle works out the model and fits it (out=None: quiet)
 
 model.log_density(records[0])    # score an observation
 model.sampler().sample(5)        # draw new ones
