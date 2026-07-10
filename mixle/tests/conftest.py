@@ -191,6 +191,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "mixture_heterogeneous_test.py": ("distribution", "latent"),
     "numerics_test.py": ("distribution",),
     "numerical_guards_test.py": ("distribution", "bayes"),
+    # Weighted-estimation contract (worklist Q5.3): weighted == integer-replicated sufficient stats,
+    # zero-weight no-op, weight-scale-invariant fits -- catches a silently dropped/normalized weight.
+    "weighted_estimation_test.py": ("distribution",),
     "objectives_test.py": ("torch", "optional"),
     "parallel_test.py": ("parallel", "integration", "slow"),
     "placement_test.py": ("parallel", "planner"),
