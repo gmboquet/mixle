@@ -241,34 +241,71 @@ class Model:
         return solve(teacher, inputs, **solve_kw)
 
     def deploy(self, path: str) -> str:
-        """Persist a durable artifact directory (model + manifest); :meth:`Model.load` restores it."""
+        """Persist a durable artifact directory (model + manifest); :meth:`Model.load` restores it.
+
+        A registry-serializable model is written as safe, type-tagged JSON (``model.json``); a model the
+        serialization registry cannot represent (e.g. a torch-backed leaf) falls back to a pickle
+        (``model.pkl``). The ``format`` recorded in the manifest tells :meth:`Model.load` which to read, so
+        the common pure-model path never needs an unsafe pickle load.
+        """
         d = self._require_fitted()
         out = Path(path)
         out.mkdir(parents=True, exist_ok=True)
-        with open(out / "model.pkl", "wb") as f:
-            pickle.dump(d, f)
+        fmt = self._write_model(out, d)
         manifest = {
             "family": type(d).__name__,
             "created_at": time.time(),
             "fit": self._fit_info,
             "notes": self.notes,
+            "format": fmt,
             "mixle_artifact": "lifecycle.Model/v1",
         }
         (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
         return str(out)
 
+    @staticmethod
+    def _write_model(out: Path, d: Any) -> str:
+        """Write ``d`` as safe JSON when the registry can represent it, else pickle. Returns the format used."""
+        try:
+            from mixle.utils.serialization import ensure_pysp_serialization_registry, to_serializable
+
+            ensure_pysp_serialization_registry()
+            text = json.dumps(to_serializable(d))
+        except Exception:  # noqa: BLE001 - not registry-serializable (torch leaf, custom object): use pickle
+            with open(out / "model.pkl", "wb") as f:
+                pickle.dump(d, f)
+            return "pickle"
+        (out / "model.json").write_text(text)
+        return "json"
+
     @classmethod
     def load(cls, path: str) -> Model:
-        """Restore a :class:`Model` from an artifact directory created by :meth:`deploy`."""
+        """Restore a :class:`Model` from an artifact directory created by :meth:`deploy`.
+
+        .. warning::
+
+           A ``pickle``-format artifact (a torch-backed model, or one written by an older mixle) is loaded
+           with :func:`pickle.load`, which **executes arbitrary code** from the file -- only load such an
+           artifact from a source you trust. JSON-format artifacts (the default for pure mixle models) are
+           deserialized through the type-tagged registry and do not execute arbitrary code.
+        """
         p = Path(path)
-        with open(p / "model.pkl", "rb") as f:
-            fitted = pickle.load(f)
+        try:
+            manifest = json.loads((p / "manifest.json").read_text())
+        except (OSError, ValueError):
+            manifest = {}
+        fmt = manifest.get("format", "pickle")  # artifacts predating the format field are pickle-only
+        if fmt == "json":
+            from mixle.utils.serialization import ensure_pysp_serialization_registry, from_serializable
+
+            ensure_pysp_serialization_registry()
+            fitted = from_serializable(json.loads((p / "model.json").read_text()))
+        else:
+            with open(p / "model.pkl", "rb") as f:
+                fitted = pickle.load(f)  # noqa: S301 - trusted-source only; see the warning above
         m = cls(fitted)
         m.fitted = fitted
-        try:
-            m.notes = list(json.loads((p / "manifest.json").read_text()).get("notes", []))
-        except (OSError, ValueError):
-            pass
+        m.notes = list(manifest.get("notes", []))
         return m
 
     # --- the analysis verbs (delegate to the inference front doors) -------------------------------
