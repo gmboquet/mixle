@@ -26,9 +26,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    # CI (.github/workflows/tests.yml) runs Linux x86_64 only. macOS (incl. arm64) is the primary dev
-    # platform and works in practice (the suite is run there routinely, ad hoc, not gated in CI) but
-    # is not a tested release guarantee; Windows is untested and unclaimed.
+    # CI (.github/workflows/tests.yml) gates Linux x86_64 and macOS arm64 (the `fast` and `fast-macos`
+    # jobs); both are tested on every PR. Windows is untested and unclaimed.
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
 ]
