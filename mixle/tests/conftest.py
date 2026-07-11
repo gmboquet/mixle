@@ -44,6 +44,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "conformal_test.py": ("ppl", "integration", "slow"),
     "fused_codegen_test.py": ("numba", "optional"),
     "jax_engine_test.py": ("jax", "optional"),
+    # Backward-compatibility-only tests (renamed class / kwarg aliases). Tagged `legacy` so a product-only
+    # run can exclude them with `-m "not legacy"`; they still run in the default `fast` gate.
+    "api_naming_aliases_test.py": ("legacy",),
     "fused_em_hmm_family_test.py": ("hmm", "integration", "slow"),
     "fused_em_variational_test.py": ("latent", "integration", "slow"),
     "hmm_sampler_batching_test.py": ("hmm", "stochastic", "slow"),

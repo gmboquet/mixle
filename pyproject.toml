@@ -127,6 +127,7 @@ markers = [
     "optional: tests that require optional extras or external executables.",
     "benchmark: timing-oriented tests; not part of correctness gates.",
     "experimental: tests for mixle.experimental mechanisms without graduation receipts yet (see mixle/experimental/README.md).",
+    "legacy: backward-compatibility tests for renamed/aliased APIs; run product-only with -m 'not legacy'.",
     "stochastic: tests whose assertions depend on random sampling.",
     "integration: end-to-end workflow tests across multiple modules.",
     "distribution: distribution interface, density, sampler, estimator, and encoder tests.",
