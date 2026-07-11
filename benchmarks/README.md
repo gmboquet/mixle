@@ -29,16 +29,17 @@ reference-runtime results, not universal performance claims:
 
 | optimization | case | wall-time speedup | work/update speedup | conclusion |
 |---|---|---:|---:|---|
-| exact E-step likelihood reuse | scalar Gaussian mixture | **1.54x** | same iterations | implemented win |
-| exact E-step likelihood reuse | full-covariance mixture | **1.70x** | same iterations | implemented win |
-| selective block EM | scalar Gaussian mixture | 0.78x | **1.60x fewer evaluations** | less work, slower |
-| selective block EM | full-covariance mixture | 0.84x | **1.33x fewer evaluations** | less work, slower |
-| routed Muon/AdamW | graph-memory MoE, batches 8-64 | 0.96-1.07x | 0.97-1.00x updates | inconclusive microfixture |
+| exact E-step likelihood reuse | scalar Gaussian mixture | **1.77x** | same iterations | implemented win |
+| exact E-step likelihood reuse | full-covariance mixture | **1.51x** | same iterations | implemented win |
+| selective block EM | scalar Gaussian mixture | 0.92x | **1.60x fewer evaluations** | less work, slower |
+| selective block EM | full-covariance mixture | 0.89x | **1.33x fewer evaluations** | less work, slower |
+| routed Muon/AdamW | graph-memory MoE, batches 8-64 | 0.87-1.02x | 0.97-1.00x updates | inconclusive microfixture |
 
 The block result is the important negative finding: selection is real, objective-gated, and
 computationally selective, but its current Python scheduling, repeated objective validation, and
 extra coordinate rounds cost more than the work they remove on these fixtures. It should not be
-described as an acceleration feature yet.
+described as an acceleration feature yet. Exact E-step reuse won all five repeats in both cases;
+block scheduling lost wall time in 4/5 scalar seeds and 5/5 multivariate seeds.
 
 The geometry panel also records target failures rather than dropping them. AdamW reaches the
 declared target on 4/5 seeds at every tested effective batch; the routed optimizer reaches it on

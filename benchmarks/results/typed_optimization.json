@@ -1,0 +1,664 @@
+{
+  "benchmark": "typed_optimization",
+  "schema_version": 1,
+  "quick": false,
+  "repetitions": 5,
+  "environment": {
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "python": "3.12.12",
+    "packages": {
+      "mixle": "0.8.0.dev0",
+      "numpy": "2.4.6",
+      "scipy": "1.17.1",
+      "torch": "2.12.1"
+    },
+    "thread_environment": {
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1"
+    }
+  },
+  "panels": {
+    "estep_reuse": {
+      "hypothesis": "reusing an exact E-step likelihood reduces wall time without changing the result",
+      "comparison": "reuse_estep_ll=True / reuse_estep_ll=False",
+      "cases": [
+        {
+          "case": "scalar-gaussian-mixture",
+          "rounds": 30,
+          "repetitions": 5,
+          "runs": [
+            {
+              "baseline_seconds": 0.3342526250053197,
+              "reuse_seconds": 0.19437825001659803,
+              "speedup": 1.719598900477691,
+              "objective_delta": 0.0
+            },
+            {
+              "baseline_seconds": 0.3833397080015857,
+              "reuse_seconds": 0.19728425002540462,
+              "speedup": 1.9430831804983033,
+              "objective_delta": 0.0
+            },
+            {
+              "baseline_seconds": 0.42556175001664087,
+              "reuse_seconds": 0.24160012500942685,
+              "speedup": 1.7614301731012603,
+              "objective_delta": 0.0
+            },
+            {
+              "baseline_seconds": 0.4039927080157213,
+              "reuse_seconds": 0.2287231249792967,
+              "speedup": 1.7662958568456488,
+              "objective_delta": 0.0
+            },
+            {
+              "baseline_seconds": 0.4441876669880003,
+              "reuse_seconds": 0.21960270800627768,
+              "speedup": 2.0226875661993318,
+              "objective_delta": 0.0
+            }
+          ],
+          "median_speedup": 1.7662958568456488,
+          "maximum_absolute_objective_delta": 0.0
+        },
+        {
+          "case": "full-covariance-gaussian-mixture",
+          "rounds": 20,
+          "repetitions": 5,
+          "runs": [
+            {
+              "baseline_seconds": 0.11887929198564962,
+              "reuse_seconds": 0.08790841698646545,
+              "speedup": 1.3523084143803032,
+              "objective_delta": 0.0
+            },
+            {
+              "baseline_seconds": 0.13615599999320693,
+              "reuse_seconds": 0.08774566699867137,
+              "speedup": 1.5517119494375555,
+              "objective_delta": 0.0
+            },
+            {
+              "baseline_seconds": 0.14597016599145718,
+              "reuse_seconds": 0.10354625000036322,
+              "speedup": 1.4097098252321563,
+              "objective_delta": 0.0
+            },
+            {
+              "baseline_seconds": 0.3343339170096442,
+              "reuse_seconds": 0.11082804200123064,
+              "speedup": 3.016690640496308,
+              "objective_delta": 0.0
+            },
+            {
+              "baseline_seconds": 0.1500515420048032,
+              "reuse_seconds": 0.09941320799407549,
+              "speedup": 1.5093722960207208,
+              "objective_delta": 0.0
+            }
+          ],
+          "median_speedup": 1.5093722960207208,
+          "maximum_absolute_objective_delta": 0.0
+        }
+      ]
+    },
+    "block_scheduling": {
+      "hypothesis": "selective block updates reduce time-to-target after scheduler and gate overhead",
+      "comparison": "budget_fraction=0.5 block EM / full-tree EM",
+      "cases": [
+        {
+          "case": "scalar-gaussian-mixture",
+          "round_budget": 150,
+          "shared_improvement_fraction": 0.99,
+          "runs": [
+            {
+              "seed": 11,
+              "target_objective": -75816.92352416829,
+              "full_seconds_to_target": 0.09422729001380503,
+              "block_seconds_to_target": 0.09053612503339536,
+              "wall_time_speedup": 1.0407700791153602,
+              "full_evaluations_to_target": 96,
+              "block_evaluations_to_target": 62,
+              "work_speedup": 1.5483870967741935,
+              "full_rounds_to_target": 6,
+              "block_rounds_to_target": 6,
+              "mean_block_active_fraction": 0.6458333333333334
+            },
+            {
+              "seed": 19,
+              "target_objective": -76159.5812249874,
+              "full_seconds_to_target": 0.07705404103035107,
+              "block_seconds_to_target": 0.11109116798616014,
+              "wall_time_speedup": 0.693610864186346,
+              "full_evaluations_to_target": 96,
+              "block_evaluations_to_target": 60,
+              "work_speedup": 1.6,
+              "full_rounds_to_target": 6,
+              "block_rounds_to_target": 6,
+              "mean_block_active_fraction": 0.625
+            },
+            {
+              "seed": 29,
+              "target_objective": -76104.29765960644,
+              "full_seconds_to_target": 0.08333808297174983,
+              "block_seconds_to_target": 0.09055620999424718,
+              "wall_time_speedup": 0.9202911978874126,
+              "full_evaluations_to_target": 96,
+              "block_evaluations_to_target": 64,
+              "work_speedup": 1.5,
+              "full_rounds_to_target": 6,
+              "block_rounds_to_target": 6,
+              "mean_block_active_fraction": 0.6666666666666666
+            },
+            {
+              "seed": 37,
+              "target_objective": -75719.88844695859,
+              "full_seconds_to_target": 0.08659108402207494,
+              "block_seconds_to_target": 0.09227633298723958,
+              "wall_time_speedup": 0.9383888719770558,
+              "full_evaluations_to_target": 96,
+              "block_evaluations_to_target": 60,
+              "work_speedup": 1.6,
+              "full_rounds_to_target": 6,
+              "block_rounds_to_target": 6,
+              "mean_block_active_fraction": 0.625
+            },
+            {
+              "seed": 43,
+              "target_objective": -75868.49438881504,
+              "full_seconds_to_target": 0.08898466601385735,
+              "block_seconds_to_target": 0.10448712500510737,
+              "wall_time_speedup": 0.8516328304516728,
+              "full_evaluations_to_target": 96,
+              "block_evaluations_to_target": 60,
+              "work_speedup": 1.6,
+              "full_rounds_to_target": 6,
+              "block_rounds_to_target": 6,
+              "mean_block_active_fraction": 0.625
+            }
+          ],
+          "median_wall_time_speedup": 0.9202911978874126,
+          "median_work_speedup": 1.6
+        },
+        {
+          "case": "full-covariance-gaussian-mixture",
+          "round_budget": 100,
+          "shared_improvement_fraction": 0.99,
+          "runs": [
+            {
+              "seed": 11,
+              "target_objective": -334806.4962796541,
+              "full_seconds_to_target": 0.024892916000680998,
+              "block_seconds_to_target": 0.02911554099409841,
+              "wall_time_speedup": 0.8549700658396381,
+              "full_evaluations_to_target": 16,
+              "block_evaluations_to_target": 12,
+              "work_speedup": 1.3333333333333333,
+              "full_rounds_to_target": 1,
+              "block_rounds_to_target": 1,
+              "mean_block_active_fraction": 1.0
+            },
+            {
+              "seed": 19,
+              "target_objective": -335920.8310245526,
+              "full_seconds_to_target": 0.02542595798149705,
+              "block_seconds_to_target": 0.02848850001464598,
+              "wall_time_speedup": 0.8924990072634758,
+              "full_evaluations_to_target": 16,
+              "block_evaluations_to_target": 12,
+              "work_speedup": 1.3333333333333333,
+              "full_rounds_to_target": 1,
+              "block_rounds_to_target": 1,
+              "mean_block_active_fraction": 1.0
+            },
+            {
+              "seed": 29,
+              "target_objective": -334770.98217758257,
+              "full_seconds_to_target": 0.02473774997633882,
+              "block_seconds_to_target": 0.029964083980303258,
+              "wall_time_speedup": 0.8255800508568878,
+              "full_evaluations_to_target": 16,
+              "block_evaluations_to_target": 12,
+              "work_speedup": 1.3333333333333333,
+              "full_rounds_to_target": 1,
+              "block_rounds_to_target": 1,
+              "mean_block_active_fraction": 1.0
+            },
+            {
+              "seed": 37,
+              "target_objective": -334929.2653847182,
+              "full_seconds_to_target": 0.025375249999342486,
+              "block_seconds_to_target": 0.027894124999875203,
+              "wall_time_speedup": 0.9096987268629511,
+              "full_evaluations_to_target": 16,
+              "block_evaluations_to_target": 12,
+              "work_speedup": 1.3333333333333333,
+              "full_rounds_to_target": 1,
+              "block_rounds_to_target": 1,
+              "mean_block_active_fraction": 1.0
+            },
+            {
+              "seed": 43,
+              "target_objective": -334277.5108537013,
+              "full_seconds_to_target": 0.02513383299810812,
+              "block_seconds_to_target": 0.028293374984059483,
+              "wall_time_speedup": 0.8883292647932085,
+              "full_evaluations_to_target": 16,
+              "block_evaluations_to_target": 12,
+              "work_speedup": 1.3333333333333333,
+              "full_rounds_to_target": 1,
+              "block_rounds_to_target": 1,
+              "mean_block_active_fraction": 1.0
+            }
+          ],
+          "median_wall_time_speedup": 0.8883292647932085,
+          "median_work_speedup": 1.3333333333333333
+        }
+      ]
+    },
+    "geometry_routing": {
+      "hypothesis": "typed Muon/AdamW routing beats AdamW time-to-target on a heterogeneous MoE",
+      "comparison": "routed optimizer / AdamW at identical stochastic batch semantics",
+      "timing_scale": "synthetic microfixture",
+      "wall_time_claim_eligible": false,
+      "claim_exclusion_reason": "target crossings are too short for a production optimizer speed claim",
+      "cases": [
+        {
+          "microbatch_size": 8,
+          "accumulation_steps": 1,
+          "effective_batch_examples": 8,
+          "runs": [
+            {
+              "seed": 11,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.0024223749933298677,
+              "routed_seconds_to_target": 0.0032867499976418912,
+              "wall_time_speedup": 0.7370122446391794,
+              "adamw_updates_to_target": 6,
+              "routed_updates_to_target": 7,
+              "update_speedup": 0.8571428571428571,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 19,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.02779983400250785,
+              "routed_seconds_to_target": 0.025061249994905666,
+              "wall_time_speedup": 1.1092756350205546,
+              "adamw_updates_to_target": 55,
+              "routed_updates_to_target": 55,
+              "update_speedup": 1.0,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 29,
+              "adamw_target_achieved": false,
+              "routed_target_achieved": false,
+              "adamw_seconds_to_target": null,
+              "routed_seconds_to_target": null,
+              "wall_time_speedup": null,
+              "adamw_updates_to_target": null,
+              "routed_updates_to_target": null,
+              "update_speedup": null,
+              "adamw_final_accuracy": 0.53125,
+              "routed_final_accuracy": 0.78125
+            },
+            {
+              "seed": 37,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.016202124999836087,
+              "routed_seconds_to_target": 0.01800979202380404,
+              "wall_time_speedup": 0.8996286563676744,
+              "adamw_updates_to_target": 34,
+              "routed_updates_to_target": 36,
+              "update_speedup": 0.9444444444444444,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 43,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.011388167011318728,
+              "routed_seconds_to_target": 0.010451666981680319,
+              "wall_time_speedup": 1.0896029342764084,
+              "adamw_updates_to_target": 28,
+              "routed_updates_to_target": 28,
+              "update_speedup": 1.0,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            }
+          ],
+          "adamw_target_achievement_rate": 0.8,
+          "routed_target_achievement_rate": 0.8,
+          "joint_target_runs": 4,
+          "median_wall_time_speedup": 0.9946157953220414,
+          "median_update_speedup": 0.9722222222222222
+        },
+        {
+          "microbatch_size": 8,
+          "accumulation_steps": 4,
+          "effective_batch_examples": 32,
+          "runs": [
+            {
+              "seed": 11,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.009313209011452273,
+              "routed_seconds_to_target": 0.008970541995950043,
+              "wall_time_speedup": 1.038199142889798,
+              "adamw_updates_to_target": 9,
+              "routed_updates_to_target": 9,
+              "update_speedup": 1.0,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 19,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.040866291004931554,
+              "routed_seconds_to_target": 0.04008308399352245,
+              "wall_time_speedup": 1.0195395896068196,
+              "adamw_updates_to_target": 49,
+              "routed_updates_to_target": 48,
+              "update_speedup": 1.0208333333333333,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 29,
+              "adamw_target_achieved": false,
+              "routed_target_achieved": false,
+              "adamw_seconds_to_target": null,
+              "routed_seconds_to_target": null,
+              "wall_time_speedup": null,
+              "adamw_updates_to_target": null,
+              "routed_updates_to_target": null,
+              "update_speedup": null,
+              "adamw_final_accuracy": 0.21875,
+              "routed_final_accuracy": 0.78125
+            },
+            {
+              "seed": 37,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.02319541698670946,
+              "routed_seconds_to_target": 0.022971250000409782,
+              "wall_time_speedup": 1.0097585889446887,
+              "adamw_updates_to_target": 23,
+              "routed_updates_to_target": 23,
+              "update_speedup": 1.0,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 43,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.02489029199932702,
+              "routed_seconds_to_target": 0.034743083990179,
+              "wall_time_speedup": 0.7164099769140494,
+              "adamw_updates_to_target": 29,
+              "routed_updates_to_target": 33,
+              "update_speedup": 0.8787878787878788,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            }
+          ],
+          "adamw_target_achievement_rate": 0.8,
+          "routed_target_achievement_rate": 0.8,
+          "joint_target_runs": 4,
+          "median_wall_time_speedup": 1.0146490892757543,
+          "median_update_speedup": 1.0
+        },
+        {
+          "microbatch_size": 16,
+          "accumulation_steps": 2,
+          "effective_batch_examples": 32,
+          "runs": [
+            {
+              "seed": 11,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.004946125001879409,
+              "routed_seconds_to_target": 0.004960208025295287,
+              "wall_time_speedup": 0.9971607998406398,
+              "adamw_updates_to_target": 9,
+              "routed_updates_to_target": 9,
+              "update_speedup": 1.0,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 19,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.02833000000100583,
+              "routed_seconds_to_target": 0.03135408301022835,
+              "wall_time_speedup": 0.903550583563997,
+              "adamw_updates_to_target": 49,
+              "routed_updates_to_target": 48,
+              "update_speedup": 1.0208333333333333,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 29,
+              "adamw_target_achieved": false,
+              "routed_target_achieved": false,
+              "adamw_seconds_to_target": null,
+              "routed_seconds_to_target": null,
+              "wall_time_speedup": null,
+              "adamw_updates_to_target": null,
+              "routed_updates_to_target": null,
+              "update_speedup": null,
+              "adamw_final_accuracy": 0.21875,
+              "routed_final_accuracy": 0.78125
+            },
+            {
+              "seed": 37,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.01516912499209866,
+              "routed_seconds_to_target": 0.012504791986430064,
+              "wall_time_speedup": 1.2130649601016852,
+              "adamw_updates_to_target": 23,
+              "routed_updates_to_target": 23,
+              "update_speedup": 1.0,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 43,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.018721041007665917,
+              "routed_seconds_to_target": 0.018369584024185315,
+              "wall_time_speedup": 1.0191325499269812,
+              "adamw_updates_to_target": 29,
+              "routed_updates_to_target": 33,
+              "update_speedup": 0.8787878787878788,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            }
+          ],
+          "adamw_target_achievement_rate": 0.8,
+          "routed_target_achievement_rate": 0.8,
+          "joint_target_runs": 4,
+          "median_wall_time_speedup": 1.0081466748838106,
+          "median_update_speedup": 1.0
+        },
+        {
+          "microbatch_size": 32,
+          "accumulation_steps": 2,
+          "effective_batch_examples": 64,
+          "runs": [
+            {
+              "seed": 11,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.004092374991159886,
+              "routed_seconds_to_target": 0.004421084013301879,
+              "wall_time_speedup": 0.9256496775105395,
+              "adamw_updates_to_target": 7,
+              "routed_updates_to_target": 7,
+              "update_speedup": 1.0,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 19,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.031145792017923668,
+              "routed_seconds_to_target": 0.039729208016069606,
+              "wall_time_speedup": 0.7839519983717236,
+              "adamw_updates_to_target": 45,
+              "routed_updates_to_target": 45,
+              "update_speedup": 1.0,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 29,
+              "adamw_target_achieved": false,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": null,
+              "routed_seconds_to_target": 0.028439040994271636,
+              "wall_time_speedup": null,
+              "adamw_updates_to_target": null,
+              "routed_updates_to_target": 51,
+              "update_speedup": null,
+              "adamw_final_accuracy": 0.53125,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 37,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.008236749999923632,
+              "routed_seconds_to_target": 0.009012458001961932,
+              "wall_time_speedup": 0.9139293629030576,
+              "adamw_updates_to_target": 15,
+              "routed_updates_to_target": 16,
+              "update_speedup": 0.9375,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 43,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.01443729200400412,
+              "routed_seconds_to_target": 0.017683166021015495,
+              "wall_time_speedup": 0.8164427109289237,
+              "adamw_updates_to_target": 26,
+              "routed_updates_to_target": 31,
+              "update_speedup": 0.8387096774193549,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            }
+          ],
+          "adamw_target_achievement_rate": 0.8,
+          "routed_target_achievement_rate": 1,
+          "joint_target_runs": 4,
+          "median_wall_time_speedup": 0.8651860369159907,
+          "median_update_speedup": 0.96875
+        },
+        {
+          "microbatch_size": 64,
+          "accumulation_steps": 1,
+          "effective_batch_examples": 64,
+          "runs": [
+            {
+              "seed": 11,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.003744791989447549,
+              "routed_seconds_to_target": 0.0034998339833691716,
+              "wall_time_speedup": 1.069991321657653,
+              "adamw_updates_to_target": 7,
+              "routed_updates_to_target": 7,
+              "update_speedup": 1.0,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 19,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.01765437499852851,
+              "routed_seconds_to_target": 0.018255957984365523,
+              "wall_time_speedup": 0.9670473066189016,
+              "adamw_updates_to_target": 45,
+              "routed_updates_to_target": 45,
+              "update_speedup": 1.0,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 29,
+              "adamw_target_achieved": false,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": null,
+              "routed_seconds_to_target": 0.02126766598667018,
+              "wall_time_speedup": null,
+              "adamw_updates_to_target": null,
+              "routed_updates_to_target": 51,
+              "update_speedup": null,
+              "adamw_final_accuracy": 0.53125,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 37,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.019740666990401223,
+              "routed_seconds_to_target": 0.01828320900676772,
+              "wall_time_speedup": 1.0797156551179834,
+              "adamw_updates_to_target": 15,
+              "routed_updates_to_target": 16,
+              "update_speedup": 0.9375,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            },
+            {
+              "seed": 43,
+              "adamw_target_achieved": true,
+              "routed_target_achieved": true,
+              "adamw_seconds_to_target": 0.011962750024395064,
+              "routed_seconds_to_target": 0.013127415993949398,
+              "wall_time_speedup": 0.9112798763982839,
+              "adamw_updates_to_target": 26,
+              "routed_updates_to_target": 31,
+              "update_speedup": 0.8387096774193549,
+              "adamw_final_accuracy": 1.0,
+              "routed_final_accuracy": 1.0
+            }
+          ],
+          "adamw_target_achievement_rate": 0.8,
+          "routed_target_achievement_rate": 1,
+          "joint_target_runs": 4,
+          "median_wall_time_speedup": 1.0185193141382773,
+          "median_update_speedup": 0.96875
+        }
+      ]
+    }
+  },
+  "interpretation": {
+    "speedup_above_one": "candidate is faster or uses fewer updates/work than baseline",
+    "wall_time_is_claim_metric": true,
+    "work_speedup_alone_is_not_acceleration": true
+  },
+  "mixle_version": "0.8.0.dev0",
+  "mixle_minor": "0.8",
+  "mixle_commit": "d4c076477efe"
+}
