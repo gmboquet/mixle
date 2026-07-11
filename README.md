@@ -23,10 +23,6 @@ neural leaf, EM for latent variables, all in one loop. A model written once can 
 Numba, GPU) and scale across the supported backends (Spark, Dask, Ray, MPI) by changing one argument, within
 the maturity limits noted below. It models what you actually have — numbers, text, categories, mixed and
 missing values, directional and angular data, rankings, graphs — the same way.
-neural leaf, EM for latent variables, all in one loop. The same model runs on the built-in engines (NumPy,
-Numba, GPU) and distributes over Spark, Dask, Ray, or MPI by switching one argument. It models what
-you actually have — numbers, text, categories, mixed and missing values, directional and angular data,
-rankings, graphs — all the same way.
 
 Not every surface is equally settled. The
 **[maturity guide](https://gmboquet.github.io/mixle/maturity.html)** separates the stable center
@@ -282,7 +278,7 @@ Normal(free * Field("x") + free * Field("z") + free, free).fit(
 
 ## Companion projects
 
-The core library stands alone; three sibling projects build on it:
+The core library stands alone; six sibling projects build on it:
 
 - **[mixle-notebooks](https://github.com/gmboquet/mixle-notebooks)** — runnable tutorials, data-science
   recipes, applied case studies, and architecture/scaling studies.
@@ -290,6 +286,12 @@ The core library stands alone; three sibling projects build on it:
   fitted mixle models alongside open and hosted LLMs, with fine-tuning, registries, and monitoring.
 - **[mixle-pde](https://github.com/gmboquet/mixle-pde)** — a differentiable PDE / physics stack
   (`Differential`, `make_ops`, `laplacian`, `NavierStokes2D`) for scientific inverse problems.
+- **[mixle-discrete](https://github.com/gmboquet/mixle-discrete)** — integer/binary least squares,
+  finite-field arithmetic, lattice cryptography, and the combinatorial-numerics pillar of the ecosystem.
+- **[mixle-agent](https://github.com/gmboquet/mixle-agent)** — an open agent system (CLI, web GUI,
+  desktop) with skills, MCP tool interop, and pluggable model providers including mixle's own models.
+- **[mixle-demos](https://github.com/gmboquet/mixle-demos)** — standalone, runnable end-to-end
+  demonstration harnesses exercising the ecosystem against synthetic truth.
 
 ## Examples
 
