@@ -11,6 +11,7 @@ import numpy as np
 from mixle.experimental.typed_runtime.contracts import (
     ArtifactKind,
     ConsistencyRequirement,
+    ConvergenceCertificate,
     CostEstimate,
     CurvatureKind,
     MergeLaw,
@@ -330,6 +331,24 @@ def _decomposition(model: Any) -> tuple[tuple[str, ...], bool]:
         return (), True
 
 
+def _convergence_certificate(
+    update_kind: UpdateKind, exact_update: bool, estimator: Any | None
+) -> ConvergenceCertificate:
+    """Guarantee class for one node: certified for exact/GEM updates, Robbins--Monro for
+    first-order updates whose ``lr_decay`` schedule lies in the SAEM window, best-visited for
+    other stochastic updates. Frozen nodes are vacuously monotone (they never propose)."""
+    if update_kind is UpdateKind.FROZEN:
+        return ConvergenceCertificate.MONOTONE_CERTIFIED
+    if update_kind is UpdateKind.UNKNOWN:
+        return ConvergenceCertificate.UNKNOWN
+    if exact_update:
+        return ConvergenceCertificate.MONOTONE_CERTIFIED
+    lr_decay = getattr(estimator, "lr_decay", None)
+    if lr_decay is not None and 0.5 < float(lr_decay) <= 1.0:
+        return ConvergenceCertificate.ROBBINS_MONRO_SCHEDULE
+    return ConvergenceCertificate.BEST_VISITED
+
+
 def infer_update_contract(model: Any, estimator: Any | None) -> UpdateContract:
     """Infer a conservative contract without scoring, sampling, or mutating the model."""
 
@@ -368,6 +387,7 @@ def infer_update_contract(model: Any, estimator: Any | None) -> UpdateContract:
         decomposition_axes=axes,
         reads=frozenset(reads),
         writes=frozenset(writes),
+        convergence_certificate=_convergence_certificate(update, exact_update, estimator),
         outer_objective_compatible=compatible,
         exact=exact_update and exact_decomposition and compatible,
         declared_by="structural_inference",
