@@ -192,9 +192,10 @@ class GaussianMixtureTestCase(unittest.TestCase):
         self.assertIsInstance(est, GaussianMixtureEstimator)
         self.assertEqual(est.num_components, 2)
 
-        # Legacy camelCase alias still works.
+        # Legacy camelCase alias still works (and warns: it is deprecated).
         fac1 = est.accumulator_factory()
-        fac2 = est.accumulatorFactory()
+        with self.assertWarns(DeprecationWarning):
+            fac2 = est.accumulatorFactory()
         self.assertEqual(type(fac1), type(fac2))
 
     def test_encoder_eq_and_str(self):

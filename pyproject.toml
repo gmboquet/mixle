@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 # PyPI distribution name; the import package is `mixle` (cf. scikit-learn -> sklearn).
 name = "mixle"
-version = "0.7.0"
+version = "0.8.0.dev0"
 description = "A package for estimating heterogeneous probability density functions."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Grant Boquet", email = "grant.boquet@gmail.com" }]
@@ -21,26 +21,26 @@ keywords = [
 classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    # CI (.github/workflows/tests.yml) runs Linux x86_64 only. macOS (incl. arm64) is the primary dev
-    # platform and works in practice (the suite is run there routinely, ad hoc, not gated in CI) but
-    # is not a tested release guarantee; Windows is untested and unclaimed.
+    # CI (.github/workflows/tests.yml) gates Linux x86_64 and macOS arm64 (the `fast` and `fast-macos`
+    # jobs); both are tested on every PR. Windows is untested and unclaimed.
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
 ]
 # Base install covers all distributions and local (numpy) estimation; acceleration,
 # distribution, and embedding back-ends are opt-in extras (see [project.optional-dependencies]).
-# Lower bounds reflect the oldest releases that carry every API mixle calls and that are routinely
-# tested (numpy >=1.26 for the stable ndarray/linalg/errstate surface; scipy >=1.10 for
-# special.logsumexp + stats.binomtest/kstwo used by the inference layer; mpmath >=1.3). They are
-# floors, not pins -- newer majors are allowed.
+# Lower bounds are the OLDEST releases the full fast suite is verified green against, not aspirational
+# minimums: numpy < 2.1 hits genuine product IndexError bugs (cross_validation / robust covariance) and
+# numpy < 2.4 makes the t-SNE/embedding layout version-fragile; scipy < 1.11.2 has no Python 3.12 wheel
+# and scipy < 1.13 loses von Mises / wrapped Cauchy normalization precision (scipy >=1.16 also pairs
+# with numpy 2.4). These pins move together and are enforced by the `min-versions` CI job
+# (constraints-min.txt on the oldest supported Python). newer majors are allowed.
 dependencies = [
-    "numpy>=1.26",
-    "scipy>=1.11",
+    "numpy>=2.4",
+    "scipy>=1.16",
     "mpmath>=1.3",
 ]
 
@@ -120,12 +120,33 @@ python_functions = ["test_*"]
 #   full correctness run : pytest -m "not optional and not benchmark"   (everything incl. slow)
 #   single file, serial  : pytest path/to/file_test.py -n0 -m ""        (-m "" clears the fast filter)
 addopts = "-ra --strict-markers -n auto -m fast"
+# Warning ownership (T3.3): a DeprecationWarning issued by mixle's OWN code during tests is promoted to an
+# error. A deprecation MUST be asserted with pytest.warns / assertWarns (which consumes it before this
+# filter sees it); a leaked one is a defect -- a deprecated path used somewhere it should not be, or a
+# deprecation nobody is testing. This is scoped to DeprecationWarning from mixle modules on purpose:
+#   * third-party warnings (numpy/scipy/torch) stay at the default action -- we do not own them, and
+#     erroring on a dependency-internal warning would make an unrelated upgrade break the suite;
+#   * mixle's numpy RuntimeWarnings (e.g. log(0) -> -inf in the HMM/sampler math) are expected numerical
+#     boundaries, not defects, so they stay at default too;
+#   * mixle's own UserWarnings (convergence / fallback notices in ppl, hawkes, context-parallel) are
+#     legitimate and not yet all wrapped in pytest.warns -- promoting them needs a per-site classification
+#     pass, tracked as follow-up warning-ownership work, not this scoped slice.
+# Verified: mixle issues no DeprecationWarning today (no warnings.warn(..., DeprecationWarning) in the
+# source), and the slow tests that DID emit mixle-origin warnings under a broader all-category filter
+# (RuntimeWarning from log(0), UserWarnings) pass cleanly under this scoped one -- so it gates future
+# deprecations rather than flagging existing warnings.
+filterwarnings = [
+    "default",
+    "error::DeprecationWarning:mixle",
+    "error::DeprecationWarning:mixle\\..*",
+]
 markers = [
     "fast: quick correctness tests suitable for every commit.",
     "slow: heavier stochastic, integration, or exhaustive tests for full CI.",
     "optional: tests that require optional extras or external executables.",
     "benchmark: timing-oriented tests; not part of correctness gates.",
     "experimental: tests for mixle.experimental mechanisms without graduation receipts yet (see mixle/experimental/README.md).",
+    "legacy: backward-compatibility tests for renamed/aliased APIs; run product-only with -m 'not legacy'.",
     "stochastic: tests whose assertions depend on random sampling.",
     "integration: end-to-end workflow tests across multiple modules.",
     "distribution: distribution interface, density, sampler, estimator, and encoder tests.",
@@ -179,12 +200,12 @@ show_missing = true
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 # Demo scripts under examples/ are illustrative and not held to library lint rules.
 extend-exclude = ["examples"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP"]
+select = ["E", "F", "W", "I", "B", "UP", "BLE"]
 ignore = [
     "F403", # `from mixle.engines.arithmetic import *` is an intentional dispatch namespace
     "F405", #   (mixle.engines.arithmetic defines __all__); the star is deliberate, not accidental.
@@ -214,3 +235,17 @@ no_implicit_optional = true
 [[tool.mypy.overrides]]
 module = "mixle.tests.*"
 ignore_errors = true
+
+# Typed-core (worklist Y4.1): these modules are fully annotated and clean under strict mypy
+# (disallow_untyped_defs). They are checked BLOCKING in CI (the "mypy (typed core)" step), unlike the
+# advisory whole-tree run. Grow this list as more modules reach the bar -- that is how the type-checked
+# core expands without a single boil-the-ocean pass.
+[[tool.mypy.overrides]]
+module = [
+    "mixle.scorecard",
+    "mixle.spend",
+    "mixle.system",
+    "mixle.registry",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true

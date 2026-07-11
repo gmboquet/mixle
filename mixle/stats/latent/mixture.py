@@ -644,7 +644,7 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
                 continue
             try:
                 enumerator = comp.enumerator()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return False
             for value, _lp in enumerator:
                 key = freeze(value)

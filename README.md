@@ -23,6 +23,10 @@ neural leaf, EM for latent variables, all in one loop. A model written once can 
 Numba, GPU) and scale across the supported backends (Spark, Dask, Ray, MPI) by changing one argument, within
 the maturity limits noted below. It models what you actually have — numbers, text, categories, mixed and
 missing values, directional and angular data, rankings, graphs — the same way.
+neural leaf, EM for latent variables, all in one loop. The same model runs on the built-in engines (NumPy,
+Numba, GPU) and distributes over Spark, Dask, Ray, or MPI by switching one argument. It models what
+you actually have — numbers, text, categories, mixed and missing values, directional and angular data,
+rankings, graphs — all the same way.
 
 Not every surface is equally settled. The
 **[maturity guide](https://gmboquet.github.io/mixle/maturity.html)** separates the stable center
@@ -42,6 +46,11 @@ to the [release-readiness](https://gmboquet.github.io/mixle/release-readiness.ht
 - **Honest uncertainty.** It can be calibrated to report when it is unsure and defer rather than guess, so an
   application can route low-confidence cases to a human or a stronger model. Calibration makes uncertainty
   usable; it is a property you measure per deployment, not a guarantee the library grants.
+  your data or your PyTorch module and it does the heavy lifting.
+- **Lower cost.** Distill a slow, expensive model — a frontier LLM, an API, a rule — into a tiny local one
+  that answers the easy cases itself and escalates only the hard ones.
+- **Honest uncertainty.** It is calibrated to know when it is unsure and defer rather than guess — so you
+  can gate on its confidence instead of trusting every answer.
 
 **Docs:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) · **Release notes:**
 [CHANGELOG.md](CHANGELOG.md)
@@ -55,7 +64,9 @@ to the [release-readiness](https://gmboquet.github.io/mixle/release-readiness.ht
 
 ## Installation
 
-Python 3.10+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64; macOS (incl. Apple Silicon)
+Python 3.10+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64 and macOS arm64 (Apple
+Silicon) on every PR; Windows is untested.
+Python 3.11+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64; macOS (incl. Apple Silicon)
 is the day-to-day dev platform and works in practice but isn't CI-gated; Windows is untested.
 
 ```sh
@@ -83,8 +94,11 @@ a first pass to inspect and refine, not a substitute for choosing the right mode
 ```python
 from mixle.inference import optimize
 
-records = [...]                # your rows: numbers, text, categories, missing values
-model = optimize(records)      # mixle works out the model and fits it
+records = [                        # your rows: a number, a category, a flag — mixed, some missing
+    (1.9, "paid", True), (0.4, "free", False), (2.1, "paid", True),
+    (0.7, "free", False), (1.6, "paid", True), (0.3, "free", None),
+]
+model = optimize(records, out=None)   # mixle works out the model and fits it (out=None: quiet)
 
 model.log_density(records[0])    # score an observation
 model.sampler().sample(5)        # draw new ones

@@ -159,7 +159,7 @@ def _is_exp_family(obj: Any) -> bool:
         from mixle.capability import ExponentialFamily, supports
 
         return bool(supports(obj, ExponentialFamily))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -168,7 +168,7 @@ def _has_exact_density(obj: Any) -> bool:
         from mixle.capability import ExactDensity, supports
 
         return bool(supports(obj, ExactDensity))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 

@@ -1168,7 +1168,7 @@ def _object_signature(x: Any) -> Any:
 def _accumulator_signature(accumulator: StatisticAccumulator, role: str) -> Any:
     try:
         value_sig = _freeze_for_signature(accumulator.value())
-    except Exception as err:
+    except Exception as err:  # noqa: BLE001
         value_sig = ("value-error", type(err).__name__, str(err))
     return (type(accumulator).__module__, type(accumulator).__qualname__, role, value_sig)
 
