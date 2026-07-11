@@ -138,7 +138,8 @@ class GrammarTestCase(unittest.TestCase):
 
         est = VertexReplacementGrammarEstimator()
         self.assertIsInstance(est.accumulator_factory(), VertexReplacementGrammarAccumulatorFactory)
-        self.assertIsInstance(est.accumulatorFactory(), VertexReplacementGrammarAccumulatorFactory)
+        with self.assertWarns(DeprecationWarning):  # camelCase alias is deprecated
+            self.assertIsInstance(est.accumulatorFactory(), VertexReplacementGrammarAccumulatorFactory)
 
     def test_encoder_equality(self):
         from mixle.stats.graphs.vertex_replacement_grammar import (
@@ -395,7 +396,8 @@ class MarkovTransformTestCase(unittest.TestCase):
 
         est = MarkovTransformEstimator(dist.num_vals, alpha=0.05)
         self.assertIsInstance(est.accumulator_factory(), MarkovTransformAccumulatorFactory)
-        self.assertIsInstance(est.accumulatorFactory(), MarkovTransformAccumulatorFactory)
+        with self.assertWarns(DeprecationWarning):  # camelCase alias is deprecated
+            self.assertIsInstance(est.accumulatorFactory(), MarkovTransformAccumulatorFactory)
 
         acc = est.accumulator_factory().make()
         acc.seq_initialize(ex, weights, np.random.RandomState(5))

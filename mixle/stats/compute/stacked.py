@@ -556,7 +556,7 @@ def _place_component_array(value: Any, engine: ComputeEngine, axis: int) -> Any:
         return value
     try:
         arr = np.asarray(value)
-    except Exception:
+    except Exception:  # noqa: BLE001
         arr = None
     if arr is not None:
         if arr.dtype.kind in ("O", "U", "S"):
@@ -577,7 +577,7 @@ def _engine_to_numpy(value: Any, engine: ComputeEngine) -> Any:
         return [_engine_to_numpy(child, engine) for child in value]
     try:
         return np.asarray(engine.to_numpy(value))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return value
 
 
@@ -594,7 +594,7 @@ def _engine_local_to_numpy(value: Any, engine: ComputeEngine) -> Any:
     if callable(local_fn):
         try:
             return _tensor_like_to_numpy(local_fn())
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
     return _engine_to_numpy(value, engine)
 
@@ -608,7 +608,7 @@ def _tensor_like_to_numpy(value: Any) -> Any:
         value = cpu()
     try:
         return np.asarray(value)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return value
 
 
@@ -623,7 +623,7 @@ def _local_component_bounds(value: Any, local_count: int) -> tuple[int, int]:
                 if offsets and sizes:
                     start = offsets[0]
                     return start, start + sizes[0]
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
     return 0, int(local_count)
 
