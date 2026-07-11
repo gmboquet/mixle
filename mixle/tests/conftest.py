@@ -306,6 +306,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # GP-surrogate active-learning + multi-fidelity placement (roadmap M4): each test fits several torch
     # GPs across a sequential design loop, mirroring doe_active_test.py / doe_multifidelity_test.py.
     "task_emulate_test.py": ("doe", "torch", "slow"),
+    # P16 spectral-health receipts (mixle/experimental/spectral_health.py): SVDs of a few 512x256 matrices
+    # with constructed spectra to validate the regime discrimination -- pure numpy, no torch.
+    "spectral_health_test.py": ("experimental",),
     # P9 e-processes (mixle/experimental/e_process.py): the anytime type-I control receipt runs several
     # hundred vectorized null/drift replications with continuous peeking -- pure numpy, stochastic, no torch.
     "e_process_test.py": ("experimental", "stochastic"),
