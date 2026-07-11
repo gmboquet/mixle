@@ -121,6 +121,26 @@ python_functions = ["test_*"]
 #   full correctness run : pytest -m "not optional and not benchmark"   (everything incl. slow)
 #   single file, serial  : pytest path/to/file_test.py -n0 -m ""        (-m "" clears the fast filter)
 addopts = "-ra --strict-markers -n auto -m fast"
+# Warning ownership (T3.3): a DeprecationWarning issued by mixle's OWN code during tests is promoted to an
+# error. A deprecation MUST be asserted with pytest.warns / assertWarns (which consumes it before this
+# filter sees it); a leaked one is a defect -- a deprecated path used somewhere it should not be, or a
+# deprecation nobody is testing. This is scoped to DeprecationWarning from mixle modules on purpose:
+#   * third-party warnings (numpy/scipy/torch) stay at the default action -- we do not own them, and
+#     erroring on a dependency-internal warning would make an unrelated upgrade break the suite;
+#   * mixle's numpy RuntimeWarnings (e.g. log(0) -> -inf in the HMM/sampler math) are expected numerical
+#     boundaries, not defects, so they stay at default too;
+#   * mixle's own UserWarnings (convergence / fallback notices in ppl, hawkes, context-parallel) are
+#     legitimate and not yet all wrapped in pytest.warns -- promoting them needs a per-site classification
+#     pass, tracked as follow-up warning-ownership work, not this scoped slice.
+# Verified: mixle issues no DeprecationWarning today (no warnings.warn(..., DeprecationWarning) in the
+# source), and the slow tests that DID emit mixle-origin warnings under a broader all-category filter
+# (RuntimeWarning from log(0), UserWarnings) pass cleanly under this scoped one -- so it gates future
+# deprecations rather than flagging existing warnings.
+filterwarnings = [
+    "default",
+    "error::DeprecationWarning:mixle",
+    "error::DeprecationWarning:mixle\\..*",
+]
 markers = [
     "fast: quick correctness tests suitable for every commit.",
     "slow: heavier stochastic, integration, or exhaustive tests for full CI.",
