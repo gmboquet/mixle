@@ -146,6 +146,18 @@ class StreamingTokenEncodedData(EncodedDataHandle):
             from mixle.utils.parallel.tensor_pipeline_context_parallel import validate_tp_pp_cp_plan
 
             validate_tp_pp_cp_plan(module, self.tp_size, self.pp_size, self.cp_size)
+            # The plan is validated but per-axis process groups are NOT integrated into training here:
+            # execution below is data-parallel (DDP) only. Running silently would replicate a model the
+            # caller asked to shard -- OOM or a wrong scaling claim, not what they requested. Fail loudly
+            # unless the caller explicitly opts into the validated-plan / data-parallel-only path.
+            if os.environ.get("MIXLE_EXPERIMENTAL_NDPARALLEL") != "1":
+                raise NotImplementedError(
+                    "tp_size/pp_size/cp_size > 1 validates the N-D-parallel plan, but per-axis process "
+                    "groups are not integrated into training -- execution would be data-parallel only, "
+                    "silently ignoring the requested tensor/pipeline/context sharding. Set "
+                    "MIXLE_EXPERIMENTAL_NDPARALLEL=1 to proceed data-parallel-only with the plan "
+                    "validated, or leave tp_size/pp_size/cp_size at 1."
+                )
         wrapped = self._wrap_for_scale(module, device)
         opt = torch.optim.AdamW(wrapped.parameters(), lr=lr)
         ce = torch.nn.CrossEntropyLoss()

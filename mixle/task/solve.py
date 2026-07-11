@@ -48,7 +48,7 @@ def _label_with(teacher: Callable[..., Any], items: list) -> list:
         out = teacher(items)
         if isinstance(out, (list, tuple)) and len(out) == len(items):
             return list(out)
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     return [teacher(x) for x in items]
 

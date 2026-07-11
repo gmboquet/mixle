@@ -30,7 +30,7 @@ class HalfNormalTestCase(unittest.TestCase):
             import torch
 
             from mixle.engines import TorchEngine
-        except Exception as exc:  # pragma: no cover - torch optional
+        except Exception as exc:  # pragma: no cover - torch optional  # noqa: BLE001
             self.skipTest("torch unavailable: %s" % exc)
         engine = TorchEngine(dtype=torch.float64)
         backend = np.asarray(engine.to_numpy(dist.backend_seq_log_density(enc, engine)))
