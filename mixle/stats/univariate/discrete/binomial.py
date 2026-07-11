@@ -220,7 +220,7 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         n = self.n
         try:
             xx = float(x)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return -np.inf
         if self.min_val is not None:
             xx -= self.min_val
@@ -283,7 +283,7 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         n = self.n
         try:
             xx = float(x)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return -np.inf
         if self.min_val is not None:
             xx -= self.min_val
