@@ -1,5 +1,9 @@
 """Flagship app (G): the ontology-constrained knowledge-graph agent, end to end.
 
+Classification: illustrative -- runs on small synthetic / stand-in data. It shows the
+end-to-end workflow shape, not measured results on a real frontier-scale dataset. See
+docs/example-execution-manifest.rst for which examples run on real public data.
+
 An LLM-backed agent that maintains and answers from a knowledge graph -- but every fact must pass the
 ontology, every assertion must clear a confidence floor, and every answer is typed retrieval over the
 constrained graph. The pipeline:

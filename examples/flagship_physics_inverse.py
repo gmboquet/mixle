@@ -1,5 +1,9 @@
 """Flagship app (G): a physics inverse problem with honest UQ, end to end.
 
+Classification: illustrative -- runs on small synthetic / stand-in data. It shows the
+end-to-end workflow shape, not measured results on a real frontier-scale dataset. See
+docs/example-execution-manifest.rst for which examples run on real public data.
+
 Recover a physical parameter -- the decay rate ``k`` of ``dy/dt = -k y`` -- from noisy observations of
 the trajectory, as a Bayesian inverse problem:
 

@@ -1,4 +1,8 @@
 """The frontier-family lifecycle, end to end: checkpoint -> J2 ladder -> I1 artifacts -> J4 edge
+
+Classification: illustrative -- runs on small synthetic / stand-in data. It shows the
+end-to-end workflow shape, not measured results on a real frontier-scale dataset. See
+docs/example-execution-manifest.rst for which examples run on real public data.
 student -> served cascade, with real cost/quality receipts at every stage (roadmap B6).
 
 This example does not build anything new -- every stage is existing, already-receipted machinery,

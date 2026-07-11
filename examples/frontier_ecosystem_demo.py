@@ -1,5 +1,9 @@
 """The frontier-ecosystem tour: the v0.6.2 workplan, running end to end in one script.
 
+Classification: illustrative -- runs on small synthetic / stand-in data. It shows the
+end-to-end workflow shape, not measured results on a real frontier-scale dataset. See
+docs/example-execution-manifest.rst for which examples run on real public data.
+
 Six acts, every number measured in this process. Runtime ~30 s on a laptop, no GPU, no network.
 
   1. AUTOMATIC INFERENCE + CERTIFICATE -- optimize(records) discovers the cross-field graph and hands
