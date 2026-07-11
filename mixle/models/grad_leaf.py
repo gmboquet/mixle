@@ -104,6 +104,7 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         loss: Any = None,
         optimizer: Any = None,
+        lr_decay: float | None = None,
     ) -> None:
         self.module = module
         self.m_steps = int(m_steps)
@@ -119,6 +120,13 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.loss = loss
         self.optimizer = optimizer
+        self.lr_decay = None if lr_decay is None else float(lr_decay)
+        if self.lr_decay is not None and not 0.0 < self.lr_decay <= 1.0:
+            raise ValueError("lr_decay must lie in (0, 1] when supplied.")
+        if self.lr_decay is not None and optimizer is not None:
+            raise ValueError(
+                "lr_decay applies to the built-in Adam schedule; it cannot be combined with a custom optimizer hook."
+            )
         self.outer_objective_compatible = loss is None
 
     def __str__(self) -> str:
@@ -163,6 +171,7 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
             name=self.name,
             loss=self.loss,
             optimizer=self.optimizer,
+            lr_decay=self.lr_decay,
         )
 
     def dist_to_encoder(self) -> GradLeafEncoder:
@@ -309,6 +318,7 @@ class GradEstimator(ParameterEstimator):
         name: str | None = None,
         loss: Any = None,
         optimizer: Any = None,
+        lr_decay: float | None = None,
     ) -> None:
         self.module = module
         self.m_steps = int(m_steps)
@@ -324,9 +334,18 @@ class GradEstimator(ParameterEstimator):
         self.name = name
         self.loss = loss
         self.optimizer = optimizer
+        self.lr_decay = None if lr_decay is None else float(lr_decay)
+        if self.lr_decay is not None and not 0.0 < self.lr_decay <= 1.0:
+            raise ValueError("lr_decay must lie in (0, 1] when supplied.")
+        if self.lr_decay is not None and optimizer is not None:
+            raise ValueError(
+                "lr_decay applies to the built-in Adam schedule; it cannot be combined with a custom optimizer hook."
+            )
         # Cumulative count of divergence recoveries across this estimator's M-steps (one optimize()
         # run shares one estimator tree, so this accumulates over EM rounds; see estimate()).
         self.nonfinite_recoveries = 0
+        # 1-based count of M-step rounds this estimator has run; drives the lr_decay schedule.
+        self._fit_rounds = 0
 
     def _leaf(self) -> GradLeaf:
         return GradLeaf(
@@ -340,6 +359,7 @@ class GradEstimator(ParameterEstimator):
             name=self.name,
             loss=self.loss,
             optimizer=self.optimizer,
+            lr_decay=self.lr_decay,
         )
 
     def accumulator_factory(self) -> DataBufferAccumulatorFactory:
@@ -360,7 +380,14 @@ class GradEstimator(ParameterEstimator):
         n = xs[0].shape[0]
         bs = self.batch_size or n
         self.module.to(dev).train()
-        opt = self.optimizer(params) if self.optimizer is not None else torch.optim.Adam(params, lr=self.lr)
+        self._fit_rounds += 1
+        # SAEM window: a per-round Robbins--Monro schedule lr / t**a with a in (0.5, 1] satisfies
+        # sum(step)=inf and sum(step^2)<inf -- the step-size conditions stochastic-approximation EM
+        # analyses (SAEM, gradient-EM) require for almost-sure convergence to stationary points.
+        # Constant lr (lr_decay=None, the default) keeps today's behavior and the weaker
+        # best-visited-iterate guarantee provided by the outer loop.
+        effective_lr = self.lr if self.lr_decay is None else self.lr / (self._fit_rounds**self.lr_decay)
+        opt = self.optimizer(params) if self.optimizer is not None else torch.optim.Adam(params, lr=effective_lr)
         autocast_dev = "cuda" if str(dev).startswith("cuda") else "cpu"
         use_bf16 = self.precision == "bf16"
         # Divergence guard: an aggressive step can drive parameters non-finite, after which the
@@ -430,6 +457,10 @@ class GradEstimator(ParameterEstimator):
             "optimizer_steps": int(optimizer_steps),
             "max_optimizer_steps": self.max_optimizer_steps,
             "gradient_estimator": "unbiased_full_weighted_objective" if self.loss is None else "custom_loss",
+            "fit_round": int(self._fit_rounds),
+            "lr_effective": float(effective_lr),
+            "lr_decay": self.lr_decay,
+            "saem_schedule": bool(self.lr_decay is not None and self.lr_decay > 0.5),
             "nonfinite_recovery": bool(recovered),
             "nonfinite_recoveries_total": int(self.nonfinite_recoveries),
         }
