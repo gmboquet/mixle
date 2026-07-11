@@ -42,6 +42,11 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.e_process` -- P9, anytime-valid receipts: :class:`~mixle.experimental.e_process.EProcess`
+  (the generic running-product e-process from per-step density ratios) and the closed-form Robbins
+  :func:`~mixle.experimental.e_process.normal_mixture_eprocess` / :class:`~mixle.experimental.e_process.MeanShiftDetector`
+  for drift. Because a mixle density ratio is an e-value, monitoring ``E_t >= 1/alpha`` gives type-I control
+  under continuous peeking and optional stopping (Ville's inequality) -- verified empirically in the test.
 
 Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
 run and reported on distinctly from the stable-package suite.
