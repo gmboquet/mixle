@@ -1,0 +1,104 @@
+{
+  "_comment": "Worklist Y4.5 baseline of exact copy-pasted bodies in mixle/stats and mixle/models. A new entry means new copy-paste: dedupe it, or add it here with justification. Regenerate with python scripts/scan_duplicate_bodies.py --write.",
+  "min_stmts": 6,
+  "groups": [
+    {
+      "locations": [
+        "mixle/models/mixture_density.py::_module_class",
+        "mixle/models/neural_density.py::_module_class"
+      ],
+      "stmts": 11
+    },
+    {
+      "locations": [
+        "mixle/stats/combinator/composite.py::backend_stacked_sufficient_statistics_with_estimator",
+        "mixle/stats/combinator/record.py::backend_stacked_sufficient_statistics_with_estimator"
+      ],
+      "stmts": 8
+    },
+    {
+      "locations": [
+        "mixle/stats/graphs/hyperedge_replacement_grammar.py::__init__",
+        "mixle/stats/graphs/vertex_replacement_grammar.py::__init__"
+      ],
+      "stmts": 7
+    },
+    {
+      "locations": [
+        "mixle/stats/graphs/hyperedge_replacement_grammar.py::update",
+        "mixle/stats/graphs/vertex_replacement_grammar.py::update"
+      ],
+      "stmts": 9
+    },
+    {
+      "locations": [
+        "mixle/stats/latent/hidden_markov.py::combine",
+        "mixle/stats/latent/tree_hidden_markov_model.py::combine"
+      ],
+      "stmts": 8
+    },
+    {
+      "locations": [
+        "mixle/stats/latent/hidden_markov.py::from_value",
+        "mixle/stats/latent/tree_hidden_markov_model.py::from_value"
+      ],
+      "stmts": 9
+    },
+    {
+      "locations": [
+        "mixle/stats/latent/hidden_markov.py::key_merge",
+        "mixle/stats/latent/tree_hidden_markov_model.py::key_merge"
+      ],
+      "stmts": 7
+    },
+    {
+      "locations": [
+        "mixle/stats/latent/hidden_markov.py::key_replace",
+        "mixle/stats/latent/tree_hidden_markov_model.py::key_replace"
+      ],
+      "stmts": 7
+    },
+    {
+      "locations": [
+        "mixle/stats/latent/hidden_markov.py::scale",
+        "mixle/stats/latent/tree_hidden_markov_model.py::scale"
+      ],
+      "stmts": 7
+    },
+    {
+      "locations": [
+        "mixle/stats/univariate/continuous/exgaussian.py::_merge",
+        "mixle/stats/univariate/continuous/skew_normal.py::_merge"
+      ],
+      "stmts": 9
+    },
+    {
+      "locations": [
+        "mixle/stats/univariate/continuous/gaussian.py::_model_fisher",
+        "mixle/stats/univariate/continuous/log_gaussian.py::_model_fisher"
+      ],
+      "stmts": 12
+    },
+    {
+      "locations": [
+        "mixle/stats/univariate/continuous/gaussian.py::backend_stacked_sufficient_statistics",
+        "mixle/stats/univariate/continuous/log_gaussian.py::backend_stacked_sufficient_statistics"
+      ],
+      "stmts": 7
+    },
+    {
+      "locations": [
+        "mixle/stats/univariate/discrete/integer_categorical.py::seq_update",
+        "mixle/stats/univariate/discrete/integer_uniform_spike.py::seq_update"
+      ],
+      "stmts": 8
+    },
+    {
+      "locations": [
+        "mixle/stats/univariate/discrete/integer_categorical.py::seq_update_engine",
+        "mixle/stats/univariate/discrete/integer_uniform_spike.py::seq_update_engine"
+      ],
+      "stmts": 11
+    }
+  ]
+}

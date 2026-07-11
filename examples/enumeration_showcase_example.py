@@ -1,5 +1,9 @@
 """Structural enumeration — a mixle capability no other PPL offers.
 
+Classification: illustrative -- the discrete model is constructed in-file. Enumeration over a
+composed model *is* the subject here, so there is no external dataset a stand-in would replace;
+it demonstrates a capability, not a benchmark result on real data.
+
 Stan / Pyro / NumPyro / PyMC can compute a *marginal* over discrete latents (variable elimination,
 logsumexp). None gives you a probability-*ranked* view of a composed model's support: iterate it in
 descending probability, ask the exact rank of a value, or unrank the k-th most probable value at an

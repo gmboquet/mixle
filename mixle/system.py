@@ -180,7 +180,7 @@ class System:
 
         try:
             result = with_fallback(_call_teacher, _teacher_down_fallback, mode="teacher_down")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return None, {
                 "produced_by": None,
                 "status": "failed",
