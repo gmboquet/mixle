@@ -14,7 +14,7 @@ import numpy as np
 
 try:
     import scipy.sparse as sp
-except Exception:  # pragma: no cover - scipy is a package dependency in normal use.
+except Exception:  # pragma: no cover - scipy is a package dependency in normal use.  # noqa: BLE001
     sp = None
 
 from mixle.stats.compute.pdist import DataSequenceEncoder
@@ -85,7 +85,7 @@ def _networkx_like_to_adjacency(graph: Any) -> tuple[np.ndarray, np.ndarray | No
                     value = attrs["block"]
                 elif "block_assignment" in attrs:
                     value = attrs["block_assignment"]
-        except Exception:
+        except Exception:  # noqa: BLE001
             value = None
         assignments.append(value)
         found_assignment = found_assignment or value is not None
@@ -174,7 +174,7 @@ def _coerce_pair_tuple(x: Any, directed: bool, fallback_assignments: Any | None)
     try:
         adj = _as_adjacency(x[0])
         assignments = x[1] if x[1] is not None else fallback_assignments
-    except Exception:
+    except Exception:  # noqa: BLE001
         adj = _as_adjacency(x)
         assignments = fallback_assignments
     return GraphObservation(adj, _as_assignments(assignments, adj.shape[0]))
@@ -184,7 +184,7 @@ def _coerce_pair_list(x: Any, directed: bool, fallback_assignments: Any | None) 
     try:
         adj = _as_adjacency(x[0])
         assignments = x[1] if x[1] is not None else fallback_assignments
-    except Exception:
+    except Exception:  # noqa: BLE001
         adj = _as_adjacency(x)
         assignments = fallback_assignments
     return GraphObservation(adj, _as_assignments(assignments, adj.shape[0]))

@@ -1,5 +1,11 @@
 """2:4 structured sparsity, end to end (roadmap I4): training-time mask ramp + cuSPARSELt-format export.
 
+.. warning::
+
+   **Experimental frontier-training prototype.** The mask-ramp and export mechanics are exact and tested,
+   but the actual cuSPARSELt speedup needs a real CUDA device with that kernel; this is not a production
+   sparsity-training pipeline. Treat it as a prototype and measure end-to-end on your target hardware.
+
 Two pieces, glued by ONE borrowed primitive rather than two reimplementations:
 
 1. :class:`TwoFourSparsityRamp` -- a schedulable training-time mask ramp. It does not reinvent 2:4
@@ -226,12 +232,12 @@ def cusparselt_status() -> dict[str, Any]:
     if cusparselt is not None:
         try:
             status["cusparselt_is_available"] = bool(cusparselt.is_available())
-        except Exception as e:  # pragma: no cover - defensive
+        except Exception as e:  # pragma: no cover - defensive  # noqa: BLE001
             status["cusparselt_is_available"] = False
             status["cusparselt_is_available_error"] = repr(e)
         try:
             status["cusparselt_version"] = cusparselt.version()
-        except Exception as e:  # pragma: no cover - defensive
+        except Exception as e:  # pragma: no cover - defensive  # noqa: BLE001
             status["cusparselt_version"] = None
             status["cusparselt_version_error"] = repr(e)
     status["has_sparse_semi_structured_tensor"] = hasattr(torch.sparse, "SparseSemiStructuredTensor")

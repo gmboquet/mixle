@@ -53,7 +53,7 @@ def _shard_estep(estimator: Any, model: Any, shard: Any, compute_dtype: Any = No
 
             if fusible_estep(model):
                 return n, fused_accumulate(model, enc, weights, compute_dtype=compute_dtype)
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass  # fall back to the exact float64 accumulator path
     acc = estimator.accumulator_factory().make()
     acc.seq_update(enc, weights, model)
