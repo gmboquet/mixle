@@ -42,6 +42,11 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.ot_geometry` -- P6, optimal-transport geometry of model space:
+  :func:`~mixle.experimental.ot_geometry.bures_wasserstein` (closed-form ``W2`` between Gaussians),
+  :func:`~mixle.experimental.ot_geometry.gaussian_barycenter` (Bures barycenter fixed-point), and
+  :func:`~mixle.experimental.ot_geometry.mixture_barycenter` (Wasserstein barycenter of Gaussian mixtures
+  via Hungarian component alignment) -- merging models in distribution space instead of parameter space.
 - :mod:`mixle.experimental.unlearning` -- P5, exact machine unlearning for closed-form leaves:
   :func:`~mixle.experimental.unlearning.certify_unlearning` re-reduces the retained shards' stored
   sufficient statistics (via each accumulator's ``combine``) in canonical order and certifies the result
