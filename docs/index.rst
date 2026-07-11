@@ -177,6 +177,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
    :hidden:
    :maxdepth: 2
 
+   neural-boundary
    neural-llm
    torch-modules
    automatic-inference
