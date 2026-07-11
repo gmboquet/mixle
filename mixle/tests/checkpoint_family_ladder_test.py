@@ -23,8 +23,6 @@ from mixle.models.eval_harness import markov_transition_matrix
 from mixle.models.transformer import build_causal_lm
 from mixle.task.checkpoint_family_ladder import RungSpec, build_checkpoint_family, count_params
 
-pytestmark = pytest.mark.fast
-
 
 def _train_headline_model(
     seed: int, vocab: int, d_model: int, n_layer: int, n_head: int, block: int, steps: int = 8000

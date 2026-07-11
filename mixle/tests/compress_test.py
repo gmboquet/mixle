@@ -21,8 +21,6 @@ torch = pytest.importorskip("torch")
 from mixle.models.compress import METHODS, compress
 from mixle.models.transformer import build_causal_lm
 
-pytestmark = pytest.mark.fast
-
 
 def _scale_weights_(model, factor: float) -> None:
     """In-place scale every Block's weight (not bias/embedding) parameters -- used to synthesize

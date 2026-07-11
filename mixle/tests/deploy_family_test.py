@@ -33,9 +33,6 @@ from mixle.task.frontier_to_native import (  # noqa: E402
     measure_cascade_receipt,
 )
 
-pytestmark = pytest.mark.fast
-
-
 # --- a small real (not random-init) headline causal LM, trained on F10's own four eval axes at
 # reduced steps -- enough to be measurably above chance without J2's own full 8000-step budget. -----
 

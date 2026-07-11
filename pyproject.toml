@@ -113,13 +113,17 @@ testpaths = ["mixle/tests"]
 python_files = ["*_test.py"]
 python_classes = ["*Test", "*TestCase"]
 python_functions = ["test_*"]
-# Fast + parallel by default: plain `pytest` runs the `fast` gate under `-n auto` in ~25 s (vs ~2.5 min
-# for the whole suite). The heavy integration / PDE-inversion / stochastic-recovery tests are tagged
-# `slow` in conftest and excluded here; they still run in CI's full gate. A later `-m` on the command
-# line overrides this default, so the CI gates keep working:
+# Fast + parallel by default: plain `pytest` runs the `fast` gate under `-n auto` in a few minutes on a
+# laptop (re-measured 2026-07-11: ~3 min for ~4.8k tests; it had silently regressed to 36+ min before
+# the conftest registry retriage). Heavy integration / training / stochastic-recovery tests are tagged
+# `slow` in conftest and excluded here; they still run in CI's full gate. Files must NOT self-mark
+# `fast` -- the conftest registry is the single triage authority (see pytest_collection_modifyitems).
+# A later `-m` on the command line overrides this default, so the CI gates keep working:
 #   full correctness run : pytest -m "not optional and not benchmark"   (everything incl. slow)
 #   single file, serial  : pytest path/to/file_test.py -n0 -m ""        (-m "" clears the fast filter)
-addopts = "-ra --strict-markers -n auto -m fast"
+# --dist loadgroup honors the xdist_group marks conftest puts on minute-scale setUpClass classes
+# (the setup runs once per suite instead of once per worker); ungrouped tests keep plain load-balancing.
+addopts = "-ra --strict-markers -n auto --dist loadgroup -m fast"
 # Warning ownership (T3.3): a DeprecationWarning issued by mixle's OWN code during tests is promoted to an
 # error. A deprecation MUST be asserted with pytest.warns / assertWarns (which consumes it before this
 # filter sees it); a leaked one is a defect -- a deprecated path used somewhere it should not be, or a

@@ -22,8 +22,6 @@ from mixle.models import (
 from mixle.stats import MixtureDistribution, MultivariateGaussianDistribution
 from mixle.utils.serialization import from_json, to_json
 
-pytestmark = pytest.mark.fast
-
 
 def _data(n=64, d=4, seed=0):
     rng = np.random.RandomState(seed)

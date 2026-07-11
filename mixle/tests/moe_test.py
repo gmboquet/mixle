@@ -106,7 +106,6 @@ class MatchedFlopsLossWinTest:
         )
 
 
-@pytest.mark.fast
 class ExpertCollapseReceiptTest:
     def _forced_merged_history(self, n_experts=4, rounds=6, n_tokens=64, seed=0):
         """Deliberately collapsed routing: nearly all mass on expert 0 every round (load-balance loss
@@ -178,7 +177,6 @@ class ExpertCollapseReceiptTest:
         assert receipt["merged"] is False, receipt["diagnosis"]
 
 
-@pytest.mark.fast
 class UpcyclingReceiptTest:
     def _trained_looking_dense(self, d_model=32, n_head=4, seed=0):
         torch.manual_seed(seed)
