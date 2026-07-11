@@ -145,6 +145,26 @@ class DictJsonRoundTripTest(unittest.TestCase):
         self.assertTrue(np.allclose(got, ll, atol=1e-5))
 
 
+class NeuralCategoricalMinibatchTest(unittest.TestCase):
+    def test_fixed_optimizer_budget_is_recorded(self):
+        _seed()
+        rng = np.random.RandomState(8)
+        data = [(rng.randn(2).astype("float32"), int(i % 2)) for i in range(24)]
+        leaf = NeuralCategorical(
+            make_mlp(2, [8], 2),
+            m_steps=20,
+            batch_size=5,
+            max_optimizer_steps=7,
+        )
+        fitted = optimize(data, leaf.estimator(), prev_estimate=leaf, max_its=1, out=None)
+        self.assertEqual(fitted.fit_receipt["optimizer_steps"], 7)
+        self.assertEqual(fitted.fit_receipt["batch_size"], 5)
+        self.assertEqual(
+            fitted.fit_receipt["gradient_estimator"],
+            "N/B responsibility-weighted cross-entropy",
+        )
+
+
 class VAEDeterminismTest(unittest.TestCase):
     def test_log_density_deterministic_across_calls(self):
         # before the fix, log_density resampled z each call (~0.7 nats jitter) -> a non-monotone EM LL

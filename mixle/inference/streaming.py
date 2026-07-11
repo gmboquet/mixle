@@ -74,6 +74,7 @@ class _StreamingBase:
         rng: RandomState | None = None,
         encoder=None,
         num_chunks: int = 1,
+        dataset_size: float | None = None,
     ) -> None:
         validate_estimator_keys(estimator)
         self.estimator = estimator
@@ -83,6 +84,10 @@ class _StreamingBase:
         self.rng = RandomState(0) if rng is None else rng  # fixed default: an un-seeded fit is deterministic
         self.encoder = encoder if encoder is not None else (model.dist_to_encoder() if model is not None else None)
         self.num_chunks = num_chunks
+        self.dataset_size = None if dataset_size is None else float(dataset_size)
+        if self.dataset_size is not None and self.dataset_size <= 0.0:
+            raise ValueError("dataset_size must be positive when supplied.")
+        self.last_batch_scale = 1.0
         self.running_accumulator = None
         self.nobs = 0.0
         self.step = 0
@@ -118,6 +123,7 @@ class _StreamingBase:
         self.model = None
         self.nobs = 0.0
         self.step = 0
+        self.last_batch_scale = 1.0
 
 
 class StreamingEstimator(_StreamingBase):
@@ -133,6 +139,7 @@ class StreamingEstimator(_StreamingBase):
         rng: RandomState | None = None,
         encoder=None,
         num_chunks: int = 1,
+        dataset_size: float | None = None,
     ) -> None:
         super().__init__(
             estimator,
@@ -142,6 +149,7 @@ class StreamingEstimator(_StreamingBase):
             rng=rng,
             encoder=encoder,
             num_chunks=num_chunks,
+            dataset_size=dataset_size,
         )
         self.schedule = harmonic(0.7) if schedule is None else schedule
 
@@ -152,10 +160,18 @@ class StreamingEstimator(_StreamingBase):
         enc_batch = self._encode_batch(data, enc_data)
         self._ensure_model(enc_batch)
         batch_nobs, batch_acc = streaming_accumulate(enc_batch, self.estimator, self.model)
+        effective_nobs = batch_nobs
+        self.last_batch_scale = 1.0
+        if self.dataset_size is not None:
+            if batch_nobs <= 0.0:
+                raise ValueError("cannot scale an empty minibatch to dataset_size.")
+            self.last_batch_scale = self.dataset_size / batch_nobs
+            batch_acc.scale(self.last_batch_scale)
+            effective_nobs = self.dataset_size
 
         if self.running_accumulator is None:
             self.running_accumulator = batch_acc
-            self.nobs = batch_nobs
+            self.nobs = effective_nobs
         else:
             rho = float(self.schedule(self.step + 1))
             if rho <= 0.0 or rho > 1.0:
@@ -163,65 +179,22 @@ class StreamingEstimator(_StreamingBase):
             self.running_accumulator.scale(1.0 - rho)
             batch_acc.scale(rho)
             self.running_accumulator.combine(batch_acc.value())
-            self.nobs = (1.0 - rho) * self.nobs + rho * batch_nobs
+            self.nobs = (1.0 - rho) * self.nobs + rho * effective_nobs
 
         self.model = self.estimator.estimate(self.nobs, self.running_accumulator.value())
         self.step += 1
         return self.model
 
 
-def _max_cancelled_bits(pre: Any, post: Any) -> float:
-    """Worst per-element magnitude collapse, in bits, between two payload snapshots.
-
-    ``log2(|pre| / |post|)`` measures how many leading bits a running statistic lost
-    when a payload was subtracted out of it -- the cheap form of the cancellation
-    escalation signal described in :mod:`mixle.engines.affine` (a subtraction at a
-    cancellation point blows up the relative-error bound).  Non-numeric leaves and
-    structure mismatches contribute 0: the guard may under-fire but never breaks
-    the update path.
-    """
-    if isinstance(pre, dict) and isinstance(post, dict):
-        return max((_max_cancelled_bits(pre[k], post[k]) for k in pre if k in post), default=0.0)
-    if isinstance(pre, (list, tuple)) and isinstance(post, (list, tuple)):
-        return max((_max_cancelled_bits(a, b) for a, b in zip(pre, post)), default=0.0)
-    if pre is None or post is None:
-        return 0.0
-    try:
-        a = np.abs(np.asarray(pre, dtype=np.float64))
-        b = np.abs(np.asarray(post, dtype=np.float64))
-    except (TypeError, ValueError):
-        return 0.0
-    if a.shape != b.shape or a.size == 0:
-        return 0.0
-    mask = a > 0.0
-    if not bool(np.any(mask)):
-        return 0.0
-    with np.errstate(divide="ignore"):
-        bits = np.log2(a[mask] / b[mask])
-    return float(np.max(bits))
-
-
 class IncrementalEstimator(_StreamingBase):
     """Neal-Hinton style incremental EM over replaceable data chunks.
 
     Each chunk contributes a sufficient-statistic payload computed under the
-    current model.  Revisiting a chunk subtracts that chunk's previous payload,
-    adds the new payload, and runs the ordinary estimator M-step on the pooled
-    statistics.  No distribution-specific estimation code lives here; the class
-    only uses ``scale(-1)``, ``combine()``, and ``estimate()``.
-
-    The subtract step is O(1) per revisit, but floating-point subtraction does not
-    invert addition: every revisit leaves roundoff residue in the running
-    statistics, and removing a payload whose magnitude dominated the running sums
-    can cancel catastrophically (e.g. the pooled second moment driven negative
-    after smaller chunks were absorbed at add time).  Because every chunk payload
-    is retained in ``chunk_values``, the exact state is always recoverable:
-    :meth:`rebase` rebuilds the running statistics by combining the stored
-    payloads in canonical order.  ``rebase_every=n`` does so automatically every
-    ``n`` updates; ``cancellation_bits=b`` watches each subtract and auto-rebases
-    when any statistic loses more than ``b`` bits of magnitude
-    (``cancellation_rebases`` counts the triggers).  Both default to off, keeping
-    the historical O(1) fast path unchanged.
+    current model. Revisiting a chunk replaces that payload and rebuilds the
+    pooled accumulator from the stored chunk summaries before running the
+    ordinary M-step. Rebuilding is essential because mergeable statistics form
+    a monoid, not necessarily a group: sums can be subtracted, but support
+    minima/maxima, weighted medians, sketches, and similar summaries cannot.
     """
 
     def __init__(
@@ -233,13 +206,7 @@ class IncrementalEstimator(_StreamingBase):
         rng: RandomState | None = None,
         encoder=None,
         num_chunks: int = 1,
-        rebase_every: int | None = None,
-        cancellation_bits: float | None = None,
     ) -> None:
-        if rebase_every is not None and rebase_every < 1:
-            raise ValueError("rebase_every must be a positive integer or None; got %r." % (rebase_every,))
-        if cancellation_bits is not None and cancellation_bits <= 0.0:
-            raise ValueError("cancellation_bits must be positive or None; got %r." % (cancellation_bits,))
         super().__init__(
             estimator,
             model=model,
@@ -249,9 +216,6 @@ class IncrementalEstimator(_StreamingBase):
             encoder=encoder,
             num_chunks=num_chunks,
         )
-        self.rebase_every = rebase_every
-        self.cancellation_bits = cancellation_bits
-        self.cancellation_rebases = 0
         self.chunk_values = dict()
         self.nobs_by_chunk = dict()
 
@@ -274,69 +238,24 @@ class IncrementalEstimator(_StreamingBase):
         self._ensure_model(enc_batch)
         batch_nobs, batch_acc = streaming_accumulate(enc_batch, self.estimator, self.model)
 
-        if self.running_accumulator is None:
-            self.running_accumulator = self.estimator.accumulator_factory().make()
-
-        needs_rebase = False
-        if chunk_id in self.chunk_values:
-            pre_value = copy.deepcopy(self.running_accumulator.value()) if self.cancellation_bits is not None else None
-            old_acc = self.estimator.accumulator_factory().make()
-            old_acc.from_value(copy.deepcopy(self.chunk_values[chunk_id]))
-            old_acc.scale(-1.0)
-            self.running_accumulator.combine(old_acc.value())
-            self.nobs -= self.nobs_by_chunk[chunk_id]
-            if pre_value is not None and (
-                _max_cancelled_bits(pre_value, self.running_accumulator.value()) > self.cancellation_bits
-            ):
-                needs_rebase = True
-
-        self.running_accumulator.combine(batch_acc.value())
-        self.nobs += batch_nobs
+        replacing = chunk_id in self.chunk_values
         self.chunk_values[chunk_id] = copy.deepcopy(batch_acc.value())
         self.nobs_by_chunk[chunk_id] = batch_nobs
-        if needs_rebase:
-            self.cancellation_rebases += 1
-            self._rebase_stats()
-        elif self.rebase_every is not None and (self.step + 1) % self.rebase_every == 0:
-            self._rebase_stats()
+
+        if replacing:
+            self.running_accumulator = self.estimator.accumulator_factory().make()
+            self.nobs = 0.0
+            for stored_id, value in self.chunk_values.items():
+                self.running_accumulator.combine(copy.deepcopy(value))
+                self.nobs += self.nobs_by_chunk[stored_id]
+        else:
+            if self.running_accumulator is None:
+                self.running_accumulator = self.estimator.accumulator_factory().make()
+            self.running_accumulator.combine(batch_acc.value())
+            self.nobs += batch_nobs
+
         self.model = self.estimator.estimate(self.nobs, self.running_accumulator.value())
         self.step += 1
-        return self.model
-
-    def _canonical_chunk_ids(self) -> list:
-        """Chunk ids in canonical (sorted) order; insertion order if ids are unorderable."""
-        try:
-            return sorted(self.chunk_values)
-        except TypeError:
-            return list(self.chunk_values)
-
-    def _rebase_stats(self) -> None:
-        """Rebuild running statistics exactly from the stored chunk payloads."""
-        ids = self._canonical_chunk_ids()
-        acc = self.estimator.accumulator_factory().make()
-        acc.from_value(copy.deepcopy(self.chunk_values[ids[0]]))
-        for cid in ids[1:]:
-            acc.combine(copy.deepcopy(self.chunk_values[cid]))
-        self.running_accumulator = acc
-        nobs = 0.0
-        for cid in ids:
-            nobs += self.nobs_by_chunk[cid]
-        self.nobs = nobs
-
-    def rebase(self) -> SequenceEncodableProbabilityDistribution | None:
-        """Recompute the running statistics from the stored chunk payloads and re-estimate.
-
-        The subtract-based fast path in :meth:`update` accumulates roundoff residue
-        (and can cancel catastrophically); this rebuilds the exact canonical-order
-        reduction of ``chunk_values`` -- identical to a from-scratch reduce over the
-        current chunk set -- and refreshes the model from it.  No data re-encoding
-        happens; cost is one ``combine`` per stored chunk plus one M-step.  A no-op
-        when no chunks have been folded yet.
-        """
-        if not self.chunk_values:
-            return self.model
-        self._rebase_stats()
-        self.model = self.estimator.estimate(self.nobs, self.running_accumulator.value())
         return self.model
 
     def chunk_value(self, chunk_id: Any):
@@ -350,4 +269,3 @@ class IncrementalEstimator(_StreamingBase):
         super().reset()
         self.chunk_values = dict()
         self.nobs_by_chunk = dict()
-        self.cancellation_rebases = 0

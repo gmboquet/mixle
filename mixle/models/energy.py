@@ -250,6 +250,10 @@ class EnergyModelEstimator(ParameterEstimator):
     noise -- so the resulting ``-E(x) + log_norm`` is a consistent, approximately-normalized log-density.
     """
 
+    # Before NCE learns log_norm, observed ``seq_log_density`` is not a comparable outer objective:
+    # an unnormalized initial model can score arbitrarily well merely by shifting that constant.
+    outer_objective_compatible = False
+
     def __init__(
         self,
         module: Any,

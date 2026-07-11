@@ -110,6 +110,32 @@ class CompositionTest(unittest.TestCase):
 
 
 class ControlStoryTest(unittest.TestCase):
+    def test_rejected_neural_step_restores_shared_module_state(self):
+        """The outer monotonic gate is a real transaction for in-place torch updates."""
+
+        def bad_loss(module, x, w):
+            return ((module.mu - 10.0) ** 2).sum()
+
+        module = DiagGauss(1)
+        leaf = GradLeaf(module, m_steps=1, lr=1.0, loss=bad_loss)
+        data = [0.0] * 16
+        before = {key: value.detach().clone() for key, value in module.state_dict().items()}
+        before_ll = sum(leaf.log_density(x) for x in data)
+
+        fitted = optimize(
+            data,
+            leaf.estimator(),
+            prev_estimate=leaf,
+            max_its=1,
+            delta=None,
+            reuse_estep_ll=False,
+            out=None,
+        )
+
+        self.assertAlmostEqual(sum(fitted.log_density(x) for x in data), before_ll, places=7)
+        for key, value in module.state_dict().items():
+            torch.testing.assert_close(value, before[key])
+
     def test_frozen_parameters_stay_frozen(self):
         # LLaVA-style: freeze one part, train the other -- requires_grad_(False) is the whole API
         module = DiagGauss(1)
@@ -223,6 +249,28 @@ class MinibatchTest(unittest.TestCase):
         data = _data(-2.0, 1.0, 5000, seed=11)
         fitted = optimize(data, GradLeaf(DiagGauss(1), m_steps=40, lr=0.05, batch_size=32), max_its=1, out=None)
         self.assertAlmostEqual(float(fitted.module.mu.detach()[0]), -2.0, delta=0.25)
+
+    def test_fixed_optimizer_budget_makes_default_gradient_scale_batch_size_stable(self):
+        data = [2.0] * 100
+
+        def sgd(params):
+            return torch.optim.SGD(params, lr=0.05)
+
+        full_module = DiagGauss(1)
+        mini_module = DiagGauss(1)
+        mini_module.load_state_dict(full_module.state_dict())
+        full_module.log_sigma.requires_grad_(False)
+        mini_module.log_sigma.requires_grad_(False)
+
+        full_start = GradLeaf(full_module, m_steps=10, optimizer=sgd, max_optimizer_steps=1)
+        mini_start = GradLeaf(mini_module, m_steps=10, optimizer=sgd, batch_size=10, max_optimizer_steps=1)
+        full = optimize(data, full_start.estimator(), prev_estimate=full_start, max_its=1, out=None)
+        mini = optimize(data, mini_start.estimator(), prev_estimate=mini_start, max_its=1, out=None)
+
+        torch.testing.assert_close(full.module.mu, mini.module.mu)
+        self.assertEqual(full.fit_receipt["optimizer_steps"], 1)
+        self.assertEqual(mini.fit_receipt["optimizer_steps"], 1)
+        self.assertEqual(mini.fit_receipt["gradient_estimator"], "unbiased_full_weighted_objective")
 
 
 class TupleDefaultLossTest(unittest.TestCase):

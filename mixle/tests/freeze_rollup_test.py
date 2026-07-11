@@ -21,7 +21,14 @@ from mixle.inference.freeze_rollup import (
     _resolve_payload,
     run_em_freeze_rollup,
 )
-from mixle.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator, seq_encode
+from mixle.stats import (
+    CompositeDistribution,
+    GaussianDistribution,
+    GaussianEstimator,
+    MixtureDistribution,
+    MixtureEstimator,
+    seq_encode,
+)
 from mixle.stats.latent.mixture import _component_enc
 
 
@@ -141,6 +148,21 @@ class FreezeRollupMonotonicityTestCase(unittest.TestCase):
 
 
 class FreezeRollupCacheInvalidationTestCase(unittest.TestCase):
+    def test_cache_signature_includes_nested_component_parameters(self):
+        component = CompositeDistribution((GaussianDistribution(0.0, 1.0), GaussianDistribution(2.0, 1.0)))
+        enc = component.dist_to_encoder().seq_encode([(0.0, 2.0), (1.0, 3.0)])
+        cache = FreezeRollupCache()
+
+        before, first_hit = cache.component_log_density(0, component, enc, frozen=True)
+        _, second_hit = cache.component_log_density(0, component, enc, frozen=True)
+        component.dists[0].mu += 10.0
+        after, third_hit = cache.component_log_density(0, component, enc, frozen=True)
+
+        self.assertFalse(first_hit)
+        self.assertTrue(second_hit)
+        self.assertFalse(third_hit)
+        self.assertFalse(np.allclose(before, after))
+
     def test_cache_invalidates_when_a_frozen_components_parameters_move_again(self):
         """A component the cache is treating as frozen must never serve a stale log-density once
         its parameters change again -- whether that change comes from this module's own M-step
