@@ -76,12 +76,6 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
-  min-versions:
-    name: min-versions (oldest declared floors)
-    # Install at the OLDEST declared dependency floors (constraints-min.txt) on the oldest supported
-    # Python and run the fast suite, so a floor that is missing an API, unbuildable, or numerically
-    # incompatible fails here instead of silently passing on whatever newer version pip resolves.
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -94,6 +88,18 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
       - name: Run fast tests
+        run: python -m pytest -m fast -n auto
+
+  min-versions:
+    name: min-versions (oldest declared floors)
+    # Install at the OLDEST declared dependency floors (constraints-min.txt) on the oldest supported
+    # Python and run the fast suite, so a floor that is missing an API, unbuildable, or numerically
+    # incompatible fails here instead of silently passing on whatever newer version pip resolves.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: pyproject.toml
