@@ -45,7 +45,7 @@ rankings, graphs — all the same way.
 
 ## Installation
 
-Python 3.10+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64; macOS (incl. Apple Silicon)
+Python 3.11+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64; macOS (incl. Apple Silicon)
 is the day-to-day dev platform and works in practice but isn't CI-gated; Windows is untested.
 
 ```sh

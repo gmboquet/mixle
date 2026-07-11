@@ -1,0 +1,14 @@
+# Minimum declared runtime dependency versions (worklist S13.4).
+#
+# The `min-versions` CI job installs the package with these constraints (on the oldest supported
+# Python) and runs the fast suite, so a declared floor that is missing an API mixle uses, has no wheel
+# on a supported Python, or is numerically incompatible fails here instead of silently passing on
+# whatever newer version happened to resolve.
+#
+# These are the OLDEST versions the full fast suite is verified green against -- see the rationale on
+# the `dependencies` floors in pyproject.toml. Keep in sync with those `>=` floors. Test tooling
+# (pytest/xdist/cov) is intentionally left unpinned: this gate tests mixle's code against its declared
+# runtime-dependency floors, not old test-harness versions.
+numpy==2.4.0
+scipy==1.16.0
+mpmath==1.3.0
