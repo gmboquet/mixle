@@ -111,7 +111,7 @@ def improve(
             if not op.applicable(model, train, ctx=ctx):
                 continue
             candidate = op.propose(model, train, ctx=ctx)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             if ledger is not None:
                 ledger.record(
                     operator=op.name,

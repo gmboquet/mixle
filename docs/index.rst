@@ -164,6 +164,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
 
    installation
    maturity
+   what-mixle-is-not
    whats-new-0-6-2
    quickstart
    concepts
@@ -176,6 +177,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
    :hidden:
    :maxdepth: 2
 
+   neural-boundary
    neural-llm
    torch-modules
    automatic-inference
@@ -191,6 +193,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
    reasoning-ecosystem
    hmms-latent
    processes
+   automatic-modeling-contract
    automatic-modeling-internals
    cookbook
 
@@ -200,8 +203,11 @@ reference under :doc:`api/modules` covers the broad public module surface;
    :maxdepth: 2
 
    release-readiness
+   claim-evidence-ledger
    validation
+   reproduction
    support-policy
+   backend-support
    security-and-data
    stability-and-missing-data
    family-release
@@ -255,3 +261,4 @@ reference under :doc:`api/modules` covers the broad public module surface;
    :maxdepth: 2
 
    design-notes
+   large-module-audit

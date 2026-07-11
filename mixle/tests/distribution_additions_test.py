@@ -315,7 +315,7 @@ class StandardDistributionAdditionsTestCase(unittest.TestCase):
     def test_fused_kernel_log_density_matches_seq(self):
         try:
             from mixle.stats.compute.fused_kernels import CompiledMixture
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self.skipTest("compiled kernels unavailable: %s" % exc)
 
         dists = [
@@ -341,7 +341,7 @@ class StandardDistributionTorchTestCase(unittest.TestCase):
     def test_torch_em_matches_seq_for_bernoulli_mixture(self):
         try:
             from mixle.stats.compute.torch_mixture import TorchMixture
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self.skipTest("torch engine unavailable: %s" % exc)
 
         model = MixtureDistribution([BernoulliDistribution(0.2), BernoulliDistribution(0.8)], [0.4, 0.6])
@@ -365,7 +365,7 @@ class StandardDistributionTorchTestCase(unittest.TestCase):
     def test_torch_em_matches_seq_for_negative_binomial_mixture(self):
         try:
             from mixle.stats.compute.torch_mixture import TorchMixture
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self.skipTest("torch engine unavailable: %s" % exc)
 
         model = MixtureDistribution(
@@ -395,7 +395,7 @@ class StandardDistributionTorchTestCase(unittest.TestCase):
     def test_torch_log_density_matches_seq_for_new_continuous_leaves(self):
         try:
             from mixle.stats.compute.torch_mixture import TorchMixture
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self.skipTest("torch engine unavailable: %s" % exc)
 
         dists = [

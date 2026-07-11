@@ -4,6 +4,20 @@ All notable changes to mixle are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — Unreleased
+
+The credibility, stability, and proof release: turning mixle from a broad, fast-moving research
+package into one whose supported core, performance, artifacts, and public claims can be independently
+trusted. Tracked by the release checklist in `release-checklists/0.8.0.md`. New capability is deferred
+to post-0.8 or kept under `mixle.experimental` per the feature freeze.
+
+### Added
+
+- A public-API manifest (`api_manifest.json`) and a drift gate so any change to the exported surface
+  is a reviewed diff.
+- Release-engineering gates: a weighted-estimation contract test, a base-install optional-import guard,
+  a tracked benchmark harness, a pull-request template, and the 0.8.0 release checklist.
+
 ## [0.7.0] — 2026-07-09
 
 Workstream: generic AI-capability platform pieces on top of the core estimation engine (task
