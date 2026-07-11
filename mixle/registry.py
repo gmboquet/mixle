@@ -147,7 +147,7 @@ class Registry:
         if isinstance(query, str):
             matches = [e for e in self._entries if query in e.capabilities]
             return matches[:top_k] if top_k is not None else matches
-        q = np.asarray(query, dtype=np.float64)
+        q: np.ndarray = np.asarray(query, dtype=np.float64)
         scored = sorted(
             (
                 (float(np.linalg.norm(np.asarray(e.fingerprint, dtype=np.float64) - q)), e)

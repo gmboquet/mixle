@@ -230,7 +230,11 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.10"
+# Matches the newest interpreter CI's lint job runs (setup-python pins 3.12), not the package's own
+# `requires-python` floor: numpy's bundled stubs use PEP 695 `type` alias syntax mypy can only parse
+# at python_version >= 3.12, regardless of what mixle's own code targets. The real 3.11-floor
+# compatibility check is the `min-versions` CI job's actual interpreter run, not this syntax target.
+python_version = "3.12"
 files = ["mixle"]
 # Strictness is intentionally relaxed for a large, partially-typed scientific codebase;
 # tighten incrementally (e.g. per-module overrides) as annotations are completed.
