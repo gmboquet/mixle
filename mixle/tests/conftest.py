@@ -296,6 +296,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # GP-surrogate active-learning + multi-fidelity placement (roadmap M4): each test fits several torch
     # GPs across a sequential design loop, mirroring doe_active_test.py / doe_multifidelity_test.py.
     "task_emulate_test.py": ("doe", "torch", "slow"),
+    # P5 exact unlearning (mixle/experimental/unlearning.py): re-reduce bitwise certificates across a few
+    # closed-form leaves plus the subtraction catastrophic-cancellation contrast -- pure numpy, no torch.
+    "unlearning_test.py": ("experimental",),
 }
 
 
