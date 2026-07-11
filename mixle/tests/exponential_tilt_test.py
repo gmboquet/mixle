@@ -168,7 +168,9 @@ class TiltValidationTestCase(unittest.TestCase):
 
         register_exponential_tilt(
             _Dummy,
-            lambda b, th: __import__("mixle.stats.combinator.exponential_tilt", fromlist=["TiltResult"]).TiltResult(0.0),
+            lambda b, th: __import__("mixle.stats.combinator.exponential_tilt", fromlist=["TiltResult"]).TiltResult(
+                0.0
+            ),
         )
         self.assertIn("_Dummy", registered_tilt_families())
 

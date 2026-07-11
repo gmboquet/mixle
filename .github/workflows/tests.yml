@@ -97,4 +97,6 @@ jobs:
       - name: Run optional tests
         run: python -m pytest -m "optional or torch or numba or jax" -n auto
       - name: Run gated two-rank torchrun smoke
-        run: MIXLE_RUN_TORCHRUN_SMOKE=1 python -m pytest mixle/tests/torchrun_encoded_data_test.py -q
+        # -m "" overrides the default `-m fast` addopts; torchrun_encoded_data_test.py's tests carry no
+        # `fast` marker, so without this the selection is empty and pytest exits 5 ("no tests collected").
+        run: MIXLE_RUN_TORCHRUN_SMOKE=1 python -m pytest mixle/tests/torchrun_encoded_data_test.py -q -m ""

@@ -779,7 +779,12 @@ from mixle.stats.bayes.conjugate import (
     mixture_conjugate_posterior,
 )
 from mixle.stats.bayes.dict_dirichlet import DictDirichletDistribution, DictDirichletSampler
-from mixle.stats.bayes.dirichlet import DirichletDataEncoder, DirichletDistribution, DirichletEstimator, DirichletSampler
+from mixle.stats.bayes.dirichlet import (
+    DirichletDataEncoder,
+    DirichletDistribution,
+    DirichletEstimator,
+    DirichletSampler,
+)
 from mixle.stats.bayes.dirichlet_process_mixture import (
     DirichletProcessMixtureDistribution,
     DirichletProcessMixtureEstimator,
