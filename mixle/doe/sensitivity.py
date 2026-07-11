@@ -34,7 +34,7 @@ def _sobol_unit(n: int, d: int, seed: int) -> np.ndarray:
         from scipy.stats import qmc
 
         return _qmc_unit(qmc.Sobol, d, n, True, np.random.RandomState(seed))
-    except Exception:  # pragma: no cover - qmc fallback
+    except Exception:  # pragma: no cover - qmc fallback  # noqa: BLE001
         return np.random.RandomState(seed).random((n, d))
 
 

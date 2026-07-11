@@ -127,7 +127,7 @@ class HDF5ArraySource(_ArrayVolumeSource):
         """Close the underlying HDF5 file handle. Idempotent."""
         try:
             self._file.close()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
     def __enter__(self) -> HDF5ArraySource:
@@ -139,7 +139,7 @@ class HDF5ArraySource(_ArrayVolumeSource):
     def __del__(self) -> None:
         try:
             self.close()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
 
