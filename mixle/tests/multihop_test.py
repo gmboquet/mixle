@@ -5,6 +5,13 @@ import unittest
 from mixle.substrate import ContextBudget, Substrate, SubstrateItem, multihop
 from mixle.telemetry import Telemetry
 
+try:
+    import torch  # noqa: F401
+
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
+
 
 def _lineage_shard():
     """A bug report -> (link) the model artifact -> (link) its training trace. The trace shares NO
@@ -60,6 +67,7 @@ class ChainTest(unittest.TestCase):
 
 
 class BudgetTest(unittest.TestCase):
+    @unittest.skipUnless(_HAS_TORCH, "30 items crosses the lexical->embedding retrieval threshold")
     def test_max_items_caps_the_chain(self):
         s = Substrate()
         for i in range(30):

@@ -41,6 +41,7 @@ class BudgetTest(unittest.TestCase):
         pkt = assemble_context(s, "long document", budget=ContextBudget(max_chars=5))
         self.assertEqual(len(pkt), 1)  # always at least the single best item
 
+    @unittest.skipUnless(_HAS_TORCH, "10 items crosses the lexical->embedding retrieval threshold")
     def test_item_cap_is_honored(self):
         s = Substrate()
         for i in range(10):
