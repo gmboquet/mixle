@@ -64,7 +64,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
 
         return DistributionCapabilities(engine_ready=("numpy",), kernel_status="legacy_numpy")
 
-    def __init__(self, topics, transitions, len_dist=None, name=None, keys=None, use_numba=False, terminal_states=None):
+    def __init__(self, topics, transitions, len_dist=None, name=None, keys=None, use_numba=None, terminal_states=None):
         """SemiSupervisedHiddenMarkovModelDistribution.
 
         Args:
@@ -73,7 +73,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
             len_dist (Optional[SequenceEncodableProbabilityDistribution]): optional sequence-length distribution.
             name (Optional[str]): optional name.
             keys (Optional[Tuple[Optional[str], Optional[str]]]): optional (transition, emission) keys for tying.
-            use_numba (bool): accepted for backward compatibility; this model is numpy-only.
+            use_numba (Optional[bool]): accepted for backward compatibility and ignored; this model is numpy-only.
         """
         self.topics = list(topics)
         self.nStates = len(self.topics)
@@ -85,6 +85,9 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         if keys is None:
             keys = (None, None)
         self.keys = keys
+        # Deliberately hard False (not a tunable default): the semi-supervised forward/backward is a
+        # custom per-sequence implementation with no numba kernel, and its encoder must emit the
+        # matching per-sequence layout. Mirrors the terminal-state force-off in hidden_markov.py.
         self.use_numba = False
         self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
         if self.terminal_states is not None:
