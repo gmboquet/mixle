@@ -191,6 +191,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
    reasoning-ecosystem
    hmms-latent
    processes
+   automatic-modeling-contract
    automatic-modeling-internals
    cookbook
 
