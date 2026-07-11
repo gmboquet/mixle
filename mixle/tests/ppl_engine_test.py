@@ -41,7 +41,7 @@ class EngineTestCase(unittest.TestCase):
             m = Mix([Normal(free, free), Normal(free, free)]).fit(
                 data, backend="mp", num_workers=2, rng=np.random.RandomState(2)
             )
-        except Exception as e:  # environment without usable mp
+        except Exception as e:  # environment without usable mp  # noqa: BLE001
             self.skipTest(f"mp backend unavailable: {e}")
         means = sorted(c.mu for c in m.dist.components)
         self.assertAlmostEqual(means[0], -5.0, delta=0.3)

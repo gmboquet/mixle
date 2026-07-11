@@ -52,7 +52,7 @@ def check_dataset(
     for i, r in enumerate(recs):
         try:
             conformed.append(schema.conform_record(r))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             issues.append(f"record {i}: does not conform to schema ({type(exc).__name__}: {exc})")
             conformed.append(None)
     if check_support:
@@ -63,7 +63,7 @@ def check_dataset(
                 lp = model.log_density(r)
                 if not np.isfinite(lp):
                     issues.append(f"record {i}: outside the model's support (log-density {lp})")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 issues.append(f"record {i}: could not be scored ({type(exc).__name__}: {exc})")
     report = DataReport(ok=not issues, n_checked=len(recs), schema=schema_desc, issues=issues)
     if raise_on_error and not report.ok:
