@@ -20,6 +20,29 @@ Production concerns are grouped into five areas:
 * reproducibility receipts and local telemetry where the broader runtime layer
   is used.
 
+.. _deployment-scope:
+
+Deployment Scope: What the Core Package Provides
+------------------------------------------------
+
+To keep the claim honest, the boundary is explicit. The **core mixle package**
+provides deployment *building blocks*, not a serving platform:
+
+* **model artifacts** -- self-describing, versionable serialized models;
+* **scoring wrappers** -- call a fitted model behind a service or cascade;
+* **drift and provenance helpers** -- headers, lineage, drift detection,
+  reproducibility receipts;
+* **local registries** -- in-process registration, aliasing, and promotion.
+
+The core package does **not** provide, and does not claim to provide, a complete
+serving platform: no hosted or autoscaling inference service, no multi-tenant
+gateway, no fine-tuning-as-a-service, no cross-model routing infrastructure, and
+no managed monitoring backend. Those responsibilities belong to the companion
+project `mixle-mlops <https://github.com/gmboquet/mixle-mlops>`_, an
+OpenAI-compatible gateway that serves fitted mixle models alongside open and
+hosted LLMs. This split matches the maturity guide: the artifact, scoring, and
+registry helpers are provisional workflow layers, not a stable serving product.
+
 Fit with Provenance
 -------------------
 
