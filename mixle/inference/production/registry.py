@@ -49,10 +49,26 @@ class Registry:
         self.root = root
         os.makedirs(root, exist_ok=True)
 
-    def _dir(self, name: str) -> str:
+    def _model_dir(self, name: str, *, create: bool) -> str:
+        """Resolve the on-disk directory for model ``name``, refusing any path that escapes the store root.
+
+        ``_safe_segment`` blocks traversal *inside* the name string, but a symlink pre-placed in the root
+        (from an untrusted or restored registry, or a tar extraction) named like a model would still let a
+        read or write follow it outside the root. Reject an entry that is a symlink, or whose real path is
+        not contained in the root's real path, before any ``open`` / ``makedirs`` follows it.
+        """
         d = os.path.join(self.root, _safe_segment(name))
-        os.makedirs(d, exist_ok=True)
+        if os.path.lexists(d):
+            root_real = os.path.realpath(self.root)
+            real = os.path.realpath(d)
+            if os.path.islink(d) or (real != root_real and not real.startswith(root_real + os.sep)):
+                raise ValueError(f"unsafe registry name {name!r}: entry resolves outside the store root")
+        if create:
+            os.makedirs(d, exist_ok=True)
         return d
+
+    def _dir(self, name: str) -> str:
+        return self._model_dir(name, create=True)
 
     def names(self) -> list[str]:
         """Registered model names."""
@@ -60,7 +76,7 @@ class Registry:
 
     def versions(self, name: str) -> list[str]:
         """Version ids for ``name`` in registration order (``v1``, ``v2``, ...)."""
-        d = os.path.join(self.root, _safe_segment(name))
+        d = self._model_dir(name, create=False)
         if not os.path.isdir(d):
             return []
         vs = [f[:-5] for f in os.listdir(d) if f.endswith(".json")]
@@ -150,20 +166,20 @@ class Registry:
     def get(self, name: str, version: str = "latest") -> tuple[Any, dict | None]:
         """Load ``(model, header)`` for a version (``"latest"`` = highest-numbered)."""
         version = self._resolve_version(name, version)
-        with open(os.path.join(self.root, name, version + ".json")) as f:
+        with open(os.path.join(self._model_dir(name, create=False), version + ".json")) as f:
             payload = json.load(f)
         return from_serializable(payload["model"]), payload.get("header")
 
     def header(self, name: str, version: str = "latest") -> dict | None:
         """Just the provenance header of a version (no model deserialization)."""
         version = self._resolve_version(name, version)
-        with open(os.path.join(self.root, name, version + ".json")) as f:
+        with open(os.path.join(self._model_dir(name, create=False), version + ".json")) as f:
             return json.load(f).get("header")
 
     def metadata(self, name: str, version: str = "latest") -> dict:
         """Just the ``metadata`` of a version (no model deserialization) -- e.g. a checkpoint's iteration."""
         version = self._resolve_version(name, version)
-        with open(os.path.join(self.root, name, version + ".json")) as f:
+        with open(os.path.join(self._model_dir(name, create=False), version + ".json")) as f:
             return json.load(f).get("metadata") or {}
 
     def promote(self, name: str, version: str, alias: str = "production") -> None:
@@ -175,7 +191,7 @@ class Registry:
 
     def current(self, name: str, alias: str = "production") -> tuple[Any, dict | None]:
         """Load the model an ``alias`` points at (falls back to ``latest`` if the alias is unset)."""
-        p = os.path.join(self.root, _safe_segment(name), _safe_segment(alias, "alias") + ".alias")
+        p = os.path.join(self._model_dir(name, create=False), _safe_segment(alias, "alias") + ".alias")
         # the version READ FROM the alias file is still resolved against the known version list by get(),
         # so a tampered alias file cannot traverse either.
         version = open(p).read().strip() if os.path.exists(p) else "latest"

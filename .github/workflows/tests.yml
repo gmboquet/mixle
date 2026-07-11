@@ -35,8 +35,14 @@ jobs:
         run: ruff format --check mixle
       - name: ruff check
         run: ruff check mixle
-      # mypy stays advisory until the type-checking backlog is addressed (config in pyproject.toml).
-      - name: mypy
+      # A curated typed-core is checked strictly and BLOCKING (worklist Y4.1): these modules are fully
+      # annotated and clean under disallow_untyped_defs (see the [[tool.mypy.overrides]] typed-core list in
+      # pyproject.toml). --follow-imports=skip keeps the check to these modules' own annotations so a
+      # dependency's or an untyped sibling's errors cannot leak in. The list grows as more modules qualify.
+      - name: mypy (typed core, blocking)
+        run: mypy --follow-imports=skip mixle/scorecard.py mixle/spend.py mixle/system.py mixle/registry.py
+      # The whole-tree mypy stays advisory until the rest of the type-checking backlog is addressed.
+      - name: mypy (whole tree, advisory)
         continue-on-error: true
         run: mypy
 
@@ -46,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -59,6 +65,27 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
       - name: Run fast tests
+        run: python -m pytest -m fast -n auto
+
+  min-versions:
+    name: min-versions (oldest declared floors)
+    # Install at the OLDEST declared dependency floors (constraints-min.txt) on the oldest supported
+    # Python and run the fast suite, so a floor that is missing an API, unbuildable, or numerically
+    # incompatible fails here instead of silently passing on whatever newer version pip resolves.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install package at the declared minimum dependency versions
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -c constraints-min.txt -e ".[test]"
+          python -c "import numpy, scipy, mpmath; print('numpy', numpy.__version__, 'scipy', scipy.__version__, 'mpmath', mpmath.__version__)"
+      - name: Run fast tests at the minimum floors
         run: python -m pytest -m fast -n auto
 
   full:
@@ -77,18 +104,48 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
       - name: Run full non-optional suite with coverage
-        # Reporting only for now, no --cov-fail-under gate: this base install skips every optional
-        # backend (torch/numba/spark/dask/jax/...), so line coverage here is a floor, not the real
-        # number -- a hard threshold set against this subset would misrepresent actual coverage and
-        # either block unrelated PRs or get raised past what full-extras coverage really supports.
-        # Revisit once the optional-extras job also reports and the two are combined.
-        run: python -m pytest -m "not optional and not benchmark" -n auto --cov --cov-report=xml --cov-report=term
+        # --cov-fail-under=45 is a deliberately conservative CATASTROPHIC-REGRESSION floor, not a coverage
+        # target. This base install skips every optional backend (torch/numba/spark/dask/jax/...), so line
+        # coverage here is a floor of the real number (locally, with the backends installed, the fast suite
+        # alone covers ~72%); a threshold set near the true number would misrepresent it and block unrelated
+        # PRs. 45% trips only when a whole subsystem's tests vanish -- e.g. a bad merge dropping a test
+        # directory -- which is exactly the regression a gate must catch. Raise it once the optional-extras
+        # job also reports coverage and the two are combined into a representative number.
+        run: python -m pytest -m "not optional and not benchmark" -n auto --cov --cov-report=xml --cov-report=term --cov-fail-under=45
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
           name: coverage-xml
           path: coverage.xml
           retention-days: 30
+
+  clean-wheel:
+    name: clean-wheel install + import sweep
+    # A base install of the BUILT WHEEL (not an editable checkout, no optional extras) must import every
+    # public module. An optional dependency imported at a module's top level breaks `import mixle...` for
+    # every base-install user -- a regression that shipped in the wheel before (numba, mpi4py).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist
+      - name: Install the wheel into a clean base env (no extras, not editable)
+        run: |
+          python -m venv "$RUNNER_TEMP/cleanvenv"
+          "$RUNNER_TEMP/cleanvenv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/cleanvenv/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/cleanvenv/bin/python" -m pip check
+      - name: Import smoke + full public-module sweep from the clean wheel
+        # Run as a script (its dir, not the repo root, is on sys.path) so the source tree cannot shadow
+        # the installed package; the script asserts it is importing the site-packages wheel.
+        run: '"$RUNNER_TEMP/cleanvenv/bin/python" scripts/import_sweep.py'
 
   optional:
     name: optional extras / py3.12
@@ -111,3 +168,9 @@ jobs:
         # -m "" overrides the default `-m fast` addopts; the torchrun tests aren't `fast`, so without this
         # the selection is empty and pytest exits 5 ("no tests collected"), failing the job.
         run: MIXLE_RUN_TORCHRUN_SMOKE=1 python -m pytest mixle/tests/torchrun_encoded_data_test.py mixle/tests/torch_neural_test.py -q -m ""
+      - name: Install the Banking77 flagship dataset dependency
+        run: python -m pip install datasets
+      - name: Run the Banking77 real-data flagship smoke
+        # The one flagship on real public data (F10.4): bounded run of the teacher/student cascade. It
+        # skips itself if the dataset can't be fetched (offline), so a network blip is a skip, not a fail.
+        run: python -m pytest mixle/tests/real_receipt_banking77_smoke_test.py -q -m ""

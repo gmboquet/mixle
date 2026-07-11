@@ -303,7 +303,7 @@ class Population:
                     report.rewards.append(0.0)
                     continue
                 candidate = op.propose(parent.model, data, ctx=ctx)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 self.bandit.reward(op.name, 0.0, cost)
                 report.rewards.append(0.0)
                 continue

@@ -111,12 +111,24 @@ class LM:
         return lm
 
     def save(self, path: str) -> None:
-        """Persist the trained LM to ``path`` via ``torch.save`` (hyperparameters + weights)."""
+        """Persist the LM's **inference artifact** to ``path`` via ``torch.save``: architecture config
+        (vocab/d_model/n_layer/n_head/block) + learned weights, nothing else.
+
+        This is **not** a training checkpoint. It deliberately does not store the optimizer, LR scheduler,
+        step count, RNG state, data-loader position, or gradient-scaler state, so :meth:`load` returns a
+        model ready for scoring and generation, not one you can resume training from without loss of state.
+        For resumable training use the checkpoint path in :mod:`mixle.utils.parallel.fault_tolerant_training`
+        / :mod:`mixle.utils.parallel.dcp_checkpoint`, which stores model + optimizer + data-loader position.
+        """
         _torch().save(self.to_dict(), path)
 
     @classmethod
     def load(cls, path: str) -> LM:
-        """Load an LM previously written by :meth:`save`."""
+        """Load an LM **inference artifact** written by :meth:`save` (config + weights).
+
+        Returns a model ready for scoring/generation; this is not a training-resume checkpoint (see
+        :meth:`save`), so optimizer/step/RNG/data-loader state is not restored.
+        """
         return cls.from_dict(_torch().load(path, weights_only=False))
 
     def fit(
@@ -133,7 +145,14 @@ class LM:
         pp_size: int = 1,
         cp_size: int = 1,
     ) -> LM:
-        """Pretrain (or continue) on a token-id array via the streaming estimator; the corpus is never buffered.
+        """Small-scale reference pretraining (or continuation) on a token-id array via the streaming
+        estimator; the corpus is never buffered.
+
+        This is a streaming pretraining path: it scores one next-token target per ``block``-length window --
+        the right shape for an unbounded stream, but only a fraction (~``1/block``) of the token supervision
+        that packed dense teacher forcing would extract from the same tokens. It is therefore a reference /
+        continuation path for small-scale runs, not a frontier pretraining engine; for dense per-position
+        supervision on a bounded corpus use :meth:`fit_pairs`.
 
         ``tp_size``/``pp_size``/``cp_size`` (only meaningful with ``distributed=True``) are the F1 N-D
         parallelism dimensions -- tensor/pipeline/context parallel, ORTHOGONAL to the data-parallel axis

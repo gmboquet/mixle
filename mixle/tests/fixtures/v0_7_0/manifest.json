@@ -1,0 +1,40 @@
+{
+  "generated_by": "mixle 0.7.0",
+  "cases": [
+    {
+      "name": "gaussian",
+      "file": "gaussian.json",
+      "type": "GaussianDistribution",
+      "probe": 0.5,
+      "log_density": -1.3280121234846454
+    },
+    {
+      "name": "poisson",
+      "file": "poisson.json",
+      "type": "PoissonDistribution",
+      "probe": 3,
+      "log_density": -1.7123179275482192
+    },
+    {
+      "name": "exponential",
+      "file": "exponential.json",
+      "type": "ExponentialDistribution",
+      "probe": 1.0,
+      "log_density": -1.0721317747748311
+    },
+    {
+      "name": "categorical",
+      "file": "categorical.json",
+      "type": "CategoricalDistribution",
+      "probe": "a",
+      "log_density": -0.6931471805599453
+    },
+    {
+      "name": "mixture",
+      "file": "mixture.json",
+      "type": "MixtureDistribution",
+      "probe": 0.5,
+      "log_density": -1.5208013695930873
+    }
+  ]
+}
