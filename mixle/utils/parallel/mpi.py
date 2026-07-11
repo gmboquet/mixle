@@ -26,6 +26,15 @@ other ranks so iteration logging is printed once. Log-density sums are
 
 mpi4py is an optional dependency (``pip install mixle[mpi]``); importing
 this module without it raises ImportError.
+
+Relationship to the other MPI route (worklist D8.5). This is the **canonical, integrated** MPI EM path:
+an :class:`~mixle.utils.parallel.planner.EncodedDataHandle` that plugs into ``optimize``, inheriting its
+convergence loop and logging, using a gather-to-root reduction. The standalone
+:func:`mixle.inference.mpi_executor.mpi_fit` runs the *same* sharded EM (same ``combine`` +
+``estimator.estimate`` M-step) as a small direct loop with an ``O(log W)`` tree ``reduce``; the two reach
+the same fit to floating-point precision (see ``mixle/tests/mpi_route_equivalence_test.py``). Prefer this
+backend for real fits; ``mpi_fit`` is the direct-transport option, and its tree reduce is the reduction this
+backend should adopt.
 """
 
 import io

@@ -7,6 +7,20 @@ gather-to-root. The combine operates on freshly-deserialized payloads (MPI ships
 the in-place ``combine()`` is safe. ``combine`` is associative + commutative, as MPI reduce requires.
 
 Run under ``mpirun -n W python your_script.py``; each rank slices its contiguous portion of the data.
+
+Relationship to the other MPI route (worklist D8.5). mixle has two MPI EM transports: this one and the
+integrated ``optimize`` backend :class:`mixle.utils.parallel.mpi.MPIEncodedData`. They run the *same*
+sharded-E-step + associative-``combine`` + ``estimator.estimate`` M-step, so they reach the **same fit to
+floating-point precision** (verified in ``mixle/tests/mpi_route_equivalence_test.py``). They differ only in:
+
+  * **reduction** -- this module uses an ``O(log W)`` tree ``comm.reduce``; the backend gathers to root
+    (``O(W)`` at the root);
+  * **entry point** -- this is a small standalone loop for scripts that want the MPI EM directly; the
+    backend plugs into ``optimize`` (``enc_data=``), inheriting its convergence loop, logging, and the rest
+    of the backend family.
+
+Prefer ``MPIEncodedData`` via ``optimize`` for real fits (integrated with the inference stack); this
+transport's ``O(log W)`` tree reduce is the reduction the backend should adopt.
 """
 
 from __future__ import annotations
