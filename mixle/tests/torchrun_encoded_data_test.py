@@ -90,7 +90,8 @@ sys.path.insert(0, %(repo)r)
 
 from mixle.engines import TorchEngine
 from mixle.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator, \
-    estimate_component_shard_value, seq_encode, seq_estimate, seq_log_density_sum, tie_component_shard_values
+    estimate_component_shard_value, seq_encode, seq_log_density_sum, tie_component_shard_values
+from mixle.inference import seq_estimate
 from mixle.inference.estimation import constant, optimize
 from mixle.inference.streaming import StreamingEstimator, streaming_accumulate
 from mixle.utils.parallel.torchrun import TorchRunEncodedData, torchrun_out
