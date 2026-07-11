@@ -20,8 +20,6 @@ from mixle.experimental.tying_discovery import (
 )
 from mixle.models.transformer import build_causal_lm
 
-pytestmark = pytest.mark.fast
-
 
 def test_profile_of_permuted_tensor_is_identical():
     """Sorting removes the arrangement: a permutation of a tensor has an IDENTICAL profile."""

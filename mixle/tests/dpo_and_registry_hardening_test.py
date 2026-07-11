@@ -13,9 +13,6 @@ import tempfile
 import numpy as np
 import pytest
 
-pytestmark = pytest.mark.fast
-
-
 # --------------------------------------------------------------------------- DPO weights
 
 

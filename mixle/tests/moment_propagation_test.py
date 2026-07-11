@@ -28,8 +28,6 @@ from mixle.models.moment_propagation import (
 )
 from mixle.models.transformer import build_causal_lm
 
-pytestmark = pytest.mark.fast
-
 
 def _law(mu, covar) -> GaussianLaw:
     return GaussianLaw(mu=np.asarray(mu, dtype=float), covar=np.asarray(covar, dtype=float))
