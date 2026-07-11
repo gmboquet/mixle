@@ -1,0 +1,1 @@
+{"__pysp_type__":"object","state":{"__pysp_type__":"dict","items":[["beta",1.5],["conj_prior_params",null],["expected_nparams",null],["has_conj_prior",false],["log_beta",0.4054651081081644],["name",null],["prior",null]]},"type":"mixle.stats.univariate.continuous.exponential.ExponentialDistribution"}
