@@ -46,11 +46,6 @@ to the [release-readiness](https://gmboquet.github.io/mixle/release-readiness.ht
 - **Honest uncertainty.** It can be calibrated to report when it is unsure and defer rather than guess, so an
   application can route low-confidence cases to a human or a stronger model. Calibration makes uncertainty
   usable; it is a property you measure per deployment, not a guarantee the library grants.
-  your data or your PyTorch module and it does the heavy lifting.
-- **Lower cost.** Distill a slow, expensive model — a frontier LLM, an API, a rule — into a tiny local one
-  that answers the easy cases itself and escalates only the hard ones.
-- **Honest uncertainty.** It is calibrated to know when it is unsure and defer rather than guess — so you
-  can gate on its confidence instead of trusting every answer.
 
 **Docs:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) · **Release notes:**
 [CHANGELOG.md](CHANGELOG.md)
