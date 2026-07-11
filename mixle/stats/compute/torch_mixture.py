@@ -60,7 +60,7 @@ class TorchMixture:
             try:
                 scores = model.kernel(engine=self.engine).component_scores(payload)
                 return np.asarray(self.engine.to_numpy(scores), dtype=np.float64)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 # Fall back to the legacy numpy path if the model has no modular kernel for this
                 # engine (or the kernel raises). This intentionally swallows kernel errors; set a
                 # breakpoint here when debugging a silently-degraded engine path.
@@ -89,7 +89,7 @@ class TorchMixture:
             comp = kernel.component_scores(payload) + self.engine.asarray(model.log_w)[None, :]
             denom = self.engine.logsumexp(comp, axis=1)
             return self.engine.exp(comp - denom[:, None])
-        except Exception:
+        except Exception:  # noqa: BLE001
             # Fall back to the legacy numpy posterior if no modular kernel is available (or it
             # raises). Intentionally swallows kernel errors to keep the engine path optional.
             return self.engine.asarray(model.seq_posterior(payload))
@@ -133,7 +133,7 @@ class TorchMixture:
             stats = model.kernel(engine=self.engine, estimator=estimator).accumulate(
                 payload, self.engine.asarray(row_weights)
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             # Fall back to the legacy accumulator M-step if no modular kernel exists for this
             # (model, estimator, engine) combination (or it raises). Swallows kernel errors by design.
             acc = estimator.accumulator_factory().make()
@@ -240,7 +240,7 @@ class TorchMixture:
         try:
             scores = model.kernel(engine=self.engine).score(payload)
             return np.asarray(self.engine.to_numpy(scores), dtype=np.float64)
-        except Exception:
+        except Exception:  # noqa: BLE001
             # Fall back to the legacy numpy scorer when no modular kernel is available (or it
             # raises). Intentionally swallows kernel errors to keep the engine path optional.
             return np.asarray(model.seq_log_density(payload), dtype=np.float64)
