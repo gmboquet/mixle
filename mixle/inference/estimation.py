@@ -5,7 +5,6 @@ objects.
 
 """
 
-import sys
 from collections.abc import Sequence
 from functools import partial
 from typing import IO, Any, NamedTuple, TypeVar
@@ -369,7 +368,7 @@ def _em_loop(
     max_its: int,
     delta: float | None,
     enc_vdata: Any | None = None,
-    out: IO | None = sys.stdout,
+    out: IO | None = None,
     print_iter: int = 1,
     monotone: bool = True,
     track_best: bool = True,
@@ -623,7 +622,7 @@ def optimize(
     vdata: Sequence[T] | None = None,
     enc_data: list[tuple[int, E0]] | None = None,
     enc_vdata: list[tuple[int, E0]] | None = None,
-    out: IO = sys.stdout,
+    out: IO | None = None,
     print_iter: int = 1,
     num_chunks: int = 1,
     engine: Any | None = None,
@@ -678,7 +677,8 @@ def optimize(
         enc_data (Optional[List[Tuple[int, E]]]): Optional encoded data of form
             List[Tuple[int, E]]. Formed from data if None.
         enc_vdata (Optional[List[Tuple[int, E0]]]): Optional sequence encoded validation set.
-        out (IO): IO stream to write out iterations of EM algorithm. Pass out=None to silence all output.
+        out (IO | None): Stream for per-iteration EM progress lines. Defaults to ``None`` (quiet, so the
+            library does not spam stdout in normal use); pass ``out=sys.stdout`` to watch convergence.
         print_iter (int): Print the log-likelihood difference every print_iter iterations; the final converged
             iteration is always reported. Pass print_iter=0 to suppress the periodic lines (keeping only the
             converged line), or out=None to silence entirely.
@@ -993,7 +993,7 @@ def fit(
         and kwargs.get("prev_estimate") is None
         and kwargs.get("strategy") is None
     ):
-        structured = _maybe_structured_model(data, max_its, kwargs.get("out", sys.stdout), kwargs.get("rng"))
+        structured = _maybe_structured_model(data, max_its, kwargs.get("out"), kwargs.get("rng"))
         if structured is not None:
             return structured
     estimator = _coerce_estimator(estimator, data)
@@ -1032,7 +1032,7 @@ def best_of(
     init_estimator: ParameterEstimator | ProbabilityDistribution | None = None,
     enc_data: list[tuple[int, E0]] | None = None,
     enc_vdata: Sequence[tuple[int, E0]] | None = None,
-    out: IO = sys.stdout,
+    out: IO | None = None,
     print_iter: int = 1,
     reuse_estep_ll: bool = True,
     objective: str = "auto",
