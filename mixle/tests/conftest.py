@@ -44,6 +44,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "conformal_test.py": ("ppl", "integration", "slow"),
     "fused_codegen_test.py": ("numba", "optional"),
     "jax_engine_test.py": ("jax", "optional"),
+    # Backward-compatibility-only tests (renamed class / kwarg aliases). Tagged `legacy` so a product-only
+    # run can exclude them with `-m "not legacy"`; they still run in the default `fast` gate.
+    "api_naming_aliases_test.py": ("legacy",),
     "fused_em_hmm_family_test.py": ("hmm", "integration", "slow"),
     "fused_em_variational_test.py": ("latent", "integration", "slow"),
     "hmm_sampler_batching_test.py": ("hmm", "stochastic", "slow"),
@@ -191,6 +194,13 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "mixture_heterogeneous_test.py": ("distribution", "latent"),
     "numerics_test.py": ("distribution",),
     "numerical_guards_test.py": ("distribution", "bayes"),
+    # Public-API drift gate (worklist A1.1): regenerates api_manifest.json from the tree and asserts
+    # the exported __all__ of every public package is unchanged -- forces a reviewed diff on any
+    # public-surface change. Imports a few runtime-assembled packages, hence integration.
+    "public_api_manifest_test.py": ("integration",),
+    # Weighted-estimation contract (worklist Q5.3): weighted == integer-replicated sufficient stats,
+    # zero-weight no-op, weight-scale-invariant fits -- catches a silently dropped/normalized weight.
+    "weighted_estimation_test.py": ("distribution",),
     "objectives_test.py": ("torch", "optional"),
     "parallel_test.py": ("parallel", "integration", "slow"),
     "placement_test.py": ("parallel", "planner"),
@@ -296,6 +306,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # GP-surrogate active-learning + multi-fidelity placement (roadmap M4): each test fits several torch
     # GPs across a sequential design loop, mirroring doe_active_test.py / doe_multifidelity_test.py.
     "task_emulate_test.py": ("doe", "torch", "slow"),
+    # P9 e-processes (mixle/experimental/e_process.py): the anytime type-I control receipt runs several
+    # hundred vectorized null/drift replications with continuous peeking -- pure numpy, stochastic, no torch.
+    "e_process_test.py": ("experimental", "stochastic"),
 }
 
 

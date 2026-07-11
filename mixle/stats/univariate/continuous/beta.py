@@ -177,7 +177,7 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         """Return the log-density or log-mass at a single observation."""
         try:
             xx = float(x)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return -np.inf
         if not np.isfinite(xx) or xx <= 0.0 or xx >= 1.0:
             return -np.inf

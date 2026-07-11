@@ -13,7 +13,7 @@ try:
     from mixle.engines import TorchEngine
 
     _TORCH = TorchEngine(device="cpu", dtype="float64")
-except Exception:
+except Exception:  # noqa: BLE001
     _TORCH = None
 
 

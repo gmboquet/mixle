@@ -1,0 +1,61 @@
+name: Extras resolver matrix
+
+# Worklist P2.3: install every documented extra (and [all]) in ISOLATION in a fresh environment, and prove
+# that (a) it resolves and installs, (b) the dependency graph stays consistent (`pip check` -- catches an
+# extra that silently downgrades or uninstalls a required package), and (c) mixle still imports. Heavy, so
+# it runs on manual dispatch and the weekly schedule, not on every PR. `fail-fast: false` keeps each extra
+# independent, so the run is a self-diagnosing matrix: one extra that cannot install on the runner is a
+# visible red cell, not a masked failure. macOS/arm64 and other OS/arch combinations are verified in the
+# release owner's environment and recorded in the release checklist; this job pins the Linux x86_64 baseline.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 9 * * 1"
+
+jobs:
+  extra:
+    name: "install .[${{ matrix.extra }}]"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        extra:
+          - numba
+          - torch
+          - jax
+          - pandas
+          - arrow
+          - sql
+          - mongo
+          - hadoop
+          - arrays
+          - grammar
+          - spark
+          - dask
+          - ray
+          - lightning
+          - mpi
+          - umap
+          - sympy
+          - sage
+          - scientist
+          - all
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # A few extras build native code and need system headers. Install them only for the extras that do.
+      - name: System build dependencies
+        run: |
+          if [ "${{ matrix.extra }}" = "mpi" ]; then
+            sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
+          fi
+      - name: Install .[${{ matrix.extra }}] in isolation
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[${{ matrix.extra }}]"
+      - name: pip check (no extra downgraded or broke a required dependency)
+        run: python -m pip check
+      - name: mixle still imports
+        run: python -c "import mixle; print('mixle', mixle.__version__, 'imports with [${{ matrix.extra }}]')"

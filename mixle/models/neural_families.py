@@ -147,7 +147,7 @@ class DiscreteAR(_NeuralFamily):
 def _register_serializable() -> None:
     try:
         from mixle.utils.serialization import register_serializable_class
-    except Exception:  # pragma: no cover - serialization support is optional at import
+    except Exception:  # pragma: no cover - serialization support is optional at import  # noqa: BLE001
         return
     for cls in (VAE, Flow, MAF, DiscreteAR):
         register_serializable_class(cls)

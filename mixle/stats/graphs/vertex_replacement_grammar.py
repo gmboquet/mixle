@@ -45,6 +45,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.deprecation import deprecated_alias
 
 #: Node attribute marking a nonterminal: its value is the left-hand-side symbol to rewrite during
 #: a derivation. A node is rewritable iff this attribute is present and indexes a rule in the grammar.
@@ -896,6 +897,7 @@ class VertexReplacementGrammarEstimator(ParameterEstimator):
             grammar=self.grammar, start_symbol=self.start_symbol, keys=self.keys
         )
 
+    @deprecated_alias("accumulator_factory", since="0.8.0", removed_in="0.10.0")
     def accumulatorFactory(self):
         """Deprecated alias for accumulator_factory()."""
         return self.accumulator_factory()

@@ -883,12 +883,57 @@ def _emit(plan: FusedPlan) -> dict[str, list[str]]:
 import hashlib  # noqa: E402
 import importlib.util  # noqa: E402
 import os  # noqa: E402
+import stat  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
 import threading  # noqa: E402
 
-_CACHE_DIR = os.environ.get("MIXLE_FUSED_CACHE_DIR") or os.path.join(tempfile.gettempdir(), "mixle_fused_cache")
+
+def _default_cache_dir() -> str:
+    """A per-user cache directory. A single shared ``/tmp/mixle_fused_cache`` lets another user pre-place the
+    module the loader imports and ``exec``s -- arbitrary code execution -- so isolate the cache by uid."""
+    suffix = f"_{os.getuid()}" if hasattr(os, "getuid") else ""
+    return os.path.join(tempfile.gettempdir(), f"mixle_fused_cache{suffix}")
+
+
+_CACHE_DIR = os.environ.get("MIXLE_FUSED_CACHE_DIR") or _default_cache_dir()
 _NJIT_LOCK = threading.Lock()
+
+
+def _owned_privately(path: str, *, require_dir: bool) -> bool:
+    """True iff ``path`` is a real dir/file we own that no other user can write (no symlink, no g/o-write).
+
+    ``lstat`` (not ``stat``) so a symlink can never pass as its -- possibly attacker-owned -- target.
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if require_dir and not stat.S_ISDIR(info.st_mode):
+        return False
+    if not require_dir and not stat.S_ISREG(info.st_mode):
+        return False
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        return False
+    return not (info.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+
+
+def _private_cache_dir() -> str | None:
+    """Return the cache dir once it is guaranteed private to us (0700, we own it), else ``None``.
+
+    ``None`` tells the caller to compile in memory only -- correct result, no disk cache, no chance of
+    importing code from a directory another user can write.
+    """
+    try:
+        os.makedirs(_CACHE_DIR, mode=0o700, exist_ok=True)
+        info = os.lstat(_CACHE_DIR)
+        # Heal a directory we own that an older (insecure) build may have created group/other-writable.
+        own = not hasattr(os, "getuid") or info.st_uid == os.getuid()
+        if stat.S_ISDIR(info.st_mode) and own and (info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            os.chmod(_CACHE_DIR, 0o700)
+    except OSError:
+        return None
+    return _CACHE_DIR if _owned_privately(_CACHE_DIR, require_dir=True) else None
 
 
 def _njit(src: str, fname: str) -> Callable:
@@ -909,9 +954,14 @@ def _njit(src: str, fname: str) -> Callable:
         if modname in sys.modules:
             return getattr(sys.modules[modname], fname)
         try:
-            os.makedirs(_CACHE_DIR, exist_ok=True)
-            path = os.path.join(_CACHE_DIR, modname + ".py")
-            if not os.path.exists(path):
+            cache_dir = _private_cache_dir()
+            if cache_dir is None:
+                raise OSError("fused cache dir is not private to this user; compiling in memory")
+            path = os.path.join(cache_dir, modname + ".py")
+            # Write our own source unless a file we privately own is already there. Never import a
+            # pre-existing file we do not own: it could be attacker-planted (arbitrary code execution).
+            # os.replace over a symlink replaces the link itself, so this cannot be redirected outside.
+            if not _owned_privately(path, require_dir=False):
                 module_src = f"import numpy as np\nimport numba\n\n\n@numba.njit(fastmath=True, cache=True)\n{src}\n"
                 tmp = f"{path}.{os.getpid()}.tmp"
                 with open(tmp, "w") as fh:
@@ -922,7 +972,7 @@ def _njit(src: str, fname: str) -> Callable:
             sys.modules[modname] = mod
             spec.loader.exec_module(mod)  # type: ignore[union-attr]
             return getattr(mod, fname)
-        except Exception:
+        except Exception:  # noqa: BLE001
             ns: dict[str, Any] = {"np": np}
             exec(src, ns)  # noqa: S102 -- generated from fixed templates, no user input
             return numba.njit(fastmath=True)(ns[fname])
