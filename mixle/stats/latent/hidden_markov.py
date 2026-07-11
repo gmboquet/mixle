@@ -2333,7 +2333,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self,
         accumulators: Sequence[SequenceEncodableStatisticAccumulator],
         len_accumulator: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
-        use_numba: bool | None = False,
+        use_numba: bool | None = None,
         keys: tuple[str | None, str | None, str | None] = (None, None, None),
         name: str | None = None,
     ) -> None:
@@ -2372,7 +2372,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self.trans_key = keys[1]
         self.state_key = keys[2]
 
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
         self.name = name
 
         # Cached once (not per EM iteration); see HiddenMarkovModelDistribution.__init__.
@@ -3211,7 +3211,7 @@ class HiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
         self,
         factories: Sequence[StatisticAccumulatorFactory],
         len_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
-        use_numba: bool = False,
+        use_numba: bool | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         name: str | None = None,
     ) -> None:
@@ -3228,7 +3228,7 @@ class HiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
             name: Optional diagnostic name shared by generated accumulators.
         """
         self.factories = factories
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
         self.keys = keys if keys is not None else (None, None, None)
         self.len_factory = len_factory
         self.name = name
@@ -3475,7 +3475,7 @@ class HiddenMarkovDataEncoder(DataSequenceEncoder):
         self,
         emission_encoder: DataSequenceEncoder,
         len_encoder: DataSequenceEncoder | None = NullDataEncoder(),
-        use_numba: bool = False,
+        use_numba: bool | None = None,
     ) -> None:
         """Create an encoder for HMM sequence observations and sequence lengths.
 
@@ -3493,7 +3493,7 @@ class HiddenMarkovDataEncoder(DataSequenceEncoder):
         """
         self.emission_encoder = emission_encoder
         self.len_encoder = len_encoder if len_encoder is not None else NullDataEncoder()
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
 
     def __str__(self) -> str:
         """Return a readable encoder summary."""
