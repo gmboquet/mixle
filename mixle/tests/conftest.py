@@ -306,6 +306,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # GP-surrogate active-learning + multi-fidelity placement (roadmap M4): each test fits several torch
     # GPs across a sequential design loop, mirroring doe_active_test.py / doe_multifidelity_test.py.
     "task_emulate_test.py": ("doe", "torch", "slow"),
+    # P15 active causal discovery (mixle/experimental/active_causal.py): EIG-vs-random discovery loops over
+    # ~30 seeds x 3 strategies on the chain/reverse/fork triple -- pure numpy, stochastic, no torch.
+    "active_causal_test.py": ("experimental", "stochastic"),
     # P13 usable-information receipts (mixle/experimental/v_information.py): polynomial-Gaussian V-info
     # estimates on synthetic linear/quadratic tasks -- pure numpy, no torch.
     "v_information_test.py": ("experimental",),
