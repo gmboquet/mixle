@@ -42,6 +42,11 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.v_information` -- P13, usable-information receipts: V-information
+  (:func:`~mixle.experimental.v_information.v_information`) is the family's realized reduction in held-out
+  predictive log-loss from conditioning on ``X``, and the usability gap
+  ``I(X;Y) - I_V`` (against the closed-form Gaussian ``I(X;Y)``) is a receipt on the *library's* ceiling --
+  large when the generative law sits outside the current grammar, closing when the missing feature is added.
 - :mod:`mixle.experimental.pac_bayes` -- P10, compositional PAC-Bayes generalization certificates:
   closed-form :func:`~mixle.experimental.pac_bayes.gaussian_kl`, an additively-composing
   :func:`~mixle.experimental.pac_bayes.total_kl` with per-node blame, the McAllester
