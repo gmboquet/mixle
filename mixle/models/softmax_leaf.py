@@ -48,7 +48,8 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
     """``p(y | x) = softmax(module(x))`` as a mixle leaf. Observation is the pair ``(x, y)``, ``y`` an int class.
 
     ``batch_size`` (None = full batch) makes the M-step minibatch SGD over ``m_steps`` passes -- needed to train a
-    real conv net on a large image set; ``device`` (e.g. ``"mps"``/``"cuda"``) runs it on the GPU.
+    real conv net on a large image set; ``max_optimizer_steps`` optionally caps updates independently of batch
+    size, and ``device`` (e.g. ``"mps"``/``"cuda"``) runs them on the GPU.
     """
 
     __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__); leaf round-trips in a mixture
@@ -61,6 +62,7 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         batch_size: int | None = None,
         device: str = "cpu",
+        max_optimizer_steps: int | None = None,
     ) -> None:
         self.module = module
         self.m_steps = int(m_steps)
@@ -68,6 +70,13 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.batch_size = None if batch_size is None else int(batch_size)
         self.device = device
+        self.max_optimizer_steps = None if max_optimizer_steps is None else int(max_optimizer_steps)
+        if self.m_steps <= 0:
+            raise ValueError("m_steps must be positive.")
+        if self.batch_size is not None and self.batch_size <= 0:
+            raise ValueError("batch_size must be positive when provided.")
+        if self.max_optimizer_steps is not None and self.max_optimizer_steps <= 0:
+            raise ValueError("max_optimizer_steps must be positive when provided.")
 
     def __str__(self) -> str:
         return "NeuralCategorical()"
@@ -106,7 +115,15 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> NeuralCategoricalEstimator:
         """Return the generalized-EM estimator for weighted cross-entropy training."""
-        return NeuralCategoricalEstimator(self.module, self.m_steps, self.lr, self.name, self.batch_size, self.device)
+        return NeuralCategoricalEstimator(
+            self.module,
+            self.m_steps,
+            self.lr,
+            self.name,
+            self.batch_size,
+            self.device,
+            max_optimizer_steps=self.max_optimizer_steps,
+        )
 
     def dist_to_encoder(self) -> NeuralCategoricalEncoder:
         """Return the encoder for ``(x, class)`` observation pairs."""
@@ -131,6 +148,7 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
             "name": self.name,
             "batch_size": self.batch_size,
             "device": self.device,
+            "max_optimizer_steps": self.max_optimizer_steps,
             "module": encode_module(self.module),
         }
 
@@ -144,6 +162,7 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
             name=payload["name"],
             batch_size=payload["batch_size"],
             device=payload["device"],
+            max_optimizer_steps=payload.get("max_optimizer_steps"),
         )
 
 
@@ -253,8 +272,9 @@ class NeuralCategoricalEstimator(ParameterEstimator):
     """EM estimator for a :class:`NeuralCategorical`: the M-step is ``m_steps`` of responsibility-weighted
     cross-entropy gradient on the module (the module is warm-started across EM iterations => generalized EM).
 
-    The weighted CE is normalized by the responsibility mass ``sum(w)`` so the M-step is scale-invariant to the
-    responsibility magnitude (the easy bug: an unnormalized weighted loss makes the step size track cluster size).
+    A minibatch of size ``B`` uses ``N/B * sum_batch(w * CE) / sum_all(w)``. Its gradient is an unbiased
+    estimate of the full responsibility-normalized objective, including when responsibility mass is unevenly
+    distributed across batches. ``max_optimizer_steps`` gives batch-size comparisons a fixed update budget.
     """
 
     def __init__(
@@ -266,6 +286,7 @@ class NeuralCategoricalEstimator(ParameterEstimator):
         batch_size: int | None = None,
         device: str = "cpu",
         ewc: Any = None,
+        max_optimizer_steps: int | None = None,
     ) -> None:
         self.module = module
         self.m_steps = int(m_steps)
@@ -275,6 +296,13 @@ class NeuralCategoricalEstimator(ParameterEstimator):
         self.device = device
         # ewc = (anchor_params, fisher_diag, lambda): the EWC anti-forgetting penalty for continued pretraining
         self.ewc = ewc
+        self.max_optimizer_steps = None if max_optimizer_steps is None else int(max_optimizer_steps)
+        if self.m_steps <= 0:
+            raise ValueError("m_steps must be positive.")
+        if self.batch_size is not None and self.batch_size <= 0:
+            raise ValueError("batch_size must be positive when provided.")
+        if self.max_optimizer_steps is not None and self.max_optimizer_steps <= 0:
+            raise ValueError("max_optimizer_steps must be positive when provided.")
 
     def accumulator_factory(self) -> NeuralCategoricalAccumulatorFactory:
         """Return an accumulator factory for weighted classification batches."""
@@ -284,7 +312,15 @@ class NeuralCategoricalEstimator(ParameterEstimator):
         """Run the weighted cross-entropy M-step and return the updated leaf."""
         torch = _torch()
         xs, ys, ws = suff_stat
-        out = NeuralCategorical(self.module, self.m_steps, self.lr, self.name, self.batch_size, self.device)
+        out = NeuralCategorical(
+            self.module,
+            self.m_steps,
+            self.lr,
+            self.name,
+            self.batch_size,
+            self.device,
+            self.max_optimizer_steps,
+        )
         if len(xs) == 0:
             return out
         dev = self.device
@@ -299,6 +335,9 @@ class NeuralCategoricalEstimator(ParameterEstimator):
         bs = self.batch_size or n
         opt = torch.optim.Adam(self.module.parameters(), lr=self.lr)
         ce = torch.nn.CrossEntropyLoss(reduction="none")
+        total_weight = wt.sum().clamp(min=1e-8)
+        optimizer_steps = 0
+        epochs_completed = 0
         ewc = None
         if self.ewc is not None:  # anchor + Fisher moved to the device once (continued-pretraining anti-forget)
             anchor, fisher, lam = self.ewc
@@ -306,11 +345,14 @@ class NeuralCategoricalEstimator(ParameterEstimator):
         for _ in range(self.m_steps):  # m_steps passes over the data (full-batch when batch_size is None)
             perm = torch.randperm(n) if bs < n else torch.arange(n)
             for k in range(0, n, bs):
+                if self.max_optimizer_steps is not None and optimizer_steps >= self.max_optimizer_steps:
+                    break
                 idx = perm[k : k + bs]
                 xb, yb, wb = xt[idx].to(dev), yt[idx].to(dev), wt[idx].to(dev)
                 opt.zero_grad()
-                # responsibility-weighted CE, normalized by the batch's responsibility mass (scale-invariant)
-                loss = (wb * ce(self.module(xb), yb)).sum() / (wb.sum() + 1e-8)
+                # Uniform minibatches estimate the full responsibility-normalized objective.
+                batch_scale = float(n) / float(len(idx))
+                loss = batch_scale * (wb * ce(self.module(xb), yb)).sum() / total_weight.to(dev)
                 if ewc is not None:  # + lambda * sum_i F_i (theta_i - theta*_i)^2 -- pull the important weights back
                     anchor, fisher, lam = ewc
                     loss = loss + lam * sum(
@@ -318,6 +360,20 @@ class NeuralCategoricalEstimator(ParameterEstimator):
                     )
                 loss.backward()
                 opt.step()
+                optimizer_steps += 1
+            else:
+                epochs_completed += 1
+                continue
+            break
+        out.fit_receipt = {
+            "nobs": int(n),
+            "batch_size": int(min(bs, n)),
+            "epochs_requested": self.m_steps,
+            "epochs_completed": epochs_completed,
+            "optimizer_steps": optimizer_steps,
+            "max_optimizer_steps": self.max_optimizer_steps,
+            "gradient_estimator": "N/B responsibility-weighted cross-entropy",
+        }
         return out
 
 

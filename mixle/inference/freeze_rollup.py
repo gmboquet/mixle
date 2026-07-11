@@ -11,10 +11,9 @@ instead reuses a cached array -- turning E-step cost from ``O(full tree)`` into
 Correctness backbone (unchanged from the rest of the D-track): freeze/roll-up is a SCHEDULING
 optimization only. It never changes what is computed, only how often -- a cached per-datum
 log-density is byte-identical to a freshly recomputed one for the SAME parameters, and the cache
-is invalidated (recomputed) the instant a subtree's parameters move again. The Neal-Hinton free
-energy F this module tracks is the same observed-data-log-likelihood objective
-:func:`mixle.inference.em.observed_log_likelihood` already tracks for vanilla EM; F is the audit
-receipt that the cache never silently drifted from a real EM trajectory.
+is invalidated (recomputed) the instant a subtree's parameters move again. This module tracks the
+observed-data log likelihood from :func:`mixle.inference.em.observed_log_likelihood`; that directly
+computed objective is the audit receipt that the cache never silently drifted from a real EM trajectory.
 
 Scope: this module targets :class:`mixle.stats.latent.mixture.MixtureDistribution`, the
 combinator with the clearest "some subtrees stop mattering" story (a component whose mixture
@@ -28,12 +27,14 @@ well-tested combinator is the honest S/M-effort scope for this item; later track
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from mixle.inference.node_report import node_report
+from mixle.inference.transaction import MutableStateSnapshot
 from mixle.stats.latent.mixture import MixtureDistribution, MixtureEstimator, _component_enc
 
 _DEFAULT_Q_GAIN_TOL = 1.0e-6
@@ -43,30 +44,75 @@ _DEFAULT_FREEZE_PATIENCE = 3
 _DEFAULT_ACCEPT_TOLERANCE = 1.0e-9
 
 
-def _param_signature(dist: Any) -> tuple:
-    """Cheap structural fingerprint of ``dist``'s own numeric parameters.
+def _param_signature(dist: Any) -> bytes:
+    """Recursive structural fingerprint of a distribution subtree's parameters.
 
     Used to decide whether a cached per-datum log-density array is still valid: if a frozen
     node's owning subtree parameters have moved since the array was cached, the signature no
-    longer matches and the cache is invalidated (recomputed) -- see :meth:`FreezeRollupCache.
-    component_log_density`. Mirrors the attribute walk already used by
-    :func:`mixle.inference.node_report._param_count` / ``_health_receipts``, just keyed on value
-    rather than count.
+    longer matches and the cache is invalidated. Unlike the former shallow attribute walk, this
+    includes nested combinators and torch-like modules. Module tensors use their identity and
+    in-place version counter, so the check is O(number of parameter tensors), not O(parameter
+    bytes); optimizer and ``load_state_dict`` updates advance those counters.
     """
-    sig: list[tuple[str, Any]] = []
-    for name, value in sorted(vars(dist).items()):
-        if name.startswith("_"):
-            continue
-        if isinstance(value, np.ndarray) and np.issubdtype(value.dtype, np.number):
-            sig.append((name, value.tobytes()))
-        elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            sig.append((name, float(value)))
-    return tuple(sig)
+
+    digest = hashlib.blake2b(digest_size=20)
+    seen: set[int] = set()
+
+    def add(value: Any) -> None:
+        if value is None or isinstance(value, (str, bytes, bytearray, int, float, complex, bool)):
+            digest.update(repr(value).encode("utf-8"))
+            return
+        ident = id(value)
+        if ident in seen:
+            digest.update(b"<seen>")
+            return
+        seen.add(ident)
+
+        if isinstance(value, np.ndarray):
+            digest.update(str(value.dtype).encode("ascii"))
+            digest.update(repr(value.shape).encode("ascii"))
+            digest.update(value.tobytes())
+            return
+
+        named_parameters = getattr(value, "named_parameters", None)
+        named_buffers = getattr(value, "named_buffers", None)
+        if callable(named_parameters) and callable(named_buffers):
+            digest.update(type(value).__qualname__.encode("utf-8"))
+            for name, tensor in list(named_parameters()) + list(named_buffers()):
+                digest.update(name.encode("utf-8"))
+                digest.update(repr(tuple(tensor.shape)).encode("ascii"))
+                digest.update(str(tensor.dtype).encode("ascii"))
+                digest.update(str(tensor.device).encode("ascii"))
+                digest.update(str(getattr(tensor, "_version", 0)).encode("ascii"))
+                try:
+                    digest.update(str(tensor.data_ptr()).encode("ascii"))
+                except RuntimeError:
+                    digest.update(str(id(tensor)).encode("ascii"))
+            return
+
+        if isinstance(value, dict):
+            for key in sorted(value, key=repr):
+                add(key)
+                add(value[key])
+            return
+        if isinstance(value, (list, tuple)):
+            for child in value:
+                add(child)
+            return
+        if hasattr(value, "__dict__"):
+            digest.update(type(value).__qualname__.encode("utf-8"))
+            for name, child in sorted(vars(value).items()):
+                if not name.startswith("_"):
+                    digest.update(name.encode("utf-8"))
+                    add(child)
+
+    add(dist)
+    return digest.digest()
 
 
 @dataclass
 class _CacheEntry:
-    signature: tuple
+    signature: bytes
     log_density: np.ndarray
 
 
@@ -74,11 +120,10 @@ class _CacheEntry:
 class FreezeRollupStats:
     """One round's accounting for the freeze/roll-up cache -- the acceptance-criteria receipt.
 
-    ``n_log_density_evals`` is the "wall-clock proxy" this module actually optimizes: the count of
+    ``n_log_density_evals`` is the model-work receipt this module actually optimizes: the count of
     real ``component.seq_log_density(...)`` calls issued this round (each ``O(nobs)``), as opposed
-    to a cache hit (``O(1)``, a dict lookup + signature compare). ``objective`` is the real,
-    provably-monotone Neal-Hinton F for this round (observed-data log-likelihood), read straight
-    off the E-step this module already had to run -- no parallel F-tracking mechanism.
+    to a cache hit (``O(1)``, a dict lookup + signature compare). ``objective`` is the directly
+    evaluated, transactionally monotone observed-data log likelihood for this round.
     """
 
     round_index: int
@@ -384,12 +429,12 @@ def run_em_freeze_rollup(
     2. Every round is objective-gated exactly like ``MonotonicEM``: the candidate model's
        objective is checked (again cache-aware, so this costs the same ``O(active fraction)``) and
        the step is rejected -- keeping the previous model -- if the objective would decrease
-       beyond ``accept_tolerance``. This is what makes the returned ``history`` a real monotone-F
+       beyond ``accept_tolerance``. This is what makes the returned ``history`` a real monotone-objective
        receipt, not just an assumption.
 
     Returns ``(final_model, history)`` where ``history[i]`` is round ``i``'s
-    :class:`FreezeRollupStats` (including ``objective``, the real Neal-Hinton F for that round,
-    and ``n_log_density_evals``, the wall-clock proxy this module optimizes).
+    :class:`FreezeRollupStats` (including ``objective``, the observed-data log likelihood for that round,
+    and ``n_log_density_evals``, the component-evaluation work receipt this module optimizes).
     """
     if not isinstance(initial_model, MixtureDistribution):
         raise TypeError("run_em_freeze_rollup requires a MixtureDistribution model.")
@@ -417,6 +462,7 @@ def run_em_freeze_rollup(
         if old_value is None:
             old_value = current_value
 
+        transaction = MutableStateSnapshot.capture(model, estimator)
         candidate = _m_step(enc_payload, estimator, model, gamma, frozen_idx)
         candidate_frozen = detect_frozen(cache, candidate)
         ll_mat_c, evals_c = _component_log_density_matrix(candidate, enc_payload, cache, candidate_frozen)
@@ -428,6 +474,7 @@ def run_em_freeze_rollup(
             model = candidate
             round_value = candidate_value
         else:
+            transaction.restore()
             round_value = current_value
 
         n_frozen = len(frozen_idx)

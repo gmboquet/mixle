@@ -232,6 +232,8 @@ class DPOAccumulatorFactory(StatisticAccumulatorFactory):
 class DPOModelEstimator(ParameterEstimator):
     """DPO M-step: ``m_steps`` of gradient on the POLICY minimizing ``-log sigmoid(beta * margin)``; ref frozen."""
 
+    outer_objective_compatible = False
+
     def __init__(self, policy: Any, ref: Any, beta: float, m_steps: int, lr: float, device: str) -> None:
         self.policy = policy
         self.ref = ref

@@ -610,7 +610,18 @@ def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, se
     while remaining > 0:
         chunk = min(_ES_CHECK_EVERY, remaining)
         leaf = NeuralCategorical(fit_module, m_steps=chunk, lr=float(lr), device=device)
-        fit = optimize(data, leaf.estimator(), prev_estimate=leaf, max_its=1, out=None)
+        # Each call is one checkpoint in a longer gradient trajectory. Returning the checkpoint's final
+        # finite update lets the next chunk cross a shallow stochastic valley; early stopping below
+        # still selects progress using the aligned full-data cross-entropy.
+        fit = optimize(
+            data,
+            leaf.estimator(),
+            prev_estimate=leaf,
+            max_its=1,
+            monotone=False,
+            track_best=False,
+            out=None,
+        )
         fit_module = fit.module
         remaining -= chunk
         steps_run += chunk

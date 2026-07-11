@@ -79,6 +79,58 @@ class ObjectiveResolutionTestCase(unittest.TestCase):
         self.assertIn("ln[p_mat(Data|Model)]=", b.getvalue())
         self.assertNotIn("ELBO=", b.getvalue())
 
+    def test_strategy_receives_the_same_resolved_map_objective_as_outer_loop(self):
+        data = list(np.random.RandomState(4).normal(1.0, 0.5, 30))
+        prior = _gaussian_prior()
+        estimator = GaussianEstimator(prior=prior)
+        initial = GaussianDistribution(0.0, 1.0, prior=prior)
+
+        class CaptureStrategy:
+            def __init__(self):
+                self.value = None
+
+            def step(self, enc_data, estimator, model, engine=None, objective=None):
+                from mixle.inference.em import EMStepResult
+
+                self.value = objective(model)
+                return EMStepResult(model, self.value)
+
+        strategy = CaptureStrategy()
+        optimize(
+            data,
+            estimator,
+            prev_estimate=initial,
+            max_its=1,
+            strategy=strategy,
+            objective="map",
+            out=None,
+        )
+        enc = initial.dist_to_encoder().seq_encode(data)
+        expected = float(initial.seq_log_density(enc).sum()) + estimator.model_log_density(initial)
+        self.assertAlmostEqual(strategy.value, expected, places=12)
+
+    def test_optimize_honors_an_explicit_strategy_rejection(self):
+        data = [0.0, 0.1, -0.1]
+        initial = GaussianDistribution(0.0, 1.0)
+
+        class RejectStrategy:
+            def step(self, enc_data, estimator, model, engine=None, objective=None):
+                from mixle.inference.em import EMStepResult
+
+                better_but_rejected = GaussianDistribution(0.0, 0.01)
+                return EMStepResult(better_but_rejected, objective(better_but_rejected), False)
+
+        fitted = optimize(
+            data,
+            GaussianEstimator(),
+            prev_estimate=initial,
+            strategy=RejectStrategy(),
+            max_its=1,
+            reuse_estep_ll=False,
+            out=None,
+        )
+        self.assertIs(fitted, initial)
+
 
 if __name__ == "__main__":
     unittest.main()

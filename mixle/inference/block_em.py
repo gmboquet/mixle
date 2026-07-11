@@ -1,46 +1,28 @@
 """Block-coordinate-ascent EM scheduler -- greedy gain-per-cost block selection (workstream D3).
 
-Frame (see the ConditionalJIT track, D1-D6): **the estimator tree is an IR**. D1
-(:mod:`mixle.inference.node_report`) instruments every node with a per-round residual/Q-gain
-report, an ``update_kind`` classification, and an E/M cost proxy. D2
-(:mod:`mixle.inference.freeze_rollup`) spent that report on one particular schedule: freeze a
-subtree once it looks converged and skip it forever after. D3 generalizes the scheduling
-question one level up: on EVERY round, rank the blocks (mixture components) that are NOT
-already D2-frozen by D1's gain-per-cost (``q_gain / (e_step_cost + m_step_cost)``) and update
-only the highest-value ones within a per-round cost budget, leaving the rest untouched for that
-round -- a genuine block-coordinate-ascent / ECM schedule, not just "freeze forever".
+The estimator tree is an update IR. After an initial full sweep, this scheduler ranks mixture
+components by the complete-data ``Q`` improvement measured the last time that component was
+updated, divided by a structural parameter-count cost. It updates the highest-value blocks within
+a per-round budget and bounds starvation with a forced periodic update.
 
 Correctness backbone (unchanged from the rest of the D-track): this module is a SCHEDULING
 optimization only. Any interleaving of a partial E-step (fresh log-density for the active
 blocks, cached log-density for the inactive ones) and a per-block conditional M-step (only the
 active blocks are re-estimated; every other block's model object is carried forward byte-for-
-byte unchanged) is still coordinate ascent on the SAME Neal-Hinton free energy F vanilla EM
-climbs -- so an accept/reject gate on the round's candidate objective (identical in spirit to
+byte unchanged) is a generalized-EM coordinate update -- so an accept/reject gate on the
+round's candidate observed-data log likelihood (identical in spirit to
 :class:`mixle.inference.em.MonotonicEM` and D2's own ``run_em_freeze_rollup``) is what turns
 "should be monotone" into "IS monotone, mechanically, every round" here too.
 
-Composition with D2: a component D2's :class:`~mixle.inference.freeze_rollup.FreezeRollupCache`
-already reports frozen (:func:`mixle.inference.freeze_rollup.detect_frozen`) is, from this
-scheduler's point of view, exactly a "zero e-step cost, zero m-step cost" block -- it is excluded
-from the gain-per-cost ranking entirely (nothing to rank: it costs nothing and is never
-scheduled to move) and is served for free from the SAME cache this module reuses for its own
-this-round-only inactive blocks. A block the scheduler chooses not to update THIS round is, from
-:class:`FreezeRollupCache`'s point of view, indistinguishable from a D2-frozen block for exactly
-one round: its parameter signature has not moved, so the cached per-datum log-density is still a
-byte-identical cache hit -- no separate caching mechanism is needed for D3, only a wider set of
-"don't touch this round" indices fed into the same ``frozen=`` parameter D2 already threads
-through :func:`~mixle.inference.freeze_rollup._component_log_density_matrix` and
-:func:`~mixle.inference.freeze_rollup._m_step`.
+The scheduler reuses :class:`~mixle.inference.freeze_rollup.FreezeRollupCache` only for blocks
+left inactive in the current round. It does not permanently freeze a component from a heuristic
+residual; ``max_skip_rounds`` guarantees every nonzero-weight block is revisited. Callers wanting
+the explicit near-zero-weight permanent-freeze policy can use ``run_em_freeze_rollup`` directly.
 
-Gain estimate, documented per the D1 module's own note that later track items may re-estimate
-a cheap proxy fresh every round rather than reuse a stale report: this module calls
-:func:`mixle.inference.node_report.node_report` on every eligible component EVERY round (a small,
-fixed-size Monte-Carlo self-residual -- ``_DEFAULT_MC_SAMPLES`` samples, not a real-data pass),
-always with the SAME seed across components (unlike :func:`mixle.inference.node_report.
-flat_report_table`, which offsets the seed per row for a deduplicated tree walk) so that
-structurally-identical components draw directly-comparable residuals -- this is what makes the
-"no useful discrimination to make" acceptance criterion (identical components => identical
-scores => no real ranking) hold deterministically rather than by RNG luck.
+The measured gain is tied to the real E-step responsibilities: for active component ``k`` it is
+``sum_i gamma_ik [log p_new(x_i,k) - log p_old(x_i,k)]``, including the weight-coordinate term.
+It is therefore a stale scheduling estimate, not a convergence proof. Correctness comes from the
+transactional observed-objective gate after every proposed round; ranking only changes work order.
 
 Degeneration to vanilla full-tree EM: when every eligible block's gain-per-cost score is the
 same (within ``tie_tol``) -- either because the blocks truly are indistinguishable, or because
@@ -51,6 +33,7 @@ round would. See ``mixle.tests.block_em_test`` for a literal test of this proper
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,15 +52,13 @@ from mixle.inference.freeze_rollup import (
     _component_log_density_matrix,
     _m_step,
     _resolve_payload,
-    detect_frozen,
 )
-from mixle.inference.node_report import node_report
+from mixle.inference.transaction import MutableStateSnapshot
 from mixle.stats.latent.mixture import MixtureDistribution, MixtureEstimator
 
 _DEFAULT_ACCEPT_TOLERANCE = 1.0e-9
 _DEFAULT_BUDGET_FRACTION = 0.5
 _DEFAULT_TIE_TOL = 1.0e-9
-_SCORE_SEED = 0  # fixed, shared across every component -- see module docstring on the tie test.
 _KNOWN_POLICIES = ("greedy", "learned_bandit", "learned_design_model")
 
 
@@ -85,9 +66,9 @@ _KNOWN_POLICIES = ("greedy", "learned_bandit", "learned_design_model")
 class BlockEMStats:
     """One round's accounting for the block-EM scheduler -- the acceptance-criteria receipt.
 
-    Mirrors :class:`mixle.inference.freeze_rollup.FreezeRollupStats` (same
-    ``n_log_density_evals`` wall-clock proxy and real Neal-Hinton ``objective``), plus the extra
-    fields specific to gain-per-cost SCHEDULING within a round rather than permanent freezing.
+    ``n_log_density_evals`` records removed model work, while ``wall_time_seconds`` records actual
+    elapsed time. ``objective`` is the observed-data likelihood used by the transactional gate;
+    ``measured_q_gain`` is the complete-data gain used for the next scheduling decision.
     """
 
     round_index: int
@@ -100,6 +81,8 @@ class BlockEMStats:
     objective: float
     accepted: bool = True
     degenerate_round: bool = False
+    measured_q_gain: float = 0.0
+    wall_time_seconds: float = 0.0
 
     @property
     def active_fraction(self) -> float:
@@ -110,43 +93,50 @@ class BlockEMStats:
 def _block_scores(
     model: MixtureDistribution,
     eligible: list[int],
-    prev_residual: dict[int, float],
+    last_q_gain: dict[int, float],
 ) -> tuple[dict[int, float], dict[int, float], dict[int, float], dict[int, float]]:
-    """Return ``(gain_per_cost, cost, residual, q_gain)`` for each ``eligible`` component index.
-
-    ``gain`` is the D1 Q-gain (residual improvement since the last round this component was
-    scored) when available, else the raw residual itself (a component never scored before has an
-    unknown Q-gain but a high residual is still a legitimate "there is a lot of room to improve
-    here" proxy for round 1). ``cost`` is D1's E-step-cost + M-step-cost proxy. Every component
-    is scored with the SAME fixed seed (see module docstring) so structurally-identical
-    components are directly comparable -- required for the degenerate-to-vanilla-EM test to be
-    deterministic rather than RNG-dependent. ``residual``/``q_gain`` (the raw, un-normalized D1
-    fields) are returned alongside the derived ``gain_per_cost``/``cost`` purely so a D5 learned
-    policy can build a :class:`~mixle.inference.conditional_jit_controller.ControllerState`
-    without a second pass over the tree.
-    """
+    """Return last measured data-Q gain per structural-cost unit for eligible blocks."""
     gain_per_cost: dict[int, float] = {}
     cost: dict[int, float] = {}
     residual: dict[int, float] = {}
     q_gain: dict[int, float] = {}
     for idx in eligible:
-        report = node_report(
-            model.components[idx],
-            field_path=str(idx),
-            seed=_SCORE_SEED,
-            nobs=1.0,
-            prev_residual=prev_residual.get(idx),
-        )
-        prev_residual[idx] = report.residual
-        gain = report.q_gain if report.q_gain is not None else report.residual
-        if not np.isfinite(gain):
-            gain = 0.0
-        block_cost = max(report.e_step_cost + report.m_step_cost, 1.0e-12)
+        gain = max(float(last_q_gain.get(idx, 0.0)), 0.0)
+        block_cost = float(max(_parameter_count(model.components[idx]), 1))
         cost[idx] = block_cost
         gain_per_cost[idx] = gain / block_cost
-        residual[idx] = report.residual if np.isfinite(report.residual) else 0.0
+        residual[idx] = gain
         q_gain[idx] = gain
     return gain_per_cost, cost, residual, q_gain
+
+
+def _parameter_count(root: Any) -> int:
+    """Count numeric parameters recursively without sampling or scoring a component."""
+    seen: set[int] = set()
+
+    def count(value: Any) -> int:
+        if value is None or isinstance(value, (str, bytes, bytearray, bool)):
+            return 0
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            return 1
+        ident = id(value)
+        if ident in seen:
+            return 0
+        seen.add(ident)
+        if isinstance(value, np.ndarray):
+            return int(value.size) if np.issubdtype(value.dtype, np.number) else 0
+        parameters = getattr(value, "parameters", None)
+        if callable(parameters):
+            return sum(int(p.numel()) for p in parameters())
+        if isinstance(value, dict):
+            return sum(count(child) for child in value.values())
+        if isinstance(value, (list, tuple)):
+            return sum(count(child) for child in value)
+        if hasattr(value, "__dict__"):
+            return sum(count(child) for name, child in vars(value).items() if not name.startswith("_"))
+        return 0
+
+    return max(count(root), 1)
 
 
 def _select_active(
@@ -219,13 +209,10 @@ def run_block_em(
 ) -> tuple[MixtureDistribution, list[BlockEMStats]]:
     """Run block-coordinate-ascent EM over a :class:`MixtureDistribution` (workstream D3, D5).
 
-    Each round: rank every component D2 does not already report frozen by D1 gain-per-cost,
-    select the highest-value ones within ``budget_fraction`` of the round's total eligible cost
-    (the rest are left untouched for this round), do a fresh partial E-step (cached log-density
-    reused for every untouched/frozen component -- same mechanism D2's
-    :class:`~mixle.inference.freeze_rollup.FreezeRollupCache` already provides), a per-block
-    conditional M-step over only the active components, and an accept/reject gate on the round's
-    real objective -- exactly D2's own monotone-F machinery, reused rather than reimplemented.
+    The first round updates every component. Later rounds rank blocks by the observed Q gain from
+    their last update per structural-cost unit, select the highest-value blocks within
+    ``budget_fraction``, reuse cached component scores for untouched blocks, and transactionally
+    gate the resulting partial M-step on observed likelihood.
 
     ``schedule="auto"`` at the :func:`mixle.inference.estimation.optimize` layer dispatches here;
     ``budget_fraction=1.0`` or ``full_tree_every_round=True`` both degenerate this to (numerically
@@ -233,22 +220,22 @@ def run_block_em(
     of that literal property.
 
     ``delta`` convergence is gated by ``stall_patience`` consecutive small-gain rounds rather
-    than a single one: a partial (budget-throttled) round can legitimately show a tiny total-F
+    than a single one: a partial (budget-throttled) round can legitimately show a tiny total-objective
     gain even while a still-improving block simply wasn't scheduled that round (its turn is
     coming), so a single-round ``delta`` check -- fine for vanilla EM, where every round touches
     every block -- would risk declaring convergence early here. Requiring the plateau to persist
     for ``stall_patience`` rounds is the same style of robustness D2's own ``freeze_patience``
     already uses for its (structurally identical) "has this genuinely stopped moving" question.
 
-    ``max_skip_rounds`` bounds STARVATION: a purely greedy top-score-wins ranking can, on a real
+    ``max_skip_rounds`` bounds starvation: a purely greedy top-score-wins ranking can, on a real
     fixture, rank the same eligible block last round after round (its own gain-per-cost score
     stays a little below its rivals') and never actually get a turn -- which is still valid
-    coordinate ascent (F still only goes up), but converges to a WORSE fixed point than vanilla
+    coordinate ascent (the gated objective still only goes up), but converges to a WORSE fixed point than vanilla
     EM would reach in the same number of rounds, since a legitimately-still-moving block is
     parked indefinitely instead of merely delayed. Any eligible block skipped
     ``max_skip_rounds`` rounds in a row is therefore force-included in ``active`` regardless of
     its score (an aging boost) -- guaranteeing every eligible block gets a turn at least once
-    every ``max_skip_rounds + 1`` rounds, which is what makes "same target F, fewer evals" (as
+    every ``max_skip_rounds + 1`` rounds, which is what makes "same target objective, fewer evals" (as
     opposed to just "monotone but permanently stuck") an honest comparison against vanilla EM.
 
     ``policy`` (workstream D5, :mod:`mixle.inference.conditional_jit_controller`) selects WHO picks
@@ -258,10 +245,10 @@ def run_block_em(
     :class:`~mixle.inference.conditional_jit_controller.LearnedController` for this round's budget
     (constructing a default :class:`~mixle.inference.conditional_jit_controller.BanditController`/
     :class:`~mixle.inference.conditional_jit_controller.DesignModelController` if ``controller`` is
-    not supplied) and feed it back the round's REALIZED gain (this round's own F improvement,
+    not supplied) and feed it back the round's REALIZED gain (this round's observed-objective improvement,
     ``round_value - current_value``, i.e. exactly what this round's active blocks achieved) and
-    REALIZED cost (``evals_e + evals_c``, the same wall-clock proxy :class:`BlockEMStats` already
-    reports) after every round -- so the controller learns from the SAME accept/reject-gated,
+    realized model-work cost (``evals_e + evals_c``) after every round -- so the controller learns
+    from the same accept/reject-gated,
     provably-monotone rounds D3 already runs, never from an invented parallel objective. Passing an
     already-constructed :class:`~mixle.inference.conditional_jit_controller.LearnedController`
     directly as ``policy`` is also accepted (equivalent to passing it as ``controller`` with
@@ -271,6 +258,11 @@ def run_block_em(
 
     Returns ``(final_model, history)`` where ``history[i]`` is round ``i``'s
     :class:`BlockEMStats`.
+
+    ``q_gain_tol``, ``weight_tol``, ``weight_delta_tol``, and ``freeze_patience`` remain accepted
+    for API compatibility with earlier scheduler releases, but permanent freeze detection is no
+    longer part of this path. Use
+    :func:`mixle.inference.freeze_rollup.run_em_freeze_rollup` when those controls are desired.
     """
     if not isinstance(initial_model, MixtureDistribution):
         raise TypeError("run_block_em requires a MixtureDistribution model.")
@@ -304,14 +296,19 @@ def run_block_em(
     model = initial_model
     history: list[BlockEMStats] = []
     old_value: float | None = None
-    prev_residual: dict[int, float] = {}
+    last_q_gain: dict[int, float] = {}
     skip_streak: dict[int, int] = {}
     stall_streak = 0
 
     for round_index in range(max(1, int(max_its))):
-        frozen_idx = detect_frozen(cache, model)
+        round_started = time.perf_counter()
+        # Permanent freezing is intentionally not used here. The block scheduler already bounds
+        # temporary inactivity with max_skip_rounds; permanently freezing from a heuristic residual
+        # would change the reachable fixed point. The separate freeze_rollup API remains available
+        # for callers that explicitly opt into its near-zero-weight policy.
+        frozen_idx: set[int] = set()
         eligible = [idx for idx in range(model.num_components) if idx not in frozen_idx and not model.zw[idx]]
-        scores, cost, residual, q_gain = _block_scores(model, eligible, prev_residual)
+        scores, cost, residual, q_gain = _block_scores(model, eligible, last_q_gain)
 
         controller_state: ControllerState | None = None
         controller_action: ControllerAction | None = None
@@ -319,16 +316,24 @@ def run_block_em(
         if controller is not None:
             controller_state = ControllerState.from_scores(round_index, eligible, scores, cost, residual, q_gain)
             controller_action = controller.select_action(controller_state)
-            round_budget_fraction = controller_action.budget_fraction
+            # A learned policy augments the declared greedy safety baseline; it cannot silently
+            # starve more work than the caller's budget_fraction permits. This keeps cold-start
+            # exploration bounded while still allowing a controller to spend more when useful.
+            round_budget_fraction = max(float(budget_fraction), controller_action.budget_fraction)
 
-        active, degenerate = _select_active(
-            eligible,
-            scores,
-            cost,
-            budget_fraction=round_budget_fraction,
-            full_tree_every_round=full_tree_every_round,
-            tie_tol=tie_tol,
-        )
+        if round_index == 0:
+            # Bootstrap every block's observed Q-gain from one real full sweep. This replaces the
+            # former self-sampled entropy proxy and gives the next round a data-linked ranking.
+            active, degenerate = set(eligible), True
+        else:
+            active, degenerate = _select_active(
+                eligible,
+                scores,
+                cost,
+                budget_fraction=round_budget_fraction,
+                full_tree_every_round=full_tree_every_round,
+                tie_tol=tie_tol,
+            )
         starved = {idx for idx in eligible if skip_streak.get(idx, 0) >= max(0, int(max_skip_rounds))}
         if starved - active:
             active = active | starved
@@ -345,19 +350,34 @@ def run_block_em(
         if old_value is None:
             old_value = current_value
 
+        transaction = MutableStateSnapshot.capture(model, estimator)
         candidate = _m_step(enc_payload, estimator, model, gamma, scheduled_inactive)
-        candidate_frozen = detect_frozen(cache, candidate)
-        candidate_inactive = candidate_frozen | (set(eligible) - active)
+        candidate_inactive = set(eligible) - active
         ll_mat_c, evals_c = _component_log_density_matrix(candidate, enc_payload, cache, candidate_inactive)
         candidate_log_density, _ = _combine(ll_mat_c, candidate.log_w)
         candidate_value = float(np.sum(candidate_log_density))
+
+        counts = gamma.sum(axis=0)
+        measured_q_gain: dict[int, float] = {}
+        for idx in active:
+            component_gain = float(np.dot(gamma[:, idx], ll_mat_c[:, idx] - ll_mat[:, idx]))
+            if counts[idx] <= 0.0 or not np.isfinite(candidate.log_w[idx]) or not np.isfinite(model.log_w[idx]):
+                weight_gain = 0.0
+            else:
+                weight_gain = float(counts[idx] * (candidate.log_w[idx] - model.log_w[idx]))
+            measured_q_gain[idx] = component_gain + weight_gain
 
         accepted = np.isfinite(candidate_value) and candidate_value + accept_tolerance >= current_value
         if accepted:
             model = candidate
             round_value = candidate_value
+            for idx, gain in measured_q_gain.items():
+                last_q_gain[idx] = max(float(gain), 0.0)
         else:
+            transaction.restore()
             round_value = current_value
+            for idx in active:
+                last_q_gain[idx] = 0.0
 
         if controller is not None and controller_state is not None and controller_action is not None:
             realized_gain = max(0.0, round_value - current_value)
@@ -377,6 +397,8 @@ def run_block_em(
                 objective=round_value,
                 accepted=accepted,
                 degenerate_round=degenerate,
+                measured_q_gain=float(sum(measured_q_gain.values())) if accepted else 0.0,
+                wall_time_seconds=float(time.perf_counter() - round_started),
             )
         )
 

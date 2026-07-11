@@ -2,11 +2,11 @@
 
 Acceptance criteria under test (see the ConditionalJIT track's D3 item):
 
-1. Monotone-F test -- F (the real Neal-Hinton free energy / observed-data log-likelihood) never
+1. Monotone-objective test -- observed-data log likelihood never
    decreases round-to-round under ``schedule="auto"``, the same coordinate-ascent guarantee
-   vanilla EM has, in the same style as D2's own monotone-F test.
-2. Beats full-tree EM on the D2 fixture -- ``schedule="auto"`` reaches the SAME target F as
-   vanilla full-tree EM using measurably fewer per-datum log-density evaluations.
+   vanilla EM has, in the same style as D2's own monotone-objective test.
+2. Work receipt on the D2 fixture -- ``schedule="auto"`` reaches the SAME target objective using fewer
+   component log-density evaluations. This is explicitly not treated as a wall-clock guarantee.
 3. Degenerates to vanilla EM -- when every eligible block's gain-per-cost score is
    indistinguishable, ``schedule="auto"``'s behavior is numerically indistinguishable from
    vanilla full-tree EM's.
@@ -69,11 +69,11 @@ def _make_symmetric_problem(seed=3, nobs=200, num_components=4):
 
 class BlockEMMonotonicityTestCase(unittest.TestCase):
     def test_free_energy_is_monotone_round_to_round(self):
-        """F (observed-data log-likelihood) never decreases round-to-round under schedule='auto'.
+        """Observed-data log likelihood never decreases round-to-round under schedule='auto'.
 
         Same style/assertion as D2's ``FreezeRollupMonotonicityTestCase`` -- the D-track's
         correctness backbone is that a learned/greedy scheduling decision changes SPEED, never
-        whether F goes up; ``run_block_em`` enforces this with an accept/reject gate on every
+        whether the objective goes up; ``run_block_em`` enforces this with an accept/reject gate on every
         round's real objective, so this test checks that gate is wired correctly end to end.
         """
         start, estimator, enc = _make_problem(seed=7, nobs=300)
@@ -85,7 +85,7 @@ class BlockEMMonotonicityTestCase(unittest.TestCase):
             self.assertGreaterEqual(
                 objectives[i],
                 objectives[i - 1] - 1.0e-9,
-                "F decreased from round %d to %d: %r -> %r" % (i - 1, i, objectives[i - 1], objectives[i]),
+                "objective decreased from round %d to %d: %r -> %r" % (i - 1, i, objectives[i - 1], objectives[i]),
             )
         # At least one round should actually have scheduled a genuine subset (n_active <
         # n_components - n_frozen) -- otherwise the monotonicity check is vacuous (every round
@@ -94,16 +94,16 @@ class BlockEMMonotonicityTestCase(unittest.TestCase):
             any(h.n_active < h.n_components - h.n_frozen and not h.degenerate_round for h in history),
             "scheduler never actually chose a proper subset of blocks during this run",
         )
+        self.assertTrue(all(h.wall_time_seconds > 0.0 for h in history))
+        self.assertTrue(all(np.isfinite(h.measured_q_gain) for h in history))
 
 
 class BlockEMSpeedupTestCase(unittest.TestCase):
-    def test_evaluation_count_speedup_matches_active_fraction(self):
-        """schedule='auto' reaches the SAME target F using far fewer log-density evaluations
-        than vanilla full-tree EM, on the same fixture D2 used for its own speedup receipt.
+    def test_evaluation_count_receipt_matches_active_fraction(self):
+        """The scheduler reaches a shared target with fewer component-density evaluations.
 
-        Honesty note (same as D2's own test): wall-clock is what the roadmap item names, but a
-        per-datum log-density-evaluation count is a direct, deterministic, CI-safe proxy for it
-        -- it IS the operation whose count wall-clock would otherwise be approximating.
+        This pins removed model work only. Python scheduling, cache hashing, and block ranking are
+        real costs, so the result must not be quoted as a wall-clock speedup.
         """
         start, estimator, enc = _make_problem()
         num_components = start.num_components
@@ -113,7 +113,7 @@ class BlockEMSpeedupTestCase(unittest.TestCase):
             estimator,
             start,
             max_its=400,
-            delta=None,  # run the full budget -- target-F crossing is measured from the trace itself
+            delta=None,  # run the full budget -- target crossing is measured from the trace itself
             budget_fraction=0.5,
             weight_tol=0.05,
             q_gain_tol=1.0e-5,
@@ -137,12 +137,12 @@ class BlockEMSpeedupTestCase(unittest.TestCase):
         block_trace = [h.objective for h in block_history]
         block_cum_evals = list(np.cumsum([h.n_log_density_evals for h in block_history]))
 
-        # Pick a target F both traces actually reach (a small margin below whichever trajectory's
+        # Pick a target objective both traces actually reach (a small margin below whichever trajectory's
         # own final value is smaller), rather than demanding the two runs land on the EXACT same
         # final fixed point -- block-coordinate EM on a real (non-synthetic-for-this-test) mixture
         # can legitimately settle into a very slightly different local optimum than vanilla EM
         # depending on update order (both are still valid coordinate ascent -- see the
-        # monotone-F test); "reaches the same target F in fewer evaluations" is the honest,
+        # monotone-objective test); "reaches the same target in fewer evaluations" is the honest,
         # order-independent form of the roadmap item's acceptance criterion.
         target = min(vanilla_trace[-1], block_trace[-1]) - 1.0e-3
 
@@ -150,7 +150,7 @@ class BlockEMSpeedupTestCase(unittest.TestCase):
             for value, evals in zip(trace, cum_evals):
                 if value >= target:
                     return evals
-            self.fail("trace never reached the target F")
+            self.fail("trace never reached the target objective")
 
         vanilla_evals = _evals_to_target(vanilla_trace, vanilla_cum_evals)
         block_evals = _evals_to_target(block_trace, block_cum_evals)
@@ -161,7 +161,7 @@ class BlockEMSpeedupTestCase(unittest.TestCase):
         ratio = vanilla_evals / block_evals
         self.assertGreater(ratio, 1.1)
         print(
-            "\nblock-EM speedup: target F=%.4f reached in %d vs %d log-density evals, ratio=%.3fx"
+            "\nblock-EM work receipt: target objective=%.4f reached in %d vs %d log-density evals, ratio=%.3fx"
             % (target, block_evals, vanilla_evals, ratio)
         )
 

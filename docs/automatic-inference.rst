@@ -251,6 +251,81 @@ Objectives
 The default is usually the right choice. Force an objective when you are testing
 or comparing routes.
 
+Minibatches and Incremental Updates
+-----------------------------------
+
+There are three distinct small-batch regimes. They have different mathematics
+and should not be treated as interchangeable.
+
+**Neural M-steps** use ``GradLeaf(..., batch_size=B)`` or
+``NeuralCategorical(..., batch_size=B)``. ``m_steps`` counts epochs, so changing
+``B`` changes the number of Adam updates per epoch. Set
+``max_optimizer_steps=U`` when comparing batch sizes under the same optimizer
+budget. Minibatch losses use an ``N/B`` factor and the global responsibility
+mass, making their gradients unbiased estimates with the same scale as the full
+weighted M-step objective. The fitted leaf's ``fit_receipt`` records the
+effective batch size, completed epochs, optimizer updates, and reduction.
+
+This scaling does not make Adam batch-size invariant. Batch size changes
+gradient noise and therefore Adam's first- and second-moment trajectories. Keep
+the optimizer-update budget fixed for comparisons, tune learning rate against
+that effective batch size, and compare the full objective at evaluation points.
+By default, the outer loop treats Adam and variational updates as approximate:
+it may traverse finite decreases, but snapshots mutable state and restores the
+best selected MLE/MAP/ELBO value seen before returning. This matters because a
+strict reject-on-first-decrease gate can prevent a stochastic optimizer from
+crossing a temporary valley. Pass ``monotone=True`` to request that strict gate;
+pass ``monotone=False`` to request best-seen selection explicitly. Immutable
+closed-form updates use the strict monotone gate automatically.
+
+Surrogate-trained leaves are a separate case. NCE energy models, for example,
+cannot be selected by their observed ``seq_log_density`` before NCE has learned
+the normalizer: an unnormalized initial constant can make that score
+artificially high. Such estimators declare the mismatch and return their final
+finite surrogate update by default. They also consume ``max_its`` instead of
+claiming convergence from a small change in that incompatible monitor.
+``track_best=True`` or ``False`` overrides selection when a caller has an
+independent evaluation objective.
+
+.. code-block:: python
+
+   from mixle.models import GradLeaf
+
+   leaf = GradLeaf(
+       module,
+       batch_size=256,
+       m_steps=20,                 # epochs
+       max_optimizer_steps=2_000,  # comparable update budget
+   )
+   fitted = optimize(data, leaf, out=None)
+   print(fitted.fit_receipt)
+
+**Stochastic EM** uses ``StreamingEstimator`` or ``OnlineEM``. For minibatches
+sampled from a finite dataset, pass ``dataset_size=N``. A batch statistic is then
+scaled by ``N/B`` before the Robbins-Monro update, so conjugate priors and global
+counts do not silently become stronger when ``B`` shrinks. The default harmonic
+schedule uses an exponent in ``(0.5, 1]``, satisfying the usual stochastic-
+approximation conditions that step sizes sum to infinity while squared step
+sizes have a finite sum.
+
+.. code-block:: python
+
+   from mixle.inference import StreamingEstimator, harmonic
+
+   stream = StreamingEstimator(
+       estimator,
+       model=initial,
+       dataset_size=len(training_data),
+       schedule=harmonic(0.7),
+   )
+   for batch in batches:
+       model = stream.update(batch)
+
+**Incremental EM** stores one sufficient-statistic summary per named chunk.
+Replacing a chunk rebuilds the pooled accumulator from those summaries. This is
+slower than subtracting a sum but remains correct for mergeable, non-invertible
+statistics such as minima, maxima, weighted medians, and sketches.
+
 Backends and Engines
 --------------------
 
