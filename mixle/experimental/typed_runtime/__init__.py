@@ -6,6 +6,14 @@ Real multi-host transport, optimizer geometry execution, and context actions
 remain behind later dependency gates.
 """
 
+from mixle.experimental.typed_runtime.acceptance import (
+    AcceptanceGateReceipt,
+    ClaimKind,
+    FrontierClaimAssessment,
+    GateStatus,
+    ScaleRunReceipt,
+    assess_frontier_claims,
+)
 from mixle.experimental.typed_runtime.benchmark import (
     BenchmarkPoint,
     FailureKind,
@@ -93,6 +101,12 @@ from mixle.experimental.typed_runtime.faults import (
     FaultEvent,
     FaultInjectionReceipt,
     FaultKind,
+)
+from mixle.experimental.typed_runtime.frontier_pilot import (
+    GraphMemoryPilotReceipt,
+    PilotStrategyReceipt,
+    RecoveryDrillReceipt,
+    run_graph_memory_pilot,
 )
 from mixle.experimental.typed_runtime.geometry import (
     BatchSemanticsReceipt,
@@ -213,6 +227,7 @@ from mixle.experimental.typed_runtime.validation import (
 )
 
 __all__ = [
+    "AcceptanceGateReceipt",
     "ArtifactKind",
     "ApplyProposalFn",
     "AttentionCandidate",
@@ -227,6 +242,7 @@ __all__ = [
     "CachedGraphPartition",
     "CanaryFn",
     "CanaryVerdict",
+    "ClaimKind",
     "ClockDecision",
     "ClockProgress",
     "ClockTrigger",
@@ -275,14 +291,17 @@ __all__ = [
     "FaultKind",
     "FisherProvider",
     "FingerprintFn",
+    "FrontierClaimAssessment",
     "GainEvidence",
     "GainProvider",
     "GainPerCostScheduler",
     "GeometryRouterConfig",
+    "GraphMemoryPilotReceipt",
     "GraphMemoryCache",
     "GraphPartition",
     "GraphPartitionPlan",
     "GraphPrefetchReceipt",
+    "GateStatus",
     "IssueSeverity",
     "HierarchicalProposalCoordinator",
     "HierarchicalRoundReceipt",
@@ -304,6 +323,7 @@ __all__ = [
     "ParameterRoute",
     "PayloadMerger",
     "PlacementScope",
+    "PilotStrategyReceipt",
     "ProposalBatch",
     "ProposalConflict",
     "ProposalPacket",
@@ -315,7 +335,9 @@ __all__ = [
     "ReplayMode",
     "ReplayReport",
     "ReplayStepReceipt",
+    "RecoveryDrillReceipt",
     "RuntimeVersions",
+    "ScaleRunReceipt",
     "NodeScheduleState",
     "ScheduleReceipt",
     "SchedulerConfig",
@@ -350,6 +372,7 @@ __all__ = [
     "VerificationUpdate",
     "ValueOfInformationScheduler",
     "WorkMeasurement",
+    "assess_frontier_claims",
     "assess_staleness",
     "apply_optimizer_evidence",
     "compile_update_graph",
@@ -371,6 +394,7 @@ __all__ = [
     "validate_update_graph",
     "run_typed_mixture_em",
     "run_structured_estimation_step",
+    "run_graph_memory_pilot",
     "route_optimizer_geometry",
     "shrink_proposal",
 ]

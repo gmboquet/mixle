@@ -40,6 +40,11 @@ print(graph.explain())
 - Bounded graph partition/prefetch/LRU memory and exact-near plus retrieved-far attention whose active tokens do not
   grow with source horizon.
 - Provenance-complete materialization that excludes contradicted evidence and unverified generated claims.
+- An integrated graph-memory mixture-of-experts pilot with local-window and AdamW ablations, real stochastic
+  microbatches and gradient accumulation, bounded active context, explicit negative controls, and bitwise
+  model/optimizer/sampler-RNG restart parity.
+- Machine-readable claim gates that remain closed until externally measured 8-GPU transport, multi-host recovery,
+  1B-parameter quality/efficiency, trillion-token source-horizon, bounded-active-context, and provenance receipts exist.
 
 ## Not implemented yet
 
@@ -50,6 +55,8 @@ print(graph.explain())
   current torch adapter uses exact SVD/eigendecomposition as a correctness reference and may be slower than AdamW.
 - Persistent external graph/vector-store adapters and production retrieval indexes. Trillion-scale **source horizons**
   are represented and tested; trillion-token dense attention is neither implemented nor claimed.
+- A real frontier-scale training result. The integrated pilot is a deterministic synthetic falsification fixture, not
+  evidence that the reference runtime can train a competitive frontier model.
 
 The local mixture adapter deliberately rejects shared component objects and conjugate weight priors until their joint
 proposal semantics are implemented. Unsupported semantics fail before execution rather than silently changing the
