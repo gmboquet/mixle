@@ -219,7 +219,7 @@ def _type_for(dist: Any) -> FieldType:
             return Count()
         if supports(dist, Continuous):
             return Real()
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     cls = type(dist).__name__.lower()
     if "categor" in cls:

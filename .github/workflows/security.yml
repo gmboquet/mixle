@@ -39,5 +39,10 @@ jobs:
           python -m pip install -e .
           python -m pip install pip-audit
       - name: Audit resolved dependencies
-        continue-on-error: true
-        run: pip-audit
+        # Blocking: a known vulnerability in a base dependency fails CI. To accept a specific finding
+        # temporarily, add its ID (with a reason + review date) to .github/pip-audit-ignore.txt; only
+        # IDs listed there are waived.
+        run: |
+          IGNORES=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' .github/pip-audit-ignore.txt | awk '{printf " --ignore-vuln %s", $1}')
+          echo "waived vulns:${IGNORES:- (none)}"
+          pip-audit $IGNORES

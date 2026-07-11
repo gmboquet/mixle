@@ -41,6 +41,7 @@ from mixle.stats.multivariate.multivariate_gaussian import (
     MultivariateGaussianDistribution,
 )
 from mixle.utils.aliasing import MISSING, coalesce_alias
+from mixle.utils.deprecation import deprecated_alias
 
 
 def _pack_sig2(sig2: Sequence[Any] | np.ndarray, num_comp: int, dim: int) -> np.ndarray:
@@ -271,11 +272,13 @@ class GaussianMixtureEstimator(MixtureEstimator):
         est_factories = [u.accumulator_factory() for u in self.estimators]
         return GaussianMixtureEstimatorAccumulatorFactory(est_factories, self.num_components, self.keys)
 
+    @deprecated_alias("accumulator_factory", since="0.8.0", removed_in="0.10.0")
     def accumulatorFactory(self) -> "GaussianMixtureEstimatorAccumulatorFactory":
-        """Backward-compatible alias for :meth:`accumulator_factory`.
+        """Deprecated alias for :meth:`accumulator_factory`.
 
         New code should call ``accumulator_factory``. The camelCase name remains
-        available for older callers and returns the same factory.
+        available for older callers and returns the same factory, but now emits a
+        ``DeprecationWarning`` (see ``docs/deprecation-policy.rst``).
         """
         return self.accumulator_factory()
 
