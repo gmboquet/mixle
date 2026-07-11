@@ -11,14 +11,14 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from mixle.utils.serialization import ensure_pysp_serialization_registry, from_serializable, to_serializable
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _safe_segment(seg: str, kind: str = "name") -> str:

@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import os
 import runpy
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 CONF = ROOT / "docs" / "conf.py"
