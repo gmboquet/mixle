@@ -60,7 +60,7 @@ themselves.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Generic, TypeVar
 
 import numpy as np
@@ -86,7 +86,7 @@ STATE_FEATURE_DIM = 5
 _DEFAULT_BUDGET_LEVELS = (0.15, 0.3, 0.5, 0.7, 0.85, 1.0)
 
 
-class ActionType(str, Enum):
+class ActionType(StrEnum):
     """The D5 action-type registry (see module docstring): a registry, not a closed enum -- future
     track items are expected to add new members and new :class:`LearnedController` subclasses that
     consume them, without needing to touch this module's two REAL, implemented action types."""

@@ -15,7 +15,7 @@ import platform
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from mixle.data.hashing import dataset_hash
@@ -167,8 +167,8 @@ def build_header(
     timing: dict = {}
     if started is not None and finished is not None:
         timing = {
-            "started": datetime.fromtimestamp(started, timezone.utc).isoformat(),
-            "finished": datetime.fromtimestamp(finished, timezone.utc).isoformat(),
+            "started": datetime.fromtimestamp(started, UTC).isoformat(),
+            "finished": datetime.fromtimestamp(finished, UTC).isoformat(),
             "duration_s": round(finished - started, 6),
         }
     ll = _final_loglik(model, data) if final_loglik == "auto" else final_loglik
@@ -184,7 +184,7 @@ def build_header(
         timing=timing,
         resources=dict(resources or {}),
         environment=environment_info(),
-        created_at=datetime.now(timezone.utc).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
     )
 
 

@@ -17,12 +17,12 @@ surface makes no stability promise until it is explicitly recorded as stable.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 __all__ = ["Maturity", "MATURITY_REGISTRY", "DEFAULT_MATURITY", "maturity_of", "status_of"]
 
 
-class Maturity(str, Enum):
+class Maturity(StrEnum):
     """API maturity tier. String-valued so it serializes as its name in JSON manifests."""
 
     STABLE = "stable"

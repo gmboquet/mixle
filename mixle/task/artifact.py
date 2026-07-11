@@ -26,7 +26,7 @@ import os
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 SCHEMA_VERSION = "1"
@@ -124,7 +124,7 @@ class TaskManifest:
         d = {
             "artifact_type": "mixle.task",
             "schema_version": self.schema_version,
-            "created_at": self.created_at or datetime.now(timezone.utc).isoformat(),
+            "created_at": self.created_at or datetime.now(UTC).isoformat(),
             "payload": self.payload,
             "task": self.task,
             "io": self.io,

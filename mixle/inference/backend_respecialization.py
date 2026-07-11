@@ -45,7 +45,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 import numpy as np
@@ -70,7 +70,7 @@ _DEFAULT_HOT_ACTIVATION_RATIO = 0.7  # a node scheduled active >=70% of recent r
 _DEFAULT_STABLE_Q_GAIN_TOL = 1.0e-6  # reuses D2/D3's own convergence-tolerance convention
 
 
-class RespecializationAction(str, Enum):
+class RespecializationAction(StrEnum):
     """The backend choice a :class:`RespecializationDecision` recommends (and :class:`NodeBackend`
     can actually apply)."""
 
