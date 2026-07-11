@@ -213,7 +213,7 @@ class Enumerable(PredicateCapability):
 
         try:
             return bool(supports_enumeration(obj))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
 
@@ -228,7 +228,7 @@ class FiniteSupport(PredicateCapability):
             return False
         try:
             n = fn()
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
         return isinstance(n, int) and n >= 0
 
@@ -262,7 +262,7 @@ class Shardable(PredicateCapability):
 
         try:
             return bool(decomposition_for(obj).is_shardable)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
 
@@ -293,7 +293,7 @@ class ConjugateUpdatable(PredicateCapability):
 
         try:
             return bool(is_conjugate_family(obj))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
 
@@ -316,7 +316,7 @@ class ExactDensity(PredicateCapability):
             return False
         try:
             return fn() is DensitySemantics.EXACT
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
 
@@ -828,7 +828,7 @@ def describe(obj: Any) -> str:
                 lines = [base, "  fit route: %s — %s" % (plan["route"], plan["reason"])]
                 lines += ["             · %s" % c for c in plan.get("caveats", [])]
                 return "\n".join(lines)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         return base
 
@@ -894,7 +894,7 @@ def _safe_supports(obj: Any, cap_name: str) -> bool:
         return False
     try:
         return supports(obj, cap)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -909,7 +909,7 @@ def what_supports(capability: type, among: Any) -> list[str]:
         try:
             if supports(obj, capability):
                 out.append(getattr(obj, "__name__", type(obj).__name__))
-        except Exception:
+        except Exception:  # noqa: BLE001
             continue
     return out
 

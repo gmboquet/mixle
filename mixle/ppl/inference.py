@@ -297,7 +297,7 @@ def _encoder_for(fam):
         defaults = {"real": 0.0, "positive": 1.0, "unit": 0.5}
         try:
             kwargs = fam.to_dist(*[defaults[s] for s in fam.support])
-        except Exception:
+        except Exception:  # noqa: BLE001
             kwargs = fam.to_dist(*([1.0] * fam.arity))
     return fam.dist_cls(**kwargs).dist_to_encoder()
 
@@ -595,7 +595,7 @@ def _build_target(rv: RandomVariable, data, extra_latents=()):
         try:
             d = build(vals)
             ll = float(np.sum(d.seq_log_density(enc)))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return _NEG_INF
         if not math.isfinite(ll):
             return _NEG_INF
@@ -888,7 +888,7 @@ def _finalize_chains(rv, slots, results, build) -> RandomVariable:
     post.rhat = {s.name: float(rhat[k]) for k, s in enumerate(slots)}
     try:
         post.ess = float(sum(np.atleast_1d(r.effective_sample_size()).min() for r in results))
-    except Exception:
+    except Exception:  # noqa: BLE001
         post.ess = None
     _attach_convergence(post, slots, np.stack([u[:n] for u in us], axis=0), results)
 
@@ -1275,7 +1275,7 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool):
                 val = _eval(t, torch)
                 (g,) = torch.autograd.grad(val, t)
                 return g.detach().numpy()
-        except Exception:
+        except Exception:  # noqa: BLE001
             grad = None
 
     def build(vals):
@@ -2155,7 +2155,7 @@ def _prior_to_dict(prior_rv):
     builder = _PRIOR_DICT_BUILDERS.get(prior_rv._family.name)
     try:
         return builder(prior_rv._args) if builder is not None else None
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -2165,7 +2165,7 @@ def _prior_probe_value(prior_rv):
     try:
         d = prior_rv._family.make_dist(tuple(prior_rv._args), prior_rv._name)
         return float(np.ravel(d.sampler(seed=0).sample(1))[0])
-    except Exception:
+    except Exception:  # noqa: BLE001
         return 1.0
 
 
@@ -2186,7 +2186,7 @@ def _stats_conjugate_probe(rv):
         probe_value = _prior_probe_value(prior_rv)
         probe_args = tuple(probe_value if i == idx else rv._args[i] for i in range(len(rv._args)))
         stats_dist = rv._family.make_dist(probe_args, rv._name)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     from mixle.stats.bayes.conjugate import is_conjugate_family
 
@@ -2215,7 +2215,7 @@ def _stats_conjugate_fit(rv: RandomVariable, data, *, prior_override=None):
     try:
         sp = conjugate_posterior(stats_dist, arr, prior=prior_dict)
         mean_dict = sp.mean()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if len(mean_dict) != 1:  # single-target conjugates only (joint NIG / NIW handled elsewhere)
         return None
