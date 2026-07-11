@@ -194,6 +194,10 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "mixture_heterogeneous_test.py": ("distribution", "latent"),
     "numerics_test.py": ("distribution",),
     "numerical_guards_test.py": ("distribution", "bayes"),
+    # Public-API drift gate (worklist A1.1): regenerates api_manifest.json from the tree and asserts
+    # the exported __all__ of every public package is unchanged -- forces a reviewed diff on any
+    # public-surface change. Imports a few runtime-assembled packages, hence integration.
+    "public_api_manifest_test.py": ("integration",),
     # Weighted-estimation contract (worklist Q5.3): weighted == integer-replicated sufficient stats,
     # zero-weight no-op, weight-scale-invariant fits -- catches a silently dropped/normalized weight.
     "weighted_estimation_test.py": ("distribution",),
