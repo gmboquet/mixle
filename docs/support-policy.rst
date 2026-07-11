@@ -96,6 +96,44 @@ surface changes:
 * bump the appropriate package version before publication; and
 * make changelog wording match the actual package role and version policy.
 
+API maturity tiers
+~~~~~~~~~~~~~~~~~~~
+
+Every public name sits in one of three tiers (see :doc:`maturity`), which set how
+much stability it promises:
+
+* **stable** -- covered by this policy; changes follow the deprecation lifecycle
+  below.
+* **provisional** -- usable and tested, but the signature or defaults may still
+  change within a minor release; changes are called out in the changelog.
+* **experimental** -- everything under ``mixle.experimental``; no compatibility
+  guarantee, and it must not be imported from stable modules.
+
+Deprecation lifecycle
+~~~~~~~~~~~~~~~~~~~~~~~
+
+When a **stable** name is renamed or retired, the old spelling is *deprecated*
+rather than deleted:
+
+* it keeps working and forwards to the replacement, unchanged in behavior;
+* it emits a ``DeprecationWarning`` (never a bare ``UserWarning`` or a print),
+  attributed to the caller's line, in one message format::
+
+      <old> is deprecated since mixle <since>; use <new> instead. It will be removed in mixle <removed_in>.
+
+* it is kept for **at least two minor releases** after the release that announces
+  the deprecation (announced in ``0.8.0`` → removable no earlier than ``0.10.0``);
+  and
+* its removal ships with a migration note and, for a renamed API, a runnable
+  before/after example.
+
+Deprecations are wired through one helper, :func:`mixle.utils.deprecation.deprecated_alias`
+(or :func:`~mixle.utils.deprecation.warn_deprecated` for finer-grained cases), so
+the category and message format are uniform. A test
+(``mixle/tests/deprecation_test.py``) statically enforces that every "Deprecated
+alias" callable actually carries the decorator -- a deprecated name that forgets
+to warn is itself a defect.
+
 Schema-owning packages such as ``mixle-knowledge`` need extra care: removing or
 renaming fields requires migration notes, validation fixtures, and consuming
 manifest checks.
