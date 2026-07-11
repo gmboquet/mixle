@@ -42,6 +42,11 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.cvi` -- P3, conjugate-computation VI: a natural-gradient step
+  (:func:`~mixle.experimental.cvi.cvi_step`) with unit step size reproduces the exact conjugate/EM
+  update for exponential-family leaves (verified on Normal-Normal, Beta-Bernoulli, Gamma-Poisson),
+  streaming is order-independent (additive natural parameters), and a damped step converges to the same
+  posterior -- the principle under the D-track's closed-form/gradient split.
 - :mod:`mixle.experimental.wake_sleep` -- P12, wake-sleep library learning over the model-structure
   grammar: :func:`~mixle.experimental.wake_sleep.wake_sleep` solves a corpus by greedy MDL structure
   search (WAKE), anti-unifies recurring subtrees into a reusable library fragment
