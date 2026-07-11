@@ -1,15 +1,24 @@
-"""Reproducibility receipts -- record a fit so it can be replayed and checked bit-for-bit (N2).
+"""Reproducibility receipts -- record a fit so it can be replayed and its content re-checked (N2).
 
 A fitted model is only trustworthy if someone else can re-derive it. :func:`record_fit` captures the
 minimal recipe -- a fingerprint of the training data, the seed, the estimator, and a fingerprint of the
 fitted parameters -- into a :class:`ReproReceipt`. :func:`verify_reproducible` refits from that recipe
-and confirms the parameters come out identical: replay-based reproducibility, the same discipline the
+and confirms the parameters come out equivalent: replay-based reproducibility, the same discipline the
 certificate applies to *how* a model was estimated, applied to *whether the exact fit can be recovered*.
 
-Fingerprints are canonical: data and parameters are serialized with floats rounded to a fixed precision
-before hashing, so last-bit platform noise doesn't make an otherwise-identical fit look different, while
-any real change to the data or the fitted parameters flips the hash. A model is fingerprinted through its
-own ``to_json`` (its complete state), so this works for any serializable mixle distribution.
+Fingerprints are **tolerance-equivalent, not bit-identical**: data and parameters are serialized with
+floats rounded to ``_NDIGITS`` (10) decimal places before hashing. This is deliberate, and it is what
+makes tampering and environment drift *distinguishable in a report*:
+
+* **environment drift** -- last-bit platform / BLAS noise below the rounding tolerance -- does NOT flip
+  the hash, so an otherwise-identical fit is not falsely flagged as changed;
+* **tampering** -- any real change to the data or fitted parameters above the tolerance -- DOES flip the
+  hash.
+
+So a matching fingerprint certifies *identity of content within tolerance*, not bit-for-bit equality and
+not correctness: two runs whose hashes match produced the same rounded content, which says nothing about
+whether that content is a good model. A model is fingerprinted through its own ``to_json`` (its complete
+state), so this works for any serializable mixle distribution.
 """
 
 from __future__ import annotations
