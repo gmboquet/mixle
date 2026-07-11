@@ -82,7 +82,7 @@ def _log_densities(model: Any, data: Any) -> np.ndarray:
     try:
         enc = model.dist_to_encoder().seq_encode(list(data))
         return np.asarray(model.seq_log_density(enc), dtype=float)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return np.asarray([model.log_density(x) for x in data], dtype=float)
 
 
@@ -164,7 +164,7 @@ def detect_drift(
             from mixle.data.schema import Schema
 
             names = [f.name for f in Schema.for_model(model).fields]
-        except Exception:
+        except Exception:  # noqa: BLE001
             names = None
         ref_cols = _columns(reference, len(names) if names else 1)
         cur_cols = _columns(current, len(names) if names else 1)

@@ -1,5 +1,9 @@
 """Flagship app (G): cross-modal industrial triage, end to end through the reasoner.
 
+Classification: illustrative -- runs on small synthetic / stand-in data. It shows the
+end-to-end workflow shape, not measured results on a real frontier-scale dataset. See
+docs/example-execution-manifest.rst for which examples run on real public data.
+
 One runnable receipt touching every plane the workplan calls for:
 
   1. KNOWLEDGE   -- a typed substrate of policy docs + a resolution trace, secrets redacted on ingest.

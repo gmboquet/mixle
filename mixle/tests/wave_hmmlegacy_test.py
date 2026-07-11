@@ -78,8 +78,9 @@ class LabeledLDATestCase(unittest.TestCase):
         np.testing.assert_array_equal(nbx, [i % 2 for i in range(len(self.data))])
         np.testing.assert_array_equal(nbidx, np.arange(len(self.data)))
 
-        # legacy seq_encode on the distribution delegates to the encoder
-        legacy_enc = self.model.seq_encode(self.data)
+        # legacy seq_encode on the distribution delegates to the encoder (and warns: it is deprecated)
+        with self.assertWarns(DeprecationWarning):
+            legacy_enc = self.model.seq_encode(self.data)
         np.testing.assert_array_equal(legacy_enc[1], idx)
         np.testing.assert_array_equal(legacy_enc[5], nbx)
 
@@ -139,7 +140,8 @@ class LabeledLDATestCase(unittest.TestCase):
     def test_accumulator_factory_alias(self):
         est = make_llda_estimator()
         f1 = est.accumulator_factory()
-        f2 = est.accumulatorFactory()
+        with self.assertWarns(DeprecationWarning):  # camelCase alias is deprecated
+            f2 = est.accumulatorFactory()
         self.assertIsInstance(f1, LabeledLDAEstimatorAccumulatorFactory)
         self.assertIsInstance(f2, LabeledLDAEstimatorAccumulatorFactory)
 
