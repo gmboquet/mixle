@@ -42,6 +42,11 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.active_causal` -- P15, active causal discovery:
+  :func:`~mixle.experimental.active_causal.active_discovery` chooses ``do(.)`` interventions by expected
+  information gain over a posterior on candidate causal structures (chain/reverse/fork), identifying the
+  true structure in far fewer experiments than random or observation-only selection. Exact linear-Gaussian
+  so the ground truth is known and the design can be graded exactly.
 
 Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
 run and reported on distinctly from the stable-package suite.
