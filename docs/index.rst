@@ -201,6 +201,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
 
    release-readiness
    validation
+   reproduction
    support-policy
    security-and-data
    stability-and-missing-data
