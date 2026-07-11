@@ -78,7 +78,7 @@ def _calibration_no_regression(
         obj = calibration_objective(seed=seed)
         champ_cal = obj.scalar(champion, data)
         chal_cal = obj.scalar(challenger, data)
-    except Exception as exc:  # calibration is best-effort: no sampler/cdf -> treat as a pass
+    except Exception as exc:  # calibration is best-effort: no sampler/cdf -> treat as a pass  # noqa: BLE001
         return True, {"calibration": "unavailable", "reason": str(exc)}
     ok = bool(chal_cal <= champ_cal + calib_tol)
     return ok, {"champion_calib": champ_cal, "challenger_calib": chal_cal, "calib_tol": calib_tol, "ok": ok}
@@ -187,7 +187,7 @@ def challenger_beats_champion(
             # in these calls challenger is 'A', champion is 'B' -> challenger wins iff favored == 'A'
             if not (vuong["favored"] == "A" and clarke["favored"] == "A"):
                 favored = "tie"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             evidence["nonnested_error"] = str(exc)
 
     # ELPD 2-SE band (Bayesian models with LOO/WAIC pointwise arrays)

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,6 +34,31 @@ MANIFEST_NAME = "manifest.json"
 WEIGHTS_NAME = "weights.safetensors"
 JSON_MODEL_NAME = "model.json"
 ARRAYS_NAME = "arrays.npz"
+
+
+def _atomic_json_dump(dst: str, obj: Any, **dump_kwargs: Any) -> None:
+    """Serialize ``obj`` as JSON to ``dst`` atomically: write a sibling temp file, fsync, then ``os.replace``.
+
+    A plain ``open(dst, "w")`` truncates ``dst`` *before* serialization runs, so a non-serializable model (or
+    a crash mid-``json.dump``) leaves a truncated, unloadable artifact -- or destroys the previous good one.
+    Writing to a temp file in the same directory and swapping it in with ``os.replace`` (atomic on POSIX and
+    Windows) makes the write all-or-nothing: on any failure the temp file is removed and ``dst`` is untouched.
+    """
+    directory = os.path.dirname(dst) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-artifact-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, **dump_kwargs)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, dst)
+    except BaseException:
+        # Serialization failed or was interrupted: drop the temp file, leave dst as it was.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # --- builder registry: name -> (**config) -> nn.Module ------------------------------------------------------
@@ -131,8 +157,7 @@ def read_manifest(path: str) -> TaskManifest:
 
 
 def _write_manifest(path: str, manifest: TaskManifest) -> None:
-    with open(os.path.join(path, MANIFEST_NAME), "w") as f:
-        json.dump(manifest.to_dict(), f, indent=2, sort_keys=True)
+    _atomic_json_dump(os.path.join(path, MANIFEST_NAME), manifest.to_dict(), indent=2, sort_keys=True)
 
 
 # --- torch payload: builder + config + tied-safe weights ----------------------------------------------------
@@ -193,8 +218,7 @@ def save_json(
 
     ensure_pysp_serialization_registry()
     os.makedirs(path, exist_ok=True)
-    with open(os.path.join(path, JSON_MODEL_NAME), "w") as f:
-        json.dump(to_serializable(model), f)
+    _atomic_json_dump(os.path.join(path, JSON_MODEL_NAME), to_serializable(model))
     _write_manifest(path, TaskManifest(payload="json", task=task, io=io or {}, meta=meta or {}))
     return path
 

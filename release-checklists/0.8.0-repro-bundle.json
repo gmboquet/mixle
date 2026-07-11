@@ -1,0 +1,57 @@
+{
+  "_comment": "Worklist E14.5 reproducibility bundle. Each entry re-derives a shipped report. Run the command from a clean clone; the sha256 pins the exact script. Regenerate with `python scripts/build_repro_bundle.py --write`.",
+  "code_license": "MIT (see LICENSE, NOTICE)",
+  "acceptance": "E14/E4 external reproduction succeeds from this bundle.",
+  "entries": [
+    {
+      "id": "flagship-banking77-cascade",
+      "kind": "flagship",
+      "command": "python examples/real_receipt_banking77.py",
+      "script": "examples/real_receipt_banking77.py",
+      "needs_network": true,
+      "dataset": "Banking77 (PolyAI)",
+      "data_license": "CONFIRM-AT-PUBLISH: verify Banking77 redistribution terms before bundling data",
+      "sha256": "459ea6f0bb8ddb44c3a9536ae7a0a3712cc4417e15f259629fa1f84857e6fefa"
+    },
+    {
+      "id": "gallery-univariate",
+      "kind": "self-contained",
+      "command": "python examples/gallery_univariate_example.py",
+      "script": "examples/gallery_univariate_example.py",
+      "needs_network": false,
+      "dataset": "none (samples from a known model)",
+      "data_license": "n/a (synthetic)",
+      "sha256": "91720d75a50dc8166c7a1c84a5451ead45d2acae2dfe2d8f08cff198993da320"
+    },
+    {
+      "id": "gallery-structured",
+      "kind": "self-contained",
+      "command": "python examples/gallery_structured_example.py",
+      "script": "examples/gallery_structured_example.py",
+      "needs_network": false,
+      "dataset": "none (samples from a known model)",
+      "data_license": "n/a (synthetic)",
+      "sha256": "e45d3c177dcb3feae6d7055f1f4b9ff0be78fd935fbb492c7eb0fa55bb323d98"
+    },
+    {
+      "id": "production-provenance",
+      "kind": "workflow",
+      "command": "python examples/production_example.py",
+      "script": "examples/production_example.py",
+      "needs_network": false,
+      "dataset": "none (synthetic)",
+      "data_license": "n/a (synthetic)",
+      "sha256": "476b549b6d0554678a412fab542dab6ac6c34e3df325a756f1c80e435200fd08"
+    },
+    {
+      "id": "scaling-backend",
+      "kind": "backend",
+      "command": "python examples/scaling_example.py",
+      "script": "examples/scaling_example.py",
+      "needs_network": false,
+      "dataset": "none (synthetic)",
+      "data_license": "n/a (synthetic)",
+      "sha256": "188e3017391c98e57e921a598764c2cba5cb850618b990d71dcc585a38b0081e"
+    }
+  ]
+}

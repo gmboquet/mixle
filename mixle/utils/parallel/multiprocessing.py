@@ -111,7 +111,7 @@ def _worker_main(conn) -> None:
             else:
                 conn.send(("err", "unknown command %r" % (cmd,)))
 
-        except BaseException as e:  # surface worker failures on the driver
+        except BaseException as e:  # surface worker failures on the driver  # noqa: BLE001
             import traceback
 
             conn.send(("err", "%s\n%s" % (e, traceback.format_exc())))
@@ -280,5 +280,5 @@ class MPEncodedData(EncodedDataHandle):
         try:
             if self._conns:
                 self.close()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
