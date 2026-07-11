@@ -31,8 +31,6 @@ from mixle.experimental.growth_operators import (  # noqa: E402
 )
 from mixle.models.transformer import Block, build_causal_lm
 
-pytestmark = pytest.mark.fast
-
 
 class Net2NetWideningExactnessTest(unittest.TestCase):
     """Acceptance criterion: the real Net2Net duplication rule preserves the composed function exactly,

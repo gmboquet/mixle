@@ -32,8 +32,6 @@ from mixle.stats import (
 )
 from mixle.utils.serialization import from_json, to_json
 
-pytestmark = pytest.mark.fast
-
 
 def _unconditional_seqs(dim=2, n=30, seed=0):
     init = HiddenMarkovModelDistribution(

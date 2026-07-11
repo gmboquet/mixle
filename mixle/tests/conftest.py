@@ -91,7 +91,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "ppl_inference_test.py": ("ppl", "stochastic", "slow"),
     "ppl_new_distributions_test.py": ("ppl", "stochastic"),
     "ppl_predictive_test.py": ("ppl", "stochastic"),
-    "ppl_survival_test.py": ("ppl", "stochastic"),
+    "ppl_survival_test.py": ("ppl", "stochastic", "slow"),  # +slow 2026-07-11: 16s censored-Weibull recovery
     "ppl_summarize_test.py": ("ppl", "stochastic"),
     "ppl_leaf_families_test.py": ("ppl", "stochastic", "slow"),
     "ppl_vector_params_test.py": ("ppl", "stochastic", "slow"),
@@ -159,7 +159,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "lookback_lag0_test.py": ("hmm",),
     "marginal_seek_test.py": ("enumeration",),
     "model_helpers_test.py": ("latent", "graph", "pomdp", "knowledge_graph", "causal", "grammar"),
-    "mcmc_test.py": ("stochastic",),
+    "mcmc_test.py": ("stochastic", "slow"),  # +slow 2026-07-11: 9s HMC-vs-MH posterior agreement
     "responsibility_attention_test.py": ("distribution", "latent", "stochastic"),
     "chained_attention_test.py": ("distribution", "latent", "stochastic", "slow"),
     "variational_multihop_attention_test.py": ("distribution", "latent", "stochastic", "slow"),
@@ -205,8 +205,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "parallel_test.py": ("parallel", "integration", "slow"),
     "placement_test.py": ("parallel", "planner"),
     "model_decomposition_test.py": ("parallel", "planner"),
-    "model_parallel_test.py": ("parallel", "planner"),
-    "ppl_separation_test.py": ("ppl",),
+    # +slow 2026-07-11: two MPI data+model-parallel composition tests at ~42-44s each were in the fast gate.
+    "model_parallel_test.py": ("parallel", "planner", "slow"),
+    "ppl_separation_test.py": ("ppl", "slow"),  # +slow 2026-07-11: 14s import-graph walk
     "random_graph_models_test.py": ("graph",),
     "quantized_hmm_test.py": ("hmm", "integration", "slow"),
     "quantized_triangular_hmm_test.py": ("hmm", "enumeration", "integration", "slow"),
@@ -345,6 +346,71 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # P9 e-processes (mixle/experimental/e_process.py): the anytime type-I control receipt runs several
     # hundred vectorized null/drift replications with continuous peeking -- pure numpy, stochastic, no torch.
     "e_process_test.py": ("experimental", "stochastic"),
+    # Roadmap acceptance-receipt files landed untriaged (profiled 2026-07-11 via `pytest -m fast
+    # --durations=60`: the fast gate had regressed to 36m38s wall; single calls up to 870s and one
+    # 1027s setUpClass). Each trains real models / runs real chaos-recovery or measured-speedup
+    # receipts -- legitimately heavy, so they move to the full gate rather than being shrunk.
+    "balance_test.py": ("parallel", "integration", "slow"),
+    "checkpoint_family_ladder_test.py": ("torch", "integration", "slow"),
+    "condition_test.py": ("stochastic", "slow"),
+    "conditional_jit_controller_test.py": ("torch", "integration", "slow"),
+    "deploy_family_test.py": ("integration", "slow"),
+    "deprecation_test.py": ("integration", "slow"),
+    "doe_stability2_test.py": ("doe", "stochastic", "slow"),
+    "energy_test.py": ("torch", "stochastic", "slow"),
+    "eval_harness_test.py": ("torch", "integration", "slow"),
+    "heterogeneous_executor_test.py": ("parallel", "integration", "slow"),
+    "hvis_goals_test.py": ("hvis", "integration", "slow"),
+    "inverse_test.py": ("stochastic", "slow"),
+    "kv_cache_quant_test.py": ("torch", "integration", "slow"),
+    "language_model_dense_fit_test.py": ("torch", "integration", "slow"),
+    "memory_efficient_training_test.py": ("torch", "integration", "slow"),
+    "mixture_density_test.py": ("torch", "integration", "slow"),
+    "mpi_route_equivalence_test.py": ("parallel", "integration", "slow"),
+    "mup_test.py": ("torch", "integration", "slow"),
+    "neural_density_test.py": ("torch", "integration", "slow"),
+    "ppl_density_test.py": ("ppl", "stochastic", "slow"),
+    "projection_leaf_test.py": ("torch", "integration", "slow"),
+    "provenance_replay_test.py": ("serialization", "integration", "slow"),
+    "qat_test.py": ("torch", "integration", "slow"),
+    "repro_bundle_test.py": ("integration", "slow"),
+    "resilient_em_test.py": ("parallel", "integration", "slow"),
+    "route_explainability_test.py": ("stochastic", "slow"),
+    "rvine_copula_test.py": ("distribution", "stochastic", "slow"),
+    "scaled_embedding_test.py": ("torch", "slow"),
+    "scaling_laws_test.py": ("doe", "stochastic", "slow"),
+    "scenario_test.py": ("stochastic", "slow"),
+    "sdc_audit_test.py": ("parallel", "integration", "slow"),
+    "self_distillation_test.py": ("torch", "integration", "slow"),
+    "sparsity_2_4_test.py": ("torch", "integration", "slow"),
+    "structure_edit_schedule_test.py": ("integration", "slow"),
+    "task_solve_test.py": ("integration", "slow"),
+    "torch_parity_test.py": ("torch", "integration", "slow"),
+    # Second retriage pass (same 2026-07-11 profiling, after the first pass cut the gate 36m38s ->
+    # 5m34s): the remaining >=5s-per-call files, plus the heavy files that had been self-marked
+    # `fast` at module level (now stripped -- see the policy note in pytest_collection_modifyitems).
+    "automatic_copula_structure_test.py": ("automatic", "distribution", "slow"),
+    "automatic_vine_core_test.py": ("automatic", "distribution", "slow"),
+    "compress_test.py": ("integration", "slow"),
+    "distill_methods_test.py": ("torch", "integration", "slow"),
+    "doe_amplify_test.py": ("doe", "stochastic", "slow"),
+    "duplicate_body_scan_test.py": ("integration", "slow"),
+    "frontier_family_showcase_smoke_test.py": ("torch", "integration", "slow"),
+    "geoscience_inversion_report_test.py": ("integration", "slow"),
+    "hmm_steady_state_test.py": ("hmm", "slow"),
+    "moe_test.py": ("torch", "integration", "slow"),
+    "multi_field_test.py": ("integration", "slow"),
+    "neural_composition_grid_test.py": ("torch", "integration", "slow"),
+    "ppl_model_comparison_test.py": ("ppl", "stochastic", "slow"),
+    "ppl_regression_test.py": ("ppl", "stochastic", "slow"),
+    "product_energy_net_test.py": ("torch", "slow"),
+    "quantization_test.py": ("integration", "slow"),
+    "random_forest_leaf_test.py": ("integration", "slow"),
+    "ranking_lazy_enumerator_test.py": ("enumeration", "slow"),
+    "real_receipt_banking77_smoke_test.py": ("integration", "slow"),
+    "reproduce_receipt_test.py": ("integration", "slow"),
+    "sorted_profile_quantizer_test.py": ("integration", "slow"),
+    "task_quantize_test.py": ("integration", "slow"),
 }
 
 
@@ -362,6 +428,24 @@ NODEID_MARKERS: tuple[tuple[str, MarkerTuple], ...] = (
     # proxy) to get an honest, independent perplexity number -- multiple real training runs are the point,
     # so it's slow by construction; the rest of sigma_weighted_projection_test.py stays in the fast gate.
     ("DataFreeSigmaBeatsPlainSvdTest", ("slow",)),
+    # grad_leaf_test.py's minibatch-vs-full-batch optimum comparison runs two real fits (~28s); the rest
+    # of the file is subsecond unit coverage of the torch bridge and stays in the fast gate. (File-scoped
+    # token: a bare "MinibatchTest" would also catch NeuralCategoricalMinibatchTest by substring.)
+    ("grad_leaf_test.py::MinibatchTest", ("slow",)),
+    # data_layer_test.py's cold-import timing checks re-launch a fresh interpreter (~8s each); the rest
+    # of the file is subsecond and stays in the fast gate.
+    ("data_layer_test.py::ColdImportTest", ("slow",)),
+)
+
+
+# Classes whose setUpClass trains for minutes: under xdist's default `load` distribution their tests
+# scatter across workers and EACH worker re-runs the whole setup (unittest caches setUpClass per
+# process, not per suite). Pinning each class to one xdist group -- honored by `--dist loadgroup` in
+# addopts -- makes the expensive setup run once per suite instead of once per worker; ungrouped tests
+# keep the default load-balancing behavior.
+XDIST_GROUPS: tuple[tuple[str, str], ...] = (
+    ("qat_test.py::QATBeatsPTQTest", "qat-beats-ptq-setup"),  # ~17 min QAT-vs-PTQ training setup
+    ("deploy_family_test.py::DeployFamilyEndToEndTest", "deploy-family-setup"),  # ~95 s family build
 )
 
 
@@ -388,7 +472,18 @@ def pytest_collection_modifyitems(items) -> None:
             if token in item.nodeid:
                 _add_markers(item, marker_names, assigned)
 
-        if not {"slow", "optional", "benchmark"} & assigned:
+        for token, group in XDIST_GROUPS:
+            if token in item.nodeid:
+                item.add_marker(pytest.mark.xdist_group(name=group))
+
+        # Respect marks the test carries on its own (module pytestmark / decorators): a file that
+        # declares itself slow/optional must not be auto-promoted into the fast gate. The converse
+        # also holds as policy: files do NOT self-mark `fast` -- this registry is the single triage
+        # authority (a self-applied fast mark would defeat retriage: the item ends up with BOTH
+        # marks and `-m fast` still selects it, which is exactly how 20 heavy roadmap files kept a
+        # regressed 36-minute fast gate pinned in place).
+        existing = {mark.name for mark in item.iter_markers()}
+        if not {"slow", "optional", "benchmark"} & (assigned | existing):
             _add_markers(item, ("fast",), assigned)
 
 

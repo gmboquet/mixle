@@ -11,8 +11,6 @@ import pytest
 
 from mixle.inference.structure import _clone
 
-pytestmark = pytest.mark.fast
-
 
 def test_clone_returns_an_independent_object_not_the_same_template():
     import mixle.stats as st

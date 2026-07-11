@@ -130,7 +130,6 @@ def _bo_tune_log_lr(
 # --- 3. hand-checkable unit tests of the abc-parametrization formulas themselves -----------------
 
 
-@pytest.mark.fast
 def test_init_std_multiplier_matches_published_mup_formula():
     # input role: Theta(1), never rescaled.
     assert init_std_multiplier("input", width_mult=1.0) == pytest.approx(1.0)
@@ -145,7 +144,6 @@ def test_init_std_multiplier_matches_published_mup_formula():
     assert init_std_multiplier("output", width_mult=16.0) == pytest.approx(1.0 / 16.0)
 
 
-@pytest.mark.fast
 def test_lr_multiplier_matches_published_mup_formula():
     # input role: constant lr, never rescaled.
     assert lr_multiplier("input", width_mult=8.0) == pytest.approx(1.0)
@@ -155,13 +153,11 @@ def test_lr_multiplier_matches_published_mup_formula():
     assert lr_multiplier("output", width_mult=8.0) == pytest.approx(0.125)
 
 
-@pytest.mark.fast
 def test_output_forward_multiplier_matches_hidden_and_output_lr_scaling():
     assert output_forward_multiplier(width_mult=1.0) == pytest.approx(1.0)
     assert output_forward_multiplier(width_mult=4.0) == pytest.approx(0.25)
 
 
-@pytest.mark.fast
 def test_transfer_lr_and_transfer_init_std_apply_the_role_multiplier():
     # width doubles -> hidden lr predicted to halve; base_width==target_width -> identity.
     assert transfer_lr(1e-3, base_width=32, target_width=64) == pytest.approx(5e-4)
@@ -169,7 +165,6 @@ def test_transfer_lr_and_transfer_init_std_apply_the_role_multiplier():
     assert transfer_lr(1e-3, base_width=32, target_width=32, role="input") == pytest.approx(1e-3)
 
 
-@pytest.mark.fast
 def test_unknown_role_raises():
     with pytest.raises(ValueError):
         init_std_multiplier("bogus", width_mult=2.0)  # type: ignore[arg-type]
@@ -180,7 +175,6 @@ def test_unknown_role_raises():
 # --- classification / param-group unit tests (fast, no training) ---------------------------------
 
 
-@pytest.mark.fast
 def test_classify_causal_lm_params_assigns_expected_roles():
     model = build_causal_lm(vocab=VOCAB, d_model=16, n_layer=2, n_head=2, block=BLOCK)
     roles = classify_causal_lm_params(model)
@@ -200,7 +194,6 @@ def test_classify_causal_lm_params_assigns_expected_roles():
     assert model.head.weight is model.tok.weight
 
 
-@pytest.mark.fast
 def test_mup_param_groups_scale_lr_by_role():
     model = build_causal_lm(vocab=VOCAB, d_model=64, n_layer=2, n_head=2, block=BLOCK)
     groups = mup_param_groups(model, base_width=32, lr=1e-2)  # width_mult = 64/32 = 2
@@ -213,7 +206,6 @@ def test_mup_param_groups_scale_lr_by_role():
     assert len(grouped) == len(list(model.parameters()))
 
 
-@pytest.mark.fast
 def test_apply_mup_init_rescales_hidden_weight_std_with_width():
     torch.manual_seed(0)
     small = build_causal_lm(vocab=VOCAB, d_model=32, n_layer=2, n_head=2, block=BLOCK)

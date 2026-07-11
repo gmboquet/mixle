@@ -39,9 +39,6 @@ from mixle.models.sparsity_2_4 import (  # noqa: E402
 )
 from mixle.models.transformer import build_causal_lm  # noqa: E402
 
-pytestmark = pytest.mark.fast
-
-
 # --------------------------------------------------------------------------------------------------------
 # 1. mask ramp correctness
 # --------------------------------------------------------------------------------------------------------

@@ -25,8 +25,6 @@ from mixle.task.checkpoint_family_ladder import RungSpec, build_checkpoint_famil
 from mixle.task.deploy_family import deploy_family  # noqa: E402
 from mixle.task.economics import CostModel  # noqa: E402
 
-pytestmark = pytest.mark.fast
-
 
 class FrontierFamilyShowcaseSmokeTest(unittest.TestCase):
     def test_lifecycle_receipt_at_reduced_scale(self):

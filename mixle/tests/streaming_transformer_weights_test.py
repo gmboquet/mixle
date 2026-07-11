@@ -15,8 +15,6 @@ torch = pytest.importorskip("torch")
 from mixle.models.streaming_transformer_leaf import StreamingTransformerAccumulatorFactory
 from mixle.models.transformer import build_causal_lm
 
-pytestmark = pytest.mark.fast
-
 
 def _batch(V=12, block=8, n=6, seed=0):
     rng = np.random.RandomState(seed)

@@ -5,8 +5,6 @@ import pytest
 import mixle.experimental as experimental
 from mixle.experimental.graduation import REGISTRY, ExperimentalMechanism
 
-pytestmark = pytest.mark.fast
-
 
 def test_experimental_package_imports():
     assert experimental.__doc__

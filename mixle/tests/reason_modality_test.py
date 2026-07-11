@@ -6,13 +6,10 @@ reported as a measured accuracy gap, not assumed.
 """
 
 import numpy as np
-import pytest
 
 from mixle.inference import optimize
 from mixle.reason.modality import ModalityGraph, ModalityView
 from mixle.stats import CategoricalEstimator, GaussianDistribution, GaussianEstimator
-
-pytestmark = pytest.mark.fast
 
 N_CATS = 16
 _CONFUSE_P = 0.15  # a noisy report names a neighboring category instead of the true one

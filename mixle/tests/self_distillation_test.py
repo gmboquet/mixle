@@ -29,9 +29,6 @@ from mixle.models.self_distillation import (
 )
 from mixle.models.transformer import build_causal_lm
 
-pytestmark = pytest.mark.fast
-
-
 # --------------------------------------------------------------------------------------------------------
 # shared synthetic-data helper: a small Markov-ish token stream, so there is real structure to learn
 # --------------------------------------------------------------------------------------------------------

@@ -27,8 +27,6 @@ from mixle.models.coarsening import (
 from mixle.models.moment_propagation import GaussianLaw
 from mixle.models.transformer import build_causal_lm
 
-pytestmark = pytest.mark.fast
-
 
 def _random_law(rng: np.random.Generator, d: int, scale: float = 0.5) -> GaussianLaw:
     mu = rng.normal(size=d) * 0.1
