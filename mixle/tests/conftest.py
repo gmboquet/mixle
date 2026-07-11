@@ -306,6 +306,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # GP-surrogate active-learning + multi-fidelity placement (roadmap M4): each test fits several torch
     # GPs across a sequential design loop, mirroring doe_active_test.py / doe_multifidelity_test.py.
     "task_emulate_test.py": ("doe", "torch", "slow"),
+    # P11 certified bounds (mixle/experimental/certified_bounds.py): interval-propagation soundness +
+    # monotonicity certificates validated against dense grids -- pure numpy, no torch.
+    "certified_bounds_test.py": ("experimental",),
     # P8 closed-loop equation discovery (mixle/experimental/equation_discovery.py): SINDy-style operator
     # recovery + active-vs-random discovery rate over ~60 seeds -- pure numpy, no torch.
     "equation_discovery_test.py": ("experimental",),
