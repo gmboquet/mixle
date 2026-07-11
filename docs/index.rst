@@ -204,6 +204,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
    claim-evidence-ledger
    validation
    support-policy
+   backend-support
    security-and-data
    stability-and-missing-data
    family-release
