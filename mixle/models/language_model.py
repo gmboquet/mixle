@@ -133,7 +133,14 @@ class LM:
         pp_size: int = 1,
         cp_size: int = 1,
     ) -> LM:
-        """Pretrain (or continue) on a token-id array via the streaming estimator; the corpus is never buffered.
+        """Small-scale reference pretraining (or continuation) on a token-id array via the streaming
+        estimator; the corpus is never buffered.
+
+        This is a streaming pretraining path: it scores one next-token target per ``block``-length window --
+        the right shape for an unbounded stream, but only a fraction (~``1/block``) of the token supervision
+        that packed dense teacher forcing would extract from the same tokens. It is therefore a reference /
+        continuation path for small-scale runs, not a frontier pretraining engine; for dense per-position
+        supervision on a bounded corpus use :meth:`fit_pairs`.
 
         ``tp_size``/``pp_size``/``cp_size`` (only meaningful with ``distributed=True``) are the F1 N-D
         parallelism dimensions -- tensor/pipeline/context parallel, ORTHOGONAL to the data-parallel axis
