@@ -201,6 +201,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
    :maxdepth: 2
 
    release-readiness
+   claim-evidence-ledger
    validation
    support-policy
    security-and-data
