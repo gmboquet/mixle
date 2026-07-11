@@ -8,6 +8,10 @@ This folder is the tracked, public record of what has to be true before a `mixle
 - **`lessons-learned.md`** — a cumulative, cross-release record of what went wrong (or nearly did),
   where each lesson is tied to the checklist gate that now catches it. This is what keeps the
   checklist from being a static wish-list: it grows from real failures.
+- **`<version>-decisions.md`** (`0.8.0-decisions.md`, …) — the append-only release decision log for a
+  version: every scope change, waiver, API break, benchmark-methodology change, and claim change, with
+  date, alternatives, evidence, owner, reviewer, expiration, and worklist ID. No release decision may
+  live only in a PR thread or a local note.
 
 This is a checklist of **gates**, not a task list. An unchecked item means the release is not
 ready, full stop — there is no "ship now, verify later" for anything marked here.

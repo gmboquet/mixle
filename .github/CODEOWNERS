@@ -1,0 +1,23 @@
+# Code ownership for mixle (worklist G0.4).
+#
+# mixle is a single-maintainer project: every stable namespace, release gate, and packaging/doc surface is
+# owned by the maintainer. There is no qualified second reviewer, so this file assigns ownership to the
+# maintainer everywhere and the review boundary is governed by the documented single-maintainer waiver in
+# release-checklists/0.8.0-ownership.md (the compensating controls -- heavy automated gates, a reduced
+# stable-claim surface, and external reproduction -- are described there).
+
+*                                   @gmboquet
+
+# Named subsystems (all the same owner today; listed so the map is explicit and a future co-owner can be
+# added per-area without changing the default).
+/mixle/stats/                       @gmboquet
+/mixle/inference/                   @gmboquet
+/mixle/ppl/                         @gmboquet
+/mixle/enumeration/                 @gmboquet
+/mixle/data/                        @gmboquet
+/mixle/models/                      @gmboquet
+/mixle/task/                        @gmboquet
+/mixle/utils/parallel/              @gmboquet
+/pyproject.toml                     @gmboquet
+/.github/                           @gmboquet
+/docs/                              @gmboquet

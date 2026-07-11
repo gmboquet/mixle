@@ -1,5 +1,11 @@
 """muP (Maximal Update Parametrization) -- width-independent lr/init transfer for :mod:`mixle.models.transformer`.
 
+.. warning::
+
+   **Experimental frontier-training prototype.** The parametrization math is exact and tested at small
+   width, but this is not a validated production scaling recipe. Verify the coordinate check at your target
+   width before relying on transfer; treat it as a research prototype, not a supported training API.
+
 **The idea.** In the standard parametrization, the learning rate and init scale that work best for a
 transformer depend on its width (``d_model``): as a model gets wider, activations/gradients grow (or
 shrink) with width unless the parametrization compensates, so a wider model needs a *different* tuned

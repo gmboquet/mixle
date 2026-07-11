@@ -29,7 +29,7 @@ def _fit(arr: np.ndarray) -> tuple[float, float] | None:
         return None
     try:
         a, b, _loc, _scale = stats.beta.fit(arr, floc=0.0, fscale=1.0)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not (math.isfinite(a) and math.isfinite(b) and a > 0.0 and b > 0.0):
         return None

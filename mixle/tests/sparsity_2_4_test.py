@@ -307,7 +307,7 @@ class InferenceSpeedupEvidenceTest(unittest.TestCase):
             torch.sparse.to_sparse_semi_structured(w24)
             real_kernel_available = True
             failure_reason = None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             real_kernel_available = False
             failure_reason = repr(e)
         print(
