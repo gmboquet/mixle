@@ -99,6 +99,7 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         lr: float = 5e-3,
         device: Any = None,
         batch_size: int | None = None,
+        max_optimizer_steps: int | None = None,
         precision: str = "fp32",
         name: str | None = None,
         loss: Any = None,
@@ -109,10 +110,16 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         self.lr = float(lr)
         self.device = device  # None => active engine's device, else CUDA if available, else CPU (_resolve_device)
         self.batch_size = None if batch_size is None else int(batch_size)
+        if self.batch_size is not None and self.batch_size <= 0:
+            raise ValueError("batch_size must be positive when supplied.")
+        self.max_optimizer_steps = None if max_optimizer_steps is None else int(max_optimizer_steps)
+        if self.max_optimizer_steps is not None and self.max_optimizer_steps <= 0:
+            raise ValueError("max_optimizer_steps must be positive when supplied.")
         self.precision = precision
         self.name = name
         self.loss = loss
         self.optimizer = optimizer
+        self.outer_objective_compatible = loss is None
 
     def __str__(self) -> str:
         return f"{type(self).__name__}({type(self.module).__name__})"
@@ -151,6 +158,7 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
             lr=self.lr,
             device=self.device,
             batch_size=self.batch_size,
+            max_optimizer_steps=self.max_optimizer_steps,
             precision=self.precision,
             name=self.name,
             loss=self.loss,
@@ -296,6 +304,7 @@ class GradEstimator(ParameterEstimator):
         lr: float = 5e-3,
         device: Any = None,
         batch_size: int | None = None,
+        max_optimizer_steps: int | None = None,
         precision: str = "fp32",
         name: str | None = None,
         loss: Any = None,
@@ -306,6 +315,11 @@ class GradEstimator(ParameterEstimator):
         self.lr = float(lr)
         self.device = device
         self.batch_size = None if batch_size is None else int(batch_size)
+        if self.batch_size is not None and self.batch_size <= 0:
+            raise ValueError("batch_size must be positive when supplied.")
+        self.max_optimizer_steps = None if max_optimizer_steps is None else int(max_optimizer_steps)
+        if self.max_optimizer_steps is not None and self.max_optimizer_steps <= 0:
+            raise ValueError("max_optimizer_steps must be positive when supplied.")
         self.precision = precision
         self.name = name
         self.loss = loss
@@ -318,6 +332,7 @@ class GradEstimator(ParameterEstimator):
             lr=self.lr,
             device=self.device,
             batch_size=self.batch_size,
+            max_optimizer_steps=self.max_optimizer_steps,
             precision=self.precision,
             name=self.name,
             loss=self.loss,
@@ -345,7 +360,10 @@ class GradEstimator(ParameterEstimator):
         opt = self.optimizer(params) if self.optimizer is not None else torch.optim.Adam(params, lr=self.lr)
         autocast_dev = "cuda" if str(dev).startswith("cuda") else "cpu"
         use_bf16 = self.precision == "bf16"
-        for _ in range(self.m_steps):  # m_steps passes over the data (full-batch when batch_size is None)
+        optimizer_steps = 0
+        epochs_completed = 0
+        stop = False
+        for _ in range(self.m_steps):  # m_steps is epochs; max_optimizer_steps can make update budgets comparable
             perm = torch.randperm(n) if bs < n else torch.arange(n)
             for k in range(0, n, bs):
                 idx = perm[k : k + bs]
@@ -358,10 +376,34 @@ class GradEstimator(ParameterEstimator):
                     else:
                         # tuple default: log_density(*fields) -- a single field unpacks to log_density(x),
                         # identical to before; a conditional bare module's log_density(x, y, ...) just works.
-                        loss = -(wb * self.module.log_density(*xb)).sum()  # weighted negative log-likelihood
+                        loss = -(wb * self.module.log_density(*xb)).sum()
+                        # ``w`` is normalized over the full M-step data. A uniform minibatch's raw
+                        # weighted sum is smaller by E[batch_size / n]; rescale it so every optimizer
+                        # step is an unbiased estimate of the same full responsibility-weighted Q
+                        # objective. This stabilizes gradient scale across batch sizes without claiming
+                        # identical Adam trajectories (their noise and moment estimates still differ).
+                        if len(idx) < n:
+                            loss = loss * (float(n) / float(len(idx)))
                 loss.backward()
                 opt.step()
-        return self._leaf()
+                optimizer_steps += 1
+                if self.max_optimizer_steps is not None and optimizer_steps >= self.max_optimizer_steps:
+                    stop = True
+                    break
+            epochs_completed += 1
+            if stop:
+                break
+        leaf = self._leaf()
+        leaf.fit_receipt = {
+            "nobs": int(n),
+            "batch_size": int(bs),
+            "epochs_requested": int(self.m_steps),
+            "epochs_completed": int(epochs_completed),
+            "optimizer_steps": int(optimizer_steps),
+            "max_optimizer_steps": self.max_optimizer_steps,
+            "gradient_estimator": "unbiased_full_weighted_objective" if self.loss is None else "custom_loss",
+        }
+        return leaf
 
 
 def _register_serializable() -> None:

@@ -263,7 +263,7 @@ def _ll_sum_fn(engine: Any | None):
     return lambda enc, model: _engine_seq_log_density_sum(enc, model, engine)
 
 
-def _em_step_fn(engine: Any | None, strategy: Any | None = None):
+def _em_step_fn(engine: Any | None, strategy: Any | None = None, objective: Any | None = None):
     """Return the per-iteration (enc, estimator, model) -> model update.
 
     With ``strategy`` set, the update is delegated to an EM strategy object
@@ -277,8 +277,8 @@ def _em_step_fn(engine: Any | None, strategy: Any | None = None):
         if isinstance(strategy, EMStrategy):
 
             def step(enc, estimator, model):
-                result = strategy.step(enc, estimator, model, engine=engine)
-                return getattr(result, "model", result)
+                result = strategy.step(enc, estimator, model, engine=engine, objective=objective)
+                return result
 
             return step
         if callable(strategy):
@@ -415,13 +415,19 @@ def _em_loop(
             on_step,
         )
 
+    from mixle.inference.transaction import MutableStateSnapshot
+
     _, old_ll = ll_fn(enc_data, model)
     has_v = enc_vdata is not None
     best_vll = ll_fn(enc_vdata, model)[1] if has_v else old_ll
     best_model = model
+    best_state = MutableStateSnapshot.capture(best_model)
 
     for i in range(int(max_its)):
-        nxt = step_fn(enc_data, estimator, model)
+        transaction = MutableStateSnapshot.capture(model, estimator)
+        proposal = step_fn(enc_data, estimator, model)
+        nxt = getattr(proposal, "model", proposal)
+        strategy_accepted = bool(getattr(proposal, "accepted", True))
         _, ll = ll_fn(enc_data, nxt)
         vll = ll_fn(enc_vdata, nxt)[1] if has_v else ll
         # ll and old_ll can both be -inf (e.g. two successive collapsed/singular-covariance steps);
@@ -436,28 +442,37 @@ def _em_loop(
         # poison the convergence reference ``old_ll`` (which would stall every later
         # iteration on NaN comparisons). For finite ``ll`` this is the historical guard.
         ll_finite = bool(np.isfinite(ll))
-        if ll_finite and ((dll >= 0) or (delta is None) or (not monotone)):
+        accepted = strategy_accepted and ll_finite and ((dll >= -1.0e-12) or (not monotone))
+        if accepted:
             model = nxt
+        else:
+            transaction.restore()
 
         # Best-model + reference update happen BEFORE the convergence break so the accepted step on the
         # converging iteration is recorded (otherwise an immediate convergence returns the stale initial
         # model). best-model selection is by validation score; record nxt (the model that achieved vll),
         # not model (unchanged on a rejected step) -- and never select a non-finite step.
-        if ll_finite:
+        if accepted:
             old_ll = ll
             if track_best and best_vll < vll:
                 best_vll = vll
                 best_model = nxt
+                best_state = MutableStateSnapshot.capture(best_model)
 
-        converged = (delta is not None) and (dll < delta)
+        converged = accepted and (delta is not None) and (0.0 <= dll < delta)
         if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
             _write_em_iter(out, i + 1, ll, dll, vll, has_v, obj_label)
         if on_step is not None:
-            on_step(EMStep(i + 1, model, float(ll), float(dll)))
-        if converged:
+            reported_ll = ll if accepted else old_ll
+            reported_delta = dll if accepted else 0.0
+            on_step(EMStep(i + 1, model, float(reported_ll), float(reported_delta)))
+        if converged or (not accepted):
             break
 
-    return (best_model if track_best else model), best_vll
+    if track_best:
+        best_state.restore()
+        return best_model, best_vll
+    return model, best_vll
 
 
 def _fused_em_loop(
@@ -481,29 +496,44 @@ def _fused_em_loop(
     data log-likelihood of the *input* model, computed for free as the posterior normalizer during
     the E-step. The convergence test therefore lags the standard loop by one iteration (it compares
     the likelihood of successive accepted models), which converges to the same fixed point; the
-    returned model is still the best-likelihood model seen (so quality is preserved even though
-    intermediate steps are accepted unconditionally). When ``ll_of_model`` is ``None`` the model
-    cannot report it and we fall back to scoring ``model`` directly for that iteration.
+    returned model is still the best-likelihood model seen. Because the fused likelihood belongs
+    to the input model, a decrease is detected one iteration late; the candidate is then rejected
+    and the last accepted model is retained. When ``ll_of_model`` is ``None`` the model cannot
+    report it and we fall back to scoring ``model`` directly for that iteration.
     """
     has_v = enc_vdata is not None
     best_model = model
     best_score = ll_fn(enc_vdata, model)[1] if has_v else None
     prev_ll = None
+    accepted_model = model
     nxt = None
     converged = False
+    exhausted = True
 
     for i in range(int(max_its)):
         nxt, ll_model = fused_step_fn(enc_data, estimator, model)
         if ll_model is None:
             _, ll_model = ll_fn(enc_data, model)
-        score = ll_fn(enc_vdata, model)[1] if has_v else ll_model
+        dll = (ll_model - prev_ll) if prev_ll is not None else float("inf")
+        if prev_ll is None and not np.isfinite(ll_model):
+            # Some categorical/association initializers have zero support and score -inf before
+            # their first M-step fills the observed categories. The standard loop can escape that
+            # state because it scores the candidate; fused scoring lags by one iteration, so allow
+            # exactly this pre-finite repair step and judge the candidate on the next pass.
+            model = nxt
+            continue
+        accepted = bool(np.isfinite(ll_model)) and (prev_ll is None or dll >= -1.0e-12)
+        if not accepted:
+            exhausted = False
+            break
 
+        accepted_model = model
+        score = ll_fn(enc_vdata, model)[1] if has_v else ll_model
         if best_score is None or score >= best_score:
             best_score = score
             best_model = model
 
-        dll = (ll_model - prev_ll) if prev_ll is not None else float("inf")
-        converged = (delta is not None) and (prev_ll is not None) and (dll < delta)
+        converged = (delta is not None) and (prev_ll is not None) and (0.0 <= dll < delta)
         if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
             _write_em_iter(out, i + 1, ll_model, dll, score, has_v, obj_label)
         if on_step is not None:
@@ -515,22 +545,23 @@ def _fused_em_loop(
             # explicitly recommends) doesn't persist a mismatched pair.
             on_step(EMStep(i + 1, model, float(ll_model), float(dll)))
         if converged:
+            exhausted = False
             break
 
-        # Keep the convergence reference on the last finite likelihood; a non-finite
-        # ``ll_model`` (e.g. a collapsed covariance) must not stall the delta test on NaN.
-        if np.isfinite(ll_model):
-            prev_ll = ll_model
+        prev_ll = ll_model
         model = nxt
 
-    if not converged and nxt is not None:
+    if exhausted and not converged and nxt is not None:
         # Loop ran to max_its: fold the final step into best-model tracking (one extra score pass).
-        score = ll_fn(enc_vdata, nxt)[1] if has_v else ll_fn(enc_data, nxt)[1]
-        if best_score is None or score >= best_score:
-            best_score = score
-            best_model = nxt
+        final_ll = ll_fn(enc_data, nxt)[1]
+        if np.isfinite(final_ll) and (prev_ll is None or final_ll - prev_ll >= -1.0e-12):
+            accepted_model = nxt
+            score = ll_fn(enc_vdata, nxt)[1] if has_v else final_ll
+            if best_score is None or score >= best_score:
+                best_score = score
+                best_model = nxt
 
-    chosen = best_model if track_best else (nxt if nxt is not None else model)
+    chosen = best_model if track_best else accepted_model
     return chosen, (best_score if best_score is not None else 0.0)
 
 
@@ -609,6 +640,69 @@ def _objective_scorer(resolved: str, estimator: ParameterEstimator, engine: Any 
     return scorer
 
 
+def _resolve_monotone(
+    monotone: bool | None,
+    estimator: ParameterEstimator,
+    model: SequenceEncodableProbabilityDistribution,
+) -> bool:
+    """Resolve whether every proposed update must improve the outer objective.
+
+    Closed-form updates over immutable distributions use the strict generalized-EM gate. Torch-like
+    modules are optimized in place with finite stochastic steps, and variational models can contain
+    approximate coordinate or hyperparameter updates; their automatic policy therefore permits a
+    non-monotone trajectory while retaining and restoring the best outer-objective state seen.
+
+    An explicit boolean always wins, which lets callers audit a supposedly exact updater with
+    ``monotone=True`` or deliberately use best-seen selection with ``monotone=False``.
+    """
+    if monotone is not None:
+        return bool(monotone)
+
+    from mixle.inference.transaction import has_mutable_state
+
+    return (
+        not has_mutable_state(model, estimator)
+        and not hasattr(model, "seq_local_elbo")
+        and not _contains_surrogate_update(estimator)
+    )
+
+
+def _contains_surrogate_update(root: Any) -> bool:
+    """Whether an estimator tree optimizes an objective incompatible with outer density scoring."""
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        obj = stack.pop()
+        if obj is None or isinstance(obj, (str, bytes, bytearray, int, float, complex, bool)):
+            continue
+        ident = id(obj)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if getattr(obj, "outer_objective_compatible", True) is False:
+            return True
+        # A module's internals are irrelevant here and can be a very large cyclic graph.
+        if callable(getattr(obj, "state_dict", None)):
+            continue
+        if isinstance(obj, dict):
+            stack.extend(obj.values())
+        elif isinstance(obj, (list, tuple, set, frozenset)):
+            stack.extend(obj)
+        elif hasattr(obj, "__dict__"):
+            stack.extend(vars(obj).values())
+    return False
+
+
+def _resolve_track_best(track_best: bool | None, estimator: ParameterEstimator) -> bool:
+    """Resolve final-vs-best selection for the estimator's actual update objective."""
+    if track_best is not None:
+        return bool(track_best)
+    # Observed density is not a valid selector for NCE, DPO, PINN, or another explicitly
+    # surrogate-trained leaf. Their estimator owns the fitting objective, so retain its final
+    # finite update instead of preferring an initially unnormalized/high-scoring model.
+    return not _contains_surrogate_update(estimator)
+
+
 # --- public estimation drivers (optimize / fit / best_of) -------------------
 def optimize(
     data: Sequence[T] | None,
@@ -644,6 +738,8 @@ def optimize(
     on_step: Any | None = None,
     structure: str = "auto",
     schedule: str = "full",
+    monotone: bool | None = None,
+    track_best: bool | None = None,
 ) -> SequenceEncodableProbabilityDistribution:
     """Fit ``estimator`` to ``data`` by a generalized-EM loop, for ``max_its`` iterations or until the
         objective improves by less than ``delta``.
@@ -730,6 +826,16 @@ def optimize(
             same argument; both share this resolution so a Bayesian estimator is fit on the correct
             objective regardless of the verb used. (Only ``'mle'`` is compatible with the fused
             E-step shortcut; ``reuse_estep_ll`` is ignored for ``'map'``/``'vb'``.)
+        monotone (Optional[bool]): Outer-objective acceptance policy. ``None`` (default) uses strict
+            generalized-EM acceptance for immutable closed-form updates and best-seen selection for
+            mutable neural or variational/approximate updates. In best-seen mode finite downhill
+            steps may be traversed, but the returned model (including mutable module parameters) is
+            restored to the best selected-objective value observed. Pass ``True`` to reject the
+            first decreasing step, or ``False`` to permit a non-monotone trajectory explicitly.
+        track_best (Optional[bool]): Whether to restore the best outer-objective state seen. ``None``
+            (default) does so except when an estimator explicitly declares a surrogate fitting
+            objective, such as NCE; observed density is not a valid selector until such a model is
+            normalized, so its final finite update is returned. Pass a boolean to override selection.
         on_step (Optional[Callable[[EMStep], None]]): Optional per-iteration callback receiving an
             :class:`EMStep` ``(iter, model, log_density, delta)`` for the accepted model. Use it to
             checkpoint a long run -- e.g. ``on_step=registry.checkpointer('run', every=5)`` -- and
@@ -742,12 +848,12 @@ def optimize(
             unconditional historical behavior. Only consulted when ``estimator`` is ``None`` and no
             ``prev_estimate``/``init_estimator``/``strategy``/``enc_data`` is supplied.
         schedule (str): ``'full'`` (default) -- unchanged vanilla full-tree EM, every round scores
-            and re-estimates every component. ``'auto'`` engages the D3 block-coordinate-ascent
-            scheduler (:mod:`mixle.inference.block_em`): each round, D1 node reports rank the
-            components NOT already D2-frozen by gain-per-cost, and only the highest-value ones
-            (within a per-round cost budget) are actually re-estimated -- composing with D2's
-            freeze/roll-up cache rather than duplicating it. This is a SPEED-only scheduling
-            choice: F (the Neal-Hinton free energy) is still gated non-decreasing every round, and
+            and re-estimates every component. ``'auto'`` engages the block-coordinate-ascent
+            scheduler (:mod:`mixle.inference.block_em`): after one full bootstrap sweep, components
+            are ranked by their last observed complete-data Q gain per structural-cost unit, and
+            only the highest-value ones within a per-round cost budget are re-estimated. Inactive
+            component scores are cached while their parameters remain unchanged. This is a
+            scheduling choice: observed likelihood is transactionally gated non-decreasing every round, and
             when there is no useful ranking to do (e.g. every component looks equally worth
             updating) the scheduler degenerates to doing exactly what ``'full'`` does. Only
             engaged when the model is a plain local-backend ``MixtureDistribution``/
@@ -863,6 +969,10 @@ def optimize(
         # the plain log-likelihood otherwise. So a Bayesian estimator converges/selects on the right
         # objective whether the caller reaches for optimize() or fit().
         resolved_objective = _resolve_objective(objective, estimator, mm)
+        surrogate_update = _contains_surrogate_update(estimator)
+        strict_monotone = _resolve_monotone(monotone, estimator, mm)
+        select_best = _resolve_track_best(track_best, estimator)
+        loop_delta = None if surrogate_update else delta
 
         # D3 block-EM scheduler: 'auto' dispatches to mixle.inference.block_em's greedy
         # gain-per-cost scheduler when the fit is a plain local MLE MixtureDistribution/
@@ -874,6 +984,7 @@ def optimize(
 
             if (
                 is_block_em_eligible(mm, estimator)
+                and not surrogate_update
                 and strategy is None
                 and resolved_objective == "mle"
                 and engine is None
@@ -887,7 +998,7 @@ def optimize(
                 if out is not None and block_history:
                     last = block_history[-1]
                     out.write(
-                        "block-em: %d rounds, final F=%.6f, mean active fraction=%.3f\n"
+                        "block-em: %d rounds, final objective=%.6f, mean active fraction=%.3f\n"
                         % (
                             len(block_history),
                             last.objective,
@@ -919,23 +1030,36 @@ def optimize(
         # from the accumulator; an explicit engine reads it from a kernel that reports it (the
         # FusedKernel), and gracefully falls back to a scoring pass otherwise.
         fused_step_fn = None
-        if reuse_estep_ll and resolved_objective == "mle" and strategy is None and isinstance(enc_data, list):
+        from mixle.inference.transaction import has_mutable_state
+
+        if (
+            reuse_estep_ll
+            and strict_monotone
+            and resolved_objective == "mle"
+            and strategy is None
+            and isinstance(enc_data, list)
+            and not has_mutable_state(mm, estimator)
+        ):
             if engine is None:
                 fused_step_fn = _local_fused_step
             else:
                 fused_step_fn = partial(_engine_fused_step, engine=engine)
 
+        objective_scorer = _objective_scorer(resolved_objective, estimator, engine)
+        objective_fn = lambda candidate: objective_scorer(enc_data, candidate)[1]
         best_model, _ = _em_loop(
             enc_data,
             estimator,
             mm,
-            step_fn=_em_step_fn(engine, strategy),
-            ll_fn=_objective_scorer(resolved_objective, estimator, engine),
+            step_fn=_em_step_fn(engine, strategy, objective_fn),
+            ll_fn=objective_scorer,
             max_its=max_its,
-            delta=delta,
+            delta=loop_delta,
             enc_vdata=enc_vdata,
             out=out,
             print_iter=print_iter,
+            monotone=strict_monotone,
+            track_best=select_best,
             fused_step_fn=fused_step_fn,
             obj_label={"mle": None, "map": "penalized-LL", "vb": "ELBO"}[resolved_objective],
             on_step=on_step,

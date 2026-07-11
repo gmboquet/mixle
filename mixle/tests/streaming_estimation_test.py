@@ -89,6 +89,22 @@ class StreamingEstimatorTestCase(unittest.TestCase):
 
         _assert_suff_close(self, stream.value(), expected.value())
 
+    def test_dataset_size_scales_minibatch_statistics_to_a_stable_full_data_objective(self):
+        estimator = GaussianEstimator()
+        start = GaussianDistribution(0.0, 1.0)
+        stream = StreamingEstimator(estimator, schedule=constant(0.5), model=start, dataset_size=100)
+
+        stream.update(np.asarray([1.0, 1.0]))
+        self.assertEqual(stream.nobs, 100.0)
+        self.assertEqual(stream.last_batch_scale, 50.0)
+        first = stream.value()
+        self.assertEqual(first[2], 100.0)
+
+        stream.update(np.asarray([3.0] * 10))
+        self.assertEqual(stream.nobs, 100.0)
+        self.assertEqual(stream.last_batch_scale, 10.0)
+        self.assertEqual(stream.value()[2], 100.0)
+
     def test_streaming_update_accepts_local_encoded_data_handle(self):
         estimator = GaussianEstimator()
         start = GaussianDistribution(0.0, 1.0)
@@ -252,6 +268,17 @@ class StreamingEstimatorTestCase(unittest.TestCase):
             inc.chunk_value("missing")
         with self.assertRaises(ValueError):
             inc.update(chunk_a, chunk_id=None)
+
+    def test_incremental_replacement_rebuilds_noninvertible_support_statistics(self):
+        """Replacing an extrema-owning chunk must remove its obsolete min/max."""
+        inc = IncrementalEstimator(UniformEstimator())
+        inc.update([0.0, 10.0], chunk_id="a")
+        inc.update([2.0, 8.0], chunk_id="b")
+
+        model = inc.update([3.0, 7.0], chunk_id="a")
+
+        self.assertEqual((model.low, model.high), (2.0, 8.0))
+        self.assertEqual(inc.value(), (4.0, 2.0, 8.0))
 
     def test_incremental_update_accepts_local_encoded_data_handle(self):
         estimator = GaussianEstimator()

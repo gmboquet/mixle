@@ -13,7 +13,7 @@ import unittest
 
 import numpy as np
 
-from mixle.inference.estimation import _em_loop, optimize
+from mixle.inference.estimation import _em_loop, _resolve_monotone, _resolve_track_best, optimize
 from mixle.stats import DiagonalGaussianEstimator, MixtureEstimator
 
 
@@ -40,6 +40,60 @@ def _steps(sequence):
 
 
 class EmNonFiniteGuardTest(unittest.TestCase):
+    def test_auto_policy_is_strict_for_exact_updates_and_best_seen_for_variational_updates(self):
+        exact = _Model("exact", 0.0)
+        self.assertTrue(_resolve_monotone(None, None, exact))
+
+        variational = _Model("variational", 0.0)
+        variational.seq_local_elbo = lambda _enc: np.array([0.0])
+        self.assertFalse(_resolve_monotone(None, None, variational))
+        self.assertTrue(_resolve_monotone(True, None, variational))
+
+        class SurrogateEstimator:
+            outer_objective_compatible = False
+
+        surrogate = SurrogateEstimator()
+        self.assertFalse(_resolve_monotone(None, surrogate, exact))
+        self.assertFalse(_resolve_track_best(None, surrogate))
+        self.assertTrue(_resolve_track_best(True, surrogate))
+
+    def test_best_seen_policy_can_cross_a_temporary_objective_valley(self):
+        init = _Model("init", 1.0)
+        valley = _Model("valley", 0.0)
+        peak = _Model("peak", 2.0)
+        chosen, score = _em_loop(
+            None,
+            None,
+            init,
+            _steps([valley, peak]),
+            _ll_fn,
+            max_its=2,
+            delta=None,
+            out=None,
+            monotone=False,
+        )
+        self.assertIs(chosen, peak)
+        self.assertEqual(score, 2.0)
+
+    def test_delta_none_does_not_disable_monotone_acceptance(self):
+        """A fixed iteration budget still rejects a finite objective decrease."""
+        init = _Model("init", 1.0)
+        bad = _Model("bad", 0.0)
+        chosen, score = _em_loop(
+            None,
+            None,
+            init,
+            _steps([bad]),
+            _ll_fn,
+            max_its=1,
+            delta=None,
+            out=None,
+            monotone=True,
+            track_best=False,
+        )
+        self.assertIs(chosen, init)
+        self.assertEqual(score, 1.0)
+
     def test_monotone_rejects_nonfinite_and_keeps_best(self):
         """A NaN step is rejected; the best finite model is returned (monotone path)."""
         init = _Model("init", 0.0)

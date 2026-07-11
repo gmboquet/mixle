@@ -389,6 +389,7 @@ class OnlineEM:
         rng: np.random.RandomState | None = None,
         encoder: Any | None = None,
         num_chunks: int = 1,
+        dataset_size: float | None = None,
     ) -> None:
         self.schedule = schedule
         self.init_estimator = init_estimator
@@ -396,6 +397,7 @@ class OnlineEM:
         self.rng = rng
         self.encoder = encoder
         self.num_chunks = num_chunks
+        self.dataset_size = dataset_size
         self._stream = None
 
     def step(
@@ -418,6 +420,8 @@ class OnlineEM:
             metadata={
                 "online_step": stream.step,
                 "nobs": stream.nobs,
+                "dataset_size": stream.dataset_size,
+                "batch_scale": stream.last_batch_scale,
             },
         )
 
@@ -440,6 +444,7 @@ class OnlineEM:
                 rng=self.rng,
                 encoder=self.encoder,
                 num_chunks=self.num_chunks,
+                dataset_size=self.dataset_size,
             )
         elif self._stream.estimator is not estimator:
             raise ValueError("OnlineEM cannot change estimator after the first step; call reset().")
@@ -712,6 +717,8 @@ def run_em(
     engine: Any | None = None,
     objective: str | Callable[[Any], float] | None = None,
     max_iter: int | None = None,
+    monotone: bool = True,
+    tolerance: float = 1.0e-12,
 ) -> SequenceEncodableProbabilityDistribution:
     """Run an EM-family strategy until convergence or ``max_its``.
 
@@ -719,6 +726,9 @@ def run_em(
     a selection string (``'auto'`` / ``'mle'`` / ``'map'`` / ``'vb'``), or a ready ``model -> float``
     callable. ``max_its`` is the canonical iteration-cap spelling (matching ``optimize`` / ``fit`` /
     ``best_of``); ``max_iter`` is accepted as a back-compat alias and overrides ``max_its`` when given.
+    ``monotone=True`` transactionally rejects an objective decrease independently of whether
+    ``delta`` is disabled. Set it to ``False`` only for a strategy whose changing surrogate objective
+    intentionally permits temporary decreases in the supplied reporting objective.
     """
     if max_iter is not None:
         max_its = max_iter
@@ -727,17 +737,21 @@ def run_em(
     model = initial_model
     last_good = model
     old_value = objective(model)
+    from mixle.inference.transaction import MutableStateSnapshot
+
     for _ in range(max(1, int(max_its))):
+        transaction = MutableStateSnapshot.capture(model, estimator)
         result = strategy.step(enc_data, estimator, model, engine=engine, objective=objective)
         candidate = result.model
         value = objective(candidate) if result.objective is None else result.objective
-        # NaN/inf guard: never propagate a non-finite step; roll back to the last good model.
-        if not np.isfinite(value):
+        gain = value - old_value
+        accepted = bool(result.accepted) and np.isfinite(value) and ((not monotone) or gain >= -float(tolerance))
+        if not accepted:
+            transaction.restore()
             return last_good
         model = candidate
         last_good = model
-        # converge on a small *improvement* only; abs() would also stop on a decrease (the wrong model)
-        if delta is not None and 0.0 <= value - old_value < delta:
+        if delta is not None and 0.0 <= gain < delta:
             break
         old_value = value
     return model

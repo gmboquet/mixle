@@ -1,22 +1,14 @@
 """D5: the LEARNED controller over the D1-D4/D6 estimator-tree IR (workstream ConditionalJIT track).
 
-Frame (see the ConditionalJIT track, D1-D6): **the estimator tree is an IR**. D1
-(:mod:`mixle.inference.node_report`) instruments every node with a per-round residual/Q-gain/cost
-report. D2 (:mod:`mixle.inference.freeze_rollup`) spends that report on one fixed rule (freeze
-once converged). D3 (:mod:`mixle.inference.block_em`) spends it on a fixed GREEDY rule
-(gain-per-cost ranking within a fixed ``budget_fraction``). D4
-(:mod:`mixle.inference.leaf_hotswap`) spends it on a fixed rule for gradient leaves specifically
-(swap once plateaued). D6 (``origin/backend-respecialization``, a sibling branch stacked on D3
-that this branch does not directly contain -- see this module's PR description) spends it on a
-fixed compile-economics rule for execution backends. D5 REPLACES the "fixed rule" part with a
-LEARNED one: the SAME per-round D1 features drive a policy that is trained -- online, from
-realized gain/cost, or offline, from logged history -- rather than hand-tuned.
+The estimator tree is an update IR. :mod:`mixle.inference.block_em` exposes per-round observed
+complete-data Q gains, structural costs, and realized objective gains. This module lets a policy
+choose the scheduler's budget from those receipts, either online from realized gain/cost or from
+logged history.
 
 Correctness backbone (unchanged from the rest of the D-track): a learned scheduling POLICY can
 only ever change WHICH blocks get how much budget THIS round -- never what a block's update
-computes, never the accept/reject monotone-F gate D2/D3 already enforce. Any interleaving of
-partial E-steps and per-block conditional M-steps is coordinate ascent on the same Neal-Hinton
-free energy F regardless of which policy chose the interleaving, so F remains the audit receipt;
+computes, never the accept/reject observed-objective gate D2/D3 already enforce. The scheduler
+directly evaluates observed-data log likelihood after each partial update, so that remains the audit receipt;
 a bad learned decision costs speed (a wasted round, a slow warmup), never correctness. This module
 therefore never runs its own EM and never touches ``accepted``/``objective`` bookkeeping -- it only
 chooses the ``budget_fraction`` knob :func:`mixle.inference.block_em.run_block_em`'s existing
@@ -29,7 +21,7 @@ Two learning modes:
   codebase's existing multi-armed-bandit module, built for exactly this "pick an
   arm/observe-a-reward, no offline data needed" loop) rather than reimplementing UCB1/Thompson
   sampling. The action space is a small discretized set of ``budget_fraction`` levels (an "arm");
-  the reward is the round's REALIZED Q-gain-per-cost. Learns round-by-round DURING a fit, and
+  the reward is the round's realized observed-objective gain per evaluated component. Learns round-by-round DURING a fit, and
   carries over (the same policy object, still adapting) across multiple fits if the caller reuses
   it -- see the offline-vs-warm-start framing in ``mixle.tests.conditional_jit_controller_test``.
 * **Offline DesignModel** (:class:`DesignModelController`) -- reuses
@@ -37,7 +29,7 @@ Two learning modes:
   fitted on logged ``(point, quality, fingerprint)`` rows, warm-startable across different but
   related tasks via its fingerprint machinery -- see :mod:`mixle.task.edge`'s own docstring)
   rather than reinventing an offline contextual bandit. ``budget_fraction`` is treated as the
-  (continuous, 1-D) design point; the current round's aggregated D1 features
+  (continuous, 1-D) design point; the current round's aggregated scheduling features
   (:class:`ControllerState`) are the fingerprint DesignModel already conditions proposals on, so a
   DesignModel trained on logged rounds from OTHER fit problems can propose a good budget for a
   brand-new, held-out problem with ZERO online exploration.
@@ -137,9 +129,9 @@ ACTION_TYPE_REGISTRY: dict[ActionType, str] = {
 
 @dataclass(frozen=True)
 class ControllerState:
-    """One round's controller-visible state: D1 features aggregated over the eligible blocks.
+    """One round's controller-visible state aggregated over the eligible blocks.
 
-    This IS "features = D1 reports" from the roadmap item, aggregated to a fixed-size vector (one
+    The observed Q-gain and structural-cost receipts are aggregated to a fixed-size vector (one
     row per ROUND, not per node) because the eligible block set can change size round to round
     (freezing, zero-weight collapse) while both the bandit arm space and DesignModel's fingerprint
     need a fixed dimension.
