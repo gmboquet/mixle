@@ -203,6 +203,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
    release-readiness
    claim-evidence-ledger
    validation
+   reproduction
    support-policy
    backend-support
    security-and-data
