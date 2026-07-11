@@ -42,6 +42,12 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.pac_bayes` -- P10, compositional PAC-Bayes generalization certificates:
+  closed-form :func:`~mixle.experimental.pac_bayes.gaussian_kl`, an additively-composing
+  :func:`~mixle.experimental.pac_bayes.total_kl` with per-node blame, the McAllester
+  :func:`~mixle.experimental.pac_bayes.mcallester_bound`, and
+  :func:`~mixle.experimental.pac_bayes.certify_generalization` turning a Gaussian-mixture fit into a
+  non-vacuous, ``1 - delta``-valid held-out-risk certificate with per-subtree blame.
 
 Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
 run and reported on distinctly from the stable-package suite.
