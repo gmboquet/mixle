@@ -42,6 +42,11 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.equation_discovery` -- P8, the closed-loop scientist (in-repo core):
+  :func:`~mixle.experimental.equation_discovery.discover` probes a scalar dynamical world, recovers the
+  governing operator by SINDy-style sparse regression over a term library, and is graded against the
+  exact operator (recovered form + coefficient error). Actively-chosen high-leverage probes beat random
+  probing on discovery-per-budget. The full flagship runs this loop in the mixle-pde PDE worlds (Track N).
 
 Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
 run and reported on distinctly from the stable-package suite.
