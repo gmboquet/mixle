@@ -60,7 +60,7 @@ def _loss_samples(loss: Loss, action: Any, draws: Sequence[Any]) -> np.ndarray:
         arr = np.asarray(loss(action, np.asarray(draws)), dtype=float).reshape(-1)
         if arr.size == len(draws):
             return arr
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     return np.asarray([float(loss(action, d)) for d in draws], dtype=float)
 

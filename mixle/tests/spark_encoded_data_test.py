@@ -30,7 +30,7 @@ def _ensure_java_home() -> None:
         out = subprocess.run(["/usr/libexec/java_home"], capture_output=True, text=True, timeout=5)
         if out.returncode == 0 and out.stdout.strip():
             candidates.append(out.stdout.strip())
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     for prefix in ("/opt/homebrew/opt", "/usr/local/opt"):  # Homebrew (Apple silicon / Intel)
         for jdk in ("openjdk@17", "openjdk@21", "openjdk@11", "openjdk"):
@@ -59,7 +59,7 @@ def _spark_context():
             .config("spark.sql.shuffle.partitions", "2")
             .getOrCreate()
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         # no usable JVM (e.g. Java not installed); treat as unavailable
         return None
     return spark.sparkContext

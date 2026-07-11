@@ -44,6 +44,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "conformal_test.py": ("ppl", "integration", "slow"),
     "fused_codegen_test.py": ("numba", "optional"),
     "jax_engine_test.py": ("jax", "optional"),
+    # Backward-compatibility-only tests (renamed class / kwarg aliases). Tagged `legacy` so a product-only
+    # run can exclude them with `-m "not legacy"`; they still run in the default `fast` gate.
+    "api_naming_aliases_test.py": ("legacy",),
     "fused_em_hmm_family_test.py": ("hmm", "integration", "slow"),
     "fused_em_variational_test.py": ("latent", "integration", "slow"),
     "hmm_sampler_batching_test.py": ("hmm", "stochastic", "slow"),
@@ -191,6 +194,13 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "mixture_heterogeneous_test.py": ("distribution", "latent"),
     "numerics_test.py": ("distribution",),
     "numerical_guards_test.py": ("distribution", "bayes"),
+    # Public-API drift gate (worklist A1.1): regenerates api_manifest.json from the tree and asserts
+    # the exported __all__ of every public package is unchanged -- forces a reviewed diff on any
+    # public-surface change. Imports a few runtime-assembled packages, hence integration.
+    "public_api_manifest_test.py": ("integration",),
+    # Weighted-estimation contract (worklist Q5.3): weighted == integer-replicated sufficient stats,
+    # zero-weight no-op, weight-scale-invariant fits -- catches a silently dropped/normalized weight.
+    "weighted_estimation_test.py": ("distribution",),
     "objectives_test.py": ("torch", "optional"),
     "parallel_test.py": ("parallel", "integration", "slow"),
     "placement_test.py": ("parallel", "planner"),
@@ -299,6 +309,36 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # P14 model economies (mixle/experimental/model_economy.py): two-agent verified component-trade vs
     # isolation vs oracle over a few seeds -- pure numpy, no torch.
     "model_economy_test.py": ("experimental",),
+    # P3 conjugate-computation VI (mixle/experimental/cvi.py): natural-gradient step vs closed-form
+    # conjugate posterior across three families -- pure numpy, no torch.
+    "cvi_test.py": ("experimental",),
+    # P12 wake-sleep library learning (mixle/experimental/wake_sleep.py): runs several 30-task wake-sleep
+    # corpora to measure the median search-cost speedup -- pure numpy, stochastic, no torch.
+    "wake_sleep_test.py": ("experimental", "stochastic"),
+    # P4 tensor-network (MPS) leaves (mixle/experimental/tensor_network.py): exact-conditioning vs brute
+    # force + entanglement/truncation receipts over small (2^8) chains -- pure numpy, no torch.
+    "tensor_network_test.py": ("experimental",),
+    # P15 active causal discovery (mixle/experimental/active_causal.py): EIG-vs-random discovery loops over
+    # ~30 seeds x 3 strategies on the chain/reverse/fork triple -- pure numpy, stochastic, no torch.
+    "active_causal_test.py": ("experimental", "stochastic"),
+    # P13 usable-information receipts (mixle/experimental/v_information.py): polynomial-Gaussian V-info
+    # estimates on synthetic linear/quadratic tasks -- pure numpy, no torch.
+    "v_information_test.py": ("experimental",),
+    # P10 PAC-Bayes certificates (mixle/experimental/pac_bayes.py): the coverage receipt fits ~150 GMMs
+    # to measure the empirical 1-delta guarantee -- pure numpy, stochastic, no torch.
+    "pac_bayes_test.py": ("experimental", "stochastic", "slow"),
+    # P6 optimal-transport model geometry (mixle/experimental/ot_geometry.py): closed-form Bures-Wasserstein
+    # + barycenter axioms plus a small GMM-merge measurement -- pure numpy/scipy, no torch.
+    "ot_geometry_test.py": ("experimental",),
+    # P5 exact unlearning (mixle/experimental/unlearning.py): re-reduce bitwise certificates across a few
+    # closed-form leaves plus the subtraction catastrophic-cancellation contrast -- pure numpy, no torch.
+    "unlearning_test.py": ("experimental",),
+    # P16 spectral-health receipts (mixle/experimental/spectral_health.py): SVDs of a few 512x256 matrices
+    # with constructed spectra to validate the regime discrimination -- pure numpy, no torch.
+    "spectral_health_test.py": ("experimental",),
+    # P9 e-processes (mixle/experimental/e_process.py): the anytime type-I control receipt runs several
+    # hundred vectorized null/drift replications with continuous peeking -- pure numpy, stochastic, no torch.
+    "e_process_test.py": ("experimental", "stochastic"),
 }
 
 

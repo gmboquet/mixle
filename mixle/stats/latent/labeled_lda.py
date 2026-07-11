@@ -41,6 +41,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.latent.lda import _lda_elbo_from_gamma, _lda_vi_fixed_point
+from mixle.utils.deprecation import deprecated_alias
 from mixle.utils.special import digammainv
 from mixle.utils.vector import row_choice
 
@@ -122,7 +123,7 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
                 Lower bound on the log-density of the document x.
 
         """
-        return self.seq_log_density(self.seq_encode([x]))[0]
+        return self.seq_log_density(self.dist_to_encoder().seq_encode([x]))[0]
 
     def seq_log_density(self, x):
         """Vectorized evaluation of the variational lower bound (ELBO) for encoded documents.
@@ -149,10 +150,11 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
             document_alphas, idx, counts, num_topics, log_density_gamma, document_gammas, per_topic_log_densities
         )
 
+    @deprecated_alias("dist_to_encoder().seq_encode()", since="0.8.0", removed_in="0.10.0")
     def seq_encode(self, x):
-        """Deprecated: encode a sequence of iid LabeledLDA observations for vectorized 'seq_' calls.
+        """Deprecated alias for ``dist_to_encoder().seq_encode()``: encode iid LabeledLDA observations.
 
-        Use 'dist_to_encoder()' and 'LabeledLDADataEncoder.seq_encode()' instead.
+        Use ``dist_to_encoder()`` and ``LabeledLDADataEncoder.seq_encode()`` instead.
 
         Args:
                 x (Sequence[Tuple[Sequence[Tuple[T, float]], Sequence[int]]]): Sequence of labeled documents.
@@ -1096,6 +1098,7 @@ class LabeledLDAEstimator(ParameterEstimator):
             est_factories, self.num_topics, self.num_alphas, self.keys, self.fixed_alpha
         )
 
+    @deprecated_alias("accumulator_factory", since="0.8.0", removed_in="0.10.0")
     def accumulatorFactory(self):
         """Deprecated alias for accumulator_factory()."""
         return self.accumulator_factory()
@@ -1307,6 +1310,7 @@ def update_alpha(current_alpha, mean_log_p, alpha_threshold):
     return rv
 
 
+@deprecated_alias("update_alpha", since="0.8.0", removed_in="0.10.0")
 def updateAlpha(current_alpha, mean_log_p, alpha_threshold):
     """Deprecated alias for update_alpha()."""
     return update_alpha(current_alpha, mean_log_p, alpha_threshold)

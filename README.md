@@ -10,28 +10,47 @@
 ![tests](https://img.shields.io/badge/tests-5000%2B-brightgreen)
 [![docs](https://img.shields.io/badge/docs-gmboquet.github.io%2Fmixle-blue)](https://gmboquet.github.io/mixle/)
 
-**mixle is a Python library for specifying, training, deploying, and maintaining models of heterogeneous
-data.** Hand it raw data and it selects and fits a model; hand it a structure and it fits that. Underneath is
-a full probabilistic-modeling stack — around 90 distributions, mixtures and hidden Markov models, automatic
+**mixle is a Python library for specifying, fitting, deploying, and maintaining models of heterogeneous
+data.** Hand it raw data and it proposes and fits a model; hand it a structure and it fits that. Underneath is
+a probabilistic-modeling stack — around 90 distributions, mixtures and hidden Markov models, automatic
 model selection, Bayesian inference from EM to NUTS, design-of-experiments optimization, and calibrated,
 monitored deployment — held together by one idea: a classical distribution, a neural network, and a
 latent-variable model are the same kind of object, so they compose freely and a single `optimize(...)` call
 fits the whole thing.
 
 Fitting follows from the structure, not a flag — closed form where a part has one, gradient descent for a
-neural leaf, EM for latent variables, all in one loop. The same model runs on any engine (NumPy, Numba, GPU)
-and scales across any backend (Spark, Dask, Ray, MPI) by changing one argument — no rewrite. It models what
+neural leaf, EM for latent variables, all in one loop. A model written once can move across engines (NumPy,
+Numba, GPU) and scale across the supported backends (Spark, Dask, Ray, MPI) by changing one argument, within
+the maturity limits noted below. It models what you actually have — numbers, text, categories, mixed and
+missing values, directional and angular data, rankings, graphs — the same way.
+neural leaf, EM for latent variables, all in one loop. The same model runs on the built-in engines (NumPy,
+Numba, GPU) and distributes over Spark, Dask, Ray, or MPI by switching one argument. It models what
 you actually have — numbers, text, categories, mixed and missing values, directional and angular data,
 rankings, graphs — all the same way.
 
-**Lab-grade AI, without the lab.** Three reasons people reach for it:
+Not every surface is equally settled. The
+**[maturity guide](https://gmboquet.github.io/mixle/maturity.html)** separates the stable center
+(distributions, estimators, `optimize`) from the provisional and experimental workflow layers, so you know
+which validation standard applies before you build on a piece. Headline claims below trace to that guide and
+to the [release-readiness](https://gmboquet.github.io/mixle/release-readiness.html) and
+[validation](https://gmboquet.github.io/mixle/validation.html) evidence.
+
+**Three reasons people reach for it:**
 
 - **Less code.** No training loops, no batching or convergence boilerplate, no glue — point `optimize` at
+  your data or your PyTorch module and it does the fitting. You still choose the data, the objective, and how
+  to validate the result; mixle removes the boilerplate, not the modeling judgment.
+- **Lower cost.** Distill a slow, expensive teacher — a frontier LLM, an API, a rule — into a tiny local
+  model that answers the easy cases itself and escalates only the hard ones. mixle fits and routes these
+  small models; it does not train frontier models.
+- **Honest uncertainty.** It can be calibrated to report when it is unsure and defer rather than guess, so an
+  application can route low-confidence cases to a human or a stronger model. Calibration makes uncertainty
+  usable; it is a property you measure per deployment, not a guarantee the library grants.
   your data or your PyTorch module and it does the heavy lifting.
 - **Lower cost.** Distill a slow, expensive model — a frontier LLM, an API, a rule — into a tiny local one
   that answers the easy cases itself and escalates only the hard ones.
-- **Honest uncertainty.** It is calibrated to know when it is unsure and defer rather than guess — safe to
-  put in front of users.
+- **Honest uncertainty.** It is calibrated to know when it is unsure and defer rather than guess — so you
+  can gate on its confidence instead of trusting every answer.
 
 **Docs:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) · **Release notes:**
 [CHANGELOG.md](CHANGELOG.md)
@@ -45,8 +64,8 @@ rankings, graphs — all the same way.
 
 ## Installation
 
-Python 3.10+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64; macOS (incl. Apple Silicon)
-is the day-to-day dev platform and works in practice but isn't CI-gated; Windows is untested.
+Python 3.11+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64 and macOS arm64 (Apple
+Silicon) on every PR; Windows is untested.
 
 ```sh
 pip install mixle          # base (numpy, scipy, mpmath): every distribution, fit locally
@@ -67,13 +86,17 @@ Development: `git clone … && pip install -e ".[all]"`.
 
 ## Quickstart
 
-**Hand it data, get a model back.** No estimator, no configuration: mixle infers the model and fits it.
+**Hand it data, get a model back.** With no estimator argument, mixle infers a starting model and fits it —
+a first pass to inspect and refine, not a substitute for choosing the right model.
 
 ```python
 from mixle.inference import optimize
 
-records = [...]                # your rows: numbers, text, categories, missing values
-model = optimize(records)      # mixle works out the model and fits it
+records = [                        # your rows: a number, a category, a flag — mixed, some missing
+    (1.9, "paid", True), (0.4, "free", False), (2.1, "paid", True),
+    (0.7, "free", False), (1.6, "paid", True), (0.3, "free", None),
+]
+model = optimize(records, out=None)   # mixle works out the model and fits it (out=None: quiet)
 
 model.log_density(records[0])    # score an observation
 model.sampler().sample(5)        # draw new ones
@@ -134,7 +157,8 @@ deep as the model does — the call at the top never changes.
 ## Engines & orchestration
 
 Distributions own the likelihood and sufficient-statistic math; **compute engines** supply the array
-ops, device, and precision — so **scale-out is a backend argument, not a rewrite**:
+ops, device, and precision — so **scale-out is usually a backend argument rather than a rewrite**, within
+the engines and backends mixle supports:
 
 ```python
 from mixle.engines import TorchEngine
@@ -144,7 +168,7 @@ optimize(..., precision="auto")   # mixed precision; stats accumulate in float64
 optimize(..., backend="spark")    # distributed: mp · dask · mpi · ray · lightning
 ```
 
-- The same fit runs unchanged on NumPy, Numba, Torch, or a symbolic backend.
+- The same fit runs on NumPy, Numba, Torch, or a symbolic backend, typically without model changes.
 - New frameworks register a factory (`register_encoded_data_backend`) — no dispatch to edit.
 - The planner (`mixle.utils.parallel.planner`) turns a hardware budget into a memory-aware placement
   (chunking, device assignment, Torch sharding) you compute once and reuse.
