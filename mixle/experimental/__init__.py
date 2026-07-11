@@ -48,6 +48,16 @@ Current contents:
   equals the never-saw-it fit bit-for-bit. NOT by subtraction -- ``T_all - T_j`` is not bitwise and can
   catastrophically cancel to a negative variance (both shown in the test). Exact for closed-form leaves;
   iterative-EM latent models are out of scope for the exact certificate.
+- :mod:`mixle.experimental.spectral_health` -- P16, data-free spectral-health receipts:
+  :func:`~mixle.experimental.spectral_health.spectral_health` fits the power-law tail exponent of a weight
+  matrix's eigenvalue spectrum (plus stable/effective rank) and classifies the layer under-trained /
+  well-trained / memorizing from the weights alone -- the heavy-tailed self-regularization lens, complementing
+  G1 (moments) and R1/G4 (quantile profiles).
+- :mod:`mixle.experimental.e_process` -- P9, anytime-valid receipts: :class:`~mixle.experimental.e_process.EProcess`
+  (the generic running-product e-process from per-step density ratios) and the closed-form Robbins
+  :func:`~mixle.experimental.e_process.normal_mixture_eprocess` / :class:`~mixle.experimental.e_process.MeanShiftDetector`
+  for drift. Because a mixle density ratio is an e-value, monitoring ``E_t >= 1/alpha`` gives type-I control
+  under continuous peeking and optional stopping (Ville's inequality) -- verified empirically in the test.
 
 Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
 run and reported on distinctly from the stable-package suite.

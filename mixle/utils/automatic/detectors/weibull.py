@@ -24,7 +24,7 @@ def _fit(arr: np.ndarray):
 
     try:
         shape, loc, scale = stats.weibull_min.fit(arr, floc=0.0)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not (np.isfinite(shape) and np.isfinite(scale) and shape > 0.0 and scale > 0.0):
         return None
