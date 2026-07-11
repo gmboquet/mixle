@@ -19,8 +19,8 @@ latent-variable model are the same kind of object, so they compose freely and a 
 fits the whole thing.
 
 Fitting follows from the structure, not a flag — closed form where a part has one, gradient descent for a
-neural leaf, EM for latent variables, all in one loop. The same model runs on any engine (NumPy, Numba, GPU)
-and scales across any backend (Spark, Dask, Ray, MPI) by changing one argument — no rewrite. It models what
+neural leaf, EM for latent variables, all in one loop. The same model runs on the built-in engines (NumPy,
+Numba, GPU) and distributes over Spark, Dask, Ray, or MPI by switching one argument. It models what
 you actually have — numbers, text, categories, mixed and missing values, directional and angular data,
 rankings, graphs — all the same way.
 
@@ -30,8 +30,8 @@ rankings, graphs — all the same way.
   your data or your PyTorch module and it does the heavy lifting.
 - **Lower cost.** Distill a slow, expensive model — a frontier LLM, an API, a rule — into a tiny local one
   that answers the easy cases itself and escalates only the hard ones.
-- **Honest uncertainty.** It is calibrated to know when it is unsure and defer rather than guess — safe to
-  put in front of users.
+- **Honest uncertainty.** It is calibrated to know when it is unsure and defer rather than guess — so you
+  can gate on its confidence instead of trusting every answer.
 
 **Docs:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) · **Release notes:**
 [CHANGELOG.md](CHANGELOG.md)
