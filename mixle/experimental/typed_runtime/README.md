@@ -30,13 +30,18 @@ print(graph.explain())
 - Contract-gated low-rank/top-k communication compression with checkpointable error-feedback residuals.
 - Strict, bounded-stale, and corrected-eventual proposal admission plus deterministic fault injection.
 - A hierarchical island coordinator and a real typed adapter over mixle's exact model-parallel statistic fold.
+- Per-parameter geometry routing for exact statistics, AdamW, Muon-style orthogonalization, Kronecker
+  preconditioning, natural gradients, proximal blocks, low-rank adapters, and sparse-expert clocks.
+- An executable routed PyTorch optimizer plus fixed-token/fixed-update batch semantics, curvature caching, and
+  measured AdamW fallback based on time-to-target evidence.
 
 ## Not implemented yet
 
 - Real multi-host transport and an 8-GPU validation run; current boundary/fault tests are deterministic in-process
   simulations, and the structured executor uses local worker threads.
 - General typed execution for every compiled estimator. Compilation does not imply an execution adapter exists.
-- Neural optimizer geometry routing and real multi-host optimizer-state sharding.
+- Fused production kernels for routed Muon/Kronecker updates and real multi-host optimizer-state sharding. The
+  current torch adapter uses exact SVD/eigendecomposition as a correctness reference and may be slower than AdamW.
 - Context action planning, graph memory, or claims of trillion-token dense attention.
 
 The local mixture adapter deliberately rejects shared component objects and conjugate weight priors until their joint
