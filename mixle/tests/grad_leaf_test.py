@@ -316,5 +316,42 @@ class TupleDefaultLossTest(unittest.TestCase):
         self.assertAlmostEqual(float(fitted.module.b.detach()[0]), 1.0, delta=0.2)
 
 
+class DivergenceRecoveryTest(unittest.TestCase):
+    def _bimodal(self, n=150):
+        rng = np.random.RandomState(0)
+        return [float(v) for v in np.concatenate([rng.normal(-4.0, 1.0, n), rng.normal(4.0, 1.0, n)])]
+
+    def test_diverging_neural_step_recovers_instead_of_crashing(self):
+        # lr=25 drives DiagGauss to NaN within a few steps; the module then RAISES from inside
+        # log_density (torch.distributions constraint check). Pre-guard this crashed optimize()
+        # mid-M-step and left the shared module poisoned; now the round restores the pre-step
+        # state, the fit completes, and the recovery is disclosed in the fit receipt.
+        torch.manual_seed(0)
+        proto = MixtureDistribution(
+            [GradLeaf(DiagGauss(1, mu0=0.5), m_steps=40, lr=25.0), GaussianDistribution(-1.0, 3.0)],
+            [0.5, 0.5],
+        )
+        data = self._bimodal()
+        fitted = optimize(data, proto.estimator(), prev_estimate=proto, max_its=8, out=None)
+
+        enc = fitted.dist_to_encoder().seq_encode(data)
+        self.assertTrue(np.isfinite(float(np.sum(fitted.seq_log_density(enc)))))
+        for p in fitted.components[0].module.parameters():
+            self.assertTrue(bool(torch.isfinite(p).all()))
+        receipt = fitted.components[0].fit_receipt
+        self.assertGreaterEqual(receipt["nonfinite_recoveries_total"], 1)
+
+    def test_healthy_fit_records_zero_recoveries(self):
+        torch.manual_seed(0)
+        proto = MixtureDistribution(
+            [GradLeaf(DiagGauss(1, mu0=0.5), m_steps=25, lr=0.05), GaussianDistribution(-1.0, 3.0)],
+            [0.5, 0.5],
+        )
+        fitted = optimize(self._bimodal(), proto.estimator(), prev_estimate=proto, max_its=8, out=None)
+        receipt = fitted.components[0].fit_receipt
+        self.assertFalse(receipt["nonfinite_recovery"])
+        self.assertEqual(receipt["nonfinite_recoveries_total"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
