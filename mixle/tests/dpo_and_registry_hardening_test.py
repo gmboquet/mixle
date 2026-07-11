@@ -111,3 +111,30 @@ def test_registry_normal_names_still_work():
         reg = Registry(os.path.join(tmp, "root"))
         d = reg._dir("good-model.v2")
         assert os.path.isdir(d) and os.path.dirname(d) == os.path.join(tmp, "root")
+
+
+def test_registry_rejects_symlinked_entry_that_escapes_root():
+    # _safe_segment validates the name string, but a symlink pre-placed in the root (from an untrusted or
+    # restored registry, or a tar extraction) named like a model would let a read/write follow it outside
+    # the root. Every path that touches such an entry must refuse it, and nothing may escape.
+    import mixle.stats as st
+    from mixle.inference.production.registry import Registry
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = os.path.join(tmp, "root")
+        outside = os.path.join(tmp, "outside")
+        os.makedirs(root)
+        os.makedirs(outside)
+        os.symlink(outside, os.path.join(root, "evil"))  # attacker-controlled symlink named like a model
+
+        reg = Registry(root)
+        with pytest.raises(ValueError):
+            reg.register(st.GaussianDistribution(0.0, 1.0), "evil")  # write must not follow the symlink
+        with pytest.raises(ValueError):
+            reg.versions("evil")  # read/list must not follow it either
+        with pytest.raises(ValueError):
+            reg.get("evil")
+        with pytest.raises(ValueError):
+            reg.current("evil")
+
+        assert os.listdir(outside) == []  # nothing was written outside the root
