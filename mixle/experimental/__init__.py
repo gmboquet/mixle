@@ -42,6 +42,11 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.spectral_health` -- P16, data-free spectral-health receipts:
+  :func:`~mixle.experimental.spectral_health.spectral_health` fits the power-law tail exponent of a weight
+  matrix's eigenvalue spectrum (plus stable/effective rank) and classifies the layer under-trained /
+  well-trained / memorizing from the weights alone -- the heavy-tailed self-regularization lens, complementing
+  G1 (moments) and R1/G4 (quantile profiles).
 - :mod:`mixle.experimental.e_process` -- P9, anytime-valid receipts: :class:`~mixle.experimental.e_process.EProcess`
   (the generic running-product e-process from per-step density ratios) and the closed-form Robbins
   :func:`~mixle.experimental.e_process.normal_mixture_eprocess` / :class:`~mixle.experimental.e_process.MeanShiftDetector`
