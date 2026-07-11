@@ -42,6 +42,12 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.wake_sleep` -- P12, wake-sleep library learning over the model-structure
+  grammar: :func:`~mixle.experimental.wake_sleep.wake_sleep` solves a corpus by greedy MDL structure
+  search (WAKE), anti-unifies recurring subtrees into a reusable library fragment
+  (:func:`~mixle.experimental.wake_sleep.abstract_fragment`, SLEEP-ABSTRACTION), and measures that the
+  fragment cuts held-out median search cost >= 2x -- while returning no fragment when the tasks share no
+  motif (it does not invent structure).
 
 Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
 run and reported on distinctly from the stable-package suite.
