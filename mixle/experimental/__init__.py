@@ -42,6 +42,11 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.spectral_health` -- P16, data-free spectral-health receipts:
+  :func:`~mixle.experimental.spectral_health.spectral_health` fits the power-law tail exponent of a weight
+  matrix's eigenvalue spectrum (plus stable/effective rank) and classifies the layer under-trained /
+  well-trained / memorizing from the weights alone -- the heavy-tailed self-regularization lens, complementing
+  G1 (moments) and R1/G4 (quantile profiles).
 
 Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
 run and reported on distinctly from the stable-package suite.
