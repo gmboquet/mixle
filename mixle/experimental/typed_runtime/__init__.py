@@ -1,9 +1,9 @@
 """Experimental statistically typed optimization and context-runtime foundation.
 
-The package currently implements the side-effect-free semantic compiler and
-Stage-0 measurement vocabulary, and deterministic typed-node scheduling.
-Execution, proposal/commit, distributed placement, and context actions are added
-only after their dependency gates pass.
+The package implements the semantic compiler, measured scheduler, transactional
+proposal runtime, structured placement, and local exact model-parallel adapter.
+Real multi-host transport, optimizer geometry execution, and context actions
+remain behind later dependency gates.
 """
 
 from mixle.experimental.typed_runtime.benchmark import (
@@ -15,6 +15,12 @@ from mixle.experimental.typed_runtime.benchmark import (
     TargetDirection,
     TimeToTargetTrace,
 )
+from mixle.experimental.typed_runtime.boundary import (
+    BoundaryInbox,
+    BoundaryMessage,
+    BoundaryMessageKind,
+    BoundaryReceipt,
+)
 from mixle.experimental.typed_runtime.cache import CachedArtifact, InvalidationReceipt, VersionedArtifactCache
 from mixle.experimental.typed_runtime.clocks import (
     ClockDecision,
@@ -24,6 +30,12 @@ from mixle.experimental.typed_runtime.clocks import (
     UpdateCadence,
 )
 from mixle.experimental.typed_runtime.compiler import ContractRegistry, compile_update_graph, infer_update_contract
+from mixle.experimental.typed_runtime.compression import (
+    CompressedDelta,
+    CompressionMethod,
+    CompressionReceipt,
+    ErrorFeedbackCompressor,
+)
 from mixle.experimental.typed_runtime.contracts import (
     ArtifactKind,
     ConsistencyRequirement,
@@ -35,7 +47,18 @@ from mixle.experimental.typed_runtime.contracts import (
     UpdateContract,
     UpdateKind,
 )
+from mixle.experimental.typed_runtime.faults import (
+    BoundaryFaultInjector,
+    FaultEvent,
+    FaultInjectionReceipt,
+    FaultKind,
+)
 from mixle.experimental.typed_runtime.graph import DependencyEdge, UpdateGraph, UpdateGraphError, UpdateNode
+from mixle.experimental.typed_runtime.hierarchical import (
+    CorrectionProvider,
+    HierarchicalProposalCoordinator,
+    HierarchicalRoundReceipt,
+)
 from mixle.experimental.typed_runtime.local import (
     GainProvider,
     TypedMixtureRoundReceipt,
@@ -72,6 +95,31 @@ from mixle.experimental.typed_runtime.scheduler import (
     SchedulerConfig,
     ScheduleReceipt,
 )
+from mixle.experimental.typed_runtime.staleness import (
+    StalenessAction,
+    StalenessPolicy,
+    StalenessReceipt,
+    assess_staleness,
+    shrink_proposal,
+)
+from mixle.experimental.typed_runtime.structured_execution import (
+    StructuredEstimationReceipt,
+    StructuredEstimationResult,
+    run_structured_estimation_step,
+)
+from mixle.experimental.typed_runtime.topology import (
+    ClusterTopology,
+    LinkProfile,
+    NodePlacement,
+    PlacementScope,
+    StructuredPlacementPlan,
+    StructuredShard,
+    TopologyDevice,
+    TransferEstimate,
+    TransferSample,
+    calibrate_links,
+    plan_structured_placement,
+)
 from mixle.experimental.typed_runtime.transaction import (
     ApplyProposalFn,
     CanaryFn,
@@ -96,35 +144,54 @@ __all__ = [
     "ArtifactKind",
     "ApplyProposalFn",
     "BenchmarkPoint",
+    "BoundaryInbox",
+    "BoundaryMessage",
+    "BoundaryMessageKind",
+    "BoundaryReceipt",
+    "BoundaryFaultInjector",
     "CachedArtifact",
     "CanaryFn",
     "CanaryVerdict",
     "ClockDecision",
     "ClockProgress",
     "ClockTrigger",
+    "ClusterTopology",
     "CommitReceipt",
     "CommitStatus",
+    "CompressedDelta",
+    "CompressionMethod",
+    "CompressionReceipt",
+    "CorrectionProvider",
     "ConsistencyRequirement",
     "ContractRegistry",
     "CostEstimate",
     "CurvatureKind",
     "DependencyEdge",
     "EffectiveContextMeasurement",
+    "ErrorFeedbackCompressor",
     "FailureKind",
     "FailureLedger",
     "FailureReceipt",
+    "FaultEvent",
+    "FaultInjectionReceipt",
+    "FaultKind",
     "FingerprintFn",
     "GainEvidence",
     "GainProvider",
     "GainPerCostScheduler",
     "IssueSeverity",
+    "HierarchicalProposalCoordinator",
+    "HierarchicalRoundReceipt",
     "InvalidationReceipt",
+    "LinkProfile",
     "MeasurementCatalog",
     "MergeLaw",
     "MultiRateUpdateClocks",
+    "NodePlacement",
     "ObjectiveKind",
     "ObjectiveTarget",
     "PayloadMerger",
+    "PlacementScope",
     "ProposalBatch",
     "ProposalConflict",
     "ProposalPacket",
@@ -141,8 +208,18 @@ __all__ = [
     "SnapshotFn",
     "StateSemantics",
     "StateProbe",
+    "StalenessAction",
+    "StalenessPolicy",
+    "StalenessReceipt",
+    "StructuredPlacementPlan",
+    "StructuredShard",
+    "StructuredEstimationReceipt",
+    "StructuredEstimationResult",
     "TargetDirection",
     "TimeToTargetTrace",
+    "TopologyDevice",
+    "TransferEstimate",
+    "TransferSample",
     "TypedMixtureRoundReceipt",
     "TypedMixtureRun",
     "TransactionParticipant",
@@ -157,12 +234,17 @@ __all__ = [
     "ValidationIssue",
     "VersionedArtifactCache",
     "WorkMeasurement",
+    "assess_staleness",
     "compile_update_graph",
+    "calibrate_links",
     "infer_update_contract",
     "merge_same_node_proposals",
     "payload_fingerprint",
     "proposal_conflicts",
+    "plan_structured_placement",
     "replay_log",
     "validate_update_graph",
     "run_typed_mixture_em",
+    "run_structured_estimation_step",
+    "shrink_proposal",
 ]

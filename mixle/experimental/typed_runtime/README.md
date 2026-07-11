@@ -25,12 +25,18 @@ print(graph.explain())
   poisoned-coordinator handling when rollback cannot be proven.
 - Independent step/token/observation update clocks with hard staleness bounds.
 - Bitwise replay and explicit-tolerance replay with semantic receipt and optional numeric-state comparisons.
+- Measured host/island/provider topology, link calibration, and exact structured-shard placement inside fast islands.
+- Versioned, ordered, duplicate-safe shard-boundary messages with approximation and error disclosure.
+- Contract-gated low-rank/top-k communication compression with checkpointable error-feedback residuals.
+- Strict, bounded-stale, and corrected-eventual proposal admission plus deterministic fault injection.
+- A hierarchical island coordinator and a real typed adapter over mixle's exact model-parallel statistic fold.
 
 ## Not implemented yet
 
-- Distributed proposal transport and topology-aware commit coordination.
+- Real multi-host transport and an 8-GPU validation run; current boundary/fault tests are deterministic in-process
+  simulations, and the structured executor uses local worker threads.
 - General typed execution for every compiled estimator. Compilation does not imply an execution adapter exists.
-- Neural optimizer routing, model sharding, or distributed topology placement.
+- Neural optimizer geometry routing and real multi-host optimizer-state sharding.
 - Context action planning, graph memory, or claims of trillion-token dense attention.
 
 The local mixture adapter deliberately rejects shared component objects and conjugate weight priors until their joint
