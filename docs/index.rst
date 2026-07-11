@@ -164,6 +164,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
 
    installation
    maturity
+   what-mixle-is-not
    whats-new-0-6-2
    quickstart
    concepts
