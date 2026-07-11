@@ -20,10 +20,15 @@ print(graph.explain())
 - Measured/proxy costs, effective-context measurements, time-to-target traces, and failure ledgers.
 - Deterministic lower-confidence-bound gain-per-cost scheduling with objective compatibility and bounded starvation.
 - An objective-gated local mixture-EM adapter whose component blocks are selected by typed node IDs.
+- Immutable proposal packets with deterministic non-pickle payload fingerprints and exact additive shard merging.
+- Versioned transactional commit with dependency-conflict checks, canaries, verified mutable-state rollback, and
+  poisoned-coordinator handling when rollback cannot be proven.
+- Independent step/token/observation update clocks with hard staleness bounds.
+- Bitwise replay and explicit-tolerance replay with semantic receipt and optional numeric-state comparisons.
 
 ## Not implemented yet
 
-- General proposal composition, distributed commit, and replay.
+- Distributed proposal transport and topology-aware commit coordination.
 - General typed execution for every compiled estimator. Compilation does not imply an execution adapter exists.
 - Neural optimizer routing, model sharding, or distributed topology placement.
 - Context action planning, graph memory, or claims of trillion-token dense attention.
