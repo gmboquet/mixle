@@ -1,0 +1,15 @@
+# pip-audit waivers for the base-install security gate (worklist S13.1).
+#
+# The "pip-audit (base install)" job in security.yml is BLOCKING: a known vulnerability in a base
+# runtime dependency (numpy / scipy / mpmath and their transitive deps) fails CI. To accept a specific
+# finding temporarily -- e.g. an advisory with no fixed release yet, or one that does not affect how
+# mixle uses the package -- add one line here:
+#
+#   <VULN-ID>   # short reason; review by YYYY-MM-DD
+#
+# for example:
+#   GHSA-xxxx-xxxx-xxxx   # no fix released yet; not reachable from mixle; review by 2026-10-01
+#
+# Blank lines and lines starting with '#' are ignored; only the first whitespace-delimited token on a
+# non-comment line is passed to pip-audit as --ignore-vuln. The base install is currently clean, so
+# there are no active waivers.
