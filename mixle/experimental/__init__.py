@@ -42,6 +42,11 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.certified_bounds` -- P11, certified model properties by abstract interpretation:
+  :func:`~mixle.experimental.certified_bounds.certified_density_bounds` propagates intervals through a
+  Gaussian/mixture tree for sound density bounds over an input box, and
+  :func:`~mixle.experimental.certified_bounds.certify_density_monotonic` proves a monotonicity direction --
+  turning a *measured* receipt into a *proven* one, validated against dense grids.
 
 Tests for code under here are tagged ``@pytest.mark.experimental`` (see ``pyproject.toml``) so they can be
 run and reported on distinctly from the stable-package suite.
