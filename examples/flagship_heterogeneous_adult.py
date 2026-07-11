@@ -1,5 +1,8 @@
 """Flagship A -- heterogeneous records in native form, on real public data (UCI Adult / Census Income).
 
+Classification: evidence -- dataset: UCI Adult / Census Income (~32k rows, downloaded once). The
+held-out generalization number below is a measured result on real data, not a synthetic stand-in.
+
 Everything about this row is mixed: integer ``age`` and ``hours.per.week`` next to categorical
 ``workclass``, ``education``, ``sex``, and ``income``. Mixle takes those tuples as-is -- no one-hot, no
 manual schema -- infers a model over them, and fits it in one ``optimize`` call. The honest receipt is a

@@ -11,7 +11,7 @@
       "needs_network": true,
       "dataset": "Banking77 (PolyAI)",
       "data_license": "CONFIRM-AT-PUBLISH: verify Banking77 redistribution terms before bundling data",
-      "sha256": "459ea6f0bb8ddb44c3a9536ae7a0a3712cc4417e15f259629fa1f84857e6fefa"
+      "sha256": "21246d3f7945279752124557b247c856cb2ad5737fc41d24947b87228e86cef0"
     },
     {
       "id": "gallery-univariate",
