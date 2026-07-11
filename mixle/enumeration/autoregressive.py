@@ -327,7 +327,12 @@ class AutoregressiveEnumerable:
         max_depth: safety bound on recursion depth for a terminating model (the probability budget is the real
             bound). Raise it if a tight model legitimately produces very long sequences.
         bin_width_bits, oversample: quantization resolution of the count index (finer = exacter ordering,
-            more memory). The defaults match the distribution count-DP.
+            more memory). The defaults match the distribution count-DP. Ordering from ``unrank``/``slice``
+            (via :meth:`seek_index`) is exact between fine buckets (width ``bin_width_bits / oversample``
+            bits) but NOT guaranteed within one -- see :meth:`~mixle.enumeration.seek_index.SeekIndex.slice`.
+            Sequences whose ``log_density`` differs by less than one bucket's width can surface in either
+            relative order; this is most visible when several near-tied candidates cluster at the head of
+            a small/short-sequence model. Raise ``oversample`` or lower ``bin_width_bits`` to shrink it.
         batch_next_logprobs: optional ``batch_next_logprobs([prefix, ...]) -> [result, ...]`` scoring many
             prefixes in one (padded) forward. When given, the count index warms its forward cache breadth-first
             in ``batch_size`` chunks -- the large speed-up for transformers, where one-at-a-time forwards

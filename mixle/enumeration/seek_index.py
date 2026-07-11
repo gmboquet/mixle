@@ -141,7 +141,14 @@ class SeekIndex:
         return self._budget_index.total_count
 
     def unrank(self, i: int) -> tuple[Any, float]:
-        """The ``i``-th most probable value (0-based, quantized order) and its exact log-probability."""
+        """The ``i``-th most probable value (0-based, quantized order) and its exact log-probability.
+
+        Order is exact **between** fine buckets (width ``bin_width_bits / oversample`` bits) but
+        unspecified **within** one: two values whose ``log_density`` differs by less than one bucket's
+        width can be returned in either relative order (see :meth:`slice`'s note -- narrow that window
+        by raising ``oversample`` or lowering ``bin_width_bits``). The returned ``log_density`` is always
+        exact regardless.
+        """
         if i < 0:
             raise IndexError("rank must be >= 0")
         self.ensure_count(int(i) + 1)
@@ -150,7 +157,17 @@ class SeekIndex:
         return self._budget_index.get(int(i))
 
     def slice(self, start: int, k: int) -> list[tuple[Any, float]]:
-        """Up to ``k`` values starting at rank ``start`` (one deepen at most, then table reads)."""
+        """Up to ``k`` values starting at rank ``start`` (one deepen at most, then table reads).
+
+        Not a strict sort by ``log_density``: values are ordered by quantized fine bucket (bucket width
+        ``bin_width_bits / oversample`` bits), and within a shared bucket the order follows the structural
+        enumeration (token/branch order), not the exact log-density. Two values less than one bucket-width
+        apart can therefore come back in either order -- this is a documented property of the quantization,
+        not a bug, and it is independent of ``branch_cap``/pruning. If a caller needs a strict top-k sort
+        (e.g. asserting descending order across close candidates), either re-sort the slice by its returned
+        ``log_density`` values, or shrink the ambiguity window by raising ``oversample`` / lowering
+        ``bin_width_bits`` on the model/index -- it cannot be eliminated, only made arbitrarily small.
+        """
         if start < 0:
             raise IndexError("start must be non-negative")
         if k < 0:
