@@ -42,6 +42,11 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.model_economy` -- P14 (speculative), model economies:
+  :func:`~mixle.experimental.model_economy.run_economy` has two agents with complementary data trade
+  fitted components (never data); the buyer verifies each offered component's gain on its own held-out set
+  (no trust in the seller), so verified trade recovers essentially all of the data-sharing oracle's gain
+  over isolation while a spurious offered component is rejected.
 - :mod:`mixle.experimental.cvi` -- P3, conjugate-computation VI: a natural-gradient step
   (:func:`~mixle.experimental.cvi.cvi_step`) with unit step size reproduces the exact conjugate/EM
   update for exponential-family leaves (verified on Normal-Normal, Beta-Bernoulli, Gamma-Poisson),

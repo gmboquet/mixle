@@ -306,6 +306,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # GP-surrogate active-learning + multi-fidelity placement (roadmap M4): each test fits several torch
     # GPs across a sequential design loop, mirroring doe_active_test.py / doe_multifidelity_test.py.
     "task_emulate_test.py": ("doe", "torch", "slow"),
+    # P14 model economies (mixle/experimental/model_economy.py): two-agent verified component-trade vs
+    # isolation vs oracle over a few seeds -- pure numpy, no torch.
+    "model_economy_test.py": ("experimental",),
     # P3 conjugate-computation VI (mixle/experimental/cvi.py): natural-gradient step vs closed-form
     # conjugate posterior across three families -- pure numpy, no torch.
     "cvi_test.py": ("experimental",),
