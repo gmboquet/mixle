@@ -1,5 +1,9 @@
 """The pitch, runnable: replace rigid code with tiny calibrated models — and show the receipts.
 
+Classification: illustrative -- runs on small synthetic / stand-in data. It shows the
+end-to-end workflow shape, not measured results on a real frontier-scale dataset. See
+docs/example-execution-manifest.rst for which examples run on real public data.
+
 A support-ops story in three acts, all synthetic and self-contained (no downloads, no API keys):
 
   1. ``solve``   — a 400-line-style if/elif ticket router becomes a ~65KB model with a conformal

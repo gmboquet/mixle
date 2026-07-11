@@ -94,13 +94,13 @@ def test_d1_all_engines_provide_required_ops():
         from mixle.engines import SYMBOLIC_ENGINE
 
         engines.append(SYMBOLIC_ENGINE)
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     try:
         from mixle.engines.torch_engine import TorchEngine
 
         engines.append(TorchEngine())
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     for eng in engines:
         missing = [op for op in ComputeEngine.REQUIRED_OPS if getattr(eng, op, None) is None]
