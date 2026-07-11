@@ -275,11 +275,11 @@ class StructuredClassifierIO:
             rows = [self._augment(v, label) for v in values]
             try:
                 out[:, k] = np.asarray(model.seq_log_density(model.dist_to_encoder().seq_encode(rows)))
-            except Exception:  # unseen conditioning value in some row: fall back to per-row scoring
+            except Exception:  # unseen conditioning value in some row: fall back to per-row scoring  # noqa: BLE001
                 for i, row in enumerate(rows):
                     try:
                         out[i, k] = float(model.log_density(row))
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         out[i, k] = -np.inf
         return out
 

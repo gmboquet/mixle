@@ -2118,6 +2118,9 @@ def normalize_input(data, *, rdd_cap: int = 200000):
     * a pandas ``DataFrame`` (duck-typed via ``columns``/``itertuples``; pandas is never imported) ->
       one record per row across its columns (scalar for a single column, tuple otherwise);
     * a Spark ``RDD`` -> the first ``rdd_cap`` rows (profiling works on a bounded sample);
+    * a one-shot iterator (generator, ``map``/``filter``/``zip``, a file object) -> materialized to a
+      list, because the profiler iterates the records more than once (schema detection, then fitting)
+      and a one-shot iterator would be exhausted after the first pass;
     * anything else (a list / sequence) is returned unchanged.
     """
     if hasattr(data, "records") and hasattr(data, "structure"):  # a mixle DataSource
@@ -2126,7 +2129,7 @@ def normalize_input(data, *, rdd_cap: int = 200000):
 
             if isinstance(data, DataSource):
                 return list(data.records())
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
     if hasattr(data, "columns") and hasattr(data, "itertuples"):  # a pandas DataFrame (duck-typed)
         from mixle.data.sources.pandas_source import dataframe_records
@@ -2137,8 +2140,17 @@ def normalize_input(data, *, rdd_cap: int = 200000):
 
         if RDD_TYPES and isinstance(data, RDD_TYPES):  # a Spark RDD -> a bounded local sample
             return data.take(int(rdd_cap))
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
+    # A one-shot iterator returns itself from __iter__ and is consumed on the first pass; the profiler
+    # reads the records more than once (schema detection, then fitting), so an un-materialized iterator
+    # would silently fit a wrong/empty model on the second pass. Materialize it to a reusable list. A
+    # reusable sequence (list/tuple/ndarray) yields a fresh iterator and is left unchanged.
+    try:
+        if iter(data) is data:
+            return list(data)
+    except TypeError:
+        pass  # not iterable -- leave it to the caller's own validation
     return data
 
 
