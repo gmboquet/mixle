@@ -160,3 +160,9 @@ jobs:
         # -m "" overrides the default `-m fast` addopts; the torchrun tests aren't `fast`, so without this
         # the selection is empty and pytest exits 5 ("no tests collected"), failing the job.
         run: MIXLE_RUN_TORCHRUN_SMOKE=1 python -m pytest mixle/tests/torchrun_encoded_data_test.py mixle/tests/torch_neural_test.py -q -m ""
+      - name: Install the Banking77 flagship dataset dependency
+        run: python -m pip install datasets
+      - name: Run the Banking77 real-data flagship smoke
+        # The one flagship on real public data (F10.4): bounded run of the teacher/student cascade. It
+        # skips itself if the dataset can't be fetched (offline), so a network blip is a skip, not a fail.
+        run: python -m pytest mixle/tests/real_receipt_banking77_smoke_test.py -q -m ""
