@@ -1,0 +1,61 @@
+name: Post-publish verify
+
+# Worklist P2.6: verify a version actually installs and works from the PUBLIC PyPI index, in a fresh
+# environment, AFTER publication -- separate evidence from the pre-publish wheel checks. Manually
+# dispatched once the index has the release (indexing can lag a publish by a few minutes), with the
+# published version as input. This never runs on a push/PR: there is nothing on PyPI to verify then.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Published version to verify from PyPI (e.g. 0.8.0)"
+        required: true
+        type: string
+
+jobs:
+  verify:
+    name: install ${{ inputs.version }} from PyPI / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Fresh venv, base install only (no repo checkout, no PYTHONPATH): this must exercise the published
+      # artifact exactly as a user gets it, not the dev tree.
+      - name: Install mixle==${{ inputs.version }} from PyPI
+        run: |
+          python -m venv /tmp/verify-env
+          /tmp/verify-env/bin/python -m pip install --upgrade pip
+          /tmp/verify-env/bin/python -m pip install "mixle==${{ inputs.version }}"
+      - name: Version metadata matches the requested version
+        run: |
+          got=$(/tmp/verify-env/bin/python -c "import mixle; print(mixle.__version__)")
+          echo "installed mixle.__version__ = $got"
+          test "$got" = "${{ inputs.version }}"
+      - name: Import smoke (base surface, no optional backends)
+        run: |
+          /tmp/verify-env/bin/python - <<'PY'
+          import mixle
+          from mixle.stats import GaussianDistribution, GaussianEstimator
+          from mixle.inference import optimize
+          print("imported mixle", mixle.__version__)
+          PY
+      - name: Quickstart smoke (fit a model through the public surface)
+        run: |
+          /tmp/verify-env/bin/python - <<'PY'
+          import numpy as np
+          from mixle.stats import GaussianEstimator
+          from mixle.inference import optimize
+          data = np.random.RandomState(0).normal(2.0, 1.5, 500).tolist()
+          model = optimize(data, GaussianEstimator(), max_its=20, out=None)
+          ll = float(np.mean([model.log_density(x) for x in data]))
+          assert np.isfinite(ll), ll
+          print("quickstart fit ok; mean log-density =", ll)
+          PY
+      - name: pip check (dependency graph is consistent)
+        run: /tmp/verify-env/bin/python -m pip check
