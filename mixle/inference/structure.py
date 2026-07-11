@@ -314,7 +314,7 @@ def glm_gain(
     try:
         edge = fit_glm_edge(list(zip(p.tolist(), c.tolist())), family)
         ll_glm = float(np.sum(edge.seq_log_density((p, c))))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return float("-inf")
     if not np.isfinite(ll_glm):
         return float("-inf")

@@ -50,7 +50,7 @@ def _make_value_and_grad(logp: Callable[[Any], Any], theta0: Any, use_compile: b
             lp, g = vg(theta0)
             if g.shape == theta0.shape and math.isfinite(float(lp.detach())):
                 return vg, True
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
     vg = _wrap(logp)
     lp, g = vg(theta0)

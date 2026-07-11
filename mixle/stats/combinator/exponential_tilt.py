@@ -465,7 +465,7 @@ class ExponentialTiltedEstimator(ParameterEstimator):
         def g(th: float) -> float:
             try:
                 return self._mean_grad_logz(th) - mean_t
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return float("nan")
 
         lo, hi = -1.0, 1.0

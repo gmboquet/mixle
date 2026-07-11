@@ -155,7 +155,7 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
                 return True
             if x == 0:
                 return False
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         return None
 

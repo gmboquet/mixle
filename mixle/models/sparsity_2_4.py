@@ -226,12 +226,12 @@ def cusparselt_status() -> dict[str, Any]:
     if cusparselt is not None:
         try:
             status["cusparselt_is_available"] = bool(cusparselt.is_available())
-        except Exception as e:  # pragma: no cover - defensive
+        except Exception as e:  # pragma: no cover - defensive  # noqa: BLE001
             status["cusparselt_is_available"] = False
             status["cusparselt_is_available_error"] = repr(e)
         try:
             status["cusparselt_version"] = cusparselt.version()
-        except Exception as e:  # pragma: no cover - defensive
+        except Exception as e:  # pragma: no cover - defensive  # noqa: BLE001
             status["cusparselt_version"] = None
             status["cusparselt_version_error"] = repr(e)
     status["has_sparse_semi_structured_tensor"] = hasattr(torch.sparse, "SparseSemiStructuredTensor")

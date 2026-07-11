@@ -35,7 +35,7 @@ def _fit(arr: np.ndarray):
 
     try:
         beta, loc, scale = stats.gennorm.fit(arr)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not (scale > 0.0 and beta > 0.0):
         return None

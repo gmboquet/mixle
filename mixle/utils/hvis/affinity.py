@@ -591,7 +591,7 @@ def _resolve_affinity(
         if getattr(mix_model, "components", None) is not None and data is not None:
             try:
                 return local_factors(mix_model, data, field_weights=field_weights)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return "bhattacharyya"
         return "bhattacharyya"
 

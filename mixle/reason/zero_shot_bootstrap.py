@@ -113,7 +113,7 @@ def _try_automatic_profiler(rows, *, rng, max_its):
     try:
         prototype = get_prototype(rows, seed=0)
         fitted = optimize(rows, prototype, max_its=max_its, rng=rng)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if isinstance(fitted, IgnoredDistribution):
         return None
@@ -332,7 +332,7 @@ def _model_typicality(model: Any, value: float) -> float:
             u = float(model.cdf(value))
             if math.isfinite(u):
                 return float(2.0 * abs(min(max(u, 0.0), 1.0) - 0.5))
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
     if supports(model, HasMoments):
         try:
@@ -340,7 +340,7 @@ def _model_typicality(model: Any, value: float) -> float:
             std = float(model.variance()) ** 0.5
             z = abs(value - mean) / max(std, 1.0e-9)
             return float(z / (1.0 + z))
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
     return 0.5
 

@@ -27,11 +27,11 @@ def _same_value(a: Any, b: Any) -> bool:
     if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
         try:
             return bool(np.array_equal(a, b))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
     try:
         return freeze(a) == freeze(b)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return a == b
 
 

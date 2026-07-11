@@ -187,7 +187,7 @@ def turbo_minimize(
         try:
             gp = _fit_surrogate(xu, yz, None, fit_kwargs)
             picks_u = _thompson_batch(gp, xu, yz, cand, q, rng)
-        except Exception:  # GP/Cholesky failure -> shrink the region and retry next iteration
+        except Exception:  # GP/Cholesky failure -> shrink the region and retry next iteration  # noqa: BLE001
             tr.update(False)
             continue
         improved = False

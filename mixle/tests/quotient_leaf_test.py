@@ -39,7 +39,7 @@ try:
 
     _cifar = hf_datasets.load_dataset("cifar10")
     _HAS_CIFAR = True
-except Exception:
+except Exception:  # noqa: BLE001
     _HAS_CIFAR = False
 
 

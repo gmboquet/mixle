@@ -427,7 +427,7 @@ def _nuts_jax(
     try:
         ss = mcmc.last_state.adapt_state.step_size
         step_size = float(np.asarray(ss).reshape(-1)[0])
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     chain_arrays = [samples[c] for c in range(chains)]
     return _pool_chains(chain_arrays, d, chains, 0, step_size, backend="jax")

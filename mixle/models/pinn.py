@@ -265,7 +265,7 @@ class PINNRegressionEstimator(NeuralGaussianEstimator):
 def _register_serializable() -> None:
     try:
         from mixle.utils.serialization import register_serializable_class
-    except Exception:  # pragma: no cover
+    except Exception:  # pragma: no cover  # noqa: BLE001
         return
     register_serializable_class(PINNRegression)
 

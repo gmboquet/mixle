@@ -172,7 +172,7 @@ def _held_out_score(
         if not np.isfinite(canonical):
             return 1.0e18, None
         return canonical, model
-    except Exception:
+    except Exception:  # noqa: BLE001
         return 1.0e18, None
 
 
@@ -335,7 +335,7 @@ def _search_bandit(
         cfg = space.sample(rng)
         try:
             seeds.append(build_fn(cfg))
-        except Exception:
+        except Exception:  # noqa: BLE001
             continue
     if not seeds:
         raise ValueError("search(method='bandit'): build_fn produced no valid seed models from the space.")

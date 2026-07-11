@@ -135,7 +135,7 @@ def _update_kind(dist: ProbabilityDistribution) -> str:
 
     try:
         estimator = dist.estimator()
-    except Exception:
+    except Exception:  # noqa: BLE001
         estimator = None
     if estimator is not None:
         est_name = type(estimator).__name__.lower()
@@ -162,7 +162,7 @@ def _residual_mc(dist: ProbabilityDistribution, n_mc: int, seed: int) -> float:
     """Monte-Carlo self-NLL: ``-mean(log_density(x))`` over ``n_mc`` self-samples (see module docstring)."""
     try:
         samples = dist.sampler(seed).sample(int(n_mc))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return float("nan")
     if samples is None:
         # A Neutral/no-op node (e.g. NullDistribution) legitimately samples nothing.
@@ -173,7 +173,7 @@ def _residual_mc(dist: ProbabilityDistribution, n_mc: int, seed: int) -> float:
     for x in samples:
         try:
             lp = float(dist.log_density(x))
-        except Exception:
+        except Exception:  # noqa: BLE001
             continue
         if np.isfinite(lp):
             total += -lp
@@ -221,7 +221,7 @@ def _health_receipts(dist: ProbabilityDistribution) -> dict[str, Any]:
             try:
                 if np.all(np.isfinite(value)) and np.linalg.cond(value) > _ILL_CONDITIONED_COND_NUMBER:
                     receipts["ill_conditioned"] = True
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
     return receipts
 

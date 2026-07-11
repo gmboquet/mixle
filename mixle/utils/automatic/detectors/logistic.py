@@ -23,7 +23,7 @@ def _fit(arr: np.ndarray):
 
     try:
         loc, scale = stats.logistic.fit(arr)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not (scale > 0.0) or not math.isfinite(scale) or not math.isfinite(loc):
         return None

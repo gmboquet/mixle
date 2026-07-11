@@ -82,7 +82,7 @@ def recommend_compute_precision(
         return PrecisionPlan(np.float64, "no model to inspect -> float64")
     try:
         from mixle.stats.compute.fused_codegen import fusible
-    except Exception:  # pragma: no cover - numba optional
+    except Exception:  # pragma: no cover - numba optional  # noqa: BLE001
         return PrecisionPlan(np.float64, "fused codegen unavailable -> float64")
     if not fusible(model):
         return PrecisionPlan(np.float64, "model has no fused reduced-precision kernel -> float64")

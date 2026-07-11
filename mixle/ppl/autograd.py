@@ -28,7 +28,7 @@ def torch_available() -> bool:
     """Return whether Torch can be imported for analytic-gradient PPL routes."""
     try:
         import torch  # noqa: F401
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     return True
 
@@ -494,7 +494,7 @@ def grad_target(rv: RandomVariable, data, missing: str = "error"):
         return None
     try:
         scorers = _scorers()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if isinstance(rv._family, CompositeFamily):
         if rv._family.name == "Mixture":
@@ -502,7 +502,7 @@ def grad_target(rv: RandomVariable, data, missing: str = "error"):
                 return None  # mixture-of-leaves missing handling not wired here; caller raises clearly
             try:
                 return _mixture_grad_target(rv, data, scorers)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return None
         return None
     from mixle.ppl.inference import _is_det_expr, _require_flat, _target_parts

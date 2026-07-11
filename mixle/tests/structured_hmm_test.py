@@ -398,7 +398,7 @@ class JitForwardTest(unittest.TestCase):
     def test_jit_forward_matches_numpy(self):
         try:
             import jax  # noqa: F401
-        except Exception:
+        except Exception:  # noqa: BLE001
             self.skipTest("jax not installed")
         from mixle.stats.latent.structured_hmm import jit_forward_loglik
 
@@ -573,7 +573,7 @@ class NumbaFastFitTest(unittest.TestCase):
     def test_fast_dense_fit_equals_numpy_fit(self):
         try:
             from mixle.utils.optional_deps import HAS_NUMBA
-        except Exception:
+        except Exception:  # noqa: BLE001
             HAS_NUMBA = False
         if not HAS_NUMBA:
             self.skipTest("numba not installed")

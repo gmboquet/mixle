@@ -273,7 +273,7 @@ class TransformDistribution(SequenceEncodableProbabilityDistribution):
             if self.density_correction:
                 rv += self.transform.log_abs_det_inverse_jacobian(x)
             return rv
-        except Exception:
+        except Exception:  # noqa: BLE001
             return -np.inf
 
     def seq_log_density(self, x: tuple[Any, np.ndarray, np.ndarray]) -> np.ndarray:
@@ -425,7 +425,7 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
         """Accumulate one inverse-transformed observation when it is valid."""
         try:
             inv = self.transform.inverse(x)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return
         self.accumulator.update(inv, weight, None if estimate is None else estimate.dist)
 
@@ -458,7 +458,7 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize from one inverse-transformed observation when it is valid."""
         try:
             inv = self.transform.inverse(x)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return
         self.accumulator.initialize(inv, weight, rng)
 
@@ -599,7 +599,7 @@ class TransformDataEncoder(DataSequenceEncoder):
                     log_jac[i] = self.transform.log_abs_det_inverse_jacobian(y)
                     if not np.isfinite(log_jac[i]):
                         valid[i] = False
-            except Exception:
+            except Exception:  # noqa: BLE001
                 inv_values.append(fill)
                 log_jac[i] = -np.inf
                 valid[i] = False

@@ -60,7 +60,7 @@ class Service:
         try:
             enc = self.model.dist_to_encoder().seq_encode(recs)
             lp = np.asarray(self.model.seq_log_density(enc), dtype=float)
-        except Exception:
+        except Exception:  # noqa: BLE001
             lp = np.asarray([self._safe_logd(r) for r in recs], dtype=float)
         dt = time.time() - t0
         finite = np.isfinite(lp)
@@ -80,7 +80,7 @@ class Service:
     def _safe_logd(self, r: Any) -> float:
         try:
             return float(self.model.log_density(r))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return float("-inf")
 
     def check_drift(self, records: Any) -> Any:

@@ -208,7 +208,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         """
         try:
             xx = float(x)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return -np.inf
         if not np.isfinite(xx) or xx < 0 or np.floor(xx) != xx:
             return -np.inf

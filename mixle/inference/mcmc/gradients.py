@@ -23,7 +23,7 @@ def torch_available() -> bool:
     """Return True if Torch can be imported (autograd gradients are available)."""
     try:
         import torch  # noqa: F401
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     return True
 

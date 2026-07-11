@@ -665,7 +665,7 @@ def _register_serializable() -> None:
     # mixle.models classes aren't in the stats/analysis auto-walk, so opt in explicitly for to_json/from_json.
     try:
         from mixle.utils.serialization import register_serializable_class
-    except Exception:  # pragma: no cover
+    except Exception:  # pragma: no cover  # noqa: BLE001
         return
     register_serializable_class(NeuralConditionalDensity)
 

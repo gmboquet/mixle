@@ -101,7 +101,7 @@ def orchestrate(
 
         try:
             observation = world.step(step)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             # atypical/failed step: record the failure, then give the plan model one chance to re-plan
             # around it before giving up -- the trace shows what actually happened, not just the outcome
             trace.steps.append(TraceStep(tool=_tool_name(step), args=step.get("args", {}), result={"error": str(exc)}))
@@ -112,7 +112,7 @@ def orchestrate(
                 break
             try:
                 observation = world.step(retry_step)
-            except Exception as retry_exc:
+            except Exception as retry_exc:  # noqa: BLE001
                 trace.steps.append(
                     TraceStep(
                         tool=_tool_name(retry_step), args=retry_step.get("args", {}), result={"error": str(retry_exc)}

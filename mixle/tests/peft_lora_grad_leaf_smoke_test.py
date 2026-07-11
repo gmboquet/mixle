@@ -27,7 +27,7 @@ from mixle.models import GradLeaf  # noqa: E402
 def _offline_or_skip():
     try:
         build_peft_wrapped_module(seed=0)
-    except Exception as exc:  # pragma: no cover - depends on network/HF Hub availability
+    except Exception as exc:  # pragma: no cover - depends on network/HF Hub availability  # noqa: BLE001
         pytest.skip(f"tiny HF checkpoint unavailable (likely offline): {exc}")
 
 

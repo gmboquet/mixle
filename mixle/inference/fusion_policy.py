@@ -44,5 +44,5 @@ def should_auto_fuse(model: Any, enc_data: Any, max_its: int) -> bool:
             return False
         n = sum(int(c[0]) for c in enc_data) if isinstance(enc_data, list) else 0
         return n * max(int(max_its), 1) >= _FUSION_MIN_WORKLOAD
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False

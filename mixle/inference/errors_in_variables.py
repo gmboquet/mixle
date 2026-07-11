@@ -138,7 +138,7 @@ def propagate_uncertainty(
         out = np.asarray(func(s), dtype=float)
         if out.shape[0] != s.shape[0]:
             raise ValueError
-    except Exception:
+    except Exception:  # noqa: BLE001
         out = np.array([np.asarray(func(row), dtype=float) for row in s])
     levels = np.asarray(quantiles, dtype=float)
     return {

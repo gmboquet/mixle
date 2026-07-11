@@ -49,7 +49,7 @@ def _fit(arr: np.ndarray) -> tuple[float, float, float] | None:
         from scipy import stats
 
         k, loc, scale = stats.exponnorm.fit(arr)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not (k > 0.0 and scale > 0.0 and math.isfinite(k) and math.isfinite(scale) and math.isfinite(loc)):
         return None
@@ -75,7 +75,7 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
         sigma = math.sqrt(sigma2)
         k = 1.0 / (lam * sigma)
         nll_nats = -float(np.mean(stats.exponnorm.logpdf(arr, k, loc=mu, scale=sigma)))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not math.isfinite(nll_nats):
         return None

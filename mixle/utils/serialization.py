@@ -21,7 +21,7 @@ import numpy as np
 
 try:
     import scipy.sparse as sp
-except Exception:  # pragma: no cover - scipy is a package dependency in normal use.
+except Exception:  # pragma: no cover - scipy is a package dependency in normal use.  # noqa: BLE001
     sp = None
 
 
@@ -131,7 +131,7 @@ def ensure_pysp_serialization_registry() -> None:
         for _, cls in inspect.getmembers(automatic, inspect.isclass):
             if cls.__module__ == automatic.__name__ and issubclass(cls, (StatsDistribution, StatsEstimator)):
                 register_serializable_class(cls)
-    except Exception:
+    except Exception:  # noqa: BLE001
         # Automatic estimator support is optional for the serializer.  The core
         # stats/bstats registries above should still be available.
         pass
@@ -144,7 +144,7 @@ def ensure_pysp_serialization_registry() -> None:
         for _, cls in inspect.getmembers(structure, inspect.isclass):
             if cls.__module__ == structure.__name__ and getattr(cls, "__pysp_serializable__", False):
                 register_serializable_class(cls)
-    except Exception:
+    except Exception:  # noqa: BLE001
         # Optional: the core stats registry above is enough for pure-stats models.
         pass
 

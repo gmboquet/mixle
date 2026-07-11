@@ -31,7 +31,7 @@ class MultivariateStudentTTestCase(unittest.TestCase):
             import torch
 
             from mixle.engines import TorchEngine
-        except Exception as exc:  # pragma: no cover - torch optional
+        except Exception as exc:  # pragma: no cover - torch optional  # noqa: BLE001
             self.skipTest("torch unavailable: %s" % exc)
         dist = _dist()
         x = dist.sampler(seed=2).sample(50)

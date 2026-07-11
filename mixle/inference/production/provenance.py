@@ -25,7 +25,7 @@ from mixle.data.hashing import model_hash as _model_hash
 def _version(mod: str) -> str | None:
     try:
         return __import__(mod).__version__
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -40,7 +40,7 @@ def _git_commit() -> str | None:
             ["git", "-C", root, "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=2
         )
         return r.stdout.strip() or None
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -62,7 +62,7 @@ def _schema_of(model: Any) -> list[tuple[str, str]]:
         from mixle.data.schema import Schema
 
         return [(f.name, repr(f.type)) for f in Schema.for_model(model).fields]
-    except Exception:
+    except Exception:  # noqa: BLE001
         return []
 
 
@@ -74,7 +74,7 @@ def _resource_usage() -> dict:
         ru = resource.getrusage(resource.RUSAGE_SELF)
         peak_mb = ru.ru_maxrss / 1e6 if sys.platform == "darwin" else ru.ru_maxrss / 1e3  # macOS bytes, Linux KB
         return {"cpu_time_s": ru.ru_utime + ru.ru_stime, "peak_rss_mb": round(peak_mb, 1)}
-    except Exception:
+    except Exception:  # noqa: BLE001
         return {}
 
 
@@ -90,7 +90,7 @@ def _final_loglik(model: Any, data: Any) -> float | None:
 
         enc = model.dist_to_encoder().seq_encode(list(_records(data)))
         return float(np.sum(model.seq_log_density(enc)))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -98,7 +98,7 @@ def _safe_model_hash(model: Any) -> str | None:
     """Fingerprint a model's serialized parameters, or ``None`` if it isn't serializable."""
     try:
         return _model_hash(model)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -287,7 +287,7 @@ def fit_with_provenance(
     header = build_header(model, data, training=training, started=t0, finished=t1, resources=usage)
     try:
         model.header = header
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     return model, header
 

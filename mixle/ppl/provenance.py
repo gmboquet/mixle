@@ -42,6 +42,6 @@ def fit_with_provenance(rv: Any, data: Any, *, seed: int | None = None, **fit_kw
     header = build_header(model, data, training=training, started=t0, finished=t1, resources=usage)
     try:
         fitted.header = header
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     return fitted, header

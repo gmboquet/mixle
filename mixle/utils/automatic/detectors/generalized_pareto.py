@@ -67,7 +67,7 @@ def _score(arr: np.ndarray, nobs: int) -> float | None:
         if not (scale > 0.0) or not math.isfinite(scale) or not math.isfinite(shape):
             return None
         nll_nats = -float(np.mean(stats.genpareto.logpdf(arr, shape, loc=loc, scale=scale)))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not math.isfinite(nll_nats):
         return None
@@ -96,7 +96,7 @@ def _cdf(arr: np.ndarray):
         if not (scale > 0.0) or not math.isfinite(scale) or not math.isfinite(shape):
             return None
         return stats.genpareto.cdf(arr, shape, loc=loc, scale=scale)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 

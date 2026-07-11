@@ -207,7 +207,7 @@ class FeatureMapEstimator(ParameterEstimator):
 def _register_serializable() -> None:
     try:
         from mixle.utils.serialization import register_serializable_class
-    except Exception:  # pragma: no cover - serialization support is optional at import
+    except Exception:  # pragma: no cover - serialization support is optional at import  # noqa: BLE001
         return
     register_serializable_class(FeatureMapDensity)
 

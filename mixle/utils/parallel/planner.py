@@ -294,7 +294,7 @@ class Resources:
                 dev_idx = rank % cuda_count
                 try:
                     mem = int(torch.cuda.get_device_properties(dev_idx).total_memory)
-                except Exception:
+                except Exception:  # noqa: BLE001
                     mem = per_device_memory
                 devices.append(
                     DeviceSpec(
@@ -1339,7 +1339,7 @@ def _dask_worker_count(client: Any) -> int:
         info = client.scheduler_info()
         workers = info.get("workers", {}) if isinstance(info, dict) else {}
         return max(1, len(workers))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return 1
 
 
@@ -1629,7 +1629,7 @@ def calibrate_resources(
                     precision=device.precision if precision is None else precision_name(precision),
                 )
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             updated.append(device)
     calibrated = Resources(tuple(updated))
     _record_calibration(
@@ -1699,7 +1699,7 @@ def estimate_estimator_stat_nbytes(estimator: Any) -> int:
     try:
         acc = estimator.accumulator_factory().make()
         return _object_nbytes(acc.value(), set(), depth=0, max_depth=8)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return 0
 
 
@@ -1860,7 +1860,7 @@ def _object_nbytes(x: Any, seen: set, depth: int, max_depth: int) -> int:
         return total
     try:
         return encoded_nbytes(x)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return 0
 
 

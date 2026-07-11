@@ -159,7 +159,7 @@ def _acquire_priority(champion: Any, failures: Sequence[Any], k: int, *, strateg
     try:
         adapter = _ConstantProbaAdapter(champion)
         return acquire(failures, adapter, k, strategy=strategy)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return failures[: min(k, len(failures))]
 
 
@@ -424,7 +424,7 @@ class ClosedLoopSelfEvolution:
                     )
                     self.champion = candidate.model
                     promoted = True
-        except Exception:
+        except Exception:  # noqa: BLE001
             delta = 0.0
 
         self.bandit.reward(ctx, op_name, delta)

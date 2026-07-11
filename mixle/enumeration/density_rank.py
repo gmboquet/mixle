@@ -130,7 +130,7 @@ def density_rank(
     try:
         # vectorized: one seq_log_density pass instead of n_samples per-sample log_density calls
         lp = np.asarray(dist.seq_log_density(dist.dist_to_encoder().seq_encode(samples)), dtype=float)
-    except Exception:
+    except Exception:  # noqa: BLE001
         lp = np.asarray([float(dist.log_density(y)) for y in samples], dtype=float)
     g = float(np.count_nonzero(lp >= t - tol)) / n_samples
     stderr = math.sqrt(max(g * (1.0 - g), 0.0) / n_samples)

@@ -44,7 +44,7 @@ def _fit(arr: np.ndarray):
 
     try:
         shape, loc, scale = stats.skewnorm.fit(arr)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not (scale > 0.0) or not (np.isfinite(shape) and np.isfinite(loc) and np.isfinite(scale)):
         return None

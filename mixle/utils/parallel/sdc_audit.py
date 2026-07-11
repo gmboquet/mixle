@@ -176,7 +176,7 @@ def _receipt(
     def _safe_repr(payload: bytes) -> str:
         try:
             return repr(pickle.loads(payload))[:2000]
-        except Exception as e:  # a corrupted payload may not even unpickle -- that's fine, still a receipt
+        except Exception as e:  # noqa: BLE001 - a corrupted payload may not even unpickle; still a receipt
             return "<unpicklable: %s>" % e
 
     return SDCAuditReceipt(

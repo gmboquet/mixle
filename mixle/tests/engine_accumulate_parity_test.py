@@ -16,7 +16,7 @@ try:
     from mixle.engines import TorchEngine
 
     _TORCH = TorchEngine(device="cpu", dtype="float64")
-except Exception:
+except Exception:  # noqa: BLE001
     _TORCH = None
 
 
@@ -67,7 +67,7 @@ class EngineAccumulateParityTestCase(unittest.TestCase):
                 continue
             try:
                 est = dist.estimator()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 continue
             enc = dist.dist_to_encoder().seq_encode(data)
             weights = np.linspace(0.5, 1.5, len(data))

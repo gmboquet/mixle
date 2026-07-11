@@ -111,7 +111,7 @@ def _spectral_init(graph: scipy.sparse.coo_matrix, emb_dim: int, rng: np.random.
             raise ValueError("not enough eigenvectors")
         y = y / max(float(np.abs(y).max()), 1.0e-12) * 10.0
         return y + rng.normal(0.0, 1.0e-4, size=(n, emb_dim))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return rng.uniform(-10.0, 10.0, size=(n, emb_dim))
 
 

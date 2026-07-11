@@ -116,7 +116,7 @@ class ParetoDistribution(SequenceEncodableProbabilityDistribution):
         """Return the log-density or log-mass at a single observation."""
         try:
             xx = float(x)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return -np.inf
         if not np.isfinite(xx) or xx < self.xm:
             return -np.inf

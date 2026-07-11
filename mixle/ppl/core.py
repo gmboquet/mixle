@@ -1545,7 +1545,7 @@ class RandomVariable:
             cd = None
             try:
                 cd = _convolve(lower(a, target="dist"), lower(b, target="dist"))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 cd = None
             if cd is not None:
                 return RandomVariable._bound(cd).log_prob(x)

@@ -319,7 +319,7 @@ class SimulatedRank:
                 if not self._go.wait(timeout=5.0):
                     return  # never released -> simulated crash: exit with no result
                 self._result = StepResult(self.rank_id, step, float(loss.item()), float(grad_norm.item()), grads)
-            except BaseException as e:  # surface on the driver, mirroring resilient_em's worker error path
+            except BaseException as e:  # noqa: BLE001 - surface on the driver, mirroring resilient_em's worker path
                 self._error = e
                 self._started.set()
             finally:

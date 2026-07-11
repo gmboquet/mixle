@@ -108,7 +108,7 @@ def _is_torch_module(obj: Any) -> bool:
             import torch.nn as nn
 
             return isinstance(obj, nn.Module)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return True
     return False
 

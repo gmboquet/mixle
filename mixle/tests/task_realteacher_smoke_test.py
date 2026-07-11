@@ -47,7 +47,7 @@ def _real_newsgroups_teacher():
         # download_if_missing=False => raise (not hang on the network) when the corpus is not cached.
         tr = fetch_20newsgroups(subset="train", categories=cats, remove=strip, download_if_missing=False)
         te = fetch_20newsgroups(subset="test", categories=cats, remove=strip, download_if_missing=False)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
     vec = TfidfVectorizer(max_features=5000, stop_words="english")

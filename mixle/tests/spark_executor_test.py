@@ -42,7 +42,7 @@ def setUpModule() -> None:
             conf=SparkConf().setMaster("local[2]").setAppName("mixle-test").set("spark.ui.enabled", "false")
         )
         _SC.setLogLevel("ERROR")
-    except Exception as e:  # pragma: no cover - environment dependent
+    except Exception as e:  # pragma: no cover - environment dependent  # noqa: BLE001
         raise unittest.SkipTest("could not start Spark: %s" % e)
 
 
