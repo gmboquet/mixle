@@ -178,6 +178,12 @@ markers = [
     "hmm: HMM, segmental HMM, tree HMM, and lookback HMM tests.",
     "pcfg: grammar and PCFG tests.",
     "latent: mixture, DPM, LDA, LLDA, and hidden-association tests.",
+    # --- T3.1 test tiers (purpose + time budget; see docs/test-tiers.rst) ---
+    "smoke: import, public-API, and critical-fit-path checks; budget <=30 s local / <=60 s CI.",
+    "core: stable base-install correctness; budget <=4 min per Python CI job.",
+    "full: all non-optional correctness incl. slow tests; budget <=20 min.",
+    "numerical: repeated-seed and numerical-stress tests; nightly, not a per-commit gate.",
+    "hardware: real MPI/GPU/multi-process receipts; scheduled or manually gated.",
 ]
 
 [tool.coverage.run]
