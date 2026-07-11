@@ -44,6 +44,7 @@ pip-delete-this-directory.txt
 .DS_Store
 .claude/
 .worktrees/
+.benchmarks/
 
 # Downloaded example datasets
 /data/
