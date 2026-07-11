@@ -14,6 +14,11 @@ full scope of what Mixle can do.
 Maturity Map
 ------------
 
+This map has a machine-readable mirror in :mod:`mixle.maturity`: ``maturity_of("mixle.stats.latent")``
+returns the tier (``stable`` / ``provisional`` / ``experimental``, matching the deprecation policy in
+:doc:`support-policy`) for any dotted module name, resolving by longest prefix. A test keeps the two in
+sync, so this table and the registry cannot drift apart.
+
 .. list-table::
    :header-rows: 1
 
