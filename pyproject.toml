@@ -236,3 +236,17 @@ no_implicit_optional = true
 [[tool.mypy.overrides]]
 module = "mixle.tests.*"
 ignore_errors = true
+
+# Typed-core (worklist Y4.1): these modules are fully annotated and clean under strict mypy
+# (disallow_untyped_defs). They are checked BLOCKING in CI (the "mypy (typed core)" step), unlike the
+# advisory whole-tree run. Grow this list as more modules reach the bar -- that is how the type-checked
+# core expands without a single boil-the-ocean pass.
+[[tool.mypy.overrides]]
+module = [
+    "mixle.scorecard",
+    "mixle.spend",
+    "mixle.system",
+    "mixle.registry",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
