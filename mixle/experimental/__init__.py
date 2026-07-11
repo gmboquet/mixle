@@ -4,6 +4,11 @@ Code here is kept for exploration and may change or be removed without the usual
 
 Current contents:
 
+- :mod:`mixle.experimental.typed_runtime` -- the statistically typed optimization-runtime foundation: a
+  side-effect-free model compiler, explicit objective/update/merge/state contracts, dependency-aware invalidation,
+  gain-per-cost scheduling, benchmark and failure receipts, and the first objective-gated local mixture-EM adapter.
+  Compilation is broader than execution support; unsupported adapter semantics fail before fitting. See
+  ``mixle/experimental/typed_runtime/README.md`` for the current boundary.
 - :mod:`mixle.experimental.program` -- the optimization-*program* approach (moves + combinators: ``minimize`` /
   ``maximize`` / ``em`` / ``alternate`` / ``weighted`` / ``constrain`` / ``reinforce`` / ``pareto`` / ``bilevel``
   / ``gail`` / ``maxent_irl``) to fitting heterogeneous neural + stats models. A reasonable idea that wasn't

@@ -32,3 +32,6 @@ mirroring how `torch`/`numba`/`jax`/`optional` mark backend-gated tests elsewher
 ## Current contents
 
 - `program.py` / `graduation.py` — see `mixle/experimental/__init__.py` for what each module is.
+- `typed_runtime/` — statistically typed update contracts, a side-effect-free model compiler, dependency-aware
+  invalidation, gain-per-cost scheduling, benchmark/failure receipts, and the first objective-gated local mixture
+  execution adapter. See `typed_runtime/README.md` for implemented and explicitly unsupported semantics.
