@@ -324,6 +324,9 @@ class GradEstimator(ParameterEstimator):
         self.name = name
         self.loss = loss
         self.optimizer = optimizer
+        # Cumulative count of divergence recoveries across this estimator's M-steps (one optimize()
+        # run shares one estimator tree, so this accumulates over EM rounds; see estimate()).
+        self.nonfinite_recoveries = 0
 
     def _leaf(self) -> GradLeaf:
         return GradLeaf(
@@ -360,6 +363,15 @@ class GradEstimator(ParameterEstimator):
         opt = self.optimizer(params) if self.optimizer is not None else torch.optim.Adam(params, lr=self.lr)
         autocast_dev = "cuda" if str(dev).startswith("cuda") else "cpu"
         use_bf16 = self.precision == "bf16"
+        # Divergence guard: an aggressive step can drive parameters non-finite, after which the
+        # module's own log_density may RAISE (e.g. a torch.distributions constraint check) from
+        # inside this M-step -- before the outer EM loop's non-finite acceptance gate or its
+        # transaction restore can act, crashing the fit and leaving the shared module poisoned.
+        # Snapshot the module state up front; on a non-finite loss/parameter or a raising module,
+        # restore the snapshot and stop stepping. The round degrades to a no-op proposal the outer
+        # loop gates normally, and the recovery is disclosed in the fit receipt.
+        pre_step_state = {key: value.detach().clone() for key, value in self.module.state_dict().items()}
+        recovered = False
         optimizer_steps = 0
         epochs_completed = 0
         stop = False
@@ -370,23 +382,39 @@ class GradEstimator(ParameterEstimator):
                 xb = tuple(xt[idx].to(dev) for xt in xs)
                 wb = w[idx].to(dev)
                 opt.zero_grad()
-                with torch.autocast(device_type=autocast_dev, dtype=torch.bfloat16, enabled=use_bf16):
-                    if self.loss is not None:
-                        loss = self.loss(self.module, *xb, wb)
+                step_healthy = True
+                try:
+                    with torch.autocast(device_type=autocast_dev, dtype=torch.bfloat16, enabled=use_bf16):
+                        if self.loss is not None:
+                            loss = self.loss(self.module, *xb, wb)
+                        else:
+                            # tuple default: log_density(*fields) -- a single field unpacks to log_density(x),
+                            # identical to before; a conditional bare module's log_density(x, y, ...) just works.
+                            loss = -(wb * self.module.log_density(*xb)).sum()
+                            # ``w`` is normalized over the full M-step data. A uniform minibatch's raw
+                            # weighted sum is smaller by E[batch_size / n]; rescale it so every optimizer
+                            # step is an unbiased estimate of the same full responsibility-weighted Q
+                            # objective. This stabilizes gradient scale across batch sizes without claiming
+                            # identical Adam trajectories (their noise and moment estimates still differ).
+                            if len(idx) < n:
+                                loss = loss * (float(n) / float(len(idx)))
+                    if not bool(torch.isfinite(loss)):
+                        step_healthy = False
                     else:
-                        # tuple default: log_density(*fields) -- a single field unpacks to log_density(x),
-                        # identical to before; a conditional bare module's log_density(x, y, ...) just works.
-                        loss = -(wb * self.module.log_density(*xb)).sum()
-                        # ``w`` is normalized over the full M-step data. A uniform minibatch's raw
-                        # weighted sum is smaller by E[batch_size / n]; rescale it so every optimizer
-                        # step is an unbiased estimate of the same full responsibility-weighted Q
-                        # objective. This stabilizes gradient scale across batch sizes without claiming
-                        # identical Adam trajectories (their noise and moment estimates still differ).
-                        if len(idx) < n:
-                            loss = loss * (float(n) / float(len(idx)))
-                loss.backward()
-                opt.step()
-                optimizer_steps += 1
+                        loss.backward()
+                        opt.step()
+                        optimizer_steps += 1
+                        if not all(bool(torch.isfinite(p).all()) for p in params):
+                            step_healthy = False
+                except (ValueError, RuntimeError):
+                    step_healthy = False
+                if not step_healthy:
+                    with torch.no_grad():
+                        self.module.load_state_dict(pre_step_state)
+                    self.nonfinite_recoveries += 1
+                    recovered = True
+                    stop = True
+                    break
                 if self.max_optimizer_steps is not None and optimizer_steps >= self.max_optimizer_steps:
                     stop = True
                     break
@@ -402,6 +430,8 @@ class GradEstimator(ParameterEstimator):
             "optimizer_steps": int(optimizer_steps),
             "max_optimizer_steps": self.max_optimizer_steps,
             "gradient_estimator": "unbiased_full_weighted_objective" if self.loss is None else "custom_loss",
+            "nonfinite_recovery": bool(recovered),
+            "nonfinite_recoveries_total": int(self.nonfinite_recoveries),
         }
         return leaf
 
