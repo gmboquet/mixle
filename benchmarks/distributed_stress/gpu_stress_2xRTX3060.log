@@ -1,0 +1,37 @@
+=== mixle distributed stress: groups=['A', 'C', 'D', 'E', 'F', 'G'] gpu=True heavy=True ===
+  [PASS] A_local_chunks.gmm4_nc1: num_chunks=1 max|Δ|=0.00e+00
+  [PASS] A_local_chunks.gmm4_nc2: num_chunks=2 max|Δ|=7.44e-13
+  [PASS] A_local_chunks.gmm4_nc4: num_chunks=4 max|Δ|=7.12e-13
+  [PASS] A_model_parallel.gmm4: max|Δ|=0.00e+00 ll_base=-6453.589 ll_mp=-6453.589
+  [PASS] A_local_chunks.catmix3_nc1: num_chunks=1 max|Δ|=0.00e+00
+  [PASS] A_local_chunks.catmix3_nc2: num_chunks=2 max|Δ|=2.94e-15
+  [PASS] A_local_chunks.catmix3_nc4: num_chunks=4 max|Δ|=1.55e-15
+  [PASS] A_model_parallel.catmix3: max|Δ|=0.00e+00 ll_base=-2887.805 ll_mp=-2887.805
+  [PASS] A_local_chunks.composite_nc1: num_chunks=1 max|Δ|=0.00e+00
+  [PASS] A_local_chunks.composite_nc2: num_chunks=2 max|Δ|=4.44e-16
+  [PASS] A_local_chunks.composite_nc4: num_chunks=4 max|Δ|=3.55e-15
+  [PASS] A_model_parallel.composite: max|Δ|=0.00e+00 ll_base=-8290.160 ll_mp=-8290.160
+  [PASS] A_local_chunks.hmm3_nc1: num_chunks=1 max|Δ|=0.00e+00
+  [PASS] A_local_chunks.hmm3_nc2: num_chunks=2 max|Δ|=6.59e-17
+  [PASS] A_local_chunks.hmm3_nc4: num_chunks=4 max|Δ|=3.33e-16
+  [PASS] A_model_parallel.hmm3: max|Δ|=0.00e+00 ll_base=-17923.410 ll_mp=-17923.410
+  [PASS] C_torch.cpu_parity: torch-cpu vs numpy max|Δ|=4.38e-13
+  [PASS] C_torch.device_count: 2 CUDA devices
+  [PASS] C_torch.cuda0_parity: cuda:0 vs numpy max|Δ|=4.94e-13
+  [PASS] C_torch.per_gpu_placement: 2 devices, ll spread=0.0000
+  [BUG ] C_torch.dtensor_component_shard: RuntimeError: Mesh should not be bigger than default world size, but found 2 ranks!
+  [PASS] D_sharding.plan_valid: plan over 8 components / 3 devices -> tuple
+  [PASS] D_sharding.auto_parallel_bit_identical: auto_parallel vs local max|Δ|=0.00e+00
+  [PASS] D_sharding.more_shards_than_components: 16 shards / 3 components did not crash
+  [PASS] E_determinism.local: local two-run max|Δ|=0.00e+00
+  [PASS] E_determinism.model_parallel: model_parallel two-run max|Δ|=0.00e+00
+  [PASS] F_edge.k1_mixture: K=1 mixture fit
+  [PASS] F_edge.tiny_data: n=3 data, 4 components, model_parallel
+  [PASS] F_edge.single_point_overchunk: single data point, num_chunks=4
+  [PASS] F_edge.empty_chunks: num_chunks=16 > n_data=5 (empty chunks)
+  [PASS] F_edge.large_k_stress: K=32, n=8000 model_parallel
+  [PASS] G_planner.plan_runs: plan() -> Placement
+  [PASS] G_planner.plan_no_data: plan(num_chunks=4) pre-fit sizing
+
+=== SUMMARY ===
+SUMMARY_JSON {"summary": {"total": 33, "PASS": 32, "FAIL": 0, "BUG": 1, "SKIP": 0}, "bugs": [{"where": "C_torch.dtensor_component_shard", "detail": "RuntimeError: Mesh should not be bigger than default world size, but found 2 ranks!", "tb": ["    self._get_or_create_default_group()", "  File \"/opt/conda/lib/python3.11/site-packages/torch/distributed/device_mesh.py\", line 272, in _get_or_create_default_group", "    raise RuntimeError(", "RuntimeError: Mesh should not be bigger than default world size, but found 2 ranks!"]}]}

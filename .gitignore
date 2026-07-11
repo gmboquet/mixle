@@ -51,7 +51,6 @@ pip-delete-this-directory.txt
 # audit ledgers + Sphinx build output stay local; the docs source (.rst) is published
 docs/_build/
 audit/
-/benchmarks/
 
 # generated logo preview / QA renders (checkerboard + dark-mode checks) stay local
 *_preview_*.png
