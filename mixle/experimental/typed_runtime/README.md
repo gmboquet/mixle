@@ -32,8 +32,9 @@ print(graph.explain())
 - A hierarchical island coordinator and a real typed adapter over mixle's exact model-parallel statistic fold.
 - Per-parameter geometry routing for exact statistics, AdamW, Muon-style orthogonalization, Kronecker
   preconditioning, natural gradients, proximal blocks, low-rank adapters, and sparse-expert clocks.
-- An executable routed PyTorch optimizer plus fixed-token/fixed-update batch semantics, curvature caching, and
-  measured AdamW fallback based on time-to-target evidence.
+- An executable routed PyTorch optimizer with native AdamW passthrough for plans whose geometry does not justify
+  custom kernels, plus fixed-token/fixed-update batch semantics, curvature caching, and measured fallback based on
+  time-to-target evidence.
 - A provenance-preserving context-action IR for retrieval, source expansion, hypothesis/query generation,
   summarization, verification, tools, linking, pruning, materialization, and explicit stopping.
 - Closed-loop value-of-information context construction with transactional graph mutation and actual-cost budgets.

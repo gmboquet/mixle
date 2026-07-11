@@ -288,7 +288,7 @@ def run_graph_memory_pilot(
             plan = route_optimizer_geometry(
                 describe_parameters(model),
                 contract,
-                GeometryRouterConfig(matrix_min_elements=2, matrix_min_dimension=1, max_state_to_parameter_ratio=8.0),
+                GeometryRouterConfig(),
             )
             optimizer = build_routed_torch_optimizer(model, plan, lr=0.04)
             families = tuple(sorted({route.family.value for route in plan.routes}))

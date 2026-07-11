@@ -79,6 +79,16 @@ def build_routed_torch_optimizer(
         )
     if not groups:
         raise ValueError("optimizer plan has no executable gradient-routed parameters.")
+    if all(group["family"] == OptimizerFamily.ADAMW.value for group in groups):
+        optimizer = torch.optim.AdamW(
+            [parameter for group in groups for parameter in group["params"]],
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            weight_decay=weight_decay,
+        )
+        optimizer.optimizer_plan = plan
+        return optimizer
 
     class RoutedTorchOptimizer(torch.optim.Optimizer):
         def __init__(self) -> None:

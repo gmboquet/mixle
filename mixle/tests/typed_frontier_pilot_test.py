@@ -42,7 +42,7 @@ def test_graph_context_improves_quality_under_bounded_active_memory_and_recovers
     assert receipt.graph_routed.batch.examples_per_microbatch == 16
     assert receipt.graph_routed.batch.accumulation_steps == 2
     assert receipt.graph_routed.batch.effective_global_examples == 32
-    assert set(receipt.graph_routed.optimizer_families) == {"adamw", "muon"}
+    assert set(receipt.graph_routed.optimizer_families) == {"adamw"}
     assert receipt.recovery.passed
     assert all(row.oracle_passed for row in receipt.failure_receipts)
 

@@ -16,9 +16,16 @@ import unittest
 
 import numpy as np
 
-from mixle.inference.block_em import _select_active, run_block_em
+from mixle.inference.block_em import (
+    _active_responsibilities,
+    _constrained_block_weights,
+    _incremental_candidate_log_density,
+    _select_active,
+    run_block_em,
+)
 from mixle.inference.em import PosteriorTransformEM, observed_log_likelihood, run_em
 from mixle.inference.estimation import optimize
+from mixle.inference.freeze_rollup import _combine, _log_density_from_matrix
 from mixle.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator, seq_encode
 
 
@@ -96,13 +103,17 @@ class BlockEMMonotonicityTestCase(unittest.TestCase):
         )
         self.assertTrue(all(h.wall_time_seconds > 0.0 for h in history))
         self.assertTrue(all(np.isfinite(h.measured_q_gain) for h in history))
+        selective = [h for h in history if h.n_active < h.n_components - h.n_zero_weight]
+        self.assertTrue(selective)
+        self.assertTrue(all(h.n_responsibility_columns == h.n_active for h in selective))
+        self.assertTrue(all(h.assumptions.incremental_normalizer for h in selective))
         self.assertTrue(history[-1].objective_exact)
         self.assertAlmostEqual(history[-1].objective, observed_log_likelihood(enc)(model), places=9)
         self.assertTrue(all(h.assumptions is not None and h.assumptions.assumptions_hold for h in history))
         self.assertTrue(all(h.timing is not None and h.timing.total_seconds == h.wall_time_seconds for h in history))
         self.assertTrue(
             all(
-                h.degenerate_round or h.assumptions.budget_utilization <= 1.0 + 1.0e-12
+                h.degenerate_round or h.assumptions.full_refresh or h.assumptions.budget_utilization <= 1.0 + 1.0e-12
                 for h in history
                 if h.assumptions is not None and h.assumptions.forced_cost <= 0.5 * h.assumptions.eligible_cost
             )
@@ -110,6 +121,124 @@ class BlockEMMonotonicityTestCase(unittest.TestCase):
 
 
 class BlockEMSpeedupTestCase(unittest.TestCase):
+    def test_active_responsibilities_are_exact_columns_of_the_dense_estep(self):
+        ll_mat = np.asarray(
+            [
+                [-1.0, -3.0, -2.0, -4.0],
+                [-5.0, -1.0, -3.0, -2.0],
+                [-2.0, -2.0, -1.0, -6.0],
+            ]
+        )
+        log_w = np.log(np.asarray([0.4, 0.3, 0.2, 0.1]))
+        log_density, dense = _combine(ll_mat, log_w)
+
+        sparse = _active_responsibilities(ll_mat, log_w, log_density, (0, 2))
+
+        np.testing.assert_allclose(sparse, dense[:, [0, 2]], rtol=1.0e-13, atol=1.0e-13)
+
+    def test_constrained_weight_update_uses_one_exact_inactive_mass_coordinate(self):
+        model = MixtureDistribution(
+            [GaussianDistribution(float(idx), 1.0) for idx in range(4)],
+            [0.4, 0.3, 0.2, 0.1],
+        )
+        estimator = MixtureEstimator([GaussianEstimator() for _ in range(4)])
+        active = (0, 2)
+        active_counts = np.asarray([20.0, 10.0])
+
+        weights, inactive_scale = _constrained_block_weights(estimator, model, active, active_counts, 100)
+
+        np.testing.assert_allclose(weights, [0.2, 0.525, 0.1, 0.175], atol=1.0e-15)
+        self.assertAlmostEqual(inactive_scale, 1.75)
+        self.assertAlmostEqual(weights[1] / weights[3], model.w[1] / model.w[3])
+        # The current point is feasible in this block. Its conditional maximizer must
+        # therefore have no smaller complete-data weight objective.
+        counts = np.asarray([20.0, 50.0, 10.0, 20.0])
+        old_q = float(np.dot(counts, np.log(model.w)))
+        new_q = float(np.dot(counts, np.log(weights)))
+        self.assertGreaterEqual(new_q, old_q)
+
+    def test_boundary_relaxation_keeps_positive_components_recoverable(self):
+        model = MixtureDistribution(
+            [GaussianDistribution(float(idx), 1.0) for idx in range(4)],
+            [0.4, 0.3, 0.2, 0.1],
+        )
+        estimator = MixtureEstimator([GaussianEstimator() for _ in range(4)])
+        active = (0, 2)
+        active_counts = np.asarray([0.0, 10.0])
+
+        optimum, _ = _constrained_block_weights(
+            estimator,
+            model,
+            active,
+            active_counts,
+            100,
+            boundary_step=1.0,
+        )
+        relaxed, _ = _constrained_block_weights(
+            estimator,
+            model,
+            active,
+            active_counts,
+            100,
+            boundary_step=0.5,
+        )
+
+        self.assertEqual(optimum[0], 0.0)
+        self.assertGreater(relaxed[0], 0.0)
+        np.testing.assert_allclose(relaxed, 0.5 * model.w + 0.5 * optimum, atol=1.0e-15)
+
+    def test_incremental_normalizer_matches_full_candidate_logsumexp(self):
+        old_scores = np.asarray(
+            [
+                [-1.0, -3.0, -2.0, -4.0],
+                [-5.0, -1.0, -3.0, -2.0],
+                [-2.0, -2.0, -1.0, -6.0],
+            ]
+        )
+        old_weights = np.asarray([0.4, 0.3, 0.2, 0.1])
+        active = (0, 2)
+        old_log_density, old_responsibilities = _combine(old_scores, np.log(old_weights))
+        new_active_scores = old_scores[:, active] + np.asarray([[0.2, -0.1], [0.4, 0.3], [-0.2, 0.5]])
+        new_weights = np.asarray([0.2, 0.525, 0.1, 0.175])
+
+        incremental, impossible, logspace_rows = _incremental_candidate_log_density(
+            old_log_density,
+            old_responsibilities[:, active],
+            old_scores[:, [1, 3]],
+            np.log(old_weights[[1, 3]]),
+            new_active_scores,
+            np.log(new_weights[list(active)]),
+            inactive_scale=1.75,
+        )
+        full_scores = old_scores.copy()
+        full_scores[:, active] = new_active_scores
+        exact = _log_density_from_matrix(full_scores, np.log(new_weights))
+
+        self.assertFalse(np.any(impossible))
+        self.assertEqual(logspace_rows, 0)
+        np.testing.assert_allclose(incremental, exact, rtol=1.0e-13, atol=1.0e-13)
+
+    def test_incremental_normalizer_repairs_cancellation_in_log_space(self):
+        old_weights = np.asarray([1.0 - 1.0e-20, 1.0e-20])
+        old_scores = np.zeros((2, 2))
+        old_log_density, responsibilities = _combine(old_scores, np.log(old_weights))
+        new_weights = np.asarray([0.5, 0.5])
+
+        incremental, impossible, logspace_rows = _incremental_candidate_log_density(
+            old_log_density,
+            responsibilities[:, [0]],
+            old_scores[:, [1]],
+            np.log(old_weights[[1]]),
+            old_scores[:, [0]],
+            np.log(new_weights[[0]]),
+            inactive_scale=new_weights[1] / old_weights[1],
+        )
+        exact = _log_density_from_matrix(old_scores, np.log(new_weights))
+
+        self.assertFalse(np.any(impossible))
+        self.assertEqual(logspace_rows, 2)
+        np.testing.assert_allclose(incremental, exact, rtol=0.0, atol=1.0e-15)
+
     def test_starvation_updates_replace_lower_value_work_inside_the_budget(self):
         eligible = list(range(8))
         scores = {idx: float(8 - idx) for idx in eligible}
@@ -149,7 +278,7 @@ class BlockEMSpeedupTestCase(unittest.TestCase):
         # Blocks skipped in round 1 become forced before round 2, so the pending wave is
         # invalidated instead of silently postponing starvation prevention.
         self.assertFalse(history[2].assumptions.schedule_reused)
-        self.assertEqual(history[2].n_active, 4)
+        self.assertEqual(history[2].assumptions.selected_cost, history[2].assumptions.forced_cost)
 
         _, reusable_history = run_block_em(
             enc,
@@ -163,6 +292,26 @@ class BlockEMSpeedupTestCase(unittest.TestCase):
         )
         self.assertFalse(reusable_history[1].assumptions.schedule_reused)
         self.assertTrue(reusable_history[2].assumptions.schedule_reused)
+
+    def test_periodic_full_refresh_resets_sparse_schedule_state(self):
+        start, estimator, enc = _make_problem(seed=23, nobs=200)
+        _, history = run_block_em(
+            enc,
+            estimator,
+            start,
+            max_its=5,
+            delta=None,
+            budget_fraction=0.5,
+            schedule_wave_rounds=4,
+            max_skip_rounds=10,
+            full_refresh_interval=2,
+        )
+
+        self.assertFalse(history[1].assumptions.full_refresh)
+        self.assertTrue(history[2].assumptions.full_refresh)
+        self.assertFalse(history[2].assumptions.schedule_reused)
+        self.assertEqual(history[2].n_responsibility_columns, history[2].n_components)
+        self.assertFalse(history[3].assumptions.schedule_reused)
 
     def test_evaluation_count_receipt_matches_active_fraction(self):
         """The scheduler reaches a shared target with fewer component-density evaluations.

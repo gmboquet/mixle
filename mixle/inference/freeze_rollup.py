@@ -358,7 +358,11 @@ def _component_log_density_matrix_profiled(
             continue
         enc_i = _component_enc(enc_data, idx)
         started = time.perf_counter()
-        log_density, hit = cache.component_log_density(idx, model.components[idx], enc_i, frozen=idx in frozen_idx)
+        if idx in frozen_idx:
+            log_density, hit = cache.component_log_density(idx, model.components[idx], enc_i, frozen=True)
+        else:
+            log_density = np.asarray(model.components[idx].seq_log_density(enc_i), dtype=np.float64)
+            hit = False
         elapsed = time.perf_counter() - started
         if hit:
             hits += 1
@@ -394,7 +398,6 @@ def _component_log_density_matrix_profiled(
 def _updated_component_log_density_matrix_profiled(
     model: MixtureDistribution,
     enc_data: Any,
-    cache: FreezeRollupCache,
     active_idx: set[int],
     base_matrix: np.ndarray,
 ) -> tuple[np.ndarray, int, DensityMatrixProfile]:
@@ -402,28 +405,68 @@ def _updated_component_log_density_matrix_profiled(
 
     if base_matrix.ndim != 2 or base_matrix.shape[1] != model.num_components:
         raise ValueError("base component-score matrix does not match the candidate model.")
+    indices, columns, evaluations, column_profile = _updated_component_log_density_columns_profiled(
+        model,
+        enc_data,
+        active_idx,
+        base_matrix.shape[0],
+    )
     assembly_started = time.perf_counter()
     ll_mat = base_matrix.copy()
-    assembly_seconds = time.perf_counter() - assembly_started
+    if indices:
+        ll_mat[:, indices] = columns
+    assembly_seconds = column_profile.assembly_seconds + time.perf_counter() - assembly_started
+    profile = DensityMatrixProfile(
+        evaluations,
+        0,
+        model.num_components - len(active_idx),
+        column_profile.zero_weight_skips,
+        column_profile.evaluation_seconds,
+        0.0,
+        assembly_seconds,
+        column_profile.component_evaluation_seconds,
+    )
+    return ll_mat, evaluations, profile
+
+
+def _updated_component_log_density_columns_profiled(
+    model: MixtureDistribution,
+    enc_data: Any,
+    active_idx: set[int],
+    nobs: int,
+) -> tuple[tuple[int, ...], np.ndarray, int, DensityMatrixProfile]:
+    """Score moved components without cache hashing or a full-matrix copy.
+
+    Active candidate parameters were just re-estimated, so they cannot be cache
+    hits. The former path hashed every active parameter tree and populated cache
+    entries that block EM never read. A compact column matrix also lets the
+    caller mutate its accepted score matrix only after transaction commit.
+    """
+
+    indices = tuple(sorted(active_idx))
+    columns: list[np.ndarray] = []
     evaluations = 0
     zero_weight_skips = 0
     evaluation_seconds = 0.0
     component_seconds = []
-    for idx in sorted(active_idx):
+    for idx in indices:
         if model.zw[idx]:
-            ll_mat[:, idx] = -np.inf
+            columns.append(np.full(nobs, -np.inf, dtype=np.float64))
             zero_weight_skips += 1
             continue
         enc_i = _component_enc(enc_data, idx)
         started = time.perf_counter()
-        log_density, _ = cache.component_log_density(idx, model.components[idx], enc_i, frozen=False)
+        log_density = np.asarray(model.components[idx].seq_log_density(enc_i), dtype=np.float64)
         elapsed = time.perf_counter() - started
-        if len(log_density) != ll_mat.shape[0]:
+        if len(log_density) != nobs:
             raise ValueError("updated component score length does not match the base matrix.")
-        ll_mat[:, idx] = log_density
+        columns.append(log_density)
         evaluations += 1
         evaluation_seconds += elapsed
         component_seconds.append((idx, elapsed))
+    assembly_started = time.perf_counter()
+    matrix = np.column_stack(columns) if columns else np.empty((nobs, 0), dtype=np.float64)
+    assembly_seconds = time.perf_counter() - assembly_started
     profile = DensityMatrixProfile(
         evaluations,
         0,
@@ -434,7 +477,7 @@ def _updated_component_log_density_matrix_profiled(
         assembly_seconds,
         tuple(component_seconds),
     )
-    return ll_mat, evaluations, profile
+    return indices, matrix, evaluations, profile
 
 
 def _component_log_density_matrix(

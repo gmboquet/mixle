@@ -60,6 +60,29 @@ def test_routed_muon_matrix_and_adamw_bias_train_a_real_module():
     assert "exp_avg_sq" in optimizer.state[module.bias]
 
 
+def test_all_adamw_plan_uses_native_optimizer_without_changing_update():
+    torch.manual_seed(21)
+    routed_module = torch.nn.Linear(4, 4)
+    reference_module = torch.nn.Linear(4, 4)
+    reference_module.load_state_dict(routed_module.state_dict())
+    plan = route_optimizer_geometry(describe_parameters(routed_module), _contract())
+    assert {route.family for route in plan.routes} == {OptimizerFamily.ADAMW}
+    routed = build_routed_torch_optimizer(routed_module, plan, lr=0.01, weight_decay=0.02)
+    reference = torch.optim.AdamW(reference_module.parameters(), lr=0.01, weight_decay=0.02)
+    inputs = torch.randn(8, 4)
+    targets = torch.randn(8, 4)
+
+    torch.nn.functional.mse_loss(routed_module(inputs), targets).backward()
+    torch.nn.functional.mse_loss(reference_module(inputs), targets).backward()
+    routed.step()
+    reference.step()
+
+    assert isinstance(routed, torch.optim.AdamW)
+    assert routed.optimizer_plan is plan
+    for routed_parameter, reference_parameter in zip(routed_module.parameters(), reference_module.parameters()):
+        torch.testing.assert_close(routed_parameter, reference_parameter, rtol=0.0, atol=0.0)
+
+
 def test_newton_schulz_muon_tracks_exact_polar_reference_without_svd(monkeypatch):
     torch.manual_seed(12)
     module = torch.nn.Linear(32, 64, bias=False)
