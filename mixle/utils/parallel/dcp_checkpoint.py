@@ -1,5 +1,12 @@
 """Sharded distributed checkpoints via ``torch.distributed.checkpoint`` (DCP) -- replaces pickle-broadcast at scale.
 
+.. warning::
+
+   **Experimental frontier-training prototype.** The DCP save/load mechanics are exact, but genuine
+   multi-rank sharded checkpointing needs a real process group across real devices; at single-process or
+   simulated-rank scale this exercises the mechanism, not a production multi-node checkpoint. Not a
+   supported production checkpointing API.
+
 The gather-to-root + ``pickle``-broadcast that :class:`TorchRunEncodedData` uses to move a model cannot save a
 model that does not fit (and is not folded on) one rank. DCP saves each rank's shard of the (FSDP2-sharded) model
 + optimizer state in parallel to a checkpoint directory, and loads it back sharded -- the standard frontier
