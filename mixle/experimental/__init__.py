@@ -42,6 +42,12 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.unlearning` -- P5, exact machine unlearning for closed-form leaves:
+  :func:`~mixle.experimental.unlearning.certify_unlearning` re-reduces the retained shards' stored
+  sufficient statistics (via each accumulator's ``combine``) in canonical order and certifies the result
+  equals the never-saw-it fit bit-for-bit. NOT by subtraction -- ``T_all - T_j`` is not bitwise and can
+  catastrophically cancel to a negative variance (both shown in the test). Exact for closed-form leaves;
+  iterative-EM latent models are out of scope for the exact certificate.
 - :mod:`mixle.experimental.spectral_health` -- P16, data-free spectral-health receipts:
   :func:`~mixle.experimental.spectral_health.spectral_health` fits the power-law tail exponent of a weight
   matrix's eigenvalue spectrum (plus stable/effective rank) and classifies the layer under-trained /
