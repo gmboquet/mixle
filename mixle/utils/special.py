@@ -337,7 +337,7 @@ def valid_integer(x: Any, *, nonneg: bool = False) -> bool:
     """
     try:
         xx = float(x)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     if not (np.isfinite(xx) and math.floor(xx) == xx):
         return False

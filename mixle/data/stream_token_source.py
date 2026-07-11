@@ -1,11 +1,17 @@
-"""A streaming token source: yield ``(context-window, next-token)`` micro-batches from a token-id array via a
-resumable cursor, WITHOUT ever materializing the ``(N, block)`` window matrix or a Python list of observations.
+"""A streaming token source: yield ``(context-window, next-token)`` micro-batches from an IN-MEMORY token-id
+array WITHOUT ever materializing the ``(N, block)`` window matrix -- each batch's windows are built on the fly
+and discarded.
 
 This is the data half of the non-buffering streaming estimator. The standard encoder builds and buffers every
-``(window -> next)`` observation (``O(corpus x block)`` host RAM -- the materialization wall); this yields them a
-micro-batch at a time from the read-only token array (``O(corpus)`` resident + ``O(batch x block)`` ephemeral).
-For a real out-of-core corpus the same generator shape reads from a memory-mapped / sharded token file; the
-cursor is resumable, so a checkpoint is just its position.
+``(window -> next)`` observation (``O(corpus x block)`` host RAM -- the materialization wall); this keeps only the
+token array resident (``O(corpus)``) plus ``O(batch x block)`` ephemeral per batch. Two honest caveats: the token
+array must fit in memory (this is not an out-of-core reader), and ``shuffle=True`` materializes one full-length
+``O(corpus)`` permutation for the epoch order (still ``O(corpus)``, but a real extra array; ``shuffle=False``
+avoids it).
+
+The same generator SHAPE extends to a true out-of-core corpus -- reading windows from a memory-mapped / sharded
+token file, where a checkpoint would be just the cursor position -- but that out-of-core / resumable-cursor
+version is not implemented here.
 """
 
 from __future__ import annotations
@@ -21,7 +27,8 @@ def stream_token_source(
 ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
     """Yield ``(context_windows (b, block) float32, next_tokens (b,) int)`` micro-batches; never buffers windows.
 
-    The token array is the only resident data; each micro-batch's windows are built on the fly and discarded.
+    The token array -- and, with ``shuffle=True``, one ``O(len(token_ids))`` permutation for the epoch order --
+    is the only resident data; each micro-batch's windows are built on the fly and discarded.
     """
     ids = np.asarray(token_ids)
     n = len(ids) - int(block)

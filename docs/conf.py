@@ -20,6 +20,38 @@ pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
 release = pyproject["project"]["version"]
 version = ".".join(release.split(".")[:2])
 
+
+def _git_commit() -> str:
+    """Short commit the docs were built from, so a page can name its exact source.
+
+    Prefers a CI-provided SHA (GitHub Actions / Read the Docs) so the value is correct
+    even when the build runs from an exported tree with no ``.git``; falls back to a
+    local ``git`` call, then to ``"unknown"``. Never raises -- a docs build must not fail
+    because provenance is unavailable.
+    """
+    import os
+    import subprocess
+
+    for env_var in ("MIXLE_DOCS_COMMIT", "GITHUB_SHA", "READTHEDOCS_GIT_COMMIT_HASH"):
+        sha = os.environ.get(env_var)
+        if sha:
+            return sha[:12]
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
+commit = _git_commit()
+
 extensions = [
     "myst_parser",
     "sphinx.ext.autodoc",
@@ -137,6 +169,14 @@ html_theme_options = {
     },
 }
 html_css_files = ["mixle-docs.css"]
+
+# Make the exact version and build commit available to every template so a reader can
+# tell which release (and which source revision) they are looking at -- X12.5.
+html_context = {
+    "mixle_release": release,
+    "mixle_version": version,
+    "mixle_commit": commit,
+}
 
 # Furo ships no host-agnostic version switcher (its built-in one only activates under Read the Docs
 # hosting) -- this repo's own _templates/sidebar/version-switcher.html reads the version list from

@@ -1,5 +1,11 @@
 """F5: scaling-law fits + compute allocation -- "mixle training mixle" (roadmap item F).
 
+.. warning::
+
+   **Experimental frontier-training prototype.** The curve fits and compute-allocation math are exact on
+   the data you give them, but any extrapolation beyond the fitted regime is a research estimate, not a
+   guarantee -- a scaling-law fit is only as trustworthy as its measured points. Not a production planner.
+
 Fits classic Chinchilla-style neural-scaling-law curves ``loss = f(N, D)`` (N = model
 parameters, D = training tokens) using mixle's OWN probabilistic-programming/regression
 machinery (:mod:`mixle.ppl`), not ``scipy.optimize.curve_fit`` or an ad-hoc fitter: a scaling
