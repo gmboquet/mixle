@@ -34,6 +34,12 @@ print(graph.explain())
   preconditioning, natural gradients, proximal blocks, low-rank adapters, and sparse-expert clocks.
 - An executable routed PyTorch optimizer plus fixed-token/fixed-update batch semantics, curvature caching, and
   measured AdamW fallback based on time-to-target evidence.
+- A provenance-preserving context-action IR for retrieval, source expansion, hypothesis/query generation,
+  summarization, verification, tools, linking, pruning, materialization, and explicit stopping.
+- Closed-loop value-of-information context construction with transactional graph mutation and actual-cost budgets.
+- Bounded graph partition/prefetch/LRU memory and exact-near plus retrieved-far attention whose active tokens do not
+  grow with source horizon.
+- Provenance-complete materialization that excludes contradicted evidence and unverified generated claims.
 
 ## Not implemented yet
 
@@ -42,7 +48,8 @@ print(graph.explain())
 - General typed execution for every compiled estimator. Compilation does not imply an execution adapter exists.
 - Fused production kernels for routed Muon/Kronecker updates and real multi-host optimizer-state sharding. The
   current torch adapter uses exact SVD/eigendecomposition as a correctness reference and may be slower than AdamW.
-- Context action planning, graph memory, or claims of trillion-token dense attention.
+- Persistent external graph/vector-store adapters and production retrieval indexes. Trillion-scale **source horizons**
+  are represented and tested; trillion-token dense attention is neither implemented nor claimed.
 
 The local mixture adapter deliberately rejects shared component objects and conjugate weight priors until their joint
 proposal semantics are implemented. Unsupported semantics fail before execution rather than silently changing the
