@@ -1,5 +1,8 @@
 """Flagship B -- a temporal/latent model on real public data (monthly sunspot counts, 1749-1983).
 
+Classification: evidence -- dataset: monthly sunspot counts, 1749-1983 (~2.8k observations, fetched
+once). The head-to-head against hmmlearn below is a measured result on real data.
+
 A hidden Markov model over a real time series: the monthly sunspot record, discretized into quantile
 symbols, modeled as a discrete-emission HMM fit with one ``optimize`` call. The honest receipt is a
 head-to-head against ``hmmlearn`` on the SAME held-out split -- mean log-likelihood per observation --
