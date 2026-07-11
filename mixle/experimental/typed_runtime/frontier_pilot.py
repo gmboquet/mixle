@@ -38,6 +38,7 @@ class PilotStrategyReceipt:
     final_loss: float
     test_accuracy: float
     time_to_target_updates: int | None
+    time_to_target_seconds: float | None
     target_accuracy: float
     elapsed_seconds: float
     batch: BatchSemanticsReceipt
@@ -55,6 +56,7 @@ class PilotStrategyReceipt:
             "final_loss": self.final_loss,
             "test_accuracy": self.test_accuracy,
             "time_to_target_updates": self.time_to_target_updates,
+            "time_to_target_seconds": self.time_to_target_seconds,
             "target_accuracy": self.target_accuracy,
             "elapsed_seconds": self.elapsed_seconds,
             "batch": self.batch.as_dict(),
@@ -299,6 +301,7 @@ def run_graph_memory_pilot(
         checkpoint = updates // 2
         snapshot = None
         accuracies = []
+        update_times = []
         started = time.perf_counter()
         loss = None
         for step in range(1, updates + 1):
@@ -314,6 +317,7 @@ def run_graph_memory_pilot(
                 accumulated_loss += float(loss.detach()) / accumulation_steps
             optimizer.step()
             accuracies.append(accuracy(model, test_rows))
+            update_times.append(time.perf_counter() - started)
             if recovery and step == checkpoint:
                 snapshot = (
                     copy.deepcopy(model.state_dict()),
@@ -322,6 +326,7 @@ def run_graph_memory_pilot(
                 )
         elapsed = time.perf_counter() - started
         time_to_target = next((index + 1 for index, value in enumerate(accuracies) if value >= target_accuracy), None)
+        time_to_target_seconds = update_times[time_to_target - 1] if time_to_target is not None else None
         batch = BatchSemanticsReceipt(
             microbatch_size,
             microbatch_size * active_tokens,
@@ -340,6 +345,7 @@ def run_graph_memory_pilot(
             accumulated_loss,
             accuracies[-1],
             time_to_target,
+            time_to_target_seconds,
             target_accuracy,
             elapsed,
             batch,

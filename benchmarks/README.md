@@ -13,6 +13,39 @@ python run_benchmarks.py --quick    # smaller sizes, fast smoke run
 python gpu_scaling.py               # GPU throughput panel (needs a CUDA device)
 ```
 
+## Typed optimization: current evidence
+
+The statistically typed runtime has a separate benchmark that measures quality-matched
+optimization behavior rather than fixed-step throughput:
+
+```bash
+python typed_optimization.py --quick       # smoke matrix
+python typed_optimization.py --reps 5      # larger local matrix
+```
+
+The current five-seed, single-threaded arm64 result is in
+`results/typed_optimization.json`. A speedup above 1 means the candidate wins. These are local
+reference-runtime results, not universal performance claims:
+
+| optimization | case | wall-time speedup | work/update speedup | conclusion |
+|---|---|---:|---:|---|
+| exact E-step likelihood reuse | scalar Gaussian mixture | **1.54x** | same iterations | implemented win |
+| exact E-step likelihood reuse | full-covariance mixture | **1.70x** | same iterations | implemented win |
+| selective block EM | scalar Gaussian mixture | 0.78x | **1.60x fewer evaluations** | less work, slower |
+| selective block EM | full-covariance mixture | 0.84x | **1.33x fewer evaluations** | less work, slower |
+| routed Muon/AdamW | graph-memory MoE, batches 8-64 | 0.96-1.07x | 0.97-1.00x updates | inconclusive microfixture |
+
+The block result is the important negative finding: selection is real, objective-gated, and
+computationally selective, but its current Python scheduling, repeated objective validation, and
+extra coordinate rounds cost more than the work they remove on these fixtures. It should not be
+described as an acceleration feature yet.
+
+The geometry panel also records target failures rather than dropping them. AdamW reaches the
+declared target on 4/5 seeds at every tested effective batch; the routed optimizer reaches it on
+4/5 seeds at batches 8 and 32 and 5/5 at batch 64. Target timings are only tens of milliseconds,
+so the JSON marks this panel ineligible for a wall-time claim. A larger neural benchmark with
+learning-rate tuning and production Muon kernels is still required.
+
 ## Methodology — why these numbers are fair
 
 A speed comparison is only meaningful if every package is doing the same computation. The

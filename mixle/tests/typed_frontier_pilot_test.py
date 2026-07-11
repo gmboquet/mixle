@@ -55,6 +55,10 @@ def test_graph_context_improves_quality_under_bounded_active_memory_and_recovers
     # Keep optimizer evidence honest: the routed reference may or may not beat AdamW.
     assert receipt.graph_adamw.time_to_target_updates is not None
     assert receipt.graph_routed.time_to_target_updates is not None
+    assert receipt.graph_adamw.time_to_target_seconds is not None
+    assert receipt.graph_routed.time_to_target_seconds is not None
+    assert receipt.graph_adamw.time_to_target_seconds <= receipt.graph_adamw.elapsed_seconds
+    assert receipt.graph_routed.time_to_target_seconds <= receipt.graph_routed.elapsed_seconds
     json.dumps(receipt.as_dict(), allow_nan=False)
     json.dumps(assessment.as_dict(), allow_nan=False)
 
