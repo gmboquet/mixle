@@ -141,18 +141,30 @@ class LM:
         distributed: bool = False,
         precision: str = "fp32",
         shuffle: bool = True,
+        dense: bool = False,
+        seed: int = 0,
+        log: Any = None,
         tp_size: int = 1,
         pp_size: int = 1,
         cp_size: int = 1,
     ) -> LM:
-        """Small-scale reference pretraining (or continuation) on a token-id array via the streaming
-        estimator; the corpus is never buffered.
+        """Small-scale reference pretraining (or continuation) on a token-id array.
 
-        This is a streaming pretraining path: it scores one next-token target per ``block``-length window --
-        the right shape for an unbounded stream, but only a fraction (~``1/block``) of the token supervision
-        that packed dense teacher forcing would extract from the same tokens. It is therefore a reference /
-        continuation path for small-scale runs, not a frontier pretraining engine; for dense per-position
-        supervision on a bounded corpus use :meth:`fit_pairs`.
+        Two paths, chosen by ``dense``:
+
+        - ``dense=False`` (default, unchanged): the streaming estimator; the corpus is never
+          buffered. It scores one next-token target per ``block``-length window -- the right shape
+          for an unbounded stream, but only a fraction (~``1/block``) of the token supervision that
+          packed dense teacher forcing extracts from the same tokens. A reference / continuation
+          path for small-scale runs, not a frontier pretraining engine.
+        - ``dense=True``: packed dense teacher forcing on a BOUNDED corpus. The token stream is cut
+          into non-overlapping rows of ``block + 1`` tokens (a partial tail row is dropped; there is
+          no padding, so no attention-mask or EOS special-casing is needed -- document boundaries are
+          whatever the ids encode); every row contributes ``block`` shifted next-token targets in a
+          single forward, recovering the ~``block``x supervision the streaming path leaves unused.
+          Token ids stay integer end to end (no float conversion). ``seed`` drives row shuffling and
+          ``log(epoch, mean_loss)`` reports per-epoch training loss, both as in :meth:`fit_pairs`.
+          Not yet wired to ``distributed=True`` (raises); use the streaming path for that.
 
         ``tp_size``/``pp_size``/``cp_size`` (only meaningful with ``distributed=True``) are the F1 N-D
         parallelism dimensions -- tensor/pipeline/context parallel, ORTHOGONAL to the data-parallel axis
@@ -163,7 +175,17 @@ class LM:
         dense forward). Composing the validated plan into real per-axis multi-GPU process groups is the
         piece that needs actual hardware this environment does not have -- see that module's docstring.
         """
-        self._check_ids(token_ids, "fit")
+        ids = self._check_ids(token_ids, "fit")
+        if dense:
+            if distributed:
+                raise NotImplementedError(
+                    "fit(dense=True) is single-process in this release; the distributed handle "
+                    "(StreamingTokenEncodedData) only implements the streaming one-target-per-window "
+                    "objective. Use dense=False with distributed=True, or run the dense path locally."
+                )
+            return self._fit_dense(
+                ids, epochs=epochs, batch_size=batch_size, lr=lr, shuffle=shuffle, seed=seed, log=log
+            )
         if distributed:
             from mixle.models.streaming_transformer_leaf import StreamingTransformerLeafEstimator
             from mixle.stats.compute.sequence import seq_estimate
@@ -190,6 +212,54 @@ class LM:
                 token_ids, block=self.block, batch_size=batch_size, epochs=epochs, shuffle=shuffle
             )
             self.module = stream_fit(self.module, src, lr=lr, device=self.device)[0].module
+        return self
+
+    def _fit_dense(
+        self,
+        ids: np.ndarray,
+        *,
+        epochs: int,
+        batch_size: int,
+        lr: float,
+        shuffle: bool,
+        seed: int,
+        log: Any,
+    ) -> LM:
+        """Packed dense teacher forcing: non-overlapping ``block + 1``-token rows, all-position loss.
+
+        Row ``r`` covers ``ids[r*(block+1) : (r+1)*(block+1)]``; inputs are its first ``block`` tokens
+        and targets its last ``block`` (shift by one), so every consumed token is supervised exactly
+        once and rows carry no padding. A partial tail row is dropped. Rows are gathered from the flat
+        id tensor per batch, so nothing beyond one batch is materialized on the device.
+        """
+        torch = _torch()
+        stride = self.block + 1
+        n_rows = len(ids) // stride
+        if n_rows < 1:
+            raise ValueError(
+                "fit(dense=True) needs at least block+1=%d tokens to form one packed row; got %d" % (stride, len(ids))
+            )
+        rng = np.random.RandomState(seed)
+        module = self.module.to(self.device)
+        module.train()
+        opt = torch.optim.Adam(module.parameters(), lr=lr)
+        flat = torch.as_tensor(ids[: n_rows * stride], dtype=torch.int64).view(n_rows, stride)
+        for epoch in range(int(epochs)):
+            order = rng.permutation(n_rows) if shuffle else np.arange(n_rows)
+            total = count = 0.0
+            for s in range(0, n_rows, int(batch_size)):
+                rows = flat[torch.as_tensor(order[s : s + int(batch_size)], dtype=torch.int64)].to(self.device)
+                logits = _forward_all_positions(module, rows[:, :-1])
+                target = rows[:, 1:]
+                loss = torch.nn.functional.cross_entropy(logits.reshape(-1, self.vocab), target.reshape(-1))
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+                n_targets = float(target.numel())
+                total += float(loss.detach()) * n_targets
+                count += n_targets
+            if log is not None:
+                log(epoch, total / max(count, 1.0))
         return self
 
     def fit_pairs(
