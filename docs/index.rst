@@ -255,3 +255,4 @@ reference under :doc:`api/modules` covers the broad public module surface;
    :maxdepth: 2
 
    design-notes
+   frontier-integration-note
