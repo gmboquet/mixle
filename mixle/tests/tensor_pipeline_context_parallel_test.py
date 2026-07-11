@@ -22,7 +22,9 @@ including an honestly-reported real-world SLOWDOWN at that model scale without N
 receipt, not a speedup claim).
 """
 
+import os
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -183,10 +185,26 @@ class FitDistributedSurfaceTest(unittest.TestCase):
         ids, v = self._corpus()
         lm = LM(vocab=v, d_model=32, n_layer=4, n_head=4, block=16)
         before = float(lm.nll(ids))
-        lm.fit(ids, distributed=True, epochs=2, batch_size=16, tp_size=2, pp_size=2, cp_size=2)
+        # tp/pp/cp > 1 is the validated-plan / data-parallel-only path, which must be opted into
+        # explicitly (see N9.5): the sharding is simulated at this scale, not integrated into training.
+        with mock.patch.dict(os.environ, {"MIXLE_EXPERIMENTAL_NDPARALLEL": "1"}):
+            lm.fit(ids, distributed=True, epochs=2, batch_size=16, tp_size=2, pp_size=2, cp_size=2)
         after = float(lm.nll(ids))
         self.assertTrue(np.isfinite(after))
         self.assertLessEqual(after, before + 5.0)  # training ran and produced a sane (finite, bounded) loss
+
+    def test_fit_distributed_tp_without_optin_raises(self):
+        # Without the opt-in, requesting tensor/pipeline/context sharding must NOT silently fall through
+        # to data-parallel (which would replicate a model the caller asked to shard). It must fail loudly.
+        from mixle.models.language_model import LM
+
+        ids, v = self._corpus()
+        lm = LM(vocab=v, d_model=32, n_layer=4, n_head=4, block=16)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MIXLE_EXPERIMENTAL_NDPARALLEL", None)
+            with self.assertRaises(NotImplementedError) as ctx:
+                lm.fit(ids, distributed=True, epochs=1, batch_size=16, tp_size=2)
+        self.assertIn("not integrated", str(ctx.exception))
 
     def test_fit_distributed_default_still_works_without_parallelism_dims(self):
         from mixle.models.language_model import LM
