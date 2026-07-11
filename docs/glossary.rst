@@ -20,6 +20,20 @@ Capability
     enumeration, finite support, latent posteriors, backend scoring, or
     conjugate updates. Prefer ``mixle.describe`` over class checks.
 
+Certified
+    A fitted block whose estimation method carries a proof-level guarantee --
+    closed-form MLE or a conjugate update -- recorded in the estimation
+    certificate. Distinct from *exact* (enumeration/support traversal) and
+    *approximate* (gradient descent, variational, MCMC): "certified" is about
+    how the parameters were solved, not about scoring the support.
+
+Checkpoint
+    A *training* checkpoint stores everything needed to resume training --
+    optimizer, scheduler, step, RNG, and data-loader position. Distinct from an
+    inference *Artifact*, which stores only architecture config plus learned
+    weights and is ready for scoring, not for resuming training (see
+    ``LM.save`` / :doc:`support-policy`).
+
 Composite
     A distribution or estimator over tuple-shaped observations. Each tuple
     field has its own child distribution or estimator.
@@ -56,6 +70,12 @@ Evidence
 Evolution Loop
     The ``mixle.evolve`` measure-propose-verify-promote workflow used to
     improve a model while preserving an auditable anti-regression gate.
+
+Experimental
+    A maturity tier (see :mod:`mixle.maturity`): no compatibility guarantee.
+    Only ``mixle.experimental`` and the frontier-training prototypes are
+    experimental. Distinct from *stable* (covered by the compatibility policy)
+    and *provisional* (usable, may change within a minor release).
 
 HMM
     Hidden Markov model: a sequence model with a latent state path and emission
@@ -119,6 +139,12 @@ Semantic Entropy
 Task Model
     A durable local model from ``mixle.task`` that can be loaded in a fresh
     process and called as a plain function.
+
+Train
+    Colloquial for fitting a neural leaf by gradient descent. mixle's uniform
+    verb is *fit* (via ``optimize``) regardless of family -- "train" is used
+    only where the family is a neural network, and "optimize" names the single
+    inference entry point that chooses the method from the model's structure.
 
 Transformer Leaf
     A neural next-token distribution used as a child in a larger mixle model,
