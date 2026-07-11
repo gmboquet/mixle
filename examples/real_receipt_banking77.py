@@ -26,12 +26,28 @@ the gate. Run: ``python examples/real_receipt_banking77.py`` (~4 min; downloads 
 from __future__ import annotations
 
 import numpy as np
-from datasets import load_dataset
 
 from mixle.task import scorecard, solve
 
 
-def main() -> None:
+def run(
+    *,
+    n_seed: int = 3000,
+    n_round: int = 1000,
+    n_rounds: int = 6,
+    n_test: int = 1500,
+    student: str = "mlp",
+    verbose: bool = True,
+) -> dict:
+    """Run the Banking77 solve loop and return its measured results.
+
+    The defaults reproduce the headline run in the module docstring. The sizes are parameters so a fast
+    bounded version can be gated in CI (see ``real_receipt_banking77_smoke_test``); ``main`` keeps the
+    full defaults. Returns ``{"card", "accuracy", "rounds"}`` where ``rounds`` is a list of
+    ``{"escalation", "accuracy"}`` per improve round.
+    """
+    from datasets import load_dataset
+
     ds = load_dataset("banking77")
     names = ds["train"].features["label"].names
     train_all = [(r["text"], names[r["label"]]) for r in ds["train"]]
@@ -44,36 +60,47 @@ def main() -> None:
     def oracle(t: str) -> str:  # the frontier stand-in: always right, priced per call
         return gold[t]
 
-    seed_texts = [t for t, _ in train_all[:3000]]
-    rounds = [[t for t, _ in train_all[3000 + i * 1000 : 3000 + (i + 1) * 1000]] for i in range(6)]
+    seed_texts = [t for t, _ in train_all[:n_seed]]
+    rounds = [[t for t, _ in train_all[n_seed + i * n_round : n_seed + (i + 1) * n_round]] for i in range(n_rounds)]
     test_texts = [t for t, _ in test]
 
-    import sys
-
-    student = "generative" if "--generative" in sys.argv else "mlp"
     kw = {"student": "generative", "pseudo_count": 4.0} if student == "generative" else {"epochs": 250}
     sol = solve(oracle, seed_texts, alpha=0.1, seed=0, **kw)
     card = scorecard(
         sol,
         oracle,
-        test_texts[:1500],
+        test_texts[:n_test],
         student_cost=0.0001,
         teacher_cost=0.03,
         task="banking77 intents (77 classes)",
     )
-    print(card.table())
+    if verbose:
+        print(card.table())
+        print("\nescalation-decay: serve fresh queries, harvest, improve — per round")
+        print("round | escalation | end-to-end accuracy")
 
-    print("\nescalation-decay: serve 1k fresh queries, harvest, improve — six rounds")
-    print("round | escalation | end-to-end accuracy")
+    round_results = []
     for i, chunk in enumerate(rounds):
+        if not chunk:
+            continue
         before = sol.cascade.stats.n_escalated
         answers = [sol(t) for t in chunk]
         esc = (sol.cascade.stats.n_escalated - before) / len(chunk)
         acc = float(np.mean([a == gold[t] for a, t in zip(answers, chunk)]))
-        print(f"  {i}   |   {esc:.3f}    |   {acc:.3f}")
+        round_results.append({"escalation": esc, "accuracy": acc})
+        if verbose:
+            print(f"  {i}   |   {esc:.3f}    |   {acc:.3f}")
         sol.improve()
 
-    print("\nevery number above was measured by this run — change the seed and check.")
+    if verbose:
+        print("\nevery number above was measured by this run — change the seed and check.")
+    return {"card": card, "metrics": card.as_dict(), "rounds": round_results}
+
+
+def main() -> None:
+    import sys
+
+    run(student="generative" if "--generative" in sys.argv else "mlp")
 
 
 if __name__ == "__main__":
