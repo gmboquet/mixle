@@ -353,6 +353,8 @@ def propose(
     holdout: float = 0.25,
     seed: int = 0,
     max_its: int = 25,
+    max_candidates: int | None = None,
+    timeout: float | None = None,
     **recommend_kw: Any,
 ) -> Model:
     """Propose a model for ``data`` from a *verified frontier* of candidates and return the winner.
@@ -365,6 +367,12 @@ def propose(
     The winner becomes the returned :class:`Model`; the full ranking lands in ``Model.frontier`` and the
     per-field confidence / dependency / candidate notes in ``Model.notes`` (shown by ``explain()``).
     Pass ``fit=True`` to also fit the winner to all of ``data`` before returning.
+
+    The frontier search is bounded by ``max_candidates`` (evaluate at most this many candidates, in
+    proposer order — the heuristic recommendation is always first) and ``timeout`` (stop starting new
+    candidate fits once this many wall-clock seconds have elapsed). Both default to ``None`` (unbounded).
+    A candidate skipped for budget is **recorded** in ``Model.frontier`` and ``Model.notes``, never silently
+    dropped, so a bounded search reports exactly what it did not evaluate.
     """
     from mixle.inference import optimize
     from mixle.task import recommend_model
@@ -394,19 +402,30 @@ def propose(
     train = [rows[i] for i in order[n_val:]]
 
     frontier: list[dict[str, Any]] = []
+    evaluated = 0
+    budget_start = time.monotonic()
     for name, est in candidates:
+        over_count = max_candidates is not None and evaluated >= max_candidates
+        over_time = timeout is not None and (time.monotonic() - budget_start) > timeout
+        if over_count or over_time:
+            reason = "max_candidates" if over_count else "timeout"
+            frontier.append({"name": name, "estimator": est, "skipped": f"search budget reached ({reason})"})
+            continue
         try:
             fitted = optimize(train, est, max_its=max_its, out=None)
             enc = fitted.dist_to_encoder().seq_encode(val)
             score = float(np.mean(np.asarray(fitted.seq_log_density(enc), dtype=np.float64)))
             frontier.append({"name": name, "estimator": est, "heldout_mean_log_density": score})
+            evaluated += 1
         except Exception as exc:  # noqa: BLE001 - a failing candidate is reported, never silently dropped
             frontier.append({"name": name, "estimator": est, "error": f"{type(exc).__name__}: {exc}"})
+            evaluated += 1
     scored = sorted(
         (f for f in frontier if "heldout_mean_log_density" in f), key=lambda f: -f["heldout_mean_log_density"]
     )
-    frontier = scored + [f for f in frontier if "error" in f]
+    frontier = scored + [f for f in frontier if "error" in f or "skipped" in f]
     winner = scored[0]["estimator"] if scored else rec.estimator
+    skipped_names = [f["name"] for f in frontier if "skipped" in f]
 
     notes = [
         f"field {c.path}: {c.family}"
@@ -419,15 +438,17 @@ def propose(
     ]
     notes += [f"dependency: {a} <-> {b} ({bits:.1f} bits for joint modeling)" for a, b, bits in rec.dependencies]
     notes += list(rec.warnings)
-    notes += [
-        f"candidate {f['name']}: "
-        + (
-            f"held-out mean log-density {f['heldout_mean_log_density']:.3f}"
-            if "error" not in f
-            else f"failed ({f['error']})"
-        )
-        for f in frontier
-    ]
+
+    def _candidate_note(f: dict[str, Any]) -> str:
+        if "skipped" in f:
+            return f"candidate {f['name']}: {f['skipped']}"
+        if "error" in f:
+            return f"candidate {f['name']}: failed ({f['error']})"
+        return f"candidate {f['name']}: held-out mean log-density {f['heldout_mean_log_density']:.3f}"
+
+    notes += [_candidate_note(f) for f in frontier]
+    if skipped_names:
+        notes.append(f"search budget: skipped {len(skipped_names)} candidate(s) unevaluated: {skipped_names}")
     m = Model(winner, notes=notes)
     m.frontier = frontier
     return m.fit(rows) if fit else m
