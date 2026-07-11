@@ -94,6 +94,44 @@ class LifecycleTest(unittest.TestCase):
             back = mixle.Model.load(path)
             self.assertAlmostEqual(back(-3.0), m(-3.0), places=10)
 
+    def test_pure_model_deploys_as_safe_json_without_pickle(self):
+        # A registry-serializable model must not be persisted as an executable pickle: loading a deployed
+        # artifact from an untrusted source would otherwise be arbitrary code execution.
+        import json
+        import os
+
+        import mixle
+        from mixle.stats import CategoricalEstimator
+
+        m = mixle.Model(CategoricalEstimator()).fit(["a", "b", "a", "a", "c", "a", "b"])
+        with tempfile.TemporaryDirectory() as d:
+            path = m.deploy(d + "/cat")
+            files = os.listdir(path)
+            self.assertNotIn("model.pkl", files)  # no pickle artifact for a pure model
+            self.assertIn("model.json", files)
+            self.assertEqual(json.loads(open(os.path.join(path, "manifest.json")).read())["format"], "json")
+            back = mixle.Model.load(path)
+            self.assertAlmostEqual(back.fitted.log_density("a"), m.fitted.log_density("a"), places=10)
+
+    def test_legacy_pickle_artifact_still_loads(self):
+        # Artifacts written before the JSON format (manifest without a "format" field) still load via pickle.
+        import json
+        import os
+        import pickle
+
+        import mixle
+        from mixle.stats import CategoricalEstimator
+
+        fitted = mixle.Model(CategoricalEstimator()).fit(["a", "b", "a"]).fitted
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "model.pkl"), "wb") as f:
+                pickle.dump(fitted, f)
+            with open(os.path.join(d, "manifest.json"), "w") as f:
+                f.write(json.dumps({"notes": ["legacy"]}))  # no "format" -> defaults to pickle
+            back = mixle.Model.load(d)
+            self.assertEqual(back.notes, ["legacy"])
+            self.assertAlmostEqual(back.fitted.log_density("a"), fitted.log_density("a"), places=10)
+
     @unittest.skipUnless(_HAS_TORCH, "torch not installed")
     def test_distill_self_teacher_labels_own_clusters(self):
         import mixle
