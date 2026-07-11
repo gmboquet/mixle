@@ -157,7 +157,9 @@ def _gate(
     observed: str,
     evidence_uri: str | None = None,
 ) -> AcceptanceGateReceipt:
-    return AcceptanceGateReceipt(name, GateStatus.PASSED if passed else GateStatus.FAILED, claims, observed, evidence_uri)
+    return AcceptanceGateReceipt(
+        name, GateStatus.PASSED if passed else GateStatus.FAILED, claims, observed, evidence_uri
+    )
 
 
 def assess_frontier_claims(
