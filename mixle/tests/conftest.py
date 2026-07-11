@@ -306,6 +306,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # GP-surrogate active-learning + multi-fidelity placement (roadmap M4): each test fits several torch
     # GPs across a sequential design loop, mirroring doe_active_test.py / doe_multifidelity_test.py.
     "task_emulate_test.py": ("doe", "torch", "slow"),
+    # P12 wake-sleep library learning (mixle/experimental/wake_sleep.py): runs several 30-task wake-sleep
+    # corpora to measure the median search-cost speedup -- pure numpy, stochastic, no torch.
+    "wake_sleep_test.py": ("experimental", "stochastic"),
     # P4 tensor-network (MPS) leaves (mixle/experimental/tensor_network.py): exact-conditioning vs brute
     # force + entanglement/truncation receipts over small (2^8) chains -- pure numpy, no torch.
     "tensor_network_test.py": ("experimental",),
