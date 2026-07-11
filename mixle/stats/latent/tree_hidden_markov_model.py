@@ -45,7 +45,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.utils.aliasing import MISSING, coalesce_alias, require
-from mixle.utils.optional_deps import numba
+from mixle.utils.optional_deps import HAS_NUMBA, numba
 
 D = tuple[int, int | None]
 T = TypeVar("T")  # Type for emissions
@@ -153,7 +153,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         terminal_level: int = 10,
         name: str | None = None,
-        use_numba: bool = False,
+        use_numba: bool | None = None,
         weights: Sequence[float] | np.ndarray = MISSING,
     ) -> None:
         """TreeHiddenMarkovModelDistribution for specifying an HMM on a rooted tree.
@@ -210,7 +210,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             self.name = name
             self.len_dist = len_dist if len_dist is not None else NullDistribution()
             self.terminal_level = terminal_level
-            self.use_numba = use_numba
+            self.use_numba = HAS_NUMBA if use_numba is None else use_numba
 
         # Cache for the parameter-only per-level marginal state probabilities
         # (init_prob @ transitions^k). Keyed by the (w, transitions) identities so it
@@ -919,7 +919,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         len_accumulator: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
         keys: tuple[str | None, str | None, str | None] = (None, None, None),
         name: str | None = None,
-        use_numba: bool = True,
+        use_numba: bool | None = None,
     ) -> None:
         """Create an accumulator for tree-HMM sufficient statistics.
 
@@ -959,7 +959,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         self.state_key = keys[2]
 
         self.name = name
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
 
         # When _track_ll is enabled, seq_update accumulates the per-tree data
         # log-likelihood into _seq_ll. Used by the fused-EM fast path in
@@ -1606,7 +1606,7 @@ class TreeHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
         len_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         name: str | None = None,
-        use_numba: bool = True,
+        use_numba: bool | None = None,
     ) -> None:
         """Create a factory for tree hidden Markov accumulators.
 
@@ -1625,7 +1625,7 @@ class TreeHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys if keys is not None else (None, None, None)
         self.len_factory = len_factory
         self.name = name
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
 
     def make(self) -> "TreeHiddenMarkovAccumulator":
         """Return a new tree hidden Markov accumulator."""
@@ -1649,7 +1649,7 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
         pseudo_count: tuple[float | None, float | None] | None = (None, None),
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
-        use_numba: bool = True,
+        use_numba: bool | None = None,
     ) -> None:
         """Create an estimator for a tree hidden Markov model.
 
@@ -1663,7 +1663,8 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
             name (Optional[str]): Optional name assigned to estimated distributions.
             keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Keys for merging the
                 initial state counts, transition counts, and state (emission) accumulators respectively.
-            use_numba (bool): If True, the estimated distribution and accumulators use the numba encoding.
+            use_numba (Optional[bool]): Whether the estimated distribution and accumulators use the numba
+                encoding. ``None`` (default) selects the compiled path when numba is installed.
 
         """
         self.num_states = len(estimators)
@@ -1672,7 +1673,7 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
         self.keys = keys if keys is not None else (None, None, None)
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.name = name
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
 
     def accumulator_factory(self) -> TreeHiddenMarkovAccumulatorFactory:
         """Return an accumulator factory configured from this estimator."""
@@ -1744,7 +1745,7 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
         self,
         emission_encoder: DataSequenceEncoder,
         len_encoder: DataSequenceEncoder | None = NullDataEncoder(),
-        use_numba: bool = True,
+        use_numba: bool | None = None,
     ) -> None:
         """Create an encoder for tree HMM observations.
 
@@ -1758,7 +1759,7 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
         """
         self.emission_encoder = emission_encoder
         self.len_encoder = len_encoder if len_encoder is not None else NullDataEncoder()
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the encoder."""

@@ -70,7 +70,7 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         name: str | None = None,
         keys: tuple[str | None, str | None] = (None, None),
-        use_numba: bool = False,
+        use_numba: bool | None = None,
     ) -> None:
         """Create an integer hidden association distribution.
 
@@ -112,7 +112,7 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         self.name = name
         self.keys = keys
         self.init_prob_vec = np.empty(0, dtype=np.float64)
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
 
     def compute_capabilities(self):
         """Return backend capability metadata for this concrete integer association model."""
@@ -527,7 +527,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         num_states: int,
         prev_acc: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
         size_acc: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
-        use_numba: bool = False,
+        use_numba: bool | None = None,
         keys: tuple[str | None, str | None] | None = (None, None),
     ) -> None:
         """Create an accumulator for integer hidden-association sufficient statistics.
@@ -538,7 +538,8 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             num_states (int): Number of hidden states.
             prev_acc (Optional[SequenceEncodableStatisticAccumulator]): Accumulator for the previous word set.
             size_acc (Optional[SequenceEncodableStatisticAccumulator]): Accumulator for the emission count.
-            use_numba (bool): If True, numba encodings are used for vectorized updates.
+            use_numba (Optional[bool]): Whether numba encodings are used for vectorized updates.
+                ``None`` (default) selects the compiled path when numba is installed.
             keys (Optional[Tuple[Optional[str], Optional[str]]]): Keys for the weight and state counts.
 
         Attributes:
@@ -550,7 +551,8 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
             num_vals1 (int): Number of words in S1.
             num_vals2 (int): Number of words in S2.
             num_states (int): Number of hidden states.
-            use_numba (bool): If True, numba encodings are used for vectorized updates.
+            use_numba (Optional[bool]): Whether numba encodings are used for vectorized updates.
+                ``None`` (default) selects the compiled path when numba is installed.
             weight_key (Optional[str]): Key for merging weight counts.
             state_key (Optional[str]): Key for merging state counts.
 
@@ -563,7 +565,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         self.num_vals1 = num_vals1
         self.num_vals2 = num_vals2
         self.num_states = num_states
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
         self.weight_key, self.state_key = keys if keys is not None else (None, None)
 
         # Data log-likelihood accumulated as a byproduct of the E-step (the per-observation log_density),
@@ -994,7 +996,7 @@ class IntegerHiddenAssociationAccumulatorFactory(StatisticAccumulatorFactory):
         num_states: int,
         prev_factory: StatisticAccumulatorFactory | None = NullAccumulatorFactory(),
         len_factory: StatisticAccumulatorFactory | None = NullAccumulatorFactory(),
-        use_numba: bool = False,
+        use_numba: bool | None = None,
         keys: tuple[str | None, str | None] = (None, None),
     ) -> None:
         """Create an accumulator factory.
@@ -1021,7 +1023,7 @@ class IntegerHiddenAssociationAccumulatorFactory(StatisticAccumulatorFactory):
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
         self.prev_factory = prev_factory if prev_factory is not None else NullAccumulatorFactory()
         self.keys = keys
-        self.use_numba = use_numba
+        self.use_numba = HAS_NUMBA if use_numba is None else use_numba
         self.num_vals1 = num_vals1
         self.num_vals2 = num_vals2
         self.num_states = num_states

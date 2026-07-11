@@ -431,7 +431,7 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
         len_dist: SequenceEncodableProbabilityDistribution | None = NullDistribution(),
         name: str | None = None,
         terminal_values: set | None = None,
-        use_numba: bool = False,
+        use_numba: bool | None = None,
         terminal_states: set[int] | Sequence[int] | None = None,
     ) -> None:
         """QuantizedHiddenMarkovModelDistribution: an HMM whose probabilities are powers of theta.
@@ -459,7 +459,8 @@ class QuantizedHiddenMarkovModelDistribution(HiddenMarkovModelDistribution):
                 on non-negative integers for the sequence lengths.
             name (Optional[str]): Optional distribution name.
             terminal_values (Optional[set]): Define terminating emission outputs of the HMM.
-            use_numba (bool): If True, use numba package for encoding and vectorized operations.
+            use_numba (Optional[bool]): Whether to use the numba encoding and vectorized operations.
+                ``None`` (default) selects the compiled path when numba is installed.
 
         Attributes:
             theta (float): Shared base.
