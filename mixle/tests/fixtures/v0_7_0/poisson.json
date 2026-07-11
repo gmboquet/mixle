@@ -1,0 +1,1 @@
+{"__pysp_type__":"object","state":{"__pysp_type__":"dict","items":[["conj_prior_params",null],["has_conj_prior",false],["lam",2.0],["log_lambda",0.6931471805599453],["name",null],["prior",null]]},"type":"mixle.stats.univariate.discrete.poisson.PoissonDistribution"}

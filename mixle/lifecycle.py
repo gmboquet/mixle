@@ -241,34 +241,71 @@ class Model:
         return solve(teacher, inputs, **solve_kw)
 
     def deploy(self, path: str) -> str:
-        """Persist a durable artifact directory (model + manifest); :meth:`Model.load` restores it."""
+        """Persist a durable artifact directory (model + manifest); :meth:`Model.load` restores it.
+
+        A registry-serializable model is written as safe, type-tagged JSON (``model.json``); a model the
+        serialization registry cannot represent (e.g. a torch-backed leaf) falls back to a pickle
+        (``model.pkl``). The ``format`` recorded in the manifest tells :meth:`Model.load` which to read, so
+        the common pure-model path never needs an unsafe pickle load.
+        """
         d = self._require_fitted()
         out = Path(path)
         out.mkdir(parents=True, exist_ok=True)
-        with open(out / "model.pkl", "wb") as f:
-            pickle.dump(d, f)
+        fmt = self._write_model(out, d)
         manifest = {
             "family": type(d).__name__,
             "created_at": time.time(),
             "fit": self._fit_info,
             "notes": self.notes,
+            "format": fmt,
             "mixle_artifact": "lifecycle.Model/v1",
         }
         (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
         return str(out)
 
+    @staticmethod
+    def _write_model(out: Path, d: Any) -> str:
+        """Write ``d`` as safe JSON when the registry can represent it, else pickle. Returns the format used."""
+        try:
+            from mixle.utils.serialization import ensure_pysp_serialization_registry, to_serializable
+
+            ensure_pysp_serialization_registry()
+            text = json.dumps(to_serializable(d))
+        except Exception:  # noqa: BLE001 - not registry-serializable (torch leaf, custom object): use pickle
+            with open(out / "model.pkl", "wb") as f:
+                pickle.dump(d, f)
+            return "pickle"
+        (out / "model.json").write_text(text)
+        return "json"
+
     @classmethod
     def load(cls, path: str) -> Model:
-        """Restore a :class:`Model` from an artifact directory created by :meth:`deploy`."""
+        """Restore a :class:`Model` from an artifact directory created by :meth:`deploy`.
+
+        .. warning::
+
+           A ``pickle``-format artifact (a torch-backed model, or one written by an older mixle) is loaded
+           with :func:`pickle.load`, which **executes arbitrary code** from the file -- only load such an
+           artifact from a source you trust. JSON-format artifacts (the default for pure mixle models) are
+           deserialized through the type-tagged registry and do not execute arbitrary code.
+        """
         p = Path(path)
-        with open(p / "model.pkl", "rb") as f:
-            fitted = pickle.load(f)
+        try:
+            manifest = json.loads((p / "manifest.json").read_text())
+        except (OSError, ValueError):
+            manifest = {}
+        fmt = manifest.get("format", "pickle")  # artifacts predating the format field are pickle-only
+        if fmt == "json":
+            from mixle.utils.serialization import ensure_pysp_serialization_registry, from_serializable
+
+            ensure_pysp_serialization_registry()
+            fitted = from_serializable(json.loads((p / "model.json").read_text()))
+        else:
+            with open(p / "model.pkl", "rb") as f:
+                fitted = pickle.load(f)  # noqa: S301 - trusted-source only; see the warning above
         m = cls(fitted)
         m.fitted = fitted
-        try:
-            m.notes = list(json.loads((p / "manifest.json").read_text()).get("notes", []))
-        except (OSError, ValueError):
-            pass
+        m.notes = list(manifest.get("notes", []))
         return m
 
     # --- the analysis verbs (delegate to the inference front doors) -------------------------------
@@ -316,6 +353,8 @@ def propose(
     holdout: float = 0.25,
     seed: int = 0,
     max_its: int = 25,
+    max_candidates: int | None = None,
+    timeout: float | None = None,
     **recommend_kw: Any,
 ) -> Model:
     """Propose a model for ``data`` from a *verified frontier* of candidates and return the winner.
@@ -328,6 +367,12 @@ def propose(
     The winner becomes the returned :class:`Model`; the full ranking lands in ``Model.frontier`` and the
     per-field confidence / dependency / candidate notes in ``Model.notes`` (shown by ``explain()``).
     Pass ``fit=True`` to also fit the winner to all of ``data`` before returning.
+
+    The frontier search is bounded by ``max_candidates`` (evaluate at most this many candidates, in
+    proposer order — the heuristic recommendation is always first) and ``timeout`` (stop starting new
+    candidate fits once this many wall-clock seconds have elapsed). Both default to ``None`` (unbounded).
+    A candidate skipped for budget is **recorded** in ``Model.frontier`` and ``Model.notes``, never silently
+    dropped, so a bounded search reports exactly what it did not evaluate.
     """
     from mixle.inference import optimize
     from mixle.task import recommend_model
@@ -357,19 +402,30 @@ def propose(
     train = [rows[i] for i in order[n_val:]]
 
     frontier: list[dict[str, Any]] = []
+    evaluated = 0
+    budget_start = time.monotonic()
     for name, est in candidates:
+        over_count = max_candidates is not None and evaluated >= max_candidates
+        over_time = timeout is not None and (time.monotonic() - budget_start) > timeout
+        if over_count or over_time:
+            reason = "max_candidates" if over_count else "timeout"
+            frontier.append({"name": name, "estimator": est, "skipped": f"search budget reached ({reason})"})
+            continue
         try:
             fitted = optimize(train, est, max_its=max_its, out=None)
             enc = fitted.dist_to_encoder().seq_encode(val)
             score = float(np.mean(np.asarray(fitted.seq_log_density(enc), dtype=np.float64)))
             frontier.append({"name": name, "estimator": est, "heldout_mean_log_density": score})
+            evaluated += 1
         except Exception as exc:  # noqa: BLE001 - a failing candidate is reported, never silently dropped
             frontier.append({"name": name, "estimator": est, "error": f"{type(exc).__name__}: {exc}"})
+            evaluated += 1
     scored = sorted(
         (f for f in frontier if "heldout_mean_log_density" in f), key=lambda f: -f["heldout_mean_log_density"]
     )
-    frontier = scored + [f for f in frontier if "error" in f]
+    frontier = scored + [f for f in frontier if "error" in f or "skipped" in f]
     winner = scored[0]["estimator"] if scored else rec.estimator
+    skipped_names = [f["name"] for f in frontier if "skipped" in f]
 
     notes = [
         f"field {c.path}: {c.family}"
@@ -382,15 +438,17 @@ def propose(
     ]
     notes += [f"dependency: {a} <-> {b} ({bits:.1f} bits for joint modeling)" for a, b, bits in rec.dependencies]
     notes += list(rec.warnings)
-    notes += [
-        f"candidate {f['name']}: "
-        + (
-            f"held-out mean log-density {f['heldout_mean_log_density']:.3f}"
-            if "error" not in f
-            else f"failed ({f['error']})"
-        )
-        for f in frontier
-    ]
+
+    def _candidate_note(f: dict[str, Any]) -> str:
+        if "skipped" in f:
+            return f"candidate {f['name']}: {f['skipped']}"
+        if "error" in f:
+            return f"candidate {f['name']}: failed ({f['error']})"
+        return f"candidate {f['name']}: held-out mean log-density {f['heldout_mean_log_density']:.3f}"
+
+    notes += [_candidate_note(f) for f in frontier]
+    if skipped_names:
+        notes.append(f"search budget: skipped {len(skipped_names)} candidate(s) unevaluated: {skipped_names}")
     m = Model(winner, notes=notes)
     m.frontier = frontier
     return m.fit(rows) if fit else m

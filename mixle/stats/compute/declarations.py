@@ -643,7 +643,7 @@ def _build_generic_numba_kernel(
         result = (kernel, n_data, ordered_params)
     except _UnsupportedNumbaLowering:
         result = None
-    except Exception:
+    except Exception:  # noqa: BLE001
         result = None
 
     _GENERIC_NUMBA_KERNEL_CACHE[dist_type] = result
@@ -1214,7 +1214,7 @@ def _statistic_layout_issues(declaration: DistributionDeclaration, suff_stat: An
     issues = []
     try:
         values = declaration.statistic_values(suff_stat)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return ("%s statistics do not match declaration: %s" % (path, exc),)
 
     names = tuple(values.keys())
@@ -1497,7 +1497,7 @@ def _weighted_histogram(stat: Any, weights: Any, engine: Any) -> dict[int, float
 def _host_legacy_value(value: Any, engine: Any) -> Any:
     try:
         arr = np.asarray(engine.to_numpy(value))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return value
     if arr.ndim == 0:
         return float(arr)
@@ -1521,7 +1521,7 @@ def _all_same(values: Sequence[Any]) -> bool:
     for value in values[1:]:
         try:
             equal = np.array_equal(first, value)
-        except Exception:
+        except Exception:  # noqa: BLE001
             equal = first == value
         if not bool(equal):
             return False

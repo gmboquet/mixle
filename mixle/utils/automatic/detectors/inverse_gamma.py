@@ -14,7 +14,7 @@ def _fit(arr: np.ndarray) -> tuple[float, float] | None:
         from scipy import stats
 
         a, _loc, scale = stats.invgamma.fit(arr, floc=0.0)  # fix loc at 0: a positive-support family
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not (a > 0.0 and scale > 0.0 and math.isfinite(a) and math.isfinite(scale)):
         return None
