@@ -28,7 +28,7 @@ class RandomDotProductGraphTestCase(unittest.TestCase):
             import torch
 
             from mixle.engines import TorchEngine
-        except Exception as exc:  # pragma: no cover - torch optional
+        except Exception as exc:  # pragma: no cover - torch optional  # noqa: BLE001
             self.skipTest("torch unavailable: %s" % exc)
         dist = RandomDotProductGraphDistribution(_X)
         enc = dist.dist_to_encoder().seq_encode(dist.sampler(seed=2).sample(5))

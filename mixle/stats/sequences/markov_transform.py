@@ -32,6 +32,7 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.stats.sequences._keyed_accumulator import InitTransKeyedAccumulator
 from mixle.utils.aliasing import MISSING, coalesce_alias
+from mixle.utils.deprecation import deprecated_alias
 from mixle.utils.optsutil import count_by_value
 
 
@@ -736,6 +737,7 @@ class MarkovTransformEstimator(ParameterEstimator):
         len_factory = None if self.len_estimator is None else self.len_estimator.accumulator_factory()
         return MarkovTransformAccumulatorFactory(self.num_vals, len_factory, self.keys)
 
+    @deprecated_alias("accumulator_factory", since="0.8.0", removed_in="0.10.0")
     def accumulatorFactory(self):
         """Deprecated alias for accumulator_factory()."""
         return self.accumulator_factory()
