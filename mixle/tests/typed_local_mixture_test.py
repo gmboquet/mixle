@@ -7,7 +7,14 @@ import pytest
 
 from mixle.experimental.typed_runtime import run_typed_mixture_em
 from mixle.inference.em import PosteriorTransformEM, observed_log_likelihood
-from mixle.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator, seq_encode
+from mixle.stats import (
+    DirichletDistribution,
+    GaussianDistribution,
+    GaussianEstimator,
+    MixtureDistribution,
+    MixtureEstimator,
+    seq_encode,
+)
 
 pytestmark = [pytest.mark.experimental, pytest.mark.fast]
 
@@ -93,6 +100,16 @@ class TypedLocalExecutionTest:
 
         with pytest.raises(NotImplementedError, match="shared component"):
             run_typed_mixture_em(encoded, estimator, model)
+
+    def test_conjugate_weight_prior_fails_before_execution_until_map_adapter_exists(self):
+        start, _, encoded = _problem(nobs=40)
+        estimator = MixtureEstimator(
+            [GaussianEstimator() for _ in start.components],
+            prior=DirichletDistribution(np.full(start.num_components, 2.0)),
+        )
+
+        with pytest.raises(NotImplementedError, match="observed-data MLE"):
+            run_typed_mixture_em(encoded, estimator, start)
 
     def test_bad_candidate_is_rejected_without_objective_regression(self, monkeypatch):
         start, estimator, encoded = _problem(nobs=80)
