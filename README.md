@@ -64,10 +64,8 @@ to the [release-readiness](https://gmboquet.github.io/mixle/release-readiness.ht
 
 ## Installation
 
-Python 3.10+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64 and macOS arm64 (Apple
+Python 3.11+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64 and macOS arm64 (Apple
 Silicon) on every PR; Windows is untested.
-Python 3.11+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64; macOS (incl. Apple Silicon)
-is the day-to-day dev platform and works in practice but isn't CI-gated; Windows is untested.
 
 ```sh
 pip install mixle          # base (numpy, scipy, mpmath): every distribution, fit locally
