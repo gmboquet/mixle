@@ -53,7 +53,7 @@ def resolve_workers(num_workers: int | None = None) -> int:
         n = len(Resources.local().devices)
         if n >= 1:
             return n
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     return max(1, os.cpu_count() or 1)
 

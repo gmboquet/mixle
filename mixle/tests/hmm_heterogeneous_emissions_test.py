@@ -45,7 +45,7 @@ try:
             return -0.5 * (x - self.p) ** 2 - 0.9189385332046727
 
     _HAVE_NEURAL = True
-except Exception:  # pragma: no cover - environment dependent
+except Exception:  # pragma: no cover - environment dependent  # noqa: BLE001
     _HAVE_NEURAL = False
 
 

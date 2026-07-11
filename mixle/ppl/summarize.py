@@ -58,7 +58,7 @@ def posterior_summary(fitted: RandomVariable, *, hdi_prob: float = 0.94) -> dict
         draws = None
         try:
             draws = np.asarray(fitted.posterior(name), dtype=float).ravel()
-        except Exception:
+        except Exception:  # noqa: BLE001
             draws = None
         if draws is not None and draws.size > 1:
             lo, hi = hdi(draws, hdi_prob)

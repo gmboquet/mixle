@@ -25,7 +25,7 @@ def _fit_params(arr: np.ndarray):
         return None
     try:
         c, loc, scale = stats.genextreme.fit(arr)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not (np.isfinite(c) and np.isfinite(loc) and np.isfinite(scale)) or scale <= 0.0:
         return None
