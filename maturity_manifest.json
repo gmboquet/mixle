@@ -1,0 +1,145 @@
+{
+  "artifact": "mixle.maturity_manifest/v1",
+  "surfaces": {
+    "mixle.analysis": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.capability": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.contracts": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.data": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.dist": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.doe": {
+      "maturity": "provisional",
+      "status": "Active application/research workflows"
+    },
+    "mixle.engines": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.enumeration": {
+      "maturity": "provisional",
+      "status": "Usable, evolving"
+    },
+    "mixle.epistemic": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.evolve": {
+      "maturity": "provisional",
+      "status": "Active application/research workflows"
+    },
+    "mixle.experimental": {
+      "maturity": "experimental",
+      "status": "No compatibility guarantee"
+    },
+    "mixle.fault": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.inference": {
+      "maturity": "stable",
+      "status": "Stable core (optimize + direct estimation)"
+    },
+    "mixle.lifecycle": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.maturity": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.meta": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.models": {
+      "maturity": "provisional",
+      "status": "Incubating applied helpers"
+    },
+    "mixle.ops": {
+      "maturity": "provisional",
+      "status": "Usable, evolving"
+    },
+    "mixle.pool": {
+      "maturity": "provisional",
+      "status": "New local application runtime"
+    },
+    "mixle.ppl": {
+      "maturity": "provisional",
+      "status": "Active development"
+    },
+    "mixle.process": {
+      "maturity": "provisional",
+      "status": "Active development"
+    },
+    "mixle.program": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.reason": {
+      "maturity": "provisional",
+      "status": "Active application/research workflows"
+    },
+    "mixle.registry": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.relations": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.represent": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.scientist": {
+      "maturity": "provisional",
+      "status": "Optional assembled workflow"
+    },
+    "mixle.scorecard": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.spend": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.stats": {
+      "maturity": "stable",
+      "status": "Stable core"
+    },
+    "mixle.substrate": {
+      "maturity": "provisional",
+      "status": "New local application runtime"
+    },
+    "mixle.system": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.task": {
+      "maturity": "provisional",
+      "status": "Active application/research workflows"
+    },
+    "mixle.telemetry": {
+      "maturity": "provisional",
+      "status": "New local application runtime"
+    },
+    "mixle.utils": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    }
+  }
+}
