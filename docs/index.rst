@@ -206,6 +206,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
    release-readiness
    claim-evidence-ledger
    validation
+   scale-out-economics
    test-tiers
    performance-crossover
    benchmark-methodology
