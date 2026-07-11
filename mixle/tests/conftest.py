@@ -306,6 +306,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # GP-surrogate active-learning + multi-fidelity placement (roadmap M4): each test fits several torch
     # GPs across a sequential design loop, mirroring doe_active_test.py / doe_multifidelity_test.py.
     "task_emulate_test.py": ("doe", "torch", "slow"),
+    # P4 tensor-network (MPS) leaves (mixle/experimental/tensor_network.py): exact-conditioning vs brute
+    # force + entanglement/truncation receipts over small (2^8) chains -- pure numpy, no torch.
+    "tensor_network_test.py": ("experimental",),
     # P15 active causal discovery (mixle/experimental/active_causal.py): EIG-vs-random discovery loops over
     # ~30 seeds x 3 strategies on the chain/reverse/fork triple -- pure numpy, stochastic, no torch.
     "active_causal_test.py": ("experimental", "stochastic"),

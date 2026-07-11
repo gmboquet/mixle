@@ -42,6 +42,12 @@ Current contents:
   propagation over evicted tokens (the fast-multipole-method structure), a tree-path positional
   encoding replacing RoPE for the far field, a predict-the-summary auxiliary loss, and a receipted
   stop-gradient horizon. See ``notes/designs/E4.md`` for the design.
+- :mod:`mixle.experimental.tensor_network` -- P4, matrix-product-state (tensor-train) leaves:
+  :class:`~mixle.experimental.tensor_network.MPS` is a Born-machine density over discrete sequences with
+  exact normalization / marginals / conditionals by contraction,
+  :func:`~mixle.experimental.tensor_network.entanglement_entropy` as the long-range-structure receipt
+  (bounded by ``log(bond)``), and :func:`~mixle.experimental.tensor_network.truncate_error` whose discarded
+  Schmidt weight tracks the truncation's distribution error.
 - :mod:`mixle.experimental.active_causal` -- P15, active causal discovery:
   :func:`~mixle.experimental.active_causal.active_discovery` chooses ``do(.)`` interventions by expected
   information gain over a posterior on candidate causal structures (chain/reverse/fork), identifying the
