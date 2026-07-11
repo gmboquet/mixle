@@ -25,6 +25,7 @@ from mixle.inference.freeze_rollup import (
     FreezeRollupCache,
     _combine,
     _component_log_density_matrix,
+    _log_density_from_matrix,
     _m_step,
     _resolve_payload,
 )
@@ -232,7 +233,7 @@ def run_typed_mixture_em(
         objective_before = float(np.sum(log_density))
         candidate = _m_step(payload, estimator, model, responsibilities, inactive)
         candidate_matrix, evals_after = _component_log_density_matrix(candidate, payload, density_cache, inactive)
-        candidate_density, _ = _combine(candidate_matrix, candidate.log_w)
+        candidate_density = _log_density_from_matrix(candidate_matrix, candidate.log_w)
         candidate_objective = float(np.sum(candidate_density))
         elapsed = time.perf_counter() - started
 

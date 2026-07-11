@@ -60,6 +60,40 @@ def test_routed_muon_matrix_and_adamw_bias_train_a_real_module():
     assert "exp_avg_sq" in optimizer.state[module.bias]
 
 
+def test_newton_schulz_muon_tracks_exact_polar_reference_without_svd(monkeypatch):
+    torch.manual_seed(12)
+    module = torch.nn.Linear(32, 64, bias=False)
+    plan = route_optimizer_geometry(
+        describe_parameters(module),
+        _contract(),
+        GeometryRouterConfig(matrix_min_elements=16, matrix_min_dimension=4),
+    )
+    exact_optimizer = build_routed_torch_optimizer(module, plan, muon_backend="svd")
+    momentum = torch.randn_like(module.weight)
+    reference = exact_optimizer._polar_direction(momentum)
+
+    monkeypatch.setattr(torch.linalg, "svd", lambda *args, **kwargs: pytest.fail("default Muon called SVD"))
+    optimizer = build_routed_torch_optimizer(module, plan)
+    approximate = optimizer._polar_direction(momentum)
+
+    cosine = torch.nn.functional.cosine_similarity(approximate.flatten(), reference.flatten(), dim=0)
+    assert float(cosine) > 0.99
+    assert torch.isfinite(approximate).all()
+
+
+def test_muon_kernel_configuration_is_validated():
+    module = torch.nn.Linear(4, 4, bias=False)
+    plan = route_optimizer_geometry(
+        describe_parameters(module),
+        _contract(),
+        GeometryRouterConfig(matrix_min_elements=16, matrix_min_dimension=4),
+    )
+    with pytest.raises(ValueError, match="muon_backend"):
+        build_routed_torch_optimizer(module, plan, muon_backend="unknown")
+    with pytest.raises(ValueError, match="muon_steps"):
+        build_routed_torch_optimizer(module, plan, muon_steps=0)
+
+
 def test_kronecker_route_builds_and_uses_axis_factors():
     torch.manual_seed(2)
     module = torch.nn.Linear(4, 4, bias=False)

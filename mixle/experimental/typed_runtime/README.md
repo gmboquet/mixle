@@ -52,7 +52,8 @@ print(graph.explain())
   simulations, and the structured executor uses local worker threads.
 - General typed execution for every compiled estimator. Compilation does not imply an execution adapter exists.
 - Fused production kernels for routed Muon/Kronecker updates and real multi-host optimizer-state sharding. The
-  current torch adapter uses exact SVD/eigendecomposition as a correctness reference and may be slower than AdamW.
+  current torch adapter uses fixed-step Newton-Schulz Muon updates (with exact SVD available as an audit backend),
+  while Kronecker inverse roots still use eigendecomposition and may be slower than AdamW.
 - Persistent external graph/vector-store adapters and production retrieval indexes. Trillion-scale **source horizons**
   are represented and tested; trillion-token dense attention is neither implemented nor claimed.
 - A real frontier-scale training result. The integrated pilot is a deterministic synthetic falsification fixture, not

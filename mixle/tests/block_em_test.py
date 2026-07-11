@@ -16,7 +16,7 @@ import unittest
 
 import numpy as np
 
-from mixle.inference.block_em import run_block_em
+from mixle.inference.block_em import _select_active, run_block_em
 from mixle.inference.em import PosteriorTransformEM, observed_log_likelihood, run_em
 from mixle.inference.estimation import optimize
 from mixle.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator, seq_encode
@@ -77,7 +77,7 @@ class BlockEMMonotonicityTestCase(unittest.TestCase):
         round's real objective, so this test checks that gate is wired correctly end to end.
         """
         start, estimator, enc = _make_problem(seed=7, nobs=300)
-        _, history = run_block_em(enc, estimator, start, max_its=150, delta=1.0e-10, budget_fraction=0.5)
+        model, history = run_block_em(enc, estimator, start, max_its=150, delta=1.0e-10, budget_fraction=0.5)
 
         self.assertGreater(len(history), 1)
         objectives = [h.objective for h in history]
@@ -96,9 +96,74 @@ class BlockEMMonotonicityTestCase(unittest.TestCase):
         )
         self.assertTrue(all(h.wall_time_seconds > 0.0 for h in history))
         self.assertTrue(all(np.isfinite(h.measured_q_gain) for h in history))
+        self.assertTrue(history[-1].objective_exact)
+        self.assertAlmostEqual(history[-1].objective, observed_log_likelihood(enc)(model), places=9)
+        self.assertTrue(all(h.assumptions is not None and h.assumptions.assumptions_hold for h in history))
+        self.assertTrue(all(h.timing is not None and h.timing.total_seconds == h.wall_time_seconds for h in history))
+        self.assertTrue(
+            all(
+                h.degenerate_round or h.assumptions.budget_utilization <= 1.0 + 1.0e-12
+                for h in history
+                if h.assumptions is not None and h.assumptions.forced_cost <= 0.5 * h.assumptions.eligible_cost
+            )
+        )
 
 
 class BlockEMSpeedupTestCase(unittest.TestCase):
+    def test_starvation_updates_replace_lower_value_work_inside_the_budget(self):
+        eligible = list(range(8))
+        scores = {idx: float(8 - idx) for idx in eligible}
+        costs = {idx: 1.0 for idx in eligible}
+
+        active, degenerate = _select_active(
+            eligible,
+            scores,
+            costs,
+            budget_fraction=0.5,
+            full_tree_every_round=False,
+            tie_tol=1.0e-9,
+            forced={6, 7},
+        )
+
+        self.assertFalse(degenerate)
+        self.assertEqual(len(active), 4)
+        self.assertTrue({6, 7} <= active)
+        self.assertEqual(active - {6, 7}, {0, 1})
+
+    def test_selective_schedule_waves_reuse_planning_but_yield_to_starvation(self):
+        start, estimator, enc = _make_problem(seed=17, nobs=200)
+        _, history = run_block_em(
+            enc,
+            estimator,
+            start,
+            max_its=4,
+            delta=None,
+            budget_fraction=0.5,
+            schedule_wave_rounds=4,
+            max_skip_rounds=1,
+        )
+
+        self.assertEqual(len(history), 4)
+        self.assertFalse(history[0].assumptions.schedule_reused)
+        self.assertFalse(history[1].assumptions.schedule_reused)
+        # Blocks skipped in round 1 become forced before round 2, so the pending wave is
+        # invalidated instead of silently postponing starvation prevention.
+        self.assertFalse(history[2].assumptions.schedule_reused)
+        self.assertEqual(history[2].n_active, 4)
+
+        _, reusable_history = run_block_em(
+            enc,
+            estimator,
+            start,
+            max_its=4,
+            delta=None,
+            budget_fraction=0.5,
+            schedule_wave_rounds=3,
+            max_skip_rounds=10,
+        )
+        self.assertFalse(reusable_history[1].assumptions.schedule_reused)
+        self.assertTrue(reusable_history[2].assumptions.schedule_reused)
+
     def test_evaluation_count_receipt_matches_active_fraction(self):
         """The scheduler reaches a shared target with fewer component-density evaluations.
 

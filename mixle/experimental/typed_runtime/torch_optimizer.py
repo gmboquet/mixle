@@ -21,15 +21,17 @@ def build_routed_torch_optimizer(
     eps: float = 1.0e-8,
     weight_decay: float = 0.0,
     precondition_frequency: int = 10,
+    muon_backend: str = "newton_schulz",
+    muon_steps: int = 7,
     fisher_provider: FisherProvider | None = None,
     projection_provider: ProjectionProvider | None = None,
 ) -> Any:
     """Build a real ``torch.optim.Optimizer`` executing a typed geometry plan.
 
-    Muon routes use an exact polar factor as a correctness reference. Kronecker
-    routes maintain row/column second-moment factors and refresh inverse
-    fourth-roots at ``precondition_frequency``. These reference kernels favor
-    transparent math over production-scale fused performance.
+    Muon routes use a fixed-step Newton-Schulz polar approximation by default;
+    ``muon_backend="svd"`` retains the exact polar factor as an audit reference.
+    Kronecker routes maintain row/column second-moment factors and refresh inverse
+    fourth-roots at ``precondition_frequency``.
     """
 
     try:
@@ -42,6 +44,10 @@ def build_routed_torch_optimizer(
         raise ValueError("optimizer betas must contain two values in [0, 1).")
     if precondition_frequency < 1:
         raise ValueError("precondition_frequency must be positive.")
+    if muon_backend not in ("newton_schulz", "svd"):
+        raise ValueError("muon_backend must be 'newton_schulz' or 'svd'.")
+    if muon_steps < 1:
+        raise ValueError("muon_steps must be positive.")
 
     named = dict(module.named_parameters())
     groups = []
@@ -103,8 +109,24 @@ def build_routed_torch_optimizer(
         def _polar_direction(momentum: Any) -> Any:
             if momentum.ndim != 2:
                 raise ValueError("Muon route requires a matrix parameter gradient.")
-            left, _, right = torch.linalg.svd(momentum.float(), full_matrices=False)
-            direction = (left @ right).to(dtype=momentum.dtype)
+            value = momentum.float()
+            if not torch.isfinite(value).all():
+                raise ValueError("Muon route requires a finite matrix gradient.")
+            if muon_backend == "svd":
+                left, _, right = torch.linalg.svd(value, full_matrices=False)
+                direction = left @ right
+            else:
+                transposed = value.shape[0] > value.shape[1]
+                work = value.T if transposed else value
+                work = work / work.norm().clamp_min(1.0e-7)
+                # The normalized singular values lie in (0, 1], where this canonical polar
+                # iteration converges to one. Fixed work makes it suitable for compilation and
+                # sharding, while the exact-SVD backend remains available for audits.
+                for _ in range(muon_steps):
+                    gram = work @ work.T
+                    work = 1.5 * work - 0.5 * gram @ work
+                direction = work.T if transposed else work
+            direction = direction.to(dtype=momentum.dtype)
             return direction * math.sqrt(max(1.0, momentum.shape[0] / momentum.shape[1]))
 
         @staticmethod

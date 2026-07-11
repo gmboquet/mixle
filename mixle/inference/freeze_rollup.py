@@ -28,6 +28,7 @@ well-tested combinator is the honest S/M-effort scope for this item; later track
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -114,6 +115,24 @@ def _param_signature(dist: Any) -> bytes:
 class _CacheEntry:
     signature: bytes
     log_density: np.ndarray
+
+
+@dataclass(frozen=True)
+class DensityMatrixProfile:
+    """Observed cache/evaluation work for one component-matrix construction."""
+
+    evaluations: int
+    cache_hits: int
+    reused_columns: int
+    zero_weight_skips: int
+    evaluation_seconds: float
+    cache_hit_seconds: float
+    assembly_seconds: float
+    component_evaluation_seconds: tuple[tuple[int, float], ...]
+
+    @property
+    def elapsed_seconds(self) -> float:
+        return self.evaluation_seconds + self.cache_hit_seconds + self.assembly_seconds
 
 
 @dataclass
@@ -306,6 +325,118 @@ def _combine(ll_mat: np.ndarray, log_w: np.ndarray) -> tuple[np.ndarray, np.ndar
     return log_density, gamma
 
 
+def _log_density_from_matrix(ll_mat: np.ndarray, log_w: np.ndarray) -> np.ndarray:
+    """Combine component scores without constructing unused responsibilities."""
+
+    ll = ll_mat + log_w
+    ll_max = ll.max(axis=1, keepdims=True)
+    bad_rows = np.isinf(ll_max.flatten())
+    if np.any(bad_rows):
+        ll[bad_rows, :] = log_w
+        ll_max[bad_rows] = np.max(log_w)
+    ll -= ll_max
+    np.exp(ll, out=ll)
+    return (np.log(ll.sum(axis=1, keepdims=True)) + ll_max).flatten()
+
+
+def _component_log_density_matrix_profiled(
+    model: MixtureDistribution, enc_data: Any, cache: FreezeRollupCache, frozen_idx: set[int]
+) -> tuple[np.ndarray, int, DensityMatrixProfile]:
+    """Build a component score matrix and expose the assumptions behind saved work."""
+
+    n = None
+    cols: list[np.ndarray | None] = [None] * model.num_components
+    evals = 0
+    hits = 0
+    zero_weight_skips = 0
+    evaluation_seconds = 0.0
+    cache_hit_seconds = 0.0
+    component_seconds = []
+    for idx in range(model.num_components):
+        if model.zw[idx]:
+            zero_weight_skips += 1
+            continue
+        enc_i = _component_enc(enc_data, idx)
+        started = time.perf_counter()
+        log_density, hit = cache.component_log_density(idx, model.components[idx], enc_i, frozen=idx in frozen_idx)
+        elapsed = time.perf_counter() - started
+        if hit:
+            hits += 1
+            cache_hit_seconds += elapsed
+        else:
+            evals += 1
+            evaluation_seconds += elapsed
+            component_seconds.append((idx, elapsed))
+        cols[idx] = log_density
+        if n is None:
+            n = len(log_density)
+    if n is None:
+        raise ValueError("MixtureDistribution has no components with nonzero weight.")
+    assembly_started = time.perf_counter()
+    ll_mat = np.full((n, model.num_components), -np.inf)
+    for idx, col in enumerate(cols):
+        if col is not None:
+            ll_mat[:, idx] = col
+    assembly_seconds = time.perf_counter() - assembly_started
+    profile = DensityMatrixProfile(
+        evals,
+        hits,
+        0,
+        zero_weight_skips,
+        evaluation_seconds,
+        cache_hit_seconds,
+        assembly_seconds,
+        tuple(component_seconds),
+    )
+    return ll_mat, evals, profile
+
+
+def _updated_component_log_density_matrix_profiled(
+    model: MixtureDistribution,
+    enc_data: Any,
+    cache: FreezeRollupCache,
+    active_idx: set[int],
+    base_matrix: np.ndarray,
+) -> tuple[np.ndarray, int, DensityMatrixProfile]:
+    """Copy a valid prior matrix and replace only columns whose components moved."""
+
+    if base_matrix.ndim != 2 or base_matrix.shape[1] != model.num_components:
+        raise ValueError("base component-score matrix does not match the candidate model.")
+    assembly_started = time.perf_counter()
+    ll_mat = base_matrix.copy()
+    assembly_seconds = time.perf_counter() - assembly_started
+    evaluations = 0
+    zero_weight_skips = 0
+    evaluation_seconds = 0.0
+    component_seconds = []
+    for idx in sorted(active_idx):
+        if model.zw[idx]:
+            ll_mat[:, idx] = -np.inf
+            zero_weight_skips += 1
+            continue
+        enc_i = _component_enc(enc_data, idx)
+        started = time.perf_counter()
+        log_density, _ = cache.component_log_density(idx, model.components[idx], enc_i, frozen=False)
+        elapsed = time.perf_counter() - started
+        if len(log_density) != ll_mat.shape[0]:
+            raise ValueError("updated component score length does not match the base matrix.")
+        ll_mat[:, idx] = log_density
+        evaluations += 1
+        evaluation_seconds += elapsed
+        component_seconds.append((idx, elapsed))
+    profile = DensityMatrixProfile(
+        evaluations,
+        0,
+        model.num_components - len(active_idx),
+        zero_weight_skips,
+        evaluation_seconds,
+        0.0,
+        assembly_seconds,
+        tuple(component_seconds),
+    )
+    return ll_mat, evaluations, profile
+
+
 def _component_log_density_matrix(
     model: MixtureDistribution, enc_data: Any, cache: FreezeRollupCache, frozen_idx: set[int]
 ) -> tuple[np.ndarray, int]:
@@ -466,7 +597,7 @@ def run_em_freeze_rollup(
         candidate = _m_step(enc_payload, estimator, model, gamma, frozen_idx)
         candidate_frozen = detect_frozen(cache, candidate)
         ll_mat_c, evals_c = _component_log_density_matrix(candidate, enc_payload, cache, candidate_frozen)
-        candidate_log_density, _ = _combine(ll_mat_c, candidate.log_w)
+        candidate_log_density = _log_density_from_matrix(ll_mat_c, candidate.log_w)
         candidate_value = float(np.sum(candidate_log_density))
 
         accepted = np.isfinite(candidate_value) and candidate_value + accept_tolerance >= current_value
