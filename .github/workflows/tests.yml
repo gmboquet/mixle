@@ -185,6 +185,13 @@ jobs:
         # -m "" overrides the default `-m fast` addopts; the torchrun tests aren't `fast`, so without this
         # the selection is empty and pytest exits 5 ("no tests collected"), failing the job.
         run: MIXLE_RUN_TORCHRUN_SMOKE=1 python -m pytest mixle/tests/torchrun_encoded_data_test.py mixle/tests/torch_neural_test.py -q -m ""
+      - name: Exercise the dask distributed backend (worklist D8.3)
+        # The dask encoded-data backend has tests that SKIP everywhere else because dask is not installed.
+        # Install it and run them, so at least one distributed backend is genuinely exercised in CI (E2),
+        # not just documented. dask is pip-only (no Java/cluster), so it is the cheapest to gate here.
+        run: |
+          python -m pip install "dask>=2023.5.0" "distributed>=2023.5.0"
+          python -m pytest mixle/tests/dask_encoded_data_test.py -q -m ""
       - name: Install the Banking77 flagship dataset dependency
         run: python -m pip install datasets
       - name: Run the Banking77 real-data flagship smoke
