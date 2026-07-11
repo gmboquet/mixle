@@ -43,7 +43,7 @@ def _fit(arr: np.ndarray) -> tuple[float, float] | None:
         from scipy import stats
 
         loc, scale = stats.gumbel_r.fit(arr)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not (scale > 0.0 and math.isfinite(scale) and math.isfinite(loc)):
         return None

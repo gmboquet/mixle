@@ -215,7 +215,7 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         """
         try:
             xx = float(x)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return 0.0
         if not np.isfinite(xx) or xx <= 0.0:
             return 0.0
@@ -238,7 +238,7 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         """
         try:
             xx = float(x)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return -np.inf
         if not np.isfinite(xx) or xx <= 0.0:
             return -np.inf
