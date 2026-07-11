@@ -4,9 +4,14 @@
    build data -- so it works the same for every version, including tags built before this file existed. #}
 <div id="version-switcher" class="version-switcher">
   <button type="button" class="version-switcher__button" aria-haspopup="listbox" aria-expanded="false">
-    <span>{{ version }}</span>
+    <span>{{ mixle_release|default(release) }}</span>
   </button>
   <ul class="version-switcher__menu" role="listbox" hidden></ul>
+  {% if mixle_commit and mixle_commit != "unknown" %}
+  <div class="version-switcher__commit" title="source revision these docs were built from">
+    build {{ mixle_commit }}
+  </div>
+  {% endif %}
 </div>
 <script>
 (function () {
@@ -74,4 +79,11 @@
   font-size: var(--sidebar-item-font-size);
 }
 .version-switcher__menu li a:hover { background: var(--color-sidebar-item-background--hover); }
+.version-switcher__commit {
+  margin: 0.25rem 0.1rem 0;
+  font-size: calc(var(--sidebar-item-font-size) * 0.85);
+  color: var(--color-sidebar-link-text);
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
 </style>
