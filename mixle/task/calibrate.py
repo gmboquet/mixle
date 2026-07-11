@@ -75,8 +75,14 @@ class CalibratedTaskModel:
         """Set the conformal threshold from held-out ``(texts, teacher_labels)`` for ``1 - alpha`` set coverage."""
         index = {label: i for i, label in enumerate(self.labels)}
         prob = self._proba(list(texts))
-        true_idx = np.asarray([index[str(y)] for y in teacher_labels])
-        cal_true = prob[np.arange(len(true_idx)), true_idx]
+        # A held-out label the student's model has no class for cannot be scored -- the student assigns it
+        # probability 0, so it is a calibration point the student is guaranteed to miss. Record 0.0 rather
+        # than raising KeyError on an unseen level: the conformal threshold must see these misses (they
+        # make the set-valued predictor correctly more conservative), not crash the calibration pass.
+        cal_true = np.array(
+            [prob[i, index[str(y)]] if str(y) in index else 0.0 for i, y in enumerate(teacher_labels)],
+            dtype=float,
+        )
         self.qhat = conformal_label_threshold(cal_true, alpha=self.alpha)
         return self
 
