@@ -118,7 +118,7 @@ from mixle.inference.cross_validation import (
 
 # Bayes-optimal decisions under a fitted posterior (decision-theoretic action + tail risk)
 from mixle.inference.decision import RiskProfile, bayes_action
-from mixle.inference.em import EMStrategy, run_em
+from mixle.inference.em import EMStrategy, SquaremEM, run_em, squarem_packer
 from mixle.inference.errors_in_variables import DemingFit, deming_regression, propagate_uncertainty, simex
 from mixle.inference.estimation import BayesianStreamingEstimator, EMStep, best_of, fit, optimize
 
@@ -421,6 +421,8 @@ __all__ = [
     "EMStep",
     "best_of",
     "run_em",
+    "SquaremEM",
+    "squarem_packer",
     "EMStrategy",
     # online / streaming estimators (single discoverable surface for the streaming drivers)
     "StreamingEstimator",
