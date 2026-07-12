@@ -114,6 +114,20 @@ class FusibilityGuardTest(unittest.TestCase):
         model = MixtureDistribution([CompositeDistribution((with_len, GaussianDistribution(0.0, 1.0)))] * 2, [0.5, 0.5])
         self.assertIsNone(fc.analyze(model), "a real length distribution is outside the fused tables")
 
+    def test_all_chain_homogeneous_mixture_survives_the_block_em_path(self):
+        """Regression pin: an ALL-chain homogeneous top mixture used to hit an IndexError inside
+        _component_enc on the block-EM/freeze-rollup path (hetero fixtures worked). Fixed upstream by
+        the freeze-rollup resolver work; pinned here so the encoder-shape edge cannot quietly return."""
+        from mixle.inference.block_em import run_block_em
+
+        rng = np.random.RandomState(3)
+        model = MixtureDistribution([_chain(j) for j in range(3)], [1 / 3] * 3)
+        data = [[STATES[rng.randint(3)] for _ in range(int(rng.randint(2, 8)))] for _ in range(1500)]
+        enc_data = [(len(data), model.dist_to_encoder().seq_encode(data))]
+        final_model, history = run_block_em(enc_data, model.estimator(), model, max_its=3)
+        self.assertTrue(len(history) >= 1)
+        self.assertTrue(np.isfinite(final_model.seq_log_density(enc_data[0][1]).sum()))
+
     def test_bare_chain_mixture_is_fusible_too(self):
         model = MixtureDistribution([_chain(0), _chain(1)], [0.5, 0.5])
         self.assertTrue(fc.fusible(model))
