@@ -151,6 +151,7 @@ from mixle.experimental.typed_runtime.measurement import (
     MeasurementCatalog,
     WorkMeasurement,
 )
+from mixle.experimental.typed_runtime.planner import ExecutionPlan, plan_execution
 from mixle.experimental.typed_runtime.proposal import (
     PayloadMerger,
     ProposalBatch,
@@ -376,6 +377,8 @@ __all__ = [
     "assess_staleness",
     "apply_optimizer_evidence",
     "compile_update_graph",
+    "ExecutionPlan",
+    "plan_execution",
     "calibrate_links",
     "build_routed_torch_optimizer",
     "bounded_context_attention",
