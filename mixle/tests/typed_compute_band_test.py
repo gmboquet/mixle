@@ -8,6 +8,10 @@ validated reduced-precision kernel," not "should this fit."
 
 import pytest
 
+# float32 eligibility exists only where the fused numba kernel does; without numba every band is
+# correctly float64 and the discriminating assertions below would be vacuous.
+pytest.importorskip("numba")
+
 from mixle.experimental.typed_runtime import compile_update_graph
 from mixle.experimental.typed_runtime.contracts import ComputeBand, weakest_band
 from mixle.stats import GaussianDistribution, LaplaceDistribution, MixtureDistribution
