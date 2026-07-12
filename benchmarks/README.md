@@ -13,6 +13,24 @@ python run_benchmarks.py --quick    # smaller sizes, fast smoke run
 python gpu_scaling.py               # GPU throughput panel (needs a CUDA device)
 ```
 
+## Installing the comparison packages
+
+The harness needs only mixle (and numpy) to run; each comparison package is imported inside its
+own timed thunk, so an absent package is recorded as an honest per-package failure
+(`FAILED` / `ImportError` in the panel) rather than aborting the sweep. To run the full
+head-to-head:
+
+```
+pip install scikit-learn pomegranate hmmlearn
+```
+
+All three are permissively licensed (scikit-learn: BSD-3-Clause; pomegranate: MIT; hmmlearn:
+BSD-3-Clause); installing them pulls no copyleft obligations into this repository, and nothing
+from them is vendored here. pomegranate additionally requires torch (its compute backend).
+Without scikit-learn the shared GMM init falls back to a seeded numpy Lloyd's k-means -- still
+deterministic and still fed identically to every package, so any comparison that does run stays
+fair; published `results/results.json` numbers were produced with the sklearn init.
+
 ## Methodology — why these numbers are fair
 
 A speed comparison is only meaningful if every package is doing the same computation. The
