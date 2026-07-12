@@ -35,6 +35,11 @@ jobs:
         run: ruff format --check mixle
       - name: ruff check
         run: ruff check mixle
+      # Y4.4 architecture contracts ([tool.importlinter] in pyproject.toml): experimental is never a
+      # dependency of the stable core; distribution kernels / engines carry no direct orchestration
+      # imports. Static graph analysis (grimp) -- imports nothing, so no optional extras needed here.
+      - name: lint-imports (architecture contracts)
+        run: lint-imports
       # A curated typed-core is checked strictly and BLOCKING (worklist Y4.1): these modules are fully
       # annotated and clean under disallow_untyped_defs (see the [[tool.mypy.overrides]] typed-core list in
       # pyproject.toml). --follow-imports=skip keeps the check to these modules' own annotations so a

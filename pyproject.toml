@@ -103,7 +103,9 @@ test = ["pytest>=8", "pytest-xdist>=3.0", "pytest-cov>=5.0"]
 # themselves ship in every sdist/wheel (MANIFEST.in + [tool.setuptools.package-data]).
 kernels = ["Cython>=3.0", "setuptools>=68"]
 # ruff is pinned: a newer release could add rules and break the blocking lint check unexpectedly.
-lint = ["ruff==0.15.17", "mypy>=1.0"]
+# import-linter is floored, not pinned: its contracts are fully self-defined in [tool.importlinter],
+# so new releases cannot add surprise rules the way a linter's default rule set can.
+lint = ["ruff==0.15.17", "mypy>=1.0", "import-linter>=2"]
 all = ["numba>=0.59", "tbb>=2021.6; platform_machine == 'x86_64'", "pyspark>=3.4", "dask>=2023.5.0", "distributed>=2023.5.0", "torch>=2.0", "safetensors>=0.4", "mpi4py>=3.1", "umap-learn>=0.5.4", "pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "networkx>=3.0", "ray>=2.9", "lightning>=2.1"]
 
 [project.urls]
@@ -117,6 +119,75 @@ include = ["mixle*"]
 # Ship the Cython kernel sources so an installed mixle can self-compile them (the `kernels` extra);
 # MANIFEST.in carries the same rule for sdists.
 "mixle.engines" = ["*.pyx"]
+
+[tool.importlinter]
+# Y4.4 architecture dependency checks. Each contract below is a bar the tree PASSES today, wired as
+# a regression gate (the `lint-imports` step of the lint CI job). Scope honesty: the full package
+# graph is NOT acyclic at package granularity -- stats<->inference, models<->inference, utils<->engines
+# and utils<->stats import each other (function-level lazy imports, deliberate for optional heavy
+# dependencies) -- so a whole-tree "layers" contract would be aspirational fiction, and the same
+# entanglement makes stats reach task TRANSITIVELY (stats -> inference -> ... -> task), so the two
+# kernel contracts forbid DIRECT imports (allow_indirect_imports): the enforceable, regression-gating
+# bar today. The experimental contract has no such caveat -- nothing imports experimental, so it is
+# enforced over full transitive chains. The ratchet path is to untangle the lazy cycles and then drop
+# allow_indirect_imports pair by pair, not to declare layers the code does not have. import-linter's graph (grimp) is static analysis; nothing is imported at lint
+# time, so the lint env does not need optional extras.
+root_package = "mixle"
+
+[[tool.importlinter.contracts]]
+name = "experimental is never a dependency of the stable core (Y4.4)"
+type = "forbidden"
+source_modules = [
+    "mixle.analysis",
+    "mixle.data",
+    "mixle.doe",
+    "mixle.engines",
+    "mixle.enumeration",
+    "mixle.epistemic",
+    "mixle.evolve",
+    "mixle.inference",
+    "mixle.models",
+    "mixle.pool",
+    "mixle.ppl",
+    "mixle.reason",
+    "mixle.represent",
+    "mixle.stats",
+    "mixle.substrate",
+    "mixle.task",
+    "mixle.telemetry",
+    "mixle.utils",
+]
+forbidden_modules = ["mixle.experimental"]
+
+[[tool.importlinter.contracts]]
+name = "distribution kernels do not depend on orchestration layers (Y4.4)"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["mixle.stats", "mixle.engines"]
+forbidden_modules = [
+    "mixle.task",
+    "mixle.doe",
+    "mixle.evolve",
+    "mixle.epistemic",
+    "mixle.substrate",
+    "mixle.ppl",
+    "mixle.reason",
+    "mixle.pool",
+]
+
+[[tool.importlinter.contracts]]
+name = "engines are model-agnostic compute (Y4.4)"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["mixle.engines"]
+forbidden_modules = [
+    "mixle.stats",
+    "mixle.models",
+    "mixle.inference",
+    "mixle.data",
+    "mixle.analysis",
+    "mixle.enumeration",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["mixle/tests"]
