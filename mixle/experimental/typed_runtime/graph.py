@@ -157,6 +157,13 @@ class UpdateGraph:
         }
 
     @property
+    def compute_band(self):
+        """Tree-level precision eligibility: float32 only when every node's subtree qualifies."""
+        from mixle.experimental.typed_runtime.contracts import weakest_band
+
+        return weakest_band(node.contract.compute_band for node in self.nodes)
+
+    @property
     def convergence_certificate(self):
         """Tree-level guarantee: the weakest node certificate (guarantees compose by minimum)."""
         from mixle.experimental.typed_runtime.contracts import weakest_certificate
@@ -170,6 +177,7 @@ class UpdateGraph:
             "Statistically typed update graph",
             "root=%s nodes=%d dependencies=%d" % (self.root_node, len(self.nodes), len(self.edges)),
             "convergence certificate (weakest link): %s" % self.convergence_certificate.value,
+            "compute band (weakest link): %s" % self.compute_band.value,
         ]
         by_id = {node.node_id: node for node in self.nodes}
         for node_id in self.topological_order():
@@ -178,7 +186,7 @@ class UpdateGraph:
             axes = ",".join(contract.decomposition_axes) or "replicated"
             state = ",".join(sorted(item.value for item in contract.state_semantics))
             lines.append(
-                "- %s %s: %s/%s merge=%s state=%s axes=%s cost=%s cert=%s"
+                "- %s %s: %s/%s merge=%s state=%s axes=%s cost=%s cert=%s band=%s"
                 % (
                     node.node_id,
                     node.path,
@@ -189,6 +197,7 @@ class UpdateGraph:
                     axes,
                     node.cost.source,
                     contract.convergence_certificate.value,
+                    contract.compute_band.value,
                 )
             )
         if self.edges:

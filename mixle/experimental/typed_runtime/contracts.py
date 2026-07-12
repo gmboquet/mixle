@@ -80,6 +80,31 @@ _CERTIFICATE_STRENGTH = {
 }
 
 
+class ComputeBand(StrEnum):
+    """Model-side compute-precision eligibility of a node's scoring subtree.
+
+    ``float32_eligible`` means the subtree fuses AND every leaf family is in the validated
+    reduced-precision set (``mixle.inference.precision_plan.FP32_SAFE_FAMILIES``) -- the fused
+    float32 kernel's summed-log-likelihood error is verified < ~1e-6 relative there. The DATA-side
+    conditions (bounded magnitude, non-degenerate variances) remain a runtime decision
+    (``optimize(precision="minimal")``); this axis declares what the model structure permits.
+    Composition is weakest-link: one ineligible node keeps the tree at ``float64``.
+    """
+
+    FLOAT32_ELIGIBLE = "float32_eligible"
+    FLOAT64 = "float64"
+
+
+def weakest_band(bands: Any) -> ComputeBand:
+    """FLOAT32_ELIGIBLE only when every node is eligible; FLOAT64 otherwise (or when empty)."""
+    result: ComputeBand | None = None
+    for band in bands:
+        if band is ComputeBand.FLOAT64:
+            return ComputeBand.FLOAT64
+        result = band
+    return result if result is not None else ComputeBand.FLOAT64
+
+
 def weakest_certificate(certificates: Any) -> ConvergenceCertificate:
     """The minimum certificate over an iterable (the tree-level guarantee); UNKNOWN when empty."""
     result: ConvergenceCertificate | None = None
@@ -209,6 +234,7 @@ class UpdateContract:
     outer_objective_compatible: bool = True
     exact: bool = True
     convergence_certificate: ConvergenceCertificate = ConvergenceCertificate.UNKNOWN
+    compute_band: ComputeBand = ComputeBand.FLOAT64
     declared_by: str = "compiler_default"
     notes: tuple[str, ...] = ()
 
@@ -250,6 +276,7 @@ class UpdateContract:
             "outer_objective_compatible": self.outer_objective_compatible,
             "exact": self.exact,
             "convergence_certificate": self.convergence_certificate.value,
+            "compute_band": self.compute_band.value,
             "declared_by": self.declared_by,
             "notes": list(self.notes),
         }
