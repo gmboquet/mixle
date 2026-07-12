@@ -84,7 +84,7 @@ jobs:
         # Revisit once the optional-extras job also reports and the two are combined.
         run: python -m pytest -m "not optional and not benchmark" -n auto --cov --cov-report=xml --cov-report=term
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-xml
           path: coverage.xml
