@@ -128,3 +128,126 @@ class AuditCadenceAndDispatchTest:
         cheap = MixtureDistribution([GaussianDistribution(-4.0, 1.0), LaplaceDistribution(4.0, 2.0)], [0.5, 0.5])
         enc_cheap = seq_encode(rng.normal(0.0, 4.0, 20_000), model=cheap)
         assert not prefer_block_schedule(cheap, enc_cheap, max_its=30)  # few AND cheap: full tree
+
+
+def _deep_mixed_problem(n=3000, seed=4):
+    """Three components: two deep fusible Gaussian-chain composites + one Laplace (non-fusible)."""
+
+    def chain(depth, rng, center):
+        node = GaussianDistribution(center + rng.uniform(-1, 1), 1.0)
+        for level in range(depth):
+            node = MixtureDistribution([node, GaussianDistribution(center + level * 0.5, 1.0)], [0.7, 0.3])
+        return node
+
+    rng = np.random.RandomState(seed)
+    data = np.concatenate(
+        [rng.normal(-8.0, 1.0, n // 3), rng.normal(0.0, 1.0, n // 3), rng.laplace(8.0, 1.5, n - 2 * (n // 3))]
+    )
+    rng.shuffle(data)
+    start = MixtureDistribution(
+        [chain(9, rng, -8.0), chain(9, rng, 0.0), LaplaceDistribution(6.0, 2.0)], [0.34, 0.33, 0.33]
+    )
+    estimator = start.estimator()
+    return start, estimator, seq_encode(data, model=start), data
+
+
+class FusedMStepParityTest:
+    def test_fused_suff_stat_matches_host_accumulator_exactly(self):
+        from mixle.inference.freeze_rollup import _component_suff_stat
+
+        start, estimator, enc, _ = _deep_mixed_problem()
+        payload = enc[0][1]
+        rng = np.random.RandomState(0)
+        weights = rng.uniform(0.05, 1.0, 3000)
+        for idx in (0, 1):  # the deep fusible components
+            comp, est_i = start.components[idx], estimator.estimators[idx]
+            enc_i = _component_enc(payload, idx)
+            fused_stat = _component_suff_stat(est_i, comp, enc_i, weights)
+            host_acc = est_i.accumulator_factory().make()
+            host_acc.seq_update(enc_i, weights, comp)
+
+            def compare(a, b):
+                if isinstance(a, (tuple, list)):
+                    assert len(a) == len(b)
+                    for x, y in zip(a, b):
+                        compare(x, y)
+                elif a is None:
+                    assert b is None
+                else:
+                    np.testing.assert_allclose(
+                        np.asarray(a, dtype=float), np.asarray(b, dtype=float), rtol=1e-12, atol=1e-12
+                    )
+
+            compare(fused_stat, host_acc.value())
+
+    def test_end_to_end_matches_host_forced_run(self, monkeypatch):
+        import mixle.inference.freeze_rollup as fr
+
+        start, estimator, enc, data = _deep_mixed_problem()
+        fused_model, fused_hist = run_block_em(enc, estimator, start, max_its=8, delta=None)
+
+        monkeypatch.setattr(fr, "_FUSED_SCORING", False)  # force the host path end to end
+        host_model, host_hist = run_block_em(enc, estimator, start, max_its=8, delta=None)
+        monkeypatch.setattr(fr, "_FUSED_SCORING", None)  # let the resolver re-probe afterwards
+
+        assert abs(fused_hist[-1].objective - host_hist[-1].objective) <= 1e-9 * abs(host_hist[-1].objective)
+
+    def test_fp32_mstep_band_holds_on_the_deep_fixture(self):
+        start, estimator, enc, _ = _deep_mixed_problem()
+        _, h64 = run_block_em(enc, estimator, start, max_its=6, delta=None)
+        _, h32 = run_block_em(enc, estimator, start, max_its=6, delta=None, compute_dtype=np.float32)
+        rel = abs(h32[-1].objective - h64[-1].objective) / abs(h64[-1].objective)
+        assert rel < 1e-6
+
+
+class FusedMStepEngagementTest:
+    """The fused accumulate path must ENGAGE on template-path components and must NOT engage on
+    nested-tree components (whose fallback kernels recompile per call -- measured 13x slower)."""
+
+    def _counting_resolver(self, monkeypatch):
+        import mixle.inference.freeze_rollup as fr
+
+        real = fr._fused_scoring()
+        assert real, "numba required for this test"
+        calls = {"n": 0}
+        fused_seq_log_density, fusible, fused_accumulate, fusible_estep, analyze = real
+
+        def counting_accumulate(model, enc, weights, **kw):
+            calls["n"] += 1
+            return fused_accumulate(model, enc, weights, **kw)
+
+        monkeypatch.setattr(
+            fr, "_FUSED_SCORING", (fused_seq_log_density, fusible, counting_accumulate, fusible_estep, analyze)
+        )
+        return calls
+
+    def test_flat_subcombinator_components_engage_and_match_host(self, monkeypatch):
+        import mixle.inference.freeze_rollup as fr
+
+        rng = np.random.RandomState(2)
+        data = np.concatenate([rng.normal(-8, 1, 1500), rng.normal(8, 1, 1500)])
+        rng.shuffle(data)
+
+        def flat_component(center):
+            return MixtureDistribution([GaussianDistribution(center + j, 1.5) for j in range(6)], [1.0 / 6] * 6)
+
+        start = MixtureDistribution(
+            [flat_component(-8.0), flat_component(8.0), LaplaceDistribution(0.0, 3.0)], [0.4, 0.4, 0.2]
+        )
+        estimator = start.estimator()
+        enc = seq_encode(data, model=start)
+
+        calls = self._counting_resolver(monkeypatch)
+        fused_model, fused_hist = run_block_em(enc, estimator, start, max_its=6, delta=None)
+        assert calls["n"] > 0  # the template-path components really took the fused kernel
+
+        monkeypatch.setattr(fr, "_FUSED_SCORING", False)
+        host_model, host_hist = run_block_em(enc, estimator, start, max_its=6, delta=None)
+        monkeypatch.setattr(fr, "_FUSED_SCORING", None)
+        assert abs(fused_hist[-1].objective - host_hist[-1].objective) <= 1e-9 * abs(host_hist[-1].objective)
+
+    def test_nested_chain_components_stay_on_the_host_path(self, monkeypatch):
+        start, estimator, enc, _ = _deep_mixed_problem(n=900)
+        calls = self._counting_resolver(monkeypatch)
+        run_block_em(enc, estimator, start, max_its=3, delta=None)
+        assert calls["n"] == 0  # nested trees are excluded until fused_nested is structure-cached

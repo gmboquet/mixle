@@ -51,6 +51,7 @@ from mixle.inference.freeze_rollup import (
     FreezeRollupCache,
     _combine,
     _component_log_density_matrix_profiled,
+    _component_suff_stat,
     _log_density_from_matrix,
     _m_step,
     _resolve_payload,
@@ -326,6 +327,7 @@ def _sparse_block_m_step(
     active: tuple[int, ...],
     responsibilities: np.ndarray,
     boundary_weight_step: float,
+    compute_dtype: Any = None,
 ) -> tuple[MixtureDistribution, np.ndarray, float]:
     """Re-estimate active leaves and the active-plus-inactive-mass weight block."""
 
@@ -335,9 +337,10 @@ def _sparse_block_m_step(
         if model.zw[idx] or counts[position] <= 0.0:
             continue
         enc_i = _component_enc(enc_data, idx)
-        accumulator = estimator.estimators[idx].accumulator_factory().make()
-        accumulator.seq_update(enc_i, responsibilities[:, position], model.components[idx])
-        components[idx] = estimator.estimators[idx].estimate(float(counts[position]), accumulator.value())
+        suff_stat = _component_suff_stat(
+            estimator.estimators[idx], model.components[idx], enc_i, responsibilities[:, position], compute_dtype
+        )
+        components[idx] = estimator.estimators[idx].estimate(float(counts[position]), suff_stat)
     weights, inactive_scale = _constrained_block_weights(
         estimator,
         model,
@@ -778,12 +781,13 @@ def run_block_em(
                 active_indices,
                 gamma_active,
                 boundary_weight_step,
+                compute_dtype=compute_dtype,
             )
             counts = None
         else:
             if gamma is None:  # pragma: no cover - established by the branch above
                 raise RuntimeError("dense block M-step requires dense responsibilities.")
-            candidate = _m_step(enc_payload, estimator, model, gamma, scheduled_inactive)
+            candidate = _m_step(enc_payload, estimator, model, gamma, scheduled_inactive, compute_dtype=compute_dtype)
             counts = gamma.sum(axis=0)
             active_counts = counts[list(active_indices)]
             inactive_scale = 1.0
