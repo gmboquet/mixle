@@ -132,6 +132,32 @@ Probabilistic-programming surface
     * **Extraction boundary:** the neural predictors (``_NeuralPredictor`` / ``Net`` / ``Conv`` /
       ``Transformer``) are the torch-touching subset and a natural split from the pure-DSL field/group core.
 
+Compiled-kernel code generation
+-------------------------------
+
+``mixle/stats/compute/fused_codegen.py`` (1,622)
+    * **Responsibilities:** the fused-kernel source generator — per-family ``LeafTemplate``\s (scalar,
+      vector, matrix, tabulated, categorical, chain), plan analysis (``analyze``/``fusible``), source
+      emission for the one-pass scorer and E-step (sequential and chunk-parallel prange variants), the
+      secure disk-cached ``_njit`` loader, and the data/parameter marshalling that feeds generated
+      signatures.
+    * **Stateful globals:** the ``_TEMPLATES`` registry (append-ordered; matching is first-hit, so
+      registration order is part of dispatch semantics) and the ``_COMPILED`` / ``_ESTEP_COMPILED``
+      kernel caches keyed by ``(plan.signature, parallel)`` — plus the on-disk module cache under
+      ``MIXLE_FUSED_CACHE_DIR`` with its ownership/symlink checks.
+    * **Optional imports:** ``numba`` — reached lazily inside ``_njit``; importing this module must stay
+      numba-free (the freeze-rollup resolver depends on that, guarded by ``HAS_NUMBA`` at its call site).
+    * **Hot paths:** every generated ``_fused`` / ``_estep`` kernel; parity is pinned by
+      ``generated_kernel_parity_test.py``, ``fused_codegen_test.py``, ``fused_parallel_test.py`` (ULP /
+      bit-stability receipts), and ``fused_chain_test.py`` — treat template ``row``/``acc`` fragments as
+      bit-checked and change them only with those suites green.
+    * **Serialization:** none — kernels are runtime artifacts; the disk cache is a per-user performance
+      cache keyed by source digest, never a schema surface.
+    * **Extraction boundary:** the leaf templates (registrations plus their param/table builders) are the
+      clean seam — they are data, not machinery, and moving them to a ``_templates`` module would halve the
+      file without touching emission. The emitter + marshalling + cache trio is a single numerical unit;
+      split only against a demonstrated defect.
+
 Infrastructure and facade
 -------------------------
 

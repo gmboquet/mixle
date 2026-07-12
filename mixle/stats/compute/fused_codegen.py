@@ -93,6 +93,17 @@ class LeafTemplate:
     # value-keyed categories (the table/value depend on the encoding's category list, so they get ``enc``).
     cat_table: Callable[[list[Any], Any], np.ndarray] | None = None  # (comps, enc) -> (K, C) log-prob table
     cat_to_value: Callable[[np.ndarray, Any, float], Any] | None = None  # (hist_k, enc, count) -> leaf value
+    # chain hooks (a Markov-chain factor: RAGGED per-row sequences, already encoded as scatter-ready
+    # (row_idx, state_idx) arrays). Scoring precomputes a per-row per-component score table by
+    # scatter-adding init/transition log-probabilities BEFORE the row loop (the same precompute slot the
+    # matrix kind's BLAS quad forms use), the row fragment is a table lookup, and the E-step accumulates
+    # weighted init/transition histograms from the responsibility matrix R in the post pass.
+    chain_tables: Callable[[list[Any], Any], tuple[np.ndarray, np.ndarray]] | None = (
+        None  # (comps, enc) -> (initT (K,S), transT (K,S,S)) in the ENCODER's state indexing
+    )
+    chain_to_value: Callable[[np.ndarray, np.ndarray, Any, float], Any] | None = (
+        None  # (init_hist_k (S,), trans_hist_k (S,S), enc, count) -> leaf value
+    )
     dtype: str = "float64"
 
 
@@ -691,6 +702,73 @@ register_leaf_template(
 )
 
 
+def _markov_chain_data(enc: Any) -> tuple[np.ndarray, ...]:
+    """The chain encoding's scatter arrays: (init row idx, init state, trans row idx, from, to)."""
+    _, idx0, idx1, init_x, prev_x, next_x, _, _ = enc
+    as_i8 = lambda a: np.ascontiguousarray(np.asarray(a, dtype=np.int64).reshape(-1))  # noqa: E731
+    return (as_i8(idx0), as_i8(init_x), as_i8(idx1), as_i8(prev_x), as_i8(next_x))
+
+
+def _markov_chain_tables(comps: list[Any], enc: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Per-component (K,S) init and (K,S,S) transition log tables in the ENCODER's state order.
+
+    Exactly replicates MarkovChainDistribution.seq_log_density's lookup: each component maps the
+    encoder's states through its own key_map (0 = out-of-support default) into its init/transition
+    log vectors, with the component's log1p(default) normalizer folded into every entry.
+    """
+    inv_key_map = enc[6]
+    S = len(inv_key_map)
+    init_t = np.empty((len(comps), max(S, 1)), dtype=np.float64)
+    trans_t = np.empty((len(comps), max(S, 1), max(S, 1)), dtype=np.float64)
+    for k, c in enumerate(comps):
+        loc = np.asarray([c.key_map.get(u, 0) for u in inv_key_map], dtype=np.int64)
+        if S:
+            init_t[k] = c.init_log_pvec[loc] - c.log1p_dv
+            dense = np.asarray(c.trans_log_pvec.toarray(), dtype=np.float64)
+            trans_t[k] = dense[np.ix_(loc, loc)] - c.log1p_dv
+        else:  # every sequence empty: no states, no scatter entries, contribution 0
+            init_t[k] = 0.0
+            trans_t[k] = 0.0
+    return init_t, trans_t
+
+
+def _markov_chain_to_value(init_hist_k: np.ndarray, trans_hist_k: np.ndarray, enc: Any, count: float) -> Any:
+    """Pack the weighted histograms into the accumulator's native (init map, trans map, len value) tuple,
+    dropping zeros exactly as MarkovChainAccumulator.seq_update does."""
+    inv_key_map = enc[6]
+    init_map = {inv_key_map[s]: float(init_hist_k[s]) for s in range(len(inv_key_map)) if init_hist_k[s] != 0.0}
+    trans_map: dict[Any, dict[Any, float]] = {}
+    nz_a, nz_b = np.nonzero(trans_hist_k)
+    for a, b in zip(nz_a.tolist(), nz_b.tolist()):
+        trans_map.setdefault(inv_key_map[a], {})[inv_key_map[b]] = float(trans_hist_k[a, b])
+    return (init_map, trans_map, None)  # None: the fusibility guard requires the Null length model
+
+
+def _markov_chain_matches(d: Any) -> bool:
+    """Fusible chain configs only: a plain (no-prior) MarkovChainDistribution whose length model is the
+    Null distribution (its seq_log_density contributes exactly zero, so the tables carry the whole
+    density). Chains with a real length distribution or a Dirichlet prior keep their own kernels."""
+    return (
+        type(d).__name__ == "MarkovChainDistribution"
+        and type(getattr(d, "len_dist", None)).__name__ == "NullDistribution"
+        and getattr(d, "prior", None) is None
+    )
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="markovchain",
+        matches=_markov_chain_matches,
+        data=_markov_chain_data,
+        params=lambda comps: {},
+        arity=5,
+        kind="chain",
+        chain_tables=_markov_chain_tables,
+        chain_to_value=_markov_chain_to_value,
+    )
+)
+
+
 def _int_categorical_table(comps: list[Any], enc: Any) -> np.ndarray:
     mn = int(np.rint(np.asarray(enc).min())) if np.asarray(enc).size else 0
     width = int(np.rint(np.asarray(enc).max())) - mn + 1 if np.asarray(enc).size else 1
@@ -733,6 +811,12 @@ class FusedPlan:
     def has_matrix(self) -> bool:
         """Whether any leaf in the fused plan requires matrix BLAS handling."""
         return any(t.kind == "matrix" for t in self.leaf_templates)
+
+    @property
+    def needs_responsibilities(self) -> bool:
+        """Whether the E-step must materialize the (n, K) responsibility matrix R (matrix BLAS
+        accumulation and chain post-pass scatters both read it after the row loop)."""
+        return any(t.kind in ("matrix", "chain") for t in self.leaf_templates)
 
 
 def _node_factors(node: Any) -> list[Any] | None:
@@ -819,6 +903,7 @@ def _dummy(t: LeafTemplate) -> Any:
         "binomial": stats.BinomialDistribution(0.5, 1),
         "negbinomial": stats.NegativeBinomialDistribution(1.0, 0.5),
         "mvgaussian": stats.MultivariateGaussianDistribution([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]]),
+        "markovchain": stats.MarkovChainDistribution({"a": 1.0}, {"a": {"a": 1.0}}),
     }[t.name]
 
 
@@ -894,6 +979,33 @@ def _emit(plan: FusedPlan, acc_suffix: str = "") -> dict[str, list[str]]:
             frag["acc"].append(f"{accmap['sx']}[k] += r * x{i}_0[i]")
             if t.tab_hist:
                 frag["acc"].append(f"{accmap['hist']}[k, int(x{i}_0[i])] += r")  # weighted count histogram
+        elif t.kind == "chain":
+            frag["param_args"] += [f"cinit{i}", f"ctrans{i}"]  # (K,S) init and (K,S,S) transition log tables
+            frag["acc_args"] += [f"ih{i}", f"th{i}"]  # (K,S) init and (K,S,S) transition weighted histograms
+            # per-row per-component chain scores, scatter-built once before the row loop:
+            # data arrays are x{i}_0=init row idx, x{i}_1=init state, x{i}_2=trans row idx, x{i}_3/4=from/to
+            frag["precompute"].extend(
+                [
+                    f"cs{i} = np.zeros((n, kc))",
+                    f"for t{i} in range(x{i}_0.shape[0]):",
+                    "    for k in range(kc):",
+                    f"        cs{i}[x{i}_0[t{i}], k] += cinit{i}[k, x{i}_1[t{i}]]",
+                    f"for t{i} in range(x{i}_2.shape[0]):",
+                    "    for k in range(kc):",
+                    f"        cs{i}[x{i}_2[t{i}], k] += ctrans{i}[k, x{i}_3[t{i}], x{i}_4[t{i}]]",
+                ]
+            )
+            frag["row"].append(f"acc += cs{i}[i, k]")
+            frag["post"].extend(
+                [
+                    f"for t{i} in range(x{i}_0.shape[0]):",
+                    "    for k in range(kc):",
+                    f"        ih{i}[k, x{i}_1[t{i}]] += R[x{i}_0[t{i}], k]",
+                    f"for t{i} in range(x{i}_2.shape[0]):",
+                    "    for k in range(kc):",
+                    f"        th{i}[k, x{i}_3[t{i}], x{i}_4[t{i}]] += R[x{i}_2[t{i}], k]",
+                ]
+            )
         elif t.kind == "categorical":
             frag["param_args"].append(f"cat{i}")  # the (K, C) log-prob table, looked up by the category index
             frag["row"].append(f"acc += cat{i}[k, int(x{i}_0[i])]")
@@ -1034,7 +1146,7 @@ def _compile(plan: FusedPlan, parallel: bool = False) -> Callable:
     data_args = f["data_args"]
     if not parallel:
         args = ", ".join(data_args + f["param_args"] + ["logw", "out", "llbuf"])
-        lines = [f"def _fused({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
+        lines = ["def _fused(%s):" % args, "    n = out.shape[0]", "    kc = logw.shape[0]"]
         lines += ["    " + ln for ln in f["precompute"]]
         lines += ["    for i in range(n):"]
         lines += _score_body("        ", f["row"], "llbuf")
@@ -1043,7 +1155,7 @@ def _compile(plan: FusedPlan, parallel: bool = False) -> Callable:
         # prange over fixed chunks; out[i] rows are disjoint and each row's arithmetic is identical to
         # the sequential kernel's, so the parallel scorer is BIT-IDENTICAL to it (asserted in tests).
         args = ", ".join(data_args + f["param_args"] + ["logw", "out", "n_chunks"])
-        lines = [f"def _fused_par({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
+        lines = ["def _fused_par(%s):" % args, "    n = out.shape[0]", "    kc = logw.shape[0]"]
         lines += ["    " + ln for ln in f["precompute"]]
         lines += [
             "    step = (n + n_chunks - 1) // n_chunks",
@@ -1067,9 +1179,9 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
         args = ", ".join(
             data_args + f["param_args"] + ["weights", "logw", "comp_counts", *f["acc_args"], "llbuf", "out_ll"]
         )
-        lines = [f"def _estep({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
-        if plan.has_matrix:
-            lines.append("    R = np.empty((n, kc))")  # responsibilities -- only matrix accumulation needs them
+        lines = ["def _estep(%s):" % args, "    n = weights.shape[0]", "    kc = logw.shape[0]"]
+        if plan.needs_responsibilities:
+            lines.append("    R = np.empty((n, kc))")  # read back by the matrix BLAS / chain post passes
         lines += ["    " + ln for ln in f["precompute"]]
         lines += [
             "    for i in range(n):",
@@ -1093,7 +1205,7 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
             "            comp_counts[k] += r",
         ]
         lines += ["            " + st for st in f["acc"]]
-        if plan.has_matrix:
+        if plan.needs_responsibilities:
             lines.append("            R[i, k] = r")
         lines += ["    " + ln for ln in f["post"]]
         fn = _njit("\n".join(lines), "_estep")
@@ -1105,13 +1217,16 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
         # worker counts. Matrix leaves are untouched here: their statistics come from the sequential BLAS
         # post-pass over the (row-disjoint) responsibility matrix R, exactly as in the sequential kernel.
         chunked = [
-            f"a{i}_{an}" for i, lt in enumerate(plan.leaf_templates) if lt.kind != "matrix" for an in lt.acc_names
+            f"a{i}_{an}"
+            for i, lt in enumerate(plan.leaf_templates)
+            if lt.kind not in ("matrix", "chain")
+            for an in lt.acc_names
         ]
         args = ", ".join(
             data_args + f["param_args"] + ["weights", "logw", "comp_counts", *f["acc_args"], "out_ll", "n_chunks"]
         )
-        lines = [f"def _estep_par({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
-        if plan.has_matrix:
+        lines = ["def _estep_par(%s):" % args, "    n = weights.shape[0]", "    kc = logw.shape[0]"]
+        if plan.needs_responsibilities:
             lines.append("    R = np.empty((n, kc))")
         lines += ["    " + ln for ln in f["precompute"]]
         lines += [
@@ -1142,7 +1257,7 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
             "                comp_counts[c, k] += r",
         ]
         lines += ["                " + st for st in f["acc"]]
-        if plan.has_matrix:
+        if plan.needs_responsibilities:
             lines.append("                R[i, k] = r")
         lines += ["    " + ln for ln in f["post"]]
         fn = _njit("\n".join(lines), "_estep_par", parallel=True)
@@ -1180,12 +1295,22 @@ def _data_and_params(
     data_arrays: list[np.ndarray] = []
     param_arrays: list[np.ndarray] = []
     tab_ctx: dict[int, tuple[int, int]] = {}
+    n_rows: int | None = None  # chain data arrays are transition-length, so rows come from another source
     for i, t in enumerate(plan.leaf_templates):
         arrs = t.data(factor_encs[i])
         data_arrays.extend(arrs)  # arity arrays, flattened in leaf order
         comps_i = [factor_lists[k][i] for k in range(plan.num_components)]
         pdict = t.params(comps_i)
         param_arrays.extend(np.ascontiguousarray(pdict[pn]) for pn in sorted(pdict.keys()))
+        if t.kind == "chain":
+            if n_rows is None:
+                n_rows = int(factor_encs[i][0])  # the chain encoding carries the row count directly
+            init_table, trans_table = t.chain_tables(comps_i, factor_encs[i])  # type: ignore[misc]
+            param_arrays.append(np.ascontiguousarray(init_table))
+            param_arrays.append(np.ascontiguousarray(trans_table))
+            tab_ctx[i] = (factor_encs[i], init_table.shape[1])  # (encoding for to_value, S states)
+        elif n_rows is None:
+            n_rows = int(arrs[0].shape[0])
         if t.kind == "tabulated":
             x = arrs[0]
             mx = int(np.rint(x.max())) if x.size else 0
@@ -1210,7 +1335,7 @@ def _data_and_params(
         cast = lambda a: np.ascontiguousarray(a, dtype=compute_dtype) if a.dtype.kind == "f" else a  # noqa: E731
         data_arrays = [cast(a) for a in data_arrays]
         param_arrays = [cast(a) for a in param_arrays]
-    return data_arrays, param_arrays, tab_ctx
+    return data_arrays, param_arrays, tab_ctx, int(n_rows if n_rows is not None else 0)
 
 
 def fused_seq_log_density(model: Any, enc: Any, compute_dtype: Any = None, parallel: bool | None = None) -> np.ndarray:
@@ -1232,9 +1357,8 @@ def fused_seq_log_density(model: Any, enc: Any, compute_dtype: Any = None, paral
         from mixle.stats.compute.fused_nested import fused_nested_seq_log_density
 
         return fused_nested_seq_log_density(model, enc)  # nested scalar tree (raises if not that either)
-    data_arrays, param_arrays, _ = _data_and_params(model, plan, enc, compute_dtype)
+    data_arrays, param_arrays, _, n = _data_and_params(model, plan, enc, compute_dtype)
     logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
-    n = data_arrays[0].shape[0]
     out = np.empty(n, dtype=np.float64)
     if parallel is None:
         parallel = _auto_parallel(n)
@@ -1260,6 +1384,7 @@ def fusible_estep(model: Any) -> bool:
         "matrix": lambda t: t.mat_accumulate,
         "tabulated": lambda t: t.tab_table,
         "categorical": lambda t: t.cat_table,
+        "chain": lambda t: t.chain_to_value,
     }
     return all(hook[t.kind](t) is not None for t in plan.leaf_templates)
 
@@ -1296,8 +1421,7 @@ def fused_accumulate(
     if not fusible_estep(model):
         raise ValueError("%s is not a fusible E-step (an unsupported leaf)." % type(model).__name__)
     K = plan.num_components
-    data_arrays, param_arrays, tab_ctx = _data_and_params(model, plan, enc, compute_dtype)
-    n = data_arrays[0].shape[0]
+    data_arrays, param_arrays, tab_ctx, n = _data_and_params(model, plan, enc, compute_dtype)
     if parallel is None:
         parallel = _auto_parallel(n)
     nc = _n_chunks(n) if parallel else 0
@@ -1307,9 +1431,22 @@ def fused_accumulate(
     # flattened by arity, so track the running offset to find each leaf's first data array.
     scalar_acc: list[dict[str, np.ndarray]] = []
     matrix_acc: list[tuple[np.ndarray, np.ndarray]] = []
+    chain_acc: list[tuple[np.ndarray, np.ndarray]] = []
     acc_arrays: list[np.ndarray] = []
     offset = 0
     for i, t in enumerate(plan.leaf_templates):
+        if t.kind == "chain":
+            S = tab_ctx[i][1]
+            # written by the sequential post-pass over R in BOTH kernel variants, so never chunked
+            ih = np.zeros((K, S), dtype=np.float64)
+            th = np.zeros((K, S, S), dtype=np.float64)
+            chain_acc.append((ih, th))
+            scalar_acc.append({})
+            matrix_acc.append((np.empty(0), np.empty(0)))
+            acc_arrays += [ih, th]
+            offset += t.arity
+            continue
+        chain_acc.append((np.empty(0), np.empty(0)))
         if t.kind == "matrix":
             d = data_arrays[offset].shape[1]
             s1 = np.zeros((K, d), dtype=np.float64)
@@ -1381,6 +1518,10 @@ def fused_accumulate(
         )
 
     def leaf_value(i: int, t: LeafTemplate, k: int) -> Any:
+        if t.kind == "chain":
+            ih, th = chain_acc[i]
+            enc_i, _ = tab_ctx[i]
+            return t.chain_to_value(ih[k], th[k], enc_i, float(comp_counts[k]))  # type: ignore[misc]
         if t.kind == "matrix":
             s1, s2 = matrix_acc[i]
             return t.to_value((s1[k], s2[k]), float(comp_counts[k]))  # type: ignore[misc]
