@@ -1954,46 +1954,68 @@ class MarkovChainDataEncoder(DataSequenceEncoder):
 
         """
 
-        init_entries = []
-        pair_entries = []
-        entries_idx0 = []
-        entries_idx1 = []
-        obs_cnt = []
-        key_map = dict()
+        import itertools
 
-        for i in range(len(x)):
-            entry = x[i]
-            obs_cnt.append(len(entry))
+        obs_cnt = np.fromiter((len(entry) for entry in x), dtype=np.int64, count=len(x))
+        n_tokens = int(obs_cnt.sum())
+        flat = list(itertools.chain.from_iterable(x))
 
-            if len(entry) == 0:
-                continue
+        # State -> first-seen integer code. Fast path: a sortable homogeneous array lets np.unique
+        # produce the codes in one vectorized pass, remapped to FIRST-SEEN order so the encoding is
+        # byte-identical to the dict walk (inv_key_map order included). Any failure (mixed or
+        # unorderable state types -- dicts compare where sorts cannot) falls back to the dict walk.
+        codes_flat = None
+        _SAFE_STATE_TYPES = (str, int, float, bool, np.str_, np.bytes_, np.integer, np.floating, np.bool_)
+        if n_tokens:
+            # The fast path must not let np.asarray COERCE across python types: [1, "1"] becomes two
+            # equal strings under coercion while the dict walk keeps them distinct states. One cheap
+            # type-homogeneity scan gates it; anything else (tuples, custom objects, mixed types)
+            # takes the dict walk with the original semantics.
+            state_types = set(map(type, flat))
+            if len(state_types) == 1 and issubclass(next(iter(state_types)), _SAFE_STATE_TYPES):
+                try:
+                    arr = np.asarray(flat)
+                    if arr.dtype != object and arr.ndim == 1:
+                        uniq, first_pos, inverse = np.unique(arr, return_index=True, return_inverse=True)
+                        order = np.argsort(first_pos, kind="stable")
+                        remap = np.empty(len(uniq), dtype=np.int64)
+                        remap[order] = np.arange(len(uniq), dtype=np.int64)
+                        codes_flat = remap[inverse.reshape(-1)]
+                        inv_key_map = np.asarray([uniq[j] for j in order])
+                except (TypeError, ValueError):  # pathological values: take the dict walk below
+                    codes_flat = None
+        if codes_flat is None:
+            key_map: dict = {}
+            codes_flat = np.empty(n_tokens, dtype=np.int64)
+            pos = 0
+            for value in flat:
+                code = key_map.get(value)
+                if code is None:
+                    code = len(key_map)
+                    key_map[value] = code
+                codes_flat[pos] = code
+                pos += 1
+            inv_key_map = [None] * len(key_map)
+            for k, v in key_map.items():
+                inv_key_map[v] = k
+            # dtype=object for heterogeneous state types: a bare asarray COERCES [1, "1"] into two
+            # equal strings, silently merging states the dict walk (and every downstream key_map
+            # lookup) keeps distinct -- a pre-existing hazard of the original encoder, fixed here.
+            inv_key_map = np.asarray(inv_key_map, dtype=object if len(state_types) > 1 else None)
 
-            if entry[0] not in key_map:
-                key_map[entry[0]] = len(key_map)
+        # Structure arrays from offsets, fully vectorized: rows of length >= 1 contribute their first
+        # token to the init arrays; every within-row position >= 1 contributes a (prev, next) pair.
+        starts = np.concatenate(([0], np.cumsum(obs_cnt)[:-1])) if len(x) else np.zeros(0, dtype=np.int64)
+        nonempty = obs_cnt > 0
+        entries_idx0 = np.nonzero(nonempty)[0]
+        init_entries = codes_flat[starts[nonempty]] if n_tokens else np.zeros(0, dtype=np.int64)
 
-            prev_idx = key_map[entry[0]]
-            init_entries.append(prev_idx)
-            entries_idx0.append(i)
-
-            for j in range(1, len(entry)):
-                if entry[j] not in key_map:
-                    key_map[entry[j]] = len(key_map)
-                next_idx = key_map[entry[j]]
-
-                pair_entries.append([prev_idx, next_idx])
-                entries_idx1.append(i)
-                prev_idx = next_idx
-
-        obs_cnt = np.asarray(obs_cnt)
-        init_entries = np.asarray(init_entries)
-        pair_entries = np.asarray(pair_entries)
-        entries_idx0 = np.asarray(entries_idx0)
-        entries_idx1 = np.asarray(entries_idx1)
-
-        inv_key_map = [None] * len(key_map)
-        for k, v in key_map.items():
-            inv_key_map[v] = k
-        inv_key_map = np.asarray(inv_key_map)
+        row_ids = np.repeat(np.arange(len(x), dtype=np.int64), obs_cnt)
+        token_pos = np.arange(n_tokens, dtype=np.int64) - np.repeat(starts, obs_cnt)
+        trans_mask = token_pos >= 1
+        entries_idx1 = row_ids[trans_mask]
+        next_entries = codes_flat[trans_mask] if n_tokens else np.zeros(0, dtype=np.int64)
+        prev_entries = codes_flat[np.nonzero(trans_mask)[0] - 1] if n_tokens else np.zeros(0, dtype=np.int64)
 
         len_enc = self.len_encoder.seq_encode(obs_cnt)
 
@@ -2002,8 +2024,8 @@ class MarkovChainDataEncoder(DataSequenceEncoder):
             entries_idx0,
             entries_idx1,
             init_entries,
-            pair_entries[:, 0],
-            pair_entries[:, 1],
+            prev_entries,
+            next_entries,
             inv_key_map,
             len_enc,
         )
