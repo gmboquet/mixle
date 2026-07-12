@@ -103,6 +103,63 @@ def quantized_exp(log_step: float = 0.01, lo_log: float = -30.0) -> QuantizedFun
     return QuantizedFunction(np.exp, step=log_step, lo=lo_log, hi=0.0)
 
 
+def quantized_logsumexp(scores: Any, *, bits: int = 12, span: float = 24.0, weights: Any = None) -> float:
+    """Log-sum-exp via an integer histogram over a ``span/2^bits`` grid plus ONE ``2^bits``-entry exp table.
+
+    Shift by the max, round every score to its grid level, count scores per level (an integer histogram
+    -- ``np.bincount``), then a single dot with the exp table and one final ``log``: ``2^bits`` exp
+    evaluations total (the table -- 12 bits = 32 KB, cache-resident per :func:`table_bytes`) no matter
+    how many scores there are, instead of one ``exp`` per score.
+
+    ``weights`` makes the histogram weighted, which is exactly the group-attention cell form
+    (``experiments/group_attention/RESULTS.md``): passing per-cell integer counts computes the LSE of the
+    token-level attention mass ``log sum_c count_c * exp(s_c)`` without ever expanding cells back to
+    tokens. ``-inf`` scores (masked slots) are dropped, matching softmax semantics.
+
+    Error: rounding moves each score by at most ``delta/2 = span / 2^(bits+1)`` (:func:`lse_error_bound`;
+    measured on N(0,3) scores: 8-bit ~2e-3 vs bound 4.7e-2, 12-bit ~6e-5 vs bound 2.9e-3). Scores more
+    than ``span`` below the max clip to the bottom bin, adding at most ``mass_clipped * exp(delta - span)``
+    in the linear domain -- under 4e-11 relative at the default ``span=24`` -- so the practical bound is
+    the grid term.
+    """
+    if bits < 1 or bits > 24:
+        raise ValueError(f"need 1 <= bits <= 24, got {bits}")
+    if span <= 0:
+        raise ValueError(f"span must be positive, got {span}")
+    scores = np.asarray(scores, dtype=np.float64).ravel()
+    if scores.size == 0:
+        raise ValueError("scores must be non-empty")
+    if np.isnan(scores).any() or np.isposinf(scores).any():
+        raise ValueError("scores must be free of NaN/+inf")
+    if weights is None:
+        w = None
+    else:
+        w = np.asarray(weights, dtype=np.float64).ravel()
+        if w.shape != scores.shape:
+            raise ValueError(f"weights shape {w.shape} != scores shape {scores.shape}")
+        if (w < 0).any():
+            raise ValueError("weights must be nonnegative")
+    keep = ~np.isneginf(scores)
+    scores = scores[keep]
+    if w is not None:
+        w = w[keep]
+    if scores.size == 0 or (w is not None and not w.any()):
+        return float("-inf")
+
+    m = float(scores.max())
+    levels = 1 << bits
+    delta = span / levels
+    idx = np.clip(np.rint((scores - m) / delta).astype(np.int64) + levels - 1, 0, levels - 1)
+    hist = np.bincount(idx, weights=w, minlength=levels)
+    table = np.exp((np.arange(levels) - (levels - 1)) * delta)
+    return float(np.log(float(hist @ table)) + m)
+
+
+def lse_error_bound(bits: int, span: float) -> float:
+    """The grid half-step ``span / 2^(bits+1)`` bounding :func:`quantized_logsumexp`'s rounding error."""
+    return 0.5 * span / (1 << bits)
+
+
 def error_bound(sup_abs_derivative: float, step: float) -> float:
     """The nearest-code lookup error bound ``(step/2) * sup|f'|`` (e.g. sigmoid sup|f'|=0.25)."""
     return 0.5 * step * sup_abs_derivative

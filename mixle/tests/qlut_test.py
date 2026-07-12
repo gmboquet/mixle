@@ -7,8 +7,10 @@ import numpy as np
 from mixle.engines.qlut import (
     QuantizedFunction,
     error_bound,
+    lse_error_bound,
     quantized_activation,
     quantized_exp,
+    quantized_logsumexp,
     step_for_tolerance,
     table_bytes,
 )
@@ -54,6 +56,55 @@ class QuantizedExpTest(unittest.TestCase):
         got = qexp.lookup(kcodes)
         rel = np.abs(got - ref) / np.maximum(np.abs(ref), 1e-300)
         self.assertLess(float(np.max(rel)), 1e-9)  # exact: the table IS exp(k*s)
+
+
+class QuantizedLogsumexpTest(unittest.TestCase):
+    def test_error_stays_within_the_grid_bound(self):
+        rng = np.random.RandomState(3)
+        scores = rng.normal(0, 3, 200000)
+        exact = float(np.log(np.sum(np.exp(scores - scores.max()))) + scores.max())
+        for bits in (8, 12):
+            got = quantized_logsumexp(scores, bits=bits, span=24.0)
+            self.assertLessEqual(abs(got - exact), lse_error_bound(bits, 24.0), f"bits={bits}")
+
+    def test_weighted_form_is_the_cell_collapsed_attention_lse(self):
+        # LSE over per-cell (score, integer count) == LSE over the expanded token stream: the
+        # group-attention identity, computed with 2^bits exps instead of one per token.
+        rng = np.random.RandomState(4)
+        cell_scores = rng.normal(0, 2, 300)
+        counts = rng.randint(1, 500, 300)
+        token_scores = np.repeat(cell_scores, counts)
+        exact = float(np.log(np.sum(np.exp(token_scores - token_scores.max()))) + token_scores.max())
+        got = quantized_logsumexp(cell_scores, bits=12, span=24.0, weights=counts)
+        self.assertLessEqual(abs(got - exact), lse_error_bound(12, 24.0))
+
+    def test_deep_tail_clips_without_breaking_the_bound(self):
+        scores = np.concatenate([np.array([0.0]), np.full(100000, -100.0)])  # far below span=24
+        exact = float(np.log(np.sum(np.exp(scores))))  # ~0: the tail is ~1e-44 mass
+        got = quantized_logsumexp(scores, bits=12, span=24.0)
+        self.assertLessEqual(abs(got - exact), lse_error_bound(12, 24.0))
+
+    def test_masked_slots_and_degenerate_inputs(self):
+        # the max itself lands exactly on the top grid level, so a single score is exact
+        self.assertAlmostEqual(quantized_logsumexp([3.7]), 3.7, places=12)
+        # -inf scores are masked slots (softmax semantics); all-masked or all-zero-weight is -inf
+        self.assertAlmostEqual(quantized_logsumexp([2.0, -np.inf]), 2.0, places=12)
+        self.assertEqual(quantized_logsumexp([-np.inf, -np.inf]), -np.inf)
+        self.assertEqual(quantized_logsumexp([1.0, 2.0], weights=[0, 0]), -np.inf)
+
+    def test_validates_inputs(self):
+        with self.assertRaises(ValueError):
+            quantized_logsumexp([])
+        with self.assertRaises(ValueError):
+            quantized_logsumexp([1.0], bits=0)
+        with self.assertRaises(ValueError):
+            quantized_logsumexp([1.0], span=-1.0)
+        with self.assertRaises(ValueError):
+            quantized_logsumexp([1.0, np.nan])
+        with self.assertRaises(ValueError):
+            quantized_logsumexp([1.0, 2.0], weights=[1.0])
+        with self.assertRaises(ValueError):
+            quantized_logsumexp([1.0, 2.0], weights=[1.0, -1.0])
 
 
 class HelpersTest(unittest.TestCase):
