@@ -832,6 +832,15 @@ def optimize(
             steps may be traversed, but the returned model (including mutable module parameters) is
             restored to the best selected-objective value observed. Pass ``True`` to reject the
             first decreasing step, or ``False`` to permit a non-monotone trajectory explicitly.
+
+            Convergence contract (worklist Q5.4; pinned by ``em_convergence_contract_test``): under
+            strict acceptance the accepted-round objectives are non-decreasing within tolerance and
+            -- bounded above by the estimator variance floors -- the objective sequence converges;
+            limit-point stationarity is the classical EM/GEM theory per family. Under best-seen
+            selection the guarantee is the best visited iterate; a neural leaf fit with
+            ``lr_decay`` in ``(0.5, 1]`` additionally follows a Robbins--Monro step schedule (the
+            condition stochastic-approximation EM analyses require). A non-finite objective is
+            never accepted and never becomes the convergence reference.
         track_best (Optional[bool]): Whether to restore the best outer-objective state seen. ``None``
             (default) does so except when an estimator explicitly declares a surrogate fitting
             objective, such as NCE; observed density is not a valid selector until such a model is
