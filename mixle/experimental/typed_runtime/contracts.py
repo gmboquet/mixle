@@ -42,6 +42,53 @@ class UpdateKind(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ConvergenceCertificate(StrEnum):
+    """Strongest convergence-guarantee class attributable to a node's update rule.
+
+    Guarantees compose by WEAKEST LINK: a tree's certificate is the minimum over its nodes'
+    (see :func:`weakest_certificate`). A frozen node is vacuously monotone -- a preserved
+    dependency cannot decline the objective.
+
+    - ``monotone_certified``: exact / generalized-EM updates under the strict acceptance gate;
+      the accepted-objective sequence is non-decreasing and (bounded above by the estimator
+      variance floors) converges.
+    - ``robbins_monro_schedule``: first-order updates whose per-round step schedule lies in the
+      Robbins--Monro window (``lr_decay`` in ``(0.5, 1]``) -- the step-size conditions
+      stochastic-approximation EM analyses require for almost-sure convergence to stationary
+      points.
+    - ``best_visited``: stochastic/mutable updates with no schedule guarantee; the outer loop
+      returns the best visited iterate.
+    - ``unknown``: no attributable guarantee.
+    """
+
+    MONOTONE_CERTIFIED = "monotone_certified"
+    ROBBINS_MONRO_SCHEDULE = "robbins_monro_schedule"
+    BEST_VISITED = "best_visited"
+    UNKNOWN = "unknown"
+
+    @property
+    def strength(self) -> int:
+        """Total order for weakest-link composition (higher is stronger)."""
+        return _CERTIFICATE_STRENGTH[self]
+
+
+_CERTIFICATE_STRENGTH = {
+    ConvergenceCertificate.MONOTONE_CERTIFIED: 3,
+    ConvergenceCertificate.ROBBINS_MONRO_SCHEDULE: 2,
+    ConvergenceCertificate.BEST_VISITED: 1,
+    ConvergenceCertificate.UNKNOWN: 0,
+}
+
+
+def weakest_certificate(certificates: Any) -> ConvergenceCertificate:
+    """The minimum certificate over an iterable (the tree-level guarantee); UNKNOWN when empty."""
+    result: ConvergenceCertificate | None = None
+    for certificate in certificates:
+        if result is None or certificate.strength < result.strength:
+            result = certificate
+    return result if result is not None else ConvergenceCertificate.UNKNOWN
+
+
 class MergeLaw(StrEnum):
     """Algebra available for combining work from separate data/model shards."""
 
@@ -161,6 +208,7 @@ class UpdateContract:
     )
     outer_objective_compatible: bool = True
     exact: bool = True
+    convergence_certificate: ConvergenceCertificate = ConvergenceCertificate.UNKNOWN
     declared_by: str = "compiler_default"
     notes: tuple[str, ...] = ()
 
@@ -201,6 +249,7 @@ class UpdateContract:
             "writes": sorted(value.value for value in self.writes),
             "outer_objective_compatible": self.outer_objective_compatible,
             "exact": self.exact,
+            "convergence_certificate": self.convergence_certificate.value,
             "declared_by": self.declared_by,
             "notes": list(self.notes),
         }

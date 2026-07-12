@@ -156,12 +156,20 @@ class UpdateGraph:
             "edges": [edge.as_dict() for edge in self.edges],
         }
 
+    @property
+    def convergence_certificate(self):
+        """Tree-level guarantee: the weakest node certificate (guarantees compose by minimum)."""
+        from mixle.experimental.typed_runtime.contracts import weakest_certificate
+
+        return weakest_certificate(node.contract.convergence_certificate for node in self.nodes)
+
     def explain(self) -> str:
         """Render a compact human-readable execution-plan explanation."""
 
         lines = [
             "Statistically typed update graph",
             "root=%s nodes=%d dependencies=%d" % (self.root_node, len(self.nodes), len(self.edges)),
+            "convergence certificate (weakest link): %s" % self.convergence_certificate.value,
         ]
         by_id = {node.node_id: node for node in self.nodes}
         for node_id in self.topological_order():
@@ -170,7 +178,7 @@ class UpdateGraph:
             axes = ",".join(contract.decomposition_axes) or "replicated"
             state = ",".join(sorted(item.value for item in contract.state_semantics))
             lines.append(
-                "- %s %s: %s/%s merge=%s state=%s axes=%s cost=%s"
+                "- %s %s: %s/%s merge=%s state=%s axes=%s cost=%s cert=%s"
                 % (
                     node.node_id,
                     node.path,
@@ -180,6 +188,7 @@ class UpdateGraph:
                     state,
                     axes,
                     node.cost.source,
+                    contract.convergence_certificate.value,
                 )
             )
         if self.edges:

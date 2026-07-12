@@ -104,6 +104,7 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         loss: Any = None,
         optimizer: Any = None,
+        lr_decay: float | None = None,
     ) -> None:
         self.module = module
         self.m_steps = int(m_steps)
@@ -119,6 +120,13 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.loss = loss
         self.optimizer = optimizer
+        self.lr_decay = None if lr_decay is None else float(lr_decay)
+        if self.lr_decay is not None and not 0.0 < self.lr_decay <= 1.0:
+            raise ValueError("lr_decay must lie in (0, 1] when supplied.")
+        if self.lr_decay is not None and optimizer is not None:
+            raise ValueError(
+                "lr_decay applies to the built-in Adam schedule; it cannot be combined with a custom optimizer hook."
+            )
         self.outer_objective_compatible = loss is None
 
     def __str__(self) -> str:
@@ -163,6 +171,7 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
             name=self.name,
             loss=self.loss,
             optimizer=self.optimizer,
+            lr_decay=self.lr_decay,
         )
 
     def dist_to_encoder(self) -> GradLeafEncoder:
@@ -309,6 +318,7 @@ class GradEstimator(ParameterEstimator):
         name: str | None = None,
         loss: Any = None,
         optimizer: Any = None,
+        lr_decay: float | None = None,
     ) -> None:
         self.module = module
         self.m_steps = int(m_steps)
@@ -324,6 +334,18 @@ class GradEstimator(ParameterEstimator):
         self.name = name
         self.loss = loss
         self.optimizer = optimizer
+        self.lr_decay = None if lr_decay is None else float(lr_decay)
+        if self.lr_decay is not None and not 0.0 < self.lr_decay <= 1.0:
+            raise ValueError("lr_decay must lie in (0, 1] when supplied.")
+        if self.lr_decay is not None and optimizer is not None:
+            raise ValueError(
+                "lr_decay applies to the built-in Adam schedule; it cannot be combined with a custom optimizer hook."
+            )
+        # Cumulative count of divergence recoveries across this estimator's M-steps (one optimize()
+        # run shares one estimator tree, so this accumulates over EM rounds; see estimate()).
+        self.nonfinite_recoveries = 0
+        # 1-based count of M-step rounds this estimator has run; drives the lr_decay schedule.
+        self._fit_rounds = 0
 
     def _leaf(self) -> GradLeaf:
         return GradLeaf(
@@ -337,6 +359,7 @@ class GradEstimator(ParameterEstimator):
             name=self.name,
             loss=self.loss,
             optimizer=self.optimizer,
+            lr_decay=self.lr_decay,
         )
 
     def accumulator_factory(self) -> DataBufferAccumulatorFactory:
@@ -357,9 +380,25 @@ class GradEstimator(ParameterEstimator):
         n = xs[0].shape[0]
         bs = self.batch_size or n
         self.module.to(dev).train()
-        opt = self.optimizer(params) if self.optimizer is not None else torch.optim.Adam(params, lr=self.lr)
+        self._fit_rounds += 1
+        # SAEM window: a per-round Robbins--Monro schedule lr / t**a with a in (0.5, 1] satisfies
+        # sum(step)=inf and sum(step^2)<inf -- the step-size conditions stochastic-approximation EM
+        # analyses (SAEM, gradient-EM) require for almost-sure convergence to stationary points.
+        # Constant lr (lr_decay=None, the default) keeps today's behavior and the weaker
+        # best-visited-iterate guarantee provided by the outer loop.
+        effective_lr = self.lr if self.lr_decay is None else self.lr / (self._fit_rounds**self.lr_decay)
+        opt = self.optimizer(params) if self.optimizer is not None else torch.optim.Adam(params, lr=effective_lr)
         autocast_dev = "cuda" if str(dev).startswith("cuda") else "cpu"
         use_bf16 = self.precision == "bf16"
+        # Divergence guard: an aggressive step can drive parameters non-finite, after which the
+        # module's own log_density may RAISE (e.g. a torch.distributions constraint check) from
+        # inside this M-step -- before the outer EM loop's non-finite acceptance gate or its
+        # transaction restore can act, crashing the fit and leaving the shared module poisoned.
+        # Snapshot the module state up front; on a non-finite loss/parameter or a raising module,
+        # restore the snapshot and stop stepping. The round degrades to a no-op proposal the outer
+        # loop gates normally, and the recovery is disclosed in the fit receipt.
+        pre_step_state = {key: value.detach().clone() for key, value in self.module.state_dict().items()}
+        recovered = False
         optimizer_steps = 0
         epochs_completed = 0
         stop = False
@@ -370,23 +409,39 @@ class GradEstimator(ParameterEstimator):
                 xb = tuple(xt[idx].to(dev) for xt in xs)
                 wb = w[idx].to(dev)
                 opt.zero_grad()
-                with torch.autocast(device_type=autocast_dev, dtype=torch.bfloat16, enabled=use_bf16):
-                    if self.loss is not None:
-                        loss = self.loss(self.module, *xb, wb)
+                step_healthy = True
+                try:
+                    with torch.autocast(device_type=autocast_dev, dtype=torch.bfloat16, enabled=use_bf16):
+                        if self.loss is not None:
+                            loss = self.loss(self.module, *xb, wb)
+                        else:
+                            # tuple default: log_density(*fields) -- a single field unpacks to log_density(x),
+                            # identical to before; a conditional bare module's log_density(x, y, ...) just works.
+                            loss = -(wb * self.module.log_density(*xb)).sum()
+                            # ``w`` is normalized over the full M-step data. A uniform minibatch's raw
+                            # weighted sum is smaller by E[batch_size / n]; rescale it so every optimizer
+                            # step is an unbiased estimate of the same full responsibility-weighted Q
+                            # objective. This stabilizes gradient scale across batch sizes without claiming
+                            # identical Adam trajectories (their noise and moment estimates still differ).
+                            if len(idx) < n:
+                                loss = loss * (float(n) / float(len(idx)))
+                    if not bool(torch.isfinite(loss)):
+                        step_healthy = False
                     else:
-                        # tuple default: log_density(*fields) -- a single field unpacks to log_density(x),
-                        # identical to before; a conditional bare module's log_density(x, y, ...) just works.
-                        loss = -(wb * self.module.log_density(*xb)).sum()
-                        # ``w`` is normalized over the full M-step data. A uniform minibatch's raw
-                        # weighted sum is smaller by E[batch_size / n]; rescale it so every optimizer
-                        # step is an unbiased estimate of the same full responsibility-weighted Q
-                        # objective. This stabilizes gradient scale across batch sizes without claiming
-                        # identical Adam trajectories (their noise and moment estimates still differ).
-                        if len(idx) < n:
-                            loss = loss * (float(n) / float(len(idx)))
-                loss.backward()
-                opt.step()
-                optimizer_steps += 1
+                        loss.backward()
+                        opt.step()
+                        optimizer_steps += 1
+                        if not all(bool(torch.isfinite(p).all()) for p in params):
+                            step_healthy = False
+                except (ValueError, RuntimeError):
+                    step_healthy = False
+                if not step_healthy:
+                    with torch.no_grad():
+                        self.module.load_state_dict(pre_step_state)
+                    self.nonfinite_recoveries += 1
+                    recovered = True
+                    stop = True
+                    break
                 if self.max_optimizer_steps is not None and optimizer_steps >= self.max_optimizer_steps:
                     stop = True
                     break
@@ -402,6 +457,12 @@ class GradEstimator(ParameterEstimator):
             "optimizer_steps": int(optimizer_steps),
             "max_optimizer_steps": self.max_optimizer_steps,
             "gradient_estimator": "unbiased_full_weighted_objective" if self.loss is None else "custom_loss",
+            "fit_round": int(self._fit_rounds),
+            "lr_effective": float(effective_lr),
+            "lr_decay": self.lr_decay,
+            "saem_schedule": bool(self.lr_decay is not None and self.lr_decay > 0.5),
+            "nonfinite_recovery": bool(recovered),
+            "nonfinite_recoveries_total": int(self.nonfinite_recoveries),
         }
         return leaf
 
