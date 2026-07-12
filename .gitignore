@@ -66,3 +66,7 @@ mixle/engines/_lns_kernel.c
 .coverage.*
 coverage.xml
 htmlcov/
+
+# benchmark smoke-run artifacts (results.json is the tracked full-sweep reference; quick runs must not clobber it)
+benchmarks/results/results_quick.json
+benchmarks/*.html

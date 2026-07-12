@@ -29,12 +29,12 @@ def _versions():
     for p in ("scikit-learn", "pomegranate", "hmmlearn", "mixle", "numpy", "scipy", "torch", "numba"):
         try:
             v[p] = md.version(p)
-        except Exception:
+        except Exception:  # noqa: BLE001 - metadata probing over optional packages; absence is the recorded fact
             v[p] = None
     cpu = platform.processor() or platform.machine()
     try:
         cpu = subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"]).decode().strip()
-    except Exception:
+    except Exception:  # noqa: BLE001 - sysctl is a macOS nicety; every other platform keeps the generic name
         pass
     return {"packages": v, "cpu": cpu, "platform": platform.platform(), "threads": os.environ.get("OMP_NUM_THREADS")}
 
@@ -219,7 +219,10 @@ def main():
         panels["hmm_scale_states"] = panel_hmm_scale_states(args.reps, args.quick)
 
     out = {"meta": meta, "panels": panels, "ll_tol": LL_TOL}
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "results.json")
+    # --quick is a smoke run: keep it away from results.json, the tracked full-sweep reference
+    # artifact that the write-up and B7.3's version-stamp gate consume.
+    fname = "results_quick.json" if args.quick else "results.json"
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", fname)
     with open(path, "w") as f:
         json.dump(out, f, indent=2)
     print(f"\nwrote {path}")

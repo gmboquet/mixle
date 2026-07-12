@@ -219,7 +219,7 @@ def sec_E(args):
                 )
                 row[name] = t
                 print(f"  MVN dim={dim:<4} {name:11}: {t * 1000:8.0f} ms", flush=True)
-            except Exception as ex:  # a CRASH is a finding, not a harness abort
+            except Exception as ex:  # noqa: BLE001 - a CRASH is a finding, not a harness abort
                 row[name] = f"CRASH: {type(ex).__name__}"
                 print(f"  MVN dim={dim:<4} {name:11}: CRASH {type(ex).__name__}: {str(ex)[:50]}", flush=True)
         OUT["engine"][f"mvn_dim{dim}"] = row

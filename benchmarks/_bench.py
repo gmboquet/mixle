@@ -32,8 +32,10 @@ import numpy as np  # noqa: E402
 
 
 def pin_torch():
-    import torch
-
+    try:
+        import torch
+    except ImportError:  # torch only matters for the pomegranate arm; a clean base clone has neither
+        return
     torch.set_num_threads(int(_THREADS))
     torch.set_default_dtype(torch.float64)  # match numpy float64 for LL parity
 
@@ -64,6 +66,20 @@ def timed(make_and_fit, reps=5):
 # --------------------------------------------------------------------------------------
 
 
+def _lloyd_kmeans(X, k, *, max_iter, seed):
+    """Seeded plain Lloyd's iteration -- the sklearn-free stand-in for the shared k-means init."""
+    rng = np.random.RandomState(seed)
+    centers = X[rng.choice(len(X), size=k, replace=False)].astype(np.float64)
+    for _ in range(max_iter):
+        d = ((X[:, None, :] - centers[None]) ** 2).sum(-1)
+        assign = d.argmin(1)
+        for j in range(k):
+            members = X[assign == j]
+            if len(members):
+                centers[j] = members.mean(0)
+    return centers
+
+
 def make_full_cov_gmm(n, dim, k, seed=42):
     """A full-covariance Gaussian mixture with genuinely correlated components.
 
@@ -71,8 +87,6 @@ def make_full_cov_gmm(n, dim, k, seed=42):
     features (think MFCC frames, tabular embeddings), separated but overlapping clusters.
     Returns ``(X, init)`` where init = (means0, cov0, weights0) shared by every package.
     """
-    from sklearn.cluster import KMeans
-
     rng = np.random.RandomState(seed)
     true_means = rng.randn(k, dim) * 3.0
     X = np.empty((n, dim), dtype=np.float64)
@@ -84,8 +98,16 @@ def make_full_cov_gmm(n, dim, k, seed=42):
         X[m] = rng.multivariate_normal(true_means[j], cov, size=int(m.sum()))
     # shared init: k-means centres (the standard, non-degenerate GMM starting point),
     # global covariance, uniform weights -- computed once, fed identically to every
-    # package, and NOT counted in any fit time.
-    means0 = KMeans(n_clusters=k, n_init=1, max_iter=25, random_state=0).fit(X).cluster_centers_.astype(np.float64)
+    # package, and NOT counted in any fit time. sklearn's KMeans when available (the
+    # configuration every published results.json used); otherwise a seeded numpy Lloyd's
+    # with the same role -- still deterministic and still SHARED, so comparisons stay
+    # fair, and with sklearn absent there is no sklearn arm to compare against anyway.
+    try:
+        from sklearn.cluster import KMeans
+
+        means0 = KMeans(n_clusters=k, n_init=1, max_iter=25, random_state=0).fit(X).cluster_centers_.astype(np.float64)
+    except ImportError:
+        means0 = _lloyd_kmeans(X, k, max_iter=25, seed=0)
     cov0 = np.cov(X.T) + 1e-6 * np.eye(dim)
     weights0 = np.full(k, 1.0 / k)
     return X, (means0, cov0, weights0)
@@ -122,13 +144,16 @@ def make_gaussian_hmm(n_seq, length, states, seed=7):
 
 
 def gmm_sklearn(X, init, max_its):
-    from sklearn.mixture import GaussianMixture
-
     means0, cov0, w0 = init
     k, dim = means0.shape
     prec0 = np.stack([np.linalg.inv(cov0)] * k)
 
     def run():
+        # imported here, inside the timed thunk's failure contract: a missing package is
+        # recorded by `timed` as an honest per-package failure instead of aborting the sweep
+        # (the first call is the discarded warm-up, so import cost never lands in a timing)
+        from sklearn.mixture import GaussianMixture
+
         gm = GaussianMixture(
             n_components=k,
             covariance_type="full",
@@ -147,15 +172,17 @@ def gmm_sklearn(X, init, max_its):
 
 
 def gmm_pomegranate(X, init, max_its):
-    import torch
-    from pomegranate.distributions import Normal
-    from pomegranate.gmm import GeneralMixtureModel
-
     means0, cov0, w0 = init
     k = means0.shape[0]
-    Xt = torch.tensor(X, dtype=torch.float64)
 
     def run():
+        # inside the timed thunk's failure contract (see gmm_sklearn); the tensor conversion
+        # repeats per rep, but it is microseconds against multi-second fits
+        import torch
+        from pomegranate.distributions import Normal
+        from pomegranate.gmm import GeneralMixtureModel
+
+        Xt = torch.tensor(X, dtype=torch.float64)
         dists = [
             Normal(means=torch.tensor(means0[j]), covs=torch.tensor(cov0), covariance_type="full") for j in range(k)
         ]
@@ -192,13 +219,14 @@ def gmm_mixle(X, init, max_its):
 
 
 def hmm_hmmlearn(seqs, xcat, lengths, init, max_its):
-    from hmmlearn.hmm import GaussianHMM
-
     start0, trans0, means0, covar0 = init
     states = start0.shape[0]
     n_seq = len(seqs)
 
     def run():
+        # inside the timed thunk's failure contract (see gmm_sklearn)
+        from hmmlearn.hmm import GaussianHMM
+
         hm = GaussianHMM(
             n_components=states, covariance_type="diag", n_iter=max_its, tol=-1e9, init_params="", params="stmc"
         )
