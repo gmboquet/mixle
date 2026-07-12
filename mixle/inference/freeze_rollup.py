@@ -313,6 +313,14 @@ def _fused_scoring():
     global _FUSED_SCORING
     if _FUSED_SCORING is None:
         try:
+            # fused_codegen itself imports without numba (its `import numba` is lazy, inside kernel
+            # compilation), so availability must be checked HERE -- otherwise the fused route is
+            # taken on numba-free installs and crashes mid-fit with ModuleNotFoundError.
+            from mixle.utils.optional_deps import HAS_NUMBA
+
+            if not HAS_NUMBA:
+                _FUSED_SCORING = False
+                return _FUSED_SCORING
             from mixle.stats.compute.fused_codegen import (
                 fused_accumulate,
                 fused_seq_log_density,

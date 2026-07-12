@@ -11,6 +11,10 @@ column scoring threaded through run_block_em(compute_dtype=...); (4) the certifi
 import numpy as np
 import pytest
 
+# The whole file exercises the fused-kernel routes and the dispatch semantics that exist only
+# when numba is installed; the no-numba lanes cover the host fallbacks through the ordinary suites.
+pytest.importorskip("numba")
+
 from mixle.inference.block_em import run_block_em
 from mixle.inference.freeze_rollup import FreezeRollupCache, _component_log_density_matrix_profiled
 from mixle.inference.fusion_policy import prefer_block_schedule
