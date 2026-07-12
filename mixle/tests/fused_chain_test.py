@@ -105,14 +105,19 @@ class FusedChainParityTest(unittest.TestCase):
 
 @unittest.skipUnless(HAS_NUMBA, "fused kernels require numba")
 class FusibilityGuardTest(unittest.TestCase):
-    def test_chains_with_length_models_or_priors_keep_their_own_kernels(self):
+    def test_chains_with_length_models_take_the_bridge_not_the_fast_tables(self):
+        """The fast chain template's tables cannot carry a real length model, so such chains must
+        NOT match it -- they fall through to the bridge template (native scoring/estimation, length
+        model included; host parity asserted in fused_bridge_test's coverage suite)."""
         from mixle.stats import PoissonDistribution as P
 
         with_len = MarkovChainDistribution(
             {"a": 0.5, "b": 0.5}, {"a": {"a": 0.5, "b": 0.5}, "b": {"a": 0.5, "b": 0.5}}, len_dist=P(3.0)
         )
-        model = MixtureDistribution([CompositeDistribution((with_len, GaussianDistribution(0.0, 1.0)))] * 2, [0.5, 0.5])
-        self.assertIsNone(fc.analyze(model), "a real length distribution is outside the fused tables")
+        comps = [CompositeDistribution((with_len, GaussianDistribution(float(j), 1.0))) for j in range(2)]
+        plan = fc.analyze(MixtureDistribution(comps, [0.5, 0.5]))
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.leaf_templates[0].name, "bridge")
 
     def test_all_chain_homogeneous_mixture_survives_the_block_em_path(self):
         """Regression pin: an ALL-chain homogeneous top mixture used to hit an IndexError inside
