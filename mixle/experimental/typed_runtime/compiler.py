@@ -10,6 +10,7 @@ import numpy as np
 
 from mixle.experimental.typed_runtime.contracts import (
     ArtifactKind,
+    ComputeBand,
     ConsistencyRequirement,
     ConvergenceCertificate,
     CostEstimate,
@@ -331,6 +332,25 @@ def _decomposition(model: Any) -> tuple[tuple[str, ...], bool]:
         return (), True
 
 
+def _compute_band(model: Any) -> ComputeBand:
+    """Float32 eligibility of this node's scoring subtree: it must fuse (the validated
+    reduced-precision path is the fused kernel's) and every leaf family must be in the
+    runtime planner's validated set. Data-side safety stays a runtime decision."""
+    try:
+        from mixle.inference.precision_plan import FP32_SAFE_FAMILIES, _leaf_components
+        from mixle.stats.compute.fused_codegen import fusible
+        from mixle.utils.optional_deps import HAS_NUMBA
+
+        if not HAS_NUMBA or model is None or not fusible(model):
+            return ComputeBand.FLOAT64
+        for leaf in _leaf_components(model):
+            if type(leaf).__name__ not in FP32_SAFE_FAMILIES:
+                return ComputeBand.FLOAT64
+        return ComputeBand.FLOAT32_ELIGIBLE
+    except Exception:  # noqa: BLE001 - eligibility probing must never break compilation
+        return ComputeBand.FLOAT64
+
+
 def _convergence_certificate(
     update_kind: UpdateKind, exact_update: bool, estimator: Any | None
 ) -> ConvergenceCertificate:
@@ -388,6 +408,7 @@ def infer_update_contract(model: Any, estimator: Any | None) -> UpdateContract:
         reads=frozenset(reads),
         writes=frozenset(writes),
         convergence_certificate=_convergence_certificate(update, exact_update, estimator),
+        compute_band=_compute_band(model),
         outer_objective_compatible=compatible,
         exact=exact_update and exact_decomposition and compatible,
         declared_by="structural_inference",

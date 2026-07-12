@@ -61,6 +61,11 @@ def _leaf_components(model: Any) -> list[Any]:
     return [model]
 
 
+# Public alias: the typed-runtime compiler declares per-node float32 eligibility from the same
+# validated family set the runtime planner uses, so the two can never drift apart.
+FP32_SAFE_FAMILIES = _FP32_SAFE
+
+
 def recommend_compute_precision(
     model: Any,
     data: Any,
