@@ -1028,6 +1028,7 @@ def optimize(
         # -- schedule='auto' never errors or changes what is computed, only how it is scheduled.
         if schedule == "auto":
             from mixle.inference.block_em import is_block_em_eligible
+            from mixle.inference.fusion_policy import prefer_block_schedule as _prefer_block
 
             if (
                 is_block_em_eligible(mm, estimator)
@@ -1038,6 +1039,7 @@ def optimize(
                 and resources is None
                 and placement is None
                 and backend_name == "local"
+                and _prefer_block(mm, enc_data, max_its)
             ):
                 from mixle.inference.block_em import run_block_em
 
