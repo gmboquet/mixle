@@ -132,6 +132,11 @@ class BlockEMStats:
     elapsed time. ``objective`` is either the exact observed-data likelihood or its certified EM
     lower bound, as disclosed by ``objective_exact``; ``measured_q_gain`` is the complete-data
     gain used for the next scheduling decision.
+
+    ``acceptance_basis == "vanilla_escape"`` marks a round where repeated rejections triggered one
+    unconditional full-tree EM step (see ``escape_after_rejections``). ``stop_reason`` is set on
+    the FINAL entry when the run terminated early; ``"rejection_livelock"`` means the scheduler
+    kept producing rejected proposals even after a vanilla escape had been spent.
     """
 
     round_index: int
@@ -154,6 +159,7 @@ class BlockEMStats:
     final_audit_seconds: float = 0.0
     assumptions: BlockEMAssumptionReceipt | None = None
     timing: BlockEMTimingReceipt | None = None
+    stop_reason: str | None = None
 
     @property
     def active_fraction(self) -> float:
@@ -450,6 +456,7 @@ def run_block_em(
     weight_delta_tol: float = 1.0e-8,
     freeze_patience: int = 3,
     stall_patience: int = 5,
+    escape_after_rejections: int = 3,
     max_skip_rounds: int = 2,
     boundary_weight_step: float = _DEFAULT_BOUNDARY_WEIGHT_STEP,
     full_refresh_interval: int | None = 10,
@@ -477,6 +484,18 @@ def run_block_em(
     every block -- would risk declaring convergence early here. Requiring the plateau to persist
     for ``stall_patience`` rounds is the same style of robustness D2's own ``freeze_patience``
     already uses for its (structurally identical) "has this genuinely stopped moving" question.
+
+    ``escape_after_rejections`` bounds a REJECTION livelock. A rejected round restores the exact
+    prior state (score caches included), so the next round regenerates a near-identical proposal:
+    when every proposal the scheduler can produce regresses observed likelihood (seen in practice
+    with stochastic GradLeaf M-steps once the closed-form blocks reach their conditional fixed
+    point), the loop would otherwise pay full proposal cost forever without moving. After that many
+    CONSECUTIVE rejected rounds, one exact vanilla full-tree EM step is taken UNCONDITIONALLY
+    (``acceptance_basis="vanilla_escape"``) -- monotone for closed-form leaves by the EM theorem,
+    and for stochastic leaves it is precisely the take-the-step-and-let-the-next-E-step-resort
+    semantics vanilla ``optimize`` uses. If a second full rejection streak accumulates without any
+    normally-accepted round after the escape, no operator available makes progress from this point:
+    the run stops early and the final receipt carries ``stop_reason="rejection_livelock"``.
 
     ``max_skip_rounds`` bounds starvation: a purely greedy top-score-wins ranking can, on a real
     fixture, rank the same eligible block last round after round (its own gain-per-cost score
@@ -544,6 +563,8 @@ def run_block_em(
         raise ValueError("boundary_weight_step must be in (0, 1].")
     if full_refresh_interval is not None and full_refresh_interval < 1:
         raise ValueError("full_refresh_interval must be positive or None.")
+    if escape_after_rejections < 1:
+        raise ValueError("escape_after_rejections must be a positive integer.")
     if isinstance(policy, LearnedController):
         controller = policy
         policy = "learned"
@@ -577,6 +598,8 @@ def run_block_em(
     last_q_gain: dict[int, float] = {}
     skip_streak: dict[int, int] = {}
     stall_streak = 0
+    rejected_streak = 0
+    escapes_since_accept = 0
     current_ll_mat: np.ndarray | None = None
     current_log_density: np.ndarray | None = None
     current_impossible: np.ndarray | None = None
@@ -588,6 +611,16 @@ def run_block_em(
 
     for round_index in range(max(1, int(max_its))):
         round_started = time.perf_counter()
+        escape_round = False
+        if rejected_streak >= escape_after_rejections:
+            if escapes_since_accept:
+                # A vanilla escape was already spent since the last normally-accepted round and the
+                # scheduler is STILL only producing rejected proposals: no operator available makes
+                # progress from here. Stop instead of paying full proposal cost forever.
+                if history:
+                    history[-1].stop_reason = "rejection_livelock"
+                break
+            escape_round = True
         # Permanent freezing is intentionally not used here. The block scheduler already bounds
         # temporary inactivity with max_skip_rounds; permanently freezing from a heuristic residual
         # would change the reachable fixed point. The separate freeze_rollup API remains available
@@ -615,7 +648,9 @@ def run_block_em(
 
         starved = {idx for idx in eligible if skip_streak.get(idx, 0) >= max(0, int(max_skip_rounds))}
         full_refresh = round_index > 0 and (
-            not eligible or (full_refresh_interval is not None and round_index % full_refresh_interval == 0)
+            escape_round
+            or not eligible
+            or (full_refresh_interval is not None and round_index % full_refresh_interval == 0)
         )
         schedule_reused = (
             round_index > 0
@@ -821,7 +856,14 @@ def run_block_em(
         audit_failed = q_accepted and candidate_value + accept_tolerance < current_value
 
         observed_accepted = np.isfinite(candidate_value) and candidate_value + accept_tolerance >= current_value
-        accepted = (q_accepted and not audit_failed) or (not q_accepted and observed_accepted)
+        # An escape round takes the exact vanilla full-tree step UNCONDITIONALLY (monotone for
+        # closed-form leaves; deliberate take-the-step semantics for stochastic ones) -- gating it
+        # would just re-reject the proposal the livelock keeps regenerating.
+        accepted = (
+            (escape_round and np.isfinite(candidate_value))
+            or (q_accepted and not audit_failed)
+            or (not q_accepted and observed_accepted)
+        )
         if accepted:
             model = candidate
             if sparse_round:
@@ -833,7 +875,9 @@ def run_block_em(
             current_impossible = candidate_impossible
             round_value = candidate_value
             objective_exact = True
-            if not q_accepted:
+            if escape_round:
+                acceptance_basis = "vanilla_escape"
+            elif not q_accepted:
                 acceptance_basis = "observed_fallback"
             elif periodic_audit:
                 acceptance_basis = "q_certified_audited"
@@ -843,6 +887,8 @@ def run_block_em(
                 acceptance_basis = "q_certified"
             for idx, gain in measured_q_gain.items():
                 last_q_gain[idx] = max(float(gain), 0.0)
+            rejected_streak = 0
+            escapes_since_accept = 1 if escape_round else 0
         else:
             if transaction is not None:
                 transaction.restore()
@@ -851,6 +897,7 @@ def run_block_em(
             acceptance_basis = "rejected"
             for idx in active:
                 last_q_gain[idx] = 0.0
+            rejected_streak += 1
 
         if controller is not None and controller_state is not None and controller_action is not None:
             realized_gain = max(0.0, round_value - current_value)
