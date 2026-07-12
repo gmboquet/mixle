@@ -282,6 +282,12 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # a tensor-sketch concentration check, misfit receipts, and an E7 bake-off across four mechanisms --
     # tagged slow for the same reason as context_spine_test.py/long_context_eval_test.py.
     "sketch_state_attention_test.py": ("torch", "experimental", "slow"),
+    # E10 quantized-key cell attention (mixle/experimental/quantized_key_attention.py): collapse-identity
+    # exactness, chunking invariance over 96-token streams, and TBPTT protocol conformance -- tagged slow
+    # for the same reason as context_spine_test.py / sketch_state_attention_test.py. (Its torch-free
+    # siblings SlidingCellWindow/CellCountTree are covered by cell_count_window_test.py, deliberately
+    # UNregistered so the integer-group properties stay in the fast gate.)
+    "quantized_key_attention_test.py": ("torch", "experimental", "slow"),
     # E2 moment-closure (mixture-state) attention (mixle/experimental/moment_closure_attention.py):
     # gradcheck, Welford-vs-batch, birth/merge, TBPTT protocol conformance, an E7 referee smoke test, and
     # a real (multi-model-training) Spearman correlation measurement -- tagged slow for the same reason as

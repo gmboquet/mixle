@@ -97,6 +97,11 @@ sympy = ["sympy>=1.12"]
 # wheel-distributed fork (the symbolic subset suffices -- it provides sage.all__sagemath_symbolics).
 sage = ["passagemath-symbolics>=10.4"]
 test = ["pytest>=8", "pytest-xdist>=3.0", "pytest-cov>=5.0"]
+# The optional Cython popcount/LNS kernels (mixle/engines/*.pyx) compile IN PLACE on the user's
+# machine via mixle.engines.build_kernels.compile_*_kernels() -- no prebuilt binaries ship, so the
+# native -mcpu flags always match the host. This extra pulls the build toolchain; the .pyx sources
+# themselves ship in every sdist/wheel (MANIFEST.in + [tool.setuptools.package-data]).
+kernels = ["Cython>=3.0", "setuptools>=68"]
 # ruff is pinned: a newer release could add rules and break the blocking lint check unexpectedly.
 lint = ["ruff==0.15.17", "mypy>=1.0"]
 all = ["numba>=0.59", "tbb>=2021.6; platform_machine == 'x86_64'", "pyspark>=3.4", "dask>=2023.5.0", "distributed>=2023.5.0", "torch>=2.0", "safetensors>=0.4", "mpi4py>=3.1", "umap-learn>=0.5.4", "pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "networkx>=3.0", "ray>=2.9", "lightning>=2.1"]
@@ -107,6 +112,11 @@ Repository = "https://github.com/gmboquet/mixle"
 
 [tool.setuptools.packages.find]
 include = ["mixle*"]
+
+[tool.setuptools.package-data]
+# Ship the Cython kernel sources so an installed mixle can self-compile them (the `kernels` extra);
+# MANIFEST.in carries the same rule for sdists.
+"mixle.engines" = ["*.pyx"]
 
 [tool.pytest.ini_options]
 testpaths = ["mixle/tests"]
