@@ -87,6 +87,12 @@ def looks_like_torch_module(obj: Any) -> bool:
 
 class GradLeaf(SequenceEncodableProbabilityDistribution):
     """Wrap a torch density ``module`` (``module.log_density(x) -> (n,)``) as a composable mixle
+
+    Measured negative, so nobody re-derives it (2026-07-12, Apple M4, torch 2.12 CPU): wrapping the
+    full-batch M-step loss in ``torch.compile`` is a LOSS here -- 0.93x at a 2x32 MLP / n=100k and
+    0.79x at 2x256 / n=200k, plus ~6s compile overhead per module -- so there is deliberately no
+    ``compile=`` flag. Re-measure before adding one (a CUDA build or a much larger module could
+    flip it); the probe script pattern lives in the introducing PR.
     distribution (see the module docstring). ``loss`` and ``optimizer`` are the M-step hooks."""
 
     __pysp_serializable__ = True  # module persisted as bytes (see __pysp_getstate__)

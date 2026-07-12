@@ -268,8 +268,11 @@ class FusedMStepEngagementTest:
         score_before, estep_before = len(fn._SCORE_CACHE), len(fn._ESTEP_CACHE)
         run_block_em(enc, estimator, start, max_its=4, delta=None)
         # two same-structure (different-parameter) chain components across four rounds: at most ONE
-        # new kernel per cache, and no per-call numba respecialization (signature growth)
+        # new kernel per cache, and no per-call numba respecialization (signature growth). The bound is
+        # per-dimension: 2 layout variants x 2 supported compute dtypes (float64 + the float32
+        # reduced-precision path the nested kernels now honor) -- growth BEYOND that means per-call
+        # respecialization is back.
         assert len(fn._SCORE_CACHE) <= score_before + 1
         assert len(fn._ESTEP_CACHE) <= estep_before + 1
         for kernel in list(fn._SCORE_CACHE.values()) + list(fn._ESTEP_CACHE.values()):
-            assert len(kernel.signatures) <= 2
+            assert len(kernel.signatures) <= 4
