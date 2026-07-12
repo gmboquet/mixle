@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.stats.compute.fused_codegen import LeafTemplate, _njit, _template_for
+from mixle.stats.compute.fused_codegen import LeafTemplate, _auto_parallel, _n_chunks, _njit, _template_for
 
 
 @dataclass
@@ -213,48 +213,114 @@ _SCORE_CACHE: dict[Any, Any] = {}
 _ESTEP_CACHE: dict[Any, Any] = {}
 
 
+def _cast_reduced(arrays: list, compute_dtype: Any) -> list:
+    """Down-cast FLOAT arrays to the reduced compute dtype (float32 only, as fused_codegen validates);
+    integer index arrays and the float64 accumulators/outputs are never touched, so accumulation
+    precision is unchanged -- the same discipline as fused_codegen's _data_and_params."""
+    if compute_dtype is None or np.dtype(compute_dtype) == np.float64:
+        return arrays
+    if np.dtype(compute_dtype) != np.float32:
+        raise ValueError("nested fused kernels support reduced precision only in float32. Got %r." % (compute_dtype,))
+    return [np.ascontiguousarray(a, dtype=np.float32) if a.dtype.kind == "f" else a for a in arrays]
+
+
 def _sig(root: Any, ctx: _Ctx) -> tuple:
     return ("nested", _shape(root), tuple(ctx.slot_template[s].name for s in range(len(ctx.slots))))
 
 
-def _compile_score(root: Any, ctx: _Ctx, sig: tuple) -> Any:
-    if sig in _SCORE_CACHE:
-        return _SCORE_CACHE[sig]
+def _compile_score(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> Any:
+    cached = _SCORE_CACHE.get((sig, parallel))
+    if cached is not None:
+        return cached
     body: list[str] = []
     expr = _emit_score(root, body)
-    args = ", ".join(_data_args(ctx) + _param_args(root) + ["out"])
-    lines = [f"def _ns({args}):", "    n = x0_0.shape[0]", "    k = 0", "    for i in range(n):"]
-    lines += ["    " + ln for ln in body]  # body already indented to one level; add the loop indent
-    lines.append(f"        out[i] = {expr}")
-    fn = _njit("\n".join(lines), "_ns")
-    _SCORE_CACHE[sig] = fn
+    if not parallel:
+        args = ", ".join(_data_args(ctx) + _param_args(root) + ["out"])
+        # k = 0: leaf templates index their (1,)-stacked params as p[k] (fused_codegen's component-loop
+        # convention); in the nested emitter every leaf node is its own single-component stack.
+        lines = [f"def _ns({args}):", "    n = out.shape[0]", "    k = 0", "    for i in range(n):"]
+        lines += ["    " + ln for ln in body]  # body already indented to one level; add the loop indent
+        lines.append(f"        out[i] = {expr}")
+        fn = _njit("\n".join(lines), "_ns")
+    else:
+        # same fixed-chunk prange design as fused_codegen: rows are disjoint (out[i] only), so the
+        # parallel scorer is bit-stable across reruns and worker counts, and agrees with the
+        # sequential kernel to 1-2 ULP (different fastmath binaries).
+        args = ", ".join(_data_args(ctx) + _param_args(root) + ["out", "n_chunks"])
+        lines = [
+            f"def _ns_par({args}):",
+            "    n = out.shape[0]",
+            "    step = (n + n_chunks - 1) // n_chunks",
+            "    for c in numba.prange(n_chunks):",
+            "        k = 0",
+            "        for i in range(c * step, min(n, (c + 1) * step)):",
+        ]
+        lines += ["        " + ln for ln in body]
+        lines.append(f"            out[i] = {expr}")
+        fn = _njit("\n".join(lines), "_ns_par", parallel=True)
+    _SCORE_CACHE[(sig, parallel)] = fn
     return fn
 
 
-def _compile_estep(root: Any, ctx: _Ctx, sig: tuple) -> Any:
-    if sig in _ESTEP_CACHE:
-        return _ESTEP_CACHE[sig]
-    fwd: list[str] = []
-    root_expr = _emit_score(root, fwd)
-    bwd: list[str] = []
-    _emit_backward(root, "wi", bwd)
+def _acc_names(root: Any) -> tuple[list[str], list[str]]:
+    """(mixture-count arg names, leaf-accumulator arg names) in emission order."""
     cc_args = [f"cc{m.node_id}" for m in _mixtures(root)]
     leaf_acc: list[str] = []
     for lf in _leaves(root):
         leaf_acc += [f"a{lf.node_id}_{an}" for an in lf.template.acc_names] + [f"ct{lf.node_id}"]
-    args = ", ".join(_data_args(ctx) + _param_args(root) + ["weights", *cc_args, *leaf_acc, "out_ll"])
-    lines = [
-        f"def _es({args}):",
-        "    n = x0_0.shape[0]",
-        "    k = 0",
-        "    for i in range(n):",
-        "        wi = weights[i]",
-    ]
-    lines += ["    " + ln for ln in fwd]
-    lines.append(f"        out_ll[0] += wi * ({root_expr})")
-    lines += ["    " + ln for ln in bwd]
-    fn = _njit("\n".join(lines), "_es")
-    _ESTEP_CACHE[sig] = fn
+    return cc_args, leaf_acc
+
+
+def _compile_estep(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> Any:
+    cached = _ESTEP_CACHE.get((sig, parallel))
+    if cached is not None:
+        return cached
+    fwd: list[str] = []
+    root_expr = _emit_score(root, fwd)
+    bwd: list[str] = []
+    _emit_backward(root, "wi", bwd)
+    cc_args, leaf_acc = _acc_names(root)
+    if not parallel:
+        args = ", ".join(_data_args(ctx) + _param_args(root) + ["weights", *cc_args, *leaf_acc, "out_ll"])
+        lines = [
+            f"def _es({args}):",
+            "    n = weights.shape[0]",
+            "    k = 0",
+            "    for i in range(n):",
+            "        wi = weights[i]",
+        ]
+        lines += ["    " + ln for ln in fwd]
+        lines.append(f"        out_ll[0] += wi * ({root_expr})")
+        lines += ["    " + ln for ln in bwd]
+        fn = _njit("\n".join(lines), "_es")
+    else:
+        # Chunk-parallel with the fused_codegen design: every accumulator gains a leading n_chunks
+        # axis (allocated by the caller), chunk c writes only row c through the _c views bound below,
+        # and the caller's fixed-order sum over the chunk axis keeps results bit-stable across runs
+        # and worker counts. The emitted statements are IDENTICAL to the sequential kernel's -- the
+        # rebinding is pure text substitution on the accumulator names.
+        acc_all = [*cc_args, *leaf_acc]
+        args = ", ".join(_data_args(ctx) + _param_args(root) + ["weights", *acc_all, "out_ll", "n_chunks"])
+        lines = [
+            f"def _es_par({args}):",
+            "    n = weights.shape[0]",
+            "    step = (n + n_chunks - 1) // n_chunks",
+            "    for c in numba.prange(n_chunks):",
+        ]
+        lines += [f"        {nm}_c = {nm}[c]" for nm in acc_all]
+        lines += [
+            "        k = 0",
+            "        for i in range(c * step, min(n, (c + 1) * step)):",
+            "            wi = weights[i]",
+        ]
+        lines += ["        " + ln for ln in fwd]
+        lines.append(f"            out_ll[c] += wi * ({root_expr})")
+        bwd_sub = bwd
+        for nm in acc_all:
+            bwd_sub = [ln.replace(f"{nm}[", f"{nm}_c[") for ln in bwd_sub]
+        lines += ["        " + ln for ln in bwd_sub]
+        fn = _njit("\n".join(lines), "_es_par", parallel=True)
+    _ESTEP_CACHE[(sig, parallel)] = fn
     return fn
 
 
@@ -291,15 +357,30 @@ def _fill_slots(model: Any, path: tuple, enc: Any, ctx: _Ctx) -> None:
         ctx.slot_data[slot] = ctx.slots[path][0].data(enc)
 
 
-def fused_nested_seq_log_density(model: Any, enc: Any) -> np.ndarray:
-    """Score encoded observations with the nested scalar fused kernel."""
+def fused_nested_seq_log_density(
+    model: Any, enc: Any, compute_dtype: Any = None, parallel: bool | None = None
+) -> np.ndarray:
+    """Score encoded observations with the nested scalar fused kernel.
+
+    ``compute_dtype``/``parallel`` follow fused_codegen's contract exactly: float32 runs the row
+    arithmetic reduced while accumulation and output stay float64; ``parallel=None`` auto-engages
+    the chunked prange kernel on large inputs, bit-stable across reruns and worker counts.
+    """
     built = analyze_nested(model)
     if built is None:
         raise ValueError("%s is not a fusible nested scalar tree." % type(model).__name__)
     root, ctx = built
     data, params = _marshal(model, root, ctx, enc)
-    out = np.empty(data[0].shape[0], dtype=np.float64)
-    _compile_score(root, ctx, _sig(root, ctx))(*data, *params, out)
+    data = _cast_reduced(data, compute_dtype)
+    params = _cast_reduced(params, compute_dtype)
+    n = data[0].shape[0]
+    out = np.empty(n, dtype=np.float64)
+    if parallel is None:
+        parallel = _auto_parallel(n)
+    if parallel:
+        _compile_score(root, ctx, _sig(root, ctx), parallel=True)(*data, *params, out, _n_chunks(n))
+    else:
+        _compile_score(root, ctx, _sig(root, ctx))(*data, *params, out)
     return out
 
 
@@ -313,30 +394,57 @@ def _node_value(node: Any, accs: dict) -> Any:
     return accs[f"cc{node.node_id}"], tuple(children)
 
 
-def fused_nested_accumulate(model: Any, enc: Any, weights: np.ndarray, return_ll: bool = False) -> Any:
-    """Accumulate nested scalar sufficient statistics with the fused E-step kernel."""
+def fused_nested_accumulate(
+    model: Any,
+    enc: Any,
+    weights: np.ndarray,
+    return_ll: bool = False,
+    compute_dtype: Any = None,
+    parallel: bool | None = None,
+) -> Any:
+    """Accumulate nested scalar sufficient statistics with the fused E-step kernel.
+
+    ``compute_dtype``/``parallel`` follow fused_codegen's contract: reduced-precision row arithmetic
+    with float64 accumulation; the chunk-parallel variant is bit-stable across reruns and worker
+    counts (fixed chunking, fixed-order combine) and differs from the sequential kernel only by
+    chunk-boundary float re-association.
+    """
     built = analyze_nested(model)
     if built is None:
         raise ValueError("%s is not a fusible nested scalar tree." % type(model).__name__)
     root, ctx = built
     data, params = _marshal(model, root, ctx, enc)
+    data = _cast_reduced(data, compute_dtype)
+    params = _cast_reduced(params, compute_dtype)
+    n = data[0].shape[0] if data else int(np.asarray(weights).shape[0])
+    if parallel is None:
+        parallel = _auto_parallel(n)
+    nc = _n_chunks(n) if parallel else 0
+    lead = (lambda shape: (nc, *shape)) if parallel else (lambda shape: shape)
     accs: dict = {}
     for lf in _leaves(root):
         for an in lf.template.acc_names:
-            accs[f"a{lf.node_id}_{an}"] = np.zeros(1, dtype=np.float64)
-        accs[f"ct{lf.node_id}"] = np.zeros(1, dtype=np.float64)
+            accs[f"a{lf.node_id}_{an}"] = np.zeros(lead((1,)), dtype=np.float64)
+        accs[f"ct{lf.node_id}"] = np.zeros(lead((1,)), dtype=np.float64)
     for mx in _mixtures(root):
-        accs[f"cc{mx.node_id}"] = np.zeros(len(mx.children), dtype=np.float64)
+        accs[f"cc{mx.node_id}"] = np.zeros(lead((len(mx.children),)), dtype=np.float64)
     cc_arrays = [accs[f"cc{m.node_id}"] for m in _mixtures(root)]
     leaf_acc: list = []
     for lf in _leaves(root):
         leaf_acc += [accs[f"a{lf.node_id}_{an}"] for an in lf.template.acc_names] + [accs[f"ct{lf.node_id}"]]
-    out_ll = np.zeros(1, dtype=np.float64)
-    _compile_estep(root, ctx, _sig(root, ctx))(
-        *data, *params, np.asarray(weights, dtype=np.float64), *cc_arrays, *leaf_acc, out_ll
-    )
+    if parallel:
+        out_ll = np.zeros(nc, dtype=np.float64)
+        _compile_estep(root, ctx, _sig(root, ctx), parallel=True)(
+            *data, *params, np.asarray(weights, dtype=np.float64), *cc_arrays, *leaf_acc, out_ll, nc
+        )
+        accs = {name: arr.sum(axis=0) for name, arr in accs.items()}  # fixed-order combine
+    else:
+        out_ll = np.zeros(1, dtype=np.float64)
+        _compile_estep(root, ctx, _sig(root, ctx))(
+            *data, *params, np.asarray(weights, dtype=np.float64), *cc_arrays, *leaf_acc, out_ll
+        )
     suff = _node_value(root, accs)
-    return (suff, float(out_ll[0])) if return_ll else suff
+    return (suff, float(out_ll.sum())) if return_ll else suff
 
 
 def fusible_nested(model: Any) -> bool:

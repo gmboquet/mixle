@@ -115,9 +115,9 @@ def register_leaf_template(t: LeafTemplate) -> None:
     _TEMPLATES.append(t)
 
 
-def _template_for(dist: Any) -> LeafTemplate | None:
+def _template_for(dist: Any, allow_bridge: bool = True) -> LeafTemplate | None:
     for t in _TEMPLATES:
-        if t.matches(dist):
+        if (allow_bridge or t.kind != "bridge") and t.matches(dist):
             return t
     return None
 
@@ -796,6 +796,28 @@ register_leaf_template(
 )
 
 
+_BRIDGE_TYPES = frozenset({"MixtureDistribution", "HiddenMarkovModelDistribution", "CompositeDistribution"})
+
+
+def _bridge_matches(d: Any) -> bool:
+    """Combinators sitting inside a composite factor: scored and estimated through their OWN native
+    machinery (seq_log_density / accumulator seq_update), so ANY configuration they support -- priors
+    included -- is supported here. Registered LAST, so every specific template outranks the bridge."""
+    return type(d).__name__ in _BRIDGE_TYPES
+
+
+register_leaf_template(
+    LeafTemplate(
+        name="bridge",
+        matches=_bridge_matches,
+        data=lambda enc: (),
+        params=lambda comps: {},
+        arity=0,
+        kind="bridge",
+    )
+)
+
+
 # --- structure analysis ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class FusedPlan:
@@ -813,17 +835,29 @@ class FusedPlan:
         return any(t.kind == "matrix" for t in self.leaf_templates)
 
     @property
+    def has_bridge(self) -> bool:
+        """Whether any factor is a BRIDGED combinator (scored via its own native seq_log_density; its
+        sufficient statistics collected by its own accumulator, weighted by the responsibility matrix)."""
+        return any(t.kind == "bridge" for t in self.leaf_templates)
+
+    @property
     def needs_responsibilities(self) -> bool:
         """Whether the E-step must materialize the (n, K) responsibility matrix R (matrix BLAS
-        accumulation and chain post-pass scatters both read it after the row loop)."""
-        return any(t.kind in ("matrix", "chain") for t in self.leaf_templates)
+        accumulation and chain post-pass scatters read it after the row loop; bridged factors hand it
+        back to the caller for their native weighted updates)."""
+        return any(t.kind in ("matrix", "chain", "bridge") for t in self.leaf_templates)
 
 
 def _node_factors(node: Any) -> list[Any] | None:
-    """The leaf factors of a fusible *node* (an exact Composite, or a templated bare leaf), else None."""
+    """The leaf factors of a fusible *node* (an exact Composite, or a templated bare leaf), else None.
+
+    The bare-node check deliberately excludes the bridge template: a bare Mixture-of-Mixtures (no
+    Composite anywhere) belongs to fused_nested's in-kernel nested-tree path, which is faster than
+    bridging. Bridge factors exist for combinators sitting INSIDE a composite, where no in-kernel
+    path exists at all."""
     if type(node).__name__ == "CompositeDistribution":
         return list(node.dists)
-    if _template_for(node) is not None:
+    if _template_for(node, allow_bridge=False) is not None:
         return [node]
     return None
 
@@ -904,6 +938,7 @@ def _dummy(t: LeafTemplate) -> Any:
         "negbinomial": stats.NegativeBinomialDistribution(1.0, 0.5),
         "mvgaussian": stats.MultivariateGaussianDistribution([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]]),
         "markovchain": stats.MarkovChainDistribution({"a": 1.0}, {"a": {"a": 1.0}}),
+        "bridge": stats.GaussianDistribution(0.0, 1.0),  # params() ignores it (bridge has no static params)
     }[t.name]
 
 
@@ -979,6 +1014,12 @@ def _emit(plan: FusedPlan, acc_suffix: str = "") -> dict[str, list[str]]:
             frag["acc"].append(f"{accmap['sx']}[k] += r * x{i}_0[i]")
             if t.tab_hist:
                 frag["acc"].append(f"{accmap['hist']}[k, int(x{i}_0[i])] += r")  # weighted count histogram
+        elif t.kind == "bridge":
+            # scored from a precomputed (n, K) table (each column: the factor's OWN seq_log_density for
+            # that component); no in-kernel statistics -- the wrapper drives the factor's native
+            # accumulator with the R column instead.
+            frag["param_args"].append(f"bt{i}")
+            frag["row"].append(f"acc += bt{i}[i, k]")
         elif t.kind == "chain":
             frag["param_args"] += [f"cinit{i}", f"ctrans{i}"]  # (K,S) init and (K,S,S) transition log tables
             frag["acc_args"] += [f"ih{i}", f"th{i}"]  # (K,S) init and (K,S,S) transition weighted histograms
@@ -1138,23 +1179,49 @@ def _score_body(indent: str, row_lines: list[str], llbuf_name: str) -> list[str]
     return lines
 
 
-def _compile(plan: FusedPlan, parallel: bool = False) -> Callable:
-    cached = _COMPILED.get((plan.signature, parallel))
+def _score_tail_quantized(indent: str, row_lines: list[str], llbuf_name: str) -> list[str]:
+    """The per-row block with the log-sum-exp EXP replaced by one LUT gather over a delta-grid --
+    mixle.engines.qlut.quantized_logsumexp's exact semantics (round to grid, clamp the deep tail into
+    the bottom bin), emitted inline. Error bound: half a grid step (lse_error_bound), plus the
+    negligible clipped-tail term the qlut docstring quantifies."""
+    lines = [f"{indent}for k in range(kc):", f"{indent}    acc = logw[k]"]
+    lines += [f"{indent}    {rt}" for rt in row_lines]
+    lines += [
+        f"{indent}    {llbuf_name}[k] = acc",
+        f"{indent}m = {llbuf_name}[0]",
+        f"{indent}for k in range(1, kc):",
+        f"{indent}    if {llbuf_name}[k] > m:",
+        f"{indent}        m = {llbuf_name}[k]",
+        f"{indent}s = 0.0",
+        f"{indent}for k in range(kc):",
+        f"{indent}    qi = int(np.rint(({llbuf_name}[k] - m) * lse_inv_delta)) + lse_levm1",
+        f"{indent}    if qi < 0:",
+        f"{indent}        qi = 0",  # scores more than `span` below the max clip into the bottom bin
+        f"{indent}    s += lse_lut[qi]",
+        f"{indent}out[i] = (m + np.log(s)) if m > -np.inf else -np.inf",
+    ]
+    return lines
+
+
+def _compile(plan: FusedPlan, parallel: bool = False, quantized_lse: bool = False) -> Callable:
+    cached = _COMPILED.get((plan.signature, parallel, quantized_lse))
     if cached is not None:
         return cached
     f = _emit(plan)
     data_args = f["data_args"]
+    lse_args = ["lse_lut", "lse_inv_delta", "lse_levm1"] if quantized_lse else []
+    tail = _score_tail_quantized if quantized_lse else _score_body
     if not parallel:
-        args = ", ".join(data_args + f["param_args"] + ["logw", "out", "llbuf"])
+        args = ", ".join(data_args + f["param_args"] + lse_args + ["logw", "out", "llbuf"])
         lines = ["def _fused(%s):" % args, "    n = out.shape[0]", "    kc = logw.shape[0]"]
         lines += ["    " + ln for ln in f["precompute"]]
         lines += ["    for i in range(n):"]
-        lines += _score_body("        ", f["row"], "llbuf")
+        lines += tail("        ", f["row"], "llbuf")
         fn = _njit("\n".join(lines), "_fused")
     else:
         # prange over fixed chunks; out[i] rows are disjoint and each row's arithmetic is identical to
         # the sequential kernel's, so the parallel scorer is BIT-IDENTICAL to it (asserted in tests).
-        args = ", ".join(data_args + f["param_args"] + ["logw", "out", "n_chunks"])
+        args = ", ".join(data_args + f["param_args"] + lse_args + ["logw", "out", "n_chunks"])
         lines = ["def _fused_par(%s):" % args, "    n = out.shape[0]", "    kc = logw.shape[0]"]
         lines += ["    " + ln for ln in f["precompute"]]
         lines += [
@@ -1163,9 +1230,9 @@ def _compile(plan: FusedPlan, parallel: bool = False) -> Callable:
             "        llbuf_c = np.empty(kc)",
             "        for i in range(c * step, min(n, (c + 1) * step)):",
         ]
-        lines += _score_body("            ", f["row"], "llbuf_c")
+        lines += tail("            ", f["row"], "llbuf_c")
         fn = _njit("\n".join(lines), "_fused_par", parallel=True)
-    _COMPILED[(plan.signature, parallel)] = fn
+    _COMPILED[(plan.signature, parallel, quantized_lse)] = fn
     return fn
 
 
@@ -1176,11 +1243,12 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
     f = _emit(plan, acc_suffix="_c" if parallel else "")
     data_args = f["data_args"]
     if not parallel:
+        extra = ["R"] if plan.has_bridge else []
         args = ", ".join(
-            data_args + f["param_args"] + ["weights", "logw", "comp_counts", *f["acc_args"], "llbuf", "out_ll"]
+            data_args + f["param_args"] + ["weights", "logw", "comp_counts", *f["acc_args"], *extra, "llbuf", "out_ll"]
         )
         lines = ["def _estep(%s):" % args, "    n = weights.shape[0]", "    kc = logw.shape[0]"]
-        if plan.needs_responsibilities:
+        if plan.needs_responsibilities and not plan.has_bridge:
             lines.append("    R = np.empty((n, kc))")  # read back by the matrix BLAS / chain post passes
         lines += ["    " + ln for ln in f["precompute"]]
         lines += [
@@ -1222,11 +1290,14 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
             if lt.kind not in ("matrix", "chain")
             for an in lt.acc_names
         ]
+        extra = ["R"] if plan.has_bridge else []
         args = ", ".join(
-            data_args + f["param_args"] + ["weights", "logw", "comp_counts", *f["acc_args"], "out_ll", "n_chunks"]
+            data_args
+            + f["param_args"]
+            + ["weights", "logw", "comp_counts", *f["acc_args"], *extra, "out_ll", "n_chunks"]
         )
         lines = ["def _estep_par(%s):" % args, "    n = weights.shape[0]", "    kc = logw.shape[0]"]
-        if plan.needs_responsibilities:
+        if plan.needs_responsibilities and not plan.has_bridge:
             lines.append("    R = np.empty((n, kc))")
         lines += ["    " + ln for ln in f["precompute"]]
         lines += [
@@ -1302,6 +1373,13 @@ def _data_and_params(
         comps_i = [factor_lists[k][i] for k in range(plan.num_components)]
         pdict = t.params(comps_i)
         param_arrays.extend(np.ascontiguousarray(pdict[pn]) for pn in sorted(pdict.keys()))
+        if t.kind == "bridge":
+            cols = [np.asarray(c.seq_log_density(factor_encs[i]), dtype=np.float64) for c in comps_i]
+            table = np.ascontiguousarray(np.stack(cols, axis=1))  # (n, K)
+            if n_rows is None:
+                n_rows = int(table.shape[0])
+            param_arrays.append(table)
+            tab_ctx[i] = (factor_encs[i], 0)  # the factor's own encoding, for the wrapper's native updates
         if t.kind == "chain":
             if n_rows is None:
                 n_rows = int(factor_encs[i][0])  # the chain encoding carries the row count directly
@@ -1338,7 +1416,14 @@ def _data_and_params(
     return data_arrays, param_arrays, tab_ctx, int(n_rows if n_rows is not None else 0)
 
 
-def fused_seq_log_density(model: Any, enc: Any, compute_dtype: Any = None, parallel: bool | None = None) -> np.ndarray:
+def fused_seq_log_density(
+    model: Any,
+    enc: Any,
+    compute_dtype: Any = None,
+    parallel: bool | None = None,
+    lse_bits: int | None = None,
+    lse_span: float = 24.0,
+) -> np.ndarray:
     """Per-row log densities of ``model`` over encoding ``enc`` via one fused numba pass.
 
     ``compute_dtype`` (e.g. ``np.float32``) runs the row arithmetic in reduced precision while the
@@ -1350,23 +1435,46 @@ def fused_seq_log_density(model: Any, enc: Any, compute_dtype: Any = None, paral
     sequential kernel it agrees to 1-2 ULP (different fastmath binaries vectorize differently --
     measured max 4.7e-16 relative), not bit-for-bit.
 
+    ``lse_bits`` (OPT-IN, banded): replace the per-row log-sum-exp's exp calls with one gather from a
+    ``2**lse_bits``-entry table over a ``lse_span/2**lse_bits`` grid -- the qlut quantized-LSE kernel
+    inlined. Per-row error is bounded by ``mixle.engines.qlut.lse_error_bound(lse_bits, lse_span)``
+    (12 bits ~ 2.9e-3 bound, ~6e-5 measured), so this is for scoring/audit paths whose compute band
+    tolerates a delta-grid; E-steps deliberately keep exact exp (a perturbed objective could flip
+    monotone-gate accepts). ``None`` (default) is the exact path, byte-identical to before.
+
     Raises ``ValueError`` if ``model`` is not fusible -- callers should check :func:`fusible` first.
     """
     plan = analyze(model)
     if plan is None:
+        if lse_bits is not None:
+            raise NotImplementedError("quantized LSE is wired for the template kernels; nested trees are exact-only.")
         from mixle.stats.compute.fused_nested import fused_nested_seq_log_density
 
-        return fused_nested_seq_log_density(model, enc)  # nested scalar tree (raises if not that either)
+        # nested scalar tree (raises if not that either); same dtype/parallel contract
+        return fused_nested_seq_log_density(model, enc, compute_dtype=compute_dtype, parallel=parallel)
     data_arrays, param_arrays, _, n = _data_and_params(model, plan, enc, compute_dtype)
     logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
     out = np.empty(n, dtype=np.float64)
     if parallel is None:
         parallel = _auto_parallel(n)
+    lse_extra: tuple = ()
+    quantized = lse_bits is not None
+    if quantized:
+        if not 1 <= int(lse_bits) <= 24:
+            raise ValueError(f"need 1 <= lse_bits <= 24, got {lse_bits}")
+        if lse_span <= 0:
+            raise ValueError(f"lse_span must be positive, got {lse_span}")
+        levels = 1 << int(lse_bits)
+        delta = float(lse_span) / levels
+        table = np.exp((np.arange(levels, dtype=np.float64) - (levels - 1)) * delta)
+        lse_extra = (table, 1.0 / delta, levels - 1)
     if parallel:
-        _compile(plan, parallel=True)(*data_arrays, *param_arrays, logw, out, _n_chunks(n))
+        _compile(plan, parallel=True, quantized_lse=quantized)(
+            *data_arrays, *param_arrays, *lse_extra, logw, out, _n_chunks(n)
+        )
     else:
         llbuf = np.empty(plan.num_components, dtype=np.float64)
-        _compile(plan)(*data_arrays, *param_arrays, logw, out, llbuf)
+        _compile(plan, quantized_lse=quantized)(*data_arrays, *param_arrays, *lse_extra, logw, out, llbuf)
     return out
 
 
@@ -1385,6 +1493,7 @@ def fusible_estep(model: Any) -> bool:
         "tabulated": lambda t: t.tab_table,
         "categorical": lambda t: t.cat_table,
         "chain": lambda t: t.chain_to_value,
+        "bridge": lambda t: t.matches,  # support == matching: statistics come from the factor's own accumulator
     }
     return all(hook[t.kind](t) is not None for t in plan.leaf_templates)
 
@@ -1417,7 +1526,9 @@ def fused_accumulate(
     if plan is None:
         from mixle.stats.compute.fused_nested import fused_nested_accumulate
 
-        return fused_nested_accumulate(model, enc, weights, return_ll=return_ll)  # nested scalar tree
+        return fused_nested_accumulate(
+            model, enc, weights, return_ll=return_ll, compute_dtype=compute_dtype, parallel=parallel
+        )  # nested scalar tree
     if not fusible_estep(model):
         raise ValueError("%s is not a fusible E-step (an unsupported leaf)." % type(model).__name__)
     K = plan.num_components
@@ -1435,6 +1546,11 @@ def fused_accumulate(
     acc_arrays: list[np.ndarray] = []
     offset = 0
     for i, t in enumerate(plan.leaf_templates):
+        if t.kind == "bridge":  # no in-kernel statistics; arity 0
+            scalar_acc.append({})
+            matrix_acc.append((np.empty(0), np.empty(0)))
+            chain_acc.append((np.empty(0), np.empty(0)))
+            continue
         if t.kind == "chain":
             S = tab_ctx[i][1]
             # written by the sequential post-pass over R in BOTH kernel variants, so never chunked
@@ -1482,6 +1598,7 @@ def fused_accumulate(
         offset += t.arity
 
     logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
+    bridge_R = [np.empty((n, K), dtype=np.float64)] if plan.has_bridge else []
     if parallel:
         comp_counts = np.zeros((nc, K), dtype=np.float64)
         out_ll = np.zeros(nc, dtype=np.float64)
@@ -1492,6 +1609,7 @@ def fused_accumulate(
             logw,
             comp_counts,
             *acc_arrays,
+            *bridge_R,
             out_ll,
             nc,
         )
@@ -1513,11 +1631,32 @@ def fused_accumulate(
             logw,
             comp_counts,
             *acc_arrays,
+            *bridge_R,
             llbuf,
             out_ll,
         )
 
+    bridge_values: dict[int, list[Any]] = {}
+    if plan.has_bridge:
+        # Each bridged factor's sufficient statistics come from its OWN accumulator, weighted by the
+        # responsibility column the kernel just computed -- byte-for-byte the host mixture E-step's
+        # semantics for that factor (priors and all), with everything else still fused.
+        factor_lists = _component_factor_lists(model, plan)
+        for i, t in enumerate(plan.leaf_templates):
+            if t.kind != "bridge":
+                continue
+            enc_i = tab_ctx[i][0]
+            vals = []
+            for k in range(K):
+                factor_k = factor_lists[k][i]
+                acc = factor_k.estimator().accumulator_factory().make()
+                acc.seq_update(enc_i, np.ascontiguousarray(bridge_R[0][:, k]), factor_k)
+                vals.append(acc.value())
+            bridge_values[i] = vals
+
     def leaf_value(i: int, t: LeafTemplate, k: int) -> Any:
+        if t.kind == "bridge":
+            return bridge_values[i][k]
         if t.kind == "chain":
             ih, th = chain_acc[i]
             enc_i, _ = tab_ctx[i]

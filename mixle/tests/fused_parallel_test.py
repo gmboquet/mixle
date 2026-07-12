@@ -144,6 +144,39 @@ class ParallelEstepTest(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_NUMBA, "parallel fused kernels require numba")
+class QuantizedLseTest(unittest.TestCase):
+    def test_quantized_scorer_stays_within_the_qlut_bound(self):
+        from mixle.engines.qlut import lse_error_bound
+
+        model, enc, _ = _mixed_model_and_enc(n=20_000)
+        exact = fc.fused_seq_log_density(model, enc)
+        for bits in (8, 12):
+            quant = fc.fused_seq_log_density(model, enc, lse_bits=bits)
+            bound = lse_error_bound(bits, 24.0)
+            self.assertLessEqual(float(np.abs(quant - exact).max()), bound, f"bits={bits}")
+        # parallel x quantized composes, with the same bit-stability contract
+        par1 = fc.fused_seq_log_density(model, enc, parallel=True, lse_bits=12)
+        par2 = fc.fused_seq_log_density(model, enc, parallel=True, lse_bits=12)
+        self.assertTrue(np.array_equal(par1, par2))
+        self.assertLessEqual(float(np.abs(par1 - exact).max()), lse_error_bound(12, 24.0))
+
+    def test_quantized_lse_is_opt_in_and_guarded(self):
+        model, enc, _ = _mixed_model_and_enc(n=500)
+        with self.assertRaises(ValueError):
+            fc.fused_seq_log_density(model, enc, lse_bits=0)
+        with self.assertRaises(ValueError):
+            fc.fused_seq_log_density(model, enc, lse_bits=12, lse_span=-1.0)
+        from mixle.stats import GaussianDistribution as G
+
+        nested = MixtureDistribution(
+            [MixtureDistribution([G(-2.0, 1.0), G(2.0, 1.0)], [0.5, 0.5]) for _ in range(2)], [0.5, 0.5]
+        )
+        nenc = nested.dist_to_encoder().seq_encode([0.1, -0.4, 2.2])
+        with self.assertRaises(NotImplementedError):
+            fc.fused_seq_log_density(nested, nenc, lse_bits=12)
+
+
+@unittest.skipUnless(HAS_NUMBA, "parallel fused kernels require numba")
 class AutoPolicyTest(unittest.TestCase):
     def test_small_inputs_stay_sequential_and_large_engage_parallel(self):
         model, enc, n = _mixed_model_and_enc(n=4_000)

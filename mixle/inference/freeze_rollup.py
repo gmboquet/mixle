@@ -389,7 +389,8 @@ def _component_score(component: Any, enc: Any, compute_dtype: Any = None) -> np.
         # scalar-tree kernels are structure-keyed and disk-cached (measured on a depth-18 chain
         # component: first-ever compile ~4.5s, then 0.10s in ANY process vs 0.34s on the host walk
         # -- 3.4x; dispatcher signature counts stay at 1-2, i.e. no per-call respecialization).
-        # The nested kernels ignore compute_dtype and always run float64.
+        # The nested kernels honor compute_dtype (float32 rows, float64 accumulation), same as the
+        # template kernels -- both route through the shared fused entry points below.
         is_combinator = (
             getattr(component, "components", None) is not None or getattr(component, "dists", None) is not None
         )

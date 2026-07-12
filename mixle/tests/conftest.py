@@ -46,6 +46,11 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # Markov-chain leaf template (composites with chain factors fuse): host-parity + guard tests --
     # numba-gated for the same reason as fused_codegen_test.py.
     "fused_chain_test.py": ("numba", "optional"),
+    # Bridge factor kind (combinators inside composites fuse via their own native machinery) -- numba-gated
+    # for the same reason as fused_codegen_test.py.
+    "fused_bridge_test.py": ("numba", "optional"),
+    # Nested scalar-tree kernels: compute_dtype + chunk-parallel receipts -- numba-gated like its siblings.
+    "fused_nested_parallel_test.py": ("numba", "optional"),
     # Chunk-parallel fused kernels: determinism receipts (bit-identity across reruns/worker counts) and
     # sequential-vs-parallel parity -- numba-gated for the same reason as fused_codegen_test.py.
     "fused_parallel_test.py": ("numba", "optional"),

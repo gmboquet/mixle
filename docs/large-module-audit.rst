@@ -135,7 +135,7 @@ Probabilistic-programming surface
 Compiled-kernel code generation
 -------------------------------
 
-``mixle/stats/compute/fused_codegen.py`` (1,622)
+``mixle/stats/compute/fused_codegen.py`` (1,703)
     * **Responsibilities:** the fused-kernel source generator — per-family ``LeafTemplate``\s (scalar,
       vector, matrix, tabulated, categorical, chain), plan analysis (``analyze``/``fusible``), source
       emission for the one-pass scorer and E-step (sequential and chunk-parallel prange variants), the
