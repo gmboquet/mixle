@@ -246,7 +246,9 @@ class FreezeRollupCache:
         self._frozen_streak[idx] = streak
         return streak >= self.freeze_patience
 
-    def component_log_density(self, idx: int, component: Any, enc: Any, *, frozen: bool) -> tuple[np.ndarray, bool]:
+    def component_log_density(
+        self, idx: int, component: Any, enc: Any, *, frozen: bool, compute_dtype: Any = None
+    ) -> tuple[np.ndarray, bool]:
         """Return ``(log_density, was_cache_hit)`` for one component on this round.
 
         A cache hit costs a dict lookup + an ``O(param_count)`` signature compare -- never a call
@@ -259,7 +261,7 @@ class FreezeRollupCache:
         entry = self._entries.get(idx)
         if frozen and entry is not None and entry.signature == signature:
             return entry.log_density, True
-        log_density = np.asarray(component.seq_log_density(enc), dtype=np.float64)
+        log_density = _component_score(component, enc, compute_dtype)
         self._entries[idx] = _CacheEntry(signature=signature, log_density=log_density)
         return log_density, False
 
@@ -303,6 +305,48 @@ def detect_frozen(cache: FreezeRollupCache, model: MixtureDistribution) -> set[i
     return frozen
 
 
+_FUSED_SCORING: tuple | None | bool = None
+
+
+def _fused_scoring():
+    """Lazily resolve the fused per-subtree scorer; False when numba/codegen is unavailable."""
+    global _FUSED_SCORING
+    if _FUSED_SCORING is None:
+        try:
+            from mixle.stats.compute.fused_codegen import fused_seq_log_density, fusible
+
+            _FUSED_SCORING = (fused_seq_log_density, fusible)
+        except ImportError:  # pragma: no cover - numba optional
+            _FUSED_SCORING = False
+    return _FUSED_SCORING
+
+
+def _component_score(component: Any, enc: Any, compute_dtype: Any = None) -> np.ndarray:
+    """One component's log-density column: the fused numba kernel when the SUBTREE fuses, else the
+    host ``seq_log_density`` path.
+
+    This is where the block/typed schedulers stop forfeiting the fused kernel the default
+    ``optimize`` path already uses: each mixture component is itself a model, so a fusible
+    component (deep scalar chains, composites of templated leaves) scores in one compiled pass
+    while non-templated components (HMMs, GradLeaf, Laplace) keep the host path. ``compute_dtype``
+    threads the validated reduced-precision band through (None = float64).
+    """
+    fused = _fused_scoring()
+    if fused:
+        fused_seq_log_density, fusible = fused
+        # Only COMBINATOR components go through the fused kernel: within-component fusion pays by
+        # eliminating per-factor passes/allocations, which a bare leaf does not have (its host
+        # seq_log_density is already one vectorized pass; measured, routing leaves through the
+        # kernel only added per-column dispatch overhead). The cross-component fusion win belongs
+        # to the whole-model kernel and is the dispatcher's job, not this scorer's.
+        is_combinator = (
+            getattr(component, "components", None) is not None or getattr(component, "dists", None) is not None
+        )
+        if is_combinator and fusible(component):
+            return np.asarray(fused_seq_log_density(component, enc, compute_dtype), dtype=np.float64)
+    return np.asarray(component.seq_log_density(enc), dtype=np.float64)
+
+
 def _combine(ll_mat: np.ndarray, log_w: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Row-wise log-sum-exp combine of a component log-density matrix into ``(log_density, gamma)``.
 
@@ -340,7 +384,11 @@ def _log_density_from_matrix(ll_mat: np.ndarray, log_w: np.ndarray) -> np.ndarra
 
 
 def _component_log_density_matrix_profiled(
-    model: MixtureDistribution, enc_data: Any, cache: FreezeRollupCache, frozen_idx: set[int]
+    model: MixtureDistribution,
+    enc_data: Any,
+    cache: FreezeRollupCache,
+    frozen_idx: set[int],
+    compute_dtype: Any = None,
 ) -> tuple[np.ndarray, int, DensityMatrixProfile]:
     """Build a component score matrix and expose the assumptions behind saved work."""
 
@@ -359,9 +407,11 @@ def _component_log_density_matrix_profiled(
         enc_i = _component_enc(enc_data, idx)
         started = time.perf_counter()
         if idx in frozen_idx:
-            log_density, hit = cache.component_log_density(idx, model.components[idx], enc_i, frozen=True)
+            log_density, hit = cache.component_log_density(
+                idx, model.components[idx], enc_i, frozen=True, compute_dtype=compute_dtype
+            )
         else:
-            log_density = np.asarray(model.components[idx].seq_log_density(enc_i), dtype=np.float64)
+            log_density = _component_score(model.components[idx], enc_i, compute_dtype)
             hit = False
         elapsed = time.perf_counter() - started
         if hit:
@@ -400,6 +450,7 @@ def _updated_component_log_density_matrix_profiled(
     enc_data: Any,
     active_idx: set[int],
     base_matrix: np.ndarray,
+    compute_dtype: Any = None,
 ) -> tuple[np.ndarray, int, DensityMatrixProfile]:
     """Copy a valid prior matrix and replace only columns whose components moved."""
 
@@ -410,6 +461,7 @@ def _updated_component_log_density_matrix_profiled(
         enc_data,
         active_idx,
         base_matrix.shape[0],
+        compute_dtype=compute_dtype,
     )
     assembly_started = time.perf_counter()
     ll_mat = base_matrix.copy()
@@ -434,6 +486,7 @@ def _updated_component_log_density_columns_profiled(
     enc_data: Any,
     active_idx: set[int],
     nobs: int,
+    compute_dtype: Any = None,
 ) -> tuple[tuple[int, ...], np.ndarray, int, DensityMatrixProfile]:
     """Score moved components without cache hashing or a full-matrix copy.
 
@@ -456,7 +509,7 @@ def _updated_component_log_density_columns_profiled(
             continue
         enc_i = _component_enc(enc_data, idx)
         started = time.perf_counter()
-        log_density = np.asarray(model.components[idx].seq_log_density(enc_i), dtype=np.float64)
+        log_density = _component_score(model.components[idx], enc_i, compute_dtype)
         elapsed = time.perf_counter() - started
         if len(log_density) != nobs:
             raise ValueError("updated component score length does not match the base matrix.")
