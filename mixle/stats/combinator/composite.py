@@ -1165,22 +1165,31 @@ class CompositeDataEncoder(DataSequenceEncoder):
                 "%s" % type(x).__name__,
                 "pass a list/tuple of observations, e.g. [(x0, x1, ...), ...].",
             )
-        for row_idx, u in enumerate(x):
-            if not isinstance(u, (tuple, list, np.ndarray)):
-                raise ContractError(
-                    "CompositeDistribution.dists (row %d)" % row_idx,
-                    "a tuple of %d fields (one per component distribution)" % count,
-                    "%s" % type(u).__name__,
-                    "wrap the observation in a %d-tuple matching the component distributions." % count,
-                )
-            if len(u) != count:
-                raise ContractError(
-                    "CompositeDistribution.dists (row %d)" % row_idx,
-                    "a tuple of length %d" % count,
-                    "a tuple of length %d" % len(u),
-                    "check row %d for a missing or extra field -- every row must have exactly %d "
-                    "entries, one per component distribution." % (row_idx, count),
-                )
+        # Validation in one C-speed pass (set(map(len, x)) -- the per-row python loop this replaces was
+        # the single largest encode cost at 1M rows); the loop below runs only on the ERROR path, so the
+        # per-row contract messages are byte-identical when something is actually wrong.
+        try:
+            row_lens = set(map(len, x))
+            row_types_ok = all(issubclass(tp, (tuple, list, np.ndarray)) for tp in set(map(type, x)))
+        except TypeError:
+            row_lens, row_types_ok = None, False
+        if row_lens is None or row_lens - {count} or not row_types_ok:
+            for row_idx, u in enumerate(x):
+                if not isinstance(u, (tuple, list, np.ndarray)):
+                    raise ContractError(
+                        "CompositeDistribution.dists (row %d)" % row_idx,
+                        "a tuple of %d fields (one per component distribution)" % count,
+                        "%s" % type(u).__name__,
+                        "wrap the observation in a %d-tuple matching the component distributions." % count,
+                    )
+                if len(u) != count:
+                    raise ContractError(
+                        "CompositeDistribution.dists (row %d)" % row_idx,
+                        "a tuple of length %d" % count,
+                        "a tuple of length %d" % len(u),
+                        "check row %d for a missing or extra field -- every row must have exactly %d "
+                        "entries, one per component distribution." % (row_idx, count),
+                    )
 
         enc_data = []
 
