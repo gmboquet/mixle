@@ -210,15 +210,13 @@ class FusedMStepEngagementTest:
         real = fr._fused_scoring()
         assert real, "numba required for this test"
         calls = {"n": 0}
-        fused_seq_log_density, fusible, fused_accumulate, fusible_estep, analyze = real
+        fused_seq_log_density, fusible, fused_accumulate, fusible_estep = real
 
         def counting_accumulate(model, enc, weights, **kw):
             calls["n"] += 1
             return fused_accumulate(model, enc, weights, **kw)
 
-        monkeypatch.setattr(
-            fr, "_FUSED_SCORING", (fused_seq_log_density, fusible, counting_accumulate, fusible_estep, analyze)
-        )
+        monkeypatch.setattr(fr, "_FUSED_SCORING", (fused_seq_log_density, fusible, counting_accumulate, fusible_estep))
         return calls
 
     def test_flat_subcombinator_components_engage_and_match_host(self, monkeypatch):
@@ -246,8 +244,28 @@ class FusedMStepEngagementTest:
         monkeypatch.setattr(fr, "_FUSED_SCORING", None)
         assert abs(fused_hist[-1].objective - host_hist[-1].objective) <= 1e-9 * abs(host_hist[-1].objective)
 
-    def test_nested_chain_components_stay_on_the_host_path(self, monkeypatch):
+    def test_nested_chain_components_engage_and_match_host(self, monkeypatch):
+        import mixle.inference.freeze_rollup as fr
+
         start, estimator, enc, _ = _deep_mixed_problem(n=900)
         calls = self._counting_resolver(monkeypatch)
-        run_block_em(enc, estimator, start, max_its=3, delta=None)
-        assert calls["n"] == 0  # nested trees are excluded until fused_nested is structure-cached
+        fused_model, fused_hist = run_block_em(enc, estimator, start, max_its=3, delta=None)
+        assert calls["n"] > 0  # nested-tree components take the structure-cached fused kernels
+
+        monkeypatch.setattr(fr, "_FUSED_SCORING", False)
+        host_model, host_hist = run_block_em(enc, estimator, start, max_its=3, delta=None)
+        monkeypatch.setattr(fr, "_FUSED_SCORING", None)
+        assert abs(fused_hist[-1].objective - host_hist[-1].objective) <= 1e-9 * abs(host_hist[-1].objective)
+
+    def test_nested_kernels_are_structure_cached_not_respecialized(self):
+        import mixle.stats.compute.fused_nested as fn
+
+        start, estimator, enc, _ = _deep_mixed_problem(n=900)
+        score_before, estep_before = len(fn._SCORE_CACHE), len(fn._ESTEP_CACHE)
+        run_block_em(enc, estimator, start, max_its=4, delta=None)
+        # two same-structure (different-parameter) chain components across four rounds: at most ONE
+        # new kernel per cache, and no per-call numba respecialization (signature growth)
+        assert len(fn._SCORE_CACHE) <= score_before + 1
+        assert len(fn._ESTEP_CACHE) <= estep_before + 1
+        for kernel in list(fn._SCORE_CACHE.values()) + list(fn._ESTEP_CACHE.values()):
+            assert len(kernel.signatures) <= 2

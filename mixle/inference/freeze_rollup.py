@@ -314,14 +314,13 @@ def _fused_scoring():
     if _FUSED_SCORING is None:
         try:
             from mixle.stats.compute.fused_codegen import (
-                analyze,
                 fused_accumulate,
                 fused_seq_log_density,
                 fusible,
                 fusible_estep,
             )
 
-            _FUSED_SCORING = (fused_seq_log_density, fusible, fused_accumulate, fusible_estep, analyze)
+            _FUSED_SCORING = (fused_seq_log_density, fusible, fused_accumulate, fusible_estep)
         except ImportError:  # pragma: no cover - numba optional
             _FUSED_SCORING = False
     return _FUSED_SCORING
@@ -346,19 +345,14 @@ def _component_suff_stat(
     """
     fused = _fused_scoring()
     if fused:
-        _, fusible, fused_accumulate, fusible_estep, analyze = fused
+        _, fusible, fused_accumulate, fusible_estep = fused
         is_combinator = (
             getattr(component_model, "components", None) is not None
             or getattr(component_model, "dists", None) is not None
         )
-        # Template path only, same rationale as _component_score: the nested fallback recompiles
-        # per call (measured 13x slower on deep chains), so it stays host until structure-cached.
-        if (
-            is_combinator
-            and fusible(component_model)
-            and fusible_estep(component_model)
-            and analyze(component_model) is not None
-        ):
+        # Same combinator guard and cache contract as _component_score (see the comment there);
+        # accumulation reductions are float64 in both kernel families regardless of compute_dtype.
+        if is_combinator and fusible(component_model) and fusible_estep(component_model):
             from mixle.stats.compute.kernel import _estimator_resident_supported
 
             if _estimator_resident_supported(component_estimator):
@@ -380,18 +374,18 @@ def _component_score(component: Any, enc: Any, compute_dtype: Any = None) -> np.
     """
     fused = _fused_scoring()
     if fused:
-        fused_seq_log_density, fusible, analyze = fused[0], fused[1], fused[4]
-        # Only COMBINATOR components on the structure-cached TEMPLATE path go through the fused
-        # kernel. Bare leaves are already one vectorized host pass (routing them only added
-        # dispatch overhead), and the nested-tree fallback (analyze() -> None -> fused_nested)
-        # recompiles per call today -- measured 13x SLOWER on deep-chain components -- so it is
-        # excluded until its kernels are structure-cached like the template path's. The
-        # cross-component fusion win belongs to the whole-model kernel and is the dispatcher's
-        # job, not this scorer's.
+        fused_seq_log_density, fusible = fused[0], fused[1]
+        # Only COMBINATOR components go through the fused kernel: a bare leaf is already one
+        # vectorized host pass (routing it only added dispatch overhead). Both kernel families
+        # share the once-per-structure-EVER compile contract: template kernels and the nested
+        # scalar-tree kernels are structure-keyed and disk-cached (measured on a depth-18 chain
+        # component: first-ever compile ~4.5s, then 0.10s in ANY process vs 0.34s on the host walk
+        # -- 3.4x; dispatcher signature counts stay at 1-2, i.e. no per-call respecialization).
+        # The nested kernels ignore compute_dtype and always run float64.
         is_combinator = (
             getattr(component, "components", None) is not None or getattr(component, "dists", None) is not None
         )
-        if is_combinator and fusible(component) and analyze(component) is not None:
+        if is_combinator and fusible(component):
             return np.asarray(fused_seq_log_density(component, enc, compute_dtype), dtype=np.float64)
     return np.asarray(component.seq_log_density(enc), dtype=np.float64)
 
