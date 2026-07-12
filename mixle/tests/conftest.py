@@ -43,6 +43,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "bingham_test.py": ("distribution", "stochastic", "slow"),
     "conformal_test.py": ("ppl", "integration", "slow"),
     "fused_codegen_test.py": ("numba", "optional"),
+    # Chunk-parallel fused kernels: determinism receipts (bit-identity across reruns/worker counts) and
+    # sequential-vs-parallel parity -- numba-gated for the same reason as fused_codegen_test.py.
+    "fused_parallel_test.py": ("numba", "optional"),
     "jax_engine_test.py": ("jax", "optional"),
     # Backward-compatibility-only tests (renamed class / kwarg aliases). Tagged `legacy` so a product-only
     # run can exclude them with `-m "not legacy"`; they still run in the default `fast` gate.
