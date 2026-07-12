@@ -704,6 +704,18 @@ def _resolve_track_best(track_best: bool | None, estimator: ParameterEstimator) 
 
 
 # --- public estimation drivers (optimize / fit / best_of) -------------------
+def _record_precision_plan(estimator: Any, plan: Any, out: IO | None) -> None:
+    """Disclose the ``precision="minimal"`` allocation: on the estimator (which survives the fit;
+    fitted models may round-trip custom serializers) and on the requested reporting stream. A
+    silent float64 fallback is a receipts violation -- the decision must be observable."""
+    try:
+        estimator.last_precision_plan = plan
+    except (AttributeError, TypeError):  # a slotted/frozen estimator: the stream still discloses
+        pass
+    if out is not None:
+        out.write("precision=minimal: %s (%s)\n" % (np.dtype(plan.compute_dtype).name, plan.rationale))
+
+
 def optimize(
     data: Sequence[T] | None,
     estimator: ParameterEstimator | ProbabilityDistribution | None = None,
@@ -891,16 +903,25 @@ def optimize(
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
     rng = RandomState(0) if rng is None else rng  # fixed default: an un-seeded fit is deterministic
+    minimal_precision_pending = False
     if precision == "minimal":
         # Data-aware allocation: inspect the data + model and run the reduced-precision fused kernel only
         # where it is verified safe; else stay float64. The accumulation is float64 either way.
-        from mixle.inference.precision_plan import recommend_compute_precision
+        # A warm start has a model to inspect NOW; a cold start defers planning until seq_initialize
+        # has produced one -- planning against ``prev_estimate=None`` silently allocated float64 to
+        # every cold-start fit (the common case). The deferred decision lands immediately after the
+        # model materializes, before any engine consumer runs.
+        if prev_estimate is not None:
+            from mixle.inference.precision_plan import recommend_compute_precision
 
-        plan = recommend_compute_precision(prev_estimate, data)
-        if plan.reduced() and engine is None:
-            from mixle.engines import NumpyEngine
+            plan = recommend_compute_precision(prev_estimate, data)
+            _record_precision_plan(estimator, plan, out)
+            if plan.reduced() and engine is None:
+                from mixle.engines import NumpyEngine
 
-            engine = NumpyEngine(dtype=plan.compute_dtype, prefer_fused=True)
+                engine = NumpyEngine(dtype=plan.compute_dtype, prefer_fused=True)
+        else:
+            minimal_precision_pending = True
         precision = None  # carried by the explicit engine (or the default float64 host path)
     elif precision == "auto":
         from mixle.engines import auto_precision
@@ -968,6 +989,23 @@ def optimize(
             mm = seq_initialize(enc_data=enc_data, estimator=est, rng=rng, p=p)
         else:
             mm = prev_estimate
+
+        if minimal_precision_pending:
+            # Deferred cold-start leg of precision="minimal" (see the block above). Parallel
+            # backends already built their encoded handles engine-free, so they keep the
+            # conservative float64 rather than switching dtype mid-flight.
+            from mixle.inference.precision_plan import PrecisionPlan, recommend_compute_precision
+
+            local_path = resources is None and placement is None and backend_name == "local"
+            if engine is None and data is not None and local_path:
+                plan = recommend_compute_precision(mm, data)
+            else:
+                plan = PrecisionPlan(np.float64, "minimal: non-local backend or engine already supplied -> float64")
+            _record_precision_plan(estimator, plan, out)
+            if plan.reduced() and engine is None:
+                from mixle.engines import NumpyEngine
+
+                engine = NumpyEngine(dtype=plan.compute_dtype, prefer_fused=True)
 
         if enc_vdata is None and vdata is not None:
             vdata_for_encoding = _data_records_for_encoding(vdata, fields, est, mm)

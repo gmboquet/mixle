@@ -132,3 +132,74 @@ class PrecisionNameHygieneTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+try:
+    from mixle.utils.optional_deps import HAS_NUMBA
+except ImportError:  # pragma: no cover
+    HAS_NUMBA = False
+
+
+class MinimalPrecisionColdStartTestCase(unittest.TestCase):
+    """optimize(precision="minimal") must plan against a REAL model on cold starts.
+
+    Planning used to run against ``prev_estimate`` before initialization, so every cold-start fit
+    hit the planner's no-model branch and silently allocated float64; the fix defers planning until
+    the initialized model exists, and the decision is disclosed on the estimator and the ``out``
+    stream either way.
+    """
+
+    def _fixture(self, offset=0.0, n=4000):
+        from mixle.stats import GaussianEstimator, MixtureEstimator
+
+        rng = np.random.RandomState(0)
+        data = np.concatenate([rng.normal(offset + 6.0 * c, 1.0, n // 4) for c in range(4)])
+        rng.shuffle(data)
+        estimator = MixtureEstimator([GaussianEstimator() for _ in range(4)])
+        return data, estimator
+
+    @unittest.skipUnless(HAS_NUMBA, "the fp32 plan requires the fused numba kernel")
+    def test_cold_start_selects_float32_on_a_safe_mixture(self):
+        from mixle.inference.estimation import optimize
+
+        data, estimator = self._fixture()
+        fitted = optimize(data, estimator, precision="minimal", max_its=4, print_iter=0, delta=None)
+
+        plan = estimator.last_precision_plan
+        self.assertEqual(np.dtype(plan.compute_dtype), np.dtype(np.float32))
+        self.assertTrue(plan.reduced())
+        enc = fitted.dist_to_encoder().seq_encode(data)
+        self.assertTrue(np.isfinite(float(np.sum(fitted.seq_log_density(enc)))))
+
+    def test_danger_zone_magnitude_stays_float64(self):
+        from mixle.inference.estimation import optimize
+
+        data, estimator = self._fixture(offset=2.0e6)  # |x| > 1e6: outside the validated fp32 band
+        optimize(data, estimator, precision="minimal", max_its=2, print_iter=0, delta=None)
+
+        plan = estimator.last_precision_plan
+        self.assertEqual(np.dtype(plan.compute_dtype), np.dtype(np.float64))
+        self.assertFalse(plan.reduced())
+
+    @unittest.skipUnless(HAS_NUMBA, "the fp32 plan requires the fused numba kernel")
+    def test_warm_start_records_the_plan_too(self):
+        from mixle.inference.estimation import optimize
+        from mixle.stats import GaussianDistribution, MixtureDistribution
+
+        data, estimator = self._fixture()
+        proto = MixtureDistribution([GaussianDistribution(6.0 * c, 2.0) for c in range(4)], [0.25] * 4)
+        optimize(data, estimator, precision="minimal", prev_estimate=proto, max_its=2, print_iter=0, delta=None)
+
+        plan = estimator.last_precision_plan
+        self.assertEqual(np.dtype(plan.compute_dtype), np.dtype(np.float32))
+
+    @unittest.skipUnless(HAS_NUMBA, "the fp32 plan requires the fused numba kernel")
+    def test_out_stream_discloses_the_allocation(self):
+        import io
+
+        from mixle.inference.estimation import optimize
+
+        data, estimator = self._fixture()
+        buf = io.StringIO()
+        optimize(data, estimator, precision="minimal", max_its=2, print_iter=0, delta=None, out=buf)
+        self.assertIn("precision=minimal: float32", buf.getvalue())
