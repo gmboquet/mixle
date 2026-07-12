@@ -65,7 +65,8 @@ class PlanDerivationTest:
         model = MixtureDistribution([shared, shared], [0.5, 0.5])
         plan = plan_execution(model, model.estimator(), nobs=100)
         assert any("shared components" in n for n in plan.adapter_notes)
-        plan.optimize_kwargs  # adapter notes are NOT blockers: optimize's full-tree path handles this
+        kwargs = plan.optimize_kwargs  # adapter notes are NOT blockers: optimize's full-tree path handles this
+        assert "monotone" in kwargs
 
 
 class PlanExecutionTest:
@@ -86,4 +87,4 @@ class PlanExecutionTest:
 
         plan = ExecutionPlan(precision=None, monotone=None, blockers=("example blocker",))
         with pytest.raises(RuntimeError, match="example blocker"):
-            plan.optimize_kwargs
+            _ = plan.optimize_kwargs
