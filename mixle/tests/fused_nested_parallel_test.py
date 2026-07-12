@@ -56,6 +56,40 @@ class NestedComputeDtypeTest(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_NUMBA, "nested fused kernels require numba")
+class NestedQuantizedLseTest(unittest.TestCase):
+    def test_quantized_scorer_stays_within_the_depth_compounded_bound(self):
+        from mixle.engines.qlut import lse_error_bound
+        from mixle.stats.compute.fused_nested import _mixture_depth, analyze_nested
+
+        model, enc, _ = _nested_model_and_enc(n=15_000)
+        root, _ctx = analyze_nested(model)
+        depth = _mixture_depth(root)
+        self.assertGreaterEqual(depth, 2, "the fixture must be genuinely nested")
+        exact = fn.fused_nested_seq_log_density(model, enc)
+        for bits in (8, 12):
+            quant = fn.fused_nested_seq_log_density(model, enc, lse_bits=bits)
+            bound = depth * lse_error_bound(bits, 24.0)
+            self.assertLessEqual(float(np.abs(quant - exact).max()), bound, f"bits={bits}")
+        par1 = fn.fused_nested_seq_log_density(model, enc, parallel=True, lse_bits=12)
+        par2 = fn.fused_nested_seq_log_density(model, enc, parallel=True, lse_bits=12)
+        self.assertTrue(np.array_equal(par1, par2), "quantized x parallel keeps bit-stable reruns")
+
+    def test_template_entry_point_forwards_to_nested_trees(self):
+        from mixle.engines.qlut import lse_error_bound
+        from mixle.stats.compute import fused_codegen as fc
+
+        model, enc, _ = _nested_model_and_enc(n=4_000)
+        exact = fc.fused_seq_log_density(model, enc)
+        quant = fc.fused_seq_log_density(model, enc, lse_bits=12)
+        self.assertLessEqual(float(np.abs(quant - exact).max()), 2 * lse_error_bound(12, 24.0))
+
+    def test_validation(self):
+        model, enc, _ = _nested_model_and_enc(n=200)
+        with self.assertRaises(ValueError):
+            fn.fused_nested_seq_log_density(model, enc, lse_bits=0)
+
+
+@unittest.skipUnless(HAS_NUMBA, "nested fused kernels require numba")
 class NestedParallelTest(unittest.TestCase):
     def test_parallel_scorer_matches_sequential_and_is_bit_stable(self):
         model, enc, _ = _nested_model_and_enc()

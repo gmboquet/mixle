@@ -31,9 +31,30 @@ count histogram. The general bar for fusion is a *map-reducible* sufficient stat
 min/max, or a histogram -- not necessarily additive): that is what lets Binomial (n from max x) and
 NegativeBinomial (iterative dispersion over the count histogram) fuse despite non-additive/iterative MLEs.
 
+Beyond the templated kinds, coverage is COMPLETE for protocol-bearing factors:
+
+* **chain leaves** (MarkovChain with the Null length model, Dirichlet priors included): scored from
+  per-encoding init/transition log tables scatter-built before the row loop, statistics scattered from
+  the responsibility matrix in the post pass.
+* **bridged factors** (everything else inside a composite -- nested Mixtures, HMMs, nested Composites,
+  length-model chains, untemplated leaves like Laplace): scored from a precomputed per-component table
+  (each column the factor's own native ``seq_log_density``), estimated by the factor's own accumulator
+  driven by the responsibility matrix -- native semantics, priors and all, while the softmax and every
+  templated sibling stay in one nopython pass. Registered last; specific templates always outrank it.
+
+Every scorer and E-step has a chunk-parallel prange variant (fixed chunking, fixed-order combine:
+bit-stable across reruns and worker counts), honors reduced-precision compute (float32 rows, float64
+accumulation), and the scorers optionally take the qlut quantized log-sum-exp (``lse_bits``; error
+bounded by the grid half-step, compounding per mixture level on nested trees). The nested scalar-tree
+kernels (:mod:`fused_nested`) carry the same contracts.
+
+Principled exclusions, deliberate and documented rather than pending: E-steps always use EXACT exp (a
+delta-grid perturbation could flip a monotone-gate accept); bare nested mixtures keep fused_nested's
+in-kernel path (faster than bridging); GradLeaf M-steps stay eager torch (torch.compile measured 0.79-
+0.93x on CPU -- see the GradLeaf docstring).
+
 Generated kernels are compiled once and disk-cached (see :func:`_njit`), so the compile cost is paid once
-per structure *ever*, not per process. A leaf with no template (e.g. Laplace, whose weighted-median MLE
-keeps the raw observations) -> :func:`fusible` is False -> numpy.
+per structure *ever*, not per process.
 """
 
 from __future__ import annotations
@@ -745,13 +766,15 @@ def _markov_chain_to_value(init_hist_k: np.ndarray, trans_hist_k: np.ndarray, en
 
 
 def _markov_chain_matches(d: Any) -> bool:
-    """Fusible chain configs only: a plain (no-prior) MarkovChainDistribution whose length model is the
-    Null distribution (its seq_log_density contributes exactly zero, so the tables carry the whole
-    density). Chains with a real length distribution or a Dirichlet prior keep their own kernels."""
+    """Fast-path chain configs: a MarkovChainDistribution whose length model is the Null distribution
+    (its seq_log_density contributes exactly zero, so the tables carry the whole density). A Dirichlet
+    prior is fine -- the sufficient statistics are the standard count maps either way, and the
+    estimator applies its prior at estimate() exactly as on the host path (parity-tested). Chains
+    with a REAL length distribution fall through to the bridge template (native scoring/estimation,
+    length model included)."""
     return (
         type(d).__name__ == "MarkovChainDistribution"
         and type(getattr(d, "len_dist", None)).__name__ == "NullDistribution"
-        and getattr(d, "prior", None) is None
     )
 
 
@@ -796,14 +819,20 @@ register_leaf_template(
 )
 
 
-_BRIDGE_TYPES = frozenset({"MixtureDistribution", "HiddenMarkovModelDistribution", "CompositeDistribution"})
-
-
 def _bridge_matches(d: Any) -> bool:
-    """Combinators sitting inside a composite factor: scored and estimated through their OWN native
-    machinery (seq_log_density / accumulator seq_update), so ANY configuration they support -- priors
-    included -- is supported here. Registered LAST, so every specific template outranks the bridge."""
-    return type(d).__name__ in _BRIDGE_TYPES
+    """ANY factor speaking the sequence protocol, scored and estimated through its OWN native
+    machinery (seq_log_density / accumulator seq_update) -- so every configuration the factor itself
+    supports (priors, length models, arbitrary combinators) is supported here. Registered LAST, so
+    every specific template outranks the bridge and this is purely the completion of coverage: a
+    composite with ANY protocol-bearing factor now fuses, with the un-templated factors paying
+    exactly their host cost while the softmax, responsibilities, and templated siblings stay in one
+    nopython pass."""
+    return (
+        hasattr(d, "seq_log_density")
+        and hasattr(d, "dist_to_encoder")
+        and hasattr(d, "estimator")
+        and callable(getattr(d, "estimator", None))
+    )
 
 
 register_leaf_template(
@@ -1446,12 +1475,13 @@ def fused_seq_log_density(
     """
     plan = analyze(model)
     if plan is None:
-        if lse_bits is not None:
-            raise NotImplementedError("quantized LSE is wired for the template kernels; nested trees are exact-only.")
         from mixle.stats.compute.fused_nested import fused_nested_seq_log_density
 
-        # nested scalar tree (raises if not that either); same dtype/parallel contract
-        return fused_nested_seq_log_density(model, enc, compute_dtype=compute_dtype, parallel=parallel)
+        # nested scalar tree (raises if not that either); same dtype/parallel/quantized-LSE contract
+        # (nested error bound compounds per mixture level -- see the nested wrapper's docstring)
+        return fused_nested_seq_log_density(
+            model, enc, compute_dtype=compute_dtype, parallel=parallel, lse_bits=lse_bits, lse_span=lse_span
+        )
     data_arrays, param_arrays, _, n = _data_and_params(model, plan, enc, compute_dtype)
     logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
     out = np.empty(n, dtype=np.float64)

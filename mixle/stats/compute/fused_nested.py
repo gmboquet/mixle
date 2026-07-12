@@ -142,15 +142,21 @@ def _vals(node: _Leaf) -> list[str]:
 
 
 # --- code generation (recursive emit over the static tree) ----------------------------------------
-def _emit_score(node: Any, lines: list[str]) -> str:
-    """Append forward-pass lines computing ``node``'s score; return the score expression."""
+def _emit_score(node: Any, lines: list[str], quantized_lse: bool = False) -> str:
+    """Append forward-pass lines computing ``node``'s score; return the score expression.
+
+    ``quantized_lse`` replaces each mixture node's exp calls with one LUT gather over a delta-grid
+    (the qlut quantized-LSE semantics; SCORE kernels only -- the E-step's responsibilities always use
+    exact exp). Nested trees apply the log-sum-exp at every mixture level, so the error bound
+    compounds to ``depth * lse_error_bound(bits, span)`` -- stated in the wrapper and asserted in
+    tests, not hidden."""
     if isinstance(node, _Leaf):
         return node.template.expr(_vals(node), _argmap(node))  # type: ignore[misc]
     if isinstance(node, _Composite):
-        return "(" + " + ".join("(" + _emit_score(c, lines) + ")" for c in node.children) + ")"
+        return "(" + " + ".join("(" + _emit_score(c, lines, quantized_lse) + ")" for c in node.children) + ")"
     cvars = []
     for j, c in enumerate(node.children):
-        e = _emit_score(c, lines)
+        e = _emit_score(c, lines, quantized_lse)
         lines.append(f"    s{node.node_id}_{j} = logw{node.node_id}[{j}] + ({e})")
         cvars.append(f"s{node.node_id}_{j}")
     lines.append(f"    mx{node.node_id} = {cvars[0]}")
@@ -158,7 +164,13 @@ def _emit_score(node: Any, lines: list[str]) -> str:
         lines.append(f"    mx{node.node_id} = max(mx{node.node_id}, {v})")
     lines.append(f"    sm{node.node_id} = 0.0")
     for v in cvars:
-        lines.append(f"    sm{node.node_id} += np.exp({v} - mx{node.node_id})")
+        if quantized_lse:
+            lines.append(f"    qi{node.node_id} = int(np.rint(({v} - mx{node.node_id}) * lse_inv_delta)) + lse_levm1")
+            lines.append(f"    if qi{node.node_id} < 0:")
+            lines.append(f"        qi{node.node_id} = 0")
+            lines.append(f"    sm{node.node_id} += lse_lut[qi{node.node_id}]")
+        else:
+            lines.append(f"    sm{node.node_id} += np.exp({v} - mx{node.node_id})")
     lines.append(f"    ns{node.node_id} = mx{node.node_id} + np.log(sm{node.node_id})")
     return f"ns{node.node_id}"
 
@@ -228,14 +240,15 @@ def _sig(root: Any, ctx: _Ctx) -> tuple:
     return ("nested", _shape(root), tuple(ctx.slot_template[s].name for s in range(len(ctx.slots))))
 
 
-def _compile_score(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> Any:
-    cached = _SCORE_CACHE.get((sig, parallel))
+def _compile_score(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False, quantized_lse: bool = False) -> Any:
+    cached = _SCORE_CACHE.get((sig, parallel, quantized_lse))
     if cached is not None:
         return cached
     body: list[str] = []
-    expr = _emit_score(root, body)
+    expr = _emit_score(root, body, quantized_lse)
+    lse_args = ["lse_lut", "lse_inv_delta", "lse_levm1"] if quantized_lse else []
     if not parallel:
-        args = ", ".join(_data_args(ctx) + _param_args(root) + ["out"])
+        args = ", ".join(_data_args(ctx) + _param_args(root) + lse_args + ["out"])
         # k = 0: leaf templates index their (1,)-stacked params as p[k] (fused_codegen's component-loop
         # convention); in the nested emitter every leaf node is its own single-component stack.
         lines = [f"def _ns({args}):", "    n = out.shape[0]", "    k = 0", "    for i in range(n):"]
@@ -246,7 +259,7 @@ def _compile_score(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> 
         # same fixed-chunk prange design as fused_codegen: rows are disjoint (out[i] only), so the
         # parallel scorer is bit-stable across reruns and worker counts, and agrees with the
         # sequential kernel to 1-2 ULP (different fastmath binaries).
-        args = ", ".join(_data_args(ctx) + _param_args(root) + ["out", "n_chunks"])
+        args = ", ".join(_data_args(ctx) + _param_args(root) + lse_args + ["out", "n_chunks"])
         lines = [
             f"def _ns_par({args}):",
             "    n = out.shape[0]",
@@ -258,7 +271,7 @@ def _compile_score(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> 
         lines += ["        " + ln for ln in body]
         lines.append(f"            out[i] = {expr}")
         fn = _njit("\n".join(lines), "_ns_par", parallel=True)
-    _SCORE_CACHE[(sig, parallel)] = fn
+    _SCORE_CACHE[(sig, parallel, quantized_lse)] = fn
     return fn
 
 
@@ -357,8 +370,20 @@ def _fill_slots(model: Any, path: tuple, enc: Any, ctx: _Ctx) -> None:
         ctx.slot_data[slot] = ctx.slots[path][0].data(enc)
 
 
+def _mixture_depth(node: Any) -> int:
+    if isinstance(node, _Leaf):
+        return 0
+    child_max = max((_mixture_depth(c) for c in node.children), default=0)
+    return child_max + (1 if isinstance(node, _Mixture) else 0)
+
+
 def fused_nested_seq_log_density(
-    model: Any, enc: Any, compute_dtype: Any = None, parallel: bool | None = None
+    model: Any,
+    enc: Any,
+    compute_dtype: Any = None,
+    parallel: bool | None = None,
+    lse_bits: int | None = None,
+    lse_span: float = 24.0,
 ) -> np.ndarray:
     """Score encoded observations with the nested scalar fused kernel.
 
@@ -377,10 +402,25 @@ def fused_nested_seq_log_density(
     out = np.empty(n, dtype=np.float64)
     if parallel is None:
         parallel = _auto_parallel(n)
+    quantized = lse_bits is not None
+    lse_extra: tuple = ()
+    if quantized:
+        # per-node error <= lse_error_bound(bits, span); NESTED trees apply the LSE at every mixture
+        # level, so the whole-tree bound is depth * lse_error_bound -- callers get that via
+        # _mixture_depth and the tests assert it.
+        if not 1 <= int(lse_bits) <= 24:
+            raise ValueError(f"need 1 <= lse_bits <= 24, got {lse_bits}")
+        if lse_span <= 0:
+            raise ValueError(f"lse_span must be positive, got {lse_span}")
+        levels = 1 << int(lse_bits)
+        delta = float(lse_span) / levels
+        lse_extra = (np.exp((np.arange(levels, dtype=np.float64) - (levels - 1)) * delta), 1.0 / delta, levels - 1)
     if parallel:
-        _compile_score(root, ctx, _sig(root, ctx), parallel=True)(*data, *params, out, _n_chunks(n))
+        _compile_score(root, ctx, _sig(root, ctx), parallel=True, quantized_lse=quantized)(
+            *data, *params, *lse_extra, out, _n_chunks(n)
+        )
     else:
-        _compile_score(root, ctx, _sig(root, ctx))(*data, *params, out)
+        _compile_score(root, ctx, _sig(root, ctx), quantized_lse=quantized)(*data, *params, *lse_extra, out)
     return out
 
 

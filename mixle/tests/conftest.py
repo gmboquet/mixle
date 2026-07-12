@@ -43,6 +43,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "bingham_test.py": ("distribution", "stochastic", "slow"),
     "conformal_test.py": ("ppl", "integration", "slow"),
     "fused_codegen_test.py": ("numba", "optional"),
+    # TreeHMM explicit-signature kernel boundaries: integer weights must coerce, not crash eager
+    # dispatch (a Python-3.14 dispatch failure pinned) -- numba-gated like its siblings.
+    "tree_hmm_dtype_test.py": ("numba", "optional"),
     # Markov-chain leaf template (composites with chain factors fuse): host-parity + guard tests --
     # numba-gated for the same reason as fused_codegen_test.py.
     "fused_chain_test.py": ("numba", "optional"),
