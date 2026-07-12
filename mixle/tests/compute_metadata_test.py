@@ -498,6 +498,10 @@ class ComputeMetadataTestCase(unittest.TestCase):
             "mixle.stats.compute.pdist",
             # the vectorized seq_* drivers — pure pdist-protocol dispatch, not concrete distributions
             "mixle.stats.compute.sequence",
+            # SQUAREM's parameter packing: it exists PRECISELY to keep concrete-family knowledge out of
+            # inference/em.py -- its own module level imports only numpy (the family handlers import
+            # lazily inside the builder), and em.py imports just the packer function.
+            "mixle.stats.parameter_packing",
         }
         concrete_suffixes = (
             "Accumulator",
