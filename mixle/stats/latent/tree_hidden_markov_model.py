@@ -1035,10 +1035,26 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         if x[0] is not None:
             tz, _, (xbi, xp, xc, xl, txz, tp, tpz), enc_x, len_enc = x[0]
 
-            states = self._idx_rng.choice(self.num_states, replace=True, size=tz[-1])
+            states = np.ascontiguousarray(
+                self._idx_rng.choice(self.num_states, replace=True, size=tz[-1]), dtype=np.int64
+            )
 
+            # The kernel signature is EXPLICIT (int32 x6, int64 states, float64 weights): coerce the
+            # caller-supplied weights at the boundary -- integer weights (np.ones with an int dtype, a
+            # list of ints) otherwise arrive as int64 and eager dispatch refuses with "No matching
+            # definition" (seen on Python 3.14; the signature has no widening to hide it).
             numba_initialize(
-                tz, txz, tp, tpz, xp, xc, states, weights, self.init_counts, self.state_counts, self.trans_counts
+                tz,
+                txz,
+                tp,
+                tpz,
+                xp,
+                xc,
+                states,
+                np.ascontiguousarray(weights, dtype=np.float64),
+                self.init_counts,
+                self.state_counts,
+                self.trans_counts,
             )
 
             idx = len_enc[0]
@@ -1182,7 +1198,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 pr_obs,
                 p_level,
                 a_mat,
-                weights,
+                np.ascontiguousarray(weights, dtype=np.float64),  # explicit signature: see numba_initialize
                 betas,
                 etas,
                 alphas,

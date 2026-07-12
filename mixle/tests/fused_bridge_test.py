@@ -107,6 +107,82 @@ class BridgeParityTest(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_NUMBA, "fused kernels require numba")
+class UniversalBridgeCoverageTest(unittest.TestCase):
+    """The completion set: factors a specific template refuses now fuse through the bridge --
+    untemplated leaves, Dirichlet-prior chains (fast chain template, prior applied at estimate),
+    and length-model chains (bridge, native length semantics)."""
+
+    def test_untemplated_leaf_factor_fuses_with_host_parity(self):
+        from mixle.stats import LaplaceDistribution
+
+        rng = np.random.RandomState(4)
+        comps = [
+            CompositeDistribution((LaplaceDistribution(float(j), 1.0 + 0.3 * j), GaussianDistribution(float(j), 1.0)))
+            for j in range(2)
+        ]
+        model = MixtureDistribution(comps, [0.5, 0.5])
+        data = [(float(rng.laplace(0, 1)), float(rng.randn())) for _ in range(2000)]
+        _parity(self, model, data)
+
+    def test_prior_chain_takes_the_fast_template_and_matches_host(self):
+        from mixle.stats import MarkovChainDistribution
+
+        states = ["a", "b"]
+        from mixle.stats.bayes.dirichlet import DirichletDistribution
+
+        def chain(seed):
+            r = np.random.RandomState(seed)
+            init = r.dirichlet(np.ones(2))
+            trans = r.dirichlet(np.ones(2), size=2)
+            d = MarkovChainDistribution(
+                dict(zip(states, init)), {s: dict(zip(states, trans[i])) for i, s in enumerate(states)}
+            )
+            d.set_prior(
+                (
+                    states,
+                    DirichletDistribution(np.full(2, 2.0)),
+                    [DirichletDistribution(np.full(2, 2.0)) for _ in states],
+                )
+            )
+            return d
+
+        rng = np.random.RandomState(5)
+        comps = [CompositeDistribution((chain(j), GaussianDistribution(float(j), 1.0))) for j in range(2)]
+        model = MixtureDistribution(comps, [0.5, 0.5])
+        plan = fc.analyze(model)
+        self.assertEqual(plan.leaf_templates[0].name, "markovchain", "prior chains take the fast template")
+        data = [
+            ([states[rng.randint(2)] for _ in range(int(rng.randint(1, 6)))], float(rng.randn())) for _ in range(1500)
+        ]
+        _parity(self, model, data)
+
+    def test_length_model_chain_falls_to_the_bridge_and_matches_host(self):
+        from mixle.stats import MarkovChainDistribution
+        from mixle.stats import PoissonDistribution as P
+
+        states = ["a", "b"]
+
+        def chain(seed):
+            r = np.random.RandomState(seed)
+            init = r.dirichlet(np.ones(2))
+            trans = r.dirichlet(np.ones(2), size=2)
+            return MarkovChainDistribution(
+                dict(zip(states, init)),
+                {s: dict(zip(states, trans[i])) for i, s in enumerate(states)},
+                len_dist=P(3.0 + seed),
+            )
+
+        rng = np.random.RandomState(6)
+        comps = [CompositeDistribution((chain(j), GaussianDistribution(float(j), 1.0))) for j in range(2)]
+        model = MixtureDistribution(comps, [0.5, 0.5])
+        plan = fc.analyze(model)
+        self.assertEqual(plan.leaf_templates[0].name, "bridge", "length-model chains bridge natively")
+        data = [
+            ([states[rng.randint(2)] for _ in range(int(rng.randint(1, 7)))], float(rng.randn())) for _ in range(1500)
+        ]
+        _parity(self, model, data)
+
+
 class BridgeBoundaryTest(unittest.TestCase):
     def test_bare_nested_mixtures_keep_the_faster_fused_nested_path(self):
         model = MixtureDistribution([_inner_mix(0), _inner_mix(1)], [0.5, 0.5])
