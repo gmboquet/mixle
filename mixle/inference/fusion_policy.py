@@ -46,3 +46,51 @@ def should_auto_fuse(model: Any, enc_data: Any, max_its: int) -> bool:
         return n * max(int(max_its), 1) >= _FUSION_MIN_WORKLOAD
     except Exception:  # noqa: BLE001
         return False
+
+
+_BLOCK_MIN_COMPONENTS = 16
+_BLOCK_MIN_COMPONENT_PARAMS = 32
+_BLOCK_MIN_WEIGHTED_WORK = 5_000_000
+
+
+def prefer_block_schedule(model: Any, enc_data: Any, max_its: int) -> bool:
+    """Whether ``schedule="auto"`` should route an ELIGIBLE mixture to block-EM rather than the
+    full-tree path (which auto-fuses when it can).
+
+    The measured decision boundary (2026-07-12, 40k observations, 30 rounds): when the WHOLE model
+    fuses, the single-pass kernel computes every component column + the log-sum-exp in one sweep of
+    the data and nothing block scheduling saves can beat it (K=32 well-separated: fused full-tree
+    0.15s vs block-EM 0.66-0.79s under every cost model) -- per-COLUMN fusion cannot capture the
+    cross-component fusion win. Block-EM's niche is the models with NO whole-model kernel (deep
+    heterogeneous components: HMMs, neural leaves, non-templated families), where sparse selection
+    beat host full-tree EM by ~2.1x on a depth-21/247-node reproducer. So: block only when the
+    model does not fuse whole, with enough components to amortize the per-round orchestration and
+    enough workload to matter (the same floor :func:`should_auto_fuse` uses).
+    """
+    components = getattr(model, "components", None)
+    if components is None or len(components) < 2:
+        return False
+    try:
+        from mixle.utils.optional_deps import HAS_NUMBA
+
+        if HAS_NUMBA:
+            from mixle.stats.compute.fused_codegen import fusible
+
+            if fusible(model):
+                return False  # the whole-model fused kernel wins outright; see the docstring numbers
+    except Exception:  # noqa: BLE001 - fusibility probe must never break dispatch
+        pass
+    # Scheduling amortizes over the COST a skipped block avoids, not the component count per se:
+    # the depth-21 reproducer wins with only 3 components because each column is a deep composite
+    # (hundreds of parameters), while a 4-leaf flat mixture's columns are too cheap to be worth
+    # per-round orchestration. Either many blocks or expensive blocks qualify, and the workload
+    # floor is parameter-WEIGHTED for the same reason (observations x iterations x mean component
+    # parameter count approximates the full-tree work block selection gets to skip).
+    from mixle.inference.block_em import _parameter_count
+
+    param_counts = [max(_parameter_count(component), 1) for component in components]
+    if len(components) < _BLOCK_MIN_COMPONENTS and max(param_counts) < _BLOCK_MIN_COMPONENT_PARAMS:
+        return False
+    n = sum(int(c[0]) for c in enc_data) if isinstance(enc_data, list) else 0
+    weighted_work = n * max(int(max_its), 1) * (sum(param_counts) / len(param_counts))
+    return weighted_work >= _BLOCK_MIN_WEIGHTED_WORK
