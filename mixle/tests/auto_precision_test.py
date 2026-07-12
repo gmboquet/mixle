@@ -134,6 +134,12 @@ if __name__ == "__main__":
     unittest.main()
 
 
+try:
+    from mixle.utils.optional_deps import HAS_NUMBA
+except ImportError:  # pragma: no cover
+    HAS_NUMBA = False
+
+
 class MinimalPrecisionColdStartTestCase(unittest.TestCase):
     """optimize(precision="minimal") must plan against a REAL model on cold starts.
 
@@ -152,6 +158,7 @@ class MinimalPrecisionColdStartTestCase(unittest.TestCase):
         estimator = MixtureEstimator([GaussianEstimator() for _ in range(4)])
         return data, estimator
 
+    @unittest.skipUnless(HAS_NUMBA, "the fp32 plan requires the fused numba kernel")
     def test_cold_start_selects_float32_on_a_safe_mixture(self):
         from mixle.inference.estimation import optimize
 
@@ -174,6 +181,7 @@ class MinimalPrecisionColdStartTestCase(unittest.TestCase):
         self.assertEqual(np.dtype(plan.compute_dtype), np.dtype(np.float64))
         self.assertFalse(plan.reduced())
 
+    @unittest.skipUnless(HAS_NUMBA, "the fp32 plan requires the fused numba kernel")
     def test_warm_start_records_the_plan_too(self):
         from mixle.inference.estimation import optimize
         from mixle.stats import GaussianDistribution, MixtureDistribution
@@ -185,6 +193,7 @@ class MinimalPrecisionColdStartTestCase(unittest.TestCase):
         plan = estimator.last_precision_plan
         self.assertEqual(np.dtype(plan.compute_dtype), np.dtype(np.float32))
 
+    @unittest.skipUnless(HAS_NUMBA, "the fp32 plan requires the fused numba kernel")
     def test_out_stream_discloses_the_allocation(self):
         import io
 
