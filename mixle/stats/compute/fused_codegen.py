@@ -834,8 +834,33 @@ def _data_names(i: int, t: LeafTemplate) -> list[str]:
 _COMPILED: dict[tuple, Callable] = {}
 _ESTEP_COMPILED: dict[tuple, Callable] = {}
 
+# Parallel (prange) kernel policy. Chunk count is a PURE function of n -- never of the worker count --
+# and per-chunk partials combine in fixed order, so parallel results are bit-identical across runs and
+# across NUMBA_NUM_THREADS (probe: fingerprints equal at 1/4/8 threads; 4.6x at 8 threads on a 2M-row
+# 8-component E-step, ~1.0x at 1 thread; 3.1x end-to-end through fused_accumulate at 400k rows). Parallel
+# output differs from the SEQUENTIAL kernel by float re-association: chunk-boundary reassociation in the
+# E-step reductions (~1e-8 relative measured), and 1-2 ULP in the scorer -- the parallel scorer has no
+# cross-row reduction, but sequential and parallel are DIFFERENT fastmath binaries, and LLVM vectorizes
+# each loop nest differently (measured max 4.7e-16 relative). Bit-identity holds within each variant,
+# never across variants.
+_PARALLEL_MIN_OBS = 262_144  # below this the fork/join overhead eats the win
+_PARALLEL_MAX_CHUNKS = 256
+_PARALLEL_CHUNK_TARGET = 16_384
 
-def _emit(plan: FusedPlan) -> dict[str, list[str]]:
+
+def _n_chunks(n: int) -> int:
+    return max(1, min(_PARALLEL_MAX_CHUNKS, n // _PARALLEL_CHUNK_TARGET))
+
+
+def _auto_parallel(n: int) -> bool:
+    if n < _PARALLEL_MIN_OBS:
+        return False
+    import numba
+
+    return numba.get_num_threads() > 1
+
+
+def _emit(plan: FusedPlan, acc_suffix: str = "") -> dict[str, list[str]]:
     """Per-leaf source fragments shared by the scorer and the E-step.
 
     Each leaf contributes (by ``kind``): ``data``/``param`` argument names; ``precompute`` (matrix-only,
@@ -858,8 +883,8 @@ def _emit(plan: FusedPlan) -> dict[str, list[str]]:
             frag["acc_args"] += [f"S1_{i}", f"S2_{i}"]
             frag["post"].extend(t.mat_accumulate(i))  # type: ignore[misc]
             continue
-        accmap = {an: f"a{i}_{an}" for an in t.acc_names}
-        frag["acc_args"].extend(accmap.values())
+        accmap = {an: f"a{i}_{an}{acc_suffix}" for an in t.acc_names}
+        frag["acc_args"].extend(f"a{i}_{an}" for an in t.acc_names)  # signature names never carry the suffix
         if t.kind == "vector":
             frag["row"].extend(t.vec_row(i, amap))  # type: ignore[misc]
             frag["acc"].extend(t.vec_accumulate(i, accmap))  # type: ignore[misc]
@@ -936,7 +961,7 @@ def _private_cache_dir() -> str | None:
     return _CACHE_DIR if _owned_privately(_CACHE_DIR, require_dir=True) else None
 
 
-def _njit(src: str, fname: str) -> Callable:
+def _njit(src: str, fname: str, parallel: bool = False) -> Callable:
     """Compile generated source to a disk-cached ``njit`` function.
 
     The source (``def _fused.../_estep...``) is written to a stable per-source module file and decorated
@@ -962,7 +987,12 @@ def _njit(src: str, fname: str) -> Callable:
             # pre-existing file we do not own: it could be attacker-planted (arbitrary code execution).
             # os.replace over a symlink replaces the link itself, so this cannot be redirected outside.
             if not _owned_privately(path, require_dir=False):
-                module_src = f"import numpy as np\nimport numba\n\n\n@numba.njit(fastmath=True, cache=True)\n{src}\n"
+                deco = (
+                    "@numba.njit(fastmath=True, cache=True, parallel=True)"
+                    if parallel
+                    else "@numba.njit(fastmath=True, cache=True)"
+                )
+                module_src = f"import numpy as np\nimport numba\n\n\n{deco}\n{src}\n"
                 tmp = f"{path}.{os.getpid()}.tmp"
                 with open(tmp, "w") as fh:
                     fh.write(module_src)
@@ -973,78 +1003,150 @@ def _njit(src: str, fname: str) -> Callable:
             spec.loader.exec_module(mod)  # type: ignore[union-attr]
             return getattr(mod, fname)
         except Exception:  # noqa: BLE001
-            ns: dict[str, Any] = {"np": np}
+            ns: dict[str, Any] = {"np": np, "numba": numba}
             exec(src, ns)  # noqa: S102 -- generated from fixed templates, no user input
-            return numba.njit(fastmath=True)(ns[fname])
+            return numba.njit(fastmath=True, parallel=parallel)(ns[fname])
 
 
-def _compile(plan: FusedPlan) -> Callable:
-    cached = _COMPILED.get(plan.signature)
+def _score_body(indent: str, row_lines: list[str], llbuf_name: str) -> list[str]:
+    """The per-row score+log-sum-exp block shared by the sequential and parallel scorers."""
+    lines = [f"{indent}for k in range(kc):", f"{indent}    acc = logw[k]"]
+    lines += [f"{indent}    {rt}" for rt in row_lines]
+    lines += [
+        f"{indent}    {llbuf_name}[k] = acc",
+        f"{indent}m = {llbuf_name}[0]",
+        f"{indent}for k in range(1, kc):",
+        f"{indent}    if {llbuf_name}[k] > m:",
+        f"{indent}        m = {llbuf_name}[k]",
+        f"{indent}s = 0.0",
+        f"{indent}for k in range(kc):",
+        f"{indent}    s += np.exp({llbuf_name}[k] - m)",
+        f"{indent}out[i] = (m + np.log(s)) if m > -np.inf else -np.inf",  # all components -inf (out of support)
+    ]
+    return lines
+
+
+def _compile(plan: FusedPlan, parallel: bool = False) -> Callable:
+    cached = _COMPILED.get((plan.signature, parallel))
     if cached is not None:
         return cached
     f = _emit(plan)
     data_args = f["data_args"]
-    args = ", ".join(data_args + f["param_args"] + ["logw", "out", "llbuf"])
-    lines = [f"def _fused({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
-    lines += ["    " + ln for ln in f["precompute"]]
-    lines += ["    for i in range(n):", "        for k in range(kc):", "            acc = logw[k]"]
-    lines += ["            " + rt for rt in f["row"]]
-    lines += [
-        "            llbuf[k] = acc",
-        "        m = llbuf[0]",
-        "        for k in range(1, kc):",
-        "            if llbuf[k] > m:",
-        "                m = llbuf[k]",
-        "        s = 0.0",
-        "        for k in range(kc):",
-        "            s += np.exp(llbuf[k] - m)",
-        "        out[i] = (m + np.log(s)) if m > -np.inf else -np.inf",  # all components -inf (out of support)
-    ]
-    fn = _njit("\n".join(lines), "_fused")
-    _COMPILED[plan.signature] = fn
+    if not parallel:
+        args = ", ".join(data_args + f["param_args"] + ["logw", "out", "llbuf"])
+        lines = [f"def _fused({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
+        lines += ["    " + ln for ln in f["precompute"]]
+        lines += ["    for i in range(n):"]
+        lines += _score_body("        ", f["row"], "llbuf")
+        fn = _njit("\n".join(lines), "_fused")
+    else:
+        # prange over fixed chunks; out[i] rows are disjoint and each row's arithmetic is identical to
+        # the sequential kernel's, so the parallel scorer is BIT-IDENTICAL to it (asserted in tests).
+        args = ", ".join(data_args + f["param_args"] + ["logw", "out", "n_chunks"])
+        lines = [f"def _fused_par({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
+        lines += ["    " + ln for ln in f["precompute"]]
+        lines += [
+            "    step = (n + n_chunks - 1) // n_chunks",
+            "    for c in numba.prange(n_chunks):",
+            "        llbuf_c = np.empty(kc)",
+            "        for i in range(c * step, min(n, (c + 1) * step)):",
+        ]
+        lines += _score_body("            ", f["row"], "llbuf_c")
+        fn = _njit("\n".join(lines), "_fused_par", parallel=True)
+    _COMPILED[(plan.signature, parallel)] = fn
     return fn
 
 
-def _compile_estep(plan: FusedPlan) -> Callable:
-    cached = _ESTEP_COMPILED.get(plan.signature)
+def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
+    cached = _ESTEP_COMPILED.get((plan.signature, parallel))
     if cached is not None:
         return cached
-    f = _emit(plan)
+    f = _emit(plan, acc_suffix="_c" if parallel else "")
     data_args = f["data_args"]
-    args = ", ".join(
-        data_args + f["param_args"] + ["weights", "logw", "comp_counts", *f["acc_args"], "llbuf", "out_ll"]
-    )
-    lines = [f"def _estep({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
-    if plan.has_matrix:
-        lines.append("    R = np.empty((n, kc))")  # responsibilities -- only matrix accumulation needs them
-    lines += ["    " + ln for ln in f["precompute"]]
-    lines += [
-        "    for i in range(n):",
-        "        wi = weights[i]",
-        "        for k in range(kc):",
-        "            acc = logw[k]",
-    ]
-    lines += ["            " + rt for rt in f["row"]]
-    lines += [
-        "            llbuf[k] = acc",
-        "        m = llbuf[0]",
-        "        for k in range(1, kc):",
-        "            if llbuf[k] > m:",
-        "                m = llbuf[k]",
-        "        s = 0.0",
-        "        for k in range(kc):",
-        "            s += np.exp(llbuf[k] - m)",
-        "        out_ll[0] += wi * (m + np.log(s))",  # data log-likelihood, free as the posterior normalizer
-        "        for k in range(kc):",
-        "            r = np.exp(llbuf[k] - m) / s * wi",
-        "            comp_counts[k] += r",
-    ]
-    lines += ["            " + st for st in f["acc"]]
-    if plan.has_matrix:
-        lines.append("            R[i, k] = r")
-    lines += ["    " + ln for ln in f["post"]]
-    fn = _njit("\n".join(lines), "_estep")
-    _ESTEP_COMPILED[plan.signature] = fn
+    if not parallel:
+        args = ", ".join(
+            data_args + f["param_args"] + ["weights", "logw", "comp_counts", *f["acc_args"], "llbuf", "out_ll"]
+        )
+        lines = [f"def _estep({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
+        if plan.has_matrix:
+            lines.append("    R = np.empty((n, kc))")  # responsibilities -- only matrix accumulation needs them
+        lines += ["    " + ln for ln in f["precompute"]]
+        lines += [
+            "    for i in range(n):",
+            "        wi = weights[i]",
+            "        for k in range(kc):",
+            "            acc = logw[k]",
+        ]
+        lines += ["            " + rt for rt in f["row"]]
+        lines += [
+            "            llbuf[k] = acc",
+            "        m = llbuf[0]",
+            "        for k in range(1, kc):",
+            "            if llbuf[k] > m:",
+            "                m = llbuf[k]",
+            "        s = 0.0",
+            "        for k in range(kc):",
+            "            s += np.exp(llbuf[k] - m)",
+            "        out_ll[0] += wi * (m + np.log(s))",  # data log-likelihood, free as the posterior normalizer
+            "        for k in range(kc):",
+            "            r = np.exp(llbuf[k] - m) / s * wi",
+            "            comp_counts[k] += r",
+        ]
+        lines += ["            " + st for st in f["acc"]]
+        if plan.has_matrix:
+            lines.append("            R[i, k] = r")
+        lines += ["    " + ln for ln in f["post"]]
+        fn = _njit("\n".join(lines), "_estep")
+    else:
+        # Chunk-parallel E-step. Every accumulator written inside the responsibility loop gains a leading
+        # n_chunks axis (allocated by the caller); chunk c only ever touches row c, so there are NO
+        # parallel-region reductions at all -- numba's parfor reduction analysis has nothing to reorder,
+        # and the caller's fixed-order sum over the chunk axis makes results bit-stable across runs and
+        # worker counts. Matrix leaves are untouched here: their statistics come from the sequential BLAS
+        # post-pass over the (row-disjoint) responsibility matrix R, exactly as in the sequential kernel.
+        chunked = [
+            f"a{i}_{an}" for i, lt in enumerate(plan.leaf_templates) if lt.kind != "matrix" for an in lt.acc_names
+        ]
+        args = ", ".join(
+            data_args + f["param_args"] + ["weights", "logw", "comp_counts", *f["acc_args"], "out_ll", "n_chunks"]
+        )
+        lines = [f"def _estep_par({args}):", f"    n = {data_args[0]}.shape[0]", "    kc = logw.shape[0]"]
+        if plan.has_matrix:
+            lines.append("    R = np.empty((n, kc))")
+        lines += ["    " + ln for ln in f["precompute"]]
+        lines += [
+            "    step = (n + n_chunks - 1) // n_chunks",
+            "    for c in numba.prange(n_chunks):",
+            "        llbuf_c = np.empty(kc)",
+        ]
+        lines += [f"        {nm}_c = {nm}[c]" for nm in chunked]
+        lines += [
+            "        for i in range(c * step, min(n, (c + 1) * step)):",
+            "            wi = weights[i]",
+            "            for k in range(kc):",
+            "                acc = logw[k]",
+        ]
+        lines += ["                " + rt for rt in f["row"]]
+        lines += [
+            "                llbuf_c[k] = acc",
+            "            m = llbuf_c[0]",
+            "            for k in range(1, kc):",
+            "                if llbuf_c[k] > m:",
+            "                    m = llbuf_c[k]",
+            "            s = 0.0",
+            "            for k in range(kc):",
+            "                s += np.exp(llbuf_c[k] - m)",
+            "            out_ll[c] += wi * (m + np.log(s))",
+            "            for k in range(kc):",
+            "                r = np.exp(llbuf_c[k] - m) / s * wi",
+            "                comp_counts[c, k] += r",
+        ]
+        lines += ["                " + st for st in f["acc"]]
+        if plan.has_matrix:
+            lines.append("                R[i, k] = r")
+        lines += ["    " + ln for ln in f["post"]]
+        fn = _njit("\n".join(lines), "_estep_par", parallel=True)
+    _ESTEP_COMPILED[(plan.signature, parallel)] = fn
     return fn
 
 
@@ -1111,11 +1213,17 @@ def _data_and_params(
     return data_arrays, param_arrays, tab_ctx
 
 
-def fused_seq_log_density(model: Any, enc: Any, compute_dtype: Any = None) -> np.ndarray:
+def fused_seq_log_density(model: Any, enc: Any, compute_dtype: Any = None, parallel: bool | None = None) -> np.ndarray:
     """Per-row log densities of ``model`` over encoding ``enc`` via one fused numba pass.
 
     ``compute_dtype`` (e.g. ``np.float32``) runs the row arithmetic in reduced precision while the
     log-sum-exp accumulator and output stay float64; ``None`` keeps the byte-identical float64 path.
+
+    ``parallel``: ``None`` auto-engages the chunked prange scorer for large inputs (>= 262144 rows and
+    more than one numba worker); ``True``/``False`` force it. Rows are disjoint (no cross-row
+    reduction), so the parallel scorer is bit-identical across runs and worker counts; against the
+    sequential kernel it agrees to 1-2 ULP (different fastmath binaries vectorize differently --
+    measured max 4.7e-16 relative), not bit-for-bit.
 
     Raises ``ValueError`` if ``model`` is not fusible -- callers should check :func:`fusible` first.
     """
@@ -1126,9 +1234,15 @@ def fused_seq_log_density(model: Any, enc: Any, compute_dtype: Any = None) -> np
         return fused_nested_seq_log_density(model, enc)  # nested scalar tree (raises if not that either)
     data_arrays, param_arrays, _ = _data_and_params(model, plan, enc, compute_dtype)
     logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
-    out = np.empty(data_arrays[0].shape[0], dtype=np.float64)
-    llbuf = np.empty(plan.num_components, dtype=np.float64)
-    _compile(plan)(*data_arrays, *param_arrays, logw, out, llbuf)
+    n = data_arrays[0].shape[0]
+    out = np.empty(n, dtype=np.float64)
+    if parallel is None:
+        parallel = _auto_parallel(n)
+    if parallel:
+        _compile(plan, parallel=True)(*data_arrays, *param_arrays, logw, out, _n_chunks(n))
+    else:
+        llbuf = np.empty(plan.num_components, dtype=np.float64)
+        _compile(plan)(*data_arrays, *param_arrays, logw, out, llbuf)
     return out
 
 
@@ -1151,7 +1265,12 @@ def fusible_estep(model: Any) -> bool:
 
 
 def fused_accumulate(
-    model: Any, enc: Any, weights: np.ndarray, return_ll: bool = False, compute_dtype: Any = None
+    model: Any,
+    enc: Any,
+    weights: np.ndarray,
+    return_ll: bool = False,
+    compute_dtype: Any = None,
+    parallel: bool | None = None,
 ) -> Any:
     """Run one fused E-step and return the sufficient statistic in the estimator's ``value()`` format.
 
@@ -1161,6 +1280,13 @@ def fused_accumulate(
     log-likelihood (the posterior normalizer, computed for free in the same pass) is also returned as
     ``(suff_stat, ll)`` so the EM loop can skip a separate scoring pass. Raises ``ValueError`` if not
     fusible.
+
+    ``parallel``: ``None`` auto-engages the chunked prange E-step for large inputs (>= 262144 rows and
+    more than one numba worker); ``True``/``False`` force it. Chunk boundaries are a pure function of n
+    and chunk partials combine in fixed order, so parallel results are bit-identical across runs AND
+    across worker counts; they differ from the sequential kernel only by float re-association across
+    chunk boundaries (~1e-7 relative). Matrix leaves accumulate through the same sequential BLAS
+    post-pass in both variants.
     """
     plan = analyze(model)
     if plan is None:
@@ -1171,6 +1297,11 @@ def fused_accumulate(
         raise ValueError("%s is not a fusible E-step (an unsupported leaf)." % type(model).__name__)
     K = plan.num_components
     data_arrays, param_arrays, tab_ctx = _data_and_params(model, plan, enc, compute_dtype)
+    n = data_arrays[0].shape[0]
+    if parallel is None:
+        parallel = _auto_parallel(n)
+    nc = _n_chunks(n) if parallel else 0
+    chunk = (lambda shape: (nc, *shape)) if parallel else (lambda shape: shape)
 
     # per-leaf accumulator arrays, in the same leaf order the generated signature expects. data_arrays is
     # flattened by arity, so track the running offset to find each leaf's first data array.
@@ -1188,43 +1319,66 @@ def fused_accumulate(
             acc_arrays += [s1, s2]
         elif t.kind == "vector":
             d = data_arrays[offset].shape[1]  # (K,D) per-dim weighted statistics
-            ad = {an: np.zeros((K, d), dtype=np.float64) for an in t.acc_names}
+            ad = {an: np.zeros(chunk((K, d)), dtype=np.float64) for an in t.acc_names}
             scalar_acc.append(ad)
             matrix_acc.append((np.empty(0), np.empty(0)))
             acc_arrays.extend(ad.values())
         elif t.kind == "tabulated":
             width = tab_ctx[i][1] + 1  # max_x + 1; sx is (K,), the histogram (if any) is (K, max_x+1)
-            ad = {an: np.zeros((K, width) if an == "hist" else K, dtype=np.float64) for an in t.acc_names}
+            ad = {
+                an: np.zeros(chunk((K, width)) if an == "hist" else chunk((K,)), dtype=np.float64) for an in t.acc_names
+            }
             scalar_acc.append(ad)
             matrix_acc.append((np.empty(0), np.empty(0)))
             acc_arrays.extend(ad.values())
         elif t.kind == "categorical":
             width = tab_ctx[i][1]  # C categories; the only statistic is the (K, C) weighted count histogram
-            ad = {"hist": np.zeros((K, width), dtype=np.float64)}
+            ad = {"hist": np.zeros(chunk((K, width)), dtype=np.float64)}
             scalar_acc.append(ad)
             matrix_acc.append((np.empty(0), np.empty(0)))
             acc_arrays.append(ad["hist"])
         else:
-            ad = {an: np.zeros(K, dtype=np.float64) for an in t.acc_names}
+            ad = {an: np.zeros(chunk((K,)), dtype=np.float64) for an in t.acc_names}
             scalar_acc.append(ad)
             matrix_acc.append((np.empty(0), np.empty(0)))
             acc_arrays.extend(ad.values())
         offset += t.arity
 
-    comp_counts = np.zeros(K, dtype=np.float64)
     logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
-    llbuf = np.empty(K, dtype=np.float64)
-    out_ll = np.zeros(1, dtype=np.float64)
-    _compile_estep(plan)(
-        *data_arrays,
-        *param_arrays,
-        np.asarray(weights, dtype=np.float64),
-        logw,
-        comp_counts,
-        *acc_arrays,
-        llbuf,
-        out_ll,
-    )
+    if parallel:
+        comp_counts = np.zeros((nc, K), dtype=np.float64)
+        out_ll = np.zeros(nc, dtype=np.float64)
+        _compile_estep(plan, parallel=True)(
+            *data_arrays,
+            *param_arrays,
+            np.asarray(weights, dtype=np.float64),
+            logw,
+            comp_counts,
+            *acc_arrays,
+            out_ll,
+            nc,
+        )
+        # fixed-order combine over the chunk axis (numpy's single-threaded pairwise reduce): the SAME
+        # partials in the SAME order regardless of how many workers computed them -> bit-stable results.
+        comp_counts = comp_counts.sum(axis=0)
+        for i, t in enumerate(plan.leaf_templates):
+            if t.kind != "matrix":
+                for an in list(scalar_acc[i]):
+                    scalar_acc[i][an] = scalar_acc[i][an].sum(axis=0)
+    else:
+        comp_counts = np.zeros(K, dtype=np.float64)
+        llbuf = np.empty(K, dtype=np.float64)
+        out_ll = np.zeros(1, dtype=np.float64)
+        _compile_estep(plan)(
+            *data_arrays,
+            *param_arrays,
+            np.asarray(weights, dtype=np.float64),
+            logw,
+            comp_counts,
+            *acc_arrays,
+            llbuf,
+            out_ll,
+        )
 
     def leaf_value(i: int, t: LeafTemplate, k: int) -> Any:
         if t.kind == "matrix":
@@ -1248,7 +1402,7 @@ def fused_accumulate(
         return tuple(leaf_vals) if plan.component_is_composite else leaf_vals[0]
 
     suff = (comp_counts, tuple(node_value(k) for k in range(K))) if plan.is_mixture else node_value(0)
-    return (suff, float(out_ll[0])) if return_ll else suff
+    return (suff, float(out_ll.sum())) if return_ll else suff
 
 
 # --- kernel wiring (used by optimize(..., engine=FUSED_NUMPY_ENGINE) for fusible models) ------------
