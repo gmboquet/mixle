@@ -51,6 +51,7 @@ from mixle.inference.freeze_rollup import (
     FreezeRollupCache,
     _combine,
     _component_log_density_matrix_profiled,
+    _component_suff_stat,
     _log_density_from_matrix,
     _m_step,
     _resolve_payload,
@@ -171,20 +172,31 @@ def _block_scores(
     model: MixtureDistribution,
     eligible: list[int],
     last_q_gain: dict[int, float],
-) -> tuple[dict[int, float], dict[int, float], dict[int, float], dict[int, float]]:
-    """Return last measured data-Q gain per structural-cost unit for eligible blocks."""
+    measured_cost: dict[int, float] | None = None,
+) -> tuple[dict[int, float], dict[int, float], dict[int, float], dict[int, float], str]:
+    """Return last measured data-Q gain per cost unit for eligible blocks.
+
+    Cost is the MEASURED per-component density seconds from earlier rounds' timing receipts when
+    every eligible block has one (``cost_model="measured"``); otherwise the structural parameter
+    count proxy. Mixed units are never compared: measured pricing engages all-or-nothing.
+    """
     gain_per_cost: dict[int, float] = {}
     cost: dict[int, float] = {}
     residual: dict[int, float] = {}
     q_gain: dict[int, float] = {}
+    use_measured = measured_cost is not None and all(measured_cost.get(idx, 0.0) > 0.0 for idx in eligible)
+    basis = "measured_seconds" if use_measured and eligible else "structural_parameter_count"
     for idx in eligible:
         gain = max(float(last_q_gain.get(idx, 0.0)), 0.0)
-        block_cost = float(max(_parameter_count(model.components[idx]), 1))
+        if use_measured:
+            block_cost = float(measured_cost[idx])
+        else:
+            block_cost = float(max(_parameter_count(model.components[idx]), 1))
         cost[idx] = block_cost
         gain_per_cost[idx] = gain / block_cost
         residual[idx] = gain
         q_gain[idx] = gain
-    return gain_per_cost, cost, residual, q_gain
+    return gain_per_cost, cost, residual, q_gain, basis
 
 
 def _parameter_count(root: Any) -> int:
@@ -315,6 +327,7 @@ def _sparse_block_m_step(
     active: tuple[int, ...],
     responsibilities: np.ndarray,
     boundary_weight_step: float,
+    compute_dtype: Any = None,
 ) -> tuple[MixtureDistribution, np.ndarray, float]:
     """Re-estimate active leaves and the active-plus-inactive-mass weight block."""
 
@@ -324,9 +337,10 @@ def _sparse_block_m_step(
         if model.zw[idx] or counts[position] <= 0.0:
             continue
         enc_i = _component_enc(enc_data, idx)
-        accumulator = estimator.estimators[idx].accumulator_factory().make()
-        accumulator.seq_update(enc_i, responsibilities[:, position], model.components[idx])
-        components[idx] = estimator.estimators[idx].estimate(float(counts[position]), accumulator.value())
+        suff_stat = _component_suff_stat(
+            estimator.estimators[idx], model.components[idx], enc_i, responsibilities[:, position], compute_dtype
+        )
+        components[idx] = estimator.estimators[idx].estimate(float(counts[position]), suff_stat)
     weights, inactive_scale = _constrained_block_weights(
         estimator,
         model,
@@ -461,7 +475,9 @@ def run_block_em(
     boundary_weight_step: float = _DEFAULT_BOUNDARY_WEIGHT_STEP,
     full_refresh_interval: int | None = 10,
     schedule_wave_rounds: int = 1,
-    objective_audit_interval: int | None = 10,
+    objective_audit_interval: int | None | str = 10,
+    compute_dtype: Any = None,
+    cost_model: str = "structural",
     policy: str | LearnedController = "greedy",
     controller: LearnedController | None = None,
 ) -> tuple[MixtureDistribution, list[BlockEMStats]]:
@@ -555,8 +571,16 @@ def run_block_em(
     """
     if not isinstance(initial_model, MixtureDistribution):
         raise TypeError("run_block_em requires a MixtureDistribution model.")
-    if objective_audit_interval is not None and objective_audit_interval < 1:
-        raise ValueError("objective_audit_interval must be positive or None.")
+    if (
+        objective_audit_interval is not None
+        and not isinstance(objective_audit_interval, str)
+        and objective_audit_interval < 1
+    ):
+        raise ValueError("objective_audit_interval must be positive, None, or 'auto'.")
+    if isinstance(objective_audit_interval, str) and objective_audit_interval != "auto":
+        raise ValueError("objective_audit_interval accepts an int, None, or 'auto'; got %r." % objective_audit_interval)
+    if cost_model not in ("structural", "measured"):
+        raise ValueError("cost_model must be 'structural' or 'measured'; got %r." % (cost_model,))
     if schedule_wave_rounds < 1:
         raise ValueError("schedule_wave_rounds must be positive.")
     if not 0.0 < boundary_weight_step <= 1.0:
@@ -604,6 +628,12 @@ def run_block_em(
     current_log_density: np.ndarray | None = None
     current_impossible: np.ndarray | None = None
     mutable_state = has_mutable_state(model, estimator)
+    if objective_audit_interval == "auto":
+        # Certificate-aware audit cadence: a tree of exact/GEM updates carries the monotone
+        # certificate, so its Q-certified rounds need only sparse exact audits; stochastic
+        # (mutable) updates get dense ones. Mirrors the convergence-certificate tiers.
+        objective_audit_interval = 5 if mutable_state else 20
+    measured_cost: dict[int, float] = {}
     wave_active: set[int] | None = None
     wave_eligible: set[int] | None = None
     wave_degenerate = False
@@ -633,7 +663,9 @@ def run_block_em(
             else {idx for idx in positive if model.w[idx] < weight_tol}
         )
         eligible = [idx for idx in positive if idx not in dormant]
-        scores, cost, residual, q_gain = _block_scores(model, positive, last_q_gain)
+        scores, cost, residual, q_gain, cost_basis = _block_scores(
+            model, positive, last_q_gain, measured_cost if cost_model == "measured" else None
+        )
 
         controller_state: ControllerState | None = None
         controller_action: ControllerAction | None = None
@@ -707,7 +739,7 @@ def run_block_em(
         reused_current_matrix = current_ll_mat is not None
         if current_ll_mat is None:
             ll_mat, evals_e, estep_profile = _component_log_density_matrix_profiled(
-                model, enc_payload, cache, scheduled_inactive
+                model, enc_payload, cache, scheduled_inactive, compute_dtype=compute_dtype
             )
         else:
             ll_mat = current_ll_mat
@@ -749,12 +781,13 @@ def run_block_em(
                 active_indices,
                 gamma_active,
                 boundary_weight_step,
+                compute_dtype=compute_dtype,
             )
             counts = None
         else:
             if gamma is None:  # pragma: no cover - established by the branch above
                 raise RuntimeError("dense block M-step requires dense responsibilities.")
-            candidate = _m_step(enc_payload, estimator, model, gamma, scheduled_inactive)
+            candidate = _m_step(enc_payload, estimator, model, gamma, scheduled_inactive, compute_dtype=compute_dtype)
             counts = gamma.sum(axis=0)
             active_counts = counts[list(active_indices)]
             inactive_scale = 1.0
@@ -766,12 +799,13 @@ def run_block_em(
                     enc_payload,
                     active,
                     ll_mat.shape[0],
+                    compute_dtype=compute_dtype,
                 )
             )
             ll_mat_c = None
         else:
             ll_mat_c, evals_c, candidate_profile = _updated_component_log_density_matrix_profiled(
-                candidate, enc_payload, active, ll_mat
+                candidate, enc_payload, active, ll_mat, compute_dtype=compute_dtype
             )
             candidate_indices = active_indices
             candidate_columns = ll_mat_c[:, candidate_indices]
@@ -936,8 +970,13 @@ def run_block_em(
             and forced_cost <= budget_cost + 1.0e-12
         ):
             failures.append("scheduler_budget_exceeded_without_forced_work")
+        for profile in (estep_profile, candidate_profile):
+            for cost_idx, seconds in profile.component_evaluation_seconds:
+                if seconds > 0.0:
+                    measured_cost[cost_idx] = float(seconds)
         assumptions = BlockEMAssumptionReceipt(
             declared_budget_fraction=round_budget_fraction,
+            cost_basis=cost_basis,
             eligible_cost=eligible_cost,
             selected_cost=selected_cost,
             forced_cost=forced_cost,

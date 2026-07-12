@@ -44,9 +44,9 @@ def _shift_components(candidate, indices, shift=8.0):
 def _corrupt_sparse(monkeypatch):
     real = block_em_module._sparse_block_m_step
 
-    def wrapper(enc_payload, estimator, model, active_indices, gamma_active, boundary_weight_step):
+    def wrapper(enc_payload, estimator, model, active_indices, gamma_active, boundary_weight_step, **kwargs):
         candidate, active_counts, inactive_scale = real(
-            enc_payload, estimator, model, active_indices, gamma_active, boundary_weight_step
+            enc_payload, estimator, model, active_indices, gamma_active, boundary_weight_step, **kwargs
         )
         return _shift_components(candidate, active_indices), active_counts, inactive_scale
 
@@ -69,14 +69,14 @@ def _corrupt_all_catastrophic(monkeypatch):
     real_sparse = block_em_module._sparse_block_m_step
     real_dense = block_em_module._m_step
 
-    def dense(enc_payload, estimator, model, gamma, scheduled_inactive):
-        candidate = real_dense(enc_payload, estimator, model, gamma, scheduled_inactive)
+    def dense(enc_payload, estimator, model, gamma, scheduled_inactive, **kwargs):
+        candidate = real_dense(enc_payload, estimator, model, gamma, scheduled_inactive, **kwargs)
         active = [i for i in range(model.num_components) if i not in scheduled_inactive]
         return _wreck_active(candidate, model, active)
 
-    def sparse(enc_payload, estimator, model, active_indices, gamma_active, boundary_weight_step):
+    def sparse(enc_payload, estimator, model, active_indices, gamma_active, boundary_weight_step, **kwargs):
         candidate, active_counts, _ = real_sparse(
-            enc_payload, estimator, model, active_indices, gamma_active, boundary_weight_step
+            enc_payload, estimator, model, active_indices, gamma_active, boundary_weight_step, **kwargs
         )
         # weights are frozen at the current model's, so the consistent inactive scale is exactly 1.
         return _wreck_active(candidate, model, active_indices), active_counts, 1.0

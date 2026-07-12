@@ -246,7 +246,9 @@ class FreezeRollupCache:
         self._frozen_streak[idx] = streak
         return streak >= self.freeze_patience
 
-    def component_log_density(self, idx: int, component: Any, enc: Any, *, frozen: bool) -> tuple[np.ndarray, bool]:
+    def component_log_density(
+        self, idx: int, component: Any, enc: Any, *, frozen: bool, compute_dtype: Any = None
+    ) -> tuple[np.ndarray, bool]:
         """Return ``(log_density, was_cache_hit)`` for one component on this round.
 
         A cache hit costs a dict lookup + an ``O(param_count)`` signature compare -- never a call
@@ -259,7 +261,7 @@ class FreezeRollupCache:
         entry = self._entries.get(idx)
         if frozen and entry is not None and entry.signature == signature:
             return entry.log_density, True
-        log_density = np.asarray(component.seq_log_density(enc), dtype=np.float64)
+        log_density = _component_score(component, enc, compute_dtype)
         self._entries[idx] = _CacheEntry(signature=signature, log_density=log_density)
         return log_density, False
 
@@ -303,6 +305,99 @@ def detect_frozen(cache: FreezeRollupCache, model: MixtureDistribution) -> set[i
     return frozen
 
 
+_FUSED_SCORING: tuple | None | bool = None
+
+
+def _fused_scoring():
+    """Lazily resolve the fused per-subtree scorer; False when numba/codegen is unavailable."""
+    global _FUSED_SCORING
+    if _FUSED_SCORING is None:
+        try:
+            # fused_codegen itself imports without numba (its `import numba` is lazy, inside kernel
+            # compilation), so availability must be checked HERE -- otherwise the fused route is
+            # taken on numba-free installs and crashes mid-fit with ModuleNotFoundError.
+            from mixle.utils.optional_deps import HAS_NUMBA
+
+            if not HAS_NUMBA:
+                _FUSED_SCORING = False
+                return _FUSED_SCORING
+            from mixle.stats.compute.fused_codegen import (
+                fused_accumulate,
+                fused_seq_log_density,
+                fusible,
+                fusible_estep,
+            )
+
+            _FUSED_SCORING = (fused_seq_log_density, fusible, fused_accumulate, fusible_estep)
+        except ImportError:  # pragma: no cover - numba optional
+            _FUSED_SCORING = False
+    return _FUSED_SCORING
+
+
+def _component_suff_stat(
+    component_estimator: Any,
+    component_model: Any,
+    enc: Any,
+    weights: np.ndarray,
+    compute_dtype: Any = None,
+) -> Any:
+    """One component's responsibility-weighted sufficient statistic, fused when the subtree allows.
+
+    The M-step twin of :func:`_component_score`: a COMBINATOR component whose subtree fuses gets
+    its whole E-step accumulation (inner responsibilities + per-leaf weighted statistics) in one
+    nopython pass, packed in the estimator's own ``value()`` format -- eliminating the per-factor
+    host walk that dominates deep components' M-step cost. Bare leaves keep the host accumulator
+    (already a single vectorized pass), as do non-templated subtrees and estimators whose M-step
+    needs more than fixed-width resident statistics. The fused kernel's reductions stay float64
+    regardless of ``compute_dtype`` (only row arithmetic narrows).
+    """
+    fused = _fused_scoring()
+    if fused:
+        _, fusible, fused_accumulate, fusible_estep = fused
+        is_combinator = (
+            getattr(component_model, "components", None) is not None
+            or getattr(component_model, "dists", None) is not None
+        )
+        # Same combinator guard and cache contract as _component_score (see the comment there);
+        # accumulation reductions are float64 in both kernel families regardless of compute_dtype.
+        if is_combinator and fusible(component_model) and fusible_estep(component_model):
+            from mixle.stats.compute.kernel import _estimator_resident_supported
+
+            if _estimator_resident_supported(component_estimator):
+                return fused_accumulate(component_model, enc, weights, compute_dtype=compute_dtype)
+    accumulator = component_estimator.accumulator_factory().make()
+    accumulator.seq_update(enc, weights, component_model)
+    return accumulator.value()
+
+
+def _component_score(component: Any, enc: Any, compute_dtype: Any = None) -> np.ndarray:
+    """One component's log-density column: the fused numba kernel when the SUBTREE fuses, else the
+    host ``seq_log_density`` path.
+
+    This is where the block/typed schedulers stop forfeiting the fused kernel the default
+    ``optimize`` path already uses: each mixture component is itself a model, so a fusible
+    component (deep scalar chains, composites of templated leaves) scores in one compiled pass
+    while non-templated components (HMMs, GradLeaf, Laplace) keep the host path. ``compute_dtype``
+    threads the validated reduced-precision band through (None = float64).
+    """
+    fused = _fused_scoring()
+    if fused:
+        fused_seq_log_density, fusible = fused[0], fused[1]
+        # Only COMBINATOR components go through the fused kernel: a bare leaf is already one
+        # vectorized host pass (routing it only added dispatch overhead). Both kernel families
+        # share the once-per-structure-EVER compile contract: template kernels and the nested
+        # scalar-tree kernels are structure-keyed and disk-cached (measured on a depth-18 chain
+        # component: first-ever compile ~4.5s, then 0.10s in ANY process vs 0.34s on the host walk
+        # -- 3.4x; dispatcher signature counts stay at 1-2, i.e. no per-call respecialization).
+        # The nested kernels ignore compute_dtype and always run float64.
+        is_combinator = (
+            getattr(component, "components", None) is not None or getattr(component, "dists", None) is not None
+        )
+        if is_combinator and fusible(component):
+            return np.asarray(fused_seq_log_density(component, enc, compute_dtype), dtype=np.float64)
+    return np.asarray(component.seq_log_density(enc), dtype=np.float64)
+
+
 def _combine(ll_mat: np.ndarray, log_w: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Row-wise log-sum-exp combine of a component log-density matrix into ``(log_density, gamma)``.
 
@@ -340,7 +435,11 @@ def _log_density_from_matrix(ll_mat: np.ndarray, log_w: np.ndarray) -> np.ndarra
 
 
 def _component_log_density_matrix_profiled(
-    model: MixtureDistribution, enc_data: Any, cache: FreezeRollupCache, frozen_idx: set[int]
+    model: MixtureDistribution,
+    enc_data: Any,
+    cache: FreezeRollupCache,
+    frozen_idx: set[int],
+    compute_dtype: Any = None,
 ) -> tuple[np.ndarray, int, DensityMatrixProfile]:
     """Build a component score matrix and expose the assumptions behind saved work."""
 
@@ -359,9 +458,11 @@ def _component_log_density_matrix_profiled(
         enc_i = _component_enc(enc_data, idx)
         started = time.perf_counter()
         if idx in frozen_idx:
-            log_density, hit = cache.component_log_density(idx, model.components[idx], enc_i, frozen=True)
+            log_density, hit = cache.component_log_density(
+                idx, model.components[idx], enc_i, frozen=True, compute_dtype=compute_dtype
+            )
         else:
-            log_density = np.asarray(model.components[idx].seq_log_density(enc_i), dtype=np.float64)
+            log_density = _component_score(model.components[idx], enc_i, compute_dtype)
             hit = False
         elapsed = time.perf_counter() - started
         if hit:
@@ -400,6 +501,7 @@ def _updated_component_log_density_matrix_profiled(
     enc_data: Any,
     active_idx: set[int],
     base_matrix: np.ndarray,
+    compute_dtype: Any = None,
 ) -> tuple[np.ndarray, int, DensityMatrixProfile]:
     """Copy a valid prior matrix and replace only columns whose components moved."""
 
@@ -410,6 +512,7 @@ def _updated_component_log_density_matrix_profiled(
         enc_data,
         active_idx,
         base_matrix.shape[0],
+        compute_dtype=compute_dtype,
     )
     assembly_started = time.perf_counter()
     ll_mat = base_matrix.copy()
@@ -434,6 +537,7 @@ def _updated_component_log_density_columns_profiled(
     enc_data: Any,
     active_idx: set[int],
     nobs: int,
+    compute_dtype: Any = None,
 ) -> tuple[tuple[int, ...], np.ndarray, int, DensityMatrixProfile]:
     """Score moved components without cache hashing or a full-matrix copy.
 
@@ -456,7 +560,7 @@ def _updated_component_log_density_columns_profiled(
             continue
         enc_i = _component_enc(enc_data, idx)
         started = time.perf_counter()
-        log_density = np.asarray(model.components[idx].seq_log_density(enc_i), dtype=np.float64)
+        log_density = _component_score(model.components[idx], enc_i, compute_dtype)
         elapsed = time.perf_counter() - started
         if len(log_density) != nobs:
             raise ValueError("updated component score length does not match the base matrix.")
@@ -551,6 +655,7 @@ def _m_step(
     model: MixtureDistribution,
     gamma: np.ndarray,
     frozen_idx: set[int],
+    compute_dtype: Any = None,
 ) -> MixtureDistribution:
     """One freeze/roll-up M-step: only ``frozen_idx``-excluded (active) components are re-estimated.
 
@@ -569,9 +674,10 @@ def _m_step(
         if idx in frozen_idx or model.zw[idx]:
             continue
         enc_i = _component_enc(enc_data, idx)
-        acc = estimator.estimators[idx].accumulator_factory().make()
-        acc.seq_update(enc_i, gamma[:, idx], model.components[idx])
-        new_components[idx] = estimator.estimators[idx].estimate(float(counts[idx]), acc.value())
+        suff_stat = _component_suff_stat(
+            estimator.estimators[idx], model.components[idx], enc_i, gamma[:, idx], compute_dtype
+        )
+        new_components[idx] = estimator.estimators[idx].estimate(float(counts[idx]), suff_stat)
     w = _mixture_weights(estimator, counts)
     return MixtureDistribution(new_components, w, name=estimator.name)
 
