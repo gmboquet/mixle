@@ -78,9 +78,7 @@ class BridgeParityTest(unittest.TestCase):
         rng = np.random.RandomState(1)
         comps = [CompositeDistribution((_hmm(j), PoissonDistribution(2.0 + j))) for j in range(2)]
         model = MixtureDistribution(comps, [0.6, 0.4])
-        data = [
-            ([float(rng.randn()) for _ in range(int(rng.randint(2, 7)))], int(rng.poisson(3))) for _ in range(1500)
-        ]
+        data = [([float(rng.randn()) for _ in range(int(rng.randint(2, 7)))], int(rng.poisson(3))) for _ in range(1500)]
         _parity(self, model, data)
 
     def test_nested_composite_factor_fuses(self):
