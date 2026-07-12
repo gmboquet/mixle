@@ -313,12 +313,59 @@ def _fused_scoring():
     global _FUSED_SCORING
     if _FUSED_SCORING is None:
         try:
-            from mixle.stats.compute.fused_codegen import fused_seq_log_density, fusible
+            from mixle.stats.compute.fused_codegen import (
+                analyze,
+                fused_accumulate,
+                fused_seq_log_density,
+                fusible,
+                fusible_estep,
+            )
 
-            _FUSED_SCORING = (fused_seq_log_density, fusible)
+            _FUSED_SCORING = (fused_seq_log_density, fusible, fused_accumulate, fusible_estep, analyze)
         except ImportError:  # pragma: no cover - numba optional
             _FUSED_SCORING = False
     return _FUSED_SCORING
+
+
+def _component_suff_stat(
+    component_estimator: Any,
+    component_model: Any,
+    enc: Any,
+    weights: np.ndarray,
+    compute_dtype: Any = None,
+) -> Any:
+    """One component's responsibility-weighted sufficient statistic, fused when the subtree allows.
+
+    The M-step twin of :func:`_component_score`: a COMBINATOR component whose subtree fuses gets
+    its whole E-step accumulation (inner responsibilities + per-leaf weighted statistics) in one
+    nopython pass, packed in the estimator's own ``value()`` format -- eliminating the per-factor
+    host walk that dominates deep components' M-step cost. Bare leaves keep the host accumulator
+    (already a single vectorized pass), as do non-templated subtrees and estimators whose M-step
+    needs more than fixed-width resident statistics. The fused kernel's reductions stay float64
+    regardless of ``compute_dtype`` (only row arithmetic narrows).
+    """
+    fused = _fused_scoring()
+    if fused:
+        _, fusible, fused_accumulate, fusible_estep, analyze = fused
+        is_combinator = (
+            getattr(component_model, "components", None) is not None
+            or getattr(component_model, "dists", None) is not None
+        )
+        # Template path only, same rationale as _component_score: the nested fallback recompiles
+        # per call (measured 13x slower on deep chains), so it stays host until structure-cached.
+        if (
+            is_combinator
+            and fusible(component_model)
+            and fusible_estep(component_model)
+            and analyze(component_model) is not None
+        ):
+            from mixle.stats.compute.kernel import _estimator_resident_supported
+
+            if _estimator_resident_supported(component_estimator):
+                return fused_accumulate(component_model, enc, weights, compute_dtype=compute_dtype)
+    accumulator = component_estimator.accumulator_factory().make()
+    accumulator.seq_update(enc, weights, component_model)
+    return accumulator.value()
 
 
 def _component_score(component: Any, enc: Any, compute_dtype: Any = None) -> np.ndarray:
@@ -333,16 +380,18 @@ def _component_score(component: Any, enc: Any, compute_dtype: Any = None) -> np.
     """
     fused = _fused_scoring()
     if fused:
-        fused_seq_log_density, fusible = fused
-        # Only COMBINATOR components go through the fused kernel: within-component fusion pays by
-        # eliminating per-factor passes/allocations, which a bare leaf does not have (its host
-        # seq_log_density is already one vectorized pass; measured, routing leaves through the
-        # kernel only added per-column dispatch overhead). The cross-component fusion win belongs
-        # to the whole-model kernel and is the dispatcher's job, not this scorer's.
+        fused_seq_log_density, fusible, analyze = fused[0], fused[1], fused[4]
+        # Only COMBINATOR components on the structure-cached TEMPLATE path go through the fused
+        # kernel. Bare leaves are already one vectorized host pass (routing them only added
+        # dispatch overhead), and the nested-tree fallback (analyze() -> None -> fused_nested)
+        # recompiles per call today -- measured 13x SLOWER on deep-chain components -- so it is
+        # excluded until its kernels are structure-cached like the template path's. The
+        # cross-component fusion win belongs to the whole-model kernel and is the dispatcher's
+        # job, not this scorer's.
         is_combinator = (
             getattr(component, "components", None) is not None or getattr(component, "dists", None) is not None
         )
-        if is_combinator and fusible(component):
+        if is_combinator and fusible(component) and analyze(component) is not None:
             return np.asarray(fused_seq_log_density(component, enc, compute_dtype), dtype=np.float64)
     return np.asarray(component.seq_log_density(enc), dtype=np.float64)
 
@@ -604,6 +653,7 @@ def _m_step(
     model: MixtureDistribution,
     gamma: np.ndarray,
     frozen_idx: set[int],
+    compute_dtype: Any = None,
 ) -> MixtureDistribution:
     """One freeze/roll-up M-step: only ``frozen_idx``-excluded (active) components are re-estimated.
 
@@ -622,9 +672,10 @@ def _m_step(
         if idx in frozen_idx or model.zw[idx]:
             continue
         enc_i = _component_enc(enc_data, idx)
-        acc = estimator.estimators[idx].accumulator_factory().make()
-        acc.seq_update(enc_i, gamma[:, idx], model.components[idx])
-        new_components[idx] = estimator.estimators[idx].estimate(float(counts[idx]), acc.value())
+        suff_stat = _component_suff_stat(
+            estimator.estimators[idx], model.components[idx], enc_i, gamma[:, idx], compute_dtype
+        )
+        new_components[idx] = estimator.estimators[idx].estimate(float(counts[idx]), suff_stat)
     w = _mixture_weights(estimator, counts)
     return MixtureDistribution(new_components, w, name=estimator.name)
 
