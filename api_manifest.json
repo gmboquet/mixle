@@ -1069,6 +1069,7 @@
     "joint",
     "kaplan_meier",
     "lipschitz",
+    "loo",
     "loo_stack",
     "loo_stacking_weights",
     "lower",
@@ -1082,7 +1083,8 @@
     "potential",
     "prior_predictive",
     "prior_predictive_check",
-    "structured_vi"
+    "structured_vi",
+    "waic"
   ],
   "mixle.reason": [
     "AXIOMS",

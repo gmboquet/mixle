@@ -38,6 +38,27 @@ class TransitionOperator:
 
     n_states: int
 
+    # Operators are required components of the serializable StructuredHMM / InputOutputHMM but are not
+    # distributions or estimators themselves, so they opt in to mixle JSON serialization explicitly
+    # (state round-trips via __dict__; SparseTransition's csr matrix uses the sparse codec).
+    __pysp_serializable__ = True
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a safe JSON-compatible representation of this operator."""
+        from mixle.utils.serialization import to_serializable
+
+        return to_serializable(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> TransitionOperator:
+        """Reconstruct an operator from ``to_dict`` output."""
+        from mixle.utils.serialization import from_serializable
+
+        rv = from_serializable(payload)
+        if not isinstance(rv, cls):
+            raise TypeError("decoded object is %s, not %s" % (type(rv).__name__, cls.__name__))
+        return rv
+
     def forward(self, alpha: np.ndarray) -> np.ndarray:  # alpha @ A
         """Push a state-belief row vector one transition forward."""
         raise NotImplementedError
@@ -1206,6 +1227,51 @@ class InputOutputHMM:
             return np.array(out)
         return np.array([self._forward_backward(self._log_b(o), list(u))[5] for o, u in zip(x, input_seqs)])
 
+    def _obs_inputs(self, seq, inputs):
+        """Split one record into (observations, inputs), accepting both call forms the scoring API uses:
+        ``(record)`` -- one sequence of ``(observation, input)`` pairs -- or ``(obs_seq, input_seq)``."""
+        if inputs is None:
+            return [p[0] for p in seq], [int(p[1]) for p in seq]
+        return list(seq), [int(u) for u in inputs]
+
+    def viterbi(self, seq, inputs=None):
+        """Most-likely state path (Viterbi / max-product), conditioned on the input/control sequence:
+        step t -> t+1 maximizes over the transition ``inputs[t]`` selects. Call as ``viterbi(record)``
+        on one ``(observation, input)``-pair sequence or as ``viterbi(obs_seq, input_seq)``. Uses the
+        per-input transition matrices, so it works for any operator; O(T K^2) -- a read-out, not the
+        EM hot loop."""
+        obs, u = self._obs_inputs(seq, inputs)
+        log_b = self._log_b(obs)
+        log_as = [np.log(t.as_matrix() + 1e-300) for t in self.transitions]
+        log_pi = np.log(self.pi + 1e-300)
+        t_len, k = log_b.shape
+        delta = np.zeros((t_len, k))
+        psi = np.zeros((t_len, k), dtype=int)
+        delta[0] = log_pi + log_b[0]
+        for t in range(1, t_len):
+            m = delta[t - 1][:, None] + log_as[u[t - 1]]  # (from, to) under the input driving this step
+            psi[t] = np.argmax(m, axis=0)
+            delta[t] = m[psi[t], np.arange(k)] + log_b[t]
+        path = np.zeros(t_len, dtype=int)
+        path[-1] = int(np.argmax(delta[-1]))
+        for t in range(t_len - 2, -1, -1):
+            path[t] = psi[t + 1, path[t + 1]]
+        return path
+
+    def posterior_decode(self, seq, inputs=None):
+        """Per-position MAP state argmax_k P(z_t = k | x, u) from the forward-backward posteriors gamma."""
+        obs, u = self._obs_inputs(seq, inputs)
+        return np.argmax(self._forward_backward(self._log_b(obs), u)[4], axis=1)
+
+    def state_posteriors(self, seq, inputs=None):
+        """The full smoothing posteriors gamma[t,k] = P(z_t = k | x, u), conditioned on the inputs."""
+        obs, u = self._obs_inputs(seq, inputs)
+        return self._forward_backward(self._log_b(obs), u)[4]
+
+    def sampler(self, seed=None):
+        """Return a sampler for ``(observation, input)``-pair records along a given control sequence."""
+        return _IOHMMSampler(self, seed)
+
     def fit(self, obs_seqs, input_seqs, *, max_its: int = 50, tol: float = 1e-6):
         """Fit the IOHMM with Baum-Welch using the supplied observation and input sequences."""
         obs_seqs = [list(o) for o in obs_seqs]
@@ -1253,6 +1319,38 @@ class InputOutputHMM:
     def estimator(self, pseudo_count=None):
         """Return the estimator for this IOHMM structure."""
         return IOHMMEstimator(self._emit_est, list(self.transitions), self.name)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a safe JSON-compatible representation of this IOHMM (decodes via ``load_models``)."""
+        from mixle.utils.serialization import to_serializable
+
+        return to_serializable(self)
+
+
+class _IOHMMSampler:
+    """Samples one IOHMM record -- a list of ``(observation, input)`` pairs -- along a given control
+    sequence. The inputs are exogenous, so the caller supplies them; the sampler draws the state path
+    through the per-input transitions and one emission per state visited."""
+
+    def __init__(self, hmm: InputOutputHMM, seed=None):
+        self.hmm = hmm
+        self.rng = np.random.RandomState(seed)
+
+    def sample(self, inputs):
+        h = self.hmm
+        u = [int(v) for v in inputs]
+        mats = [t.as_matrix() for t in h.transitions]
+        s = self.rng.choice(h.K, p=h.pi)
+        out = []
+        for t, m in enumerate(u):
+            out.append((h.emissions[s].sampler(seed=int(self.rng.randint(1, 2**31))).sample(), m))
+            if h.term_mask is not None and h.term_mask[s]:
+                break  # terminal (absorbing) state ends the sequence -- length is the stopping time
+            if t + 1 < len(u):
+                row = mats[m][s]
+                rs = row.sum()
+                s = self.rng.choice(h.K, p=row / rs) if rs > 0 else s
+        return out
 
 
 class IOHMMDataEncoder(DataSequenceEncoder):

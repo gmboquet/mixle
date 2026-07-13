@@ -70,7 +70,7 @@ from mixle.ppl.density import (
     DiscreteAR,
     Flow,
 )
-from mixle.ppl.diagnostics import loo_stack, loo_stacking_weights
+from mixle.ppl.diagnostics import loo, loo_stack, loo_stacking_weights, waic
 from mixle.ppl.distributions import (
     AR1,
     EMG,
@@ -273,6 +273,8 @@ __all__ = [
     "Potts",
     "multistart",
     "conformal",
+    "waic",
+    "loo",
     "loo_stack",
     "loo_stacking_weights",
     "ConformalRegressor",

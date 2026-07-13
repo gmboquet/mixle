@@ -268,8 +268,31 @@ class ScheduledHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
         return ScheduledHMMSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> ScheduledHMMEstimator:
-        """Raise because emission and length estimators must be supplied explicitly."""
-        raise NotImplementedError("supply emission/len estimators via ScheduledHMMEstimator(...) directly")
+        """Create the matching estimator from this distribution's own components.
+
+        ``ScheduledHMMEstimator`` reuses ONE emission estimator for every phase x state, so the
+        shared prototype is taken from the first phase/state emission; the length estimator mirrors
+        ``len_dist`` when one is modeled. This keeps the prototype -> estimator convention
+        ``optimize(data, scheduled_hmm)`` relies on.
+        """
+        len_est = None if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
+        emission_est = self.emissions[0][0].estimator(pseudo_count=pseudo_count)
+        if pseudo_count is None:
+            return ScheduledHMMEstimator(
+                n_states=self.n_states,
+                schedule=self.schedule,
+                emission_estimator=emission_est,
+                len_estimator=len_est,
+                name=self.name,
+            )
+        return ScheduledHMMEstimator(
+            n_states=self.n_states,
+            schedule=self.schedule,
+            emission_estimator=emission_est,
+            len_estimator=len_est,
+            pseudo_count=pseudo_count,
+            name=self.name,
+        )
 
     def dist_to_encoder(self) -> ScheduledHMMDataEncoder:
         """Return the pass-through scheduled HMM encoder."""

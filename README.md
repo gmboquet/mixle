@@ -198,19 +198,23 @@ continuations.rank(continuations.unrank(5)[0])   # -> rank=6, cumulative_prob=0.
 ```
 
 The same operations work on a model you just fit — here an HMM learns *when to stop* from an absorbing
-terminal state, and its EOL-terminated support enumerates in descending probability:
+terminal state, and its EOL-terminated support enumerates in descending probability. One precondition:
+the *fitted* terminal state's emissions must be disjoint from the other states' (it must own `<EOL>`
+outright). EM delivers that given enough sequences; on only a handful it can leave overlapping emission
+mass, and `enumerator()` refuses with an `EnumerationError` rather than enumerate a different
+distribution:
 
 ```python
 from mixle.inference import optimize
 from mixle.stats import HiddenMarkovEstimator, CategoricalEstimator
 
-# each sequence ends in an EOL token
-sequences = [["team", "meet", "buy", "<EOL>"], ["now", "now", "<EOL>"], ...]
+# each sequence ends in an EOL token (enough of them that EM gives <EOL> to the terminal state alone)
+sequences = [["team", "meet", "buy", "<EOL>"], ["now", "now", "<EOL>"], ["buy", "<EOL>"]] * 70
 model = optimize(sequences,
     HiddenMarkovEstimator([CategoricalEstimator()] * 3, terminal_states={2}))
 
 # most probable EOL-terminated sequences
-model.enumerator().top_k(3)   # -> [(['buy', '<EOL>'], -2.09), ...]
+model.enumerator().top_k(3)   # -> [(['buy', '<EOL>'], -1.79), ...]
 ```
 
 - **Decomposable families** (Composite / Record / Sequence / MarkovChain): rank ↔ value is an exact

@@ -307,6 +307,20 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         """Excess kurtosis 1/lambda."""
         return float(1.0 / self.lam)
 
+    def entropy(self) -> float:
+        """Shannon entropy in nats, by exact summation of the standard series.
+
+        The Poisson entropy ``-sum_k p_k log p_k`` has no closed form; the series is summed over
+        the effective support ``k <= lam + 40 sqrt(lam) + 40``, beyond which the remaining terms
+        are far below double rounding (the tail mass decays super-geometrically).
+        """
+        from scipy.special import gammaln
+
+        kmax = int(math.ceil(self.lam + 40.0 * math.sqrt(self.lam) + 40.0))
+        k = np.arange(kmax + 1, dtype=np.float64)
+        log_p = k * math.log(self.lam) - self.lam - gammaln(k + 1.0)
+        return float(-np.sum(np.exp(log_p) * log_p))
+
     def quantile(self, q: float) -> float:
         """Inverse CDF F^{-1}(q) (via scipy poisson)."""
         from scipy.stats import poisson
