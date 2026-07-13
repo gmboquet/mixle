@@ -9,10 +9,12 @@ torch = pytest.importorskip("torch")
 
 from mixle.task.distill_methods import (
     DistillResult,
+    analytic_response_distill,
     attention_transfer,
     hint_distill,
     kd_loss,
     multi_teacher_distill,
+    planned_response_distill,
     relational_distill,
     response_distill,
     sequence_level_distill,
@@ -93,6 +95,46 @@ def test_response_distill_deterministic():
     b = response_distill(_mlp(dim, (8,), k, seed=9), teacher, x, y, epochs=100, seed=11)
     assert a.after == b.after
     assert a.history == b.history
+
+
+def test_analytic_response_distill_solves_linear_student_without_autograd():
+    torch.manual_seed(3)
+    teacher = torch.nn.Linear(5, 4)
+    student = torch.nn.Sequential(torch.nn.Linear(5, 4))
+    x = torch.randn(96, 5)
+
+    result = analytic_response_distill(student, teacher, x, ridge=1e-10, seed=8)
+
+    assert result.improved
+    assert result.after < 1e-8
+    assert result.extra["analytic_projection"]["autograd_steps"] == 0
+    assert result.extra["analytic_projection"]["optimizer"] == "none"
+    assert result.extra["analytic_projection"]["teacher_queries"] == 1
+
+
+def test_planned_response_distill_refines_in_minibatches_without_adam():
+    dim, classes = 6, 3
+    x, y = _blobs(30, classes, dim, seed=13, spread=2.0)
+    teacher = _trained_teacher(x, y, classes, dim, hidden=(16,), seed=14, epochs=150)
+    student = _mlp(dim, (8,), classes, seed=15)
+
+    result = planned_response_distill(
+        student,
+        teacher,
+        x,
+        y,
+        refinement_epochs=40,
+        batch_size=18,
+        lr=1e-2,
+        seed=16,
+    )
+
+    assert result.improved
+    assert result.extra["projected_soft_kl"] < result.before
+    assert result.extra["optimizer"]["batch_size"] == 18
+    families = result.extra["optimizer"]["plan"]["families"]
+    assert families
+    assert not any("adam" in family for family in families)
 
 
 def test_multi_teacher_beats_average_single_teacher():

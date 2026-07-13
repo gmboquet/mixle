@@ -2,8 +2,8 @@
 
 The contract (Distribution / Sampler / Estimator / Accumulator / DataEncoder) earns its keep for
 closed-form families: additive sufficient statistics are what make EM exact and distributable. A
-GRADIENT leaf has no sufficient statistics -- its "accumulator" can only buffer the
-responsibility-weighted data, its encoder is ``np.asarray``, and its M-step is SGD -- so per-family
+GRADIENT leaf has no declared sufficient statistics -- its "accumulator" can only buffer the
+responsibility-weighted data, its encoder is ``np.asarray``, and its generic M-step is gradient based -- so per-family
 contract code is pure ceremony (mixle.models grew nine hand-written buffer accumulators saying so).
 This module writes that ceremony ONCE, generically. A neural family is now just a module:
 
@@ -17,10 +17,11 @@ only if you draw samples, ``sample(n) -> (n, d)``. Control never leaves the call
 
 * ``loss(module, x, w) -> scalar`` overrides the default responsibility-weighted NLL -- custom
   objectives are a hook, not a subclass tree;
-* ``optimizer(params) -> torch.optim.Optimizer`` picks the optimizer; it receives only TRAINABLE
-  parameters, so freezing submodules with ``requires_grad_(False)`` just works (train a projection
-  head against a frozen encoder; a FULLY frozen module is a fixed distribution and the M-step is a
-  no-op);
+* ``module.mixle_analytic_m_step(*fields, weights=..., batch_size=...)`` can provide an exact or
+  symbolically generated update, bypassing autograd and iterative optimization entirely;
+* ``optimizer=None`` routes trainable parameters by role, geometry, and batch regime (AdaGrad for
+  stochastic embeddings/routers, Rprop for small full-batch blocks, Muon for large matrices).
+  Named optimizers and ``optimizer(params)`` remain explicit escape hatches;
 * ``fitted.module`` is the raw torch module -- nothing is trapped.
 
 Serialization: the module round-trips as portable bytes (``mixle.models._neural_serial``); custom
@@ -73,6 +74,31 @@ def _resolve_device(device: Any, torch: Any) -> Any:
         except (TypeError, RuntimeError):
             pass
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _build_optimizer(
+    module: Any, params: list[Any], optimizer: Any, lr: float, torch: Any, *, sign_stable: bool
+) -> tuple[Any, dict[str, Any]]:
+    """Resolve the gradient tier while keeping Adam an explicit request."""
+
+    del params, torch
+    from mixle.models.optimizer_routing import resolve_neural_optimizer
+
+    return resolve_neural_optimizer(module, optimizer, lr=lr, sign_stable=sign_stable)
+
+
+def _run_analytic_m_step(module: Any, fields: tuple[Any, ...], weights: Any, batch_size: int | None) -> Any:
+    """Run a module-owned exact update when the module declares one."""
+
+    update = getattr(module, "mixle_analytic_m_step", None)
+    if not callable(update):
+        return None
+    result = update(*fields, weights=weights, batch_size=batch_size)
+    if result is None:
+        return {}
+    if not isinstance(result, dict):
+        raise TypeError("mixle_analytic_m_step must return a receipt dictionary or None.")
+    return dict(result)
 
 
 def looks_like_torch_module(obj: Any) -> bool:
@@ -129,9 +155,9 @@ class GradLeaf(SequenceEncodableProbabilityDistribution):
         self.lr_decay = None if lr_decay is None else float(lr_decay)
         if self.lr_decay is not None and not 0.0 < self.lr_decay <= 1.0:
             raise ValueError("lr_decay must lie in (0, 1] when supplied.")
-        if self.lr_decay is not None and optimizer is not None:
+        if self.lr_decay is not None and callable(optimizer):
             raise ValueError(
-                "lr_decay applies to the built-in Adam schedule; it cannot be combined with a custom optimizer hook."
+                "lr_decay applies to mixle-managed optimizers; it cannot be combined with a custom optimizer hook."
             )
         self.outer_objective_compatible = loss is None
 
@@ -343,9 +369,9 @@ class GradEstimator(ParameterEstimator):
         self.lr_decay = None if lr_decay is None else float(lr_decay)
         if self.lr_decay is not None and not 0.0 < self.lr_decay <= 1.0:
             raise ValueError("lr_decay must lie in (0, 1] when supplied.")
-        if self.lr_decay is not None and optimizer is not None:
+        if self.lr_decay is not None and callable(optimizer):
             raise ValueError(
-                "lr_decay applies to the built-in Adam schedule; it cannot be combined with a custom optimizer hook."
+                "lr_decay applies to mixle-managed optimizers; it cannot be combined with a custom optimizer hook."
             )
         # Cumulative count of divergence recoveries across this estimator's M-steps (one optimize()
         # run shares one estimator tree, so this accumulates over EM rounds; see estimate()).
@@ -393,7 +419,38 @@ class GradEstimator(ParameterEstimator):
         # Constant lr (lr_decay=None, the default) keeps today's behavior and the weaker
         # best-visited-iterate guarantee provided by the outer loop.
         effective_lr = self.lr if self.lr_decay is None else self.lr / (self._fit_rounds**self.lr_decay)
-        opt = self.optimizer(params) if self.optimizer is not None else torch.optim.Adam(params, lr=effective_lr)
+        pre_step_state = {key: value.detach().clone() for key, value in self.module.state_dict().items()}
+        analytic_receipt = _run_analytic_m_step(self.module, xs, w, self.batch_size)
+        if analytic_receipt is not None:
+            recovered = not all(bool(torch.isfinite(p).all()) for p in params)
+            if recovered:
+                with torch.no_grad():
+                    self.module.load_state_dict(pre_step_state)
+                self.nonfinite_recoveries += 1
+            leaf = self._leaf()
+            leaf.fit_receipt = {
+                "nobs": int(n),
+                "batch_size": int(bs),
+                "epochs_requested": int(self.m_steps),
+                "epochs_completed": 0,
+                "optimizer_steps": 0,
+                "max_optimizer_steps": self.max_optimizer_steps,
+                "gradient_estimator": "not_used",
+                "update_method": "analytic_m_step",
+                "optimizer": "none",
+                "optimizer_plan": None,
+                "analytic_receipt": analytic_receipt,
+                "fit_round": int(self._fit_rounds),
+                "lr_effective": float(effective_lr),
+                "lr_decay": self.lr_decay,
+                "saem_schedule": False,
+                "nonfinite_recovery": bool(recovered),
+                "nonfinite_recoveries_total": int(self.nonfinite_recoveries),
+            }
+            return leaf
+        opt, optimizer_receipt = _build_optimizer(
+            self.module, params, self.optimizer, effective_lr, torch, sign_stable=bs >= n
+        )
         autocast_dev = "cuda" if str(dev).startswith("cuda") else "cpu"
         use_bf16 = self.precision == "bf16"
         # Divergence guard: an aggressive step can drive parameters non-finite, after which the
@@ -403,7 +460,6 @@ class GradEstimator(ParameterEstimator):
         # Snapshot the module state up front; on a non-finite loss/parameter or a raising module,
         # restore the snapshot and stop stepping. The round degrades to a no-op proposal the outer
         # loop gates normally, and the recovery is disclosed in the fit receipt.
-        pre_step_state = {key: value.detach().clone() for key, value in self.module.state_dict().items()}
         recovered = False
         optimizer_steps = 0
         epochs_completed = 0
@@ -463,6 +519,9 @@ class GradEstimator(ParameterEstimator):
             "optimizer_steps": int(optimizer_steps),
             "max_optimizer_steps": self.max_optimizer_steps,
             "gradient_estimator": "unbiased_full_weighted_objective" if self.loss is None else "custom_loss",
+            "update_method": "autograd",
+            "optimizer": optimizer_receipt["name"],
+            "optimizer_plan": optimizer_receipt["plan"],
             "fit_round": int(self._fit_rounds),
             "lr_effective": float(effective_lr),
             "lr_decay": self.lr_decay,
