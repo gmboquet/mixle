@@ -327,7 +327,9 @@ class LeafFamilyTest(unittest.TestCase):
                 ang,
             ),
             ([stats.LogSeriesDistribution(0.4), stats.LogSeriesDistribution(0.7)], stats.LogSeriesEstimator, ge),
-            # Pareto: scale xm is the global min over x (a map-reducible reduction); all data >= xm
+            # Pareto: scale xm is the PER-COMPONENT min over rows with responsibility > 0 (the wmin
+            # accumulator); with shared supports it coincides with the global min. Differing supports
+            # are pinned by fused_out_of_support_test.
             (
                 [stats.ParetoDistribution(0.5, 2.0), stats.ParetoDistribution(0.5, 4.0)],
                 stats.ParetoEstimator,

@@ -90,6 +90,11 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # log-sum-exp guard that fastmath's ninf flag used to fold away, tiny/empty data) + the SQUAREM
     # never-loses-to-plain-EM soak.
     "fused_edge_panel_test.py": ("numba", "optional"),
+    # Out-of-support / impossible rows through the compiled paths: scoring parity with a -inf leaf
+    # (the fastmath ninf/nnan regression net), the all-components-impossible E-step guard (flat and
+    # nested), the nested wants_minmax decline, and per-component weighted Pareto support minima --
+    # numba-gated like its siblings; the numba-free halves live in fastmath_policy_test.py.
+    "fused_out_of_support_test.py": ("numba", "optional"),
     "jax_engine_test.py": ("jax", "optional"),
     # Backward-compatibility-only tests (renamed class / kwarg aliases). Tagged `legacy` so a product-only
     # run can exclude them with `-m "not legacy"`; they still run in the default `fast` gate.
