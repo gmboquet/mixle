@@ -237,6 +237,11 @@ def psis_loo(loglik: np.ndarray) -> dict:
     }
 
 
+def loo(loglik: np.ndarray) -> dict:
+    """PSIS-LOO under its conventional short name (see :func:`psis_loo`)."""
+    return psis_loo(loglik)
+
+
 def loo_stacking_weights(pointwise_lpd: np.ndarray, iters: int = 2000, tol: float = 1.0e-10) -> np.ndarray:
     """Return LOO stacking weights (Yao, Vehtari, Simpson & Gelman, 2018).
 

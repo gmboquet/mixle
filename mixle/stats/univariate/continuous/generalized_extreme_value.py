@@ -239,6 +239,10 @@ class GeneralizedExtremeValueDistribution(SequenceEncodableProbabilityDistributi
             return float(self.scale * self.scale * (g2 - g1 * g1) / (xi * xi))
         return float("inf")
 
+    def entropy(self) -> float:
+        """Differential entropy log(scale) + euler_gamma * xi + euler_gamma + 1."""
+        return float(self.log_scale + np.euler_gamma * self.shape + np.euler_gamma + 1.0)
+
     def sampler(self, seed: int | None = None) -> "GeneralizedExtremeValueSampler":
         """Return a sampler for drawing observations from this distribution."""
         return GeneralizedExtremeValueSampler(self, seed)

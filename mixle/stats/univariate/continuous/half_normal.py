@@ -213,6 +213,18 @@ class HalfNormalDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(self.sigma * math.sqrt(2.0) * erfinv(float(q)))
 
+    def mean(self) -> float:
+        """Mean E[X] = sigma * sqrt(2/pi)."""
+        import math
+
+        return float(self.sigma * math.sqrt(2.0 / math.pi))
+
+    def variance(self) -> float:
+        """Variance Var[X] = sigma^2 (1 - 2/pi)."""
+        import math
+
+        return float(self.sigma * self.sigma * (1.0 - 2.0 / math.pi))
+
     def entropy(self) -> float:
         """Differential entropy 0.5*log(pi*sigma^2/2) + 1/2."""
         import math

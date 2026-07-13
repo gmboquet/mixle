@@ -2070,7 +2070,9 @@ class HiddenMarkovModelEnumerator(DistributionEnumerator):
             raise EnumerationError(
                 dist,
                 reason="terminal_states enumeration requires terminal and non-terminal states to emit "
-                "disjoint values (overlap on %r)" % sorted(term_vals & nonterm_vals)[:4],
+                "disjoint values (overlap on %r); give the terminal states dedicated emission values "
+                "(e.g. an end token only they emit) or fit on more sequences so EM drives the "
+                "overlapping emission mass to zero" % sorted(term_vals & nonterm_vals)[:4],
             )
         self._setup_terminal_values(dist, term_vals, topics, log_w, log_transitions, path_root)
 
