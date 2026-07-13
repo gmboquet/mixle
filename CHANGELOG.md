@@ -17,6 +17,15 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   is a reviewed diff.
 - Release-engineering gates: a weighted-estimation contract test, a base-install optional-import guard,
   a tracked benchmark harness, a pull-request template, and the 0.8.0 release checklist.
+- `CompiledEM` as a reusable fused full-mixture strategy, recursive SQUAREM packing for nested
+  mixtures/composites, and function-preserving shared-trunk/residual-expert MoE upcycling.
+
+### Fixed
+
+- Block scheduling now prices density, responsibility, and parameter-update work together instead of
+  treating density time as the whole block cost; learned controllers receive the same measured cost.
+- Dirichlet-prior block and freeze/roll-up updates now use the exact MAP objective and carry the
+  posterior weight prior; nested homogeneous mixtures preserve heterogeneous encoding depth.
 
 ## [0.7.0] — 2026-07-09
 

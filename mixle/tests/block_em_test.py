@@ -13,6 +13,7 @@ Acceptance criteria under test (see the ConditionalJIT track's D3 item):
 """
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -27,6 +28,7 @@ from mixle.inference.em import PosteriorTransformEM, observed_log_likelihood, ru
 from mixle.inference.estimation import optimize
 from mixle.inference.freeze_rollup import _combine, _log_density_from_matrix
 from mixle.stats import GaussianDistribution, GaussianEstimator, MixtureDistribution, MixtureEstimator, seq_encode
+from mixle.stats.bayes.dirichlet import DirichletDistribution
 
 
 def _make_problem(seed=42, nobs=400):
@@ -118,6 +120,51 @@ class BlockEMMonotonicityTestCase(unittest.TestCase):
                 if h.assumptions is not None and h.assumptions.forced_cost <= 0.5 * h.assumptions.eligible_cost
             )
         )
+
+
+class BlockEMMapTestCase(unittest.TestCase):
+    def test_dirichlet_map_full_sweep_matches_standard_update(self):
+        rng = np.random.RandomState(31)
+        data = np.concatenate([rng.normal(-2.0, 0.8, 300), rng.normal(2.5, 1.1, 500)])
+        start = MixtureDistribution(
+            [GaussianDistribution(-0.5, 2.0), GaussianDistribution(0.5, 2.0)],
+            [0.5, 0.5],
+        )
+        estimator = MixtureEstimator(
+            [GaussianEstimator(), GaussianEstimator()],
+            prior=DirichletDistribution(np.array([4.0, 2.0])),
+            w_min=0.45,
+        )
+        enc = seq_encode(data, model=start)
+        expected = PosteriorTransformEM().step(enc, estimator, start).model
+        actual, history = run_block_em(
+            enc,
+            estimator,
+            start,
+            max_its=1,
+            delta=None,
+            full_tree_every_round=True,
+        )
+        np.testing.assert_allclose(actual.w, expected.w, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(
+            [component.mu for component in actual.components],
+            [component.mu for component in expected.components],
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        self.assertEqual(history[0].acceptance_basis, "map_observed_gate")
+        self.assertIsInstance(actual.get_prior()[0], DirichletDistribution)
+
+    def test_dirichlet_map_objective_is_monotone(self):
+        start, _, enc = _make_symmetric_problem(seed=9, nobs=500, num_components=3)
+        estimator = MixtureEstimator(
+            [GaussianEstimator() for _ in range(3)],
+            prior=DirichletDistribution(np.array([2.0, 3.0, 4.0])),
+        )
+        _, history = run_block_em(enc, estimator, start, max_its=8, delta=None)
+        objectives = np.asarray([item.objective for item in history])
+        self.assertTrue(np.all(np.diff(objectives) >= -1e-9), objectives)
+        self.assertTrue(all(item.acceptance_basis == "map_observed_gate" for item in history if item.accepted))
 
 
 class BlockEMSpeedupTestCase(unittest.TestCase):
@@ -454,6 +501,29 @@ class BlockEMOptimizeDispatchTestCase(unittest.TestCase):
         # A legitimate fit: total responsibility-weighted mass should be non-trivial and finite.
         objective = observed_log_likelihood(enc)
         self.assertTrue(np.isfinite(objective(fitted)))
+
+    def test_optimize_schedule_auto_dispatches_dirichlet_map(self):
+        start, _, enc = _make_problem(seed=17, nobs=200)
+        estimator = MixtureEstimator(
+            [GaussianEstimator() for _ in range(start.num_components)],
+            prior=DirichletDistribution(np.full(start.num_components, 2.0)),
+        )
+        with (
+            mock.patch("mixle.inference.fusion_policy.prefer_block_schedule", return_value=True),
+            mock.patch("mixle.inference.block_em.run_block_em", wraps=run_block_em) as scheduled,
+        ):
+            fitted = optimize(
+                None,
+                estimator,
+                enc_data=enc,
+                prev_estimate=start,
+                max_its=4,
+                delta=None,
+                schedule="auto",
+                out=None,
+            )
+        self.assertTrue(scheduled.called)
+        self.assertIsInstance(fitted.get_prior()[0], DirichletDistribution)
 
     def test_optimize_schedule_auto_falls_back_for_non_mixture_models(self):
         """``schedule='auto'`` on a model block-EM does not know how to schedule (anything that

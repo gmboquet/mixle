@@ -1022,7 +1022,7 @@ def optimize(
         loop_delta = None if surrogate_update else delta
 
         # D3 block-EM scheduler: 'auto' dispatches to mixle.inference.block_em's greedy
-        # gain-per-cost scheduler when the fit is a plain local MLE MixtureDistribution/
+        # gain-per-cost scheduler when the fit is a local MLE/MAP MixtureDistribution/
         # MixtureEstimator fit with none of the other execution knobs engaged (those all need
         # the standard _em_loop path); everything else silently keeps the 'full' behavior below
         # -- schedule='auto' never errors or changes what is computed, only how it is scheduled.
@@ -1034,7 +1034,7 @@ def optimize(
                 is_block_em_eligible(mm, estimator)
                 and not surrogate_update
                 and strategy is None
-                and resolved_objective == "mle"
+                and resolved_objective in ("mle", "map")
                 and engine is None
                 and resources is None
                 and placement is None
