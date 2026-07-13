@@ -68,28 +68,44 @@ def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
     return estimator
 
 
-def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState | None) -> Any:
+def _maybe_structured_model(
+    data: Any,
+    max_its: int,
+    out: Any,
+    rng: RandomState | None,
+    *,
+    delta: float | None = 1.0e-9,
+    init_p: float = 0.1,
+    objective: str = "auto",
+    reuse_estep_ll: bool = True,
+) -> tuple[Any, Any]:
     """The automatic-structure front door for ``optimize(data)`` / ``fit(data)`` with no estimator.
 
     For flat tuple records the independent :class:`CompositeDistribution` the automatic detector
     produces is a Naive-Bayes assumption — the one heterogeneous data most often violates. This
     discovers the cross-field dependency graph (:func:`mixle.inference.learn_bayesian_network`) and
     returns it only when it beats the independent composite by BIC on the same data; anything else —
-    no edges found, non-record data, too few rows, or any failure at all — returns ``None`` and the
-    historical composite path proceeds untouched, so the default is never worse.
+    no edges found, non-record data, too few rows, or an expected data/numeric failure — yields
+    ``None`` and the historical composite path proceeds untouched, so the default is never worse.
+
+    Returns ``(structured, composite)``: ``structured`` is the winning dependence model or ``None``;
+    ``composite`` is the fully fitted independent composite whenever the BIC gate paid for that fit
+    (dependence candidates were scored), so the caller can reuse it instead of refitting the identical
+    model. The keyword-only EM knobs (``delta``/``init_p``/``objective``/``reuse_estep_ll``) are
+    threaded into that composite fit so it is exactly the fit the caller would otherwise run.
     """
     try:
         rows = list(data)
         if len(rows) < 40:
-            return None
+            return None, None
         first = rows[0]
         if not isinstance(first, tuple) or len(first) < 2:
-            return None
+            return None, None
         n_fields = len(first)
         if any(not isinstance(r, tuple) or len(r) != n_fields for r in rows):
-            return None
+            return None, None
         if any(not isinstance(v, (str, bool, int, float, np.integer, np.floating)) for v in first):
-            return None  # nested/sequence fields: structure search handles flat records only
+            return None, None  # nested/sequence fields: structure search handles flat records only
 
         from mixle.inference.bayesian_network import bayesian_network_bic, learn_bayesian_network
         from mixle.inference.structure import _num_free_params
@@ -100,9 +116,19 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState 
         all_continuous = all(isinstance(v, (float, np.floating)) for v in first)
         net = learn_bayesian_network(rows)
         if not net.edges() and not all_continuous:
-            return None  # independence is what the composite already models; keep the automatic families
+            return None, None  # independence is what the composite already models; keep the automatic families
 
-        composite = optimize(rows, get_estimator(rows), max_its=max_its, rng=rng, out=None)
+        composite = optimize(
+            rows,
+            get_estimator(rows),
+            max_its=max_its,
+            delta=delta,
+            init_p=init_p,
+            rng=rng,
+            out=None,
+            reuse_estep_ll=reuse_estep_ll,
+            objective=objective,
+        )
         enc = composite.dist_to_encoder().seq_encode(rows)
         comp_ll = float(np.sum(composite.seq_log_density(enc)))
         n_log = float(np.log(max(len(rows), 2)))
@@ -119,7 +145,7 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState 
 
             candidates.extend(copula_candidates(rows, composite, comp_params, comp_bic, n_log, max_its, rng))
         if not candidates:
-            return None
+            return None, composite
         # a later, more complex candidate (e.g. a vine) only displaces an earlier, simpler one (e.g. the
         # plain Gaussian copula core it can degenerate to exactly on low-dimensional data) when it wins by
         # more than floating-point noise -- otherwise a sub-ulp BIC difference from platform/BLAS variance
@@ -129,14 +155,17 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState 
             if bic < best_bic - 1e-6 * max(1.0, abs(best_bic)):
                 best_bic, best_model, desc = bic, model, name
         if best_bic >= comp_bic:
-            return None
+            return None, composite
         if out is not None:
             out.write(
                 "structure: %s dependence beats independent fields (BIC %.1f < %.1f)\n" % (desc, best_bic, comp_bic)
             )
-        return best_model
-    except Exception:  # noqa: BLE001 - the structure default must never break the historical path
-        return None
+        return best_model, composite
+    except (ValueError, TypeError, KeyError, IndexError, FloatingPointError, OverflowError, ZeroDivisionError):
+        # The data-shape and numeric failures the structure search actually raises (np.linalg.LinAlgError
+        # is a ValueError): fall back to the historical composite path. Anything else -- an AttributeError,
+        # ImportError, ... -- is a structure-path regression and must surface, not be silently swallowed.
+        return None, None
 
 
 # --- data-encoding helpers --------------------------------------------------
@@ -896,9 +925,40 @@ def optimize(
         and init_estimator is None
         and strategy is None
     ):
-        structured = _maybe_structured_model(data, max_its, out, rng)
+        structured, independent_composite = _maybe_structured_model(
+            data,
+            max_its,
+            out,
+            rng,
+            delta=delta,
+            init_p=init_p,
+            objective=objective,
+            reuse_estep_ll=reuse_estep_ll,
+        )
         if structured is not None:
             return structured
+        # When the dependence candidates were scored and lost, the BIC gate already paid for a full
+        # fit of the independent composite that this path would now refit identically -- reuse it,
+        # but only when every knob it could not see is at the default that front-door fit used.
+        if independent_composite is not None and (
+            vdata is None
+            and enc_vdata is None
+            and out is None
+            and num_chunks == 1
+            and engine is None
+            and precision is None
+            and fields is None
+            and resources is None
+            and placement is None
+            and sub_chunks == 1
+            and chunk_size is None
+            and backend == "local"
+            and on_step is None
+            and schedule == "full"
+            and monotone is None
+            and track_best is None
+        ):
+            return independent_composite
     estimator = _coerce_estimator(estimator, data)
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
@@ -1166,9 +1226,34 @@ def fit(
         and kwargs.get("prev_estimate") is None
         and kwargs.get("strategy") is None
     ):
-        structured = _maybe_structured_model(data, max_its, kwargs.get("out"), kwargs.get("rng"))
+        structured, independent_composite = _maybe_structured_model(
+            data,
+            max_its,
+            kwargs.get("out"),
+            kwargs.get("rng"),
+            delta=delta,
+            init_p=kwargs.get("init_p", 0.1),
+            objective=kwargs.get("objective", "auto"),
+            reuse_estep_ll=kwargs.get("reuse_estep_ll", False),  # fit forces the exact scored loop below
+        )
         if structured is not None:
             return structured
+        # Same double-fit repair as optimize's front door: the losing-candidates path already fitted
+        # this exact composite (fit's delta/reuse_estep_ll/objective/init_p were threaded into it), so
+        # reuse it unless some other optimize knob was passed through **kwargs.
+        _threaded_or_inert = {
+            "structure",
+            "rng",
+            "out",
+            "enc_data",
+            "prev_estimate",
+            "strategy",
+            "init_p",
+            "objective",
+            "reuse_estep_ll",
+        }
+        if independent_composite is not None and kwargs.get("out") is None and not (set(kwargs) - _threaded_or_inert):
+            return independent_composite
     estimator = _coerce_estimator(estimator, data)
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)

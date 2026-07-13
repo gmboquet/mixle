@@ -14,7 +14,11 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 
 from mixle.inference.estimation import _engine_seq_estimate, _engine_seq_log_density_sum, _local_encoded_chunks
-from mixle.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
+from mixle.stats.compute.pdist import (
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    merge_accumulator_keys,
+)
 from mixle.stats.compute.sequence import seq_estimate, seq_log_density_sum
 from mixle.stats.parameter_packing import squarem_packer
 
@@ -102,6 +106,9 @@ class PosteriorTransformEM:
             gamma = self._transform(gamma)
             acc.combine(_mixture_stats_from_gamma(model, estimator, enc, gamma))
             nobs += sz
+        # The same key_merge/key_replace pass seq_estimate runs after accumulation: without it,
+        # keyed (tied) parameters are silently untied under HardEM/AnnealedEM/PosteriorTransformEM.
+        merge_accumulator_keys(acc)
         return EMStepResult(estimator.estimate(nobs, acc.value()))
 
     def _transform(self, gamma: np.ndarray) -> np.ndarray:
