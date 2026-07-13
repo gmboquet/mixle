@@ -103,9 +103,16 @@ def seq_encode(
         else:
             num_chunks_loc = num_chunks
 
+        if num_chunks_loc <= 1:
+            # single chunk: hand the data straight to the encoder -- the old element-by-element
+            # rebuild copied (and, for arrays, boxed) the whole dataset for nothing (audit E-3)
+            return [(sz, encoder.seq_encode(data))]
+
         rv = []
         for i in range(num_chunks_loc):
-            data_loc = [data[i] for i in range(i, sz, num_chunks_loc)]
+            # a stride slice is C-speed for lists and a zero-copy view for arrays; the previous
+            # per-element comprehension boxed every ndarray row and dominated encode time
+            data_loc = data[i::num_chunks_loc]
             enc_data = encoder.seq_encode(data_loc)
             rv.append((len(data_loc), enc_data))
 

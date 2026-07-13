@@ -376,9 +376,14 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         if self.use_lstsq:
             return np.ones(x.shape[0])
         else:
-            diff = self.mu - x
-            soln = scipy.linalg.cho_solve(self.chol, diff.T).T
-            rv = self.chol_const - 0.5 * ((diff * soln).sum(axis=1))
+            # One gemm against the ALREADY-STORED precision matrix (the same quadratic form the
+            # engine backend uses, line for line) instead of a per-call cho_solve -- LAPACK potrs
+            # on a transposed RHS copies in/out and rescans for finiteness on every EM iteration.
+            # Memory-neutral by design: an extra precomputed factor here (one more d x d array per
+            # component) tipped the placement planner's byte budget in memory-constrained plans.
+            diff = x - self.mu
+            soln = np.dot(diff, self.inv_covar)
+            rv = self.chol_const - 0.5 * (diff * soln).sum(axis=1)
             return rv
 
     @staticmethod
@@ -1023,4 +1028,10 @@ class MultivariateGaussianDataEncoder(DataSequenceEncoder):
 
         """
         self.dim = len(x[0]) if self.dim is None else self.dim
-        return np.reshape(np.asarray(x), (-1, self.dim))
+        rv = np.reshape(np.asarray(x, dtype=float), (-1, self.dim))
+        if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
+            # the same encode-time gate the univariate Gaussian applies: scoring previously relied
+            # on cho_solve's check_finite to reject NaN loudly; the gemm path (no LAPACK scan) needs
+            # the contract enforced where every fit/score pass already runs exactly once
+            raise ValueError("MultivariateGaussianDistribution requires finite observations.")
+        return rv
