@@ -1600,12 +1600,23 @@ class _HeteroMixtureEncoded:
         self.encodings = encodings
 
 
+class _SharedMixtureEncoded:
+    """One shared nested-mixture encoding, retaining the current mixture depth."""
+
+    __slots__ = ("encoding",)
+
+    def __init__(self, encoding: Any) -> None:
+        self.encoding = encoding
+
+
 def _component_enc(enc_data: Any, i: int) -> Any:
     """Select the encoding destined for component ``i``.
 
     For a homogeneous mixture (single shared encoding) this returns ``enc_data`` unchanged; for a
     heterogeneous mixture it returns that component's own encoding from the wrapper.
     """
+    if isinstance(enc_data, _SharedMixtureEncoded):
+        return enc_data.encoding
     if isinstance(enc_data, _HeteroMixtureEncoded):
         return enc_data.encodings[i]
     return enc_data
@@ -1692,7 +1703,10 @@ class MixtureDataEncoder(DataSequenceEncoder):
             )
         if self.homogeneous:
             try:
-                return self.encoder.seq_encode(x)
+                encoded = self.encoder.seq_encode(x)
+                if isinstance(encoded, (_HeteroMixtureEncoded, _SharedMixtureEncoded)):
+                    return _SharedMixtureEncoded(encoded)
+                return encoded
             except ContractError as e:
                 raise prefix_contract_error("MixtureDistribution.components", e) from None
             except (TypeError, ValueError, IndexError, KeyError) as e:
