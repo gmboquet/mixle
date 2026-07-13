@@ -61,8 +61,9 @@ def sample(
             ``FieldPosterior`` or ``LatentPosterior``.
         size: ``None`` returns a single draw in the object's natural type; an int returns a collection
             (an array for homogeneous leaves, a list / dict-of-arrays for structured draws).
-        seed: scalar seed for the draw (ignored if ``rng`` is given).
-        rng: a shared ``RandomState`` for reproducible, composable streams; takes precedence over ``seed``.
+        seed: scalar seed for the draw. Mutually exclusive with ``rng``.
+        rng: a shared ``RandomState`` for reproducible, composable streams. Mutually exclusive
+            with ``seed``.
         **kwargs: forwarded to the underlying sampler -- e.g. ``temperature`` / ``k`` / ``uniform`` for a
             relation, ``nodes`` for a field posterior, ``batched`` for a distribution.
 
@@ -70,8 +71,12 @@ def sample(
         A single draw (``size=None``) or a collection of ``size`` draws.
 
     Raises:
-        TypeError: if ``model`` is not a recognized samplable object.
+        TypeError: if ``model`` is not a recognized samplable object, or if both ``seed`` and
+            ``rng`` are supplied (two randomness sources are ambiguous -- the same double-supply
+            policy as the constructor keyword aliases).
     """
+    if seed is not None and rng is not None:
+        raise TypeError("'seed' and 'rng' are mutually exclusive; pass only one")
     # Relation -- a sampler under a Gibbs measure over its members (temperature/k/uniform are sampler args).
     from mixle.relations import Relation
 

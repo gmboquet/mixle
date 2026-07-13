@@ -73,7 +73,7 @@ def seq_encode(
         elif estimator is not None:
             encoder = estimator.accumulator_factory().make().acc_to_encoder()
         else:
-            raise Exception("At least one arg: encoder, estimator, or dist must be passed.")
+            raise ValueError("At least one arg: encoder, estimator, or dist must be passed.")
 
     # DataSource branch (additive) -- a structured/typed source routes through its structure-aware
     # encoder and returns the same [(count, payload)] shape; the bare-list and RDD paths are untouched.

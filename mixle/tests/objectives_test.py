@@ -372,8 +372,10 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         y = np.sin(x[:, 0])
         gp = GaussianProcessRegressor(lengthscale=0.3, amplitude=0.5, noise=0.6, engine=self.engine)
         before = float(gp.log_marginal_likelihood(x, y).detach().cpu().item())
-        after, _ = gp.fit(x, y, max_its=120, lr=0.03, tol=0.0)
+        fitted = gp.fit(x, y, max_its=120, lr=0.03, tol=0.0)
+        after = float(gp.log_marginal_likelihood(x, y).detach().cpu().item())
 
+        self.assertIs(fitted, gp)  # fit returns the model; (value, iterations) moved behind return_result
         self.assertGreater(after, before)
         pred = gp.predict(x, y, x)
         self.assertLess(np.mean((pred - y) ** 2), 0.20)

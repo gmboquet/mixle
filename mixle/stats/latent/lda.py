@@ -40,6 +40,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.compute.posterior import MeanFieldLDAPosterior
+from mixle.utils.aliasing import broadcast_pseudo_count
 from mixle.utils.special import digammainv
 from mixle.utils.vector import row_choice
 
@@ -1076,7 +1077,7 @@ class LDAEstimator(ParameterEstimator):
         estimators: Sequence[ParameterEstimator],
         len_estimator: ParameterEstimator | None = NullEstimator(),
         suff_stat: Any | None = None,
-        pseudo_count: tuple[float, float] | None = None,
+        pseudo_count: float | tuple[float, float] | None = None,
         keys: tuple[str | None, str | None] | None = (None, None),
         fixed_alpha: np.ndarray | None = None,
         gamma_threshold: float = 1.0e-8,
@@ -1112,6 +1113,7 @@ class LDAEstimator(ParameterEstimator):
         self.num_topics = len(estimators)
         self.estimators = estimators
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.keys = keys if keys is not None else (None, None)

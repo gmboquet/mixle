@@ -136,12 +136,18 @@ class GaussianProcessRegressor:
         return_result: bool = False,
         restore_best: bool = True,
     ) -> Any:
-        """Maximize the GP log marginal likelihood.
+        """Maximize the GP log marginal likelihood and return ``self``.
 
-        The default return shape is the historical ``(value, iterations)``
-        tuple.  Set ``return_result=True`` for the full objective diagnostics.
+        Returns the fitted model so ``model = gp.fit(x, y)`` works like every
+        other ``Model.fit`` in ``mixle.models``. Set ``return_result=True``
+        for the full objective diagnostics (an ``ObjectiveFitResult`` carrying
+        the objective value, iteration count, and history).
+
+        Compatibility note: before 0.8.0 the default return was the
+        ``(value, iterations)`` tuple; those live behind ``return_result=True``
+        now (``result.value`` / ``result.iterations``).
         """
-        return optimize_torch_objective(
+        result = optimize_torch_objective(
             self.parameters(),
             lambda: self.log_marginal_likelihood(x, y),
             engine=self.engine,
@@ -155,6 +161,9 @@ class GaussianProcessRegressor:
             return_result=return_result,
             restore_best=restore_best,
         )
+        if return_result:
+            return result
+        return self
 
     def predict(self, x_train: Any, y_train: Any, x_new: Any, return_cov: bool = False) -> Any:
         """Return posterior predictive mean, and optionally covariance."""
