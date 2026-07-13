@@ -19,6 +19,30 @@ import pytest
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
+
+@pytest.fixture(autouse=True)
+def _seed_transformers_warningregistry():
+    """unittest.assertWarns walks EVERY sys.modules entry probing ``__warningregistry__`` on enter.
+    ``transformers`` registers ~200 LAZY placeholder submodules whose module ``__getattr__``
+    intercepts that probe, tries to resolve it as a lazy symbol, and IMPORTS optional dependencies
+    -- crashing with ModuleNotFoundError (torchvision) instead of AttributeError. The crash then
+    surfaces inside whichever assertWarns-using test runs after anything imported transformers in
+    the same worker: the long-standing "wave_* xdist flakes" were exactly this, not contention.
+    Seeding a real ``__warningregistry__`` dict on every transformers module keeps plain attribute
+    lookup from ever reaching the lazy hook. Re-run per test because more stubs register as
+    transformers lazily loads; the sweep is a few hundred dict setdefaults (~0.1 ms). Raising
+    non-AttributeError from module __getattr__ is the upstream defect; this is the inoculation."""
+    import sys as _sys
+
+    if "transformers" in _sys.modules:
+        for name, mod in list(_sys.modules.items()):
+            if name.startswith("transformers") and mod is not None:
+                try:
+                    mod.__dict__.setdefault("__warningregistry__", {})
+                except (AttributeError, TypeError):  # exotic module objects: leave them be
+                    pass
+    yield
+
 MarkerTuple = tuple[str, ...]
 
 
