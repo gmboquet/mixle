@@ -171,6 +171,16 @@ class InverseGammaDistribution(SequenceEncodableProbabilityDistribution):
         """Returns the differential entropy in nats."""
         return float(self.alpha + math.log(self.beta) + gammaln(self.alpha) - (1.0 + self.alpha) * digamma(self.alpha))
 
+    def mean(self) -> float:
+        """Mean E[X] = beta / (alpha - 1) for alpha > 1, else inf (the mean integral diverges)."""
+        return float(self.beta / (self.alpha - 1.0)) if self.alpha > 1.0 else float("inf")
+
+    def variance(self) -> float:
+        """Variance beta^2 / ((alpha-1)^2 (alpha-2)) for alpha > 2, else inf."""
+        if self.alpha > 2.0:
+            return float(self.beta * self.beta / ((self.alpha - 1.0) ** 2 * (self.alpha - 2.0)))
+        return float("inf")
+
     def density(self, x: float) -> float:
         """Return the probability density at a single observation."""
         return math.exp(self.log_density(x))

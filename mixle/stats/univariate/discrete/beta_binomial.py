@@ -21,6 +21,7 @@ from scipy.special import betaln, gammaln
 
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -70,6 +71,35 @@ class BetaBinomialDistribution(SequenceEncodableProbabilityDistribution):
         rv = log_choose + betaln(k + self.a, self.n - k + self.b) - self._log_beta_ab
         return np.where((k < 0) | (k > self.n), -np.inf, rv)
 
+    def support_size(self) -> int:
+        """``n + 1`` outcomes ``{0, ..., n}``."""
+        return int(self.n) + 1
+
+    def _log_cdf_table(self) -> np.ndarray:
+        """Log cumulative masses ``log P(X <= k)`` for k = 0..n by stable log-space accumulation."""
+        return np.logaddexp.accumulate(self.seq_log_density(np.arange(self.n + 1, dtype=np.float64)))
+
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function P(X <= x): a log-space partial sum of the pmf over {0..n}."""
+        k = math.floor(float(x))
+        if k < 0:
+            return 0.0
+        if k >= self.n:
+            return 1.0
+        return float(min(np.exp(self._log_cdf_table()[k]), 1.0))
+
+    def quantile(self, q: float) -> float:
+        """Inverse CDF F^{-1}(q) over {0..n}: the smallest count whose cdf reaches ``q`` (search on the cdf)."""
+        qq = float(q)
+        if qq <= 0.0:
+            return 0.0
+        cum = np.exp(self._log_cdf_table())
+        return float(min(int(np.searchsorted(cum, qq, side="left")), self.n))
+
+    def enumerator(self) -> "BetaBinomialEnumerator":
+        """Returns BetaBinomialEnumerator iterating the support in descending probability order."""
+        return BetaBinomialEnumerator(self)
+
     def sampler(self, seed: int | None = None) -> "BetaBinomialSampler":
         """Return a sampler for drawing counts from this distribution."""
         return BetaBinomialSampler(self, seed)
@@ -81,6 +111,29 @@ class BetaBinomialDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> "BetaBinomialDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return BetaBinomialDataEncoder()
+
+
+class BetaBinomialEnumerator(DistributionEnumerator):
+    """Enumerate the bounded beta-binomial support {0, ..., n} in descending probability order.
+
+    Unlike the binomial, the beta-binomial pmf is not always unimodal (it is U-shaped for
+    ``a < 1, b < 1``), so a two-pointer walk from a mode is not safe here; the finite support is
+    materialized and sorted instead (the CategoricalEnumerator pattern), with value-order tie-breaks.
+    """
+
+    def __init__(self, dist: BetaBinomialDistribution) -> None:
+        super().__init__(dist)
+        lp = dist.seq_log_density(np.arange(dist.n + 1, dtype=np.float64))
+        order = np.argsort(-lp, kind="stable")
+        self._entries = [(int(k), float(lp[k])) for k in order if np.isfinite(lp[k])]
+        self._pos = 0
+
+    def __next__(self) -> tuple[int, float]:
+        if self._pos >= len(self._entries):
+            raise StopIteration
+        rv = self._entries[self._pos]
+        self._pos += 1
+        return rv
 
 
 class BetaBinomialSampler(DistributionSampler):
