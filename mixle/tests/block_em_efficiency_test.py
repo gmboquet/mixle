@@ -16,8 +16,9 @@ import pytest
 pytest.importorskip("numba")
 
 from mixle.inference.block_em import run_block_em
+from mixle.inference.estimation import optimize
 from mixle.inference.freeze_rollup import FreezeRollupCache, _component_log_density_matrix_profiled
-from mixle.inference.fusion_policy import prefer_block_schedule
+from mixle.inference.fusion_policy import prefer_block_schedule, prefer_compiled_mixture
 from mixle.stats import (
     GaussianDistribution,
     GaussianEstimator,
@@ -139,6 +140,8 @@ class AuditCadenceAndDispatchTest:
         enc = seq_encode(rng.normal(0.0, 4.0, 20_000), model=deepish)
         # only 3 components, but each is an expensive subtree: block scheduling qualifies
         assert prefer_block_schedule(deepish, enc, max_its=100)
+        # Most expensive child subtrees compile even though the heterogeneous root cannot.
+        assert prefer_compiled_mixture(deepish, enc, max_its=100)
         assert not prefer_block_schedule(deepish, enc, max_its=1)  # weighted-work floor still applies
         cheap = MixtureDistribution([GaussianDistribution(-4.0, 1.0), LaplaceDistribution(4.0, 2.0)], [0.5, 0.5])
         enc_cheap = seq_encode(rng.normal(0.0, 4.0, 20_000), model=cheap)
@@ -233,6 +236,25 @@ class FusedMStepEngagementTest:
 
         monkeypatch.setattr(fr, "_FUSED_SCORING", (fused_seq_log_density, fusible, counting_accumulate, fusible_estep))
         return calls
+
+    def test_optimize_full_dispatch_engages_compiled_component_kernels(self, monkeypatch):
+        start, estimator, enc, _ = _deep_mixed_problem(n=900)
+        calls = self._counting_resolver(monkeypatch)
+        monkeypatch.setattr("mixle.inference.fusion_policy.prefer_compiled_mixture", lambda *_: True)
+
+        fitted = optimize(
+            None,
+            estimator,
+            enc_data=enc,
+            prev_estimate=start,
+            max_its=2,
+            delta=None,
+            schedule="full",
+            out=None,
+        )
+
+        assert isinstance(fitted, MixtureDistribution)
+        assert calls["n"] > 0
 
     def test_flat_subcombinator_components_engage_and_match_host(self, monkeypatch):
         import mixle.inference.freeze_rollup as fr

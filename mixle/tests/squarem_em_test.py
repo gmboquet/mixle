@@ -103,6 +103,11 @@ class CompiledEMTest(unittest.TestCase):
         )
         self.assertTrue(result.metadata["compiled"])
         self.assertGreater(result.metadata["mstep_seconds"], 0.0)
+        self.assertAlmostEqual(
+            result.metadata["input_data_objective"],
+            observed_log_likelihood(enc_data)(model),
+            places=9,
+        )
 
     def test_squarem_accepts_compiled_base_strategy(self):
         model, est, enc_data = _overlapping_gmm(n=6_000)
