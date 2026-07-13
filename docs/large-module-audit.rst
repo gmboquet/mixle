@@ -161,6 +161,19 @@ Compiled-kernel code generation
 Infrastructure and facade
 -------------------------
 
+``mixle/inference/estimation.py`` (1,548)
+    * **Responsibilities:** the ``optimize`` / ``fit`` / ``best_of`` front door — data encoding, model
+      proposal handoff (``_maybe_structured_model``), the fused/standard EM drivers, and the
+      schedule/objective plumbing.
+    * **Stateful globals:** none (module-level constants only).
+    * **Optional imports:** ``torch`` (gradient-fit path), reached lazily.
+    * **Hot paths:** ``optimize``'s fused-step loop (``_local_fused_step`` / ``_engine_fused_step``) —
+      change with LL-parity tests against the standard loop.
+    * **Serialization:** none directly (delegates to the model's encoders).
+    * **Extraction boundary:** the structure-proposal gate (``_maybe_structured_model``) and the
+      EM-driver loops are separable seams; extract only to remove a demonstrated defect, per the
+      audit's own rule.
+
 ``mixle/stats/__init__.py`` (2,133)
     * **Responsibilities:** the ``mixle.stats`` facade — lazy ``__getattr__`` re-exports, capability
       registration, and the ``load_models`` / ``dump_models`` model-collection serialization entry points.
