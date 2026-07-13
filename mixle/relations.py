@@ -19,8 +19,9 @@ residual: a cost (minimized) or score (maximized); ``sense`` records which.
 
 Assignment, spanning tree, the edit-distance ball, k-best Viterbi, shortest path, and best-subset
 regression are all specified and consumed the same way, each delegating to whatever engine fits
-(Murty for assignment, Gabow for spanning trees, A* / :func:`best_first_paths` for paths and Viterbi,
-Dijkstra / :func:`nearest_first` for the edit-distance ball, exhaustive ranking for best-subset).
+(Murty for assignment, Gabow for spanning trees, A* / :func:`best_first_paths` for paths,
+:func:`mixle.enumeration.hmm_paths.hmm_best_paths` for Viterbi, Dijkstra / :func:`nearest_first`
+for the edit-distance ball, exhaustive ranking for best-subset).
 The two shared low-level engines are :func:`best_first_paths` (k-best *paths to a goal*) and
 :func:`nearest_first` (distinct *states outward* from a center -- an expanding metric ball).
 
@@ -42,6 +43,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from mixle.enumeration.assignment import k_best_assignments
+from mixle.enumeration.hmm_paths import hmm_best_paths
 from mixle.enumeration.spanning import k_best_spanning_trees
 
 __all__ = [
@@ -330,21 +332,27 @@ def min_cut(capacity: Any, source: int, sink: int) -> tuple[float, list[int], li
 def tsp_held_karp(distance: Any) -> tuple[float, list[int]]:
     """Exact minimum-cost Hamiltonian cycle through all nodes (Held-Karp).
 
-    ``distance`` is an ``n x n`` matrix of arc costs (may be asymmetric). Returns ``(cost, tour)`` where
-    ``tour`` starts at node 0, visits every node once, and the cost includes the closing arc back to 0.
-    The Held-Karp bitmask DP is exact in ``O(2^n n^2)`` time / ``O(2^n n)`` memory, so it is intended for
-    small ``n`` (roughly <= 15-18); beyond that use a heuristic.
+    ``distance`` is an ``n x n`` matrix of arc costs (may be asymmetric); a non-finite cost marks a
+    missing arc. Returns ``(cost, tour)`` where ``tour`` starts at node 0, visits every node once, and
+    the cost includes the closing arc back to 0. Raises :class:`ValueError` when the finite arcs admit
+    no Hamiltonian cycle. The Held-Karp bitmask DP is exact in ``O(2^n n^2)`` time / ``O(2^n n)``
+    memory, so it is intended for small ``n`` (roughly <= 15-18); beyond that use a heuristic.
     """
     d = np.asarray(distance, dtype=np.float64)
     n = d.shape[0]
+    no_cycle = "no Hamiltonian cycle: the finite arcs admit no tour visiting every node once"
     if n <= 1:
         return 0.0, list(range(n))
     if n == 2:
+        if not (np.isfinite(d[0, 1]) and np.isfinite(d[1, 0])):
+            raise ValueError(no_cycle)
         return float(d[0, 1] + d[1, 0]), [0, 1]
     full = (1 << (n - 1)) - 1
     # C[(mask, j)] = (min cost of a path 0 -> ... -> j visiting exactly the nodes in mask, predecessor k)
-    # where mask is a bitmask over nodes 1..n-1.
-    cost_to: dict[tuple[int, int], tuple[float, int]] = {(1 << (j - 1), j): (float(d[0, j]), 0) for j in range(1, n)}
+    # where mask is a bitmask over nodes 1..n-1; unreachable (mask, j) simply have no entry.
+    cost_to: dict[tuple[int, int], tuple[float, int]] = {
+        (1 << (j - 1), j): (float(d[0, j]), 0) for j in range(1, n) if np.isfinite(d[0, j])
+    }
     for mask in range(1, full + 1):
         for j in range(1, n):
             bj = 1 << (j - 1)
@@ -353,7 +361,7 @@ def tsp_held_karp(distance: Any) -> tuple[float, list[int]]:
             prev_mask = mask ^ bj
             best: tuple[float, int] | None = None
             for k in range(1, n):
-                if k == j or not (prev_mask & (1 << (k - 1))):
+                if k == j or not (prev_mask & (1 << (k - 1))) or not np.isfinite(d[k, j]):
                     continue
                 pc = cost_to.get((prev_mask, k))
                 if pc is None:
@@ -367,12 +375,14 @@ def tsp_held_karp(distance: Any) -> tuple[float, list[int]]:
     end: tuple[float, int] | None = None
     for j in range(1, n):
         c = cost_to.get((full, j))
-        if c is None:
+        if c is None or not np.isfinite(d[j, 0]):
             continue
         cand = c[0] + float(d[j, 0])
         if end is None or cand < end[0]:
             end = (cand, j)
-    cost, last = end  # type: ignore[misc]
+    if end is None:
+        raise ValueError(no_cycle)
+    cost, last = end
     rev = []
     mask, j = full, last
     while j != 0:
@@ -584,7 +594,7 @@ def branch_and_bound_milp(
     obj = -cvec if sense == "max" else cvec
     if sense not in ("min", "max"):
         raise ValueError("sense must be 'min' or 'max'")
-    integer = range(n) if integer is None else integer
+    integer = list(range(n)) if integer is None else list(integer)  # materialize once: consumed at every node
     lo0 = [(-np.inf if bounds is None else bounds[i][0]) for i in range(n)]
     hi0 = [(np.inf if bounds is None else bounds[i][1]) for i in range(n)]
 
@@ -605,7 +615,9 @@ def branch_and_bound_milp(
         frac = next((i for i in integer if abs(x[i] - round(x[i])) > tol), None)
         if frac is None:
             if f < incumbent[0]:
-                incumbent = [f, np.array(x)]
+                x_int = np.array(x, dtype=np.float64)
+                x_int[integer] = np.round(x_int[integer])  # snap within-tol coordinates to exact integers
+                incumbent = [f, x_int]
             continue
         floor_hi = [hi[j] if j != frac else float(np.floor(x[frac])) for j in range(n)]
         ceil_lo = [lo[j] if j != frac else float(np.ceil(x[frac])) for j in range(n)]
@@ -635,7 +647,8 @@ def cardinality_constrained_milp(
     Adds a cardinality (sparsity) constraint to the linear program ``a_ub @ x <= b_ub`` with per-variable
     ``bounds`` via the standard big-M indicator formulation: a binary ``z_i`` gates each variable
     (``lower_i z_i <= x_i <= upper_i z_i``, so ``z_i = 0`` forces ``x_i = 0``) and ``sum z_i <=
-    max_nonzero``; the extended mixed-integer program is solved by :func:`branch_and_bound_milp`. Returns
+    max_nonzero``; the extended mixed-integer program is solved by :func:`branch_and_bound_milp`. Every
+    bound must be finite -- the bounds are the big-M constants of the indicator rows. Returns
     ``(objective, x)`` (the sparse optimizer) or ``None`` if infeasible. This is the indicator/
     set-membership/cardinality constraint primitive (best-subset selection, sparse design).
     """
@@ -645,6 +658,12 @@ def cardinality_constrained_milp(
     b = np.asarray(b_ub, dtype=np.float64) if b_ub is not None else np.zeros(0)
     lo = np.array([bd[0] for bd in bounds], dtype=np.float64)
     hi = np.array([bd[1] for bd in bounds], dtype=np.float64)
+    if not (np.isfinite(lo).all() and np.isfinite(hi).all()):
+        raise ValueError(
+            "cardinality_constrained_milp needs finite bounds for every variable: the big-M indicator "
+            "rows (lo_i z_i <= x_i <= hi_i z_i) are built from them, and a non-finite bound would put "
+            "inf/nan into the constraint matrix"
+        )
     rows: list[np.ndarray] = []
     rhs: list[float] = []
     for i in range(a.shape[0]):  # original constraints, padded for the z block
@@ -1026,7 +1045,9 @@ class ViterbiPath(Relation):
 
     Standard Viterbi returns only the single best path; this reduces the trellis (nodes ``(t, s)``)
     to a longest-log-prob path and yields the top ``k``. The solution value is a length-``T`` list of
-    state indices.
+    state indices. Delegates to :func:`mixle.enumeration.hmm_paths.hmm_best_paths`, whose backward
+    Viterbi completion value is a tight admissible heuristic: emission log-*densities* may be positive
+    (any density > 1), so a zero-heuristic ``sense="max"`` search would pop suboptimal goals first.
 
     Args:
         log_init: ``log p(state s at t=0)``, length ``S``.
@@ -1047,19 +1068,9 @@ class ViterbiPath(Relation):
         """Yield up to ``k`` hidden-state paths ordered by joint log probability."""
         if self.n_steps == 0:
             return
-        t_last, s = self.n_steps - 1, self.n_states
-        log_init, log_trans, log_obs = self.log_init, self.log_trans, self.log_obs
-
-        def successors(node):
-            t, state = node
-            if t == -1:
-                return [((0, sp), float(log_init[sp]) + float(log_obs[0][sp])) for sp in range(s)]
-            if t >= t_last:
-                return []  # states at the final step are sinks -> goals
-            return [((t + 1, sp), float(log_trans[state][sp]) + float(log_obs[t + 1][sp])) for sp in range(s)]
-
-        for path, score in best_first_paths((-1, -1), successors, sense="max", max_results=k):
-            yield Solution([st for (_t, st) in path[1:]], float(score))
+        log_b = np.asarray(self.log_obs, dtype=np.float64)
+        for path, score in hmm_best_paths(self.log_init, self.log_trans, log_b, k=k):
+            yield Solution(list(path), float(score))
 
 
 # ---------------------------------------------------------------------------
