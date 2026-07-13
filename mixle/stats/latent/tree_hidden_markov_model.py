@@ -2049,10 +2049,17 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
             return None, self._seq_encode(x)
 
 
+# fastmath SUBSET for the tree kernels: reassociation/contraction/approximations keep the SIMD wins,
+# but ninf/nnan stay OFF -- the upward recursion scores impossible observations ``-np.inf``, which
+# full ``fastmath=True`` (LLVM ninf) declares undefined behavior and may fold away (the same policy
+# as fused_codegen._njit and _hidden_markov_numba_kernels).
+_FASTMATH_SUBSET = {"reassoc", "contract", "arcp", "afn", "nsz"}
+
+
 @numba.njit(
     "void(int32, int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], "
     "int32[:], float64[:,:], float64[:, :], float64[:, :], float64[:], float64[:,:], float64[:,:], float64[:])",
-    fastmath=True,
+    fastmath=_FASTMATH_SUBSET,
     parallel=True,
     cache=True,
 )
@@ -2310,7 +2317,7 @@ def numba_baum_welch(
 @numba.njit(
     "void(int32, int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], "
     "int32[:], float64[:,:], float64[:, :], float64[:,:], float64[:,:], float64[:,:])",
-    fastmath=True,
+    fastmath=_FASTMATH_SUBSET,
     parallel=True,
     cache=True,
 )
