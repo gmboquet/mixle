@@ -137,7 +137,9 @@ def bootstrap(
         groups: ``(n,)`` labels for **stratified** resampling (resample within each group).
         clusters: ``(n,)`` labels for **cluster** resampling (resample whole clusters with replacement).
         block_length: moving-**block** length for serially dependent (time-series) data.
-        m: subsample size for **m-out-of-n** subsampling (without replacement).
+        m: subsample size for **m-out-of-n** subsampling (without replacement). Replicates are
+            rescaled about the point estimate by ``sqrt(m/n)`` (Politis--Romano), so the returned
+            distribution / interval / standard error are at full-sample scale.
 
     Returns:
         A :class:`BootstrapResult`.
@@ -150,6 +152,11 @@ def bootstrap(
     for b in range(n_boot):
         idx = _resample_indices(n, rng, groups=groups, clusters=clusters, block_length=block_length, m=m)
         reps[b] = _call(statistic, _take(data, idx))
+    if m is not None and m < n:
+        # Politis-Romano m-out-of-n rescaling: a size-m subsample statistic fluctuates at the
+        # sqrt(m) rate, so shrink the replicates about the point estimate by sqrt(m/n) to put
+        # them at full-sample scale (assumes the usual sqrt(n)-consistent statistic).
+        reps = estimate + np.sqrt(m / n) * (reps - estimate)
 
     alpha = 1.0 - ci_level
     if method == "bca" and special:
@@ -323,8 +330,13 @@ def _mean_diff(x: np.ndarray, y: np.ndarray) -> float:
     return float(np.mean(x) - np.mean(y))
 
 
-def _pvalue(observed: float, null: np.ndarray, alternative: str) -> float:
-    """Monte-Carlo / exact p-value with the +1 finite-sample correction."""
+def _pvalue(observed: float, null: np.ndarray, alternative: str, *, exact: bool = False) -> float:
+    """Permutation p-value: ``count / n`` when the full group was enumerated, else Monte-Carlo.
+
+    With ``exact=True`` the null set already contains the identity rearrangement, so ``count / n``
+    IS the exact p-value; the ``(count + 1) / (n + 1)`` finite-sample correction (which adds the
+    identity to a *random* sample of rearrangements) would double-count it.
+    """
     n = null.size
     if alternative == "greater":
         count = np.sum(null >= observed)
@@ -334,6 +346,8 @@ def _pvalue(observed: float, null: np.ndarray, alternative: str) -> float:
         count = np.sum(np.abs(null) >= abs(observed))
     else:
         raise ValueError("alternative must be 'two-sided', 'greater', or 'less'.")
+    if exact:
+        return float(count / n)
     return float((count + 1) / (n + 1))
 
 
@@ -394,7 +408,8 @@ def permutation_test(
             for p in range(n_perm):
                 signs = rng.choice([-1.0, 1.0], size=n)
                 null[p] = stat(d * signs, np.zeros_like(d))
-        return PermutationResult(observed, _pvalue(observed, null, alternative), null, null.size, exact, alternative)
+        pval = _pvalue(observed, null, alternative, exact=exact)
+        return PermutationResult(observed, pval, null, null.size, exact, alternative)
 
     observed = stat(x, y)
     pooled = np.concatenate([x, y])
@@ -429,7 +444,8 @@ def permutation_test(
         for p in range(n_perm):
             perm = rng.permutation(pooled)
             null[p] = stat(perm[:nx], perm[nx:])
-    return PermutationResult(observed, _pvalue(observed, null, alternative), null, null.size, exact, alternative)
+    pval = _pvalue(observed, null, alternative, exact=exact)
+    return PermutationResult(observed, pval, null, null.size, exact, alternative)
 
 
 __all__ = [

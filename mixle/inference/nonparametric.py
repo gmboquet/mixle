@@ -112,9 +112,11 @@ class TestResult:
 def brunner_munzel(x: Any, y: Any, *, alternative: str = "two-sided", distribution: str = "t") -> TestResult:
     """Brunner-Munzel test: the generalized Wilcoxon test that does not assume equal variances/shapes.
 
-    Tests the stochastic-equality null ``P(x < y) + 0.5 P(x = y) = 1/2``. ``distribution='t'`` uses a
-    Satterthwaite t reference (recommended for small samples); ``'normal'`` the normal approximation.
-    Reports the estimated relative effect ``p_hat = P(x < y) + 0.5 P(x = y)`` in ``extra``.
+    Tests the stochastic-equality null ``P(x < y) + 0.5 P(x = y) = 1/2``. ``alternative`` is
+    ``'two-sided'``, ``'greater'`` (x > y), or ``'less'`` -- the same direction convention as
+    :func:`mann_whitney_u` (and scipy). ``distribution='t'`` uses a Satterthwaite t reference
+    (recommended for small samples); ``'normal'`` the normal approximation. Reports the estimated
+    relative effect ``p_hat = P(x < y) + 0.5 P(x = y)`` in ``extra``.
     """
     x = np.asarray(x, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
@@ -140,10 +142,10 @@ def brunner_munzel(x: Any, y: Any, *, alternative: str = "two-sided", distributi
         extra = {"p_hat": float(p_hat)}
     if alternative == "two-sided":
         p = 2.0 * dist.sf(abs(w))
-    elif alternative == "greater":
-        p = dist.sf(w)
-    elif alternative == "less":
+    elif alternative == "greater":  # x > y pushes the y-ranks (and w) DOWN: lower tail
         p = dist.cdf(w)
+    elif alternative == "less":
+        p = dist.sf(w)
     else:
         raise ValueError("alternative must be 'two-sided', 'greater', or 'less'.")
     return TestResult(float(w), float(min(p, 1.0)), extra)
@@ -316,8 +318,9 @@ def wilcoxon_signed_rank(
 
     Ranks ``|d|`` for ``d = x - y`` (mid-ranks for ties), splits into positive / negative rank sums, and
     uses the tie-corrected normal approximation. ``zero_method='wilcox'`` drops zero differences (and
-    their ranks); ``'pratt'`` keeps them in the ranking but drops them from the sums. The matched-pairs
-    rank-biserial correlation is reported as the effect size.
+    their ranks); ``'pratt'`` keeps them in the ranking but drops them from the sums, with the matching
+    Pratt/Cureton zero corrections applied to the null mean and variance (as scipy does). The
+    matched-pairs rank-biserial correlation is reported as the effect size.
     """
     x = np.asarray(x, dtype=float).ravel()
     d = x if y is None else x - np.asarray(y, dtype=float).ravel()
@@ -327,15 +330,22 @@ def wilcoxon_signed_rank(
     if n == 0:
         return WilcoxonResult(0.0, 0.0, 1.0, 0.0, alternative)
     r = _ranks(np.abs(d))
+    n_zero = 0
     if zero_method == "pratt":
+        n_zero = int(np.sum(d == 0))
         keep = d != 0
         r, d = r[keep], d[keep]
     r_plus = float(r[d > 0].sum())
     r_minus = float(r[d < 0].sum())
-    nn = d.size
+    nn = d.size + n_zero  # the ranked count (zeros stay in the ranking under 'pratt')
     t = min(r_plus, r_minus)
-    mu = nn * (nn + 1) / 4.0
-    sigma = np.sqrt((nn * (nn + 1) * (2 * nn + 1) - 0.5 * _tie_term(r)) / 24.0)
+    # Pratt/Cureton (1967) zero corrections: the zero block occupies the lowest ranks but contributes
+    # to neither sum, so its share is subtracted from the null mean and variance (no-op when n_zero=0);
+    # ties among the remaining |d| correct the variance as usual.
+    mu = (nn * (nn + 1) - n_zero * (n_zero + 1)) / 4.0
+    sigma = np.sqrt(
+        (nn * (nn + 1) * (2 * nn + 1) - n_zero * (n_zero + 1) * (2 * n_zero + 1) - 0.5 * _tie_term(r)) / 24.0
+    )
     if sigma == 0:
         z, p = 0.0, 1.0
     else:

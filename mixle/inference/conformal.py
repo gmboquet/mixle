@@ -49,6 +49,26 @@ def _conformal_quantile(scores: np.ndarray, alpha: float) -> float:
     return float(s[k - 1])
 
 
+def _jackknife_plus_bounds(lo_vals: np.ndarray, hi_vals: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray]:
+    """Barber et al. (2021) finite-sample J+/CV+ endpoints from ``(n, m)`` per-fold bound matrices.
+
+    Per test point, the lower endpoint is the ``floor(alpha (n+1))``-th smallest of
+    ``mu_{-i}(x) - R_i`` and the upper the ``ceil((1-alpha)(n+1))``-th smallest of
+    ``mu_{-i}(x) + R_i`` -- the explicit ``(n+1)``-based order statistics that carry the J+
+    coverage guarantee (mirroring :func:`_conformal_quantile`; ``np.quantile``'s ``(n-1)``-based
+    virtual indices do not). An out-of-range index (small ``n`` for the requested ``alpha``)
+    yields the honest unbounded endpoint ``-inf`` / ``+inf``.
+    """
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"alpha must be in [0.0, 1.0], got {alpha!r}.")
+    n, m = lo_vals.shape
+    k_lo = int(np.floor(alpha * (n + 1)))
+    k_hi = int(np.ceil((1.0 - alpha) * (n + 1)))
+    lower = np.full(m, -np.inf) if k_lo < 1 else np.sort(lo_vals, axis=0)[k_lo - 1]
+    upper = np.full(m, np.inf) if k_hi > n else np.sort(hi_vals, axis=0)[k_hi - 1]
+    return lower, upper
+
+
 def split_conformal(
     cal_pred: np.ndarray,
     cal_y: np.ndarray,
@@ -116,9 +136,7 @@ def jackknife_plus(
         preds = np.asarray(fit_predict(x[mask], y[mask], eval_pts), dtype=float).ravel()
         resid[i] = abs(y[i] - preds[0])
         loo_test[i] = preds[1:]
-    lower = np.quantile(loo_test - resid[:, None], alpha, axis=0, method="lower")
-    upper = np.quantile(loo_test + resid[:, None], 1.0 - alpha, axis=0, method="higher")
-    return lower, upper
+    return _jackknife_plus_bounds(loo_test - resid[:, None], loo_test + resid[:, None], alpha)
 
 
 def cv_plus(
@@ -155,9 +173,7 @@ def cv_plus(
         k = fold.shape[0]
         resid[fold] = np.abs(y[fold] - preds[:k])
         loo_test[fold] = np.tile(preds[k:], (k, 1))
-    lower = np.quantile(loo_test - resid[:, None], alpha, axis=0, method="lower")
-    upper = np.quantile(loo_test + resid[:, None], 1.0 - alpha, axis=0, method="higher")
-    return lower, upper
+    return _jackknife_plus_bounds(loo_test - resid[:, None], loo_test + resid[:, None], alpha)
 
 
 def mondrian_conformal(
