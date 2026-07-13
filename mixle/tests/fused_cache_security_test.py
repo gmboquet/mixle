@@ -51,7 +51,9 @@ class PlantedFileNotExecutedTest(unittest.TestCase):
         src = "def _fused_sec_probe(x):\n    return x * 2.0\n"
         import hashlib
 
-        digest = hashlib.sha1(src.encode()).hexdigest()[:16]  # noqa: S324 -- cache key, mirrors the module
+        # mirrors _njit's digest EXACTLY (v2 salt + parallel flag + source); if this drifts from the
+        # module the symlink lands at an unused path and the test can no longer see the overwrite
+        digest = hashlib.sha1(f"v2|parallel=False|{src}".encode()).hexdigest()[:16]  # noqa: S324 -- cache key
         path = os.path.join(fc._private_cache_dir(), f"_pysp_fused_{digest}.py")
 
         with tempfile.TemporaryDirectory() as tmp:

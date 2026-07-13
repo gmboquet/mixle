@@ -43,6 +43,7 @@ def _seed_transformers_warningregistry():
                     pass
     yield
 
+
 MarkerTuple = tuple[str, ...]
 
 
@@ -81,6 +82,14 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # Chunk-parallel fused kernels: determinism receipts (bit-identity across reruns/worker counts) and
     # sequential-vs-parallel parity -- numba-gated for the same reason as fused_codegen_test.py.
     "fused_parallel_test.py": ("numba", "optional"),
+    # Structure fuzzing vs the host oracle (12 signatures + randomized samples x 5 properties): the
+    # broadest correctness net over the compiled optimizer. Slow because a fresh environment compiles
+    # every pool signature (~1s each; disk-cached thereafter).
+    "fused_fuzz_test.py": ("numba", "optional", "slow"),
+    # Numerical edge panel for the compiled paths (extreme scales, degenerate mixtures, the -inf
+    # log-sum-exp guard that fastmath's ninf flag used to fold away, tiny/empty data) + the SQUAREM
+    # never-loses-to-plain-EM soak.
+    "fused_edge_panel_test.py": ("numba", "optional"),
     "jax_engine_test.py": ("jax", "optional"),
     # Backward-compatibility-only tests (renamed class / kwarg aliases). Tagged `legacy` so a product-only
     # run can exclude them with `-m "not legacy"`; they still run in the default `fast` gate.
