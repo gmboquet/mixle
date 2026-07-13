@@ -404,7 +404,11 @@ def _combine(ll_mat: np.ndarray, log_w: np.ndarray) -> tuple[np.ndarray, np.ndar
 
     Mirrors :meth:`MixtureDistribution.seq_log_density` and ``seq_posterior`` combined into a
     single pass (both need the same row-max/logsumexp arithmetic), since this module already has
-    ``ll_mat`` in hand from the cache and would otherwise pay for that arithmetic twice.
+    ``ll_mat`` in hand from the cache and would otherwise pay for that arithmetic twice. Rows where
+    every component is impossible score ``-inf`` exactly as ``seq_log_density`` does (NOT
+    ``logsumexp(log_w) = 0``, which would certify a zero-support model as probability one and make
+    the acceptance gate reject every repair M-step); their responsibilities fall back to the prior
+    weights exactly as ``seq_posterior`` does, so the M-step still sees those rows.
     """
     ll = ll_mat + log_w
     ll_max = ll.max(axis=1, keepdims=True)
@@ -417,12 +421,19 @@ def _combine(ll_mat: np.ndarray, log_w: np.ndarray) -> tuple[np.ndarray, np.ndar
     np.exp(shifted, out=shifted)
     row_sum = shifted.sum(axis=1, keepdims=True)
     log_density = (np.log(row_sum) + ll_max).flatten()
+    if np.any(bad_rows):
+        log_density[bad_rows] = -np.inf
     gamma = np.divide(shifted, row_sum, out=np.zeros_like(shifted), where=row_sum > 0.0)
     return log_density, gamma
 
 
 def _log_density_from_matrix(ll_mat: np.ndarray, log_w: np.ndarray) -> np.ndarray:
-    """Combine component scores without constructing unused responsibilities."""
+    """Combine component scores without constructing unused responsibilities.
+
+    All-impossible rows score ``-inf``, matching :meth:`MixtureDistribution.seq_log_density`
+    (see :func:`_combine`); the ``log_w`` substitution below only keeps the shifted-exponential
+    arithmetic NaN-free on those rows before they are overwritten.
+    """
 
     ll = ll_mat + log_w
     ll_max = ll.max(axis=1, keepdims=True)
@@ -432,7 +443,10 @@ def _log_density_from_matrix(ll_mat: np.ndarray, log_w: np.ndarray) -> np.ndarra
         ll_max[bad_rows] = np.max(log_w)
     ll -= ll_max
     np.exp(ll, out=ll)
-    return (np.log(ll.sum(axis=1, keepdims=True)) + ll_max).flatten()
+    log_density = (np.log(ll.sum(axis=1, keepdims=True)) + ll_max).flatten()
+    if np.any(bad_rows):
+        log_density[bad_rows] = -np.inf
+    return log_density
 
 
 def _component_log_density_matrix_profiled(

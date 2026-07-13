@@ -257,12 +257,17 @@ def spatial_block_kfold(
     span = np.where(hi > lo, hi - lo, 1.0)
     if block_size is not None:
         cell = np.full(d, float(block_size))
+        # cells covering [lo, hi] per axis; the epsilon absorbs float noise when span/cell is integral
+        n_cells = np.maximum(np.ceil(span / cell - 1e-12).astype(int), 1)
     else:
         if n_side is None:
             n_side = max(2, int(np.ceil((4 * n_splits) ** (1.0 / d))))
         cell = span / n_side
+        n_cells = np.full(d, int(n_side))
     block_idx = np.floor((coords - lo) / cell).astype(int)
-    block_idx = np.minimum(block_idx, np.floor(span / cell).astype(int))  # clamp the max edge
+    # clamp max-edge points into the last cell: a point at hi floors to n_cells (one past the grid),
+    # and a floor(span/cell) bound is a no-op (floor is monotone), leaving phantom one-past-the-grid blocks
+    block_idx = np.minimum(block_idx, n_cells - 1)
     _, block_id = np.unique(block_idx, axis=0, return_inverse=True)
     n_blocks = block_id.max() + 1
     rng = _as_rng(seed)
