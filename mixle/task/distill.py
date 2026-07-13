@@ -133,7 +133,9 @@ def distill_from_labels(
     texts = [str(t) for t in texts]
     label_list, y = _encode_labels(teacher_labels, labels)
     feat = HashedNGram(n=n, dim=dim, seed=seed)
-    module, cfg, steps_run = _fit_mlp(feat.transform(texts), y, len(label_list), hidden, epochs, lr, seed, device)
+    module, cfg, steps_run, optimizer_receipt = _fit_mlp(
+        feat.transform(texts), y, len(label_list), hidden, epochs, lr, seed, device
+    )
     student = _student(
         module,
         cfg,
@@ -141,7 +143,15 @@ def distill_from_labels(
         task or "distilled text classifier",
         len(texts),
         label_list,
-        {"n": n, "dim": dim, "hidden": list(cfg["hidden_dims"]), "epochs": epochs, "epochs_run": steps_run, "lr": lr},
+        {
+            "n": n,
+            "dim": dim,
+            "hidden": list(cfg["hidden_dims"]),
+            "epochs": epochs,
+            "epochs_run": steps_run,
+            "lr": lr,
+            "optimizer": optimizer_receipt,
+        },
     )
     student.meta["train_agreement"] = agreement(student, teacher_labels, texts)
     return student
@@ -308,7 +318,9 @@ def distill_records_from_labels(
     records = list(records)
     label_list, y = _encode_labels(teacher_labels, labels)
     feat = HashedRecord(dim=dim, seed=seed)
-    module, cfg, steps_run = _fit_mlp(feat.transform(records), y, len(label_list), hidden, epochs, lr, seed, device)
+    module, cfg, steps_run, optimizer_receipt = _fit_mlp(
+        feat.transform(records), y, len(label_list), hidden, epochs, lr, seed, device
+    )
     student = _student(
         module,
         cfg,
@@ -316,7 +328,14 @@ def distill_records_from_labels(
         task or "distilled record classifier",
         len(records),
         label_list,
-        {"dim": dim, "hidden": list(cfg["hidden_dims"]), "epochs": epochs, "epochs_run": steps_run, "lr": lr},
+        {
+            "dim": dim,
+            "hidden": list(cfg["hidden_dims"]),
+            "epochs": epochs,
+            "epochs_run": steps_run,
+            "lr": lr,
+            "optimizer": optimizer_receipt,
+        },
     )
     student.meta["train_agreement"] = agreement(student, teacher_labels, records)
     return student
@@ -587,7 +606,8 @@ def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, se
     is a CEILING: once the mean training cross-entropy stops improving, further chunks are skipped rather than
     always spending the full requested step count -- a task that converges early trains faster for it, and a
     harder one still gets up to ``epochs`` steps. ``steps_run`` (the actual gradient-step count) is recorded
-    by the caller as ``recipe["epochs_run"]`` so the speedup is observable, not just internal.
+    by the caller as ``recipe["epochs_run"]`` so the speedup is observable, not just internal. The fourth return
+    value is the final chunk's optimizer receipt.
     """
     import torch
 
@@ -607,6 +627,7 @@ def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, se
     enc = (np.asarray(x, dtype=float), np.asarray(y, dtype=int))
 
     remaining, best_loss, stall, fit_module, steps_run = int(epochs), float("inf"), 0, module, 0
+    optimizer_receipt = None
     while remaining > 0:
         chunk = min(_ES_CHECK_EVERY, remaining)
         leaf = NeuralCategorical(fit_module, m_steps=chunk, lr=float(lr), device=device)
@@ -623,6 +644,7 @@ def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, se
             out=None,
         )
         fit_module = fit.module
+        optimizer_receipt = fit.fit_receipt.get("optimizer_plan")
         remaining -= chunk
         steps_run += chunk
         loss = -float(np.mean(fit.seq_log_density(enc)))
@@ -632,7 +654,7 @@ def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, se
             stall += 1
             if stall >= _ES_PATIENCE:
                 break
-    return fit_module, cfg, steps_run
+    return fit_module, cfg, steps_run, {"name": "auto", "plan": optimizer_receipt}
 
 
 def _student(module, cfg, adapter, task, n_examples, label_list, recipe) -> TaskModel:

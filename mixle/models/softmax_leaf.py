@@ -333,7 +333,9 @@ class NeuralCategoricalEstimator(ParameterEstimator):
         wt = torch.as_tensor(np.array(ws), dtype=torch.float32)
         n = xt.shape[0]
         bs = self.batch_size or n
-        opt = torch.optim.Adam(self.module.parameters(), lr=self.lr)
+        from mixle.models.optimizer_routing import resolve_neural_optimizer
+
+        opt, optimizer_receipt = resolve_neural_optimizer(self.module, lr=self.lr, sign_stable=bs >= n)
         ce = torch.nn.CrossEntropyLoss(reduction="none")
         total_weight = wt.sum().clamp(min=1e-8)
         optimizer_steps = 0
@@ -373,6 +375,8 @@ class NeuralCategoricalEstimator(ParameterEstimator):
             "optimizer_steps": optimizer_steps,
             "max_optimizer_steps": self.max_optimizer_steps,
             "gradient_estimator": "N/B responsibility-weighted cross-entropy",
+            "optimizer": optimizer_receipt["name"],
+            "optimizer_plan": optimizer_receipt["plan"],
         }
         return out
 

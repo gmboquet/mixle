@@ -22,11 +22,10 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
-from mixle.models.grad_leaf import GradLeaf
+from mixle.models.grad_leaf import DataBufferAccumulatorFactory, GradEstimator, GradLeaf
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
-    ParameterEstimator,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
@@ -52,11 +51,7 @@ class NeuralDensity(GradLeaf):
     def __init__(
         self, module: Any, *, m_steps: int = 60, lr: float = 5e-3, device: str = "cpu", name: str | None = None
     ) -> None:
-        self.module = module
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
-        self.device = device
-        self.name = name
+        super().__init__(module, m_steps=m_steps, lr=lr, device=device, name=name)
 
     def __str__(self) -> str:
         return f"NeuralDensity({type(self.module).__name__})"
@@ -212,38 +207,19 @@ class NeuralDensityAccumulatorFactory(StatisticAccumulatorFactory):
         return NeuralDensityAccumulator()
 
 
-class NeuralDensityEstimator(ParameterEstimator):
+class NeuralDensityEstimator(GradEstimator):
     """M-step: responsibility-weighted MLE -- ``max sum_i w_i log p(x_i)`` by gradient ascent on the module (warm)."""
 
     def __init__(
         self, module: Any, *, m_steps: int = 60, lr: float = 5e-3, device: str = "cpu", name: str | None = None
     ) -> None:
-        self.module = module
-        self.m_steps = int(m_steps)
-        self.lr = float(lr)
-        self.device = device
-        self.name = name
+        super().__init__(module, m_steps=m_steps, lr=lr, device=device, name=name)
 
-    def accumulator_factory(self) -> NeuralDensityAccumulatorFactory:
+    def accumulator_factory(self) -> DataBufferAccumulatorFactory:
         """Return an accumulator factory for weighted neural-density batches."""
-        return NeuralDensityAccumulatorFactory()
+        return DataBufferAccumulatorFactory(NeuralDensityEncoder())
 
-    def estimate(self, nobs: float | None, suff_stat: tuple) -> NeuralDensity:
-        """Run the weighted neural-density M-step and return the updated leaf."""
-        torch = _torch()
-        xs, ws = suff_stat
-        if len(xs) == 0:
-            return NeuralDensity(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
-        x = torch.as_tensor(np.asarray(xs, dtype=float), dtype=torch.float32, device=self.device)
-        w = torch.as_tensor(np.asarray(ws, dtype=float), dtype=torch.float32, device=self.device)
-        w = w / w.sum().clamp(min=1e-8)
-        self.module.to(self.device).train()
-        opt = torch.optim.Adam(self.module.parameters(), lr=self.lr)
-        for _ in range(self.m_steps):
-            opt.zero_grad()
-            loss = -(w * self.module.log_density(x)).sum()  # weighted negative log-likelihood
-            loss.backward()
-            opt.step()
+    def _leaf(self) -> NeuralDensity:
         return NeuralDensity(self.module, m_steps=self.m_steps, lr=self.lr, device=self.device, name=self.name)
 
 

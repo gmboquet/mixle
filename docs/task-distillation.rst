@@ -218,6 +218,16 @@ Available methods include:
     Hinton-style soft-target response distillation, optionally mixed with hard
     labels.
 
+``analytic_response_distill``
+    Evaluates the teacher once, freezes the student's body, and solves its final
+    linear head against centered teacher logits by weighted ridge regression.
+    It uses neither generated samples nor autograd steps.
+
+``planned_response_distill``
+    Runs the analytic head solve first, then optionally refines all student
+    blocks with automatically routed, minibatched updates. Set
+    ``refinement_epochs=0`` for the analytic projection alone.
+
 ``multi_teacher_distill``
     Soft-target distillation from an averaged or weighted teacher ensemble.
 
@@ -235,7 +245,9 @@ Available methods include:
     Sequence-level distillation for small language-model students.
 
 These methods return ``DistillResult`` records with before/after fidelity
-numbers and a training-loss history. They require Torch and are not task
+numbers, optimizer/analytic receipts, and a training-loss history. Their
+automatic gradient routes do not select Adam; pass ``optimizer="adam"`` only
+as an explicit fallback. They require Torch and are not task
 ``Solution`` objects; use them to train or compress modules before wrapping the
 result in a Mixle model, skill, or service boundary.
 

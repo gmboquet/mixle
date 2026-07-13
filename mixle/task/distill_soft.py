@@ -58,6 +58,9 @@ def distill_from_soft_labels(
     seed: int = 0,
     task: str = "",
     device: str = "cpu",
+    batch_size: int | None = None,
+    optimizer: Any = "auto",
+    analytic_ridge: float = 1.0e-6,
 ) -> TaskModel:
     """Fit a student to per-example teacher probabilities over ``labels``.
 
@@ -73,6 +76,7 @@ def distill_from_soft_labels(
     import torch
 
     from mixle.models.neural import make_mlp
+    from mixle.task.distill_methods import planned_response_distill
 
     if not 0.0 <= hard_weight <= 1.0:
         raise ValueError("hard_weight must be in [0, 1].")
@@ -97,23 +101,23 @@ def distill_from_soft_labels(
 
     xb = torch.as_tensor(x, device=device)
     pt = torch.as_tensor(p_teacher, dtype=torch.float32, device=device)
-    pt_soft = torch.softmax(torch.log(pt.clamp_min(_EPS)) / temperature, dim=1)  # teacher at temperature T
     hard_idx = torch.as_tensor(np.argmax(p_teacher, axis=1), device=device)
-    opt = torch.optim.Adam(module.parameters(), lr=float(lr))
-    module.train()
-    for _ in range(int(epochs)):
-        opt.zero_grad()
-        logits = module(xb)
-        log_ps_T = torch.log_softmax(logits / temperature, dim=1)
-        # KL(teacher || student) = sum pt_soft * (log pt_soft - log ps_T); the pt log-term is constant in
-        # the student, so cross-entropy suffices -- scaled by T^2 to preserve soft-gradient magnitude.
-        soft_loss = (temperature**2) * -(pt_soft * log_ps_T).sum(dim=1).mean()
-        loss = (1.0 - hard_weight) * soft_loss
-        if hard_weight > 0.0:
-            loss = loss + hard_weight * torch.nn.functional.cross_entropy(logits, hard_idx)
-        loss.backward()
-        opt.step()
-    module.eval()
+    teacher_logits = torch.log(pt.clamp_min(_EPS))
+    distilled = planned_response_distill(
+        module,
+        lambda _inputs: teacher_logits,
+        xb,
+        hard_idx,
+        temperature=temperature,
+        alpha=1.0 - hard_weight,
+        ridge=analytic_ridge,
+        refinement_epochs=epochs,
+        lr=lr,
+        batch_size=batch_size,
+        optimizer=optimizer,
+        seed=seed,
+    )
+    module = distilled.student.eval()
 
     return TaskModel(
         module,
@@ -128,7 +132,16 @@ def distill_from_soft_labels(
             "hard_weight": float(hard_weight),
             "n_examples": len(texts),
             "labels": label_list,
-            "recipe": {"n": n, "dim": dim, "hidden": list(cfg["hidden_dims"]), "epochs": epochs, "lr": lr},
+            "recipe": {
+                "n": n,
+                "dim": dim,
+                "hidden": list(cfg["hidden_dims"]),
+                "epochs": epochs,
+                "lr": lr,
+                "batch_size": batch_size,
+                "optimizer": distilled.extra["optimizer"],
+                "analytic_projection": distilled.extra["analytic_projection"],
+            },
         },
     )
 
