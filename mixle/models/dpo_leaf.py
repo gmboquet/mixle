@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import decode_module, encode_module
+from mixle.models.grad_leaf import _module_mode
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -64,7 +65,7 @@ class DPOModel(SequenceEncodableProbabilityDistribution):
     def _logits(self, module: Any, x: np.ndarray) -> np.ndarray:
         torch = _torch()
         module.to(self.device)
-        with torch.no_grad():
+        with _module_mode(module, train=False), torch.no_grad():
             return module(torch.as_tensor(np.atleast_2d(x), dtype=torch.float32).to(self.device)).cpu().numpy()
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
@@ -266,16 +267,17 @@ class DPOModelEstimator(ParameterEstimator):
         wsum = wt.sum().clamp(min=1e-8)
         ar = torch.arange(len(ct), device=dev)
         opt = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
-        with torch.no_grad():  # reference log-probs are constant -- compute once
+        with _module_mode(self.ref, train=False), torch.no_grad():  # reference log-probs are constant -- compute once
             lr_all = torch.log_softmax(self.ref(xt), dim=1)
             lr_ch, lr_rj = lr_all[ar, ct], lr_all[ar, rt]
-        for _ in range(self.m_steps):
-            opt.zero_grad()
-            lp = torch.log_softmax(self.policy(xt), dim=1)
-            margin = (lp[ar, ct] - lr_ch) - (lp[ar, rt] - lr_rj)
-            loss = -(wt * torch.nn.functional.logsigmoid(self.beta * margin)).sum() / wsum  # weighted DPO loss
-            loss.backward()
-            opt.step()
+        with _module_mode(self.policy, train=True):
+            for _ in range(self.m_steps):
+                opt.zero_grad()
+                lp = torch.log_softmax(self.policy(xt), dim=1)
+                margin = (lp[ar, ct] - lr_ch) - (lp[ar, rt] - lr_rj)
+                loss = -(wt * torch.nn.functional.logsigmoid(self.beta * margin)).sum() / wsum  # weighted DPO loss
+                loss.backward()
+                opt.step()
         return out
 
 
