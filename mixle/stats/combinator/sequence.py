@@ -463,7 +463,9 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if self.null_len_dist:
-            raise Exception("Error: len_dist cannot be none for SequenceDistribution.sampler(seed:Optional[int]=None).")
+            raise ValueError(
+                "Error: len_dist cannot be none for SequenceDistribution.sampler(seed:Optional[int]=None)."
+            )
         else:
             return SequenceSampler(self.dist, self.len_dist, seed)
 

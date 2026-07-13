@@ -205,6 +205,10 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         pmap = coalesce_alias("pmap", pmap, "prob_map", prob_map, default=MISSING)
+        if any(v < 0.0 for v in pmap.values()):
+            # A negative "probability" silently propagates into density()/log_density() answers,
+            # so reject it at the constructor like the scalar families do.
+            raise ValueError("CategoricalDistribution requires non-negative probabilities.")
         self.name = name
         self.pmap = pmap
         self.no_default = default_value != 0.0

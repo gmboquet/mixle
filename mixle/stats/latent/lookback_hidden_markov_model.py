@@ -60,7 +60,7 @@ from mixle.stats.latent._hidden_markov_numba_kernels import (
     numba_seq_log_density,
 )
 from mixle.stats.sequences.markov_chain import MarkovChainDistribution
-from mixle.utils.aliasing import MISSING, coalesce_alias, require
+from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias, require
 
 T = TypeVar("T")
 E0 = TypeVar("E0")
@@ -1155,7 +1155,7 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
         init_estimators: Sequence[ParameterEstimator] | None = None,
         len_estimator: ParameterEstimator | None = NullEstimator(),
         suff_stat=None,
-        pseudo_count: tuple[float | None, float | None] | None = (None, None),
+        pseudo_count: float | tuple[float | None, float | None] | None = (None, None),
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         terminal_states=None,
@@ -1181,6 +1181,7 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
         """
         self.num_states = len(estimators)
         self.estimators = estimators
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None)
         self.suff_stat = suff_stat
         self.keys = keys if keys is not None else (None, None, None)

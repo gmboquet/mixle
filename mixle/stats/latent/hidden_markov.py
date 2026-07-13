@@ -67,7 +67,7 @@ from mixle.stats.latent._hidden_markov_numba_kernels import (
 from mixle.stats.latent.heterogeneous_mixture import HeterogeneousMixtureDataEncoder
 from mixle.stats.latent.mixture import MixtureDistribution
 from mixle.stats.sequences.markov_chain import MarkovChainDistribution, stationary_distribution
-from mixle.utils.aliasing import MISSING, coalesce_alias, require
+from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias, require
 from mixle.utils.optional_deps import HAS_NUMBA, numba
 
 T = TypeVar("T")
@@ -340,7 +340,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
     def __init__(
         self,
-        topics: Sequence[SequenceEncodableProbabilityDistribution],
+        topics: Sequence[SequenceEncodableProbabilityDistribution] = MISSING,
         w: Sequence[float] | np.ndarray = MISSING,
         transitions: list[list[float]] | np.ndarray = MISSING,
         taus: list[list[float]] | np.ndarray | None = None,
@@ -351,12 +351,14 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         weights: Sequence[float] | np.ndarray = MISSING,
         prior=None,
         terminal_states: set[int] | Sequence[int] | None = None,
+        components: Sequence[SequenceEncodableProbabilityDistribution] = MISSING,
     ) -> None:
         """Create an HMM distribution over variable-length observation sequences.
 
         Args:
             topics: Emission distributions. All emissions must accept the same
-                observation type.
+                observation type. ``components`` is accepted as an alias
+                (matching ``MixtureDistribution``).
             w: Initial hidden-state probabilities. ``weights`` is accepted as
                 an alias.
             transitions: Hidden-state transition probability matrix.
@@ -374,6 +376,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             prior: Optional conjugate chain prior metadata.
             terminal_states: Optional absorbing hidden states that define
                 stopping-time sequence likelihoods.
+            components: Alias for ``topics``.
 
         Attributes:
             topics: Emission distributions.
@@ -392,6 +395,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             use_numba: Whether vectorized sequence calls use the Numba route.
 
         """
+        topics = coalesce_alias("topics", topics, "components", components, default=MISSING)
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
         transitions = require("transitions", transitions, default=MISSING)
         # Default to numba when it is installed (matching HiddenMarkovEstimator). The distribution's
@@ -1234,7 +1238,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if supports(self.len_dist, Neutral) and self.terminal_values is None and self.terminal_states is None:
-            raise Exception(
+            raise ValueError(
                 "HiddenMarkovSampler requires len_dist with support on non-negative integers, or terminal_"
                 "values / terminal_states to be set."
             )
@@ -3252,7 +3256,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
         self,
         estimators: list[ParameterEstimator],
         len_estimator: ParameterEstimator | None = NullEstimator(),
-        pseudo_count: tuple[float | None, float | None] | None = (None, None),
+        pseudo_count: float | tuple[float | None, float | None] | None = (None, None),
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         use_numba: bool | None = None,
@@ -3283,6 +3287,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
         """
         self.num_states = len(estimators)
         self.estimators = estimators
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None)
         self.keys = keys if keys is not None else (None, None, None)
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()

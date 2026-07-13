@@ -24,9 +24,24 @@ from mixle.stats.compute.sequence import (
     seq_initialize,
     seq_log_density_sum,
 )
+from mixle.utils.aliasing import coalesce_alias
 
 T = TypeVar("T")
 E0 = TypeVar("E0")
+
+
+def _resolve_rng_arg(rng: RandomState | int | None, seed: int | None) -> RandomState | None:
+    """Reconcile the legacy ``rng=`` argument with its ``seed=`` alias.
+
+    ``seed`` is the spelling every other entry point takes (``create``/``forecast``/``advi``/...),
+    so the fit verbs accept it too. Passing both raises ``TypeError`` (the standard alias
+    double-supply policy); an integer ``rng`` is coerced to a ``RandomState`` the way ``advi`` /
+    ``nuts`` coerce theirs. ``None`` is returned unchanged so each caller keeps its own default.
+    """
+    value = coalesce_alias("rng", rng, "seed", seed, required=False, default=None)
+    if isinstance(value, (int, np.integer)):
+        return RandomState(int(value))
+    return value
 
 
 # --- estimator coercion -----------------------------------------------------
@@ -752,6 +767,7 @@ def optimize(
     schedule: str = "full",
     monotone: bool | None = None,
     track_best: bool | None = None,
+    seed: int | None = None,
 ) -> SequenceEncodableProbabilityDistribution:
     """Fit ``estimator`` to ``data`` by a generalized-EM loop, for ``max_its`` iterations or until the
         objective improves by less than ``delta``.
@@ -779,6 +795,7 @@ def optimize(
         rng (RandomState): RandomState used to set seed for initializing EM algorithm. ``None`` resolves to
             a FIXED seed, so an un-seeded ``optimize``/``fit`` is deterministic by default; pass your own
             RandomState when you WANT different initializations across calls (e.g. hand-rolled restarts).
+            An integer is accepted and coerced to ``RandomState(rng)``. Mutually exclusive with ``seed``.
         vdata (Optional[Sequence[T]]): Optional validation set.
         prev_estimate (Optional[SeqeuenceEncodableProbabilityDistribution]): Optional model estimate used from prior
             fitting. Must be consistent with estimator.
@@ -881,12 +898,16 @@ def optimize(
             ``MixtureEstimator`` MLE fit with no explicit ``strategy``/``engine``/``resources``/
             ``placement`` -- anything else silently falls back to ``'full'`` (never an error, never
             a behavior change beyond scheduling).
+        seed (Optional[int]): Integer seed for initializing the EM algorithm -- shorthand for
+            ``rng=RandomState(seed)``, matching the ``seed=`` argument the samplers and the other
+            entry points take. Mutually exclusive with ``rng`` (passing both raises ``TypeError``).
 
     Returns:
         SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm
             is met.
 
     """
+    rng = _resolve_rng_arg(rng, seed)
     if (
         estimator is None
         and structure == "auto"
@@ -938,7 +959,11 @@ def optimize(
 
     backend_name = str(backend or "local").lower()
     if data is None and enc_data is None and not (backend_name == "mpi" and root_only):
-        raise Exception("Optimization called with empty data or enc_data.")
+        raise ValueError("Optimization called with empty data or enc_data.")
+    # Empty (but non-None) data previously slipped through and silently returned the initialized
+    # prior/default model -- a wrong answer, not a fit. Match ppl's "fit() received empty data."
+    if data is not None and enc_data is None and hasattr(data, "__len__") and len(data) == 0:
+        raise ValueError("optimize() received empty data.")
 
     est = estimator if init_estimator is None else init_estimator
 
@@ -1157,6 +1182,10 @@ def fit(
     verbatim, so reaching for a heavier knob never means switching verbs. ``estimator`` accepts the same
     three spellings as :func:`optimize` (estimator, distribution prototype, or ``None`` to infer from data).
     """
+    # Resolve seed=/rng= up front (same alias policy as optimize) so the automatic-structure path
+    # below sees the same RandomState the forwarded optimize call would.
+    if "seed" in kwargs or "rng" in kwargs:
+        kwargs["rng"] = _resolve_rng_arg(kwargs.pop("rng", None), kwargs.pop("seed", None))
     if (
         estimator is None
         and kwargs.get("structure", "auto") == "auto"
@@ -1173,7 +1202,7 @@ def fit(
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
     if data is None and kwargs.get("enc_data") is None:
-        raise Exception("fit called with empty data or enc_data.")
+        raise ValueError("fit called with empty data or enc_data.")
     # opt-in sample-structure check: a tagged DataSource is verified against the model it feeds (warns on
     # a mismatch, e.g. a SEQUENTIAL source handed to an i.i.d. leaf). Bare lists carry no structure tag.
     if data is not None and getattr(data, "structure", None) is not None:
@@ -1201,7 +1230,7 @@ def best_of(
     max_its: int,
     init_p: float,
     delta: float,
-    rng: RandomState,
+    rng: RandomState | int | None = None,
     init_estimator: ParameterEstimator | ProbabilityDistribution | None = None,
     enc_data: list[tuple[int, E0]] | None = None,
     enc_vdata: Sequence[tuple[int, E0]] | None = None,
@@ -1209,6 +1238,7 @@ def best_of(
     print_iter: int = 1,
     reuse_estep_ll: bool = True,
     objective: str = "auto",
+    seed: int | None = None,
 ) -> tuple[float, SequenceEncodableProbabilityDistribution]:
     """Performs EM algorithm for trials-number of randomized initial conditions. Returns the best model fit in terms of
         maximum log-likelihood value from validation data.
@@ -1222,7 +1252,8 @@ def best_of(
         max_its (int): Integer value >=1, sets the maximum number of iterations of EM to be performed as stopping criteria.
         init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
         delta (float): Stopping criteria for EM when |old-log-likelihood - new-log-likelihood| < delta.
-        rng (RandomState): RandomState for setting seed.
+        rng (RandomState): RandomState for setting seed. An integer is coerced to ``RandomState(rng)``;
+            ``None`` (default) resolves to the fixed default seed. Mutually exclusive with ``seed``.
         init_estimator (Optional[ParameterEstimator]): Optional ParameterEstimator used for fitting.
         enc_data (Optional[List[Tuple[int, E]]]): Optional encoded data, if provided data need not be
             provided. If None, enc_data is set from data.
@@ -1234,13 +1265,16 @@ def best_of(
             Set False to force the exact historical per-iteration scoring behavior.
         objective (str): Convergence/selection objective forwarded to each trial's ``optimize`` call;
             ``'auto'`` (default) selects MLE / MAP / variational Bayes from the prior (see ``optimize``).
+        seed (Optional[int]): Integer seed -- shorthand for ``rng=RandomState(seed)``. Mutually
+            exclusive with ``rng`` (passing both raises ``TypeError``).
 
     Returns:
         Tuple of log-likelihood of best fitting model and the best fitting model from number of trials.
 
     """
+    rng = _resolve_rng_arg(rng, seed)
     if data is None and enc_data is None:
-        raise Exception("Optimization called with empty data or enc_data.")
+        raise ValueError("Optimization called with empty data or enc_data.")
 
     est = _coerce_estimator(est, data)
     if init_estimator is not None:

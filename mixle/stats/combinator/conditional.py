@@ -770,7 +770,7 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
             return self.default_sampler.sample()
 
         else:
-            raise Exception("Conditional default distribution unspecified.")
+            raise ValueError("Conditional default distribution unspecified.")
 
 
 class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):

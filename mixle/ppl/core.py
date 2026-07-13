@@ -21,6 +21,7 @@ import numpy as np
 from mixle.capability import supports
 from mixle.inference.estimation import optimize
 from mixle.ppl._result import PosteriorResult, Sampleable, Summarizable
+from mixle.utils.aliasing import coalesce_alias
 
 __all__ = [
     "RandomVariable",
@@ -1458,8 +1459,13 @@ class RandomVariable:
         return self._result
 
     # -- query verbs (valid once concrete) ----------------------------------
-    def sample(self, n: int | None = None, seed: int | None = None):
-        """Draw samples from the represented distribution or derived expression."""
+    def sample(self, n: int | None = None, seed: int | None = None, size: int | None = None):
+        """Draw samples from the represented distribution or derived expression.
+
+        ``n`` and ``size`` are aliases (``size`` matches the ``stats``-layer samplers); pass at
+        most one. ``None`` returns a single draw.
+        """
+        n = coalesce_alias("n", n, "size", size, required=False, default=None)
         if self._kind == "joint":  # joint rejection sampling under a relation
             leaves, constraint = self._args
             rng = np.random.RandomState(seed)
@@ -1565,6 +1571,11 @@ class RandomVariable:
         data = list(x)
         enc = d.dist_to_encoder().seq_encode(data)
         return np.asarray(d.seq_log_density(enc))
+
+    def log_density(self, x):
+        """Alias of :meth:`log_prob` -- the ``mixle.stats`` density verb, so a random variable
+        answers the same call a fitted distribution does."""
+        return self.log_prob(x)
 
     def log_likelihood(self, data) -> float:
         """Total log-likelihood of ``data`` under the fitted model (sum of log_prob)."""

@@ -58,6 +58,7 @@ __all__ = [
     "FieldPosterior",
     "GP",
     "Gaussian",
+    "GaussianObs",
     "Niche",
     "Cox",
     "joint",
@@ -1135,9 +1136,20 @@ def _as_affine(x) -> _GPAffine:
 
 
 def Gaussian(y, *, mean, sd) -> tuple:
-    """A linear-Gaussian observation ``y ~ N(gain*field + offset, sd)``; ``mean`` is an affine in a GP."""
+    """A linear-Gaussian observation ``y ~ N(gain*field + offset, sd)``; ``mean`` is an affine in a GP.
+
+    This is an *observation helper* for :func:`joint` -- it returns a ``(field, proxy)`` pair, not a
+    distribution. For the Gaussian distribution as a random variable (the ``stats`` ``Gaussian``
+    analogue), use :func:`mixle.ppl.Normal`. Also exported as :data:`GaussianObs` to keep the
+    distinction visible at the call site.
+    """
     aff = _as_affine(mean)
     return aff.gp, GaussianProxy(y, slope=aff.gain, intercept=aff.offset, scale=sd, prefix=aff.gp.name + "_gauss")
+
+
+#: Alias of :func:`Gaussian`, named for what it is -- a linear-Gaussian *observation* term for
+#: :func:`joint`, not the Gaussian distribution (that is :func:`mixle.ppl.Normal`).
+GaussianObs = Gaussian
 
 
 def Niche(presence, *, over: GP, mu_scale: float = 2.0) -> tuple:

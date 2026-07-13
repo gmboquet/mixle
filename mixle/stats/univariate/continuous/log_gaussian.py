@@ -25,6 +25,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.aliasing import broadcast_pseudo_count
 from mixle.utils.special import digamma
 
 
@@ -646,7 +647,7 @@ class LogGaussianEstimator(ParameterEstimator):
 
     def __init__(
         self,
-        pseudo_count: tuple[float | None, float | None] = (None, None),
+        pseudo_count: float | tuple[float | None, float | None] = (None, None),
         suff_stat: tuple[float | None, float | None] = (None, None),
         min_covar: float | None = None,
         name: str | None = None,
@@ -657,6 +658,7 @@ class LogGaussianEstimator(ParameterEstimator):
 
         Args:
             pseudo_count (Tuple[Optional[float], Optional[float]]): Tuple of two positive floats.
+                A scalar is broadcast to both slots.
             suff_stat (Tuple[Optional[float], Optional[float]]): Tuple of float and positive float.
             name (Optional[str]): Assign a name to LogGaussianEstimator.
             keys (Optional[str]): Assign keys to LogGaussianEstimator for combining sufficient statistics.
@@ -672,6 +674,7 @@ class LogGaussianEstimator(ParameterEstimator):
             keys (Optional[str]): String keys of LogGaussianEstimator instance for combining sufficient statistics.
 
         """
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
@@ -784,5 +787,5 @@ class LogGaussianDataEncoder(DataSequenceEncoder):
         rv = np.asarray(np.log(x), dtype=float)
 
         if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
-            raise Exception("LogGaussianDistribution requires support x in (0,inf).")
+            raise ValueError("LogGaussianDistribution requires support x in (0,inf).")
         return rv
