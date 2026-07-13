@@ -91,6 +91,7 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
             ),
             statistics=(
                 StatisticSpec("component_counts"),
+                StatisticSpec("outer_weight_counts"),  # document-level outer posteriors (the w M-step)
                 StatisticSpec("topics", kind="tuple"),
                 StatisticSpec("length", kind="child_stat"),
             ),

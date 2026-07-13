@@ -349,10 +349,14 @@ class EngineForwardBackwardImpossibleObservationTest(unittest.TestCase):
     def test_kernel_statistics_are_finite(self):
         dist = self._model()
         data = [["a", "b", "a"], ["a", "z", "b"], ["b", "b"]]  # "z" is out of support in every state
-        _, ((idx, sz, xs), _) = dist.dist_to_encoder().seq_encode(data)
-        pr_obs = np.empty((int(np.sum(sz)), dist.n_states), dtype=np.float64)
+        # build the padded emission matrix from the raw data (the HMM encoder's internal payload
+        # layout varies with numba availability, which is exactly what CI's base matrix lacks)
+        flat = [x for s in data for x in s]
+        sz = np.asarray([len(s) for s in data], dtype=np.int64)
+        enc_flat = dist.topics[0].dist_to_encoder().seq_encode(flat)
+        pr_obs = np.empty((len(flat), dist.n_states), dtype=np.float64)
         for i in range(dist.n_states):
-            pr_obs[:, i] = dist.topics[i].seq_log_density(xs)
+            pr_obs[:, i] = dist.topics[i].seq_log_density(enc_flat)
         padded, mask, _ = hmm_pad_log_emissions(pr_obs, sz)
         with np.errstate(divide="ignore", invalid="ignore"):
             log_w = np.log(dist.w)

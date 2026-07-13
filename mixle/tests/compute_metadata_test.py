@@ -985,7 +985,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
         hier_decl = declaration_for(hier)
         self.assertEqual(hier_decl.name, "hierarchical_mixture")
         self.assertEqual(hier_decl.parameter_names, ("w", "taus"))
-        self.assertEqual(hier_decl.statistic_names, ("component_counts", "topics", "length"))
+        self.assertEqual(hier_decl.statistic_names, ("component_counts", "outer_weight_counts", "topics", "length"))
         self.assertEqual(hier_decl.child_roles, ("topic_0", "topic_1", "length"))
         self.assertFalse(hier_decl.differentiable)
 
