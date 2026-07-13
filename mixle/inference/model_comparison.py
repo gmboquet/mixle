@@ -107,10 +107,16 @@ def vuong_test(
     n = m.shape[0]
     lr = m.sum() - _complexity_correction(correction, k_a, k_b, n)
     omega = m.std(ddof=1)
-    stat = float(lr / (np.sqrt(n) * omega)) if omega > 0 else 0.0
+    # Vuong's variance pretest: when the pointwise log-ratios are (nearly) constant the two models
+    # are observationally indistinguishable and the ratio statistic is meaningless -- a tiny but
+    # nonzero omega otherwise manufactures an enormous "significant" statistic from pure noise.
+    scale = max(float(np.abs(m).max(initial=0.0)), 1.0)
+    if omega <= 1e-12 * scale:
+        return {"statistic": 0.0, "p_value": 1.0, "favored": "tie", "indistinguishable": True}
+    stat = float(lr / (np.sqrt(n) * omega))
     p = float(2.0 * stats.norm.sf(abs(stat)))
     favored = "tie" if p >= 0.05 else ("A" if stat > 0 else "B")
-    return {"statistic": stat, "p_value": p, "favored": favored}
+    return {"statistic": stat, "p_value": p, "favored": favored, "indistinguishable": False}
 
 
 def clarke_test(
