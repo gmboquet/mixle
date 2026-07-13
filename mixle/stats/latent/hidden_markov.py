@@ -796,29 +796,44 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             return retval
 
         else:
-            x_iter = iter(x)
             log_w = self.log_w
             log_taus = self.log_taus
-            n_states = self.n_states
-            x0 = next(x_iter)
+            num_states = self.n_states
 
-            obs_log_density_by_topic = np.asarray([u.log_density(x0) for u in self.topics])
-            log_likelihood_by_state = np.asarray(
-                [log_w[i] + vec.weighted_log_sum(obs_log_density_by_topic, log_taus[i, :]) for i in range(n_states)]
-            )
+            # State i's emission is the topic mixture b_i(x_t) = sum_j taus[i, j] p_j(x_t); run the
+            # same scaled forward recursion as the plain branch above on those mixture emissions.
+            def state_log_b(obs) -> np.ndarray:
+                obs_log_density_by_topic = np.asarray([u.log_density(obs) for u in self.topics])
+                return np.asarray(
+                    [vec.weighted_log_sum(obs_log_density_by_topic, log_taus[i, :]) for i in range(num_states)]
+                )
 
-            for x in x_iter:
-                obs_log_density_by_topic = np.asarray([u.log_density(x) for u in self.topics])
-                log_likelihood_by_state = [
-                    vec.weighted_log_sum(obs_log_density_by_topic, log_taus[:, i])
-                    + vec.weighted_log_sum(obs_log_density_by_topic, log_taus[i, :])
-                    for i in range(n_states)
-                ]
+            obs_log_likelihood = log_w + state_log_b(x[0])
 
-            rv = vec.log_sum(log_likelihood_by_state)
-            rv += self.len_dist.log_density(len(x))
+            max_ll = obs_log_likelihood.max()
+            if max_ll == -np.inf:
+                return -np.inf
+            obs_log_likelihood -= max_ll
+            np.exp(obs_log_likelihood, out=obs_log_likelihood)
+            retval = np.log(np.sum(obs_log_likelihood)) + max_ll
 
-            return rv
+            for k in range(1, len(x)):
+                np.dot(self.transitions.T, obs_log_likelihood, out=obs_log_likelihood)
+                obs_log_likelihood /= obs_log_likelihood.sum()
+                np.log(obs_log_likelihood, out=obs_log_likelihood)
+                obs_log_likelihood += state_log_b(x[k])
+
+                max_ll = obs_log_likelihood.max()
+                if max_ll == -np.inf:
+                    # x[k] is outside every mixture emission's support: zero-probability sequence.
+                    return -np.inf
+                obs_log_likelihood -= max_ll
+                np.exp(obs_log_likelihood, out=obs_log_likelihood)
+                retval += np.log(np.sum(obs_log_likelihood)) + max_ll
+
+            retval += self.len_dist.log_density(len(x))
+
+            return retval
 
     def _terminal_states_seq_log_density(self, x: E1 | E2) -> np.ndarray:
         """Vectorized terminal-state forward: per-sequence stopping-time likelihood from encoded emissions."""
@@ -843,6 +858,29 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             out[s] = terminal_forward_loglik(self.log_w, self.log_transitions, log_b, self._terminal_mask)
         return out
 
+    def _state_seq_log_densities(self, enc_data) -> np.ndarray:
+        """Per-state log emission densities for encoded observations (one column per hidden state).
+
+        This is the shared emission read-out for the vectorized scoring and decoding paths. It
+        handles the two non-plain emission layouts: per-state heterogeneous emission encodings
+        (PR #275), scored group-by-group via ``_iter_emission_groups``, and the taus/topic-mixture
+        parameterization, where state ``i`` emits the ``taus[i, :]``-weighted mixture of the shared
+        topics: ``b_i(x) = sum_j taus[i, j] p_j(x)``, mixed stably in log space.
+        """
+        num_dists = self.n_topics
+        cols = [None] * num_dists
+        if self._homogeneous_emissions:
+            for i in range(num_dists):
+                cols[i] = self.topics[i].seq_log_density(enc_data)
+        else:
+            for group_indices, group_enc in _iter_emission_groups(enc_data):
+                for i in group_indices:
+                    cols[i] = self.topics[i].seq_log_density(group_enc)
+        log_topics = np.column_stack(cols).astype(np.float64, copy=False)
+        if not self.has_topics:
+            return log_topics
+        return logsumexp(log_topics[:, None, :] + self.log_taus[None, :, :], axis=2)
+
     def seq_log_density(self, x: E1 | E2) -> np.ndarray:
         """Return one HMM log-density value per encoded observation sequence.
 
@@ -864,17 +902,10 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
             good = idx_mat >= 0
 
-            pr_obs = np.zeros((tot_cnt, num_states))
             ll_ret = np.zeros(num_seq)
 
             # Compute state likelihood vectors and scale the max to one
-            if self._homogeneous_emissions:
-                for i in range(num_states):
-                    pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
-            else:
-                for group_indices, group_enc in _iter_emission_groups(enc_data):
-                    for i in group_indices:
-                        pr_obs[:, i] = self.topics[i].seq_log_density(group_enc)
+            pr_obs = self._state_seq_log_densities(enc_data)
 
             with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> ll_ret sanitized below
                 pr_max0 = pr_obs.max(axis=1, keepdims=True)
@@ -923,18 +954,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             tot_cnt = len(idx)
             num_seq = len(sz)
 
-            pr_obs = np.zeros((tot_cnt, num_states), dtype=np.float64)
             ll_ret = np.zeros(num_seq, dtype=np.float64)
             tz = np.concatenate([[0], sz]).cumsum().astype(dtype=np.int32)
 
             # Compute state likelihood vectors and scale the max to one
-            if self._homogeneous_emissions:
-                for i in range(num_states):
-                    pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
-            else:
-                for group_indices, group_enc in _iter_emission_groups(enc_data):
-                    for i in group_indices:
-                        pr_obs[:, i] = self.topics[i].seq_log_density(group_enc)
+            pr_obs = self._state_seq_log_densities(enc_data)
 
             with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> sanitized after the kernel
                 pr_max0 = pr_obs.max(axis=1)
@@ -1071,8 +1095,13 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             rv = rv + backend_seq_log_density(self.len_dist, len_enc, engine)
         return rv
 
-    def seq_posterior(self, x: E2) -> list[np.ndarray] | None:
-        """Return vectorized posterior state probabilities for encoded observations."""
+    def seq_posterior(self, x: E2, filtered: bool = False) -> list[np.ndarray] | None:
+        """Return per-sequence posterior state probabilities for encoded observations.
+
+        Each returned array holds the forward-backward SMOOTHING marginals ``P(z_t = k | x_1..T)``
+        (one row per position), matching every other ``seq_posterior`` in the package. Pass
+        ``filtered=True`` for the forward-only filtered probabilities ``P(z_t = k | x_1..t)``.
+        """
         if not self.use_numba:
             return None
 
@@ -1083,7 +1112,6 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         tot_cnt = len(idx)
         seq_cnt = len(sz)
         num_states = self.n_states
-        pr_obs = np.zeros((tot_cnt, num_states), dtype=np.float64)
         weights = np.ones(seq_cnt, dtype=np.float64)
         max_len = sz.max()
         tz = np.concatenate([[0], sz]).cumsum().astype(dtype=np.int32)
@@ -1092,8 +1120,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         tran_mat = self.transitions
 
         # Compute state likelihood vectors and scale the max to one
-        for i in range(num_states):
-            pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
+        pr_obs = self._state_seq_log_densities(enc_data)
 
         pr_max = pr_obs.max(axis=1, keepdims=True)
         with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
@@ -1104,36 +1131,43 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         alphas = np.zeros((tot_cnt, num_states), dtype=np.float64)
         xi_acc = np.zeros((seq_cnt, num_states, num_states), dtype=np.float64)
         pi_acc = np.zeros((seq_cnt, num_states), dtype=np.float64)
-        numba_baum_welch_alphas(num_states, tz, pr_obs, init_pvec, tran_mat, weights, alphas, xi_acc, pi_acc)
+        # The full Baum-Welch kernel leaves the smoothing marginals gamma in `alphas` (its backward
+        # pass rescales each row in place); the forward-only kernel leaves the filtered alphas.
+        kernel = numba_baum_welch_alphas if filtered else numba_baum_welch2
+        kernel(num_states, tz, pr_obs, init_pvec, tran_mat, weights, alphas, xi_acc, pi_acc)
 
         return [alphas[tz[i] : tz[i + 1], :] for i in range(len(tz) - 1)]
 
     def viterbi(self, x: list[T]) -> np.ndarray:
-        """Return the most likely latent-state path for a single observation sequence."""
+        """Return the most likely latent-state path for a single observation sequence.
+
+        The path is recovered by backpointer backtracking (max-product / Viterbi), so it is the
+        jointly most probable state SEQUENCE -- not the per-position argmax of the score matrix.
+        """
         nn = len(x)
         num_states = self.n_states
 
-        v = np.zeros((nn, num_states), dtype=np.float64)
-        ptr = np.zeros(nn, dtype=np.int32)
-        pr_obs = np.zeros((nn, num_states), dtype=np.float64)
-        enc_x = self.topics[0].dist_to_encoder().seq_encode(x)
+        path = np.zeros(nn, dtype=np.int32)
+        if nn == 0:
+            return path
 
-        for i in range(num_states):
-            pr_obs[:, i] = self.topics[i].seq_log_density(enc_x)
+        emission_encoder, _ = _build_emission_encoder(_emission_encoders_from_dists(self.topics))
+        pr_obs = self._state_seq_log_densities(emission_encoder.seq_encode(list(x)))
 
-        v[0, :] += pr_obs[0, :] + self.log_w
+        delta = np.zeros((nn, num_states), dtype=np.float64)
+        psi = np.zeros((nn, num_states), dtype=np.int32)
+        delta[0, :] = pr_obs[0, :] + self.log_w
 
         for t in range(1, nn):
-            temp = np.zeros((num_states, num_states), dtype=np.float64)
-            temp += np.reshape(v[t - 1, :], (num_states, 1))
-            temp += self.log_transitions
-            temp += np.reshape(pr_obs[t, :], (1, num_states))
-            v[t, :] += temp.max(axis=0, keepdims=False)
+            temp = np.reshape(delta[t - 1, :], (num_states, 1)) + self.log_transitions  # (from, to)
+            psi[t, :] = np.argmax(temp, axis=0)
+            delta[t, :] = temp[psi[t, :], np.arange(num_states)] + pr_obs[t, :]
 
-        for t in range(nn - 1, -1, -1):
-            ptr[t] = np.argmax(v[t, :])
+        path[-1] = int(np.argmax(delta[-1, :]))
+        for t in range(nn - 2, -1, -1):
+            path[t] = psi[t + 1, path[t + 1]]
 
-        return ptr
+        return path
 
     def latent_posterior(self, x: list[T]) -> MarkovChainLatentPosterior:
         """Return the exact chain posterior ``q(z | x)`` over hidden states for one observation sequence.
@@ -1142,10 +1176,8 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         ``.marginals()`` (forward-backward smoothing probabilities), ``.sample(rng)`` a full state path
         by FFBS, ``.mode()`` (the Viterbi path), or ``.entropy()`` (the exact chain entropy).
         """
-        enc = self.topics[0].dist_to_encoder().seq_encode(list(x))
-        log_b = np.empty((len(x), self.n_states))
-        for k in range(self.n_states):
-            log_b[:, k] = self.topics[k].seq_log_density(enc)
+        emission_encoder, _ = _build_emission_encoder(_emission_encoders_from_dists(self.topics))
+        log_b = self._state_seq_log_densities(emission_encoder.seq_encode(list(x)))
         return MarkovChainLatentPosterior(self.log_w, self.log_transitions, log_b)
 
     def posterior_predictive(self, x: list[T], seed: int | None = None) -> list[Any]:
@@ -1160,52 +1192,90 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         topic_samplers = [t.sampler(seed=rng.randint(maxrandint)) for t in self.topics]
         return [topic_samplers[k].sample() for k in z]
 
-    def seq_viterbi(self, x: E2):
+    def seq_viterbi(self, x: E1 | E2):
         """Return maximum-likelihood hidden-state assignments for encoded sequences.
 
-        The result is indexed in the encoder's flattened sequence layout. Use
-        the data encoder metadata to map flattened assignments back to individual
-        sequences when working directly with encoded data.
+        Each sequence's assignment is its Viterbi path, recovered by backpointer backtracking. The
+        result is indexed in the encoder's flattened sequence layout (time-banded for the blocked
+        encoding, sequence-contiguous for the numba encoding). Use the data encoder metadata to map
+        flattened assignments back to individual sequences when working directly with encoded data.
         """
         x0, x1 = x
+        num_states = self.n_states
+        log_w = self.log_w
+        log_a_mat = self.log_transitions
+
         if x1 is None:
-            num_states = self.n_states
             (tot_cnt, idx_bands, has_next, len_vec, idx_mat, idx_vec, enc_data), _, len_enc = x0
-            log_w = self.log_w
-            log_a_mat = self.log_transitions
 
             max_len = len(idx_bands)
             num_seq = idx_mat.shape[0]
 
-            good = idx_mat >= 0
-
-            pr_obs = np.zeros((tot_cnt, num_states))
-            v = np.zeros((tot_cnt, num_states), dtype=np.float64)
             ptr = np.zeros(tot_cnt, dtype=np.int32)
+            if tot_cnt == 0:
+                return ptr
 
-            # Compute state likelihood vectors and scale the max to one
-            for i in range(num_states):
-                pr_obs[:, i] = self.topics[i].seq_log_density(enc_data)
+            pr_obs = self._state_seq_log_densities(enc_data)
+            v = np.zeros((tot_cnt, num_states), dtype=np.float64)
+            psi = np.zeros((tot_cnt, num_states), dtype=np.int32)
 
-            # Vectorized alpha pass
+            # Vectorized Viterbi score pass with backpointers
             prev_band_idx = np.arange(idx_bands[0][0], idx_bands[0][1])
-            v[prev_band_idx, :] += pr_obs[prev_band_idx, :] + log_w
+            v[prev_band_idx, :] = pr_obs[prev_band_idx, :] + log_w
 
             for i in range(1, max_len):
                 nxt_band_idx = np.arange(idx_bands[i][0], idx_bands[i][1])
                 has_next_loc = has_next[i - 1]
 
-                temp = np.zeros((len(has_next_loc), num_states, num_states), dtype=np.float64)
-                temp += np.reshape(v[prev_band_idx[has_next_loc], :], (-1, num_states, 1)) + log_a_mat
-                temp += np.reshape(pr_obs[nxt_band_idx, :], (-1, 1, num_states))
+                temp = np.reshape(v[prev_band_idx[has_next_loc], :], (-1, num_states, 1)) + log_a_mat  # (B, from, to)
+                psi[nxt_band_idx, :] = np.argmax(temp, axis=1)
+                v[nxt_band_idx, :] = np.max(temp, axis=1) + pr_obs[nxt_band_idx, :]
 
-                v[nxt_band_idx, :] += np.max(temp, axis=1)
+                prev_band_idx = nxt_band_idx
 
-                prev_band_idx = nxt_band_idx.copy()
+            # Backtrack each sequence from its final position
+            for s in range(num_seq):
+                length = int(len_vec[s])
+                if length == 0:
+                    continue
+                rows = idx_mat[s, :length]
+                state = int(np.argmax(v[rows[-1], :]))
+                ptr[rows[-1]] = state
+                for t in range(length - 2, -1, -1):
+                    state = int(psi[rows[t + 1], state])
+                    ptr[rows[t]] = state
 
-            for i in range(max_len - 1, -1, -1):
-                prev_band_idx = np.arange(idx_bands[i][0], idx_bands[i][1])
-                ptr[prev_band_idx] += np.argmax(v[prev_band_idx, :], axis=1)
+            return ptr
+
+        else:
+            (idx, sz, enc_data), len_enc = x1
+
+            sz = np.asarray(sz)
+            tot_cnt = int(sz.sum())
+            tz = np.concatenate([[0], sz]).cumsum().astype(np.int64)
+
+            ptr = np.zeros(tot_cnt, dtype=np.int32)
+            if tot_cnt == 0:
+                return ptr
+
+            pr_obs = self._state_seq_log_densities(enc_data)
+
+            for s in range(len(sz)):
+                s0, s1 = int(tz[s]), int(tz[s + 1])
+                if s0 == s1:
+                    continue
+                length = s1 - s0
+                delta = pr_obs[s0, :] + log_w
+                psi = np.zeros((length, num_states), dtype=np.int32)
+                for t in range(1, length):
+                    temp = np.reshape(delta, (num_states, 1)) + log_a_mat  # (from, to)
+                    psi[t, :] = np.argmax(temp, axis=0)
+                    delta = temp[psi[t, :], np.arange(num_states)] + pr_obs[s0 + t, :]
+                state = int(np.argmax(delta))
+                ptr[s1 - 1] = state
+                for t in range(length - 2, -1, -1):
+                    state = int(psi[t + 1, state])
+                    ptr[s0 + t] = state
 
             return ptr
 
@@ -3510,19 +3580,25 @@ class HiddenMarkovDataEncoder(DataSequenceEncoder):
     def __eq__(self, other: object) -> bool:
         """Return whether another encoder is equivalent to this encoder.
 
+        The emission encoder participates in the comparison: the heterogeneous grouping machinery
+        (e.g. a mixture over HMMs with unlike emission families) keys off encoder equality, so two
+        HMM encoders are interchangeable only when their emission encodings are.
+
         Args:
             other (object): Object to compare.
 
         Returns:
-            True if other is HiddenMarkovDataEncoder with equivalent 'len_encoder' and 'use_numba', else False.
+            True if other is a HiddenMarkovDataEncoder with equivalent 'emission_encoder',
+            'len_encoder', and 'use_numba', else False.
 
         """
-        if isinstance(other, HiddenMarkovDataEncoder):
-            if self.use_numba == other.use_numba:
-                if self.len_encoder == other.len_encoder:
-                    return True
-        else:
+        if not isinstance(other, HiddenMarkovDataEncoder):
             return False
+        return (
+            self.use_numba == other.use_numba
+            and self.len_encoder == other.len_encoder
+            and self.emission_encoder == other.emission_encoder
+        )
 
     def _seq_encode(self, x: list[list[T]]) -> tuple[E1, None]:
         """Sequence encoding for iid HMM sequence for vectorized numpy functions that do not use numba.
@@ -3838,14 +3914,24 @@ def hmm_engine_forward_backward(engine, log_emit, log_w, log_a, mask, weights=No
     # gamma (posterior state probabilities). Empty/all-padded sequences give -inf alpha+beta whose
     # normalization is -inf - (-inf) = NaN; zero the padded slots with a mask-select (not a
     # multiply, since NaN * 0 = NaN) so degenerate sequences contribute nothing.
+    #
+    # Impossible-observation guard (the engine analogue of _zero_impossible_emission_rows on the
+    # host paths): a zero-mass sequence -- some VALID step has -inf emissions under every state --
+    # also normalizes by logsumexp(ab) = -inf, making log_gamma NaN at its valid steps, which the
+    # padding mask does not touch. Such a sequence contributes zero statistics on the host E-step,
+    # so zero its gamma/xi/pi here too instead of NaN-poisoning the engine-resident statistics
+    # (its ll is already -inf from the forward pass).
     zero = engine.asarray(0.0)
     ab = alpha_stack + beta_stack
     log_gamma = ab - engine.logsumexp(ab, axis=2, keepdims=True)
     gamma = engine.exp(log_gamma) * wvec[:, None, None]
     gamma = engine.where(m[:, :, None] > 0, gamma, zero)
+    gamma = engine.where(engine.isnan(gamma), zero, gamma)
     pi = gamma[:, 0, :]
 
-    # xi (expected transition counts) summed over valid transitions
+    # xi (expected transition counts) summed over valid transitions. For a zero-mass sequence the
+    # -ll term is +inf but always pairs with a -inf alpha/emission/beta term, so bad entries are
+    # NaN (never bare +inf); the same guard zeroes them.
     xi_sum = engine.asarray(np.zeros((num_states, num_states)))
     for t in range(tmax - 1):
         log_xi = (
@@ -3856,6 +3942,7 @@ def hmm_engine_forward_backward(engine, log_emit, log_w, log_a, mask, weights=No
         )
         contrib = engine.exp(log_xi) * wvec[:, None, None]
         contrib = engine.where((m[:, t + 1] > 0)[:, None, None], contrib, zero)
+        contrib = engine.where(engine.isnan(contrib), zero, contrib)
         xi_sum = xi_sum + engine.sum(contrib, axis=0)
 
     return ll, gamma, xi_sum, pi

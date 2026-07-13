@@ -1375,9 +1375,9 @@ def seq_posterior2(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarr
     alpha_loc = np.repeat(np.reshape(alpha, (1, num_topics)), num_documents, axis=0)
 
     if gammas is None:
-        document_gammas = alpha_loc + np.reshape(np.bincount(idx_full.flat), (num_documents, num_topics)) / float(
-            num_topics
-        )
+        document_gammas = alpha_loc + np.reshape(
+            np.bincount(idx_full.flat, minlength=num_documents * num_topics), (num_documents, num_topics)
+        ) / float(num_topics)
     else:
         document_gammas = gammas.copy()
 
@@ -1459,9 +1459,9 @@ def _lda_vi_fixed_point(
     idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
 
     if gammas is None:
-        document_gammas = alphas_loc + np.reshape(np.bincount(idx_full.flat), (num_documents, num_topics)) / float(
-            num_topics
-        )
+        document_gammas = alphas_loc + np.reshape(
+            np.bincount(idx_full.flat, minlength=num_documents * num_topics), (num_documents, num_topics)
+        ) / float(num_topics)
     else:
         document_gammas = gammas.copy()
 
@@ -1514,7 +1514,7 @@ def _lda_vi_fixed_point(
         posterior_sum_ll_loc /= rel_counts
         log_density_gamma_loc /= posterior_sum_ll_loc
 
-        gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma_loc.flat)
+        gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma_loc.flat, minlength=alphas_loc2.size)
         gamma_updates = np.reshape(gamma_updates, (-1, num_topics))
         gamma_updates += alphas_loc2
 
@@ -1592,7 +1592,7 @@ def _lda_vi_fixed_point(
     idx_full *= num_topics
     idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
 
-    gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma.flat)
+    gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma.flat, minlength=alphas_loc.size)
     gamma_updates = np.reshape(gamma_updates, (-1, num_topics))
     gamma_updates += alphas_loc
     final_gammas = gamma_updates
@@ -1638,7 +1638,7 @@ def _lda_elbo_from_gamma(
     elob1 = elob0[idx, :]
     elob2 = ldg * (elob1 + per_topic_log_densities - np.log(ldg) + np.log(np.reshape(counts, (-1, 1))))
     elob3 = np.sum(elob0 * ((per_doc_alpha - 1.0) - (dg - 1.0)), axis=1)
-    elob4 = np.bincount(idx_full.flat, weights=elob2.flat)
+    elob4 = np.bincount(idx_full.flat, weights=elob2.flat, minlength=document_gammas.size)
     elob5 = np.sum(np.reshape(elob4, (-1, num_topics)), axis=1)
     elob6 = np.sum(gammaln(dg), axis=1) - gammaln(dg.sum(axis=1))
     if per_doc_alpha.ndim == 1:
