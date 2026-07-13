@@ -252,11 +252,23 @@ def fit_scaling_law(
         resid = loss - mu
         return -0.5 * float(np.sum(resid * resid)) / (sigma_v * sigma_v) - loss.size * log_sigma_v
 
+    carrier_sd = 50.0
+    carrier_obs = 1.0
+
+    def evidence_ll(e_v, log_a_v, log_alpha_v, log_b_v, log_beta_v, log_sigma_v):
+        # The MCMC route needs a carrier observation to build its target, and the carrier
+        # ``Normal(e_rv, carrier_sd)`` scored on ``[carrier_obs]`` contributes a REAL
+        # ``N(carrier_obs | E, carrier_sd^2)`` likelihood factor (precision 1/carrier_sd^2)
+        # pulling E toward the carrier point. Cancel its E-dependent term here so the carrier
+        # is genuinely vacuous and the physics potential is the ONLY evidence.
+        ll = physics_ll(e_v, log_a_v, log_alpha_v, log_b_v, log_beta_v, log_sigma_v)
+        return ll + 0.5 * (carrier_obs - e_v) ** 2 / (carrier_sd * carrier_sd)
+
     fit_rng = np.random.RandomState(seed) if rng is None else rng
-    fitted = Normal(e_rv, 50.0).fit(  # a vacuous carrier observation; the potential IS the evidence
-        [1.0],
+    fitted = Normal(e_rv, carrier_sd).fit(  # carrier observation; its E-factor is cancelled in evidence_ll
+        [carrier_obs],
         how="mcmc",
-        potentials=potential(physics_ll, e_rv, log_a, log_alpha, log_b, log_beta, log_sigma),
+        potentials=potential(evidence_ll, e_rv, log_a, log_alpha, log_b, log_beta, log_sigma),
         draws=int(draws),
         burn=int(burn),
         scale=scale,

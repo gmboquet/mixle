@@ -132,9 +132,13 @@ class GradTarget:
     + positivity Jacobian) but is backed by Torch autograd, so ``value_and_grad`` returns
     the analytic gradient. ``slots``/``build``/``unpack``/``dmean``/``dstd`` are shared with
     the numerical builder so the caller constructs results identically.
+
+    ``jacobian=True`` (samplers / VI) includes the support-transform log|J|, making the target
+    the joint density in the unconstrained space; ``jacobian=False`` (point estimates, MAP)
+    scores the joint in the constrained parameter space, so flat priors reduce to the MLE.
     """
 
-    def __init__(self, rv, data, slots, build, unpack, dmean, dstd, missing="error"):
+    def __init__(self, rv, data, slots, build, unpack, dmean, dstd, missing="error", jacobian=True):
         import torch
 
         self._torch = torch
@@ -145,6 +149,7 @@ class GradTarget:
         self.unpack = unpack
         self.dmean = dmean
         self.dstd = dstd
+        self._jacobian = bool(jacobian)
 
         from mixle.engines import TorchEngine
 
@@ -222,6 +227,8 @@ class GradTarget:
                 ]
                 xt = theta.reshape(1)
                 plp = plp + apply_p(pargs, prep_p(xt, torch), xt, self._eng).sum()
+        if not self._jacobian:  # point-estimate objective: constrained-space density (no log|J|)
+            return ll + plp
         return ll + plp + logj
 
     def _logtarget_batch(self, U, x=None, data_terms=None, lik_scale=1.0, w=None):
@@ -274,6 +281,8 @@ class GradTarget:
                 ]
                 xt = vals[s.index].reshape(B, 1)
                 plp = plp + apply_p(pargs, prep_p(xt, torch), xt, self._eng).sum(dim=1)
+        if not self._jacobian:  # point-estimate objective: constrained-space density (no log|J|)
+            return ll + plp
         return ll + plp + logj
 
     def log_target(self, u_np) -> float:
@@ -349,14 +358,12 @@ class GradTarget:
             family=family,
             alpha=alpha,
         )
-        vals = np.empty_like(U)
-        for k, s in enumerate(self.slots):
-            if s.support == "positive":
-                vals[:, k] = np.exp(U[:, k])
-            elif s.support == "unit":
-                vals[:, k] = 1.0 / (1.0 + np.exp(-U[:, k]))
-            else:
-                vals[:, k] = U[:, k]
+        from mixle.ppl.inference import _u_to_vals
+
+        # Shared with the samplers' readout: applies each slot's support transform AND the
+        # non-centered back-transform ``value = loc + scale * z`` (``reparam == "loc_scale"``),
+        # so the returned draws are parameter values, never z-space latents.
+        vals = _u_to_vals(self.slots, U)
         return vals, mean_np, scale_np, objective
 
 
@@ -367,7 +374,7 @@ class MixtureGradTarget(GradTarget):
     (Gamma-represented) mixture weights. Other combinators (HMM, sequence) stay on the numeric path.
     """
 
-    def __init__(self, rv, data, slots, build, dmean, dstd, comp_layouts, weight, comp_family):
+    def __init__(self, rv, data, slots, build, dmean, dstd, comp_layouts, weight, comp_family, jacobian=True):
         import torch
 
         from mixle.engines import TorchEngine
@@ -379,6 +386,7 @@ class MixtureGradTarget(GradTarget):
         self.unpack = None
         self.dmean = dmean
         self.dstd = dstd
+        self._jacobian = bool(jacobian)
         self._eng = TorchEngine(dtype="float64")
         self._scorers = _scorers()
         self._x = torch.tensor(np.asarray(data, dtype=float), dtype=torch.float64)
@@ -429,10 +437,12 @@ class MixtureGradTarget(GradTarget):
             for j, wi in enumerate(self._weight[1]):
                 a = float(self._weight[2][j])
                 plp = plp + ((a - 1.0) * torch.log(vals[wi]) - vals[wi] - math.lgamma(a))
+        if not self._jacobian:  # point-estimate objective: constrained-space density (no log|J|)
+            return ll + plp
         return ll + plp + logj
 
 
-def _mixture_grad_target(rv, data, scorers):
+def _mixture_grad_target(rv, data, scorers, jacobian=True):
     """Build a MixtureGradTarget for a Mix of same-family leaf components, or None if it isn't one
     (heterogeneous components, a composite component, or a missing Torch scorer)."""
     comps, weights_arg = rv._args[0], rv._args[1]
@@ -480,15 +490,17 @@ def _mixture_grad_target(rv, data, scorers):
         return None
     arr = np.asarray(data, dtype=float)
     dmean, dstd = float(arr.mean()), float(arr.std() or 1.0)
-    return MixtureGradTarget(rv, data, slots, build, dmean, dstd, comp_layouts, weight, fam0)
+    return MixtureGradTarget(rv, data, slots, build, dmean, dstd, comp_layouts, weight, fam0, jacobian=jacobian)
 
 
-def grad_target(rv: RandomVariable, data, missing: str = "error"):
+def grad_target(rv: RandomVariable, data, missing: str = "error", jacobian: bool = True):
     """Build a Torch autograd target for a flat model or a mixture-of-leaves, or ``None``.
 
     Returns ``None`` (caller falls back to the numerical path) when Torch is missing, or the model
     is neither a flat ``Sample`` nor a supported mixture, or any family has no Torch scorer.
     ``missing='marginalize'`` integrates NaN observations out of the likelihood (flat models only here).
+    ``jacobian=False`` builds the constrained-space point-estimate objective (MAP; flat priors == MLE);
+    the default keeps the support-transform log|J| the samplers and VI need.
     """
     if not torch_available() or rv._kind != "sample":
         return None
@@ -501,7 +513,7 @@ def grad_target(rv: RandomVariable, data, missing: str = "error"):
             if missing == "marginalize":
                 return None  # mixture-of-leaves missing handling not wired here; caller raises clearly
             try:
-                return _mixture_grad_target(rv, data, scorers)
+                return _mixture_grad_target(rv, data, scorers, jacobian=jacobian)
             except Exception:  # noqa: BLE001
                 return None
         return None
@@ -524,4 +536,4 @@ def grad_target(rv: RandomVariable, data, missing: str = "error"):
             return None
     _require_flat(rv)
     fam, slots, build, unpack, (dmean, dstd) = _target_parts(rv, data)
-    return GradTarget(rv, data, slots, build, unpack, dmean, dstd, missing=missing)
+    return GradTarget(rv, data, slots, build, unpack, dmean, dstd, missing=missing, jacobian=jacobian)

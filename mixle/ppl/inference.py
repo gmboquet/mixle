@@ -407,10 +407,16 @@ def _collect_composite(rv: RandomVariable):
     ``w = g / sum(g)`` (so ``w ~ Dirichlet(alpha)`` exactly, with no simplex Jacobian needed).
     Child models (an RV, or a list of RVs) are recursed into; other args (lengths, fixed
     weights) are kept. ``collect`` and ``rebuild`` traverse identically, so the k-th parameter
-    encountered is ``slots[k]``."""
+    encountered is ``slots[k]``.
+
+    Auto-generated slot names inside a multi-component list are qualified by the component path
+    (``comp0.arg0``, ``comp1.arg0``, ...): without the qualifier a K-component mixture of
+    same-shaped components yields K colliding ``arg{i}`` names, and ``summary()`` / ``samples()``
+    / R-hat (all keyed by name) silently drop all but one. User-chosen names and any names in a
+    single-component list are kept as-is."""
     slots: list[_Slot] = []
 
-    def collect(node: RandomVariable):
+    def collect(node: RandomVariable, prefix: str = ""):
         fam = node._family
         if isinstance(fam, CompositeFamily):
             # Components of a finite mixture are exchangeable -> tag their slots with the component
@@ -418,10 +424,11 @@ def _collect_composite(rv: RandomVariable):
             exch = fam.name in ("Mixture", "SemiMix")
             for a in node._args:
                 if isinstance(a, (list, tuple)):
+                    multi = sum(1 for c in a if isinstance(c, RandomVariable)) > 1
                     for gi, c in enumerate(a):
                         if isinstance(c, RandomVariable):
                             before = len(slots)
-                            collect(c)
+                            collect(c, f"{prefix}comp{gi}." if multi else prefix)
                             if exch:  # tag only the outermost exchangeable level (nested groups keep theirs)
                                 for s in slots[before:]:
                                     if s.group is None:
@@ -430,25 +437,29 @@ def _collect_composite(rv: RandomVariable):
                 spec = _struct_spec_for(node, a)
                 if spec is not None:  # structural vector/matrix parameter -> scalar slots
                     handle = _handle_of(a)  # a param(...) handle is referenceable in constraints
+                    named = bool(getattr(spec, "name", None))  # user-chosen spec names stay unqualified
                     for gi, (prior, support, nm) in enumerate(_spec_slot_defs(spec)):
+                        nm = nm if named else f"{prefix}{nm}"
                         s = _Slot(len(slots), prior, support == "positive", nm, handle, support)
                         if exch:  # mixture weights: weight j pairs with component j -> permute together
                             s.group, s.role = gi, "weight"
                         slots.append(s)
                 elif isinstance(a, RandomVariable):
-                    collect(a)  # child model
+                    collect(a, prefix)  # child model
             return
         for i, a in enumerate(node._args):
             if _spec_of(a) is not None:  # a vector/matrix leaf parameter (Dirichlet alpha, Categorical probs)
                 handle = _handle_of(a)
-                for prior, support, nm in _spec_slot_defs(_spec_of(a)):
+                spec = _spec_of(a)
+                named = bool(getattr(spec, "name", None))
+                for prior, support, nm in _spec_slot_defs(spec):
+                    nm = nm if named else f"{prefix}{nm}"
                     slots.append(_Slot(len(slots), prior, support == "positive", nm, handle, support))
             elif isinstance(a, RandomVariable):
-                slots.append(
-                    _Slot(len(slots), lower(a, target="dist"), fam.positive[i], a.name or f"arg{i}", a, fam.support[i])
-                )
+                nm = a.name or f"{prefix}arg{i}"
+                slots.append(_Slot(len(slots), lower(a, target="dist"), fam.positive[i], nm, a, fam.support[i]))
             elif a is free:
-                slots.append(_Slot(len(slots), None, fam.positive[i], f"arg{i}", None, fam.support[i]))
+                slots.append(_Slot(len(slots), None, fam.positive[i], f"{prefix}arg{i}", None, fam.support[i]))
 
     collect(rv)
     if not slots:
@@ -581,8 +592,13 @@ def _target_parts(rv: RandomVariable, data, extra_latents=()):
     return fam, slots, build, unpack, (dmean, dstd)
 
 
-def _build_target(rv: RandomVariable, data, extra_latents=()):
-    """Return (log_target(u), slots, fam, build, unpack, (dmean,dstd)) for unconstrained u."""
+def _build_target(rv: RandomVariable, data, extra_latents=(), jacobian: bool = True):
+    """Return (log_target(u), slots, fam, build, unpack, (dmean,dstd)) for unconstrained u.
+
+    ``jacobian=True`` (samplers / VI / Laplace) includes the support-transform log|J|, so
+    ``log_target`` is the joint density in the *unconstrained* space. ``jacobian=False`` builds
+    the point-estimate objective: the joint scored in the constrained parameter space, so MAP
+    maximizes ``ll + log prior`` there and reduces to the MLE under flat priors."""
     fam, slots, build, unpack, (dmean, dstd) = _target_parts(rv, data, extra_latents)
     if fam is not None:
         enc = _encoder_for(fam).seq_encode(list(data))
@@ -612,7 +628,7 @@ def _build_target(rv: RandomVariable, data, extra_latents=()):
                 plp += float(s.handle._family.make_dist(tuple(pargs), s.handle._name).log_density(vals[s.index]))
             elif s.prior is not None:
                 plp += float(s.prior.log_density(vals[s.index]))
-        return ll + plp + logj
+        return ll + plp + (logj if jacobian else 0.0)
 
     return log_target, slots, fam, build, unpack, (dmean, dstd)
 
@@ -1142,7 +1158,8 @@ def _lp_gamma(x, k, theta, xp):
 
 
 def _lp_halfnormal(x, s, xp):
-    return 0.2257913526447274 - _xlog(s, xp) - 0.5 * (x / s) ** 2
+    # log sqrt(2/pi) = -0.22579...: the folded-Normal doubling (+log 2) net of the Normal constant.
+    return -0.2257913526447274 - _xlog(s, xp) - 0.5 * (x / s) ** 2
 
 
 def _lp_exponential(x, rate, xp):
@@ -1585,12 +1602,18 @@ def sample_fit(rv: RandomVariable, data, **kw) -> RandomVariable:
 def map_fit(
     rv: RandomVariable, data, *, rng=None, constraints=None, penalty=None, potentials=None, missing="error"
 ) -> RandomVariable:
-    """Fit a PPL model by maximum a posteriori optimization."""
+    """Fit a PPL model by maximum a posteriori optimization.
+
+    The point estimate maximizes ``log p(data | theta) + log p(theta)`` in the *constrained*
+    parameter space -- no support-transform log-Jacobian -- so with flat priors MAP coincides
+    with the MLE (e.g. the ``sqrt(S/n)`` sd for a Normal). The samplers and VI/Laplace keep the
+    Jacobian: they need the unconstrained-space density.
+    """
     from scipy.optimize import minimize
 
     from mixle.ppl import autograd as _ag
 
-    g = None if potentials is not None else _ag.grad_target(rv, data, missing=missing)
+    g = None if potentials is not None else _ag.grad_target(rv, data, missing=missing, jacobian=False)
     if g is None and constraints is None and penalty is None and potentials is None and not _ag.torch_available():
         # Without Torch, the analytic-gradient L-BFGS path is unavailable and MAP uses a derivative-free
         # optimizer. Warn once rather than letting callers infer the route from timing.
@@ -1620,7 +1643,9 @@ def map_fit(
         return RandomVariable._bound(g.build(vals), name=rv._name)
 
     # derivative-free path (no Torch, an unsupported family, or a constrained / penalized region)
-    log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(rv, data, _potential_latents(potentials))
+    log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(
+        rv, data, _potential_latents(potentials), jacobian=False
+    )
     soft = _soft_penalty(constraints, slots, _auto_penalty(constraints, penalty))
     # penalty=... enforces the constraints softly (a log-joint term), so it replaces hard rejection.
     feasible = None if soft is not None else _feasibility(constraints, slots)
@@ -1734,6 +1759,7 @@ def vi_fit(
     family: str = "meanfield",
     alpha: float = 1.0,
     rng=None,
+    seed: int | None = None,
     missing: str = "error",
 ) -> RandomVariable:
     """Variational Bayes (ADVI) — a Gaussian variational posterior fit by reparameterized-MC Adam.
@@ -1744,11 +1770,13 @@ def vi_fit(
     ``alpha<1`` is mass-covering (widens the often-too-narrow KL fit). ``batch_size`` subsamples the
     data per step (SGVB). Without Torch it falls back to derivative-free mean-field ELBO. Works for
     *non-conjugate* priors; returns a variational Posterior with draws and posterior-predictive.
+    ``seed`` makes the fit deterministic when ``rng`` is not given (``fit(how='vi', seed=...)``,
+    matching the samplers' seeding).
     """
     from mixle.ppl import autograd as _ag
 
     if rng is None:
-        rng = np.random.RandomState()
+        rng = np.random.RandomState(seed)
 
     ag = _ag.grad_target(rv, data, missing=missing)
     if ag is None and missing == "marginalize":
@@ -2084,6 +2112,13 @@ def _nig_conjugate_fit(rv, data, *, mu0=0.0, kappa=0.0, alpha=1.0, beta=0.0) -> 
         return np.asarray(nig.sampler(seed=int(rng.randint(1, 2**31))).sample(k), dtype=float).reshape(k, 2)
 
     mean_sigma2 = b_n / (a_n - 1.0) if a_n > 1.0 else b_n / a_n  # E[sigma^2] under the inverse-gamma marginal
+    # E[sigma] under sigma^2 ~ InvGamma(a_n, b_n) is sqrt(b_n) * Gamma(a_n - 1/2) / Gamma(a_n)
+    # (finite for a_n > 1/2); sqrt(E[sigma^2]) overstates it (Jensen).
+    mean_sigma = (
+        math.sqrt(b_n) * math.exp(math.lgamma(a_n - 0.5) - math.lgamma(a_n))
+        if (a_n > 0.5 and b_n > 0.0)
+        else float(np.sqrt(mean_sigma2))
+    )
     entries = {
         "mu": {
             "index": 0,
@@ -2097,7 +2132,7 @@ def _nig_conjugate_fit(rv, data, *, mu0=0.0, kappa=0.0, alpha=1.0, beta=0.0) -> 
             "index": 1,
             "handle": None,
             "name": "sqrt-InverseGamma",
-            "mean": float(np.sqrt(mean_sigma2)),
+            "mean": mean_sigma,
             "hyper": {"alpha_n": a_n, "beta_n": b_n},
             "sample": lambda k, rng: 1.0 / np.sqrt(_draw(k, rng)[:, 1]),
         },
