@@ -19,6 +19,31 @@ import pytest
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
+
+@pytest.fixture(autouse=True)
+def _seed_transformers_warningregistry():
+    """unittest.assertWarns walks EVERY sys.modules entry probing ``__warningregistry__`` on enter.
+    ``transformers`` registers ~200 LAZY placeholder submodules whose module ``__getattr__``
+    intercepts that probe, tries to resolve it as a lazy symbol, and IMPORTS optional dependencies
+    -- crashing with ModuleNotFoundError (torchvision) instead of AttributeError. The crash then
+    surfaces inside whichever assertWarns-using test runs after anything imported transformers in
+    the same worker: the long-standing "wave_* xdist flakes" were exactly this, not contention.
+    Seeding a real ``__warningregistry__`` dict on every transformers module keeps plain attribute
+    lookup from ever reaching the lazy hook. Re-run per test because more stubs register as
+    transformers lazily loads; the sweep is a few hundred dict setdefaults (~0.1 ms). Raising
+    non-AttributeError from module __getattr__ is the upstream defect; this is the inoculation."""
+    import sys as _sys
+
+    if "transformers" in _sys.modules:
+        for name, mod in list(_sys.modules.items()):
+            if name.startswith("transformers") and mod is not None:
+                try:
+                    mod.__dict__.setdefault("__warningregistry__", {})
+                except (AttributeError, TypeError):  # exotic module objects: leave them be
+                    pass
+    yield
+
+
 MarkerTuple = tuple[str, ...]
 
 
@@ -57,6 +82,14 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # Chunk-parallel fused kernels: determinism receipts (bit-identity across reruns/worker counts) and
     # sequential-vs-parallel parity -- numba-gated for the same reason as fused_codegen_test.py.
     "fused_parallel_test.py": ("numba", "optional"),
+    # Structure fuzzing vs the host oracle (12 signatures + randomized samples x 5 properties): the
+    # broadest correctness net over the compiled optimizer. Slow because a fresh environment compiles
+    # every pool signature (~1s each; disk-cached thereafter).
+    "fused_fuzz_test.py": ("numba", "optional", "slow"),
+    # Numerical edge panel for the compiled paths (extreme scales, degenerate mixtures, the -inf
+    # log-sum-exp guard that fastmath's ninf flag used to fold away, tiny/empty data) + the SQUAREM
+    # never-loses-to-plain-EM soak.
+    "fused_edge_panel_test.py": ("numba", "optional"),
     "jax_engine_test.py": ("jax", "optional"),
     # Backward-compatibility-only tests (renamed class / kwarg aliases). Tagged `legacy` so a product-only
     # run can exclude them with `-m "not legacy"`; they still run in the default `fast` gate.

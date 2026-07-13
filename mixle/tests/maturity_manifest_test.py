@@ -7,6 +7,7 @@ every top-level public subpackage, and its anchor tiers must match the registry.
 """
 
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -23,7 +24,13 @@ GEN = REPO_ROOT / "scripts" / "gen_maturity_manifest.py"
 class MaturityManifestTest(unittest.TestCase):
     def test_manifest_is_not_stale(self):
         # Regenerate and diff: the committed file must equal what the generator produces now.
-        proc = subprocess.run([sys.executable, str(GEN), "--check"], cwd=str(REPO_ROOT), capture_output=True, text=True)
+        # PYTHONPATH pins the subprocess to THIS worktree's mixle: without it, an editable install
+        # pointing at a different (possibly stale) checkout resolves the import and the check fails
+        # for environmental reasons that have nothing to do with the manifest.
+        env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+        proc = subprocess.run(
+            [sys.executable, str(GEN), "--check"], cwd=str(REPO_ROOT), capture_output=True, text=True, env=env
+        )
         self.assertEqual(
             proc.returncode,
             0,
