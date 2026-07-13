@@ -1038,4 +1038,10 @@ class MultivariateGaussianDataEncoder(DataSequenceEncoder):
 
         """
         self.dim = len(x[0]) if self.dim is None else self.dim
-        return np.reshape(np.asarray(x), (-1, self.dim))
+        rv = np.reshape(np.asarray(x, dtype=float), (-1, self.dim))
+        if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
+            # the same encode-time gate the univariate Gaussian applies: scoring previously relied
+            # on cho_solve's check_finite to reject NaN loudly; the gemm path (no LAPACK scan) needs
+            # the contract enforced where every fit/score pass already runs exactly once
+            raise ValueError("MultivariateGaussianDistribution requires finite observations.")
+        return rv
