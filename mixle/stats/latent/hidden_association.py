@@ -373,9 +373,9 @@ class HiddenAssociationSampler(DistributionSampler):
 
         """
         if supports(dist.given_dist, Neutral):
-            raise Exception("HiddenAssociationSampler requires attribute dist.given_dist.")
+            raise ValueError("HiddenAssociationSampler requires attribute dist.given_dist.")
         if supports(dist.len_dist, Neutral):
-            raise Exception("HiddenAssociationSampler requires attribute dist.len_dist.")
+            raise ValueError("HiddenAssociationSampler requires attribute dist.len_dist.")
 
         self.rng = np.random.RandomState(seed)
         self.dist = dist

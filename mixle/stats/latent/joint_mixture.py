@@ -50,6 +50,7 @@ from mixle.inference.fisher import (
     to_fisher,
 )
 from mixle.stats.latent.mixture import MixtureFisherView
+from mixle.utils.aliasing import broadcast_pseudo_count
 
 
 class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
@@ -900,7 +901,7 @@ class JointMixtureEstimator(ParameterEstimator):
         estimators1: Sequence[ParameterEstimator],
         estimators2: Sequence[ParameterEstimator],
         suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, tuple[E0, ...], tuple[E1, ...]] | None = None,
-        pseudo_count: tuple[float, float, float] | None = None,
+        pseudo_count: float | tuple[float, float, float] | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         name: str | None = None,
     ) -> None:
@@ -910,7 +911,8 @@ class JointMixtureEstimator(ParameterEstimator):
             estimators1: Component estimators for ``X1``.
             estimators2: Component estimators for ``X2``.
             suff_stat: Optional prior sufficient statistics used with ``pseudo_count``.
-            pseudo_count: Optional smoothing counts for state and joint counts.
+            pseudo_count: Optional smoothing counts for state and joint counts. A scalar is
+                broadcast to all three slots.
             keys: Optional merge keys for joint counts, ``X1`` accumulators, and
                 ``X2`` accumulators.
             name: Optional diagnostic name.
@@ -928,6 +930,7 @@ class JointMixtureEstimator(ParameterEstimator):
         self.num_components2 = len(estimators2)
         self.estimators1 = estimators1
         self.estimators2 = estimators2
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 3)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.keys = keys if keys is not None else (None, None, None)

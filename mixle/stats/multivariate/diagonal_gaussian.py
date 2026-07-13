@@ -27,7 +27,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.utils.aliasing import MISSING, coalesce_alias
+from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias
 from mixle.utils.special import digamma
 
 
@@ -670,7 +670,7 @@ class DiagonalGaussianEstimator(ParameterEstimator):
     def __init__(
         self,
         dim: int | None = None,
-        pseudo_count: tuple[float | None, float | None] = (None, None),
+        pseudo_count: float | tuple[float | None, float | None] = (None, None),
         suff_stat: tuple[np.ndarray | None, np.ndarray | None] = (None, None),
         name: str | None = None,
         keys: str | None = None,
@@ -682,7 +682,8 @@ class DiagonalGaussianEstimator(ParameterEstimator):
 
         Args:
             dim: Optional Gaussian dimension.
-            pseudo_count: Optional smoothing counts for mean and variance.
+            pseudo_count: Optional smoothing counts for mean and variance. A scalar is
+                broadcast to both slots.
             suff_stat: Optional prior mean and variance used for smoothing.
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
@@ -717,6 +718,7 @@ class DiagonalGaussianEstimator(ParameterEstimator):
 
         self.name = name
         self.dim = dim_loc
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count
         self.prior_mu = None if suff_stat[0] is None else np.reshape(suff_stat[0], dim_loc)
         self.prior_covar = None if suff_stat[1] is None else np.reshape(suff_stat[1], dim_loc)

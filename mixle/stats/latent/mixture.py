@@ -220,6 +220,12 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         else:
             self.w = np.asarray(w, dtype=float)
 
+        if len(components) != len(self.w):
+            # A mismatched pair constructs a model whose densities are silently wrong (and whose
+            # sampler dies later, far from the mistake), so fail at the constructor like the
+            # scalar families do.
+            raise ValueError("MixtureDistribution requires len(components) == len(w).")
+
         self.zw = self.w == 0.0
         self.log_w = np.log(w + self.zw)
         self.log_w[self.zw] = -np.inf

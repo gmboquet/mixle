@@ -44,7 +44,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.utils.aliasing import MISSING, coalesce_alias, require
+from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias, require
 from mixle.utils.optional_deps import HAS_NUMBA, numba
 
 D = tuple[int, int | None]
@@ -717,12 +717,12 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             TreeHiddenMarkovSampler: Sampler bound to this distribution.
 
         Raises:
-            Exception: If len_dist is a NullDistribution (a length distribution with support on the
+            ValueError: If len_dist is a NullDistribution (a length distribution with support on the
                 non-negative integers is required for sampling).
 
         """
         if supports(self.len_dist, Neutral):
-            raise Exception("TreeHiddenMarkovSampler requires len_dist with support on non-negative integers")
+            raise ValueError("TreeHiddenMarkovSampler requires len_dist with support on non-negative integers")
         return TreeHiddenMarkovSampler(self, seed)
 
     def enumerator(self) -> DistributionEnumerator:
@@ -1662,7 +1662,7 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
         self,
         estimators: list[ParameterEstimator],
         len_estimator: ParameterEstimator | None = NullEstimator(),
-        pseudo_count: tuple[float | None, float | None] | None = (None, None),
+        pseudo_count: float | tuple[float | None, float | None] | None = (None, None),
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         use_numba: bool | None = None,
@@ -1685,6 +1685,7 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
         """
         self.num_states = len(estimators)
         self.estimators = estimators
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None)
         self.keys = keys if keys is not None else (None, None, None)
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
