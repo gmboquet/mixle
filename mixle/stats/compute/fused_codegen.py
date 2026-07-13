@@ -1155,7 +1155,12 @@ def _njit(src: str, fname: str, parallel: bool = False) -> Callable:
     filesystem/import problem falls back to an in-memory ``exec`` (no disk cache, identical result)."""
     import numba
 
-    digest = hashlib.sha1(src.encode()).hexdigest()[:16]  # noqa: S324 -- cache key, not security
+    # The digest keys the disk-cached module. It MUST cover the decorator configuration too (the
+    # fastmath flag set, parallel) -- hashing the source alone silently reuses modules built under a
+    # previous decorator, which is exactly how the ninf/nnan fix below almost didn't ship: the old
+    # fastmath=True modules kept serving until the digest learned about the flags. v2 in the salt
+    # retires every pre-subset cache entry.
+    digest = hashlib.sha1(f"v2|parallel={parallel}|{src}".encode()).hexdigest()[:16]  # noqa: S324 -- cache key
     modname = f"_pysp_fused_{digest}"
     with _NJIT_LOCK:
         if modname in sys.modules:
@@ -1169,10 +1174,15 @@ def _njit(src: str, fname: str, parallel: bool = False) -> Callable:
             # pre-existing file we do not own: it could be attacker-planted (arbitrary code execution).
             # os.replace over a symlink replaces the link itself, so this cannot be redirected outside.
             if not _owned_privately(path, require_dir=False):
+                # fastmath SUBSET: reassociation/contraction/approximations keep the SIMD wins, but
+                # ninf/nnan stay OFF -- with them, LLVM folds the all--inf log-sum-exp guard
+                # (`m > -inf`) away and a row every component scores -inf becomes NaN instead of
+                # -inf (caught by the fused edge panel; the host path returns -inf).
+                flags = "{'reassoc', 'contract', 'arcp', 'afn', 'nsz'}"
                 deco = (
-                    "@numba.njit(fastmath=True, cache=True, parallel=True)"
+                    f"@numba.njit(fastmath={flags}, cache=True, parallel=True)"
                     if parallel
-                    else "@numba.njit(fastmath=True, cache=True)"
+                    else f"@numba.njit(fastmath={flags}, cache=True)"
                 )
                 module_src = f"import numpy as np\nimport numba\n\n\n{deco}\n{src}\n"
                 tmp = f"{path}.{os.getpid()}.tmp"
@@ -1187,7 +1197,8 @@ def _njit(src: str, fname: str, parallel: bool = False) -> Callable:
         except Exception:  # noqa: BLE001
             ns: dict[str, Any] = {"np": np, "numba": numba}
             exec(src, ns)  # noqa: S102 -- generated from fixed templates, no user input
-            return numba.njit(fastmath=True, parallel=parallel)(ns[fname])
+            # same fastmath subset as the disk template (ninf/nnan off: the -inf guard must hold)
+            return numba.njit(fastmath={"reassoc", "contract", "arcp", "afn", "nsz"}, parallel=parallel)(ns[fname])
 
 
 def _score_body(indent: str, row_lines: list[str], llbuf_name: str) -> list[str]:
