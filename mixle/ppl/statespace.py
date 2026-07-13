@@ -101,13 +101,25 @@ def _kalman_em(y, phi_free, max_its, tol):
     prev_ll = None
     for _ in range(max_its):
         xs, Ps, Pcov, ll = _kalman_smooth(y, phi, q, r, x0, P0)
+        # The filter treats (x0, P0) as the state BEFORE the first observation (its first
+        # prediction is phi*x0), so the E-step must smooth one extra step back to that same
+        # pre-sample state (Shumway & Stoffer): assigning the time-0 posterior instead mixes
+        # timing conventions and breaks EM monotonicity on short series.
+        Pp0 = phi * phi * P0 + q  # the filter's first prediction from (x0, P0)
+        J0 = phi * P0 / Pp0
+        xs_init = x0 + J0 * (xs[0] - phi * x0)
+        Ps_init = P0 + J0 * J0 * (Ps[0] - Pp0)
+        Pcov0 = J0 * Ps[0]  # lag-one smoothed covariance Cov(x_init, x_0 | y)
         Exx = Ps + xs**2
         Exx1 = Pcov[1:] + xs[1:] * xs[:-1]
+        # transition sums include the pre-sample -> time-0 step, matching the filter's timing
+        num = float(Pcov0 + xs[0] * xs_init) + float(np.sum(Exx1))  # sum E[x_t x_{t-1}]
+        den = float(Ps_init + xs_init * xs_init) + float(np.sum(Exx[:-1]))  # sum E[x_{t-1}^2]
         if phi_free:
-            phi = float(np.sum(Exx1) / max(np.sum(Exx[:-1]), 1e-12))
-        q = max(float(np.mean(Exx[1:] - 2 * phi * Exx1 + phi * phi * Exx[:-1])), 1e-8)
+            phi = float(num / max(den, 1e-12))
+        q = max(float((np.sum(Exx) - 2 * phi * num + phi * phi * den) / T), 1e-8)
         r = max(float(np.mean((y - xs) ** 2 + Ps)), 1e-8)
-        x0, P0 = float(xs[0]), float(Ps[0])
+        x0, P0 = float(xs_init), max(float(Ps_init), 1e-8)
         if prev_ll is not None and abs(ll - prev_ll) < tol:
             break
         prev_ll = ll
