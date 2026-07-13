@@ -17,8 +17,9 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   is a reviewed diff.
 - Release-engineering gates: a weighted-estimation contract test, a base-install optional-import guard,
   a tracked benchmark harness, a pull-request template, and the 0.8.0 release checklist.
-- `CompiledEM` as a reusable fused full-mixture strategy, recursive SQUAREM packing for nested
-  mixtures/composites, and function-preserving shared-trunk/residual-expert MoE upcycling.
+- `CompiledEM` as a reusable fused full-mixture strategy, automatically selected by `optimize()` for
+  eligible partially fusible heterogeneous mixtures; recursive SQUAREM packing for nested
+  mixtures/composites; and function-preserving shared-trunk/residual-expert MoE upcycling.
 
 ### Fixed
 

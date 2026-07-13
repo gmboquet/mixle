@@ -730,7 +730,7 @@ def compiled_em_step(
     )
     density_seconds = time.perf_counter() - density_started
     responsibility_started = time.perf_counter()
-    _, gamma = _combine(matrix, model.log_w)
+    log_density, gamma = _combine(matrix, model.log_w)
     responsibility_seconds = time.perf_counter() - responsibility_started
     update_seconds: dict[int, float] = {}
     mstep_started = time.perf_counter()
@@ -746,6 +746,7 @@ def compiled_em_step(
     mstep_seconds = time.perf_counter() - mstep_started
     return candidate, {
         "compiled": True,
+        "input_data_objective": float(np.sum(log_density)),
         "density_profile": density_profile,
         "density_seconds": density_seconds,
         "responsibility_seconds": responsibility_seconds,

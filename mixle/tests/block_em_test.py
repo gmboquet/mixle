@@ -17,6 +17,7 @@ from unittest import mock
 
 import numpy as np
 
+from mixle.inference import estimation as estimation_module
 from mixle.inference.block_em import (
     _active_responsibilities,
     _constrained_block_weights,
@@ -524,6 +525,46 @@ class BlockEMOptimizeDispatchTestCase(unittest.TestCase):
             )
         self.assertTrue(scheduled.called)
         self.assertIsInstance(fitted.get_prior()[0], DirichletDistribution)
+
+    def test_optimize_full_uses_compiled_fused_step_when_policy_selects_it(self):
+        start, estimator, enc = _make_symmetric_problem(seed=23, nobs=300, num_components=3)
+        with (
+            mock.patch("mixle.inference.fusion_policy.prefer_compiled_mixture", return_value=True),
+            mock.patch(
+                "mixle.inference.estimation._compiled_fused_step",
+                wraps=estimation_module._compiled_fused_step,
+            ) as compiled_step,
+        ):
+            fitted = optimize(
+                None,
+                estimator,
+                enc_data=enc,
+                prev_estimate=start,
+                max_its=3,
+                delta=None,
+                schedule="full",
+                out=None,
+            )
+        with mock.patch("mixle.inference.fusion_policy.prefer_compiled_mixture", return_value=False):
+            baseline = optimize(
+                None,
+                estimator,
+                enc_data=enc,
+                prev_estimate=start,
+                max_its=3,
+                delta=None,
+                schedule="full",
+                out=None,
+            )
+        self.assertTrue(compiled_step.called)
+        self.assertIsInstance(fitted, MixtureDistribution)
+        probe = start.dist_to_encoder().seq_encode([-2.0, -0.5, 0.0, 1.0, 3.0])
+        np.testing.assert_allclose(
+            fitted.seq_log_density(probe),
+            baseline.seq_log_density(probe),
+            rtol=1e-11,
+            atol=1e-11,
+        )
 
     def test_optimize_schedule_auto_falls_back_for_non_mixture_models(self):
         """``schedule='auto'`` on a model block-EM does not know how to schedule (anything that
