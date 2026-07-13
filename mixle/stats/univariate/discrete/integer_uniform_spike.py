@@ -86,7 +86,7 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
         self.max_val = min_val + num_vals - 1
 
         if not self.min_val <= k <= self.max_val:
-            raise Exception("Spike value k must be between [%s, %s]." % (repr(self.min_val), repr(self.max_val)))
+            raise ValueError("Spike value k must be between [%s, %s]." % (repr(self.min_val), repr(self.max_val)))
         else:
             self.k = k
 

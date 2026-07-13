@@ -47,6 +47,7 @@ from mixle.stats.compute.pdist import (
     child_enumerator,
 )
 from mixle.stats.multivariate.categorical_multinomial import MultisetProductEnumerator
+from mixle.utils.aliasing import broadcast_pseudo_count
 from mixle.utils.optional_deps import numba
 from mixle.utils.optsutil import count_by_value
 
@@ -944,7 +945,7 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
         num_states: int,
         num_docs: int,
         len_estimator: ParameterEstimator | None = NullEstimator(),
-        pseudo_count: tuple[float | None, float | None, float | None] | None = (None, None, None),
+        pseudo_count: float | tuple[float | None, float | None, float | None] | None = (None, None, None),
         suff_stat: tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None] | None = (
             None,
             None,
@@ -977,6 +978,7 @@ class IntegerProbabilisticLatentSemanticIndexingEstimator(ParameterEstimator):
             keys: Optional sufficient-statistic merge keys.
         """
         self.suff_stat = suff_stat if suff_stat is not None else (None, None, None)
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 3)
         self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None, None)
         self.num_vals = num_vals
         self.num_states = num_states

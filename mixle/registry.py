@@ -104,7 +104,9 @@ class Registry:
         ``capabilities`` names what this model answers (matched by :meth:`find_for`); ``fingerprint`` is
         typically :func:`~mixle.task.edge.task_fingerprint`'s vector for the training data; ``profile`` is
         free-form (e.g. a :func:`~mixle.task.capability.capture_profile` dict); ``cost`` is the per-request
-        cost used to order :meth:`tier_stack`.
+        cost used to order :meth:`tier_stack`. An explicit ``entry_id`` that already exists (in the index
+        or as an artifact directory) raises rather than duplicating the index row and silently
+        overwriting the artifact; auto-generated ids scan past taken ones.
         """
         if isinstance(model, CalibratedTaskModel):
             kind = "calibrated"
@@ -112,7 +114,17 @@ class Registry:
             kind = "task"
         else:
             raise TypeError(f"Registry only stores TaskModel/CalibratedTaskModel, got {type(model)!r}")
-        entry_id = entry_id or f"entry_{len(self._entries):04d}"
+        taken = {e.entry_id for e in self._entries}
+        if entry_id is not None:
+            if entry_id in taken or os.path.exists(os.path.join(self.dir, entry_id)):
+                raise ValueError(f"registry already has an entry {entry_id!r}; entry ids must be unique")
+        else:
+            # a len()-based id collides after manual index edits, explicit ids, or another writer's
+            # artifacts -- scan forward until the id is free in BOTH the index and the directory
+            i = len(self._entries)
+            while f"entry_{i:04d}" in taken or os.path.exists(os.path.join(self.dir, f"entry_{i:04d}")):
+                i += 1
+            entry_id = f"entry_{i:04d}"
         path = os.path.join(self.dir, entry_id)
         model.save(path)
         entry = RegistryEntry(
@@ -169,11 +181,12 @@ class Registry:
     ) -> list[tuple[str, Any, float]]:
         """Ascending-cost ``(name, model, cost)`` tiers for capability ``task``, ``frontier`` appended last.
 
-        Matching entries are loaded (:meth:`load`) and ordered by their registered ``cost``. The result is
-        exactly the shape :class:`~mixle.task.router.Router` takes as ``tiers=``: each non-final tier exposes
-        ``decide(x)``, the final tier is the callable ``frontier`` fallback. ``costs`` (one entry per matching
-        solution plus one for ``frontier``, mirroring :meth:`~mixle.task.router.Router.from_solutions`) overrides
-        the registered per-entry costs when given.
+        Matching entries are loaded (:meth:`load`) and ordered by their *effective* cost -- the ``costs``
+        override when given, else the registered per-entry cost. The result is exactly the shape
+        :class:`~mixle.task.router.Router` takes as ``tiers=``: each non-final tier exposes ``decide(x)``,
+        the final tier is the callable ``frontier`` fallback. ``costs`` (one entry per matching solution in
+        registered-cost order, plus one for ``frontier``, mirroring
+        :meth:`~mixle.task.router.Router.from_solutions`) overrides the registered per-entry costs when given.
         """
         pool = sorted(self.find_for(task), key=lambda e: e.cost)
         if costs is not None and len(costs) != len(pool) + 1:
@@ -181,5 +194,6 @@ class Registry:
         tier_costs = [float(c) for c in costs] if costs is not None else [e.cost for e in pool] + [1.0]
         tier_names = list(names) if names is not None else [e.entry_id for e in pool] + ["frontier"]
         tiers = [(tier_names[i], self.load(e.entry_id), tier_costs[i]) for i, e in enumerate(pool)]
+        tiers.sort(key=lambda t: t[2])  # a costs= override can reorder the pool; Router assumes ascending tiers
         tiers.append((tier_names[-1], frontier, tier_costs[-1]))
         return tiers

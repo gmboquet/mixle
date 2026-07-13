@@ -122,7 +122,7 @@ def _nuts_core(value_and_grad, theta0, num_samples, warmup, mass, target_accept,
     t0 = 10.0
     kappa = 0.75
 
-    n_keep = num_samples // thin
+    n_keep = num_samples  # retained draws; num_samples * thin post-warmup iterations, keep every thin-th
     samples = np.empty((n_keep, d))
     kept = 0
     total = warmup + num_samples * thin

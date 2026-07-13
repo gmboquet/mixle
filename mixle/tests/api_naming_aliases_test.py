@@ -1,8 +1,9 @@
-"""Tests for the distribution API naming migration (notes/distribution_api_naming_accounting.md).
+"""Tests for the distribution API naming aliases.
 
-Covers step 1 (backward-compatible class-name aliases), step 2 (constructor keyword-argument
-aliases), and the mixle.utils.aliasing helper. Alias constructors must produce models identical to
-the legacy spelling, and passing both spellings (or neither, for required arguments) must raise.
+Covers backward-compatible class-name aliases, constructor keyword-argument aliases, and the
+``mixle.utils.aliasing`` helper (the module docstring there states the alias policy). Alias
+constructors must produce models identical to the legacy spelling, and passing both spellings
+(or neither, for required arguments) must raise.
 """
 
 import unittest

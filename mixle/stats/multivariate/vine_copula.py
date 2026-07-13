@@ -69,8 +69,9 @@ def _bisect_h_inv(pc: Any, w: np.ndarray, b: np.ndarray, iters: int = 60) -> np.
 
 
 # --------------------------------------------------------------------- pair copulas
-# Each pair copula exposes logpdf(a, b), h(a, b) = P(A <= a | B = b) = dC/db, and h_inv(w, b) (inverse in the
-# first argument). ``fit(a, b, w)`` returns a fitted instance; ``family`` names it. All are bivariate.
+# Each pair copula exposes logpdf(a, b) (with the library-wide ``log_density`` verb as an alias),
+# h(a, b) = P(A <= a | B = b) = dC/db, and h_inv(w, b) (inverse in the first argument). ``fit(a, b, w)``
+# returns a fitted instance; ``family`` names it. All are bivariate.
 
 
 class IndependencePairCopula:
@@ -78,6 +79,10 @@ class IndependencePairCopula:
 
     def logpdf(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         return np.zeros(np.broadcast(a, b).shape)
+
+    def log_density(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Alias of :meth:`logpdf` matching the library-wide ``log_density`` verb."""
+        return self.logpdf(a, b)
 
     def h(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         return _clip01(a)
@@ -100,6 +105,10 @@ class GaussianPairCopula:
         za, zb = norm.ppf(_clip01(a)), norm.ppf(_clip01(b))
         r = self.rho
         return -0.5 * np.log(1.0 - r * r) - (r * r * (za * za + zb * zb) - 2.0 * r * za * zb) / (2.0 * (1.0 - r * r))
+
+    def log_density(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Alias of :meth:`logpdf` matching the library-wide ``log_density`` verb."""
+        return self.logpdf(a, b)
 
     def h(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         za, zb = norm.ppf(_clip01(a)), norm.ppf(_clip01(b))
@@ -132,6 +141,10 @@ class ClaytonPairCopula:
         s = a ** (-th) + b ** (-th) - 1.0
         return np.log1p(th) - (1.0 + th) * (np.log(a) + np.log(b)) - (2.0 + 1.0 / th) * np.log(s)
 
+    def log_density(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Alias of :meth:`logpdf` matching the library-wide ``log_density`` verb."""
+        return self.logpdf(a, b)
+
     def h(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a, b, th = _clip01(a), _clip01(b), self.theta
         s = a ** (-th) + b ** (-th) - 1.0
@@ -161,6 +174,10 @@ class FrankPairCopula:
         h1 = 1.0 - np.exp(-th)
         denom = h1 - (1.0 - np.exp(-th * a)) * (1.0 - np.exp(-th * b))
         return np.log(abs(th)) + np.log(abs(h1)) - th * (a + b) - 2.0 * np.log(np.abs(denom))
+
+    def log_density(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Alias of :meth:`logpdf` matching the library-wide ``log_density`` verb."""
+        return self.logpdf(a, b)
 
     def h(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a, b, th = _clip01(a), _clip01(b), self.theta
@@ -207,6 +224,10 @@ class GumbelPairCopula:
             - np.log(b)
         )
 
+    def log_density(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Alias of :meth:`logpdf` matching the library-wide ``log_density`` verb."""
+        return self.logpdf(a, b)
+
     def h(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a, b, th = _clip01(a), _clip01(b), self.theta
         if th <= 1.0 + 1e-12:
@@ -242,6 +263,10 @@ class StudentTPairCopula:
         log_num += -0.5 * np.log(1.0 - r * r) - (nu + 2.0) / 2.0 * np.log1p(quad / nu)
         log_den = -(nu + 1.0) / 2.0 * (np.log1p(za * za / nu) + np.log1p(zb * zb / nu))
         return log_num - log_den
+
+    def log_density(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Alias of :meth:`logpdf` matching the library-wide ``log_density`` verb."""
+        return self.logpdf(a, b)
 
     def h(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         nu, r = self.df, self.rho

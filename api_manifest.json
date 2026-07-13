@@ -995,6 +995,7 @@
     "Gamma",
     "Gaussian",
     "GaussianField",
+    "GaussianObs",
     "GaussianProxy",
     "GeneralizedGaussian",
     "GeneralizedPareto",
@@ -2079,6 +2080,7 @@
     "is_encoded_data_handle",
     "model_parallel_fold",
     "model_sharding_plan",
-    "plan"
+    "plan",
+    "register_encoded_data_backend"
   ]
 }

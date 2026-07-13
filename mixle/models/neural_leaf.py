@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
-from mixle.models.grad_leaf import _resolve_device
+from mixle.models.grad_leaf import _module_mode, _resolve_device, _resolve_dtype
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -39,6 +39,24 @@ def _torch() -> Any:
     import torch
 
     return torch
+
+
+def _place_module(module: Any, dev: Any, torch: Any) -> Any:
+    """Move ``module`` to ``dev`` and return the float dtype its tensor math must use.
+
+    An active torch engine's declared float dtype wins and the module is cast to match, so a
+    ``TorchEngine(dtype=torch.float64)`` run evaluates the net in fp64 like the rest of the substrate
+    math instead of the old hardcoded fp32. Without an engine policy the module is left untouched and
+    the math follows the module's own parameter dtype (``float32`` for a stock torch module -- today's
+    behavior). Following the parameters, not a literal, keeps E-step scoring consistent after an
+    engine-driven M-step cast the module: the estimation loop activates the engine only around
+    ``estimate()``, so the next scoring pass runs outside the engine context."""
+    dtype = _resolve_dtype(torch)
+    if dtype is not None:
+        module.to(dev, dtype=dtype)
+        return dtype
+    module.to(dev)
+    return next((p.dtype for p in module.parameters() if p.dtype.is_floating_point), torch.float32)
 
 
 class NeuralGaussian(SequenceEncodableProbabilityDistribution):
@@ -68,9 +86,9 @@ class NeuralGaussian(SequenceEncodableProbabilityDistribution):
     def _forward(self, x: np.ndarray) -> np.ndarray:
         torch = _torch()
         dev = _resolve_device(self.device, torch)
-        self.module.to(dev)
-        with torch.no_grad():
-            mean = self.module(torch.as_tensor(np.atleast_2d(x), dtype=torch.float32, device=dev))
+        dtype = _place_module(self.module, dev, torch)
+        with _module_mode(self.module, train=False), torch.no_grad():
+            mean = self.module(torch.as_tensor(np.atleast_2d(x), dtype=dtype, device=dev))
         return np.atleast_2d(mean.detach().cpu().numpy())
 
     def log_density(self, xy: Any) -> float:
@@ -293,23 +311,28 @@ class NeuralGaussianEstimator(ParameterEstimator):
         if len(xs) == 0:
             return NeuralGaussian(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
         dev = _resolve_device(self.device, torch)
-        self.module.to(dev)
+        dtype = _place_module(self.module, dev, torch)
         xs = np.asarray(xs, dtype=float).reshape(len(xs), -1)
         ys = np.asarray(ys, dtype=float).reshape(len(ys), -1)
-        xt = torch.as_tensor(xs, dtype=torch.float32, device=dev)
-        yt = torch.as_tensor(ys, dtype=torch.float32, device=dev)
-        wt = torch.as_tensor(np.array(ws), dtype=torch.float32, device=dev)
+        xt = torch.as_tensor(xs, dtype=dtype, device=dev)
+        yt = torch.as_tensor(ys, dtype=dtype, device=dev)
+        wt = torch.as_tensor(np.array(ws), dtype=dtype, device=dev)
         wsum = float(wt.sum()) + 1e-8
-        log_noise = torch.log(torch.tensor(float(self.noise), device=dev)).clone().detach().requires_grad_(True)
+        log_noise = (
+            torch.log(torch.tensor(float(self.noise), dtype=dtype, device=dev)).clone().detach().requires_grad_(True)
+        )
         opt = torch.optim.Adam(list(self.module.parameters()) + [log_noise], lr=self.lr)
         d = yt.shape[1]
-        for _ in range(self.m_steps):
-            opt.zero_grad()
-            mean = self.module(xt)
-            sig2 = torch.exp(2.0 * log_noise)
-            nll = (wt * (0.5 * ((yt - mean) ** 2).sum(1) / sig2 + 0.5 * d * torch.log(2.0 * np.pi * sig2))).sum() / wsum
-            nll.backward()
-            opt.step()
+        with _module_mode(self.module, train=True):
+            for _ in range(self.m_steps):
+                opt.zero_grad()
+                mean = self.module(xt)
+                sig2 = torch.exp(2.0 * log_noise)
+                nll = (
+                    wt * (0.5 * ((yt - mean) ** 2).sum(1) / sig2 + 0.5 * d * torch.log(2.0 * np.pi * sig2))
+                ).sum() / wsum
+                nll.backward()
+                opt.step()
         self.noise = float(torch.exp(log_noise).detach())  # warm-start noise for the next EM iteration
         return NeuralGaussian(self.module, self.noise, self.m_steps, self.lr, self.name, self.device)
 

@@ -26,6 +26,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.aliasing import broadcast_pseudo_count
 from mixle.utils.special import digamma
 
 
@@ -722,7 +723,7 @@ class GaussianEstimator(ParameterEstimator):
 
     def __init__(
         self,
-        pseudo_count: tuple[float | None, float | None] = (None, None),
+        pseudo_count: float | tuple[float | None, float | None] = (None, None),
         suff_stat: tuple[float | None, float | None] = (None, None),
         name: str | None = None,
         keys: str | None = None,
@@ -734,6 +735,7 @@ class GaussianEstimator(ParameterEstimator):
 
         Args:
             pseudo_count: Optional smoothing weights for the prior mean and variance statistics.
+                A scalar is broadcast to both slots.
             suff_stat: Optional prior mean and variance statistics used with ``pseudo_count``.
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
@@ -756,6 +758,7 @@ class GaussianEstimator(ParameterEstimator):
             keys: Optional sufficient-statistic key.
 
         """
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.keys = keys
@@ -895,5 +898,5 @@ class GaussianDataEncoder(DataSequenceEncoder):
         rv = np.asarray(x, dtype=float)
 
         if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
-            raise Exception("GaussianDistribution requires support x in (-inf,inf).")
+            raise ValueError("GaussianDistribution requires support x in (-inf,inf).")
         return rv

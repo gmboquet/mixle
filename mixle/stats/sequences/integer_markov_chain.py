@@ -646,7 +646,7 @@ class IntegerMarkovChainSampler(DistributionSampler):
     def single_sample(self) -> Sequence[int]:
         """Returns a single sample from the integer Markov chain distribution."""
         if self.init_sampler is None or self.len_sampler is None:
-            raise Exception("IntegerMarkovChainSampler requires init_dist and len_dist for unconditional sampling.")
+            raise ValueError("IntegerMarkovChainSampler requires init_dist and len_dist for unconditional sampling.")
         cnt = self.len_sampler.sample()
         lag = self.dist.lag
         n_val = self.dist.num_values
@@ -671,7 +671,7 @@ class IntegerMarkovChainSampler(DistributionSampler):
         portion is statistically equivalent but NOT byte-identical to ``batched=False``.
         """
         if self.init_sampler is None or self.len_sampler is None:
-            raise Exception("IntegerMarkovChainSampler requires init_dist and len_dist for unconditional sampling.")
+            raise ValueError("IntegerMarkovChainSampler requires init_dist and len_dist for unconditional sampling.")
         lag = self.dist.lag
         n_val = self.dist.num_values
         m_shape = [n_val] * lag

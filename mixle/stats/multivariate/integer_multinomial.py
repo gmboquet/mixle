@@ -429,7 +429,7 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if supports(self.len_dist, Neutral):
-            raise Exception(
+            raise ValueError(
                 "IntegerMultinomialDistribution must have len_dist set to distribution with support on "
                 "non-negative integers."
             )
