@@ -580,8 +580,11 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             self.count += suff_stat[2]
 
         elif suff_stat[0] is not None and self.sum is None:
-            self.sum = suff_stat[0]
-            self.sum2 = suff_stat[1]
+            # copy on adopt: value() hands out the LIVE arrays, so adopting the caller's reference
+            # makes every later in-place += here mutate the DONOR accumulator too (chunk combines
+            # and keyed pooling both hit this -- caught by the keyed-protocol sweep)
+            self.sum = np.asarray(suff_stat[0], dtype=np.float64).copy()
+            self.sum2 = np.asarray(suff_stat[1], dtype=np.float64).copy()
             self.count = suff_stat[2]
 
         return self
@@ -601,8 +604,8 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             This accumulator.
 
         """
-        self.sum = x[0]
-        self.sum2 = x[1]
+        self.sum = None if x[0] is None else np.asarray(x[0], dtype=np.float64).copy()
+        self.sum2 = None if x[1] is None else np.asarray(x[1], dtype=np.float64).copy()
         self.count = x[2]
         return self
 
@@ -619,6 +622,10 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         if self.keys is not None:
             if self.keys in stats_dict:
                 self.combine(stats_dict[self.keys].value())
+                # write the POOL back: the dict must end holding the pooled accumulator, else
+                # key_replace hands every tied site the FIRST site's statistics (later sites'
+                # data silently discarded -- caught by the keyed-protocol sweep)
+                stats_dict[self.keys] = self
             else:
                 stats_dict[self.keys] = self
 
@@ -634,7 +641,9 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         """
         if self.keys is not None:
             if self.keys in stats_dict:
-                self.from_value(stats_dict[self.keys])
+                # the dict holds the pooled ACCUMULATOR (see key_merge); passing it whole made
+                # from_value subscript an accumulator object -- keyed use crashed with TypeError
+                self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "DiagonalGaussianDataEncoder":
         """Return an encoder compatible with this accumulator's dimension."""

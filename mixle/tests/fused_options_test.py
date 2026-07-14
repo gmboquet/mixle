@@ -77,6 +77,14 @@ class FusedOptionsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown keys.*prallel"):
             optimize(data, estimator=est, prev_estimate=model, max_its=1, fused_options={"prallel": True})
 
+    def test_best_of_forwards_fused_options(self):
+        from mixle.inference.estimation import best_of
+
+        data, model, est = _fixture(n_per=50)
+        # the unknown-key refusal proves the knob reaches optimize through the trials wrapper
+        with self.assertRaisesRegex(ValueError, "unknown keys.*prallel"):
+            best_of(data, None, est, trials=1, max_its=1, init_p=1.0, delta=1e-9, fused_options={"prallel": True})
+
     def test_parallel_true_engages_below_the_auto_gate_and_matches_the_sequential_fit(self):
         data, model, est = _fixture()  # 3,000 obs << the 65,536 auto-gate floor
         base = optimize(

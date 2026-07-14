@@ -111,6 +111,21 @@ class KeyedPoolingProtocolTest(unittest.TestCase):
             np.testing.assert_array_equal(acc.counts, [[0.0, 6.0], [4.0, 0.0]])
             np.testing.assert_array_equal(acc.dwell, [3.5, 1.5])
 
+    def test_malformed_tuple_keys_on_scalar_families_refuse_loudly(self):
+        # Scalar families declare keys: str|None but silently accepted tuples (the combinator
+        # convention), tying as one opaque composite key instead of what the caller meant. The
+        # validator now checks the value against each family's OWN ctor annotation.
+        from mixle.stats.compute.pdist import validate_estimator_keys
+        from mixle.stats.latent.mixture import MixtureEstimator
+        from mixle.stats.univariate.continuous.gaussian import GaussianEstimator
+
+        bad = MixtureEstimator([GaussianEstimator(keys=(None, "shared_var")), GaussianEstimator()])
+        with self.assertRaisesRegex(ValueError, "combinator convention"):
+            validate_estimator_keys(bad)
+        # tuple keys stay legal exactly where they are declared: combinator estimators
+        good = MixtureEstimator([GaussianEstimator(keys="s"), GaussianEstimator(keys="s")], keys=("w", "c"))
+        validate_estimator_keys(good)
+
     def test_tied_gaussian_mixture_reaches_the_analytic_pooled_fixed_point(self):
         from mixle.stats.compute.sequence import seq_estimate
         from mixle.stats.latent.mixture import MixtureEstimator
