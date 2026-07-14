@@ -52,9 +52,14 @@ __all__ = [
     "BestSubsetRegression",
     "branch_and_bound_milp",
     "cardinality_constrained_milp",
+    "Design",
     "EditDistance",
+    "Flow",
     "graph_coloring",
     "irreducible_infeasible_subset",
+    "min_cost_flow",
+    "multicommodity_flow",
+    "network_design",
     "Relation",
     "RelationSampler",
     "ShortestPath",
@@ -324,6 +329,279 @@ def min_cut(capacity: Any, source: int, sink: int) -> tuple[float, list[int], li
     cut_edges = [(u, v) for u in reachable for v in range(n) if v not in reachable and cap[u, v] > 0.0]
     cut_capacity = float(sum(cap[u, v] for u, v in cut_edges))
     return cut_capacity, sorted(reachable), cut_edges
+
+
+# ---------------------------------------------------------------------------
+# Minimum-cost flow, multicommodity flow, and capacitated network design
+# ---------------------------------------------------------------------------
+class Flow(NamedTuple):
+    """A resolved flow: ``value`` (total/objective cost) and ``flow[u, v]`` per-arc, like `max_flow`'s output."""
+
+    value: float
+    flow: np.ndarray
+
+
+class Design(NamedTuple):
+    """A network-design solution: ``cost`` (total), ``open`` (opened-arc/facility mask), and the induced ``flow``."""
+
+    cost: float
+    open: np.ndarray
+    flow: np.ndarray
+
+
+def min_cost_flow(cap: Any, cost: Any, supply: Any) -> Flow:
+    """Min-cost feasible flow meeting node ``supply`` (positive = source) under arc ``cap``/``cost``.
+
+    Successive-shortest-path with node potentials: a super-source feeds every ``supply > 0`` node and
+    every ``supply < 0`` node feeds a super-sink (arc capacity ``|supply|``, cost 0), then the residual
+    super-source -> super-sink path of least *reduced* cost is repeatedly augmented (Dijkstra, since the
+    potentials keep every reduced cost non-negative) until the super-sink is unreachable. Potentials are
+    seeded with a Bellman-Ford pass so arbitrary-sign ``cost`` entries are handled, then updated by the
+    per-round Dijkstra distances (the standard Johnson's-algorithm maintenance). ``cap``/``cost`` are
+    ``n x n`` arc matrices; ``supply`` is length ``n`` and must sum to (approximately) zero. Returns
+    `Flow(value=total cost, flow=(n, n) arc flows)`; raises :class:`ValueError` if the supply cannot be
+    fully routed under the given capacities.
+    """
+    cap = np.asarray(cap, dtype=np.float64)
+    cost = np.asarray(cost, dtype=np.float64)
+    supply = np.asarray(supply, dtype=np.float64)
+    n = supply.shape[0]
+    if cap.shape != (n, n) or cost.shape != (n, n):
+        raise ValueError("cap/cost must be (n, n), matching supply's length n")
+    assert abs(float(supply.sum())) < 1.0e-6, "supply must sum to (approximately) zero"
+
+    ss, tt, m = n, n + 1, n + 2  # super-source, super-sink, extended node count
+    big_cap = np.zeros((m, m))
+    big_cap[:n, :n] = cap
+    big_cost = np.zeros((m, m))
+    big_cost[:n, :n] = cost
+    total_supply = 0.0
+    for i in range(n):
+        if supply[i] > 1.0e-12:
+            big_cap[ss, i] = supply[i]
+            total_supply += float(supply[i])
+        elif supply[i] < -1.0e-12:
+            big_cap[i, tt] = -float(supply[i])
+
+    residual = big_cap.copy()
+    flow = np.zeros((m, m))
+
+    def bellman_ford_from_source() -> np.ndarray:
+        dist = np.full(m, np.inf)
+        dist[ss] = 0.0
+        for _ in range(m - 1):
+            changed = False
+            for u in range(m):
+                if not np.isfinite(dist[u]):
+                    continue
+                for v in range(m):
+                    if residual[u, v] > 1.0e-12 and dist[u] + big_cost[u, v] < dist[v] - 1.0e-9:
+                        dist[v] = dist[u] + big_cost[u, v]
+                        changed = True
+            if not changed:
+                break
+        return np.where(np.isfinite(dist), dist, 0.0)
+
+    pot = bellman_ford_from_source()  # seeds potentials so Dijkstra sees non-negative reduced costs
+    routed = 0.0
+    while routed < total_supply - 1.0e-9:
+        reduced = big_cost + pot[:, None] - pot[None, :]
+        dist = np.full(m, np.inf)
+        dist[ss] = 0.0
+        prev = np.full(m, -1, dtype=int)
+        visited = np.zeros(m, dtype=bool)
+        heap: list[tuple[float, int]] = [(0.0, ss)]
+        while heap:
+            d, u = heapq.heappop(heap)
+            if visited[u]:
+                continue
+            visited[u] = True
+            for v in range(m):
+                if not visited[v] and residual[u, v] > 1.0e-12:
+                    nd = d + reduced[u, v]
+                    if nd < dist[v] - 1.0e-12:
+                        dist[v] = nd
+                        prev[v] = u
+                        heapq.heappush(heap, (nd, v))
+        if not visited[tt]:
+            break  # super-sink unreachable: no more augmenting paths
+        for v in range(m):
+            if visited[v] and np.isfinite(dist[v]):
+                pot[v] += dist[v]  # Johnson's-algorithm potential maintenance
+
+        bottleneck = total_supply - routed
+        path: list[tuple[int, int]] = []
+        v = tt
+        while v != ss:
+            u = prev[v]
+            bottleneck = min(bottleneck, residual[u, v])
+            path.append((u, v))
+            v = u
+        for u, v in path:
+            residual[u, v] -= bottleneck
+            residual[v, u] += bottleneck
+            cancel = min(bottleneck, flow[v, u])  # undo previously-pushed flow on the reverse arc first
+            flow[v, u] -= cancel
+            if bottleneck - cancel > 1.0e-15:
+                flow[u, v] += bottleneck - cancel
+        routed += bottleneck
+
+    if routed < total_supply - 1.0e-6:
+        raise ValueError("min_cost_flow: infeasible -- supply cannot be fully routed under the given capacities")
+
+    value = float((flow[:n, :n] * cost).sum())
+    return Flow(value=value, flow=flow[:n, :n])
+
+
+def multicommodity_flow(cap: Any, cost: Any, demands: Any) -> Flow:
+    """Multi-commodity min-cost flow (different products/grades share arc ``cap``) via LP relaxation.
+
+    ``cap``/``cost`` are ``n x n`` arc matrices (an arc exists where ``cap > 0``); ``demands`` lists
+    ``(source, sink, amount)`` rows, one per commodity. Each commodity gets its own flow variables with
+    its own conservation constraints (per-commodity supply at its source, demand at its sink, balance
+    elsewhere); every arc's *combined* commodity flow is capped at ``cap[u, v]``. Solved as a single LP
+    (``scipy.optimize.linprog``, HiGHS) over the stacked per-commodity arc variables. Returns `Flow` with
+    the aggregate cost and the summed arc flows (``flow = sum_k x_k``); raises :class:`ValueError` if the
+    demands cannot be met under the shared capacities.
+    """
+    from scipy.optimize import linprog
+
+    cap = np.asarray(cap, dtype=np.float64)
+    cost = np.asarray(cost, dtype=np.float64)
+    demands = np.atleast_2d(np.asarray(demands, dtype=np.float64))
+    n = cap.shape[0]
+    if cap.shape != (n, n) or cost.shape != (n, n):
+        raise ValueError("cap/cost must be square (n, n) arc matrices")
+    k = demands.shape[0]
+    arcs = [(u, v) for u in range(n) for v in range(n) if cap[u, v] > 0.0]
+    n_arcs = len(arcs)
+
+    def var(kk: int, ai: int) -> int:
+        return kk * n_arcs + ai
+
+    n_vars = k * n_arcs
+    c = np.zeros(n_vars)
+    for kk in range(k):
+        for ai, (u, v) in enumerate(arcs):
+            c[var(kk, ai)] = cost[u, v]
+
+    a_eq_rows: list[np.ndarray] = []
+    b_eq: list[float] = []
+    for kk in range(k):
+        src, snk, qty = int(demands[kk, 0]), int(demands[kk, 1]), float(demands[kk, 2])
+        for node in range(n):
+            row = np.zeros(n_vars)
+            for ai, (u, v) in enumerate(arcs):
+                if u == node:
+                    row[var(kk, ai)] += 1.0
+                if v == node:
+                    row[var(kk, ai)] -= 1.0
+            rhs = qty if node == src else (-qty if node == snk else 0.0)
+            a_eq_rows.append(row)
+            b_eq.append(rhs)
+
+    a_ub_rows: list[np.ndarray] = []
+    b_ub: list[float] = []
+    for ai, (u, v) in enumerate(arcs):
+        row = np.zeros(n_vars)
+        for kk in range(k):
+            row[var(kk, ai)] = 1.0
+        a_ub_rows.append(row)
+        b_ub.append(cap[u, v])
+
+    res = linprog(
+        c,
+        A_ub=np.array(a_ub_rows) if a_ub_rows else None,
+        b_ub=np.array(b_ub) if b_ub else None,
+        A_eq=np.array(a_eq_rows) if a_eq_rows else None,
+        b_eq=np.array(b_eq) if b_eq else None,
+        bounds=[(0.0, None)] * n_vars,
+        method="highs",
+    )
+    if not res.success:
+        raise ValueError("multicommodity_flow: infeasible -- demands cannot be met under the shared capacities")
+
+    flow = np.zeros((n, n))
+    for kk in range(k):
+        for ai, (u, v) in enumerate(arcs):
+            flow[u, v] += res.x[var(kk, ai)]
+    return Flow(value=float(res.fun), flow=flow)
+
+
+def network_design(nodes: Sequence[int], arcs: Sequence[tuple[int, int]], fixed_costs: Any, demands: Any) -> Design:
+    """Capacitated fixed-charge network design (which arcs/facilities to open) via big-M MILP.
+
+    ``nodes`` lists node ids; ``arcs`` lists candidate directed arcs (``fixed_costs[i]`` is the cost of
+    opening ``arcs[i]``); ``demands`` is a length-``len(nodes)`` net supply/demand vector aligned with
+    ``nodes`` (positive = supply, negative = demand, summing to zero) -- the same convention as
+    :func:`min_cost_flow`'s ``supply``. Continuous flow ``x[arc] >= 0`` is big-M-linked to the binary
+    open/closed decision ``y[arc]`` (``x[arc] <= M * y[arc]``, ``M`` sized from the total demand so it
+    never binds a genuinely open arc); flow balance ``A x = demands`` is encoded as the paired
+    inequalities ``A x <= demands`` and ``-A x <= -demands`` (:func:`branch_and_bound_milp` exposes only
+    ``a_ub``/``b_ub``). The frozen signature carries no per-unit routing cost, so the objective is the
+    total opening cost ``fixed_costs @ y`` (the classic uncapacitated-routing fixed-charge network design:
+    which arcs to build so the demand vector is routable at minimum build cost). Returns
+    ``Design(cost, open, flow)`` where ``open`` is the boolean opened-arc mask and ``flow`` is the induced
+    ``(n, n)`` arc flow; raises :class:`ValueError` if no arc-opening choice can route the demands.
+    """
+    node_list = list(nodes)
+    n = len(node_list)
+    index = {node: i for i, node in enumerate(node_list)}
+    arc_list = list(arcs)
+    n_arcs = len(arc_list)
+    fixed = np.asarray(fixed_costs, dtype=np.float64)
+    demand = np.asarray(demands, dtype=np.float64)
+    if fixed.shape != (n_arcs,):
+        raise ValueError("fixed_costs must align with arcs, one entry per candidate arc")
+    if demand.shape != (n,):
+        raise ValueError("demands must align with nodes, one net supply/demand entry per node")
+    if abs(float(demand.sum())) > 1.0e-6:
+        raise ValueError("network_design: demands must sum to (approximately) zero")
+
+    big_m = float(np.abs(demand).sum()) or 1.0  # a non-binding capacity once an arc is opened
+    n_vars = 2 * n_arcs  # [x_0..x_{n_arcs-1}, y_0..y_{n_arcs-1}]
+
+    def x_idx(a: int) -> int:
+        return a
+
+    def y_idx(a: int) -> int:
+        return n_arcs + a
+
+    c = np.zeros(n_vars)
+    c[n_arcs:] = fixed  # objective: total opening cost (no per-unit routing cost in the frozen signature)
+
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+    for a in range(n_arcs):  # big-M link: x[a] - M * y[a] <= 0
+        row = np.zeros(n_vars)
+        row[x_idx(a)] = 1.0
+        row[y_idx(a)] = -big_m
+        rows.append(row)
+        rhs.append(0.0)
+
+    balance = np.zeros((n, n_vars))
+    for a, (u, v) in enumerate(arc_list):
+        balance[index[u], x_idx(a)] += 1.0
+        balance[index[v], x_idx(a)] -= 1.0
+    for node_row, b in zip(balance, demand, strict=True):  # A x = b as paired A x <= b, -A x <= -b
+        rows.append(node_row.copy())
+        rhs.append(float(b))
+        rows.append(-node_row)
+        rhs.append(-float(b))
+
+    bounds = [(0.0, big_m)] * n_arcs + [(0.0, 1.0)] * n_arcs
+    result = branch_and_bound_milp(
+        c, np.array(rows), np.array(rhs), integer=list(range(n_arcs, n_vars)), bounds=bounds, sense="min"
+    )
+    if result is None:
+        raise ValueError("network_design: infeasible -- no arc-opening choice routes the given demands")
+    value, sol = result
+    opened = np.round(sol[n_arcs:]).astype(bool)
+    x = sol[:n_arcs]
+    flow_matrix = np.zeros((n, n))
+    for a, (u, v) in enumerate(arc_list):
+        flow_matrix[index[u], index[v]] = x[a]
+    return Design(cost=float(value), open=opened, flow=flow_matrix)
 
 
 # ---------------------------------------------------------------------------
