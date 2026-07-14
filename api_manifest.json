@@ -543,6 +543,7 @@
     "orthogonalized_matrix_direction",
     "partition_context_graph",
     "payload_fingerprint",
+    "plan_distributed_updates",
     "plan_execution",
     "plan_structured_placement",
     "proposal_conflicts",
@@ -2116,15 +2117,29 @@
     "tsne_barnes_hut"
   ],
   "mixle.utils.parallel": [
+    "BackendCapabilities",
+    "CollectiveKind",
+    "DistributedUpdate",
+    "LightningFabricLauncher",
     "ModelParallelEncodedData",
     "ModelParallelEstimator",
+    "ParallelAxis",
+    "ParallelPlan",
+    "ParameterLayout",
+    "PayloadKind",
+    "RayTrainLauncher",
     "Resources",
+    "StateLayout",
+    "StepReceipt",
     "auto_parallel_estimator",
+    "available_training_backends",
     "encoded_data",
+    "get_training_backend",
     "is_encoded_data_handle",
     "model_parallel_fold",
     "model_sharding_plan",
     "plan",
-    "register_encoded_data_backend"
+    "register_encoded_data_backend",
+    "register_training_backend"
   ]
 }
