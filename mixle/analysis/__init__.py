@@ -69,6 +69,7 @@ from mixle.analysis.rank_aggregation import (
     mallows_fit,
     spearman_footrule,
 )
+from mixle.analysis.real_options import OptionValue, real_option_value, voi_dollars
 from mixle.analysis.sdm import HabitatModel, SpeciesObservation, fit_sdm
 from mixle.analysis.spatial_mixture import SpatialMixture
 from mixle.analysis.valuation import NPVDistribution, capex_opex, cost_curve, monte_carlo_npv
@@ -150,4 +151,8 @@ __all__ = [
     # mixle.stochastic_opt.risk_adjusted_plan
     "priced_liabilities",
     "hard_constraints",
+    # real options & decision-under-uncertainty
+    "OptionValue",
+    "real_option_value",
+    "voi_dollars",
 ]
