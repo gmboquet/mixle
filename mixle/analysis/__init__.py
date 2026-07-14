@@ -24,6 +24,7 @@ from mixle.analysis.carcinogenic_risk import (
     radon_wlm_risk,
 )
 from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator
+from mixle.analysis.developmental_risk import BMDResult, benchmark_dose, rfd_exceedance
 from mixle.analysis.coverage import (
     ace,
     chao1,
@@ -110,6 +111,10 @@ __all__ = [
     "endpoint_estimator",
     "n_records",
     "record_times",
+    # teratogenic / reproductive / developmental risk: benchmark dose (K8)
+    "BMDResult",
+    "benchmark_dose",
+    "rfd_exceedance",
     # dose-response / health-risk models (K3)
     "DOSE_RESPONSE_MODELS",
     "DoseResponse",
