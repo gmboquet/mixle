@@ -28,6 +28,7 @@ from mixle.analysis.coverage import (
     turing_coverage,
 )
 from mixle.analysis.emissions import EmissionFactors, Footprint, emissions_footprint
+from mixle.analysis.epidemiology import CohortAttribution, cohort_attribution
 from mixle.analysis.extreme import (
     GPDFit,
     endpoint_estimator,
@@ -120,6 +121,9 @@ __all__ = [
     "ice",
     "hill_numbers",
     "rarefaction_curve",
+    # epidemiological cohort attribution: Cox PH hazard ratio + Aalen-Johansen competing-risks CIF
+    "CohortAttribution",
+    "cohort_attribution",
     # geostatistics: variograms and kriging
     "Variogram",
     "empirical_variogram",
