@@ -27,7 +27,7 @@ from mixle.analysis.coverage import (
     rarefaction_curve,
     turing_coverage,
 )
-from mixle.analysis.emissions import EmissionFactors, Footprint, emissions_footprint
+from mixle.analysis.emissions import EmissionFactors, Footprint, emissions_footprint, transition_risk
 from mixle.analysis.epidemiology import CohortAttribution, cohort_attribution
 from mixle.analysis.extreme import (
     GPDFit,
@@ -150,10 +150,11 @@ __all__ = [
     "capex_opex",
     "NPVDistribution",
     "monte_carlo_npv",
-    # emissions / carbon accounting (Scope 1/2/3 GHG footprint)
+    # emissions / carbon accounting (Scope 1/2/3 GHG footprint) + carbon transition risk
     "EmissionFactors",
     "Footprint",
     "emissions_footprint",
+    "transition_risk",
     # reclamation ecology / biodiversity offsets (priced habitat-offset liability + no-net-loss constraint)
     "habitat_offset_liability",
     "no_net_loss_constraint",
