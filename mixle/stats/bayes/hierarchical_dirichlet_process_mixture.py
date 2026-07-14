@@ -314,7 +314,7 @@ class HierarchicalDirichletProcessMixtureSampler(DistributionSampler):
         """
         if n is None:
             if self.len_sampler is None:
-                raise Exception("HDP sampler requires a len_dist (or explicit n) to sample groups.")
+                raise ValueError("HDP sampler requires a len_dist (or explicit n) to sample groups.")
             n = int(self.len_sampler.sample())
 
         pi = self.rng.dirichlet(np.maximum(self.dist.alpha * self.dist.beta, 1.0e-8))

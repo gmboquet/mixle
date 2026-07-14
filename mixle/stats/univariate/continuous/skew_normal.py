@@ -116,6 +116,16 @@ class SkewNormalDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(_sp.ppf(q, self.shape, loc=self.loc, scale=self.scale))
 
+    def mean(self) -> float:
+        """Mean E[X] = loc + scale * delta * sqrt(2/pi), delta = shape / sqrt(1 + shape^2)."""
+        delta = self.shape / math.sqrt(1.0 + self.shape * self.shape)
+        return float(self.loc + self.scale * delta * _B)
+
+    def variance(self) -> float:
+        """Variance Var[X] = scale^2 (1 - 2 delta^2 / pi), delta = shape / sqrt(1 + shape^2)."""
+        delta = self.shape / math.sqrt(1.0 + self.shape * self.shape)
+        return float(self.scale * self.scale * (1.0 - 2.0 * delta * delta / math.pi))
+
     def sampler(self, seed: int | None = None) -> "SkewNormalSampler":
         """Return a sampler for drawing observations from this distribution."""
         return SkewNormalSampler(self, seed)

@@ -18,6 +18,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.stats.compute.pdist import merge_accumulator_keys, validate_estimator_keys
+
 
 def tree_reduce_values(values: list[Any], factory: Any, branch: int = 2) -> Any:
     """Fold accumulator ``value()`` payloads with a ``branch``-ary tree of ``combine()`` -- O(log n) depth.
@@ -94,7 +96,12 @@ def heterogeneous_em_step(
     optional ``concurrent.futures``-style executor (e.g. ``ProcessPoolExecutor``) whose ``map`` runs the
     shard E-steps on real worker processes -- the sufficient-statistic payloads cross the process boundary
     by pickling, and ``combine`` operates on those freshly-unpickled copies (never a shared reference).
+
+    Keyed (tied) estimators are handled exactly like every serial driver: keys are validated up front
+    and the ``key_merge``/``key_replace`` pooling pass runs ONCE on the fully tree-reduced statistics
+    (the MPI/multiprocessing drivers' driver-side contract), never per shard.
     """
+    validate_estimator_keys(estimator)
     bounds = _shard_bounds(len(data), shard_sizes, n_shards)
     tasks = []
     for i, (lo, hi) in enumerate(bounds):
@@ -107,7 +114,9 @@ def heterogeneous_em_step(
     values = [v for _, v in results]
     total = sum(c for c, _ in results)
     combined = tree_reduce_values(values, estimator.accumulator_factory(), branch)
-    return estimator.estimate(float(total), combined)
+    accumulator = estimator.accumulator_factory().make().from_value(combined)
+    merge_accumulator_keys(accumulator)
+    return estimator.estimate(float(total), accumulator.value())
 
 
 def heterogeneous_fit(

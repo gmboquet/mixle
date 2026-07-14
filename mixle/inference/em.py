@@ -14,7 +14,11 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 
 from mixle.inference.estimation import _engine_seq_estimate, _engine_seq_log_density_sum, _local_encoded_chunks
-from mixle.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
+from mixle.stats.compute.pdist import (
+    ParameterEstimator,
+    SequenceEncodableProbabilityDistribution,
+    merge_accumulator_keys,
+)
 from mixle.stats.compute.sequence import seq_estimate, seq_log_density_sum
 from mixle.stats.parameter_packing import squarem_packer
 
@@ -70,6 +74,51 @@ class StandardEM:
         return EMStepResult(new_model)
 
 
+class CompiledEM:
+    """Local full-mixture EM using the profiled fused component kernels.
+
+    This is the reusable form of the full-tree execution path used by block EM. It keeps the
+    ordinary EM fixed point and update semantics, but can avoid generic accumulator traversal for
+    fusible subtrees of a :class:`~mixle.stats.MixtureDistribution`. Unsupported models or remote
+    execution engines fall back to :class:`StandardEM`.
+    """
+
+    def __init__(self, *, compute_dtype: Any = None) -> None:
+        self.compute_dtype = compute_dtype
+        self._cache: Any | None = None
+
+    def step(
+        self,
+        enc_data: Any,
+        estimator: ParameterEstimator,
+        model: SequenceEncodableProbabilityDistribution,
+        engine: Any | None = None,
+        objective: Callable[[Any], float] | None = None,
+    ) -> EMStepResult:
+        """Run one compiled full-mixture E/M sweep."""
+        from mixle.inference.freeze_rollup import (
+            FreezeRollupCache,
+            compiled_em_step,
+            is_compiled_em_eligible,
+        )
+
+        if engine is not None or not is_compiled_em_eligible(model, estimator):
+            result = StandardEM().step(enc_data, estimator, model, engine=engine, objective=objective)
+            result.metadata = {"compiled": False, "fallback": "unsupported_execution_shape"}
+            return result
+
+        if self._cache is None:
+            self._cache = FreezeRollupCache()
+        candidate, metadata = compiled_em_step(
+            enc_data,
+            estimator,
+            model,
+            compute_dtype=self.compute_dtype,
+            cache=self._cache,
+        )
+        return EMStepResult(candidate, metadata=metadata)
+
+
 class PosteriorTransformEM:
     """EM update that transforms mixture posteriors before the M-step.
 
@@ -102,6 +151,9 @@ class PosteriorTransformEM:
             gamma = self._transform(gamma)
             acc.combine(_mixture_stats_from_gamma(model, estimator, enc, gamma))
             nobs += sz
+        # The same key_merge/key_replace pass seq_estimate runs after accumulation: without it,
+        # keyed (tied) parameters are silently untied under HardEM/AnnealedEM/PosteriorTransformEM.
+        merge_accumulator_keys(acc)
         return EMStepResult(estimator.estimate(nobs, acc.value()))
 
     def _transform(self, gamma: np.ndarray) -> np.ndarray:

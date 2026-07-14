@@ -220,6 +220,12 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         else:
             self.w = np.asarray(w, dtype=float)
 
+        if len(components) != len(self.w):
+            # A mismatched pair constructs a model whose densities are silently wrong (and whose
+            # sampler dies later, far from the mistake), so fail at the constructor like the
+            # scalar families do.
+            raise ValueError("MixtureDistribution requires len(components) == len(w).")
+
         self.zw = self.w == 0.0
         self.log_w = np.log(w + self.zw)
         self.log_w[self.zw] = -np.inf
@@ -1417,7 +1423,13 @@ class MixtureEstimator(ParameterEstimator):
             robust: Enable the robust default path: k-means++ initialization
                 where applicable plus a small data-independent weight floor.
             init: Initialization strategy for the accumulator. ``None`` selects
-                ``"kmeans++"`` in robust mode and ``"dirichlet"`` otherwise.
+                ``"kmeans++"`` in robust mode and ``"dirichlet"`` otherwise. The ``"dirichlet"``
+                default draws per-observation responsibilities from a deliberately degenerate
+                Dirichlet (``alpha = 1/K**2``) -- sparse random assignments, the standard
+                responsibility init. Because random subsets of a large dataset share its pooled
+                moments, every component still starts near the global law as ``n`` grows; for
+                well-separated location families prefer ``init="kmeans++"`` (or ``robust=True`` /
+                :func:`~mixle.inference.best_of` restarts) when a single default fit must separate.
         """
         self.num_components = len(estimators)
         self.estimators = estimators
@@ -1600,12 +1612,23 @@ class _HeteroMixtureEncoded:
         self.encodings = encodings
 
 
+class _SharedMixtureEncoded:
+    """One shared nested-mixture encoding, retaining the current mixture depth."""
+
+    __slots__ = ("encoding",)
+
+    def __init__(self, encoding: Any) -> None:
+        self.encoding = encoding
+
+
 def _component_enc(enc_data: Any, i: int) -> Any:
     """Select the encoding destined for component ``i``.
 
     For a homogeneous mixture (single shared encoding) this returns ``enc_data`` unchanged; for a
     heterogeneous mixture it returns that component's own encoding from the wrapper.
     """
+    if isinstance(enc_data, _SharedMixtureEncoded):
+        return enc_data.encoding
     if isinstance(enc_data, _HeteroMixtureEncoded):
         return enc_data.encodings[i]
     return enc_data
@@ -1692,7 +1715,10 @@ class MixtureDataEncoder(DataSequenceEncoder):
             )
         if self.homogeneous:
             try:
-                return self.encoder.seq_encode(x)
+                encoded = self.encoder.seq_encode(x)
+                if isinstance(encoded, (_HeteroMixtureEncoded, _SharedMixtureEncoded)):
+                    return _SharedMixtureEncoded(encoded)
+                return encoded
             except ContractError as e:
                 raise prefix_contract_error("MixtureDistribution.components", e) from None
             except (TypeError, ValueError, IndexError, KeyError) as e:

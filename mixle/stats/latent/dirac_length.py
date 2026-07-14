@@ -89,7 +89,7 @@ class DiracLengthMixtureDistribution(SequenceEncodableProbabilityDistribution):
         self, len_dist: SequenceEncodableProbabilityDistribution, p: float, v: int = 0, name: str | None = None
     ):
         if not 0 < p <= 1:
-            raise Exception("p must be between (0,1].")
+            raise ValueError("p must be between (0,1].")
         with np.errstate(divide="ignore"):
             self.p = p
             self.v = v

@@ -377,7 +377,7 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if supports(self.len_dist, Neutral):
-            raise Exception(
+            raise ValueError(
                 "len_dist must not be a SequenceEncodableProbabilityDistribution with support of non-negative integers."
             )
         return MultinomialSampler(self, seed)

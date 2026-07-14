@@ -166,6 +166,18 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
         """Inverse CDF F^{-1}(q)."""
         return float(self.loc - self.scale * math.log(-math.log(float(q))))
 
+    def mean(self) -> float:
+        """Mean E[X] = loc + scale * euler_gamma."""
+        import numpy as np
+
+        return float(self.loc + self.scale * np.euler_gamma)
+
+    def variance(self) -> float:
+        """Variance Var[X] = pi^2 scale^2 / 6."""
+        import math
+
+        return float(math.pi * math.pi * self.scale * self.scale / 6.0)
+
     def entropy(self) -> float:
         """Differential entropy log(scale) + euler_gamma + 1."""
         import math

@@ -152,6 +152,20 @@ class StudentTDistribution(SequenceEncodableProbabilityDistribution):
         """Variance scale^2 * df/(df-2) for df > 2, else inf."""
         return float(self.scale * self.scale * self.df / (self.df - 2.0)) if self.df > 2.0 else float("inf")
 
+    def entropy(self) -> float:
+        """Differential entropy log(scale) + (df+1)/2 [psi((df+1)/2) - psi(df/2)] + log(sqrt(df) B(df/2, 1/2))."""
+        from scipy.special import digamma
+
+        nu = self.df
+        return float(
+            math.log(self.scale)
+            + 0.5 * (nu + 1.0) * (digamma(0.5 * (nu + 1.0)) - digamma(0.5 * nu))
+            + 0.5 * math.log(nu)
+            + gammaln(0.5 * nu)
+            + gammaln(0.5)
+            - gammaln(0.5 * (nu + 1.0))
+        )
+
     def sampler(self, seed: int | None = None) -> "StudentTSampler":
         """Return a sampler for drawing observations from this distribution."""
         return StudentTSampler(self, seed)

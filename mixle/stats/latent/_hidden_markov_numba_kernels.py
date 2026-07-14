@@ -12,11 +12,17 @@ import numpy as np
 
 from mixle.utils.optional_deps import numba
 
+# fastmath SUBSET shared by every kernel here: reassociation/contraction/approximations keep the
+# SIMD wins, but ninf/nnan stay OFF -- ``numba_seq_log_density`` adds ``-np.inf`` to the
+# log-likelihood on impossible observations, which full ``fastmath=True`` (LLVM ninf) declares
+# undefined behavior and may fold away (the same policy as fused_codegen._njit).
+_FASTMATH_SUBSET = {"reassoc", "contract", "arcp", "afn", "nsz"}
+
 
 @numba.njit(
     "void(int32, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:], float64[:])",
     parallel=True,
-    fastmath=True,
+    fastmath=_FASTMATH_SUBSET,
     cache=True,
 )
 def numba_seq_log_density(num_states, tz, prob_mat, init_pvec, tran_mat, max_ll, next_alpha_mat, alpha_buff_mat, out):
@@ -160,7 +166,7 @@ def numba_baum_welch(
     "void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], "
     "float64[:,:])",
     parallel=True,
-    fastmath=True,
+    fastmath=_FASTMATH_SUBSET,
     cache=True,
 )
 def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc):
@@ -255,7 +261,7 @@ def numba_baum_welch2(num_states, tz, prob_mat, init_pvec, tran_mat, weights, al
     "void(int64, int32[:], float64[:,:], float64[:], float64[:,:], float64[:], float64[:,:], float64[:,:,:], "
     "float64[:,:])",
     parallel=True,
-    fastmath=True,
+    fastmath=_FASTMATH_SUBSET,
     cache=True,
 )
 def numba_baum_welch_alphas(num_states, tz, prob_mat, init_pvec, tran_mat, weights, alpha_loc, xi_acc, pi_acc):

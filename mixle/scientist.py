@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -151,7 +151,7 @@ def study(
     """Fit a CERTIFIED classifier over encoder latents: closed-form Gaussian class-conditionals + a
     split-conformal abstention rail. No gradient descent anywhere -- the certificate proves it."""
     import mixle.stats as st
-    from mixle.inference import certify, optimize
+    from mixle.inference import EstimationCertificate, certify, optimize
 
     z = np.asarray(latents, dtype=np.float64)
     y = np.asarray(list(labels))
@@ -166,15 +166,33 @@ def study(
     priors = []
     for c in classes:
         zc = z[fit_idx][y[fit_idx] == c]
+        if len(zc) == 0:
+            raise ValueError(
+                f"class {c!r} has no examples in the fit split (n_fit={len(fit_idx)}, n_cal={n_cal}): "
+                "provide more data for this class, or lower cal_frac so the fit split is bigger"
+            )
         heads.append(optimize(list(zc), st.DiagonalGaussianEstimator(dim=z.shape[1]), out=None, max_its=1))
         priors.append(len(zc))
     priors = np.asarray(priors, dtype=float)
     priors = priors / priors.sum()
 
+    # certify EVERY class head, not just the first: the aggregate guarantee is the weakest head's, and
+    # the per-head blocks (qualified by class) keep the receipt auditable for K > 1 problems
+    head_certificates = [certify(h) for h in heads]
+    certificate = EstimationCertificate(
+        guarantee=min(cert.guarantee for cert in head_certificates),
+        blocks=[
+            replace(b, name=f"head[{c!r}].{b.name}" if b.name else f"head[{c!r}]")
+            for c, cert in zip(classes, head_certificates)
+            for b in cert.blocks
+        ],
+        escape_tested=all(cert.escape_tested for cert in head_certificates),
+    )
+
     model = StudiedModel(
         head=heads,
         classes=classes,
-        certificate=certify(heads[0]),
+        certificate=certificate,
         qhat=0.0,
         alpha=alpha,
         class_priors=priors,
@@ -185,7 +203,10 @@ def study(
     idx = {c: j for j, c in enumerate(classes)}
     scores = 1.0 - p_cal[np.arange(len(cal_idx)), [idx[c] for c in y[cal_idx]]]
     k = int(np.ceil((len(scores) + 1) * (1 - alpha))) - 1
-    model.qhat = float(np.sort(scores)[min(k, len(scores) - 1)])
+    # finite-sample split conformal: when ceil((n_cal+1)(1-alpha)) exceeds n_cal, NO calibration score
+    # certifies the level -- the threshold is +inf (every prediction set is all labels / abstain), not
+    # the max score. n_cal is surfaced in provenance so the regime is visible.
+    model.qhat = float(np.sort(scores)[k]) if k < len(scores) else float("inf")
     model.train_seconds = time.time() - t0
     model.provenance = {"n_fit": len(fit_idx), "n_cal": len(cal_idx), "alpha": alpha, "seed": seed}
     return model

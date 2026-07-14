@@ -1276,3 +1276,17 @@ def validate_accumulator_keys(accumulator: StatisticAccumulator) -> None:
     """Validate keyed sites in an already-created accumulator tree."""
     accumulator_registry: dict[Any, tuple[Any, str]] = {}
     _collect_accumulator_keys(accumulator, accumulator_registry, type(accumulator).__name__, set())
+
+
+def merge_accumulator_keys(accumulator: StatisticAccumulator) -> None:
+    """Pool keyed statistics across ``accumulator``'s tree -- the parameter-tying pass.
+
+    Runs the ``key_merge``/``key_replace`` pair every EM driver applies exactly once after
+    accumulation (see :func:`mixle.stats.compute.sequence.seq_estimate`), so sites sharing a key
+    estimate from the pooled statistics.  A no-op when no site in the tree carries a key.  Call it
+    on the fully-combined accumulator, never per shard: pooling twice would double-count the
+    shared statistics on the second ``combine``.
+    """
+    stats_dict: dict[Any, Any] = {}
+    accumulator.key_merge(stats_dict)
+    accumulator.key_replace(stats_dict)

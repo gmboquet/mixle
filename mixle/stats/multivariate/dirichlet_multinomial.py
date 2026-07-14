@@ -11,6 +11,8 @@ which adds overdispersion (and category correlation) over a plain multinomial. T
 a cumulative-count sufficient statistic so it converges inside a single ``estimate`` call.
 """
 
+import heapq
+import itertools
 import math
 from collections.abc import Sequence
 from typing import Any
@@ -21,6 +23,7 @@ from scipy.special import gammaln
 
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -86,6 +89,62 @@ class DirichletMultinomialDistribution(SequenceEncodableProbabilityDistribution)
     def dist_to_encoder(self) -> "DirichletMultinomialDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return DirichletMultinomialDataEncoder()
+
+    def enumerator(self) -> "DirichletMultinomialEnumerator":
+        """Return an enumerator over count vectors summing to ``n`` in descending probability order."""
+        return DirichletMultinomialEnumerator(self)
+
+
+class DirichletMultinomialEnumerator(DistributionEnumerator):
+    """Enumerate Dirichlet-multinomial count vectors in descending probability order, lazily (A* best-first).
+
+    The log-mass separates per category: ``log P(x) = log_const + sum_k f_k(x_k)`` with
+    ``f_k(c) = gammaln(c + alpha_k) - gammaln(alpha_k) - gammaln(c + 1)``, and each ``f_k`` is monotone
+    in ``c`` (increasing for ``alpha_k > 1``, decreasing for ``alpha_k < 1``), so a prefix assignment
+    ``(x_1..x_j)`` with ``m`` trials left admits the admissible completion bound
+    ``sum_{k>j} max(f_k(0), f_k(m))``. A* on the exact prefix score plus that bound streams count
+    vectors in exact descending order without materializing the ``C(n+K-1, K-1)`` support.
+    """
+
+    def __init__(self, dist: DirichletMultinomialDistribution) -> None:
+        super().__init__(dist)
+        self._counter = itertools.count()
+        counts = np.arange(dist.n + 1, dtype=np.float64)
+        # f[k, c] = the per-category log-mass term of count c in category k (f[k, 0] == 0).
+        self._f = (
+            gammaln(counts[None, :] + dist.alpha[:, None])
+            - gammaln(dist.alpha)[:, None]
+            - gammaln(counts + 1.0)[None, :]
+        )
+        # suffix_best[j, m] = sum_{k >= j} max over c in [0, m] of f_k(c) = sum_{k >= j} max(0, f_k(m)),
+        # by the per-category monotonicity -- the admissible bound on any completion of m trials.
+        best = np.maximum(self._f, 0.0)
+        self._suffix_best = np.zeros((dist.dim + 1, dist.n + 1))
+        for j in range(dist.dim - 1, -1, -1):
+            self._suffix_best[j] = self._suffix_best[j + 1] + best[j]
+        # heap entries: (-(g + h), tiebreak, prefix_tuple, g); a full-length prefix carries its exact score.
+        root = -(float(dist._log_const) + float(self._suffix_best[0][dist.n]))
+        self._heap: list[tuple[float, int, tuple[int, ...], float]] = []
+        heapq.heappush(self._heap, (root, next(self._counter), (), float(dist._log_const)))
+
+    def __next__(self) -> tuple[np.ndarray, float]:
+        d = self.dist
+        while self._heap:
+            _, _, prefix, g = heapq.heappop(self._heap)
+            if len(prefix) == d.dim:
+                return (np.asarray(prefix, dtype=np.int64), g)
+            m = d.n - sum(prefix)
+            if len(prefix) == d.dim - 1:
+                # the last category is forced to the remaining total: push the completed vector exactly
+                g2 = g + float(self._f[d.dim - 1, m])
+                heapq.heappush(self._heap, (-g2, next(self._counter), prefix + (m,), g2))
+                continue
+            j = len(prefix)
+            for c in range(m + 1):
+                g2 = g + float(self._f[j, c])
+                bound = g2 + float(self._suffix_best[j + 1][m - c])
+                heapq.heappush(self._heap, (-bound, next(self._counter), prefix + (c,), g2))
+        raise StopIteration
 
 
 class DirichletMultinomialSampler(DistributionSampler):

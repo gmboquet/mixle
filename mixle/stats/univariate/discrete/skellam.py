@@ -27,6 +27,7 @@ from numpy.random import RandomState
 
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -186,6 +187,52 @@ class SkellamDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> "SkellamDataEncoder":
         """Return the encoder for Skellam observations."""
         return SkellamDataEncoder()
+
+    def enumerator(self) -> "SkellamEnumerator":
+        """Return an enumerator over all integers in descending probability order."""
+        return SkellamEnumerator(self)
+
+
+class SkellamEnumerator(DistributionEnumerator):
+    """Enumerate the two-sided Skellam support in descending probability order.
+
+    The Skellam pmf is log-concave (the difference of two independent Poisson counts, each
+    log-concave on the integers), hence unimodal: enumeration hill-climbs from ``round(mu1 - mu2)``
+    to the mode and walks outward with the standard two-pointer merge over the two tails, emitting
+    the larger side each step. Values whose mass underflows to zero are skipped per the enumerator
+    contract, so the iterator ends when both tails are exhausted at float precision.
+    """
+
+    def __init__(self, dist: SkellamDistribution) -> None:
+        super().__init__(dist)
+        mode = int(round(dist.mu1 - dist.mu2))
+        while dist.log_density(mode + 1) > dist.log_density(mode):
+            mode += 1
+        while dist.log_density(mode - 1) > dist.log_density(mode):
+            mode -= 1
+        self._left = mode - 1
+        self._right = mode + 1
+        self._lp_left = dist.log_density(self._left)
+        self._lp_right = dist.log_density(self._right)
+        self._head: tuple[int, float] | None = (mode, dist.log_density(mode))
+
+    def __next__(self) -> tuple[int, float]:
+        if self._head is not None:
+            rv = self._head
+            self._head = None
+            return rv
+        while self._lp_left > -np.inf or self._lp_right > -np.inf:
+            if self._lp_left >= self._lp_right:
+                rv = (self._left, self._lp_left)
+                self._left -= 1
+                self._lp_left = self.dist.log_density(self._left)
+            else:
+                rv = (self._right, self._lp_right)
+                self._right += 1
+                self._lp_right = self.dist.log_density(self._right)
+            if rv[1] > -np.inf:
+                return rv
+        raise StopIteration
 
 
 class SkellamSampler(DistributionSampler):

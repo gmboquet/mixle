@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import check_finite, decode_module, encode_module
+from mixle.models.grad_leaf import _module_mode
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -85,7 +86,7 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
         torch = _torch()
         self.module.to(self.device)
         out = []
-        with torch.no_grad():
+        with _module_mode(self.module, train=False), torch.no_grad():
             xt = torch.as_tensor(np.atleast_2d(x), dtype=torch.float32)
             for k in range(0, xt.shape[0], 4096):  # chunked so a large image set fits in GPU memory
                 out.append(self.module(xt[k : k + 4096].to(self.device)).detach().cpu().numpy())
@@ -344,29 +345,30 @@ class NeuralCategoricalEstimator(ParameterEstimator):
         if self.ewc is not None:  # anchor + Fisher moved to the device once (continued-pretraining anti-forget)
             anchor, fisher, lam = self.ewc
             ewc = ([a.to(dev) for a in anchor], [f.to(dev) for f in fisher], float(lam))
-        for _ in range(self.m_steps):  # m_steps passes over the data (full-batch when batch_size is None)
-            perm = torch.randperm(n) if bs < n else torch.arange(n)
-            for k in range(0, n, bs):
-                if self.max_optimizer_steps is not None and optimizer_steps >= self.max_optimizer_steps:
-                    break
-                idx = perm[k : k + bs]
-                xb, yb, wb = xt[idx].to(dev), yt[idx].to(dev), wt[idx].to(dev)
-                opt.zero_grad()
-                # Uniform minibatches estimate the full responsibility-normalized objective.
-                batch_scale = float(n) / float(len(idx))
-                loss = batch_scale * (wb * ce(self.module(xb), yb)).sum() / total_weight.to(dev)
-                if ewc is not None:  # + lambda * sum_i F_i (theta_i - theta*_i)^2 -- pull the important weights back
-                    anchor, fisher, lam = ewc
-                    loss = loss + lam * sum(
-                        (f * (p - a) ** 2).sum() for p, a, f in zip(self.module.parameters(), anchor, fisher)
-                    )
-                loss.backward()
-                opt.step()
-                optimizer_steps += 1
-            else:
-                epochs_completed += 1
-                continue
-            break
+        with _module_mode(self.module, train=True):
+            for _ in range(self.m_steps):  # m_steps passes over the data (full-batch when batch_size is None)
+                perm = torch.randperm(n) if bs < n else torch.arange(n)
+                for k in range(0, n, bs):
+                    if self.max_optimizer_steps is not None and optimizer_steps >= self.max_optimizer_steps:
+                        break
+                    idx = perm[k : k + bs]
+                    xb, yb, wb = xt[idx].to(dev), yt[idx].to(dev), wt[idx].to(dev)
+                    opt.zero_grad()
+                    # Uniform minibatches estimate the full responsibility-normalized objective.
+                    batch_scale = float(n) / float(len(idx))
+                    loss = batch_scale * (wb * ce(self.module(xb), yb)).sum() / total_weight.to(dev)
+                    if ewc is not None:  # + lambda * sum_i F_i (theta_i - theta*_i)^2 -- pull important weights back
+                        anchor, fisher, lam = ewc
+                        loss = loss + lam * sum(
+                            (f * (p - a) ** 2).sum() for p, a, f in zip(self.module.parameters(), anchor, fisher)
+                        )
+                    loss.backward()
+                    opt.step()
+                    optimizer_steps += 1
+                else:
+                    epochs_completed += 1
+                    continue
+                break
         out.fit_receipt = {
             "nobs": int(n),
             "batch_size": int(min(bs, n)),

@@ -29,6 +29,7 @@ from mixle.stats import (
     MixtureEstimator,
     seq_encode,
 )
+from mixle.stats.bayes.dirichlet import DirichletDistribution
 from mixle.stats.latent.mixture import _component_enc
 
 
@@ -145,6 +146,19 @@ class FreezeRollupMonotonicityTestCase(unittest.TestCase):
         # At least one component should actually have frozen during this run -- otherwise the
         # monotonicity check would be vacuous (identical to plain PosteriorTransformEM).
         self.assertTrue(any(h.n_frozen > 0 for h in history))
+
+    def test_dirichlet_prior_uses_the_map_objective(self):
+        start, _, enc = _make_problem(seed=13, nobs=300)
+        estimator = MixtureEstimator(
+            [GaussianEstimator() for _ in range(start.num_components)],
+            prior=DirichletDistribution(np.full(start.num_components, 2.0)),
+        )
+        model, history = run_em_freeze_rollup(enc, estimator, start, max_its=8, delta=None)
+        objectives = np.asarray([item.objective for item in history])
+        self.assertTrue(np.all(np.diff(objectives) >= -1.0e-9), objectives)
+        expected = observed_log_likelihood(enc)(model) + estimator.model_log_density(model)
+        self.assertAlmostEqual(history[-1].objective, expected, places=8)
+        self.assertIsInstance(model.get_prior()[0], DirichletDistribution)
 
 
 class FreezeRollupCacheInvalidationTestCase(unittest.TestCase):

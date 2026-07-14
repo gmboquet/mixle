@@ -52,10 +52,11 @@ def quantize(
     from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
 
     n = 1 << int(bits)
-    # bracket the bulk of the mass
-    if callable(getattr(dist, "density_quantile", None)):
-        lo = float(dist.density_quantile(lo_q, seed=seed))
-        hi = float(dist.density_quantile(hi_q, seed=seed))
+    # bracket the bulk of the mass with the spatial quantile (inverse CDF) when the family has one,
+    # else an empirical quantile of a sample. NOT ``density_quantile``: that index is descending-DENSITY
+    # order (q=0 is the mode, q -> 1 walks into a tail on either side), so it cannot bracket a support.
+    if callable(getattr(dist, "quantile", None)):
+        lo, hi = float(dist.quantile(lo_q)), float(dist.quantile(hi_q))
     else:
         s = np.asarray(dist.sampler(seed).sample(n_samples), dtype=float).ravel()
         lo, hi = float(np.quantile(s, lo_q)), float(np.quantile(s, hi_q))

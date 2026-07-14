@@ -24,9 +24,24 @@ from mixle.stats.compute.sequence import (
     seq_initialize,
     seq_log_density_sum,
 )
+from mixle.utils.aliasing import coalesce_alias
 
 T = TypeVar("T")
 E0 = TypeVar("E0")
+
+
+def _resolve_rng_arg(rng: RandomState | int | None, seed: int | None) -> RandomState | None:
+    """Reconcile the legacy ``rng=`` argument with its ``seed=`` alias.
+
+    ``seed`` is the spelling every other entry point takes (``create``/``forecast``/``advi``/...),
+    so the fit verbs accept it too. Passing both raises ``TypeError`` (the standard alias
+    double-supply policy); an integer ``rng`` is coerced to a ``RandomState`` the way ``advi`` /
+    ``nuts`` coerce theirs. ``None`` is returned unchanged so each caller keeps its own default.
+    """
+    value = coalesce_alias("rng", rng, "seed", seed, required=False, default=None)
+    if isinstance(value, (int, np.integer)):
+        return RandomState(int(value))
+    return value
 
 
 # --- estimator coercion -----------------------------------------------------
@@ -68,28 +83,44 @@ def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
     return estimator
 
 
-def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState | None) -> Any:
+def _maybe_structured_model(
+    data: Any,
+    max_its: int,
+    out: Any,
+    rng: RandomState | None,
+    *,
+    delta: float | None = 1.0e-9,
+    init_p: float = 0.1,
+    objective: str = "auto",
+    reuse_estep_ll: bool = True,
+) -> tuple[Any, Any]:
     """The automatic-structure front door for ``optimize(data)`` / ``fit(data)`` with no estimator.
 
     For flat tuple records the independent :class:`CompositeDistribution` the automatic detector
     produces is a Naive-Bayes assumption — the one heterogeneous data most often violates. This
     discovers the cross-field dependency graph (:func:`mixle.inference.learn_bayesian_network`) and
     returns it only when it beats the independent composite by BIC on the same data; anything else —
-    no edges found, non-record data, too few rows, or any failure at all — returns ``None`` and the
-    historical composite path proceeds untouched, so the default is never worse.
+    no edges found, non-record data, too few rows, or an expected data/numeric failure — yields
+    ``None`` and the historical composite path proceeds untouched, so the default is never worse.
+
+    Returns ``(structured, composite)``: ``structured`` is the winning dependence model or ``None``;
+    ``composite`` is the fully fitted independent composite whenever the BIC gate paid for that fit
+    (dependence candidates were scored), so the caller can reuse it instead of refitting the identical
+    model. The keyword-only EM knobs (``delta``/``init_p``/``objective``/``reuse_estep_ll``) are
+    threaded into that composite fit so it is exactly the fit the caller would otherwise run.
     """
     try:
         rows = list(data)
         if len(rows) < 40:
-            return None
+            return None, None
         first = rows[0]
         if not isinstance(first, tuple) or len(first) < 2:
-            return None
+            return None, None
         n_fields = len(first)
         if any(not isinstance(r, tuple) or len(r) != n_fields for r in rows):
-            return None
+            return None, None
         if any(not isinstance(v, (str, bool, int, float, np.integer, np.floating)) for v in first):
-            return None  # nested/sequence fields: structure search handles flat records only
+            return None, None  # nested/sequence fields: structure search handles flat records only
 
         from mixle.inference.bayesian_network import bayesian_network_bic, learn_bayesian_network
         from mixle.inference.structure import _num_free_params
@@ -100,9 +131,19 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState 
         all_continuous = all(isinstance(v, (float, np.floating)) for v in first)
         net = learn_bayesian_network(rows)
         if not net.edges() and not all_continuous:
-            return None  # independence is what the composite already models; keep the automatic families
+            return None, None  # independence is what the composite already models; keep the automatic families
 
-        composite = optimize(rows, get_estimator(rows), max_its=max_its, rng=rng, out=None)
+        composite = optimize(
+            rows,
+            get_estimator(rows),
+            max_its=max_its,
+            delta=delta,
+            init_p=init_p,
+            rng=rng,
+            out=None,
+            reuse_estep_ll=reuse_estep_ll,
+            objective=objective,
+        )
         enc = composite.dist_to_encoder().seq_encode(rows)
         comp_ll = float(np.sum(composite.seq_log_density(enc)))
         n_log = float(np.log(max(len(rows), 2)))
@@ -119,7 +160,7 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState 
 
             candidates.extend(copula_candidates(rows, composite, comp_params, comp_bic, n_log, max_its, rng))
         if not candidates:
-            return None
+            return None, composite
         # a later, more complex candidate (e.g. a vine) only displaces an earlier, simpler one (e.g. the
         # plain Gaussian copula core it can degenerate to exactly on low-dimensional data) when it wins by
         # more than floating-point noise -- otherwise a sub-ulp BIC difference from platform/BLAS variance
@@ -129,14 +170,17 @@ def _maybe_structured_model(data: Any, max_its: int, out: Any, rng: RandomState 
             if bic < best_bic - 1e-6 * max(1.0, abs(best_bic)):
                 best_bic, best_model, desc = bic, model, name
         if best_bic >= comp_bic:
-            return None
+            return None, composite
         if out is not None:
             out.write(
                 "structure: %s dependence beats independent fields (BIC %.1f < %.1f)\n" % (desc, best_bic, comp_bic)
             )
-        return best_model
-    except Exception:  # noqa: BLE001 - the structure default must never break the historical path
-        return None
+        return best_model, composite
+    except (ValueError, TypeError, KeyError, IndexError, FloatingPointError, OverflowError, ZeroDivisionError):
+        # The data-shape and numeric failures the structure search actually raises (np.linalg.LinAlgError
+        # is a ValueError): fall back to the historical composite path. Anything else -- an AttributeError,
+        # ImportError, ... -- is a structure-path regression and must surface, not be silently swallowed.
+        return None, None
 
 
 # --- data-encoding helpers --------------------------------------------------
@@ -210,6 +254,14 @@ def _engine_fused_step(
             have_ll = False
         else:
             ll += float(chunk_ll)
+    # The key_merge/key_replace pass every other EM driver runs after accumulation (seq_estimate,
+    # _local_fused_step; #432 added it to the posterior-transform strategies). Without it, KEYED
+    # (tied) parameters silently untie on the engine-kernel path -- and the auto-fusion gate routes
+    # large fused-eligible fits here, so a tied-variance mixture at scale estimated per-component
+    # stats instead of pooled ones (proven: sigma2 1.36 vs 3.18 where the host ties both at 1.36).
+    stats_dict: dict = {}
+    accumulator.key_merge(stats_dict)
+    accumulator.key_replace(stats_dict)
     return estimator.estimate(nobs, accumulator.value()), (ll if have_ll else None)
 
 
@@ -310,6 +362,14 @@ def _local_fused_step(enc_data, estimator, model):
     nxt = estimator.estimate(None, accumulator.value())
     # Present only when the top-level accumulator recorded it (e.g. mixtures); else None -> fallback.
     return nxt, getattr(accumulator, "_seq_ll", None)
+
+
+def _compiled_fused_step(enc_data, estimator, model, strategy):
+    """Compiled full-mixture step plus its already-computed input-model objective."""
+
+    result = strategy.step(enc_data, estimator, model)
+    metadata = result.metadata or {}
+    return result.model, metadata.get("input_data_objective")
 
 
 class EMStep(NamedTuple):
@@ -752,6 +812,7 @@ def optimize(
     schedule: str = "full",
     monotone: bool | None = None,
     track_best: bool | None = None,
+    seed: int | None = None,
 ) -> SequenceEncodableProbabilityDistribution:
     """Fit ``estimator`` to ``data`` by a generalized-EM loop, for ``max_its`` iterations or until the
         objective improves by less than ``delta``.
@@ -777,8 +838,13 @@ def optimize(
             If None, estimator is used. Must be consistent with estimator.
         init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
         rng (RandomState): RandomState used to set seed for initializing EM algorithm. ``None`` resolves to
-            a FIXED seed, so an un-seeded ``optimize``/``fit`` is deterministic by default; pass your own
-            RandomState when you WANT different initializations across calls (e.g. hand-rolled restarts).
+            a FIXED seed, so the NumPy-driven parts of an un-seeded ``optimize``/``fit`` (initialization,
+            EM, subsampling) are deterministic by default; pass your own RandomState when you WANT
+            different initializations across calls (e.g. hand-rolled restarts). Torch-backed leaves are
+            the deliberate exception: modules that consume torch's global RNG (dropout, VAE
+            reparameterization draws, minibatch shuffling) follow torch's own default non-determinism --
+            call ``torch.manual_seed`` yourself when a torch-backed fit must be exactly reproducible.
+            An integer is accepted and coerced to ``RandomState(rng)``. Mutually exclusive with ``seed``.
         vdata (Optional[Sequence[T]]): Optional validation set.
         prev_estimate (Optional[SeqeuenceEncodableProbabilityDistribution]): Optional model estimate used from prior
             fitting. Must be consistent with estimator.
@@ -819,7 +885,7 @@ def optimize(
         root (int): MPI root rank for ``backend='mpi'``.
         root_only (bool): MPI root-only data mode for ``backend='mpi'``.
         strategy (Optional[Any]): Optional EM strategy from ``mixle.inference.em`` (e.g. ``AnnealedEM``,
-            ``HardEM``, ``MonteCarloEM``) or any callable ``(enc, estimator, model) -> model`` to use
+            ``HardEM``, ``MonteCarloEM``, ``CompiledEM``) or any callable ``(enc, estimator, model) -> model`` to use
             in place of the standard exact E/M step. ``None`` uses the standard step.
         reuse_estep_ll (bool): Default True. Reuse the data log-likelihood computed during the E-step
             (the posterior normalizer / forward pass / variational ELBO) for convergence instead of
@@ -868,25 +934,31 @@ def optimize(
             the historical automatic-composite path proceeds untouched. ``'off'`` restores the
             unconditional historical behavior. Only consulted when ``estimator`` is ``None`` and no
             ``prev_estimate``/``init_estimator``/``strategy``/``enc_data`` is supplied.
-        schedule (str): ``'full'`` (default) -- unchanged vanilla full-tree EM, every round scores
-            and re-estimates every component. ``'auto'`` engages the block-coordinate-ascent
-            scheduler (:mod:`mixle.inference.block_em`): after one full bootstrap sweep, components
-            are ranked by their last observed complete-data Q gain per structural-cost unit, and
-            only the highest-value ones within a per-round cost budget are re-estimated. Inactive
-            component scores are cached while their parameters remain unchanged. This is a
+        schedule (str): ``'full'`` (default) performs exact full-tree EM every round and automatically
+            uses whole-model or component-level compiled kernels when the local model is eligible.
+            ``'auto'`` additionally engages the block-coordinate-ascent scheduler
+            (:mod:`mixle.inference.block_em`) when selective work is expected to win: after one full
+            bootstrap sweep, components are ranked by their last observed complete-data Q gain per
+            measured whole-block cost, and only the highest-value ones within a per-round budget are
+            re-estimated. Inactive component scores are cached while their parameters remain unchanged.
+            This is a
             scheduling choice: observed likelihood is transactionally gated non-decreasing every round, and
             when there is no useful ranking to do (e.g. every component looks equally worth
             updating) the scheduler degenerates to doing exactly what ``'full'`` does. Only
-            engaged when the model is a plain local-backend ``MixtureDistribution``/
-            ``MixtureEstimator`` MLE fit with no explicit ``strategy``/``engine``/``resources``/
+            engaged when the model is a local-backend ``MixtureDistribution``/
+            ``MixtureEstimator`` MLE/MAP fit with no explicit ``strategy``/``engine``/``resources``/
             ``placement`` -- anything else silently falls back to ``'full'`` (never an error, never
             a behavior change beyond scheduling).
+        seed (Optional[int]): Integer seed for initializing the EM algorithm -- shorthand for
+            ``rng=RandomState(seed)``, matching the ``seed=`` argument the samplers and the other
+            entry points take. Mutually exclusive with ``rng`` (passing both raises ``TypeError``).
 
     Returns:
         SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm
             is met.
 
     """
+    rng = _resolve_rng_arg(rng, seed)
     if (
         estimator is None
         and structure == "auto"
@@ -896,13 +968,44 @@ def optimize(
         and init_estimator is None
         and strategy is None
     ):
-        structured = _maybe_structured_model(data, max_its, out, rng)
+        structured, independent_composite = _maybe_structured_model(
+            data,
+            max_its,
+            out,
+            rng,
+            delta=delta,
+            init_p=init_p,
+            objective=objective,
+            reuse_estep_ll=reuse_estep_ll,
+        )
         if structured is not None:
             return structured
+        # When the dependence candidates were scored and lost, the BIC gate already paid for a full
+        # fit of the independent composite that this path would now refit identically -- reuse it,
+        # but only when every knob it could not see is at the default that front-door fit used.
+        if independent_composite is not None and (
+            vdata is None
+            and enc_vdata is None
+            and out is None
+            and num_chunks == 1
+            and engine is None
+            and precision is None
+            and fields is None
+            and resources is None
+            and placement is None
+            and sub_chunks == 1
+            and chunk_size is None
+            and backend == "local"
+            and on_step is None
+            and schedule == "full"
+            and monotone is None
+            and track_best is None
+        ):
+            return independent_composite
     estimator = _coerce_estimator(estimator, data)
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
-    rng = RandomState(0) if rng is None else rng  # fixed default: an un-seeded fit is deterministic
+    rng = RandomState(0) if rng is None else rng  # fixed default: the numpy side of an un-seeded fit is deterministic
     minimal_precision_pending = False
     if precision == "minimal":
         # Data-aware allocation: inspect the data + model and run the reduced-precision fused kernel only
@@ -938,7 +1041,11 @@ def optimize(
 
     backend_name = str(backend or "local").lower()
     if data is None and enc_data is None and not (backend_name == "mpi" and root_only):
-        raise Exception("Optimization called with empty data or enc_data.")
+        raise ValueError("Optimization called with empty data or enc_data.")
+    # Empty (but non-None) data previously slipped through and silently returned the initialized
+    # prior/default model -- a wrong answer, not a fit. Match ppl's "fit() received empty data."
+    if data is not None and enc_data is None and hasattr(data, "__len__") and len(data) == 0:
+        raise ValueError("optimize() received empty data.")
 
     est = estimator if init_estimator is None else init_estimator
 
@@ -1020,9 +1127,25 @@ def optimize(
         strict_monotone = _resolve_monotone(monotone, estimator, mm)
         select_best = _resolve_track_best(track_best, estimator)
         loop_delta = None if surrogate_update else delta
+        from mixle.inference.transaction import has_mutable_state
+
+        compiled_full = False
+        if (
+            schedule in ("auto", "full")
+            and strategy is None
+            and resolved_objective == "mle"
+            and engine is None
+            and resources is None
+            and placement is None
+            and backend_name == "local"
+            and not has_mutable_state(mm, estimator)
+        ):
+            from mixle.inference.fusion_policy import prefer_compiled_mixture
+
+            compiled_full = prefer_compiled_mixture(mm, enc_data, max_its)
 
         # D3 block-EM scheduler: 'auto' dispatches to mixle.inference.block_em's greedy
-        # gain-per-cost scheduler when the fit is a plain local MLE MixtureDistribution/
+        # gain-per-cost scheduler when the fit is a local MLE/MAP MixtureDistribution/
         # MixtureEstimator fit with none of the other execution knobs engaged (those all need
         # the standard _em_loop path); everything else silently keeps the 'full' behavior below
         # -- schedule='auto' never errors or changes what is computed, only how it is scheduled.
@@ -1034,7 +1157,7 @@ def optimize(
                 is_block_em_eligible(mm, estimator)
                 and not surrogate_update
                 and strategy is None
-                and resolved_objective == "mle"
+                and resolved_objective in ("mle", "map")
                 and engine is None
                 and resources is None
                 and placement is None
@@ -1079,17 +1202,25 @@ def optimize(
         # from the accumulator; an explicit engine reads it from a kernel that reports it (the
         # FusedKernel), and gracefully falls back to a scoring pass otherwise.
         fused_step_fn = None
-        from mixle.inference.transaction import has_mutable_state
+        effective_strategy = strategy
+        if compiled_full:
+            from mixle.inference.em import CompiledEM
+
+            effective_strategy = CompiledEM()
+            if out is not None:
+                out.write("compiled-em: component-level fused full-tree execution\n")
 
         if (
             reuse_estep_ll
             and strict_monotone
             and resolved_objective == "mle"
-            and strategy is None
+            and (strategy is None or compiled_full)
             and isinstance(enc_data, list)
             and not has_mutable_state(mm, estimator)
         ):
-            if engine is None:
+            if compiled_full:
+                fused_step_fn = partial(_compiled_fused_step, strategy=effective_strategy)
+            elif engine is None:
                 fused_step_fn = _local_fused_step
             else:
                 fused_step_fn = partial(_engine_fused_step, engine=engine)
@@ -1100,7 +1231,7 @@ def optimize(
             enc_data,
             estimator,
             mm,
-            step_fn=_em_step_fn(engine, strategy, objective_fn),
+            step_fn=_em_step_fn(engine, effective_strategy, objective_fn),
             ll_fn=objective_scorer,
             max_its=max_its,
             delta=loop_delta,
@@ -1157,6 +1288,10 @@ def fit(
     verbatim, so reaching for a heavier knob never means switching verbs. ``estimator`` accepts the same
     three spellings as :func:`optimize` (estimator, distribution prototype, or ``None`` to infer from data).
     """
+    # Resolve seed=/rng= up front (same alias policy as optimize) so the automatic-structure path
+    # below sees the same RandomState the forwarded optimize call would.
+    if "seed" in kwargs or "rng" in kwargs:
+        kwargs["rng"] = _resolve_rng_arg(kwargs.pop("rng", None), kwargs.pop("seed", None))
     if (
         estimator is None
         and kwargs.get("structure", "auto") == "auto"
@@ -1166,14 +1301,39 @@ def fit(
         and kwargs.get("prev_estimate") is None
         and kwargs.get("strategy") is None
     ):
-        structured = _maybe_structured_model(data, max_its, kwargs.get("out"), kwargs.get("rng"))
+        structured, independent_composite = _maybe_structured_model(
+            data,
+            max_its,
+            kwargs.get("out"),
+            kwargs.get("rng"),
+            delta=delta,
+            init_p=kwargs.get("init_p", 0.1),
+            objective=kwargs.get("objective", "auto"),
+            reuse_estep_ll=kwargs.get("reuse_estep_ll", False),  # fit forces the exact scored loop below
+        )
         if structured is not None:
             return structured
+        # Same double-fit repair as optimize's front door: the losing-candidates path already fitted
+        # this exact composite (fit's delta/reuse_estep_ll/objective/init_p were threaded into it), so
+        # reuse it unless some other optimize knob was passed through **kwargs.
+        _threaded_or_inert = {
+            "structure",
+            "rng",
+            "out",
+            "enc_data",
+            "prev_estimate",
+            "strategy",
+            "init_p",
+            "objective",
+            "reuse_estep_ll",
+        }
+        if independent_composite is not None and kwargs.get("out") is None and not (set(kwargs) - _threaded_or_inert):
+            return independent_composite
     estimator = _coerce_estimator(estimator, data)
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
     if data is None and kwargs.get("enc_data") is None:
-        raise Exception("fit called with empty data or enc_data.")
+        raise ValueError("fit called with empty data or enc_data.")
     # opt-in sample-structure check: a tagged DataSource is verified against the model it feeds (warns on
     # a mismatch, e.g. a SEQUENTIAL source handed to an i.i.d. leaf). Bare lists carry no structure tag.
     if data is not None and getattr(data, "structure", None) is not None:
@@ -1201,7 +1361,7 @@ def best_of(
     max_its: int,
     init_p: float,
     delta: float,
-    rng: RandomState,
+    rng: RandomState | int | None = None,
     init_estimator: ParameterEstimator | ProbabilityDistribution | None = None,
     enc_data: list[tuple[int, E0]] | None = None,
     enc_vdata: Sequence[tuple[int, E0]] | None = None,
@@ -1209,6 +1369,7 @@ def best_of(
     print_iter: int = 1,
     reuse_estep_ll: bool = True,
     objective: str = "auto",
+    seed: int | None = None,
 ) -> tuple[float, SequenceEncodableProbabilityDistribution]:
     """Performs EM algorithm for trials-number of randomized initial conditions. Returns the best model fit in terms of
         maximum log-likelihood value from validation data.
@@ -1222,7 +1383,8 @@ def best_of(
         max_its (int): Integer value >=1, sets the maximum number of iterations of EM to be performed as stopping criteria.
         init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
         delta (float): Stopping criteria for EM when |old-log-likelihood - new-log-likelihood| < delta.
-        rng (RandomState): RandomState for setting seed.
+        rng (RandomState): RandomState for setting seed. An integer is coerced to ``RandomState(rng)``;
+            ``None`` (default) resolves to the fixed default seed. Mutually exclusive with ``seed``.
         init_estimator (Optional[ParameterEstimator]): Optional ParameterEstimator used for fitting.
         enc_data (Optional[List[Tuple[int, E]]]): Optional encoded data, if provided data need not be
             provided. If None, enc_data is set from data.
@@ -1234,13 +1396,16 @@ def best_of(
             Set False to force the exact historical per-iteration scoring behavior.
         objective (str): Convergence/selection objective forwarded to each trial's ``optimize`` call;
             ``'auto'`` (default) selects MLE / MAP / variational Bayes from the prior (see ``optimize``).
+        seed (Optional[int]): Integer seed -- shorthand for ``rng=RandomState(seed)``. Mutually
+            exclusive with ``rng`` (passing both raises ``TypeError``).
 
     Returns:
         Tuple of log-likelihood of best fitting model and the best fitting model from number of trials.
 
     """
+    rng = _resolve_rng_arg(rng, seed)
     if data is None and enc_data is None:
-        raise Exception("Optimization called with empty data or enc_data.")
+        raise ValueError("Optimization called with empty data or enc_data.")
 
     est = _coerce_estimator(est, data)
     if init_estimator is not None:
@@ -1396,7 +1561,9 @@ class BayesianStreamingEstimator:
             raise ValueError("mode must be 'posterior_carry' or 'forgetting'.")
         self.model = model
         self.init_p = init_p
-        self.rng = RandomState(0) if rng is None else rng  # fixed default: an un-seeded fit is deterministic
+        self.rng = (
+            RandomState(0) if rng is None else rng
+        )  # fixed default: the numpy side of an un-seeded fit is deterministic
         self.num_chunks = num_chunks
         self.step = 0
         self.nobs = 0.0

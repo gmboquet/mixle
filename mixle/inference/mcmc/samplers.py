@@ -15,6 +15,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.inference.diagnostics import _geyer_tau
+
 from .proposals import Proposal, _normalize_transition_proposals
 
 LogTarget = Callable[[Any], float]
@@ -59,10 +61,11 @@ class MCMCResult:
         return arr
 
     def effective_sample_size(self, max_lag: int | None = None) -> Any:
-        """Estimate effective sample size using positive autocorrelation lags.
+        """Estimate effective sample size via Geyer's initial monotone sequence, per component.
 
         Scalar samples return a float. Vector samples return one ESS value per
-        trailing dimension.
+        trailing dimension (each component's autocorrelation sum truncates
+        independently at its own first non-positive adjacent-lag pair).
         """
         arr = self.sample_array()
         n = int(arr.shape[0])
@@ -77,15 +80,7 @@ class MCMCResult:
             return float(ess[0]) if arr.ndim == 1 else ess.reshape(arr.shape[1:])
 
         lag_limit = n - 1 if max_lag is None else min(int(max_lag), n - 1)
-        tau = np.ones(int(np.sum(positive_var)), dtype=float)
-        centered_pos = centered[:, positive_var]
-        var_pos = var[positive_var]
-        for lag in range(1, lag_limit + 1):
-            rho = np.mean(centered_pos[:-lag] * centered_pos[lag:], axis=0) / var_pos
-            positive = rho > 0.0
-            if not np.any(positive):
-                break
-            tau += 2.0 * np.where(positive, rho, 0.0)
+        tau = _geyer_tau(centered[None, :, positive_var], var[positive_var], lag_limit)
         ess[positive_var] = np.maximum(1.0, n / tau)
         return float(ess[0]) if arr.ndim == 1 else ess.reshape(arr.shape[1:])
 
@@ -524,27 +519,34 @@ def particle_filter(
     particles, rng)`` returns the particles advanced one step through the transition (including process
     noise); ``log_likelihood(particles, y)`` returns the per-particle observation log-density. Each step
     reweights by the likelihood, records the weighted-mean filtered state, and (by default) multinomially
-    resamples to fight weight degeneracy. Returns ``(filtered_means, log_likelihood)`` where the second
-    value is the SMC estimate of the model's marginal log-likelihood ``log p(y_1:T)`` (an unbiased
-    evidence estimate, usable for parameter inference). For a linear-Gaussian model it converges to the
-    exact Kalman filter as ``N -> infinity``.
+    resamples to fight weight degeneracy; with ``resample=False`` it is sequential importance sampling,
+    carrying the weight product ``w_t = w_{t-1} * p(y_t | x_t)`` across steps. Returns
+    ``(filtered_means, log_likelihood)`` where the second value is the SMC estimate of the model's
+    marginal log-likelihood ``log p(y_1:T)`` (an unbiased evidence estimate, usable for parameter
+    inference). For a linear-Gaussian model it converges to the exact Kalman filter as ``N -> infinity``.
     """
     rng = np.random.RandomState() if rng is None else rng
     particles = np.array(initial_particles, dtype=np.float64)
     n = particles.shape[0]
     means: list[np.ndarray] = []
     log_lik = 0.0
+    log_w_cum = np.zeros(n)  # carried log-weights (uniform again after every resample)
     for y in observations:
         particles = np.asarray(propagate(particles, rng), dtype=np.float64)
-        log_w = np.asarray(log_likelihood(particles, y), dtype=np.float64)
-        max_lw = float(np.max(log_w))
-        weights = np.exp(log_w - max_lw)
+        log_w_cum = log_w_cum + np.asarray(log_likelihood(particles, y), dtype=np.float64)
+        max_lw = float(np.max(log_w_cum))
+        weights = np.exp(log_w_cum - max_lw)
         w_sum = float(weights.sum())
-        log_lik += max_lw + np.log(w_sum / n)  # marginal-likelihood increment (log-sum-exp / N)
         weights = weights / w_sum
         means.append(weights @ particles)
         if resample:
+            # weights entered this step uniform, so log mean w is the per-step evidence increment
+            log_lik += max_lw + np.log(w_sum / n)
             particles = particles[rng.choice(n, size=n, p=weights)]
+            log_w_cum = np.zeros(n)
+        else:
+            # pure SIS: the evidence estimate is the mean carried weight, log p(y_1:t) ~= log mean_i w_t^i
+            log_lik = max_lw + np.log(w_sum / n)
     return np.array(means), log_lik
 
 

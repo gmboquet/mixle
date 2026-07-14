@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 
 from mixle.models._neural_serial import decode_module, encode_module
+from mixle.models.grad_leaf import _module_mode
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -81,7 +82,7 @@ class StreamingTransformer(SequenceEncodableProbabilityDistribution):
         """Return argmax next-token predictions for one or more contexts."""
         torch = _torch()
         self.module.to(self.device)
-        with torch.no_grad():
+        with _module_mode(self.module, train=False), torch.no_grad():
             logits = self.module(torch.as_tensor(np.atleast_2d(x), dtype=torch.float32).to(self.device))
         return logits.argmax(1).cpu().numpy()
 
@@ -95,7 +96,7 @@ class StreamingTransformer(SequenceEncodableProbabilityDistribution):
         x, y = enc
         self.module.to(self.device)
         out = []
-        with torch.no_grad():
+        with _module_mode(self.module, train=False), torch.no_grad():
             xt = torch.as_tensor(np.atleast_2d(x), dtype=torch.float32)
             for k in range(0, xt.shape[0], 4096):
                 out.append(self.module(xt[k : k + 4096].to(self.device)).cpu().numpy())
@@ -179,18 +180,19 @@ class StreamingTransformerAccumulator(SequenceEncodableStatisticAccumulator):
         x, y = enc
         xt = torch.as_tensor(np.asarray(x), dtype=torch.float32).to(self.device)
         yt = torch.as_tensor(np.asarray(y), dtype=torch.long).to(self.device)
-        self.opt.zero_grad()
-        logits = self.module(xt)
-        if weights is None:
-            loss = self.ce(logits, yt)  # pure-streaming path unchanged (uniform)
-        else:
-            # per-token responsibility (mixture expert / streaming decay / sample weight): weighted mean, so the
-            # gradient scale matches the unweighted mean when the weights are uniform (bit-identical then).
-            wt = torch.as_tensor(np.asarray(weights, dtype=float), dtype=torch.float32).to(self.device).ravel()
-            per = torch.nn.functional.cross_entropy(logits, yt, reduction="none")
-            loss = (wt * per).sum() / wt.sum().clamp(min=1e-8)
-        loss.backward()
-        self.opt.step()
+        with _module_mode(self.module, train=True):  # one train step; scoring passes between updates stay eval
+            self.opt.zero_grad()
+            logits = self.module(xt)
+            if weights is None:
+                loss = self.ce(logits, yt)  # pure-streaming path unchanged (uniform)
+            else:
+                # per-token responsibility (mixture expert / streaming decay / sample weight): weighted mean, so the
+                # gradient scale matches the unweighted mean when the weights are uniform (bit-identical then).
+                wt = torch.as_tensor(np.asarray(weights, dtype=float), dtype=torch.float32).to(self.device).ravel()
+                per = torch.nn.functional.cross_entropy(logits, yt, reduction="none")
+                loss = (wt * per).sum() / wt.sum().clamp(min=1e-8)
+            loss.backward()
+            self.opt.step()
         self.last_loss = float(loss.detach())
         self.loss_sum += self.last_loss * len(yt)
         self.tokens += int(len(yt))

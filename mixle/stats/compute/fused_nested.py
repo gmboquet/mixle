@@ -111,6 +111,8 @@ def _build(model: Any, path: tuple, ctx: _Ctx) -> Any | None:
     t = _template_for(model)
     if t is None or t.kind != "scalar":  # only scalar leaves nest cleanly (no precompute / BLAS / tables)
         return None
+    if t.wants_minmax:  # minmax leaves (Pareto) need the to_value_g / support-min plumbing this emitter
+        return None  # lacks: _node_value would call to_value (None) and crash mid-fit -- decline instead
     if path not in ctx.slots:
         slot = len(ctx.slots)
         ctx.slots[path] = (t, slot)
@@ -171,7 +173,11 @@ def _emit_score(node: Any, lines: list[str], quantized_lse: bool = False) -> str
             lines.append(f"    sm{node.node_id} += lse_lut[qi{node.node_id}]")
         else:
             lines.append(f"    sm{node.node_id} += np.exp({v} - mx{node.node_id})")
-    lines.append(f"    ns{node.node_id} = mx{node.node_id} + np.log(sm{node.node_id})")
+    # finite-max guard at EVERY mixture node (the flat compiler's guard, nested edition): when all
+    # children score -inf, -inf - (-inf) = NaN above; the host scores such rows -inf.
+    lines.append(
+        f"    ns{node.node_id} = (mx{node.node_id} + np.log(sm{node.node_id})) if mx{node.node_id} > -np.inf else -np.inf"
+    )
     return f"ns{node.node_id}"
 
 
@@ -190,7 +196,12 @@ def _emit_backward(node: Any, rho: str, lines: list[str]) -> None:
     lines.append(f"    {rv} = {rho}")
     for j, c in enumerate(node.children):
         crv = f"{rv}_{j}"
-        lines.append(f"    {crv} = {rv} * np.exp(s{node.node_id}_{j} - ns{node.node_id})")
+        # impossible subtree (ns = -inf, so s_j - ns = NaN): mirror the legacy accumulator -- the
+        # responsibility falls back to the prior mixture weights (a zero rho stays exactly zero).
+        lines.append(
+            f"    {crv} = {rv} * (np.exp(s{node.node_id}_{j} - ns{node.node_id}) "
+            f"if ns{node.node_id} > -np.inf else np.exp(logw{node.node_id}[{j}]))"
+        )
         lines.append(f"    cc{node.node_id}[{j}] += {crv}")
         _emit_backward(c, crv, lines)
 

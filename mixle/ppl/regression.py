@@ -9,10 +9,12 @@ link:
 
 Coefficients may be ``free`` or may carry Normal penalty handles.  Fitting is
 IRLS/Fisher scoring for a likelihood or penalized-likelihood point estimate.
-For Normal responses this module uses the ridge/penalized-least-squares
-convention documented in the book and reports a scale-adjusted
-inverse-curvature diagnostic; it is not a full Gaussian-prior posterior
-unless the likelihood and prior precisions are scaled consistently.  Fit with
+For Normal responses a Normal coefficient prior is scaled by the residual
+variance (the fixed ``sigma``, or the working ``sigma^2`` when it is free), so
+``result.beta`` / ``result.cov`` are the exact Gaussian posterior mean and
+covariance at that plug-in scale.  Non-Gaussian GLM families (Bernoulli /
+Poisson) have unit dispersion, so the prior enters the IRLS equations
+unscaled -- the exact penalized-likelihood (MAP) mode.  Fit with
 ``.fit(y, given={"x": xs})``.
 """
 
@@ -298,16 +300,37 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
             pred = Zg @ b_g
             err2 += float((rg - pred) @ (rg - pred))
             trace_term += float(np.trace(Zg @ cov_g @ Zg.T))
-        Sigma = SS / G  # M-step
-        sigma2 = max((err2 + trace_term) / N, 1e-8)
+        Sigma_new = SS / G  # M-step
+        sigma2_new = max((err2 + trace_term) / N, 1e-8)
         Zb = np.einsum("nq,nq->n", Z, b[g])
         beta_new = np.linalg.lstsq(X, yv - Zb, rcond=None)[0]
-        if np.max(np.abs(beta_new - beta)) < tol:
-            beta = beta_new
+        # Converge on (beta, Sigma, sigma^2) JOINTLY. In a balanced design beta is an exact
+        # fixed point after one update (the BLUP means cancel), so a beta-only test exits at
+        # iteration ~0 with the variance components one EM step from their crude init.
+        delta = max(
+            float(np.max(np.abs(beta_new - beta))),
+            float(np.max(np.abs(Sigma_new - Sigma))),
+            abs(sigma2_new - sigma2),
+        )
+        beta, Sigma, sigma2 = beta_new, Sigma_new, sigma2_new
+        if delta < tol:
             break
-        beta = beta_new
 
-    cov = np.linalg.inv(X.T @ X / sigma2) if p else np.zeros((0, 0))
+    # GLS fixed-effect covariance (X' V^-1 X)^-1 with V = Z Sigma Z' + sigma^2 I (block-diagonal
+    # per group). inv(X'X / sigma^2) would ignore the random-effect term and is badly
+    # anti-conservative under grouping. Woodbury per group reuses the E-step posterior:
+    # V_g^-1 = (I - Z_g cov_g Z_g' / sigma^2) / sigma^2 with cov_g = (Sigma^-1 + Z_g'Z_g/sigma^2)^-1.
+    if p:
+        Sinv = np.linalg.inv(Sigma)
+        xtvx = np.zeros((p, p))
+        for idx in groups:
+            Xg, Zg = X[idx], Z[idx]
+            cov_g = np.linalg.inv(Sinv + Zg.T @ Zg / sigma2)
+            XtZ = Xg.T @ Zg
+            xtvx += (Xg.T @ Xg - XtZ @ cov_g @ XtZ.T / sigma2) / sigma2
+        cov = np.linalg.inv(xtvx)
+    else:
+        cov = np.zeros((0, 0))
     result = LMMResult(names, beta, cov, Sigma, np.sqrt(sigma2), b, list(levels), re_names)
     return RandomVariable._bound(None, name=rv._name, result=result)
 
@@ -417,8 +440,12 @@ def _glmm_fit(rv, y, given, linpred, link, max_iter, tol):
                 beta = beta_new
                 break
             beta = beta_new
-        Sigma = (sum(np.outer(b[gi], b[gi]) + cov_groups[gi] for gi in range(G))) / G  # M-step
-        if np.max(np.abs(beta - beta_prev)) < tol:
+        Sigma_new = (sum(np.outer(b[gi], b[gi]) + cov_groups[gi] for gi in range(G))) / G  # M-step
+        # Converge on (beta, Sigma) JOINTLY -- a beta-only test can exit while the variance
+        # components are still moving (the same failure as the LMM in balanced designs).
+        delta = max(float(np.max(np.abs(beta - beta_prev))), float(np.max(np.abs(Sigma_new - Sigma))))
+        Sigma = Sigma_new
+        if delta < tol:
             break
 
     result = GLMMResult(rv._family.name, link, names, beta, cov, Sigma, b, list(levels), re_names)
@@ -723,7 +750,15 @@ def regression_fit(
         result = RegressionResult(names, idx_of, beta, np.zeros((p, p)), sigma, columns, link="identity")
         return RandomVariable._bound(None, name=rv._name, result=result)
 
-    # IRLS / Fisher scoring (one step is OLS for the Gaussian identity link)
+    # IRLS / Fisher scoring (one step is OLS for the Gaussian identity link).
+    # For a Normal response the likelihood precision is X'X / sigma^2, so a Normal coefficient
+    # prior (precision P0, in 1/coef^2 units) must enter the working normal equations -- which
+    # are in X'X units -- scaled by sigma^2: (X'X + sigma^2 P0) beta = X'y + sigma^2 P0 m0 is
+    # the exact Gaussian posterior mode. Unscaled, the "Bayesian" fit is ridge-at-sigma=1.
+    # Non-Gaussian GLM families (Bernoulli/Poisson) have unit dispersion, so X'WX is already the
+    # likelihood precision and P0 enters unscaled (the exact penalized-likelihood / MAP mode).
+    sigma_fixed = fam != "Normal" or not (scale is FREE or isinstance(scale, RandomVariable))
+    sigma2_work = float(scale) ** 2 if (fam == "Normal" and sigma_fixed) else 1.0
     beta = np.zeros(p)
     cov = np.eye(p)
     for _ in range(max_iter):
@@ -731,23 +766,27 @@ def regression_fit(
         mu = _link_inv(link, eta)
         W = _irls_weight(link, mu)
         z = (eta - offset) + (y - mu) / W  # working response (predictor space)
+        if fam == "Normal" and not sigma_fixed and np.any(p0 > 0.0):
+            # free sigma: plug in the working residual variance (stabilizes as beta converges)
+            sigma2_work = max(float((y - mu) @ (y - mu)) / N, 1e-8)
         WX = X * W[:, None]
-        A = X.T @ WX + P0
+        A = X.T @ WX + sigma2_work * P0
         cov = np.linalg.inv(A)
-        new_beta = cov @ (X.T @ (W * z) + P0 @ m0)
+        new_beta = cov @ (X.T @ (W * z) + sigma2_work * (P0 @ m0))
         if np.max(np.abs(new_beta - beta)) < tol:
             beta = new_beta
             break
         beta = new_beta
 
     if fam == "Normal":  # residual scale
-        sigma_fixed = not (scale is FREE or isinstance(scale, RandomVariable))
         if sigma_fixed:
             sigma = float(scale)
         else:
             resid = y - (offset + X @ beta)
             sigma = float(np.sqrt(max(resid @ resid / N, 1e-8)))
-        cov = cov * (sigma**2)  # OLS coef cov scales with sigma^2
+        # coef cov scales with sigma^2: with the sigma^2-scaled prior above this is exactly
+        # (X'X / sigma^2 + P0)^-1, the Gaussian posterior covariance (OLS curvature when P0 = 0)
+        cov = cov * (sigma**2)
     else:
         sigma = float("nan")
 

@@ -30,6 +30,7 @@ Serialization: the module round-trips as portable bytes (``mixle.models._neural_
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
@@ -99,6 +100,41 @@ def _run_analytic_m_step(module: Any, fields: tuple[Any, ...], weights: Any, bat
     if not isinstance(result, dict):
         raise TypeError("mixle_analytic_m_step must return a receipt dictionary or None.")
     return dict(result)
+
+
+def _resolve_dtype(torch: Any) -> Any:
+    """The active compute engine's torch float dtype, or ``None`` when no torch precision policy applies.
+
+    The precision twin of ``_resolve_device`` (one place for the engine-following policy): under
+    ``TorchEngine(dtype=torch.float64)`` a neural leaf should evaluate its module in fp64 like the rest
+    of the substrate math instead of silently dropping to fp32. Outside a torch engine -- including the
+    NumPy default, whose ``dtype`` is a numpy dtype -- this returns ``None`` and callers keep their
+    historical float32 behavior."""
+    from mixle.engines.base import active_engine
+
+    eng_dtype = getattr(active_engine(), "dtype", None)
+    if isinstance(eng_dtype, torch.dtype) and eng_dtype.is_floating_point:
+        return eng_dtype
+    return None
+
+
+@contextmanager
+def _module_mode(module: Any, *, train: bool) -> Any:
+    """Hold ``module`` in train/eval mode for the block, restoring every submodule's prior flag on exit.
+
+    Scoring must be a pure read: without ``eval()`` a Dropout submodule scores stochastically, and a
+    BatchNorm submodule both scores with batch statistics and MUTATES its running stats on a mere
+    ``log_density`` call. The M-step is the converse -- a module the user pre-set to ``eval()`` must
+    still optimize under train-mode semantics. The snapshot is per submodule (not just the root flag),
+    so a deliberately eval-pinned submodule inside a train-mode net comes back exactly as the caller
+    left it. Shared by every gradient-fit leaf, like ``_resolve_device`` above."""
+    states = [(m, m.training) for m in module.modules()]
+    module.train(train)
+    try:
+        yield module
+    finally:
+        for m, was_training in states:
+            m.training = was_training
 
 
 def looks_like_torch_module(obj: Any) -> bool:
@@ -302,6 +338,12 @@ class DataBufferAccumulator(SequenceEncodableStatisticAccumulator):
     def combine(self, other: Any) -> DataBufferAccumulator:
         *fields, ws = other
         if len(ws):
+            # same widen-once rule as _append: a combine()-fed root (the mp/mpi/dask/ray fan-in path)
+            # starts at the declared default arity and must adopt the workers' true arity before
+            # zipping, or every field past the first is silently dropped for conditional leaves.
+            if len(fields) != len(self.parts) and not any(self.parts):
+                self.parts = [[] for _ in fields]
+                self.n_fields = len(fields)
             for buf, f in zip(self.parts, fields):
                 buf.append(np.asarray(f, dtype=float))
             self.w.append(np.asarray(ws, dtype=float).ravel())

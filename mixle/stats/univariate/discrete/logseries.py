@@ -25,6 +25,7 @@ from numpy.random import RandomState
 
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
+    DistributionEnumerator,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
@@ -259,6 +260,28 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
     def dist_to_encoder(self) -> "LogSeriesDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
         return LogSeriesDataEncoder()
+
+    def enumerator(self) -> "LogSeriesEnumerator":
+        """Return an enumerator over k = 1, 2, ... in descending probability order."""
+        return LogSeriesEnumerator(self)
+
+
+class LogSeriesEnumerator(DistributionEnumerator):
+    """Enumerate log-series support values in descending probability order.
+
+    The log-series pmf ``p^k / (k * -log(1 - p))`` is strictly decreasing in ``k`` (each step
+    multiplies by ``p * k / (k + 1) < 1``), so value order 1, 2, 3, ... IS descending-probability
+    order. The iterator is infinite.
+    """
+
+    def __init__(self, dist: LogSeriesDistribution) -> None:
+        super().__init__(dist)
+        self._k = 1
+
+    def __next__(self) -> tuple[int, float]:
+        k = self._k
+        self._k += 1
+        return (k, self.dist.log_density(k))
 
 
 class LogSeriesSampler(DistributionSampler):

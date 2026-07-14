@@ -30,7 +30,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.utils.aliasing import MISSING, coalesce_alias
+from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias
 
 
 def _robust_cho_factor(covar: np.ndarray):
@@ -376,9 +376,14 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         if self.use_lstsq:
             return np.ones(x.shape[0])
         else:
-            diff = self.mu - x
-            soln = scipy.linalg.cho_solve(self.chol, diff.T).T
-            rv = self.chol_const - 0.5 * ((diff * soln).sum(axis=1))
+            # One gemm against the ALREADY-STORED precision matrix (the same quadratic form the
+            # engine backend uses, line for line) instead of a per-call cho_solve -- LAPACK potrs
+            # on a transposed RHS copies in/out and rescans for finiteness on every EM iteration.
+            # Memory-neutral by design: an extra precomputed factor here (one more d x d array per
+            # component) tipped the placement planner's byte budget in memory-constrained plans.
+            diff = x - self.mu
+            soln = np.dot(diff, self.inv_covar)
+            rv = self.chol_const - 0.5 * (diff * soln).sum(axis=1)
             return rv
 
     @staticmethod
@@ -785,7 +790,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
     def __init__(
         self,
         dim: int | None = None,
-        pseudo_count: tuple[float | None, float | None] | None = (None, None),
+        pseudo_count: float | tuple[float | None, float | None] | None = (None, None),
         suff_stat: tuple[np.ndarray | None, np.ndarray | None] | None = (None, None),
         name: str | None = None,
         keys: str | None = None,
@@ -799,7 +804,8 @@ class MultivariateGaussianEstimator(ParameterEstimator):
 
         Args:
             dim: Gaussian dimension. Inferred from ``suff_stat`` when omitted.
-            pseudo_count: Optional smoothing counts for mean and covariance.
+            pseudo_count: Optional smoothing counts for mean and covariance. A scalar is
+                broadcast to both slots.
             suff_stat: Optional prior mean and covariance used for smoothing.
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
@@ -845,6 +851,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         )
 
         self.dim = dim_loc
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count
         self.prior_mu = None if suff_stat[0] is None else np.reshape(suff_stat[0], dim_loc)
         self.prior_covar = None if suff_stat[1] is None else np.reshape(suff_stat[1], (dim_loc, dim_loc))
@@ -1021,4 +1028,10 @@ class MultivariateGaussianDataEncoder(DataSequenceEncoder):
 
         """
         self.dim = len(x[0]) if self.dim is None else self.dim
-        return np.reshape(np.asarray(x), (-1, self.dim))
+        rv = np.reshape(np.asarray(x, dtype=float), (-1, self.dim))
+        if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
+            # the same encode-time gate the univariate Gaussian applies: scoring previously relied
+            # on cho_solve's check_finite to reject NaN loudly; the gemm path (no LAPACK scan) needs
+            # the contract enforced where every fit/score pass already runs exactly once
+            raise ValueError("MultivariateGaussianDistribution requires finite observations.")
+        return rv

@@ -244,7 +244,7 @@ def cox_ph(
     cov = np.linalg.inv(-hess)
     se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
 
-    # partial log-likelihood (Breslow) and Breslow baseline cumulative hazard
+    # partial log-likelihood (under the requested ties handling) and Breslow baseline cumulative hazard
     loglik = 0.0
     base_t, base_h = [], []
     for s in np.unique(strata):
@@ -256,8 +256,14 @@ def cox_ph(
             tied = (ts == et) & (es == 1)
             theta = np.exp(Xs[risk] @ beta)
             s0 = theta.sum()
-            loglik += float(np.sum(Xs[tied] @ beta)) - tied.sum() * np.log(s0)
-            cum += tied.sum() / s0
+            d = int(tied.sum())
+            loglik += float(np.sum(Xs[tied] @ beta))
+            if ties == "breslow" or d == 1:
+                loglik -= d * np.log(s0)
+            else:  # Efron: the denominator sheds a growing fraction of the tied-set mass
+                sd0 = np.exp(Xs[tied] @ beta).sum()
+                loglik -= float(np.sum(np.log(s0 - np.arange(d) / d * sd0)))
+            cum += d / s0
             base_t.append(et)
             base_h.append(cum)
     order = np.argsort(base_t)
@@ -458,7 +464,7 @@ def frailty_cox(
         res = _cox_offset(X, time, event, log_w, ties=ties)
         risk_score = np.exp(X @ res)
         base = _breslow_cumhaz(X, time, event, res)
-        H = base[np.searchsorted(np.unique(time[event == 1]), time, side="right").clip(0, len(base) - 1)]
+        H = _cumhaz_at(np.unique(time[event == 1]), base, time)
         w_post = np.empty(len(uniq))
         theta_terms = []
         for gi, g in enumerate(uniq):
@@ -530,6 +536,17 @@ def _breslow_cumhaz(X, time, event, beta):
         cum += tied.sum() / s0
         out.append(cum)
     return np.asarray(out)
+
+
+def _cumhaz_at(event_times, base, t):
+    """Evaluate the cumulative-hazard step function at arbitrary times ``t``.
+
+    ``base[j]`` is the cumulative hazard AT the sorted ``event_times[j]`` (its own increment
+    included); the step function is 0 before the first event and right-continuous, so a time
+    between events takes the value at the most recent event time ``<= t``.
+    """
+    step = np.concatenate([[0.0], np.asarray(base, dtype=float)])
+    return step[np.searchsorted(np.asarray(event_times, dtype=float), t, side="right")]
 
 
 __all__ = [

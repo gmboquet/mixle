@@ -53,6 +53,46 @@ _BLOCK_MIN_COMPONENT_PARAMS = 32
 _BLOCK_MIN_WEIGHTED_WORK = 5_000_000
 
 
+def prefer_compiled_mixture(model: Any, enc_data: Any, max_its: int) -> bool:
+    """Whether component-level fusion should drive a heterogeneous full-mixture fit.
+
+    Whole-model fusion remains preferable when available. This path targets the middle ground:
+    the root cannot fuse because one or more children are heterogeneous/non-templated, while a
+    meaningful share of expensive combinator children can still use fused scoring and accumulation.
+    """
+
+    components = getattr(model, "components", None)
+    if components is None or len(components) < 2 or not isinstance(enc_data, list):
+        return False
+    try:
+        from mixle.utils.optional_deps import HAS_NUMBA
+
+        if not HAS_NUMBA:
+            return False
+        from mixle.stats.compute.fused_codegen import fusible, fusible_estep
+
+        if fusible(model) and fusible_estep(model):
+            return False
+        from mixle.inference.block_em import _parameter_count
+
+        total_cost = 0
+        compiled_cost = 0
+        for component in components:
+            cost = max(_parameter_count(component), 1)
+            total_cost += cost
+            is_combinator = (
+                getattr(component, "components", None) is not None or getattr(component, "dists", None) is not None
+            )
+            if is_combinator and fusible(component) and fusible_estep(component):
+                compiled_cost += cost
+        if compiled_cost == 0 or compiled_cost / max(total_cost, 1) < 0.25:
+            return False
+        nobs = sum(int(chunk[0]) for chunk in enc_data)
+        return nobs * max(int(max_its), 1) * compiled_cost >= _FUSION_MIN_WORKLOAD
+    except Exception:  # noqa: BLE001 - an optimization probe must preserve the host fallback
+        return False
+
+
 def prefer_block_schedule(model: Any, enc_data: Any, max_its: int) -> bool:
     """Whether ``schedule="auto"`` should route an ELIGIBLE mixture to block-EM rather than the
     full-tree path (which auto-fuses when it can).

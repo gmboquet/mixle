@@ -77,6 +77,9 @@ _LINKS: dict[str, Link] = {
         lambda eta: np.exp(eta - np.exp(eta)),
     ),
     "inverse": Link("inverse", lambda mu: 1.0 / mu, lambda eta: 1.0 / eta, lambda eta: -1.0 / eta**2),
+    "inverse_squared": Link(
+        "inverse_squared", lambda mu: 1.0 / mu**2, lambda eta: 1.0 / np.sqrt(eta), lambda eta: -0.5 * eta**-1.5
+    ),
     "sqrt": Link("sqrt", lambda mu: np.sqrt(mu), lambda eta: eta**2, lambda eta: 2.0 * eta),
 }
 
@@ -86,7 +89,14 @@ _LINKS: dict[str, Link] = {
 
 @dataclass(frozen=True)
 class Family:
-    """An exponential-family error model: variance function, canonical link, deviance, dispersion."""
+    """An exponential-family error model: variance function, canonical link, deviance, dispersion.
+
+    ``canonical`` names the family's *mathematical* canonical link; ``default_link`` (when set) is
+    the link :func:`glm` fits with when none is requested. They are separate so families whose
+    canonical link is numerically awkward (gamma's ``inverse``, inverse-Gaussian's
+    ``inverse_squared`` -- neither keeps ``mu`` positive) can default to ``log`` without mislabeling
+    the canonical link.
+    """
 
     name: str
     variance: Callable[[np.ndarray], np.ndarray]
@@ -94,6 +104,7 @@ class Family:
     unit_deviance: Callable[[np.ndarray, np.ndarray], np.ndarray]
     estimate_dispersion: bool
     extra: float = 1.0  # negative-binomial theta
+    default_link: str | None = None  # fitting default when it differs from the canonical link
 
 
 def _binom_dev(y: np.ndarray, mu: np.ndarray) -> np.ndarray:
@@ -132,8 +143,22 @@ _FAMILIES: dict[str, Family] = {
     "gaussian": Family("gaussian", lambda mu: np.ones_like(mu), "identity", lambda y, mu: (y - mu) ** 2, True),
     "binomial": Family("binomial", lambda mu: _clip01(mu) * (1 - _clip01(mu)), "logit", _binom_dev, False),
     "poisson": Family("poisson", lambda mu: mu, "log", _pois_dev, False),
-    "gamma": Family("gamma", lambda mu: mu**2, "log", _gamma_dev, True),
-    "inverse_gaussian": Family("inverse_gaussian", lambda mu: mu**3, "log", _ig_dev, True),
+    "gamma": Family(
+        name="gamma",
+        variance=lambda mu: mu**2,
+        canonical="inverse",
+        unit_deviance=_gamma_dev,
+        estimate_dispersion=True,
+        default_link="log",
+    ),
+    "inverse_gaussian": Family(
+        name="inverse_gaussian",
+        variance=lambda mu: mu**3,
+        canonical="inverse_squared",
+        unit_deviance=_ig_dev,
+        estimate_dispersion=True,
+        default_link="log",
+    ),
 }
 
 
@@ -243,7 +268,9 @@ def glm(
         y: ``(n,)`` response (counts, 0/1 or proportions, positive reals, ... per the family).
         family: ``"gaussian"``, ``"binomial"``, ``"poisson"``, ``"gamma"``, ``"inverse_gaussian"``,
             ``"negativebinomial"``, or a :class:`Family`.
-        link: link name; defaults to the family's canonical link.
+        link: link name; defaults to the family's default link (the canonical link, except gamma /
+            inverse-Gaussian which default to ``log`` -- their canonical ``inverse`` /
+            ``inverse_squared`` links do not keep ``mu`` positive).
         offset: ``(n,)`` known additive term on the linear-predictor scale (e.g. ``log`` exposure).
         weights: ``(n,)`` prior weights.
         max_iter, tol: IRLS controls (convergence on the relative deviance change).
@@ -258,7 +285,7 @@ def glm(
     fam = _resolve_family(
         family, getattr(family, "extra", 1.0) if isinstance(family, Family) else _nb_theta_default(family)
     )
-    lk = _LINKS[link or fam.canonical]
+    lk = _LINKS[link or fam.default_link or fam.canonical]
     off = np.zeros(n) if offset is None else np.asarray(offset, dtype=float).ravel()
     w = np.ones(n) if weights is None else np.asarray(weights, dtype=float).ravel()
 
