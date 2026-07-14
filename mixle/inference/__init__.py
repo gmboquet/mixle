@@ -255,8 +255,12 @@ from mixle.inference.resampling import (
     wild_bootstrap,
 )
 
-# risk / tail metrics over a Monte-Carlo outcome distribution (VaR, CVaR, stress-scenario ranking)
-from mixle.inference.risk import conditional_value_at_risk, stress_rank, value_at_risk
+# risk / tail metrics over a Monte-Carlo outcome distribution (VaR, CVaR, stress-scenario ranking).
+# Same circular-import hazard as the condition/scenario lazy exports above: mixle.inference.risk ->
+# mixle.analysis -> mixle.reason -> ... -> mixle.stats.latent.mixture -> mixle.stats.bayes.dirichlet,
+# which is exactly the module whose own top-level `from mixle.inference.fisher import FixedFisherView`
+# reaches this package mid-init. Exported lazily instead (see __getattr__ at the bottom of this module).
+_RISK_LAZY_NAMES = frozenset({"conditional_value_at_risk", "stress_rank", "value_at_risk"})
 
 # robust / sandwich covariance for M-estimators and regression (misspecification-robust SEs)
 from mixle.inference.robust import (
@@ -740,6 +744,13 @@ def __getattr__(name: str):
 
         _scenario_module = importlib.import_module("mixle.inference.scenario")
         value = getattr(_scenario_module, _SCENARIO_LAZY_NAMES[name])
+        globals()[name] = value
+        return value
+    if name in _RISK_LAZY_NAMES:
+        import importlib
+
+        _risk_module = importlib.import_module("mixle.inference.risk")
+        value = getattr(_risk_module, name)
         globals()[name] = value
         return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

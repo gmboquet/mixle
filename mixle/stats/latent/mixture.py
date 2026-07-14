@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
@@ -33,8 +33,6 @@ from mixle.enumeration.algorithms import (
     freeze,
 )
 from mixle.inference.fisher import Path
-from mixle.stats.bayes.dirichlet import DirichletDistribution
-from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 from mixle.stats.compute.pdist import (
     ContractError,
     DataSequenceEncoder,
@@ -51,6 +49,26 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.compute.posterior import CategoricalLatentPosterior
 from mixle.utils.aliasing import MISSING, coalesce_alias
 from mixle.utils.special import digamma
+
+if TYPE_CHECKING:
+    from mixle.stats.bayes.dirichlet import DirichletDistribution
+    from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
+
+
+def _dirichlet_types() -> tuple[type, type]:
+    """Import `(DirichletDistribution, SymmetricDirichletDistribution)` lazily.
+
+    `mixle.stats.bayes.dirichlet` itself transitively imports this module (via
+    `mixle.inference` -> `mixle.analysis` -> `mixle.reason` -> `mixle.reason.cross_modal`), so a
+    module-level import here would be circular whenever `dirichlet.py` is the entry point of that
+    chain (e.g. `import mixle.ppl` / `import mixle_pde` before anything else has warmed
+    `mixle.stats.bayes.dirichlet`). Deferring the import to call time breaks the cycle.
+    """
+    from mixle.stats.bayes.dirichlet import DirichletDistribution
+    from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
+
+    return DirichletDistribution, SymmetricDirichletDistribution
+
 
 T = TypeVar("T")  ### Type of Mixture component data.
 T1 = TypeVar("T1")  ### Type of encoded data.
@@ -80,8 +98,9 @@ def mixture_prior(
     return weight_prior, tuple(component_priors)
 
 
-def _default_weight_prior(num_components: int) -> DirichletDistribution:
+def _default_weight_prior(num_components: int) -> "DirichletDistribution":
     """Flat (concentration-one) Dirichlet weight prior of the given dimension."""
+    DirichletDistribution, _ = _dirichlet_types()
     return DirichletDistribution(np.ones(num_components))
 
 
@@ -154,6 +173,7 @@ def _dirichlet_expectations(prior: Any, num_components: int) -> tuple[np.ndarray
     ``E[log w_k] = digamma(alpha_k) - digamma(sum_j alpha_j)`` are the variational weight
     expectations used by ``expected_log_density``.
     """
+    DirichletDistribution, SymmetricDirichletDistribution = _dirichlet_types()
     if isinstance(prior, DirichletDistribution):
         alpha = np.asarray(prior.get_parameters(), dtype=float)
         if alpha.shape[0] != num_components:
@@ -1478,6 +1498,7 @@ class MixtureEstimator(ParameterEstimator):
         if component_priors is not None:
             for d, p in zip(self.estimators, component_priors):
                 _set_estimator_prior(d, p)
+        DirichletDistribution, SymmetricDirichletDistribution = _dirichlet_types()
         self.has_conj_prior = isinstance(self.prior, (DirichletDistribution, SymmetricDirichletDistribution))
 
     def model_log_density(self, model: MixtureDistribution) -> float:
@@ -1549,6 +1570,7 @@ class MixtureEstimator(ParameterEstimator):
             # Conjugate Dirichlet weight update: MAP weights w_k proportional to
             # (count_k + alpha_k - 1), clamped at the simplex boundary; the posterior
             # Dirichlet(alpha + counts) is carried forward as the new weight prior.
+            DirichletDistribution, SymmetricDirichletDistribution = _dirichlet_types()
             if isinstance(self.prior, SymmetricDirichletDistribution):
                 alpha = np.ones(num_components) * float(self.prior.get_parameters())
             else:
