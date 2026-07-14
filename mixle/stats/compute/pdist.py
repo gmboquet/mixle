@@ -1272,6 +1272,18 @@ def validate_estimator_keys(estimator: ParameterEstimator) -> None:
     _collect_accumulator_keys(accumulator, accumulator_registry, type(accumulator).__name__, set())
 
 
+def estimator_has_keys(estimator: ParameterEstimator) -> bool:
+    """Whether any site in the estimator tree carries a tying key.
+
+    Keyed sites require the ``merge_accumulator_keys`` pass after accumulation; an EM driver that
+    cannot run it (or whose update decomposition conflicts with pooling, e.g. block-EM's sparse
+    per-component M-steps) must refuse or reroute keyed estimators rather than silently untie them.
+    """
+    registry: dict[Any, tuple[Any, str]] = {}
+    _collect_estimator_keys(estimator, registry, type(estimator).__name__, set())
+    return bool(registry)
+
+
 def validate_accumulator_keys(accumulator: StatisticAccumulator) -> None:
     """Validate keyed sites in an already-created accumulator tree."""
     accumulator_registry: dict[Any, tuple[Any, str]] = {}

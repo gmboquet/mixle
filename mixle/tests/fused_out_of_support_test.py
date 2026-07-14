@@ -159,7 +159,9 @@ class NestedImpossibleRowTest(unittest.TestCase):
 
 @unittest.skipUnless(HAS_NUMBA, "fused kernels require numba")
 class NestedMinmaxDeclineTest(unittest.TestCase):
-    """D-4: minmax leaves decline nested fusion with the DECLARED ValueError, never a mid-fit crash."""
+    """D-4: minmax leaves decline the NESTED template with the DECLARED ValueError, never a mid-fit
+    crash -- and the bare-bridge last resort then covers the shape with host-exact semantics (it
+    drives each inner mixture's own accumulator, so weighted per-component minima survive)."""
 
     def _model(self):
         inner1 = stats.MixtureDistribution(
@@ -172,21 +174,32 @@ class NestedMinmaxDeclineTest(unittest.TestCase):
         )
         return stats.MixtureDistribution(components=[inner1, inner2], w=[0.7, 0.3])
 
-    def test_nested_pareto_mixture_declines_instead_of_crashing(self):
+    def test_nested_pareto_mixture_declines_the_template_and_bridges_with_parity(self):
         model = self._model()
         data = [1.2, 3.0, 0.3]  # 0.3 is below every xm: out of support everywhere
         enc = model.dist_to_encoder().seq_encode(data)
-        self.assertFalse(fc.fusible(model))
-        self.assertFalse(fc.fusible_estep(model))
-        # the wrappers refuse up front (previously: scoring returned NaN on the 0.3 row and the
-        # E-step crashed with ``TypeError: 'NoneType' object is not callable`` mid-fit)
+        # the nested TEMPLATE still refuses up front (previously: scoring returned NaN on the 0.3
+        # row and the E-step crashed with ``TypeError: 'NoneType' object is not callable`` mid-fit)
         with self.assertRaises(ValueError):
             fn.fused_nested_seq_log_density(model, enc)
         with self.assertRaises(ValueError):
             fn.fused_nested_accumulate(model, enc, np.ones(len(data)))
-        # the host path these models now take scores the out-of-support row -inf and the rest finite
+        # ...but the shape is fusible anyway: the bare-bridge last resort picks it up
+        self.assertTrue(fc.fusible(model))
+        self.assertTrue(fc.fusible_estep(model))
         host = model.seq_log_density(enc)
         self.assertTrue(np.isfinite(host[0]) and np.isfinite(host[1]) and np.isneginf(host[2]))
+        fused = fc.fused_seq_log_density(model, enc)
+        np.testing.assert_allclose(fused[:2], host[:2], rtol=1e-9)
+        self.assertTrue(np.isneginf(fused[2]), "the out-of-support row must stay -inf, never NaN")
+        # M-step parity through the bridge E-step (weighted minima handled by the host accumulator)
+        w = np.ones(len(data))
+        est = model.estimator()
+        acc = est.accumulator_factory().make()
+        acc.seq_update(enc, w, model)
+        new_host = est.estimate(len(data), acc.value())
+        new_fused = est.estimate(len(data), fc.fused_accumulate(model, enc, w))
+        np.testing.assert_allclose(new_fused.seq_log_density(enc), new_host.seq_log_density(enc), rtol=1e-9, atol=1e-12)
 
 
 @unittest.skipUnless(HAS_NUMBA, "fused kernels require numba")

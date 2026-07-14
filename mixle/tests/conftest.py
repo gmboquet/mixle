@@ -98,6 +98,10 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # Keyed (tied) parameters through the fused ENGINE path: the #432 bug class's fused edition
     # (merge_accumulator_keys was skipped exactly where the auto-fusion gate routes large fits).
     "fused_keyed_tying_test.py": ("numba", "optional"),
+    # optimize(fused_options=...) plumbing (parallel override, quantized-LSE scoring) + the fused
+    # disk-cache GC. keyed_pooling_test.py is deliberately NOT registered here: it exercises the
+    # host-side key_merge/key_replace pooling protocol only, so it belongs to the default fast gate.
+    "fused_options_test.py": ("numba", "optional"),
     "jax_engine_test.py": ("jax", "optional"),
     # Backward-compatibility-only tests (renamed class / kwarg aliases). Tagged `legacy` so a product-only
     # run can exclude them with `-m "not legacy"`; they still run in the default `fast` gate.

@@ -84,8 +84,12 @@ class NestedMinmaxExclusionTest(unittest.TestCase):
         # wants_minmax templates have to_value=None; the nested emitter would call it mid-fit
         mm = self._pareto_mixture_of_mixtures()
         self.assertFalse(fused_nested.fusible_nested(mm))
-        self.assertFalse(fused_codegen.fusible(mm))
-        self.assertFalse(fused_codegen.fusible_estep(mm))
+        self.assertFalse(fused_codegen.fusible(mm, bare_bridge=False))
+        self.assertFalse(fused_codegen.fusible_estep(mm, bare_bridge=False))
+        # the shape is still COVERED, by the bare-bridge last resort: per-component native
+        # scoring/accumulation has no to_value problem (parity pinned in fused_out_of_support_test)
+        self.assertTrue(fused_codegen.fusible(mm))
+        self.assertTrue(fused_codegen.fusible_estep(mm))
 
     def test_flat_pareto_mixture_still_fuses(self):
         # the exclusion is scoped to NESTING: the flat compiler has the minmax plumbing
