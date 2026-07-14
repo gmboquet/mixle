@@ -19,6 +19,19 @@ distribution, never a bare point estimate:
 
 This module supplies the dose-response *machinery*; it ships no regulatory/clinical dose-response
 table -- ``params`` are always supplied by the caller or a knowledge lookup (see Non-goals).
+
+K6 (this file's second addition, appended after K3) turns a K3/K4 risk distribution into the two
+things J's objective/optimizer actually need -- a priced cost term and a hard feasibility screen:
+
+  * :func:`health_liability` -- prices a case-count/exceedance-probability `DerivedQuantity` (e.g.
+    `population_risk`'s output, or K4's `safety_risk_surface`) into a dollar-liability
+    `DerivedQuantity` at ``cost_per_case`` per case, discounted -- the ``health_cost`` term J6's
+    ``priced_liabilities``/``risk_adjusted_plan`` (``analysis/valuation.py``) sums alongside carbon
+    (L6) and remediation (G-side) liabilities.
+  * :func:`exposure_constraints` -- screens a list of candidate operating options against named
+    occupational/community exposure ``limits``, marking each ``feasible`` (or not, naming the
+    ``binding`` limit(s)) so H4's ``two_stage_stochastic_plan`` (``stochastic_opt.py``) only ever
+    optimizes over the surviving, feasible candidate set.
 """
 
 from __future__ import annotations
@@ -191,9 +204,63 @@ def population_risk(
     return _SampleDerivedQuantity(samples=np.full(int(n), expected_cases), prior_dominated=False)
 
 
+def health_liability(risk: DerivedQuantity, *, cost_per_case: float, discount: float = 0.0) -> DerivedQuantity:
+    """Price a K3/K4 risk `DerivedQuantity` into an expected-liability `DerivedQuantity` (K6, work-plan §7-K).
+
+    ``risk`` is any IC-1-shaped `DerivedQuantity` over an expected case count or exceedance
+    probability (:func:`population_risk`'s output, or K4's ``safety_risk_surface``); every draw in
+    ``risk.samples`` is multiplied by ``cost_per_case`` (dollars per case/incident) and divided by
+    ``(1 + discount)`` -- a single-period present-value factor (``discount=0`` is undiscounted;
+    multi-period accounting applies its own per-period factor before summing across periods, this
+    function prices one period/one risk term at a time). Pricing does not change *how* uncertain the
+    underlying risk is: the returned quantity keeps ``risk``'s sample count/shape and its
+    `prior_dominated` flag unchanged, so a liability that is prior-dominated upstream is still
+    honestly flagged as such downstream. Handed to J6's ``priced_liabilities``/``risk_adjusted_plan``
+    (``analysis/valuation.py``) as the ``health_cost`` callable's output.
+    """
+    samples = np.asarray(risk.samples, dtype=float)
+    factor = float(cost_per_case) / (1.0 + float(discount))
+    prior_dominated = bool(getattr(risk, "prior_dominated", False))
+    return _SampleDerivedQuantity(samples=samples * factor, prior_dominated=prior_dominated)
+
+
+def exposure_constraints(options: list[dict], limits: dict[str, float]) -> list[dict]:
+    """Screen candidate operating ``options`` against named exposure/exceedance ``limits`` (K6).
+
+    ``limits`` maps an occupational/community exposure metric name (e.g. ``"silica_pm4"``, an
+    8-hour TWA, or an exceedance probability) to the regulatory/policy limit for that metric.
+    ``options`` is a list of plain dicts -- each one candidate operating configuration, carrying
+    (among whatever other plan data the caller needs, e.g. block cost or grade) a value for zero or
+    more of those metric keys.
+
+    Returns a *new* list (the input dicts are never mutated), one entry per option, each the
+    original option's key/value pairs plus:
+
+    - ``"feasible"``: ``True`` iff the option breaches none of its limited metrics.
+    - ``"binding"``: the sorted list of limit names actually breached (empty when feasible) --
+      naming exactly which limit made the option infeasible.
+
+    An option with no entry for a given limit key is not evaluated against that key (the metric was
+    simply not modeled for that option), not treated as a violation. A caller filters the returned
+    list down to the feasible options *before* handing the survivors' blocks to H4's
+    ``two_stage_stochastic_plan`` (``stochastic_opt.py``) -- an infeasible option is dropped from the
+    candidate set entirely, so the optimizer never has the chance to select it (see the K6 DoD).
+    """
+    annotated: list[dict] = []
+    for option in options:
+        binding = sorted(name for name, limit in limits.items() if name in option and option[name] > limit)
+        out = dict(option)
+        out["feasible"] = len(binding) == 0
+        out["binding"] = binding
+        annotated.append(out)
+    return annotated
+
+
 __all__ = [
     "DOSE_RESPONSE_MODELS",
     "DoseResponse",
     "cumulative_exposure",
     "population_risk",
+    "health_liability",
+    "exposure_constraints",
 ]

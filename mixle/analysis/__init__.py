@@ -38,6 +38,8 @@ from mixle.analysis.health_risk import (
     DOSE_RESPONSE_MODELS,
     DoseResponse,
     cumulative_exposure,
+    exposure_constraints,
+    health_liability,
     population_risk,
 )
 from mixle.analysis.kde import (
@@ -88,6 +90,9 @@ __all__ = [
     "DoseResponse",
     "cumulative_exposure",
     "population_risk",
+    # health/safety liability + exposure-limit hard constraints into J6/H4 (K6)
+    "health_liability",
+    "exposure_constraints",
     # kernel density estimation
     "KDE",
     "kde",
