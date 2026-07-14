@@ -5,8 +5,8 @@ and that CUDA/FSDP claims not rest solely on CPU simulation. The GPU parity/memo
 jobs require hardware this CI lacks; what *is* collectable here, on CPU, is a correctness
 receipt: every ``torch.*`` symbol mixle references must resolve on the installed Torch,
 and a curated set of critical nested APIs must be present. This catches a typo'd or
-removed API before a user hits it, and substantiates the ``torch>=2.0`` floor for the
-core surface (all referenced APIs are Torch-2.0-stable).
+removed API before a user hits it, and substantiates the ``torch>=2.4`` floor used
+by the FSDP2 and DCP distributed-training surface.
 
 The honest split between this CPU correctness receipt and the still-pending GPU receipts
 is recorded in ``release-checklists/0.8.0-gpu-claims.md``, whose consistency this file
@@ -15,6 +15,7 @@ also checks.
 
 from __future__ import annotations
 
+import importlib
 import re
 from pathlib import Path
 
@@ -44,6 +45,10 @@ _CRITICAL_NESTED = (
     "torch.einsum",
     "torch.no_grad",
     "torch.cuda.is_available",
+    "torch.distributed.checkpoint.async_save",
+    "torch.distributed.device_mesh.init_device_mesh",
+    "torch.distributed.fsdp.fully_shard",
+    "torch.distributed.tensor.parallel.parallelize_module",
 )
 
 
@@ -69,9 +74,17 @@ def test_every_referenced_torch_api_resolves() -> None:
 def test_critical_nested_apis_resolve() -> None:
     for dotted in _CRITICAL_NESTED:
         obj = torch
+        module_name = "torch"
         for seg in dotted.split(".")[1:]:
-            assert hasattr(obj, seg), f"{dotted} is not available on torch {torch.__version__}"
-            obj = getattr(obj, seg)
+            if hasattr(obj, seg):
+                obj = getattr(obj, seg)
+                module_name = f"{module_name}.{seg}"
+                continue
+            module_name = f"{module_name}.{seg}"
+            try:
+                obj = importlib.import_module(module_name)
+            except ModuleNotFoundError:
+                pytest.fail(f"{dotted} is not available on torch {torch.__version__}")
 
 
 def test_gpu_ledger_separates_correctness_from_gpu_receipts() -> None:

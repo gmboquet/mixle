@@ -166,12 +166,7 @@ class ContextParallelTest(unittest.TestCase):
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class FitDistributedSurfaceTest(unittest.TestCase):
-    """Smoke test: ``lm.fit(distributed=True, tp_size=..., pp_size=..., cp_size=...)`` runs and trains.
-
-    This exercises the EXTENDED ``LM.fit`` signature end to end at small (single-process, simulated-rank)
-    scale -- it does NOT run on real multi-GPU hardware (none is available here) and is not a claim about
-    MFU or scale; it confirms the declarative surface accepts and threads the new parallelism knobs.
-    """
+    """The legacy streaming surface must reject model axes it cannot execute."""
 
     def _corpus(self):
         text = "mixle composes the layer above the trainer, not the trainer itself. " * 12
@@ -179,19 +174,15 @@ class FitDistributedSurfaceTest(unittest.TestCase):
         stoi = {c: i for i, c in enumerate(chars)}
         return np.array([stoi[c] for c in text]), len(chars)
 
-    def test_fit_distributed_with_tp_pp_cp_smoke(self):
+    def test_streaming_fit_rejects_tp_pp_cp_even_with_legacy_optin(self):
         from mixle.models.language_model import LM
 
         ids, v = self._corpus()
         lm = LM(vocab=v, d_model=32, n_layer=4, n_head=4, block=16)
-        before = float(lm.nll(ids))
-        # tp/pp/cp > 1 is the validated-plan / data-parallel-only path, which must be opted into
-        # explicitly (see N9.5): the sharding is simulated at this scale, not integrated into training.
         with mock.patch.dict(os.environ, {"MIXLE_EXPERIMENTAL_NDPARALLEL": "1"}):
-            lm.fit(ids, distributed=True, epochs=2, batch_size=16, tp_size=2, pp_size=2, cp_size=2)
-        after = float(lm.nll(ids))
-        self.assertTrue(np.isfinite(after))
-        self.assertLessEqual(after, before + 5.0)  # training ran and produced a sane (finite, bounded) loss
+            with self.assertRaises(ValueError) as ctx:
+                lm.fit(ids, distributed=True, epochs=2, batch_size=16, tp_size=2, pp_size=2, cp_size=2)
+        self.assertIn("does not execute an explicit parallel plan", str(ctx.exception))
 
     def test_fit_distributed_tp_without_optin_raises(self):
         # Without the opt-in, requesting tensor/pipeline/context sharding must NOT silently fall through
@@ -202,9 +193,9 @@ class FitDistributedSurfaceTest(unittest.TestCase):
         lm = LM(vocab=v, d_model=32, n_layer=4, n_head=4, block=16)
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("MIXLE_EXPERIMENTAL_NDPARALLEL", None)
-            with self.assertRaises(NotImplementedError) as ctx:
+            with self.assertRaises(ValueError) as ctx:
                 lm.fit(ids, distributed=True, epochs=1, batch_size=16, tp_size=2)
-        self.assertIn("not integrated", str(ctx.exception))
+        self.assertIn("dense=True", str(ctx.exception))
 
     def test_fit_distributed_default_still_works_without_parallelism_dims(self):
         from mixle.models.language_model import LM
