@@ -30,6 +30,7 @@
     "KDE",
     "LedoitWolfEstimator",
     "NPVDistribution",
+    "OptionValue",
     "SmithMaxStable",
     "SmithMaxStableSampler",
     "SpatialMixture",
@@ -76,13 +77,15 @@
     "population_risk",
     "priced_liabilities",
     "rarefaction_curve",
+    "real_option_value",
     "record_times",
     "return_level",
     "scott_bandwidth",
     "silverman_bandwidth",
     "spearman_footrule",
     "turing_coverage",
-    "universal_kriging"
+    "universal_kriging",
+    "voi_dollars"
   ],
   "mixle.data": [
     "Boolean",
