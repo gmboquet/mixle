@@ -66,6 +66,7 @@ from mixle.analysis.rank_aggregation import (
     mallows_fit,
     spearman_footrule,
 )
+from mixle.analysis.sdm import HabitatModel, SpeciesObservation, fit_sdm
 from mixle.analysis.spatial_mixture import SpatialMixture
 from mixle.analysis.valuation import NPVDistribution, capex_opex, cost_curve, monte_carlo_npv
 
@@ -135,4 +136,8 @@ __all__ = [
     # reclamation ecology / biodiversity offsets (priced habitat-offset liability + no-net-loss constraint)
     "habitat_offset_liability",
     "no_net_loss_constraint",
+    # species-distribution / habitat-suitability modelling (IC-12)
+    "SpeciesObservation",
+    "HabitatModel",
+    "fit_sdm",
 ]
