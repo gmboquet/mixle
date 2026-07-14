@@ -449,8 +449,21 @@ def _select_active(
 def is_block_em_eligible(model: Any, estimator: Any) -> bool:
     """Whether ``model``/``estimator`` are a plain ``MixtureDistribution``/``MixtureEstimator`` pair
     the D3 scheduler can drive. Lives here (not in estimation.py) so the high-level estimation driver
-    never imports a concrete distribution type -- see compute_metadata_test.py's layering check."""
-    return isinstance(model, MixtureDistribution) and isinstance(estimator, MixtureEstimator)
+    never imports a concrete distribution type -- see compute_metadata_test.py's layering check.
+
+    Keyed (tied) estimators are ineligible: tying pools statistics ACROSS sites via the
+    merge_accumulator_keys pass, and block-EM's sparse per-component M-steps neither run that pass
+    nor could honor it without re-estimating every tied sibling of an updated block -- exactly the
+    silent-untying bug class #432 fixed in the posterior-transform strategies. schedule='auto'
+    therefore keeps keyed fits on the full-tree path (this predicate), and an EXPLICIT run_block_em
+    call refuses loudly instead of silently untying."""
+    from mixle.stats.compute.pdist import estimator_has_keys
+
+    return (
+        isinstance(model, MixtureDistribution)
+        and isinstance(estimator, MixtureEstimator)
+        and not estimator_has_keys(estimator)
+    )
 
 
 def run_block_em(
@@ -569,6 +582,15 @@ def run_block_em(
     part of this path. ``weight_tol`` controls temporary dormancy only. Use
     :func:`mixle.inference.freeze_rollup.run_em_freeze_rollup` when those controls are desired.
     """
+    from mixle.stats.compute.pdist import estimator_has_keys
+
+    if estimator_has_keys(estimator):
+        raise NotImplementedError(
+            "block-EM does not support keyed (tied) estimators: its sparse per-component M-steps "
+            "cannot run the merge_accumulator_keys pooling pass without re-estimating every tied "
+            "sibling of an updated block, so tying would silently break. Use the full-tree path "
+            "(optimize(schedule='full') or schedule='auto', which reroutes keyed fits automatically)."
+        )
     if not isinstance(initial_model, MixtureDistribution):
         raise TypeError("run_block_em requires a MixtureDistribution model.")
     if (

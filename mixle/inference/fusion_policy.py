@@ -76,7 +76,11 @@ def prefer_block_schedule(model: Any, enc_data: Any, max_its: int) -> bool:
         if HAS_NUMBA:
             from mixle.stats.compute.fused_codegen import fusible
 
-            if fusible(model):
+            # bare_bridge=False: only the FAST fused paths beat block scheduling. The bare-bridge
+            # last resort scores each component through its own native seq_log_density (host-speed
+            # columns + a fused softmax), so it does NOT capture the cross-component win the
+            # docstring numbers are about -- sparse block selection still pays off there.
+            if fusible(model, bare_bridge=False):
                 return False  # the whole-model fused kernel wins outright; see the docstring numbers
     except Exception:  # noqa: BLE001 - fusibility probe must never break dispatch
         pass

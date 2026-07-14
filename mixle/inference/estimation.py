@@ -221,6 +221,11 @@ def _engine_seq_estimate(
     for sz, enc in chunks:
         nobs += sz
         accumulator.combine(kernel.accumulate(enc, np.ones(sz, dtype=np.float64)))
+    # The post-accumulation key pass every EM driver must run -- same omission as _engine_fused_step
+    # had: without it, keyed (tied) parameters silently untie on any engine-kernel fit routed here.
+    stats_dict: dict = {}
+    accumulator.key_merge(stats_dict)
+    accumulator.key_replace(stats_dict)
     # Activate the engine so device-aware M-steps (e.g. NeuralLeaf) follow its device. The context
     # wraps nested component estimates too (a MixtureEstimator's per-leaf estimate runs inside it).
     from mixle.engines.base import using_active_engine
@@ -230,7 +235,11 @@ def _engine_seq_estimate(
 
 
 def _engine_fused_step(
-    enc_data: Any, estimator: ParameterEstimator, prev_estimate: Any, engine: Any
+    enc_data: Any,
+    estimator: ParameterEstimator,
+    prev_estimate: Any,
+    engine: Any,
+    fused_options: dict[str, Any] | None = None,
 ) -> tuple[Any, float | None]:
     """Engine E/M step that also returns the data log-likelihood of ``prev_estimate``.
 
@@ -242,6 +251,10 @@ def _engine_fused_step(
     validate_estimator_keys(estimator)
     chunks = _local_encoded_chunks(enc_data)
     kernel = prev_estimate.kernel(engine=engine, estimator=estimator)
+    if fused_options:
+        for knob, value in fused_options.items():
+            if hasattr(kernel, knob):  # only the FusedKernel carries the tuning attrs
+                setattr(kernel, knob, value)
     accumulator = estimator.accumulator_factory().make()
     nobs = 0.0
     ll = 0.0
@@ -805,6 +818,7 @@ def optimize(
     monotone: bool | None = None,
     track_best: bool | None = None,
     seed: int | None = None,
+    fused_options: dict[str, Any] | None = None,
 ) -> SequenceEncodableProbabilityDistribution:
     """Fit ``estimator`` to ``data`` by a generalized-EM loop, for ``max_its`` iterations or until the
         objective improves by less than ``delta``.
@@ -938,6 +952,14 @@ def optimize(
         seed (Optional[int]): Integer seed for initializing the EM algorithm -- shorthand for
             ``rng=RandomState(seed)``, matching the ``seed=`` argument the samplers and the other
             entry points take. Mutually exclusive with ``rng`` (passing both raises ``TypeError``).
+        fused_options (Optional[dict]): Tuning knobs for the fused compiled kernels, applied when the
+            fit runs on a fused engine (an explicit fused ``engine=`` or the auto-fusion gate).
+            Recognized keys: ``parallel`` (bool -- force the chunk-parallel kernels on or off,
+            overriding the observation-count auto-gate; results are bit-stable either way),
+            ``lse_bits`` (int -- opt SCORING into quantized log-sum-exp with a ~2**-bits relative
+            bound; E-steps always stay exact), and ``lse_span`` (float, default 24.0 -- the clipped
+            LSE exponent range used with ``lse_bits``). Unknown keys raise ``ValueError``. Ignored
+            (with the same validation) when the fit resolves to a non-fused path.
 
     Returns:
         SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm
@@ -945,6 +967,12 @@ def optimize(
 
     """
     rng = _resolve_rng_arg(rng, seed)
+    if fused_options is not None:
+        unknown = set(fused_options) - {"parallel", "lse_bits", "lse_span"}
+        if unknown:
+            raise ValueError(
+                f"optimize(fused_options=...): unknown keys {sorted(unknown)}; expected a subset of ['lse_bits', 'lse_span', 'parallel']"
+            )
     if (
         estimator is None
         and structure == "auto"
@@ -1185,7 +1213,7 @@ def optimize(
             if engine is None:
                 fused_step_fn = _local_fused_step
             else:
-                fused_step_fn = partial(_engine_fused_step, engine=engine)
+                fused_step_fn = partial(_engine_fused_step, engine=engine, fused_options=fused_options)
 
         objective_scorer = _objective_scorer(resolved_objective, estimator, engine)
         objective_fn = lambda candidate: objective_scorer(enc_data, candidate)[1]

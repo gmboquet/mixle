@@ -123,7 +123,9 @@ class AuditCadenceAndDispatchTest:
             ],
             [0.34, 0.33, 0.33],
         )
-        assert not fusible(deepish)  # the Laplace leaf breaks whole-model fusion
+        # the Laplace leaf keeps this off the FAST fused paths (the bare-bridge last resort covers
+        # it at host speed, which is exactly why prefer_block_schedule asks with bare_bridge=False)
+        assert not fusible(deepish, bare_bridge=False)
         rng = np.random.RandomState(3)
         enc = seq_encode(rng.normal(0.0, 4.0, 20_000), model=deepish)
         # only 3 components, but each is an expensive subtree: block scheduling qualifies
