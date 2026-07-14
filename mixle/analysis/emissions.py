@@ -10,11 +10,16 @@ GHG-Protocol-style :class:`EmissionFactors`.
     are supplied, and a content-addressed ``activity_content_hash`` in the returned
     :class:`Footprint`'s provenance so every number traces back to the exact activity schedule that
     produced it.
+  * :func:`transition_risk` -- prices a :class:`Footprint` against a set of carbon-price/policy
+    scenario paths and subtracts the resulting per-scenario carbon cost from a J2 ``npv_samples``
+    distribution, returning an IC-1 `DerivedQuantity` that carries the carbon-adjusted NPV samples
+    (uncertainty-aware, not just a point estimate) plus a mean-value scenario ranking.
 
 Emission factors are always supplied by the caller (or an upstream knowledge store) -- this module
-vendors no lifecycle-inventory database; see the work-plan Non-goals for L1. Carbon *pricing* (turning
-a footprint into a cost/NPV term) is out of scope here too -- see :mod:`mixle.analysis.emissions`'s
-``transition_risk`` (L3) and ``climate_terms`` (L6), which build on :class:`Footprint`.
+vendors no lifecycle-inventory database; see the work-plan Non-goals for L1. A full risk-adjusted
+mining objective that also folds in water constraints is out of scope here too -- see
+:mod:`mixle.analysis.emissions`'s ``climate_terms`` (L6), which builds on :class:`Footprint` and
+:func:`transition_risk` alongside L2's water balance.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from mixle.data.hashing import _canonical
+from mixle.reason.posterior_protocol import DerivedQuantity
 
 _VALID_SCOPES = (1, 2, 3)
 
@@ -148,5 +154,119 @@ def emissions_footprint(
         scope3=scope_values[3],
         total=total,
         ci=ci,
+        provenance=provenance,
+    )
+
+
+@dataclass
+class TransitionRiskResult:
+    """The carbon-adjusted NPV distribution across carbon-price/policy scenarios (L3).
+
+    Satisfies the frozen ``mixle.reason.posterior_protocol.DerivedQuantity`` structural protocol --
+    ``samples``, ``prior_dominated``, ``credible_interval`` -- so a carbon-adjusted value can flow
+    anywhere a `DerivedQuantity` is expected (J5 tail risk, J2 re-valuation). ``samples`` is shaped
+    ``(n, k)``: the ``n`` baseline ``npv_samples`` draws, each re-priced under every one of the ``k``
+    carbon-price scenarios (one column per scenario) -- the re-ranking below stays uncertainty-aware
+    rather than collapsing straight to a point estimate. ``prior_dominated`` is always ``False``: there
+    is no prior/regulariser here, the distribution's width is set entirely by ``npv_samples``.
+
+    Beyond the protocol, ``scenario_mean`` (per-scenario mean carbon-adjusted NPV), ``ranking``
+    (scenario indices sorted best -> worst by ``scenario_mean``), and ``carbon_cost`` (the
+    priced-and-discounted carbon cost subtracted from each scenario) carry the scenario-level
+    comparison :func:`transition_risk` exists to produce.
+    """
+
+    samples: np.ndarray
+    prior_dominated: bool
+    scenario_mean: np.ndarray
+    ranking: list[int]
+    carbon_cost: np.ndarray
+    provenance: dict
+
+    def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
+        """Per-scenario central ``level`` interval of the carbon-adjusted NPV, each shape ``(k,)``."""
+        alpha = (1.0 - level) / 2.0
+        lo = np.quantile(self.samples, alpha, axis=0)
+        hi = np.quantile(self.samples, 1.0 - alpha, axis=0)
+        return lo, hi
+
+
+def _coerce_price_paths(carbon_price_paths: np.ndarray) -> np.ndarray:
+    """Coerce ``carbon_price_paths`` to a ``(k, t)`` scenario matrix (one row per scenario).
+
+    A 1-D ``(k,)`` array is a flat carbon price per scenario with no explicit period axis (each
+    scenario has a single "period"); a 2-D ``(k, t)`` array is one price path per scenario, ``t``
+    periods each -- the same "one row per scenario" convention `monte_carlo_npv` (J2) uses for
+    ``price_paths``.
+    """
+    prices = np.asarray(carbon_price_paths, dtype=np.float64)
+    if prices.ndim == 1:
+        return prices[:, None]
+    if prices.ndim == 2:
+        return prices
+    raise ValueError(f"transition_risk: carbon_price_paths must be 1-D (k,) or 2-D (k, t); got shape {prices.shape}")
+
+
+def transition_risk(
+    footprint: Footprint,
+    carbon_price_paths: np.ndarray,
+    *,
+    npv_samples: np.ndarray,
+    discount: np.ndarray | None = None,
+) -> DerivedQuantity:
+    """Carbon-adjusted NPV distribution + scenario ranking under a set of carbon-price paths (L3).
+
+    For each of the ``k`` scenarios in ``carbon_price_paths`` (a ``(k,)`` flat price or a ``(k, t)``
+    per-period path -- see :func:`_coerce_price_paths`), the priced carbon cost is
+    ``footprint.total * sum_t(price[t] * discount[t])`` (``discount`` defaults to all-ones, i.e. no
+    discounting, when omitted -- pass period discount factors, e.g. ``1 / (1 + r) ** t``, to match a
+    J2 ``monte_carlo_npv`` DCF). That per-scenario carbon cost is subtracted from every draw of the
+    baseline ``npv_samples`` (a J2 `NPVDistribution.samples`-shaped ``(n,)`` array), yielding an
+    ``(n, k)`` carbon-adjusted value distribution: one re-priced NPV distribution per scenario, still
+    carrying the original valuation uncertainty.
+
+    Scenarios are ranked by mean carbon-adjusted NPV (``scenario_mean``, descending: best scenario
+    first) so a high-carbon-price/policy scenario reliably re-ranks below a low-price one, with the
+    gap between any two scenarios scaling linearly in ``footprint.total`` -- a bigger footprint pays
+    proportionally more carbon cost under the same price paths. The returned
+    :class:`TransitionRiskResult` satisfies IC-1's `DerivedQuantity` protocol so the re-ranking is
+    always inspectable with a credible interval, not just a point estimate; it feeds J5 tail risk and
+    J2 re-valuation directly.
+    """
+    prices = _coerce_price_paths(carbon_price_paths)
+    n_scenarios, n_periods = prices.shape
+
+    if discount is None:
+        weights = np.ones(n_periods, dtype=np.float64)
+    else:
+        weights = np.asarray(discount, dtype=np.float64)
+        if weights.shape != (n_periods,):
+            raise ValueError(
+                f"transition_risk: discount must have shape ({n_periods},) to match carbon_price_paths' "
+                f"period axis; got {weights.shape}"
+            )
+
+    carbon_cost = footprint.total * (prices * weights[None, :]).sum(axis=1)  # (k,)
+
+    npv = np.asarray(npv_samples, dtype=np.float64).reshape(-1)  # (n,)
+    adjusted = npv[:, None] - carbon_cost[None, :]  # (n, k)
+
+    scenario_mean = adjusted.mean(axis=0)
+    ranking = [int(i) for i in np.argsort(-scenario_mean)]
+
+    provenance = {
+        "footprint_activity_hash": footprint.provenance.get("activity_content_hash"),
+        "n_scenarios": n_scenarios,
+        "n_periods": n_periods,
+        "discounted": discount is not None,
+        "carbon_cost": [float(c) for c in carbon_cost],
+    }
+
+    return TransitionRiskResult(
+        samples=adjusted,
+        prior_dominated=False,
+        scenario_mean=scenario_mean,
+        ranking=ranking,
+        carbon_cost=carbon_cost,
         provenance=provenance,
     )
