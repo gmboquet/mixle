@@ -55,13 +55,53 @@ def rhat(chains: Any) -> np.ndarray:
     return np.where(w > 0.0, out, 1.0)
 
 
+def _geyer_tau(centered: np.ndarray, var: np.ndarray, lag_limit: int) -> np.ndarray:
+    """Integrated autocorrelation time per component via Geyer's initial monotone sequence.
+
+    Args:
+        centered: ``(n_chains, n_draws, k)`` draws, each chain centered by its own mean.
+        var: ``(k,)`` pooled variances of ``centered`` (all strictly positive).
+        lag_limit: largest autocorrelation lag considered.
+
+    Autocorrelations are pooled across chains and paired lag-by-lag (``P_0 = rho_0 + rho_1``,
+    ``P_j = rho_{2j} + rho_{2j+1}``). Each component *independently* sums its pairs up to (not
+    including) its first non-positive pair -- Geyer's initial positive sequence -- with the retained
+    pairs additionally forced non-increasing (initial monotone sequence), giving
+    ``tau = 2 * sum(P) - 1`` (Geyer 1992). Truncating per component at its own noise floor is what
+    keeps one slowly-mixing component from letting the others accumulate positive autocorrelation
+    noise at post-cutoff lags.
+    """
+    m, n, k = centered.shape
+    if lag_limit < 1:
+        return np.ones(k, dtype=float)
+    psum = np.zeros(k, dtype=float)
+    prev = np.full(k, np.inf)
+    active = np.ones(k, dtype=bool)
+    lag = 0
+    while np.any(active) and lag + 1 <= lag_limit:
+        if lag == 0:
+            rho_even = np.ones(k, dtype=float)
+        else:
+            rho_even = np.mean(centered[:, :-lag] * centered[:, lag:], axis=(0, 1)) / var
+        rho_odd = np.mean(centered[:, : -(lag + 1)] * centered[:, lag + 1 :], axis=(0, 1)) / var
+        pair = np.minimum(rho_even + rho_odd, prev)
+        active &= pair > 0.0
+        psum = np.where(active, psum + pair, psum)
+        prev = np.where(active, pair, prev)
+        lag += 2
+    tau = 2.0 * psum - 1.0
+    # positivity floor for (near-)antithetic chains (rho_1 ~ -1), Stan's 1/log10(N) convention
+    return np.maximum(tau, 1.0 / np.log10(max(float(m * n), 10.0)))
+
+
 def ess(samples: Any, max_lag: int | None = None) -> np.ndarray:
-    """Effective sample size per parameter from positive autocorrelation lags.
+    """Effective sample size per parameter, ``n / tau`` with Geyer's initial-monotone-sequence ``tau``.
 
     Accepts a single chain ``(n_draws,)`` / ``(n_draws, d)`` or a stack of chains
     ``(n_chains, n_draws, d)`` (the chains are pooled into one autocorrelation estimate after
-    centering each chain by its own mean). Uses the initial-positive-sequence truncation
-    (Geyer): sum autocorrelations until the first non-positive lag.
+    centering each chain by its own mean). Adjacent-lag autocorrelation pairs are summed until the
+    first non-positive pair, independently per parameter, with the retained pairs forced
+    non-increasing (Geyer 1992) -- see :func:`_geyer_tau`.
 
     Returns:
         A length-``d`` array of ESS values.
@@ -85,15 +125,7 @@ def ess(samples: Any, max_lag: int | None = None) -> np.ndarray:
     if not np.any(nonzero):
         return out
     lag_limit = n - 1 if max_lag is None else min(int(max_lag), n - 1)
-    tau = np.ones(int(nonzero.sum()), dtype=float)
-    cvar = var[nonzero]
-    cc = centered[:, :, nonzero]
-    for lag in range(1, lag_limit + 1):
-        rho = np.mean(cc[:, :-lag] * cc[:, lag:], axis=(0, 1)) / cvar
-        positive = rho > 0.0
-        if not np.any(positive):
-            break
-        tau += 2.0 * np.where(positive, rho, 0.0)
+    tau = _geyer_tau(centered[:, :, nonzero], var[nonzero], lag_limit)
     out[nonzero] = np.maximum(1.0, n_total / tau)
     return out
 
@@ -114,7 +146,7 @@ def _rank_normalize(arr: np.ndarray) -> np.ndarray:
     out = np.empty_like(arr)
     for k in range(d):
         ranks = rankdata(arr[:, :, k].ravel(), method="average")
-        out[:, :, k] = ndtri((ranks - 0.375) / (total - 0.25)).reshape(m, n)
+        out[:, :, k] = ndtri((ranks - 0.375) / (total + 0.25)).reshape(m, n)
     return out
 
 

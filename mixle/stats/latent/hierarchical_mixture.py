@@ -91,6 +91,7 @@ class HierarchicalMixtureDistribution(SequenceEncodableProbabilityDistribution):
             ),
             statistics=(
                 StatisticSpec("component_counts"),
+                StatisticSpec("outer_weight_counts"),  # document-level outer posteriors (the w M-step)
                 StatisticSpec("topics", kind="tuple"),
                 StatisticSpec("length", kind="child_stat"),
             ),
@@ -545,11 +546,14 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
                 Each SequenceEncodableStatisticAccumulator should be compatible with data type T.
             num_topics (int): Number of topic distributions. Length of accumulators above.
             num_mixtures (int): Number of outer mixture components.
-            comp_counts (ndarray): Numpy array of shape ('num_mixtures', 'num_topics') for tracking component counts,
-                used to estimate the weights.
+            comp_counts (ndarray): Numpy array of shape ('num_mixtures', 'num_topics') for tracking token-level
+                component counts, used to estimate the topic weights 'taus'.
+            w_counts (ndarray): Numpy array of length 'num_mixtures' with document-level outer-posterior sums,
+                used to estimate the outer weights 'w'.
             len_accumulator (Optional[SequenceEncodableStatisticAccumulator]): Optional accumulator for the
                 length of the topic distributions.
-            weight_key (Optional[str]): If set, comp_counts are merged with objects containing matching weight_key.
+            weight_key (Optional[str]): If set, comp_counts/w_counts are merged with objects containing matching
+                weight_key.
             comp_key (Optional[str]): If set, the components of the outer-mixture are merged with objects containing
                 a matching comp_key.
             _init_rng (bool): False if rng for accumulators has not been set.
@@ -564,6 +568,12 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         self.num_topics = len(accumulators)
         self.num_mixtures = num_mixtures
         self.comp_counts = vec.zeros((self.num_mixtures, self.num_topics))
+        # Document-level outer-posterior sums, one entry per outer mixture component. The EM
+        # maximizer for the outer weights `w` is the sum of DOCUMENT posteriors; deriving `w` from
+        # the token-level `comp_counts` row sums weights each document by its length, which is not
+        # the EM update and breaks monotonicity on variable-length corpora. `comp_counts` stays
+        # token-level (its row-normalization is the correct `taus` update).
+        self.w_counts = vec.zeros(self.num_mixtures)
         self.len_accumulator = len_accumulator if len_accumulator is not None else NullAccumulator()
         keys_temp = keys if keys is not None else (None, None)
         self.weight_key = keys_temp[0]
@@ -634,6 +644,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             self._rng_initialize(rng)
 
         idx1 = self._w_rng.choice(self.num_mixtures)
+        self.w_counts[idx1] += weight
 
         for j in range(len(x)):
             idx2 = self._tau_rng.choice(self.num_topics)
@@ -677,6 +688,8 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         idx1 = self._w_rng.choice(self.num_mixtures, size=sz, replace=True)  # draw component
         idx2 = self._tau_rng.choice(self.num_topics, size=tsz, replace=True)  # draw seqeucne mixture in component
         ww = weights[idx]
+
+        self.w_counts += np.bincount(idx1, weights=weights, minlength=self.num_mixtures)
 
         for i in range(self.num_topics):
             w = np.zeros_like(ww)
@@ -767,6 +780,10 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             self._seq_ll += float(np.dot(weights, row_ll))
 
         rv /= ll_sum
+        # Outer weights: accumulate the DOCUMENT-level outer posteriors (one row per document,
+        # weighted by the document weight) -- the EM maximizer for `w`. The token-level expansion
+        # below (rv[idx, :]) feeds only the taus/topic statistics.
+        self.w_counts += np.dot(weights, rv)
         rv = rv[idx, :]
         ww = np.reshape(weights[idx], (-1, 1))
 
@@ -798,6 +815,9 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         tsz = len(idx)
         weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
         if tsz == 0:
+            if sz and estimate is not None:
+                # every document is empty: its outer posterior is the prior (matches host seq_update)
+                self.w_counts += float(np.sum(weights_np)) * np.asarray(estimate.w, dtype=np.float64)
             if self.len_accumulator is not None:
                 self.len_accumulator.seq_update(enc_len, weights_np, None if estimate is None else estimate.len_dist)
             return
@@ -824,6 +844,9 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         rv = rv - engine.logsumexp(rv, axis=1, keepdims=True)
         rv = engine.exp(rv)  # outer posteriors (sz, M)
 
+        # Outer weights: document-level outer-posterior sums (matches the host seq_update).
+        self.w_counts += np.dot(weights_np, np.asarray(engine.to_numpy(rv)))
+
         rv_items = rv[idx_e, :]  # (tsz, M)
         ww = engine.asarray(weights_np)[idx_e][:, None]
         taus = engine.asarray(np.asarray(estimate.taus, dtype=np.float64))  # (M, T)
@@ -848,62 +871,73 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             self.len_accumulator.seq_update(enc_len, weights_np, None if estimate is None else estimate.len_dist)
 
     def combine(
-        self, suff_stat: tuple[np.ndarray, tuple[SS1, ...], SS2 | None]
+        self, suff_stat: tuple[np.ndarray, np.ndarray, tuple[SS1, ...], SS2 | None]
     ) -> "HierarchicalMixtureEstimatorAccumulator":
         """Combine the sufficient statistics of 'suff_stat; with attribute variables.
 
-        Arg suff_stat is a Tuple of length 3 containing,
-            suff_stat[0] (ndarray[float]): Aggregated component counts with shape (num_mixtures, num_topics).
-            suff_stat[1] (Tuple[SS1,...]): Tuple of 'num_topics' sufficient statistics for the topics.
-            suff_stat[2] (Optional[SS2]): Optional sufficient statistic for length accumulator.
+        Arg suff_stat is a Tuple of length 4 containing,
+            suff_stat[0] (ndarray[float]): Aggregated token-level component counts with shape
+                (num_mixtures, num_topics).
+            suff_stat[1] (ndarray[float]): Aggregated document-level outer-posterior sums with length num_mixtures.
+            suff_stat[2] (Tuple[SS1,...]): Tuple of 'num_topics' sufficient statistics for the topics.
+            suff_stat[3] (Optional[SS2]): Optional sufficient statistic for length accumulator.
 
         Args:
-            suff_stat (Tuple[np.ndarray, Tuple[SS1, ...], Optional[SS2]]): See above for details.
+            suff_stat (Tuple[np.ndarray, np.ndarray, Tuple[SS1, ...], Optional[SS2]]): See above for details.
 
         Returns:
             HierarchicalMixtureEstimatorAccumulator object.
 
         """
         self.comp_counts += suff_stat[0]
+        self.w_counts += suff_stat[1]
         for i in range(self.num_topics):
-            self.accumulators[i].combine(suff_stat[1][i])
+            self.accumulators[i].combine(suff_stat[2][i])
 
-        self.len_accumulator.combine(suff_stat[2])
+        self.len_accumulator.combine(suff_stat[3])
 
         return self
 
-    def value(self) -> tuple[np.ndarray, tuple[Any, ...], Any | None]:
-        """Returns sufficient statistics of type Tuple[np.ndarray, Tuple[SS1,...], Optional[SS2]]."""
-        return self.comp_counts, tuple([u.value() for u in self.accumulators]), self.len_accumulator.value()
+    def value(self) -> tuple[np.ndarray, np.ndarray, tuple[Any, ...], Any | None]:
+        """Returns sufficient statistics of type Tuple[np.ndarray, np.ndarray, Tuple[SS1,...], Optional[SS2]]."""
+        return (
+            self.comp_counts,
+            self.w_counts,
+            tuple([u.value() for u in self.accumulators]),
+            self.len_accumulator.value(),
+        )
 
     def from_value(
-        self, x: tuple[np.ndarray, tuple[SS1, ...], SS2 | None]
+        self, x: tuple[np.ndarray, np.ndarray, tuple[SS1, ...], SS2 | None]
     ) -> "HierarchicalMixtureEstimatorAccumulator":
         """Set the attribute variables for sufficient statistics to arg 'x'.
 
-        Arg 'x' is a Tuple of length 3 containing,
-            x[0] (ndarray[float]): Aggregated component counts with shape (num_mixtures, num_topics).
-            x[1] (Tuple[SS1,...]): Tuple of 'num_topics' sufficient statistics for the topics.
-            x[2] (Optional[SS2]): Optional sufficient statistic for length accumulator.
+        Arg 'x' is a Tuple of length 4 containing,
+            x[0] (ndarray[float]): Aggregated token-level component counts with shape (num_mixtures, num_topics).
+            x[1] (ndarray[float]): Aggregated document-level outer-posterior sums with length num_mixtures.
+            x[2] (Tuple[SS1,...]): Tuple of 'num_topics' sufficient statistics for the topics.
+            x[3] (Optional[SS2]): Optional sufficient statistic for length accumulator.
 
         Args:
-            x (Tuple[np.ndarray, Tuple[SS1, ...], Optional[SS2]]): See above for details.
+            x (Tuple[np.ndarray, np.ndarray, Tuple[SS1, ...], Optional[SS2]]): See above for details.
 
         Returns:
             HierarchicalMixtureEstimatorAccumulator object.
 
         """
         self.comp_counts = x[0]
+        self.w_counts = x[1]
         for i in range(self.num_topics):
-            self.accumulators[i].from_value(x[1][i])
+            self.accumulators[i].from_value(x[2][i])
 
-        self.len_accumulator.from_value(x[2])
+        self.len_accumulator.from_value(x[3])
 
         return self
 
     def scale(self, c: float) -> "HierarchicalMixtureEstimatorAccumulator":
         """Scale linear counts and delegate child/length sufficient statistics."""
         self.comp_counts *= c
+        self.w_counts *= c
         for acc in self.accumulators:
             acc.scale(c)
         self.len_accumulator.scale(c)
@@ -912,7 +946,8 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge this accumulator into keyed sufficient statistics.
 
-        Merges ``comp_counts`` when ``weight_key`` is set, and merges topic accumulators when ``comp_key`` is set.
+        Merges ``comp_counts``/``w_counts`` when ``weight_key`` is set, and merges topic accumulators when
+        ``comp_key`` is set.
 
         Also delegates keyed merging to the topic and length accumulators.
 
@@ -925,9 +960,11 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         """
         if self.weight_key is not None:
             if self.weight_key in stats_dict:
-                stats_dict[self.weight_key] += self.comp_counts
+                keyed_comp_counts, keyed_w_counts = stats_dict[self.weight_key]
+                keyed_comp_counts += self.comp_counts
+                keyed_w_counts += self.w_counts
             else:
-                stats_dict[self.weight_key] = self.comp_counts
+                stats_dict[self.weight_key] = (self.comp_counts, self.w_counts)
 
         if self.comp_key is not None:
             if self.comp_key in stats_dict:
@@ -945,7 +982,8 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace this accumulator's statistics from matching keyed values.
 
-        Replaces ``comp_counts`` when ``weight_key`` is set, and replaces topic accumulators when ``comp_key`` is set.
+        Replaces ``comp_counts``/``w_counts`` when ``weight_key`` is set, and replaces topic accumulators when
+        ``comp_key`` is set.
 
         Also delegates keyed replacement to the topic and length accumulators.
 
@@ -958,7 +996,7 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         """
         if self.weight_key is not None:
             if self.weight_key in stats_dict:
-                self.comp_counts = stats_dict[self.weight_key]
+                self.comp_counts, self.w_counts = stats_dict[self.weight_key]
 
         if self.comp_key is not None:
             if self.comp_key in stats_dict:
@@ -1074,14 +1112,18 @@ class HierarchicalMixtureEstimator(ParameterEstimator):
         return HierarchicalMixtureEstimatorAccumulatorFactory(est_factories, self.num_mixtures, len_factory, self.keys)
 
     def estimate(
-        self, nobs: float | None, suff_stat: tuple[np.ndarray, SS1, SS2 | None]
+        self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, SS1, SS2 | None]
     ) -> "HierarchicalMixtureDistribution":
         """Estimate a hierarchical mixture from aggregated sufficient statistics.
 
-        ``suff_stat`` is a three-item tuple containing:
-            suff_stat[0] (ndarray[float]): Aggregated component counts with shape (num_mixtures, num_topics).
-            suff_stat[1] (Tuple[SS1,...]): One sufficient-statistic value per topic.
-            suff_stat[2] (Optional[SS2]): Sufficient statistics for the length estimator.
+        ``suff_stat`` is a four-item tuple containing:
+            suff_stat[0] (ndarray[float]): Aggregated token-level component counts with shape
+                (num_mixtures, num_topics). Row-normalized into the topic weights ``taus``.
+            suff_stat[1] (ndarray[float]): Aggregated document-level outer-posterior sums with length
+                num_mixtures. Normalized into the outer weights ``w`` -- the EM maximizer for ``w``
+                is the document-level posterior sum, NOT the (length-weighted) token-level row sums.
+            suff_stat[2] (Tuple[SS1,...]): One sufficient-statistic value per topic.
+            suff_stat[3] (Optional[SS2]): Sufficient statistics for the length estimator.
 
         Args:
             nobs (Optional[float]): Number of observations used in accumulation of 'suff_stat'.
@@ -1093,7 +1135,7 @@ class HierarchicalMixtureEstimator(ParameterEstimator):
         """
         num_components = self.num_components
         num_mixtures = self.num_mixtures
-        counts, comp_suff_stats, len_suff_stats = suff_stat
+        counts, w_counts, comp_suff_stats, len_suff_stats = suff_stat
         len_dist = self.len_estimator.estimate(None, len_suff_stats) if len_suff_stats is not None else self.len_dist
 
         components = [self.estimators[i].estimate(None, comp_suff_stats[i]) for i in range(num_components)]
@@ -1101,30 +1143,28 @@ class HierarchicalMixtureEstimator(ParameterEstimator):
         if self.pseudo_count is not None and self.suff_stat is None:
             p = self.pseudo_count / (num_components * num_mixtures)
             taus = counts + p
-            w = taus.sum(axis=1, keepdims=True)
-            taus /= w
-            w /= w.sum()
-            w = w.flatten()
+            taus /= taus.sum(axis=1, keepdims=True)
+            w = w_counts + self.pseudo_count / num_mixtures
+            w = w / w.sum()
 
         elif self.pseudo_count is not None and self.suff_stat is not None:
             taus = (counts + self.suff_stat * self.pseudo_count) / (counts.sum() + self.pseudo_count)
-            w = taus.sum(axis=1, keepdims=True)
-            taus /= w
-            w /= w.sum()
-            w = w.flatten()
+            taus /= taus.sum(axis=1, keepdims=True)
+            w = w_counts + self.pseudo_count * np.asarray(self.suff_stat).sum(axis=1)
+            w = w / w.sum()
 
         else:
             taus = counts
-            w = taus.sum(axis=1, keepdims=True)
-            w_pos = w[:, 0] > 0
-            taus[w_pos, :] /= w[w_pos, :]
-            taus[~w_pos, :] = 1.0 / float(num_components)
-            w_sum = w.sum()
+            row_sums = taus.sum(axis=1, keepdims=True)
+            rows_pos = row_sums[:, 0] > 0
+            taus[rows_pos, :] /= row_sums[rows_pos, :]
+            taus[~rows_pos, :] = 1.0 / float(num_components)
+            w_sum = w_counts.sum()
 
             if w_sum == 0:
                 w = np.ones(num_mixtures) / float(num_mixtures)
             else:
-                w = (w / w_sum).flatten()
+                w = w_counts / w_sum
 
         return HierarchicalMixtureDistribution(components, w, taus, len_dist=len_dist, name=self.name, keys=self.keys)
 

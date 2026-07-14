@@ -19,6 +19,7 @@ from mixle.utils.parallel.planner import (  # noqa: E402
     is_encoded_data_handle,
     model_sharding_plan,
     plan,
+    register_encoded_data_backend,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "is_encoded_data_handle",
     "model_sharding_plan",
     "plan",
+    "register_encoded_data_backend",
 ]

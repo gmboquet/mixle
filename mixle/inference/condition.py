@@ -285,18 +285,37 @@ def _condition_mixture(model: MixtureDistribution, ev: dict[FieldPath, Any]) -> 
 def _condition_hmm(model: HiddenMarkovModelDistribution, ev: dict[FieldPath, Any]) -> Posterior:
     if any(len(p) != 1 for p in ev):
         raise _NoExactRule("nested evidence is not supported by the HMM exact handler")
-    observed = {p[0]: v for p, v in ev.items()}
+    observed = {int(p[0]): v for p, v in ev.items()}
     if not observed:
         raise _NoExactRule("no evidence")
     t_max = max(observed)
     n_states = model.n_states
-    log_b = np.zeros((t_max + 1, n_states), dtype=np.float64)
-    for t in range(t_max + 1):
-        if t in observed:
+
+    def _emission_log_b(fields: dict[int, Any], horizon: int) -> np.ndarray:
+        """Per-time emission log-likelihood matrix ``(horizon, K)``; unevidenced times stay 0."""
+        log_b = np.zeros((horizon, n_states), dtype=np.float64)
+        for t, val in fields.items():
             for k in range(n_states):
-                log_b[t, k] = _safe_log_density(model.topics[k], observed[t])
-    q = MarkovChainLatentPosterior(model.log_w, model.log_transitions, log_b)
+                log_b[t, k] = _safe_log_density(model.topics[k], val)
+        return log_b
+
+    q = MarkovChainLatentPosterior(model.log_w, model.log_transitions, _emission_log_b(observed, t_max + 1))
     marginals = q.marginals()  # (T, K) smoothed state responsibilities
+    log_z = q.log_likelihood()  # log p(evidence), the forward normalizer
+
+    def _state_marginals_at(t: int) -> np.ndarray:
+        """``p(z_t | evidence)`` at any time, extending past the last evidenced time by prediction."""
+        if t < 0:
+            raise ValueError(f"HMM field index must be a non-negative time step; got {t}.")
+        if t <= t_max:
+            return marginals[t]
+        # Beyond the last evidenced time the smoothed chain is a pure prediction: evidence only
+        # touches times <= t_max, so p(z_t | evidence) = p(z_{t_max} | evidence) A^(t - t_max).
+        w = marginals[t_max]
+        trans = np.exp(model.log_transitions)
+        for _ in range(t - t_max):
+            w = w @ trans
+        return w
 
     def sample_fn(n: int, s: int | None) -> Any:
         rng = RandomState(s)
@@ -313,16 +332,33 @@ def _condition_hmm(model: HiddenMarkovModelDistribution, ev: dict[FieldPath, Any
         return out
 
     def log_density_fn(partial_row: dict[int, Any]) -> float:
-        total = 0.0
-        for t, val in partial_row.items():
-            w = marginals[t]
-            comp_ld = np.array([_safe_log_density(model.topics[k], val) for k in range(n_states)])
-            total += float(logsumexp(comp_ld + np.log(w + 1e-300)))
-        return total
+        # The EXACT joint conditional the "exact" label promises (matching sample_fn's own joint
+        # draws): log p(query | evidence) = log p(query, evidence) - log p(evidence), both by the
+        # forward algorithm -- NOT a sum of per-time smoothed-marginal predictives, which is the
+        # product of marginals and ignores the latent correlation between query times. Query times
+        # past the last evidenced time simply extend the forward chain (unevidenced rows marginalize
+        # out), so any non-negative time is scoreable.
+        query = {int(t): val for t, val in partial_row.items()}
+        if not query:
+            return 0.0
+        if min(query) < 0:
+            raise ValueError(f"HMM field index must be a non-negative time step; got {min(query)}.")
+        clashes = sorted(set(query) & set(observed))
+        if clashes:
+            raise ValueError(
+                "log_density scores an assignment to the UNOBSERVED fields, but time step(s) "
+                f"{clashes} are already evidence in this posterior."
+            )
+        horizon = max(max(query), t_max) + 1
+        log_b = _emission_log_b(observed, horizon)
+        for t, val in query.items():
+            for k in range(n_states):
+                log_b[t, k] = _safe_log_density(model.topics[k], val)
+        joint = MarkovChainLatentPosterior(model.log_w, model.log_transitions, log_b).log_likelihood()
+        return float(joint - log_z)
 
     def mean_fn(path: FieldPath) -> float:
-        t = path[0]
-        w = marginals[t]
+        w = _state_marginals_at(int(path[0]))
         means = np.array([_analytic_mean(model.topics[k]) for k in range(n_states)], dtype=np.float64)
         return float(np.sum(w * means))
 

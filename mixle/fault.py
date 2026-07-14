@@ -61,10 +61,14 @@ def route_past(tiers: Sequence[Callable[[], Any]], *, names: Sequence[str] | Non
     """``model_error`` mode: try each tier in order; a raising tier is skipped (not fatal) in favor of the
     next. The result is degraded unless the first tier answers cleanly. Raises
     the last tier's exception if every tier fails."""
+    if len(tiers) == 0:
+        raise ValueError("route_past needs at least one tier")
     names = list(names) if names is not None else [f"tier{i}" for i in range(len(tiers))]
+    if len(names) != len(tiers):
+        raise ValueError(f"names has {len(names)} entries for {len(tiers)} tiers; they must match one-to-one")
     failed: list[str] = []
     last_exc: Exception | None = None
-    for name, tier in zip(names, tiers):
+    for name, tier in zip(names, tiers, strict=True):
         try:
             value = tier()
         except Exception as exc:  # noqa: BLE001 -- route past this tier to the next, whatever it raised

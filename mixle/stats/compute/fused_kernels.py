@@ -502,7 +502,7 @@ class _BernoulliB(_CountSumB):
     def freeze(self, buf):
         x = np.asarray(buf)
         if x.size and np.any((x != 0) & (x != 1)):
-            raise Exception("BernoulliDistribution requires observations in {False, True} or {0, 1}.")
+            raise ValueError("BernoulliDistribution requires observations in {False, True} or {0, 1}.")
         return (x.astype(np.float64),)
 
 
@@ -553,7 +553,7 @@ class _NegativeBinomialB(_CountSumB):
 
         x = np.asarray(buf, dtype=np.float64)
         if x.size and (np.any(x < 0) or np.any(np.isnan(x)) or np.any(np.floor(x) != x)):
-            raise Exception("NegativeBinomialDistribution requires non-negative integer values for x.")
+            raise ValueError("NegativeBinomialDistribution requires non-negative integer values for x.")
         return x, gammaln(x + 1.0)
 
 
@@ -603,7 +603,7 @@ class _WeibullB(_LeafBuilder):
     def freeze(self, buf):
         x = np.asarray(buf, dtype=np.float64)
         if x.size and (np.any(x < 0.0) or np.any(np.isnan(x))):
-            raise Exception("WeibullDistribution requires non-negative values for x.")
+            raise ValueError("WeibullDistribution requires non-negative values for x.")
         with np.errstate(divide="ignore"):
             lx = np.log(x)
         return x, lx
@@ -626,7 +626,7 @@ class _RayleighB(_LeafBuilder):
     def freeze(self, buf):
         x = np.asarray(buf, dtype=np.float64)
         if x.size and (np.any(x < 0.0) or np.any(np.isnan(x))):
-            raise Exception("RayleighDistribution requires non-negative values for x.")
+            raise ValueError("RayleighDistribution requires non-negative values for x.")
         with np.errstate(divide="ignore"):
             lx = np.log(x)
         return x, x * x, lx
@@ -650,7 +650,7 @@ class _ParetoB(_LeafBuilder):
     def freeze(self, buf):
         x = np.asarray(buf, dtype=np.float64)
         if x.size and (np.any(x <= 0.0) or np.any(np.isnan(x))):
-            raise Exception("ParetoDistribution requires positive values for x.")
+            raise ValueError("ParetoDistribution requires positive values for x.")
         return x, np.log(x)
 
     def make_stats(self, K):
@@ -702,7 +702,7 @@ class _GammaB(_LeafBuilder):
     def freeze(self, buf):
         x = np.asarray(buf, dtype=np.float64)
         if x.size and (np.any(x <= 0) or np.any(np.isnan(x))):
-            raise Exception("GammaDistribution has support x > 0.")
+            raise ValueError("GammaDistribution has support x > 0.")
         return x, np.log(x)
 
     def make_stats(self, K):
@@ -726,7 +726,7 @@ class _LogGaussianB(_LeafBuilder):
     def freeze(self, buf):
         lx = np.log(np.asarray(buf, dtype=np.float64))
         if lx.size and (np.any(np.isnan(lx)) or np.any(np.isinf(lx))):
-            raise Exception("LogGaussianDistribution requires support x in (0,inf).")
+            raise ValueError("LogGaussianDistribution requires support x in (0,inf).")
         return (lx,)
 
     def make_stats(self, K):
@@ -766,7 +766,7 @@ class _BinomialB(_LeafBuilder):
 
         x = np.asarray(buf, dtype=np.float64)
         if x.size and (np.any(x < 0) or np.any(np.isnan(x))):
-            raise Exception("BinomialDistribution requires non-negative integer values for x.")
+            raise ValueError("BinomialDistribution requires non-negative integer values for x.")
         if self.n0 >= 0:
             xx = x - self.m0
             lbc = gammaln(self.n0 + 1.0) - gammaln(xx + 1.0) - gammaln(self.n0 - xx + 1.0)

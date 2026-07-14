@@ -70,7 +70,7 @@ from mixle.ppl.density import (
     DiscreteAR,
     Flow,
 )
-from mixle.ppl.diagnostics import loo_stack, loo_stacking_weights
+from mixle.ppl.diagnostics import loo, loo_stack, loo_stacking_weights, waic
 from mixle.ppl.distributions import (
     AR1,
     EMG,
@@ -129,6 +129,7 @@ from mixle.ppl.field import (
     FieldSystem,
     Gaussian,
     GaussianField,
+    GaussianObs,
     GaussianProxy,
     GreatCircleMatern,
     GreatCircleRBF,
@@ -263,6 +264,7 @@ __all__ = [
     "FieldPosterior",
     "GP",
     "Gaussian",
+    "GaussianObs",
     "Niche",
     "Cox",
     "joint",
@@ -271,6 +273,8 @@ __all__ = [
     "Potts",
     "multistart",
     "conformal",
+    "waic",
+    "loo",
     "loo_stack",
     "loo_stacking_weights",
     "ConformalRegressor",

@@ -468,44 +468,23 @@ def fit_parameter_objective(
 
     opt = _make_optimizer(torch, optimizer, params, lr)
     sign = 1.0 if maximize else -1.0
-    iterations = max(1, int(max_its))
-    converged = False
 
     def objective_value():
         return objective(param_set.values(), enc, engine)
 
-    history = [_objective_scalar(objective_value())]
-    best_value = history[0]
-    best_iteration = 0
-    best_state = _clone_parameter_state(params)
-    for i in range(iterations):
-        if optimizer == "lbfgs":
-
-            def closure():
-                opt.zero_grad()
-                loss = -sign * objective_value()
-                loss.backward()
-                return loss
-
-            loss = opt.step(closure)
-        else:
-            opt.zero_grad()
-            loss = -sign * objective_value()
-            loss.backward()
-            opt.step()
-
-        cur = _objective_scalar(objective_value())
-        history.append(cur)
-        if out is not None and (i + 1) % max(1, int(print_iter)) == 0:
-            out.write("parameter objective iteration %d: value=%e\n" % (i + 1, cur))
-        if _objective_is_better(cur, best_value, maximize=maximize):
-            best_value = cur
-            best_iteration = len(history) - 1
-            best_state = _clone_parameter_state(params)
-        if len(history) > 2 and abs(cur - history[-2]) < tol * max(1.0, abs(cur)):
-            iterations = i + 1
-            converged = True
-            break
+    history, best_value, best_iteration, best_state, iterations, converged = _run_objective_optimization(
+        opt,
+        optimizer,
+        objective_value,
+        params,
+        sign,
+        max(1, int(max_its)),
+        tol,
+        maximize,
+        out,
+        print_iter,
+        "parameter objective",
+    )
 
     final_delta = history[-1] - history[-2] if len(history) > 1 else None
     if restore_best:
@@ -550,14 +529,43 @@ def _run_objective_optimization(
     Steps ``opt`` to maximize ``sign * eval_fn()`` for up to ``iterations`` steps (early-stopping when
     the value change falls below ``tol``), tracking the best parameter state of ``params``. Returns
     ``(history, best_value, best_iteration, best_state, iterations_run, converged)``.
+
+    The Adam path records ``history`` from the loss already computed for each step's forward pass
+    (one forward per iteration, matching a raw torch loop) instead of re-evaluating the objective
+    after the step; the final iterate is scored once after the loop. For a deterministic objective
+    the recorded values, best state, stopping decisions, and iterate trajectory are identical to the
+    historical evaluate-twice loop -- each history entry is the same objective at the same parameters
+    -- and the ``.item()`` sync is issued after ``backward()`` is queued so it overlaps the backward
+    work on asynchronous devices. L-BFGS keeps a standalone pre-step evaluation because ``opt.step``
+    owns its own (possibly multiple) closure forwards; its total forward count is unchanged.
     """
-    history = [_objective_scalar(eval_fn())]
-    best_value = history[0]
+    history = []
+    best_value = float("nan")
     best_iteration = 0
     best_state = _clone_parameter_state(params)
     converged = False
+
+    def record(cur):
+        # Shared per-value bookkeeping: history, progress output, best-state tracking (parameters
+        # must still hold the iterate that produced ``cur`` when this is called).
+        nonlocal best_value, best_iteration, best_state
+        history.append(cur)
+        step_index = len(history) - 1
+        if out is not None and step_index > 0 and step_index % max(1, int(print_iter)) == 0:
+            out.write("%s iteration %d: value=%e\n" % (label, step_index, cur))
+        if _objective_is_better(cur, best_value, maximize=maximize):
+            best_value = cur
+            best_iteration = step_index
+            best_state = _clone_parameter_state(params)
+        return len(history) > 2 and abs(cur - history[-2]) < tol * max(1.0, abs(cur))
+
     for i in range(iterations):
         if optimizer == "lbfgs":
+            cur = _objective_scalar(eval_fn())
+            if record(cur):
+                iterations = i
+                converged = True
+                break
 
             def closure():
                 opt.zero_grad()
@@ -570,20 +578,17 @@ def _run_objective_optimization(
             opt.zero_grad()
             loss = -sign * eval_fn()
             loss.backward()
+            cur = -sign * _objective_scalar(loss)
+            if record(cur):
+                iterations = i
+                converged = True
+                break
             opt.step()
 
-        cur = _objective_scalar(eval_fn())
-        history.append(cur)
-        if out is not None and (i + 1) % max(1, int(print_iter)) == 0:
-            out.write("%s iteration %d: value=%e\n" % (label, i + 1, cur))
-        if _objective_is_better(cur, best_value, maximize=maximize):
-            best_value = cur
-            best_iteration = len(history) - 1
-            best_state = _clone_parameter_state(params)
-        if len(history) > 2 and abs(cur - history[-2]) < tol * max(1.0, abs(cur)):
-            iterations = i + 1
+    if not converged:
+        # Loop exhausted: score the final iterate once (the old loop's last post-step evaluation).
+        if record(_objective_scalar(eval_fn())):
             converged = True
-            break
     return history, best_value, best_iteration, best_state, iterations, converged
 
 
@@ -609,6 +614,17 @@ def _objective_best_entry(history: Sequence[float], maximize: bool = True) -> tu
 
 
 def _objective_is_better(value: float, best_value: float, maximize: bool = True) -> bool:
+    """Return whether ``value`` improves on ``best_value`` in the requested direction.
+
+    NaN-aware (audit I-2): a NaN candidate never wins, and a NaN incumbent always loses. The
+    historical plain comparison was False whenever ``best_value`` was NaN, so a NaN *initial*
+    objective froze best-state tracking forever and ``restore_best=True`` returned the initial
+    parameters no matter how far the objective later improved.
+    """
+    if np.isnan(value):
+        return False
+    if np.isnan(best_value):
+        return True
     return value > best_value if maximize else value < best_value
 
 

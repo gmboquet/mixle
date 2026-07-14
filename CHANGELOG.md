@@ -17,6 +17,76 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   is a reviewed diff.
 - Release-engineering gates: a weighted-estimation contract test, a base-install optional-import guard,
   a tracked benchmark harness, a pull-request template, and the 0.8.0 release checklist.
+- `CompiledEM` as a reusable fused full-mixture strategy, automatically selected by `optimize()` for
+  eligible partially fusible heterogeneous mixtures; recursive SQUAREM packing for nested
+  mixtures/composites; and function-preserving shared-trunk/residual-expert MoE upcycling.
+
+### Fixed
+
+- Block scheduling now prices density, responsibility, and parameter-update work together instead of
+  treating density time as the whole block cost; learned controllers receive the same measured cost.
+- Dirichlet-prior block and freeze/roll-up updates now use the exact MAP objective and carry the
+  posterior weight prior; nested homogeneous mixtures preserve heterogeneous encoding depth.
+
+### Fixed
+
+Findings from the 2026-07-13 full-tree code review (IDs reference its audit ledger; every fix ships
+with a regression test that fails on the unfixed code):
+
+- Fused numba kernels no longer compile with `fastmath=True` (`ninf`/`nnan` miscompiled -inf
+  out-of-support scores into positive log-densities, reachable through `optimize()` auto-fusion), the
+  fused E-step and nested emitters guard all-impossible rows, nested fusion declines
+  min/max-statistic leaves, and the fused Pareto E-step tracks per-component support minima
+  (D-1..D-5, D-7; #428).
+- HMM `viterbi`/`seq_viterbi` perform real backpointer backtracking; the `taus` parameterization
+  scores correctly in both scalar and vectorized paths; `seq_posterior` returns smoothing (not
+  filtered) marginals; heterogeneous-emission models work through every read-out API;
+  hierarchical-mixture EM is monotone on variable-length corpora; LDA handles empty trailing
+  documents; structured/IO-HMM guard zero-mass observations and `fit(fast=True)` honors
+  `final_states` (L-1..L-12; #435).
+- `ops.quantize` brackets with the spatial quantile (was: half of every symmetric distribution
+  silently discarded); `relations.ViterbiPath` delegates to the admissible k-best HMM search;
+  split-conformal certification abstains honestly at small calibration sizes and certifies every
+  class head; registry/relations/fault edge cases raise clear errors (C-1..C-11; #425).
+- ppl: VI applies the non-centered transform (was: z-space values returned as posteriors);
+  mixed-model EM converges on all parameters, with GLS standard errors; MAP point estimates drop the
+  transform Jacobian (flat-prior MAP equals the MLE again); composite slot names no longer collide in
+  summaries; half-normal log-density constant, IRLS coefficient-prior scaling, Kalman-EM
+  initial-state timing, the NIG sigma summary, and `vi_fit(seed=)` (P-1..P-11; #431).
+- inference: `optimize(schedule="auto")` can no longer accept a zero-support model (impossible rows
+  score -inf, matching the mixture contract); keyed (tied) parameters survive the posterior-transform
+  strategies and the heterogeneous executor; HMM conditioning answers past the evidence horizon with
+  a true forward-algorithm joint; spatial-block folds clamp the max edge; Vuong pretests degenerate
+  variance (I-1, I-3, I-6..I-9, I-11; #432).
+- UQ/statistics: `brunner_munzel` one-sided p-values un-inverted; Wilcoxon `pratt` zero corrections;
+  the particle filter carries SIS weights when not resampling; jackknife+/CV+ use the finite-sample
+  order statistics with unbounded small-n endpoints; ESS uses Geyer's initial-monotone truncation per
+  component; `nuts_numba` thinning returns the requested draw count; frailty-Cox hazard lookup,
+  rank-normalization plotting position, Efron reported likelihood, canonical-link labels, m-out-of-n
+  rescaling, and exact permutation p-values (U-1..U-10, I-4, I-5; #430).
+- Neural leaves hold `eval()` during scoring and `train()` during fitting (dropout/batchnorm modules
+  scored stochastically and mutated running statistics on mere `log_density` calls); multi-field
+  accumulator fan-in no longer drops fields; module dtype follows the engine precision (G-1, G-2,
+  G-5; #426).
+- API consistency: `optimize(seed=)`; mixture/categorical constructor validation (negative
+  categorical probabilities were accepted and returned negative densities); empty-data `ValueError`s
+  and the `raise Exception` -> `ValueError` narrowing; ppl dialect aliases (`log_density`,
+  `sample(size=)`, `GaussianObs`, HMM `components=`, pair-copula `log_density`); scalar
+  `pseudo_count` broadcast; GP `fit` returns the model (S-1..S-4, S-6..S-10, S-13, S-14; #433).
+- Completeness: structured/IO-HMM `TransitionOperator`s serialize (fitted models round-trip);
+  `InputOutputHMM` gains sampler/viterbi/posterior-decode/state-posteriors; BetaBinomial honors the
+  finite-support contract; LogSeries/Skellam/DirichletMultinomial enumerate; closed-form moments and
+  entropies filled across the univariate catalog; `mixle.ppl` exports `waic`/`loo`;
+  `ScheduledHMM.estimator()` restores the prototype convention (F-1, F-2, F-4, F-6, F-7, F-9, F-11,
+  F-12; #434).
+
+### Changed
+
+- Performance (exactness-preserving, parity-tested): multivariate-Gaussian scoring precomputes the
+  inverse Cholesky factor for single-gemm scoring (1.3-2.3x kernel, 1.59x end-to-end on the benchmark
+  GMM config, identical likelihoods); the torch objective fitters evaluate one forward per Adam
+  iteration instead of two, with NaN-aware best-state tracking; `seq_encode` chunking uses stride
+  slices (~76x on ndarray inputs) (E-1, E-2/G-3, E-3, I-2; #436).
 
 ## [0.7.0] — 2026-07-09
 

@@ -528,6 +528,7 @@
     "BootstrapResult",
     "CalibrationReport",
     "Clustering",
+    "CompiledEM",
     "ConditionReceipt",
     "ConjugatePosterior",
     "ConjugateUpdatable",
@@ -995,6 +996,7 @@
     "Gamma",
     "Gaussian",
     "GaussianField",
+    "GaussianObs",
     "GaussianProxy",
     "GeneralizedGaussian",
     "GeneralizedPareto",
@@ -1068,6 +1070,7 @@
     "joint",
     "kaplan_meier",
     "lipschitz",
+    "loo",
     "loo_stack",
     "loo_stacking_weights",
     "lower",
@@ -1081,7 +1084,8 @@
     "potential",
     "prior_predictive",
     "prior_predictive_check",
-    "structured_vi"
+    "structured_vi",
+    "waic"
   ],
   "mixle.reason": [
     "AXIOMS",
@@ -2079,6 +2083,7 @@
     "is_encoded_data_handle",
     "model_parallel_fold",
     "model_sharding_plan",
-    "plan"
+    "plan",
+    "register_encoded_data_backend"
   ]
 }

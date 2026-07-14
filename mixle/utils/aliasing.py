@@ -15,9 +15,10 @@ legacy argument keeps its position. Passing both raises ``TypeError``; passing n
 ``TypeError`` for required arguments.
 """
 
+import numbers
 from typing import Any
 
-__all__ = ["coalesce_alias", "require", "MISSING"]
+__all__ = ["coalesce_alias", "require", "broadcast_pseudo_count", "MISSING"]
 
 
 class _Missing:
@@ -47,6 +48,26 @@ def require(name: str, value: Any, *, default: Any = MISSING) -> Any:
     if value is default:
         raise TypeError("missing required argument %r" % name)
     return value
+
+
+def broadcast_pseudo_count(pseudo_count: Any, arity: int) -> Any:
+    """Broadcast a scalar ``pseudo_count`` to the tuple arity a composite estimator stores.
+
+    The ``dist.estimator(pseudo_count=...)`` facades are scalar everywhere, while some estimator
+    constructors keep a historical per-statistic tuple. Those constructors accept the scalar
+    spelling too by broadcasting it to every slot -- exactly what the facades do (``(pc, pc)``).
+    Tuples/lists and ``None`` pass through unchanged.
+
+    Args:
+        pseudo_count (Any): Scalar smoothing count, per-statistic tuple, or ``None``.
+        arity (int): Number of tuple slots the estimator stores.
+
+    Returns:
+        ``(pseudo_count,) * arity`` for a real scalar, else ``pseudo_count`` unchanged.
+    """
+    if isinstance(pseudo_count, numbers.Real) and not isinstance(pseudo_count, bool):
+        return (pseudo_count,) * arity
+    return pseudo_count
 
 
 def coalesce_alias(

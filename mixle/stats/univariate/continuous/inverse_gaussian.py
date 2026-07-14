@@ -259,6 +259,33 @@ class InverseGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(invgauss.ppf(float(q), mu=self.mu / self.lam, scale=self.lam))
 
+    def mean(self) -> float:
+        """Mean E[X] = mu."""
+        return float(self.mu)
+
+    def variance(self) -> float:
+        """Variance Var[X] = mu^3 / lam."""
+        return float(self.mu**3 / self.lam)
+
+    def entropy(self) -> float:
+        """Differential entropy in nats (closed form).
+
+        ``H = -E[log f(X)] = 1/2 log(2 pi e / lam) + 3/2 E[log X]`` (the quadratic term integrates
+        to exactly 1/2 since ``E[(X - mu)^2 / X] = mu^2 / lam``), with
+        ``E[log X] = log(mu) - e^{2z} E_1(2z)`` at ``z = lam / mu`` -- the order-derivative identity
+        for the Bessel ``K_{1/2}`` under the GIG representation, ``E_1`` the exponential integral.
+        The scaled product ``e^x E_1(x)`` switches to its asymptotic series where ``exp`` overflows.
+        """
+        from scipy.special import exp1
+
+        x = 2.0 * self.lam / self.mu
+        if x < 700.0:
+            scaled = math.exp(x) * float(exp1(x))
+        else:
+            inv = 1.0 / x
+            scaled = inv * (1.0 - inv * (1.0 - 2.0 * inv * (1.0 - 3.0 * inv)))
+        return float(0.5 * math.log(2.0 * math.pi * math.e / self.lam) + 1.5 * (math.log(self.mu) - scaled))
+
     def sampler(self, seed: int | None = None) -> "InverseGaussianSampler":
         """Return a sampler for drawing observations from this distribution."""
         return InverseGaussianSampler(self, seed)

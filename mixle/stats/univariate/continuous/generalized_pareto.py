@@ -200,6 +200,10 @@ class GeneralizedParetoDistribution(SequenceEncodableProbabilityDistribution):
             return float(self.scale * self.scale / ((1.0 - xi) ** 2 * (1.0 - 2.0 * xi)))
         return float("inf")
 
+    def entropy(self) -> float:
+        """Differential entropy log(scale) + xi + 1."""
+        return float(self.log_scale + self.shape + 1.0)
+
     def sampler(self, seed: int | None = None) -> "GeneralizedParetoSampler":
         """Return a sampler for drawing observations from this distribution."""
         return GeneralizedParetoSampler(self, seed)

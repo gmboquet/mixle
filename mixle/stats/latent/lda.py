@@ -40,6 +40,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.compute.posterior import MeanFieldLDAPosterior
+from mixle.utils.aliasing import broadcast_pseudo_count
 from mixle.utils.special import digammainv
 from mixle.utils.vector import row_choice
 
@@ -1076,7 +1077,7 @@ class LDAEstimator(ParameterEstimator):
         estimators: Sequence[ParameterEstimator],
         len_estimator: ParameterEstimator | None = NullEstimator(),
         suff_stat: Any | None = None,
-        pseudo_count: tuple[float, float] | None = None,
+        pseudo_count: float | tuple[float, float] | None = None,
         keys: tuple[str | None, str | None] | None = (None, None),
         fixed_alpha: np.ndarray | None = None,
         gamma_threshold: float = 1.0e-8,
@@ -1112,6 +1113,7 @@ class LDAEstimator(ParameterEstimator):
         self.num_topics = len(estimators)
         self.estimators = estimators
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.keys = keys if keys is not None else (None, None)
@@ -1373,9 +1375,9 @@ def seq_posterior2(estimate: LDADistribution, x: tuple[int, np.ndarray, np.ndarr
     alpha_loc = np.repeat(np.reshape(alpha, (1, num_topics)), num_documents, axis=0)
 
     if gammas is None:
-        document_gammas = alpha_loc + np.reshape(np.bincount(idx_full.flat), (num_documents, num_topics)) / float(
-            num_topics
-        )
+        document_gammas = alpha_loc + np.reshape(
+            np.bincount(idx_full.flat, minlength=num_documents * num_topics), (num_documents, num_topics)
+        ) / float(num_topics)
     else:
         document_gammas = gammas.copy()
 
@@ -1457,9 +1459,9 @@ def _lda_vi_fixed_point(
     idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
 
     if gammas is None:
-        document_gammas = alphas_loc + np.reshape(np.bincount(idx_full.flat), (num_documents, num_topics)) / float(
-            num_topics
-        )
+        document_gammas = alphas_loc + np.reshape(
+            np.bincount(idx_full.flat, minlength=num_documents * num_topics), (num_documents, num_topics)
+        ) / float(num_topics)
     else:
         document_gammas = gammas.copy()
 
@@ -1512,7 +1514,7 @@ def _lda_vi_fixed_point(
         posterior_sum_ll_loc /= rel_counts
         log_density_gamma_loc /= posterior_sum_ll_loc
 
-        gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma_loc.flat)
+        gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma_loc.flat, minlength=alphas_loc2.size)
         gamma_updates = np.reshape(gamma_updates, (-1, num_topics))
         gamma_updates += alphas_loc2
 
@@ -1590,7 +1592,7 @@ def _lda_vi_fixed_point(
     idx_full *= num_topics
     idx_full += np.reshape(np.arange(num_topics), (1, num_topics))
 
-    gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma.flat)
+    gamma_updates = np.bincount(idx_full.flat, weights=log_density_gamma.flat, minlength=alphas_loc.size)
     gamma_updates = np.reshape(gamma_updates, (-1, num_topics))
     gamma_updates += alphas_loc
     final_gammas = gamma_updates
@@ -1636,7 +1638,7 @@ def _lda_elbo_from_gamma(
     elob1 = elob0[idx, :]
     elob2 = ldg * (elob1 + per_topic_log_densities - np.log(ldg) + np.log(np.reshape(counts, (-1, 1))))
     elob3 = np.sum(elob0 * ((per_doc_alpha - 1.0) - (dg - 1.0)), axis=1)
-    elob4 = np.bincount(idx_full.flat, weights=elob2.flat)
+    elob4 = np.bincount(idx_full.flat, weights=elob2.flat, minlength=document_gammas.size)
     elob5 = np.sum(np.reshape(elob4, (-1, num_topics)), axis=1)
     elob6 = np.sum(gammaln(dg), axis=1) - gammaln(dg.sum(axis=1))
     if per_doc_alpha.ndim == 1:

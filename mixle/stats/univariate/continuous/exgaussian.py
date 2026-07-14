@@ -382,5 +382,5 @@ class ExponentiallyModifiedGaussianDataEncoder(DataSequenceEncoder):
         """Validate and encode EMG observations as a finite float array."""
         rv = np.asarray(x, dtype=float)
         if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
-            raise Exception("ExponentiallyModifiedGaussianDistribution requires support x in (-inf, inf).")
+            raise ValueError("ExponentiallyModifiedGaussianDistribution requires support x in (-inf, inf).")
         return rv

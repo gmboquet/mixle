@@ -366,9 +366,9 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
 
         """
         if supports(self.prev_dist, Neutral):
-            raise Exception("HiddenAssociationSampler requires attribute dist.prev_dist.")
+            raise ValueError("HiddenAssociationSampler requires attribute dist.prev_dist.")
         if supports(self.len_dist, Neutral):
-            raise Exception("HiddenAssociationSampler requires attribute dist.size_dist.")
+            raise ValueError("HiddenAssociationSampler requires attribute dist.size_dist.")
         return IntegerHiddenAssociationSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "IntegerHiddenAssociationEstimator":
@@ -454,12 +454,12 @@ class IntegerHiddenAssociationSampler(DistributionSampler):
         self.dist = dist
 
         if supports(self.dist.prev_dist, Neutral):
-            raise Exception("HiddenAssociationSampler requires attribute dist.prev_dist.")
+            raise ValueError("HiddenAssociationSampler requires attribute dist.prev_dist.")
         else:
             self.prev_sampler = self.dist.prev_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
         if supports(self.dist.len_dist, Neutral):
-            raise Exception("HiddenAssociationSampler requires attribute dist.size_dist.")
+            raise ValueError("HiddenAssociationSampler requires attribute dist.size_dist.")
         else:
             self.size_sampler = self.dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 

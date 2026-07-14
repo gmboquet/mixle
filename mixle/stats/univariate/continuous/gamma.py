@@ -27,6 +27,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.aliasing import broadcast_pseudo_count
 from mixle.utils.special import digamma, gammaln, trigamma
 
 _MIN_GAMMA_PARAM = 1.0e-12
@@ -608,7 +609,7 @@ class GammaEstimator(ParameterEstimator):
 
     def __init__(
         self,
-        pseudo_count: tuple[float, float] = (0.0, 0.0),
+        pseudo_count: float | tuple[float, float] = (0.0, 0.0),
         suff_stat: tuple[float, float] = (1.0, 0.0),
         threshold: float = 1.0e-8,
         name: str | None = None,
@@ -617,7 +618,8 @@ class GammaEstimator(ParameterEstimator):
         """Create an estimator for Gamma sufficient statistics.
 
         Args:
-            pseudo_count: Smoothing weights for the mean and log-mean statistics.
+            pseudo_count: Smoothing weights for the mean and log-mean statistics. A scalar
+                is broadcast to both slots.
             suff_stat: Prior mean and log-mean statistics used with ``pseudo_count``.
             threshold: Convergence threshold for shape estimation.
             name: Optional diagnostic name.
@@ -631,6 +633,7 @@ class GammaEstimator(ParameterEstimator):
             keys: Optional sufficient-statistic key.
 
         """
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.threshold = threshold

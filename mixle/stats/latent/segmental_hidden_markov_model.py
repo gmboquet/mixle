@@ -38,7 +38,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.sequences.markov_chain import MarkovChainDistribution
-from mixle.utils.aliasing import MISSING, coalesce_alias, require
+from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias, require
 
 
 def _forward_log(log_w: np.ndarray, log_a: np.ndarray, log_emit: np.ndarray) -> float:
@@ -640,7 +640,7 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
         self,
         estimators: Sequence[ParameterEstimator],
         len_estimator: ParameterEstimator | None = NullEstimator(),
-        pseudo_count: tuple[float | None, float | None] | None = (None, None),
+        pseudo_count: float | tuple[float | None, float | None] | None = (None, None),
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         terminal_states: set[int] | Sequence[int] | None = None,
@@ -648,6 +648,7 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
         self.estimators = list(estimators)
         self.num_states = len(self.estimators)
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
+        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
         self.pseudo_count = pseudo_count if pseudo_count is not None else (None, None)
         self.keys = keys
         self.name = name

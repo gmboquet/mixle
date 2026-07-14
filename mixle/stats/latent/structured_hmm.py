@@ -38,6 +38,27 @@ class TransitionOperator:
 
     n_states: int
 
+    # Operators are required components of the serializable StructuredHMM / InputOutputHMM but are not
+    # distributions or estimators themselves, so they opt in to mixle JSON serialization explicitly
+    # (state round-trips via __dict__; SparseTransition's csr matrix uses the sparse codec).
+    __pysp_serializable__ = True
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a safe JSON-compatible representation of this operator."""
+        from mixle.utils.serialization import to_serializable
+
+        return to_serializable(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> TransitionOperator:
+        """Reconstruct an operator from ``to_dict`` output."""
+        from mixle.utils.serialization import from_serializable
+
+        rv = from_serializable(payload)
+        if not isinstance(rv, cls):
+            raise TypeError("decoded object is %s, not %s" % (type(rv).__name__, cls.__name__))
+        return rv
+
     def forward(self, alpha: np.ndarray) -> np.ndarray:  # alpha @ A
         """Push a state-belief row vector one transition forward."""
         raise NotImplementedError
@@ -466,23 +487,26 @@ class StructuredHMM:
         T, _ = log_b.shape
         op = self.transition
         mx = log_b.max(axis=1, keepdims=True)
-        b = np.exp(log_b - mx)  # (T,K) scaled emissions
+        b = np.exp(log_b - np.where(np.isfinite(mx), mx, 0.0))  # (T,K) scaled; all-impossible row -> b=0
+
         alpha = np.zeros((T, self.K))
         c = np.zeros(T)
         alpha[0] = (self.pi if pi is None else pi) * b[0]
         c[0] = alpha[0].sum()
-        alpha[0] /= c[0]
+        alpha[0] = alpha[0] / c[0] if c[0] > 0 else alpha[0]
         for t in range(1, T):
             alpha[t] = op.forward(alpha[t - 1]) * b[t]
             c[t] = alpha[t].sum()
-            alpha[t] /= c[t]
-        loglik = float(np.sum(np.log(c)) + np.sum(mx))  # add the per-step maxima back
+            alpha[t] = alpha[t] / c[t] if c[t] > 0 else alpha[t]
+        with np.errstate(divide="ignore"):  # an impossible observation gives c=0 -> loglik -inf, not NaN
+            loglik = float(np.sum(np.log(c)) + np.sum(mx))  # add the per-step maxima back
         beta = np.zeros((T, self.K))
         beta[T - 1] = 1.0
         for t in range(T - 2, -1, -1):
-            beta[t] = op.backward(b[t + 1] * beta[t + 1]) / c[t + 1]
+            beta[t] = op.backward(b[t + 1] * beta[t + 1]) / c[t + 1] if c[t + 1] > 0 else beta[t + 1]
         gamma = alpha * beta
-        gamma /= gamma.sum(axis=1, keepdims=True)
+        gsum = gamma.sum(axis=1, keepdims=True)
+        gamma = np.divide(gamma, gsum, out=np.full_like(gamma, 1.0 / self.K), where=gsum > 0)
         return alpha, beta, c, b, gamma, loglik
 
     def _final_forward_backward(self, log_b, pi=None):
@@ -492,7 +516,7 @@ class StructuredHMM:
         T, _ = log_b.shape
         op = self.transition
         mx = log_b.max(axis=1, keepdims=True)
-        b = np.exp(log_b - mx)
+        b = np.exp(log_b - np.where(np.isfinite(mx), mx, 0.0))  # all-impossible row -> b=0, not NaN
         alpha = np.zeros((T, self.K))
         c = np.zeros(T)
         alpha[0] = (self.pi if pi is None else pi) * b[0]
@@ -523,7 +547,7 @@ class StructuredHMM:
         op = self.transition
         nonterm = ~self.term_mask
         mx = log_b.max(axis=1, keepdims=True)
-        b = np.exp(log_b - mx)
+        b = np.exp(log_b - np.where(np.isfinite(mx), mx, 0.0))  # all-impossible row -> b=0, not NaN
         alpha = np.zeros((T, self.K))
         c = np.zeros(T)
         alpha[0] = (self.pi if pi is None else pi) * b[0]
@@ -612,7 +636,12 @@ class StructuredHMM:
         """The numba dense forward-backward applies for a plain dense transition with no terminal states."""
         from mixle.utils.optional_deps import HAS_NUMBA
 
-        return HAS_NUMBA and self.term_mask is None and type(self.transition) is DenseTransition
+        return (
+            HAS_NUMBA
+            and self.term_mask is None
+            and self.final_mask is None  # the fast kernel is unconstrained; final_states needs the masked backward
+            and type(self.transition) is DenseTransition
+        )
 
     def fit(self, seqs, *, max_its: int = 50, tol: float = 1e-6, fast: bool = True):
         """EM (Baum-Welch) through the transition operator. Returns ``(fitted_hmm, loglik_trace)``.
@@ -649,7 +678,7 @@ class StructuredHMM:
                     emit_accs[k].seq_update(enc, gamma[:, k], self.emissions[k])
                     nk[k] += gamma[:, k].sum()
             self.transition = self.transition.estimate(trans_acc)
-            self.pi = pi_acc / pi_acc.sum()
+            self.pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else self.pi
             self.emissions = [self._emit_est[k].estimate(float(nk[k]), emit_accs[k].value()) for k in range(self.K)]
             ll_trace.append(total_ll)
             if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
@@ -821,15 +850,23 @@ def fit_chunked(
     seqs = [list(s) for s in seqs]
     uniform = np.ones(hmm.K) / hmm.K
     ll_trace = []
+    scaled_trace = []
 
     def chunk_estep(args):
         seq, ctx_lo, ctx_hi, keep_lo, keep_hi = args
         log_b = hmm._log_b(seq)[ctx_lo:ctx_hi]
         pi = hmm.pi if ctx_lo == 0 else uniform
         alpha, beta, c, b, gamma, ll = hmm._forward_backward(log_b, pi=pi)
-        # transition mass over kept interior transitions only
-        contrib_ll = float(np.sum(np.log(c[keep_lo : max(keep_lo + 1, keep_hi)])))
-        return seq, ctx_lo, keep_lo, keep_hi, alpha, beta, c, b, gamma, contrib_ll
+        # transition mass over kept interior transitions only; c is in the mx-scaled frame of
+        # _forward_backward, so the kept window's per-position emission maxima must be added back
+        # for the REPORTED trace (the full-fit loglik does the same) -- without them the returned
+        # ll_trace is offset by a parameter-dependent amount. The convergence break below keeps
+        # using the scaled-frame quantity so stopping behavior is unchanged.
+        win = slice(keep_lo, max(keep_lo + 1, keep_hi))
+        with np.errstate(divide="ignore"):
+            contrib_scaled = float(np.sum(np.log(c[win])))
+            contrib_ll = contrib_scaled + float(np.sum(log_b[win].max(axis=1)))
+        return seq, ctx_lo, keep_lo, keep_hi, alpha, beta, c, b, gamma, (contrib_ll, contrib_scaled)
 
     for _ in range(int(max_its)):
         tasks = [
@@ -849,8 +886,10 @@ def fit_chunked(
         emit_accs = [est.accumulator_factory().make() for est in hmm._emit_est]
         nk = np.zeros(hmm.K)
         total_ll = 0.0
-        for seq, ctx_lo, keep_lo, keep_hi, alpha, beta, c, b, gamma, contrib_ll in results:
+        total_scaled = 0.0
+        for seq, ctx_lo, keep_lo, keep_hi, alpha, beta, c, b, gamma, (contrib_ll, contrib_scaled) in results:
             total_ll += contrib_ll
+            total_scaled += contrib_scaled
             if ctx_lo == 0:
                 pi_acc += gamma[0]
             for t in range(keep_lo, keep_hi):  # kept interior transitions
@@ -866,7 +905,10 @@ def fit_chunked(
         hmm.pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else hmm.pi
         hmm.emissions = [hmm._emit_est[k].estimate(float(nk[k]), emit_accs[k].value()) for k in range(hmm.K)]
         ll_trace.append(total_ll)
-        if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
+        scaled_trace.append(total_scaled)
+        # break on the scaled-frame quantity (historical behavior): the reported ll includes the
+        # parameter-dependent emission-max offset, which would rescale the relative tolerance
+        if len(scaled_trace) > 1 and abs(scaled_trace[-1] - scaled_trace[-2]) < tol * max(1.0, abs(scaled_trace[-2])):
             break
     return hmm, ll_trace
 
@@ -1142,19 +1184,20 @@ class InputOutputHMM:
         term = self.term_mask
         nonterm = None if term is None else ~term
         mx = log_b.max(axis=1, keepdims=True)
-        b = np.exp(log_b - mx)
+        b = np.exp(log_b - np.where(np.isfinite(mx), mx, 0.0))  # all-impossible row -> b=0, not NaN
         alpha = np.zeros((t_len, self.K))
         c = np.zeros(t_len)
         alpha[0] = self.pi * b[0]
         c[0] = alpha[0].sum()
-        alpha[0] /= c[0]
+        alpha[0] = alpha[0] / c[0] if c[0] > 0 else alpha[0]
         for t in range(1, t_len):
             prev = alpha[t - 1] if nonterm is None else np.where(nonterm, alpha[t - 1], 0.0)
             alpha[t] = self.transitions[inputs[t - 1]].forward(prev) * b[t]
             c[t] = alpha[t].sum()
             alpha[t] = alpha[t] / c[t] if c[t] > 0 else alpha[t]
         if term is None:
-            loglik = float(np.sum(np.log(c)) + np.sum(mx))
+            with np.errstate(divide="ignore"):  # impossible observation: c=0 -> -inf, not NaN
+                loglik = float(np.sum(np.log(c)) + np.sum(mx))
         else:
             tm = float(alpha[t_len - 1][term].sum())
             loglik = float(np.sum(np.log(c)) + np.sum(mx) + np.log(tm + 1e-300))
@@ -1162,7 +1205,8 @@ class InputOutputHMM:
         beta[t_len - 1] = 1.0 if term is None else np.where(term, 1.0, 0.0)
         for t in range(t_len - 2, -1, -1):
             back = self.transitions[inputs[t]].backward(b[t + 1] * beta[t + 1])
-            beta[t] = (back if nonterm is None else np.where(nonterm, back, 0.0)) / c[t + 1]
+            scaled = back if nonterm is None else np.where(nonterm, back, 0.0)
+            beta[t] = scaled / c[t + 1] if c[t + 1] > 0 else scaled
         gamma = alpha * beta
         gs = gamma.sum(axis=1, keepdims=True)
         gamma = np.divide(gamma, gs, out=np.zeros_like(gamma), where=gs > 0)
@@ -1182,6 +1226,51 @@ class InputOutputHMM:
                 out.append(self._forward_backward(self._log_b(obs), inputs)[5])
             return np.array(out)
         return np.array([self._forward_backward(self._log_b(o), list(u))[5] for o, u in zip(x, input_seqs)])
+
+    def _obs_inputs(self, seq, inputs):
+        """Split one record into (observations, inputs), accepting both call forms the scoring API uses:
+        ``(record)`` -- one sequence of ``(observation, input)`` pairs -- or ``(obs_seq, input_seq)``."""
+        if inputs is None:
+            return [p[0] for p in seq], [int(p[1]) for p in seq]
+        return list(seq), [int(u) for u in inputs]
+
+    def viterbi(self, seq, inputs=None):
+        """Most-likely state path (Viterbi / max-product), conditioned on the input/control sequence:
+        step t -> t+1 maximizes over the transition ``inputs[t]`` selects. Call as ``viterbi(record)``
+        on one ``(observation, input)``-pair sequence or as ``viterbi(obs_seq, input_seq)``. Uses the
+        per-input transition matrices, so it works for any operator; O(T K^2) -- a read-out, not the
+        EM hot loop."""
+        obs, u = self._obs_inputs(seq, inputs)
+        log_b = self._log_b(obs)
+        log_as = [np.log(t.as_matrix() + 1e-300) for t in self.transitions]
+        log_pi = np.log(self.pi + 1e-300)
+        t_len, k = log_b.shape
+        delta = np.zeros((t_len, k))
+        psi = np.zeros((t_len, k), dtype=int)
+        delta[0] = log_pi + log_b[0]
+        for t in range(1, t_len):
+            m = delta[t - 1][:, None] + log_as[u[t - 1]]  # (from, to) under the input driving this step
+            psi[t] = np.argmax(m, axis=0)
+            delta[t] = m[psi[t], np.arange(k)] + log_b[t]
+        path = np.zeros(t_len, dtype=int)
+        path[-1] = int(np.argmax(delta[-1]))
+        for t in range(t_len - 2, -1, -1):
+            path[t] = psi[t + 1, path[t + 1]]
+        return path
+
+    def posterior_decode(self, seq, inputs=None):
+        """Per-position MAP state argmax_k P(z_t = k | x, u) from the forward-backward posteriors gamma."""
+        obs, u = self._obs_inputs(seq, inputs)
+        return np.argmax(self._forward_backward(self._log_b(obs), u)[4], axis=1)
+
+    def state_posteriors(self, seq, inputs=None):
+        """The full smoothing posteriors gamma[t,k] = P(z_t = k | x, u), conditioned on the inputs."""
+        obs, u = self._obs_inputs(seq, inputs)
+        return self._forward_backward(self._log_b(obs), u)[4]
+
+    def sampler(self, seed=None):
+        """Return a sampler for ``(observation, input)``-pair records along a given control sequence."""
+        return _IOHMMSampler(self, seed)
 
     def fit(self, obs_seqs, input_seqs, *, max_its: int = 50, tol: float = 1e-6):
         """Fit the IOHMM with Baum-Welch using the supplied observation and input sequences."""
@@ -1209,7 +1298,7 @@ class InputOutputHMM:
                     emit_accs[k].seq_update(enc, gamma[:, k], self.emissions[k])
                     nk[k] += gamma[:, k].sum()
             self.transitions = [self.transitions[m].estimate(trans_accs[m]) for m in range(self.M)]
-            self.pi = pi_acc / pi_acc.sum()
+            self.pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else self.pi
             self.emissions = [self._emit_est[k].estimate(float(nk[k]), emit_accs[k].value()) for k in range(self.K)]
             ll_trace.append(total_ll)
             if len(ll_trace) > 1 and abs(ll_trace[-1] - ll_trace[-2]) < tol * max(1.0, abs(ll_trace[-2])):
@@ -1230,6 +1319,38 @@ class InputOutputHMM:
     def estimator(self, pseudo_count=None):
         """Return the estimator for this IOHMM structure."""
         return IOHMMEstimator(self._emit_est, list(self.transitions), self.name)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a safe JSON-compatible representation of this IOHMM (decodes via ``load_models``)."""
+        from mixle.utils.serialization import to_serializable
+
+        return to_serializable(self)
+
+
+class _IOHMMSampler:
+    """Samples one IOHMM record -- a list of ``(observation, input)`` pairs -- along a given control
+    sequence. The inputs are exogenous, so the caller supplies them; the sampler draws the state path
+    through the per-input transitions and one emission per state visited."""
+
+    def __init__(self, hmm: InputOutputHMM, seed=None):
+        self.hmm = hmm
+        self.rng = np.random.RandomState(seed)
+
+    def sample(self, inputs):
+        h = self.hmm
+        u = [int(v) for v in inputs]
+        mats = [t.as_matrix() for t in h.transitions]
+        s = self.rng.choice(h.K, p=h.pi)
+        out = []
+        for t, m in enumerate(u):
+            out.append((h.emissions[s].sampler(seed=int(self.rng.randint(1, 2**31))).sample(), m))
+            if h.term_mask is not None and h.term_mask[s]:
+                break  # terminal (absorbing) state ends the sequence -- length is the stopping time
+            if t + 1 < len(u):
+                row = mats[m][s]
+                rs = row.sum()
+                s = self.rng.choice(h.K, p=row / rs) if rs > 0 else s
+        return out
 
 
 class IOHMMDataEncoder(DataSequenceEncoder):
@@ -1492,7 +1613,7 @@ class ExplicitDurationHMM:
                     enc = self.emissions[k].dist_to_encoder().seq_encode(seq)
                     emit_accs[k].seq_update(enc, occ[:, k], self.emissions[k])
                     nk[k] += occ[:, k].sum()
-            self.pi = pi_acc / pi_acc.sum()
+            self.pi = pi_acc / pi_acc.sum() if pi_acc.sum() > 0 else self.pi
             np.fill_diagonal(trans_acc, 0.0)
             self.a = _row_normalize(trans_acc) if trans_acc.sum() > 0 else self.a
             self.dur = _row_normalize(dur_acc)

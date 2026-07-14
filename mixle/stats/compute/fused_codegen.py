@@ -109,6 +109,9 @@ class LeafTemplate:
     # global min/max over x (a map-reducible reduction) for a scalar leaf whose value() needs it (Pareto's xm)
     wants_minmax: bool = False
     to_value_g: Callable[[tuple, float, float, float], tuple] | None = None  # (stats, count, min, max) -> value
+    # scalar accumulators combined by MIN instead of SUM (allocated +inf; the parallel chunk axis and any
+    # merge must min-reduce them) -- per-component weighted support minima, e.g. Pareto's xm
+    min_acc_names: tuple[str, ...] = ()
     # categorical hooks (data is already a category index; score from a (K,C) log-prob table, accumulate a
     # (K,C) weighted count histogram -- the only sufficient statistic). Generalizes the tabulated pattern to
     # value-keyed categories (the table/value depend on the encoding's category list, so they get ``enc``).
@@ -430,10 +433,17 @@ register_leaf_template(
         arity=2,
         # support x >= xm: log p = log a + a log xm - (a+1) log x; below the scale the component is impossible
         expr=lambda v, p: f"(({p['const']}[k] - {p['am1']}[k] * {v[1]}) if {v[0]} >= {p['xm']}[k] else -np.inf)",
-        acc_names=("slogx",),
-        acc_stmt=lambda v, a, r: f"{a['slogx']}[k] += {r} * {v[1]}",
-        wants_minmax=True,  # the scale xm is estimated as the minimum observed x (a global reduction)
-        to_value_g=lambda s, count, mn, mx: (count, s[0], mn),  # (n, sum_w logx, min x)
+        acc_names=("slogx", "wmin"),
+        # wmin tracks the PER-COMPONENT minimum over rows with responsibility > 0 -- the legacy
+        # ParetoAccumulator statistic that ParetoEstimator uses directly as the scale xm. The global
+        # data minimum (to_value_g's mn) is wrong whenever component supports differ.
+        acc_stmt=lambda v, a, r: (
+            f"{a['slogx']}[k] += {r} * {v[1]}; "
+            f"{a['wmin']}[k] = {v[0]} if {r} > 0.0 and {v[0]} < {a['wmin']}[k] else {a['wmin']}[k]"
+        ),
+        wants_minmax=True,  # keeps minmax leaves out of the nested emitter (no to_value / min plumbing there)
+        min_acc_names=("wmin",),
+        to_value_g=lambda s, count, mn, mx: (count, s[0], s[1]),  # (n, sum_w logx, per-component min x)
     )
 )
 
@@ -992,7 +1002,9 @@ _ESTEP_COMPILED: dict[tuple, Callable] = {}
 # cross-row reduction, but sequential and parallel are DIFFERENT fastmath binaries, and LLVM vectorizes
 # each loop nest differently (measured max 4.7e-16 relative). Bit-identity holds within each variant,
 # never across variants.
-_PARALLEL_MIN_OBS = 262_144  # below this the fork/join overhead eats the win
+_PARALLEL_MIN_OBS = (
+    65_536  # measured crossover ~48k on a 3-component composite (0.89x at 32k, 1.49x at 64k, 2.44x at 262k)
+)
 _PARALLEL_MAX_CHUNKS = 256
 _PARALLEL_CHUNK_TARGET = 16_384
 
@@ -1304,10 +1316,20 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
             "        for k in range(1, kc):",
             "            if llbuf[k] > m:",
             "                m = llbuf[k]",
+            # all components -inf (impossible row): -inf - (-inf) = NaN would poison every statistic.
+            # Mirror the legacy accumulator: responsibilities fall back to the prior mixture weights
+            # and the row's log-likelihood is -inf (the scorer's guard, E-step edition).
+            "        ok = m > -np.inf",
+            "        if not ok:",
+            "            for k in range(kc):",
+            "                llbuf[k] = logw[k]",
+            "                if llbuf[k] > m:",
+            "                    m = llbuf[k]",
             "        s = 0.0",
             "        for k in range(kc):",
             "            s += np.exp(llbuf[k] - m)",
-            "        out_ll[0] += wi * (m + np.log(s))",  # data log-likelihood, free as the posterior normalizer
+            # data log-likelihood, free as the posterior normalizer
+            "        out_ll[0] += wi * (m + np.log(s)) if ok else wi * -np.inf",
             "        for k in range(kc):",
             "            r = np.exp(llbuf[k] - m) / s * wi",
             "            comp_counts[k] += r",
@@ -1359,10 +1381,17 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
             "            for k in range(1, kc):",
             "                if llbuf_c[k] > m:",
             "                    m = llbuf_c[k]",
+            # same all-components-impossible guard as the sequential kernel (prior-weight fallback)
+            "            ok = m > -np.inf",
+            "            if not ok:",
+            "                for k in range(kc):",
+            "                    llbuf_c[k] = logw[k]",
+            "                    if llbuf_c[k] > m:",
+            "                        m = llbuf_c[k]",
             "            s = 0.0",
             "            for k in range(kc):",
             "                s += np.exp(llbuf_c[k] - m)",
-            "            out_ll[c] += wi * (m + np.log(s))",
+            "            out_ll[c] += wi * (m + np.log(s)) if ok else wi * -np.inf",
             "            for k in range(kc):",
             "                r = np.exp(llbuf_c[k] - m) / s * wi",
             "                comp_counts[c, k] += r",
@@ -1469,7 +1498,7 @@ def fused_seq_log_density(
     ``compute_dtype`` (e.g. ``np.float32``) runs the row arithmetic in reduced precision while the
     log-sum-exp accumulator and output stay float64; ``None`` keeps the byte-identical float64 path.
 
-    ``parallel``: ``None`` auto-engages the chunked prange scorer for large inputs (>= 262144 rows and
+    ``parallel``: ``None`` auto-engages the chunked prange scorer for large inputs (>= 65536 rows -- the measured crossover -- and
     more than one numba worker); ``True``/``False`` force it. Rows are disjoint (no cross-row
     reduction), so the parallel scorer is bit-identical across runs and worker counts; against the
     sequential kernel it agrees to 1-2 ULP (different fastmath binaries vectorize differently --
@@ -1556,7 +1585,7 @@ def fused_accumulate(
     ``(suff_stat, ll)`` so the EM loop can skip a separate scoring pass. Raises ``ValueError`` if not
     fusible.
 
-    ``parallel``: ``None`` auto-engages the chunked prange E-step for large inputs (>= 262144 rows and
+    ``parallel``: ``None`` auto-engages the chunked prange E-step for large inputs (>= 65536 rows -- the measured crossover -- and
     more than one numba worker); ``True``/``False`` force it. Chunk boundaries are a pure function of n
     and chunk partials combine in fixed order, so parallel results are bit-identical across runs AND
     across worker counts; they differ from the sequential kernel only by float re-association across
@@ -1632,7 +1661,13 @@ def fused_accumulate(
             matrix_acc.append((np.empty(0), np.empty(0)))
             acc_arrays.append(ad["hist"])
         else:
-            ad = {an: np.zeros(chunk((K,)), dtype=np.float64) for an in t.acc_names}
+            # min-combined accumulators (per-component support minima) start at +inf, additive ones at 0
+            ad = {
+                an: np.full(chunk((K,)), np.inf, dtype=np.float64)
+                if an in t.min_acc_names
+                else np.zeros(chunk((K,)), dtype=np.float64)
+                for an in t.acc_names
+            }
             scalar_acc.append(ad)
             matrix_acc.append((np.empty(0), np.empty(0)))
             acc_arrays.extend(ad.values())
@@ -1660,7 +1695,9 @@ def fused_accumulate(
         for i, t in enumerate(plan.leaf_templates):
             if t.kind != "matrix":
                 for an in list(scalar_acc[i]):
-                    scalar_acc[i][an] = scalar_acc[i][an].sum(axis=0)
+                    # support minima are non-additive: chunk partials must min-combine, never sum
+                    chunk_op = np.minimum.reduce if an in t.min_acc_names else np.add.reduce
+                    scalar_acc[i][an] = chunk_op(scalar_acc[i][an], axis=0)
     else:
         comp_counts = np.zeros(K, dtype=np.float64)
         llbuf = np.empty(K, dtype=np.float64)
