@@ -57,6 +57,7 @@ from mixle.analysis.kriging import (
     universal_kriging,
 )
 from mixle.analysis.max_stable import SmithMaxStable, SmithMaxStableSampler, fit_smith_maxstable
+from mixle.analysis.objective import hard_constraints, priced_liabilities
 from mixle.analysis.rank_aggregation import (
     borda_count,
     cayley_distance,
@@ -140,4 +141,8 @@ __all__ = [
     "SpeciesObservation",
     "HabitatModel",
     "fit_sdm",
+    # economic objective integration (J6): priced liabilities + hard constraints for
+    # mixle.stochastic_opt.risk_adjusted_plan
+    "priced_liabilities",
+    "hard_constraints",
 ]

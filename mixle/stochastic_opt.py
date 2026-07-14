@@ -21,6 +21,14 @@ Public API nor its Algorithm section actually calls into either module directly 
 here is built entirely on the already-landed :mod:`mixle.reason.posterior_protocol` (IC-1) and
 :func:`mixle.relations.branch_and_bound_milp` — so this module imports neither `mixle.relations`' new
 flow surface nor `mixle.mine_planning`.
+
+J6 (the grand synthesis, work-plan §7-J) extends this scenario program with :func:`risk_adjusted_plan`:
+the same grade-uncertainty CVaR objective, but net of the priced environmental/health/carbon liabilities
+:func:`mixle.analysis.objective.priced_liabilities` assembles, and subject to the hard no-mine/exposure/
+water constraints :func:`mixle.analysis.objective.hard_constraints` assembles — grade, cost, carbon, and
+enviro/health terms all trading off on one objective, one MILP. It is a distinct symbol from
+:func:`two_stage_stochastic_plan` above (never edited by J6), so the two land in different waves without
+a same-file write conflict.
 """
 
 from __future__ import annotations
@@ -32,7 +40,7 @@ import numpy as np
 from mixle.reason.posterior_protocol import Posterior
 from mixle.relations import branch_and_bound_milp
 
-__all__ = ["StochasticPlan", "cvar_epigraph", "two_stage_stochastic_plan"]
+__all__ = ["StochasticPlan", "cvar_epigraph", "risk_adjusted_plan", "two_stage_stochastic_plan"]
 
 # Risk-aversion weight lambda in ``maximize E[v] - _CVAR_LAMBDA * CVaR_alpha(-v)`` (work-plan §7-H step
 # 3). Not exposed on the frozen public signature (only posterior/block_cost/price/k_scenarios/alpha/rng
@@ -138,6 +146,112 @@ def two_stage_stochastic_plan(
     solved = branch_and_bound_milp(objective, a_ub_rows, b_ub, integer=integer, bounds=bounds, sense="max")
     if solved is None:
         raise ValueError("two_stage_stochastic_plan: MILP infeasible for the given blocks/scenarios")
+    _, x_full = solved
+
+    extract = np.round(x_full[:n_blocks]).astype(bool)
+    eta_star = float(x_full[var_index])
+    u_star = x_full[var_index + 1 :]
+    coef = 1.0 / ((1.0 - alpha) * k_scenarios)
+    cvar = eta_star + coef * float(u_star.sum())
+    expected_value = float(mean_profit @ extract.astype(np.float64))
+
+    return StochasticPlan(extract=extract, expected_value=expected_value, cvar=cvar, scenarios=g)
+
+
+def risk_adjusted_plan(
+    posterior: Posterior,
+    block_cost: Any,
+    price: float,
+    liabilities: dict,
+    constraints: dict,
+    *,
+    k_scenarios: int = 50,
+    alpha: float = 0.9,
+    rng: np.random.Generator,
+) -> StochasticPlan:
+    """J6 — the risk-adjusted-NPV extension of :func:`two_stage_stochastic_plan`.
+
+    Same two-stage scenario program (grade-uncertainty CVaR objective), but:
+
+    1. Per-scenario recourse value is net of ``liabilities["total"]`` — a length-``n_blocks`` per-block
+       dollar array (typically :func:`mixle.analysis.objective.priced_liabilities`'s output) folding in
+       remediation, health, and carbon-price terms: ``v_k(x) = sum_b x_b * (price * g[k, b] -
+       block_cost[b] - liabilities["total"][b])``. An empty/absent ``liabilities`` (``{}`` or no
+       ``"total"`` key) means zero liability, i.e. identical to :func:`two_stage_stochastic_plan`.
+    2. ``constraints`` (typically :func:`mixle.analysis.objective.hard_constraints`'s output) adds hard
+       constraints on top of the shared ``x_b in {0, 1}`` bounds:
+       - ``"no_mine_mask"``: boolean array, ``True`` blocks are hard-fixed to ``x_b = 0`` (G9 no-mine/
+         buffer zones) by tightening their variable bounds to ``(0, 0)`` — exact, not just penalized.
+       - ``"caps"``: a list of ``{"coeffs": array, "bound": float}`` linear rows (already normalized to
+         the solver's ``<=`` convention), each added as an extra ``a_ub`` row ``coeffs @ x <= bound``
+         (K6 exposure budgets, L6 water budgets, or any other block-level activity cap).
+
+    Reuses :func:`cvar_epigraph` for the CVaR epigraph and :func:`mixle.relations.branch_and_bound_milp`
+    for the extended MILP — the same solver ``two_stage_stochastic_plan`` uses, so grade, cost, carbon,
+    and enviro/health terms all trade off against each other on one objective.
+    """
+    cost = np.asarray(block_cost, dtype=np.float64)
+    n_blocks = cost.size
+
+    g = np.asarray(posterior.samples(k_scenarios, rng), dtype=np.float64)
+    if g.shape != (k_scenarios, n_blocks):
+        raise ValueError(f"posterior.samples returned shape {g.shape}, expected {(k_scenarios, n_blocks)}")
+
+    liability_total = liabilities.get("total") if liabilities else None
+    if liability_total is None:
+        liability = np.zeros(n_blocks, dtype=np.float64)
+    else:
+        liability = np.asarray(liability_total, dtype=np.float64)
+        if liability.shape != (n_blocks,):
+            raise ValueError(f"risk_adjusted_plan: liabilities['total'] shape {liability.shape} != {(n_blocks,)}")
+
+    profit = price * g - cost[None, :] - liability[None, :]  # (K, n_blocks): v_k(x) = profit[k] @ x
+    mean_profit = profit.mean(axis=0)
+    losses = -profit  # L_k(x) = -v_k(x)
+
+    c_add, a_ub_rows, b_ub, var_index = cvar_epigraph(losses, alpha)
+    width = a_ub_rows.shape[1]
+
+    c_ev = np.zeros(width, dtype=np.float64)
+    c_ev[:n_blocks] = mean_profit
+    objective = c_ev - _CVAR_LAMBDA * c_add  # maximize E[v] - lambda * CVaR(-v)
+
+    bounds = [(0.0, 1.0)] * n_blocks + [(-np.inf, np.inf)] + [(0.0, np.inf)] * k_scenarios
+
+    constraints = constraints or {}
+    no_mine_mask = constraints.get("no_mine_mask")
+    if no_mine_mask is not None:
+        mask = np.asarray(no_mine_mask, dtype=bool)
+        if mask.shape != (n_blocks,):
+            raise ValueError(f"risk_adjusted_plan: constraints['no_mine_mask'] shape {mask.shape} != {(n_blocks,)}")
+        for b in np.flatnonzero(mask):
+            bounds[b] = (0.0, 0.0)
+
+    extra_rows: list[np.ndarray] = []
+    extra_b: list[float] = []
+    for cap in constraints.get("caps") or ():
+        coeffs = np.asarray(cap["coeffs"], dtype=np.float64)
+        bound = float(cap["bound"])
+        sense = cap.get("sense", "<=")
+        if sense == ">=":
+            coeffs, bound = -coeffs, -bound
+        elif sense != "<=":
+            raise ValueError(f"risk_adjusted_plan: cap 'sense' must be '<=' or '>=', got {sense!r}")
+        if coeffs.shape != (n_blocks,):
+            raise ValueError(f"risk_adjusted_plan: constraints['caps'] coeffs shape {coeffs.shape} != {(n_blocks,)}")
+        row = np.zeros(width, dtype=np.float64)
+        row[:n_blocks] = coeffs
+        extra_rows.append(row)
+        extra_b.append(bound)
+
+    if extra_rows:
+        a_ub_rows = np.vstack([a_ub_rows, np.array(extra_rows)])
+        b_ub = np.concatenate([b_ub, np.array(extra_b, dtype=np.float64)])
+
+    integer = list(range(n_blocks))
+    solved = branch_and_bound_milp(objective, a_ub_rows, b_ub, integer=integer, bounds=bounds, sense="max")
+    if solved is None:
+        raise ValueError("risk_adjusted_plan: MILP infeasible for the given blocks/scenarios/constraints")
     _, x_full = solved
 
     extract = np.round(x_full[:n_blocks]).astype(bool)
