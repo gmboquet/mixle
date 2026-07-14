@@ -64,6 +64,26 @@ class PublicApiManifestTest(unittest.TestCase):
             "and commit if intended):\n" + "\n".join(drift),
         )
 
+    def test_dynamic_packages_resolve_cleanly(self):
+        """``mixle``, ``mixle.stats``, and ``mixle.utils`` assemble ``__all__`` at runtime and must
+        actually resolve here -- every dependency they need is installed in this environment, none is
+        optional. A prior regression imported ``mixle.stats`` before ``mixle.reason`` had a chance to
+        finish initializing, tripping a real circular-import chain (``mixle.stats.bayes.dirichlet`` ->
+        ``mixle.inference`` -> ``mixle.analysis`` -> ``mixle.reason`` -> ``mixle.stats.latent.mixture``
+        -> back to ``mixle.stats.bayes.dirichlet``) and silently recording ``mixle.stats`` as
+        ``{"unresolved": "ImportError"}`` -- which ``_resolvable`` above then treats exactly like a
+        legitimately-missing optional dependency and skips, defeating drift coverage for the whole
+        package. Assert that does not happen."""
+        current = _load_generator().build_manifest(_REPO_ROOT)
+        for key in ("mixle", "mixle.stats", "mixle.utils"):
+            value = current.get(key)
+            self.assertIsInstance(
+                value,
+                list,
+                f"{key} failed to resolve ({value!r}) even though its dependencies are all installed "
+                "here -- likely an import-ordering regression, not a genuinely missing optional dep",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
