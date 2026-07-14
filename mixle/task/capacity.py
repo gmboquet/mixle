@@ -259,7 +259,10 @@ def _fit_rung(
         label_index = {y: i for i, y in enumerate(label_list)}
         y = np.asarray([label_index[str(t)] for t in train_labels], dtype=np.int64)
         featurizer = WordEmbeddingFeaturizer(word_vectors, dim=vec_dim, seed=seed)
-        module, cfg, _steps_run = _fit_mlp(
+        # unpack ALL of _fit_mlp's returns: this call site missed a return-arity change TWICE (#47's
+        # 2->3, then the optimizer-receipt 3->4) because it only runs where safetensors is installed
+        # and CI skips it -- keep the arity in sync with distill.py's own call sites
+        module, cfg, _steps_run, _optimizer_receipt = _fit_mlp(
             featurizer.transform(train_texts), y, len(label_list), hidden, epochs, lr, seed, device
         )
         student = TaskModel(
