@@ -9,7 +9,14 @@ collected here so the distributions package stays focused on distribution famili
 
 from __future__ import annotations
 
-from mixle.analysis.biodiversity import habitat_offset_liability, no_net_loss_constraint
+from mixle.analysis.biodiversity import (
+    fragmentation_impact,
+    habitat_connectivity,
+    habitat_offset_liability,
+    least_cost_corridor,
+    no_net_loss_constraint,
+    resistance_raster,
+)
 from mixle.analysis.carcinogenic_risk import (
     RiskQuantity,
     SlopeFactor,
@@ -163,6 +170,11 @@ __all__ = [
     "transition_risk",
     # climate objective + risk: emissions footprint and carbon/water terms into J6/H4 (L6)
     "climate_terms",
+    # habitat connectivity (graph resistance on a habitat-cost raster; N4)
+    "resistance_raster",
+    "least_cost_corridor",
+    "habitat_connectivity",
+    "fragmentation_impact",
     # reclamation ecology / biodiversity offsets (priced habitat-offset liability + no-net-loss constraint)
     "habitat_offset_liability",
     "no_net_loss_constraint",
