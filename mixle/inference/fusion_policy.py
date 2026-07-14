@@ -71,7 +71,7 @@ def prefer_compiled_mixture(model: Any, enc_data: Any, max_its: int) -> bool:
             return False
         from mixle.stats.compute.fused_codegen import fusible, fusible_estep
 
-        if fusible(model) and fusible_estep(model):
+        if fusible(model, bare_bridge=False) and fusible_estep(model, bare_bridge=False):
             return False
         from mixle.inference.block_em import _parameter_count
 
@@ -83,7 +83,7 @@ def prefer_compiled_mixture(model: Any, enc_data: Any, max_its: int) -> bool:
             is_combinator = (
                 getattr(component, "components", None) is not None or getattr(component, "dists", None) is not None
             )
-            if is_combinator and fusible(component) and fusible_estep(component):
+            if is_combinator and fusible(component, bare_bridge=False) and fusible_estep(component, bare_bridge=False):
                 compiled_cost += cost
         if compiled_cost == 0 or compiled_cost / max(total_cost, 1) < 0.25:
             return False
