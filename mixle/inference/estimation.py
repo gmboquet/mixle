@@ -364,6 +364,14 @@ def _local_fused_step(enc_data, estimator, model):
     return nxt, getattr(accumulator, "_seq_ll", None)
 
 
+def _compiled_fused_step(enc_data, estimator, model, strategy):
+    """Compiled full-mixture step plus its already-computed input-model objective."""
+
+    result = strategy.step(enc_data, estimator, model)
+    metadata = result.metadata or {}
+    return result.model, metadata.get("input_data_objective")
+
+
 class EMStep(NamedTuple):
     """One accepted EM iteration, handed to an ``optimize(on_step=...)`` callback.
 
@@ -877,7 +885,7 @@ def optimize(
         root (int): MPI root rank for ``backend='mpi'``.
         root_only (bool): MPI root-only data mode for ``backend='mpi'``.
         strategy (Optional[Any]): Optional EM strategy from ``mixle.inference.em`` (e.g. ``AnnealedEM``,
-            ``HardEM``, ``MonteCarloEM``) or any callable ``(enc, estimator, model) -> model`` to use
+            ``HardEM``, ``MonteCarloEM``, ``CompiledEM``) or any callable ``(enc, estimator, model) -> model`` to use
             in place of the standard exact E/M step. ``None`` uses the standard step.
         reuse_estep_ll (bool): Default True. Reuse the data log-likelihood computed during the E-step
             (the posterior normalizer / forward pass / variational ELBO) for convergence instead of
@@ -926,17 +934,19 @@ def optimize(
             the historical automatic-composite path proceeds untouched. ``'off'`` restores the
             unconditional historical behavior. Only consulted when ``estimator`` is ``None`` and no
             ``prev_estimate``/``init_estimator``/``strategy``/``enc_data`` is supplied.
-        schedule (str): ``'full'`` (default) -- unchanged vanilla full-tree EM, every round scores
-            and re-estimates every component. ``'auto'`` engages the block-coordinate-ascent
-            scheduler (:mod:`mixle.inference.block_em`): after one full bootstrap sweep, components
-            are ranked by their last observed complete-data Q gain per structural-cost unit, and
-            only the highest-value ones within a per-round cost budget are re-estimated. Inactive
-            component scores are cached while their parameters remain unchanged. This is a
+        schedule (str): ``'full'`` (default) performs exact full-tree EM every round and automatically
+            uses whole-model or component-level compiled kernels when the local model is eligible.
+            ``'auto'`` additionally engages the block-coordinate-ascent scheduler
+            (:mod:`mixle.inference.block_em`) when selective work is expected to win: after one full
+            bootstrap sweep, components are ranked by their last observed complete-data Q gain per
+            measured whole-block cost, and only the highest-value ones within a per-round budget are
+            re-estimated. Inactive component scores are cached while their parameters remain unchanged.
+            This is a
             scheduling choice: observed likelihood is transactionally gated non-decreasing every round, and
             when there is no useful ranking to do (e.g. every component looks equally worth
             updating) the scheduler degenerates to doing exactly what ``'full'`` does. Only
-            engaged when the model is a plain local-backend ``MixtureDistribution``/
-            ``MixtureEstimator`` MLE fit with no explicit ``strategy``/``engine``/``resources``/
+            engaged when the model is a local-backend ``MixtureDistribution``/
+            ``MixtureEstimator`` MLE/MAP fit with no explicit ``strategy``/``engine``/``resources``/
             ``placement`` -- anything else silently falls back to ``'full'`` (never an error, never
             a behavior change beyond scheduling).
         seed (Optional[int]): Integer seed for initializing the EM algorithm -- shorthand for
@@ -1117,9 +1127,25 @@ def optimize(
         strict_monotone = _resolve_monotone(monotone, estimator, mm)
         select_best = _resolve_track_best(track_best, estimator)
         loop_delta = None if surrogate_update else delta
+        from mixle.inference.transaction import has_mutable_state
+
+        compiled_full = False
+        if (
+            schedule in ("auto", "full")
+            and strategy is None
+            and resolved_objective == "mle"
+            and engine is None
+            and resources is None
+            and placement is None
+            and backend_name == "local"
+            and not has_mutable_state(mm, estimator)
+        ):
+            from mixle.inference.fusion_policy import prefer_compiled_mixture
+
+            compiled_full = prefer_compiled_mixture(mm, enc_data, max_its)
 
         # D3 block-EM scheduler: 'auto' dispatches to mixle.inference.block_em's greedy
-        # gain-per-cost scheduler when the fit is a plain local MLE MixtureDistribution/
+        # gain-per-cost scheduler when the fit is a local MLE/MAP MixtureDistribution/
         # MixtureEstimator fit with none of the other execution knobs engaged (those all need
         # the standard _em_loop path); everything else silently keeps the 'full' behavior below
         # -- schedule='auto' never errors or changes what is computed, only how it is scheduled.
@@ -1131,7 +1157,7 @@ def optimize(
                 is_block_em_eligible(mm, estimator)
                 and not surrogate_update
                 and strategy is None
-                and resolved_objective == "mle"
+                and resolved_objective in ("mle", "map")
                 and engine is None
                 and resources is None
                 and placement is None
@@ -1176,17 +1202,25 @@ def optimize(
         # from the accumulator; an explicit engine reads it from a kernel that reports it (the
         # FusedKernel), and gracefully falls back to a scoring pass otherwise.
         fused_step_fn = None
-        from mixle.inference.transaction import has_mutable_state
+        effective_strategy = strategy
+        if compiled_full:
+            from mixle.inference.em import CompiledEM
+
+            effective_strategy = CompiledEM()
+            if out is not None:
+                out.write("compiled-em: component-level fused full-tree execution\n")
 
         if (
             reuse_estep_ll
             and strict_monotone
             and resolved_objective == "mle"
-            and strategy is None
+            and (strategy is None or compiled_full)
             and isinstance(enc_data, list)
             and not has_mutable_state(mm, estimator)
         ):
-            if engine is None:
+            if compiled_full:
+                fused_step_fn = partial(_compiled_fused_step, strategy=effective_strategy)
+            elif engine is None:
                 fused_step_fn = _local_fused_step
             else:
                 fused_step_fn = partial(_engine_fused_step, engine=engine)
@@ -1197,7 +1231,7 @@ def optimize(
             enc_data,
             estimator,
             mm,
-            step_fn=_em_step_fn(engine, strategy, objective_fn),
+            step_fn=_em_step_fn(engine, effective_strategy, objective_fn),
             ll_fn=objective_scorer,
             max_its=max_its,
             delta=loop_delta,
