@@ -239,20 +239,93 @@ if _HAS_TORCH:
         and codebook toward encoder. ``encode``/``reconstruct`` are the integer <-> vector halves the
         cell store uses: ``reconstruct`` is a live embedding lookup, so far-field attention scores
         backpropagate into the codebooks directly.
+
+        ``codebook_update="ema"`` switches the codebook half to exponential-moving-average cluster
+        updates (van den Oord et al.'s VQ-VAE-2 recipe) with dead-code reseeding: codes track the
+        decayed mean of the sub-vectors assigned to them instead of descending the commitment
+        gradient, and a code whose decayed occupancy falls below ``reseed_threshold`` is re-seeded
+        to a random sub-vector from the current batch. This is the standard remedy for the VQ
+        optimization friction the falsification measured (the quantized arm needing ~2x the dense
+        arm's step budget -- ``experiments/group_attention/RESULTS.md``); the acceptance experiment
+        ``experiments/group_attention/ema_friction.py`` quantifies the reduction. In EMA mode the
+        commitment loss keeps only the encoder-side term (the codebook no longer needs gradients)
+        and the codebooks stop receiving far-field score gradients (they are buffers in all but
+        name) -- the encoder path is unchanged either way.
         """
 
-        def __init__(self, head_dim: int, *, n_blocks: int, codes_per_block: int, beta: float = 0.25) -> None:
+        def __init__(
+            self,
+            head_dim: int,
+            *,
+            n_blocks: int,
+            codes_per_block: int,
+            beta: float = 0.25,
+            codebook_update: str = "gradient",
+            ema_decay: float = 0.99,
+            ema_eps: float = 1e-5,
+            reseed_threshold: float = 0.1,
+        ) -> None:
             super().__init__()
             if head_dim % n_blocks != 0:
                 raise ValueError(f"head_dim={head_dim} must divide into n_blocks={n_blocks}")
+            if codebook_update not in ("gradient", "ema"):
+                raise ValueError(f"codebook_update must be 'gradient' or 'ema', got {codebook_update!r}")
             self.head_dim = int(head_dim)
             self.n_blocks = int(n_blocks)
             self.codes_per_block = int(codes_per_block)
             self.sub_dim = head_dim // n_blocks
             self.beta = float(beta)
-            self.codebooks = nn.Parameter(
-                torch.randn(self.n_blocks, self.codes_per_block, self.sub_dim) / (head_dim**0.5)
-            )
+            self.codebook_update = codebook_update
+            self.ema_decay = float(ema_decay)
+            self.ema_eps = float(ema_eps)
+            self.reseed_threshold = float(reseed_threshold)
+            init = torch.randn(self.n_blocks, self.codes_per_block, self.sub_dim) / (head_dim**0.5)
+            self.codebooks = nn.Parameter(init, requires_grad=codebook_update == "gradient")
+            if codebook_update == "ema":
+                self.register_buffer("_ema_cluster_size", torch.ones(self.n_blocks, self.codes_per_block))
+                self.register_buffer("_ema_embed_avg", init.clone())
+                self.register_buffer("_ema_initialized", torch.zeros((), dtype=torch.bool))
+
+        def _ema_update(self, k: Any, codes: Any) -> None:
+            """One EMA cluster step from a batch of (detached) keys and their code assignments."""
+            with torch.no_grad():
+                kb = k.detach().reshape(-1, self.n_blocks, self.sub_dim)
+                if not bool(self._ema_initialized) and kb.shape[0] > 0:
+                    # data-dependent init: seed every code from ACTUAL first-batch sub-vectors. The
+                    # random N(0, 1/sqrt(d)) init has the wrong scale relative to the encoder's real
+                    # key activations, so early assignments collapse onto a few codes and every
+                    # update scheme spends its first phase waiting for the encoder to reorganize --
+                    # the decay-insensitive ~1.6x friction floor measured in ema_friction.py.
+                    for b_idx in range(self.n_blocks):
+                        picks = torch.randperm(kb.shape[0])[: self.codes_per_block]
+                        if len(picks) < self.codes_per_block:
+                            picks = torch.randint(0, kb.shape[0], (self.codes_per_block,))
+                        self.codebooks.data[b_idx] = kb[picks, b_idx]
+                        self._ema_embed_avg[b_idx] = kb[picks, b_idx]
+                        self._ema_cluster_size[b_idx].fill_(1.0)
+                    self._ema_initialized.fill_(True)
+                    codes = self.encode(k)  # re-assign against the seeded codebooks
+                flat = codes.detach().reshape(-1, self.n_blocks)
+                for b_idx in range(self.n_blocks):
+                    assign = flat[:, b_idx]
+                    n = torch.bincount(assign, minlength=self.codes_per_block).to(kb.dtype)
+                    sums = torch.zeros(self.codes_per_block, self.sub_dim, dtype=kb.dtype, device=kb.device)
+                    sums.index_add_(0, assign, kb[:, b_idx])
+                    self._ema_cluster_size[b_idx].mul_(self.ema_decay).add_(n, alpha=1.0 - self.ema_decay)
+                    self._ema_embed_avg[b_idx].mul_(self.ema_decay).add_(sums, alpha=1.0 - self.ema_decay)
+                    # Laplace-smoothed normalization keeps rarely-hit codes finite
+                    size = self._ema_cluster_size[b_idx]
+                    total = size.sum()
+                    smoothed = (size + self.ema_eps) / (total + self.codes_per_block * self.ema_eps) * total
+                    self.codebooks.data[b_idx] = self._ema_embed_avg[b_idx] / smoothed[:, None]
+                    # dead-code reseed: a code nobody uses re-enters at a random batch sub-vector,
+                    # so early collapse (everything mapping to 2 cells) self-repairs
+                    dead = size < self.reseed_threshold
+                    if bool(dead.any()) and kb.shape[0] > 0:
+                        picks = torch.randint(0, kb.shape[0], (int(dead.sum()),), device=kb.device)
+                        self.codebooks.data[b_idx][dead] = kb[picks, b_idx]
+                        self._ema_embed_avg[b_idx][dead] = kb[picks, b_idx]
+                        self._ema_cluster_size[b_idx][dead] = 1.0
 
         def encode(self, k: Any) -> Any:
             """``(..., head_dim) -> (..., n_blocks)`` nearest-code indices (no gradient; argmin is discrete)."""
@@ -269,7 +342,15 @@ if _HAS_TORCH:
             codes = self.encode(k)
             quant = self.reconstruct(codes)
             blocks_flat = k  # commitment in the full-key metric == sum of per-block metrics
-            commit = F.mse_loss(blocks_flat, quant.detach()) + self.beta * F.mse_loss(quant, blocks_flat.detach())
+            if self.codebook_update == "ema":
+                # encoder-side pull only; the codebook is trained by the EMA cluster step (applied
+                # AFTER this batch used the current codes -- the standard VQ-VAE-EMA ordering, so
+                # the returned codes and quantized keys stay mutually consistent)
+                commit = self.beta * F.mse_loss(blocks_flat, quant.detach())
+                if self.training and torch.is_grad_enabled():
+                    self._ema_update(k, codes)
+            else:
+                commit = F.mse_loss(blocks_flat, quant.detach()) + self.beta * F.mse_loss(quant, blocks_flat.detach())
             k_q = k + (quant - k).detach()  # straight-through
             return k_q, codes, commit
 
@@ -349,6 +430,29 @@ if _HAS_TORCH:
         new_cache_k = k_full_raw[:, -window:]
         new_cache_v = v_full_raw[:, -window:]
         return near_logits, gap_logits, vh, new_cache_k, new_cache_v, evicted_k_raw, evicted_v_raw
+
+    def quantized_softmax_weights(logits: Any, *, bits: int, span: float = 24.0) -> Any:
+        """Unnormalized softmax weights through the Q-LSE grid: ONE ``2^bits`` exp table, no real exp.
+
+        ``mixle.engines.qlut.quantized_logsumexp``'s exact semantics, elementwise: shift by the
+        row max, round to the ``span / 2^bits`` grid, clamp scores more than ``span`` below the max
+        into the bottom bin, and read ``exp`` off the precomputed table (``-inf`` rows get weight
+        0, matching softmax's treatment of masked slots). Dividing by the row sum gives softmax
+        weights within ``exp(+-lse_error_bound(bits, span)) - 1`` relative of exact -- the same
+        grid half-step bound, now carried through the attention READOUT rather than just the
+        scorer. The histogram+dot evaluation of these same numbers is the O(2^bits) form; here the
+        table gather is per element because the readout needs the per-slot weights against values.
+        """
+        levels = 1 << bits
+        delta = span / levels
+        finite = torch.isfinite(logits)
+        m = logits.masked_fill(~finite, float("-inf")).amax(dim=-1, keepdim=True)
+        m = torch.where(torch.isfinite(m), m, torch.zeros_like(m))  # all-masked rows: any shift works
+        idx = torch.clamp(torch.round((logits - m) / delta).long() + levels - 1, min=0, max=levels - 1)
+        table = torch.exp((torch.arange(levels, device=logits.device, dtype=torch.float64) - (levels - 1)) * delta).to(
+            logits.dtype
+        )
+        return table[idx] * finite.to(logits.dtype)
 
     def _far_bank(codes: Any, counts: Any, vsum: Any, q_raw: Any, pq: ProductQuantizer) -> tuple[Any, Any]:
         """Far-field logits and mean values from the cell store.
@@ -473,6 +577,9 @@ if _HAS_TORCH:
             codes_per_block: int = 16,
             max_cells: int = 128,
             commit_weight: float = 1.0,
+            codebook_update: str = "gradient",
+            lse_bits: int | None = None,
+            lse_span: float = 24.0,
         ) -> None:
             super().__init__()
             assert d_model % n_head == 0
@@ -486,12 +593,22 @@ if _HAS_TORCH:
             self.codes_per_block = int(codes_per_block)
             self.max_cells = int(max_cells)
             self.commit_weight = float(commit_weight)
+            # Q-LSE readout: with lse_bits set, INFERENCE steps (no grad) normalize the joint
+            # softmax through the quantized-exp table (quantized_softmax_weights); training steps
+            # always use exact exp -- the same exact-when-learning discipline as the fused E-steps.
+            self.lse_bits = None if lse_bits is None else int(lse_bits)
+            self.lse_span = float(lse_span)
             (self.tok, self.qkv, self.proj, self.ln1, self.ln2, self.mlp, self.ln_f, self.head) = _transformer_block(
                 vocab, d_model, n_layer, n_head
             )
             self.pq = nn.ModuleList(
                 [
-                    ProductQuantizer(self.head_dim, n_blocks=n_blocks, codes_per_block=codes_per_block)
+                    ProductQuantizer(
+                        self.head_dim,
+                        n_blocks=n_blocks,
+                        codes_per_block=codes_per_block,
+                        codebook_update=codebook_update,
+                    )
                     for _ in range(n_layer)
                 ]
             )
@@ -568,7 +685,12 @@ if _HAS_TORCH:
 
                 # One softmax over {far cells} + {gap tokens, quantized} + {near tokens, exact}: softmax
                 # attention over the whole stream with far keys quantized -- the collapse identity's LHS.
-                joint = torch.cat([far_logits, gap_logits, near_logits], dim=-1).softmax(dim=-1)
+                joint_logits = torch.cat([far_logits, gap_logits, near_logits], dim=-1)
+                if self.lse_bits is not None and not torch.is_grad_enabled():
+                    w = quantized_softmax_weights(joint_logits, bits=self.lse_bits, span=self.lse_span)
+                    joint = w / w.sum(dim=-1, keepdim=True).clamp(min=torch.finfo(w.dtype).tiny)
+                else:
+                    joint = joint_logits.softmax(dim=-1)
                 n_cells = far_logits.shape[-1]
                 n_unfolded = gap_logits.shape[-1]
                 out = (
