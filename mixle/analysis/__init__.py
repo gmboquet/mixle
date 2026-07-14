@@ -20,6 +20,7 @@ from mixle.analysis.coverage import (
     rarefaction_curve,
     turing_coverage,
 )
+from mixle.analysis.emissions import EmissionFactors, Footprint, emissions_footprint
 from mixle.analysis.extreme import (
     GPDFit,
     endpoint_estimator,
@@ -113,4 +114,8 @@ __all__ = [
     # mine economics: cost curves and capex/opex roll-up
     "cost_curve",
     "capex_opex",
+    # emissions / carbon accounting (Scope 1/2/3 GHG footprint)
+    "EmissionFactors",
+    "Footprint",
+    "emissions_footprint",
 ]
