@@ -114,3 +114,38 @@ prediction playing out quantitatively (its quantized arm needed ~2x the dense ar
 criterion verdict: not killed on structure; at the referee's own budget the sketches' smoother
 optimization wins needle@16 (E3a 0.312 vs 0), recorded as the honest scale caveat. Untried
 remedies for the friction itself: EMA codebooks, temperature annealing.
+
+## Acceptance round (2026-07-14): friction remedy, natural-data occupancy, Q-LSE readout
+
+Pre-stated criteria in the script headers, run same-day as written.
+
+1. **EMA codebooks cut the VQ friction to 1.46x — PASS (`ema_friction.py`, acceptance <= 1.5x).**
+   `ProductQuantizer(codebook_update="ema")`: EMA cluster updates + dead-code reseeding +
+   data-dependent init. Budgets to held-out recall >= 0.95 on associative recall (batch 64):
+   dense 83,200 examples; gradient-VQ 166,400 (**2.00x** — the falsification's ~2x, reproduced
+   exactly); EMA **121,600 (1.46x)**. Two negative findings recorded on the way: the EMA decay is
+   NOT the lever (0.99/0.95/0.9/0.8 all plateau at ~1.6x), and the friction floor lived in the
+   INIT — random `N(0, 1/sqrt(d))` codebooks have the wrong scale relative to real key
+   activations, so early assignments collapse and every update scheme waits for the encoder to
+   reorganize. Seeding codes from actual first-batch sub-vectors is what crossed the bar.
+   Gradient mode stays the constructor default; EMA is opt-in per spine
+   (`QuantizedKeyAttentionSpine(codebook_update="ema")`).
+
+2. **Occupancy on natural data: bounded and sublinear — PASS (`natural_occupancy.py`).** The K3
+   caveat (random-token streams, tiny synthetic vocab) closed: byte-level English prose (this
+   repository's README + docs, 300 TBPTT steps), held-out streaming. Occupied cells/layer:
+   **69 max @ 4k -> [78, 90] @ 16k -> [91, 108] @ 64k** of 256 capacity (4,096 possible), **0
+   dropped tokens**. Growth 4k->64k is 1.57x for a 16x context increase (acceptance: < 80% of
+   capacity with 0 drops, sublinear < 2x). Natural data occupies more cells than the synthetic
+   task's 49, exactly as the caveat predicted — and stays an order of magnitude below the cell
+   space with per-query cost O(100) at every length measured.
+
+3. **Q-LSE beyond scoring: the attention readout itself — landed with a certified bound.**
+   `quantized_softmax_weights` computes the joint softmax's unnormalized weights through the
+   qlut grid (shift by row max, round to the `span/2^bits` grid, ONE `2^bits` exp table, -inf
+   slots -> weight 0), and `QuantizedKeyAttentionSpine(lse_bits=...)` uses it for INFERENCE
+   steps — training always stays exact-exp, the same discipline as the fused E-steps. Tests pin
+   (a) row normalizers equal to `mixle.engines.qlut.quantized_logsumexp` bit for bit (same grid,
+   torch vs numpy), (b) readout error within the `exp(2*lse_error_bound(bits, span)) - 1`
+   weight-ratio bound, (c) quantized-inference loss within 1e-2 of exact at 12 bits while
+   grad-enabled steps match the exact spine to 1e-12.
