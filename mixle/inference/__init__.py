@@ -222,6 +222,9 @@ from mixle.inference.planning import (
 )
 from mixle.inference.posterior import ParameterPosterior, PredictivePosterior, posterior
 
+# commodity-price / cost forecasting with conformally-calibrated intervals (J1)
+from mixle.inference.price_forecast import PriceForecast, forecast_price
+
 # closed-form variational projections — compress a structured teacher onto a smaller student exactly
 from mixle.inference.project import collapse_mixture, fisher_merge, gaussian_kl, moment_project, reduce_mixture
 
@@ -495,6 +498,9 @@ __all__ = [
     "posterior",
     "ParameterPosterior",
     "PredictivePosterior",
+    # commodity-price / cost forecasting with conformally-calibrated intervals (J1)
+    "PriceForecast",
+    "forecast_price",
     # answer receipts -- bind ledger + trace + calibration + provenance, re-verifiable offline (H3)
     "Receipt",
     "VerificationReport",
