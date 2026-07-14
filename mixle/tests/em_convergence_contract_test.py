@@ -135,13 +135,13 @@ class MutableModeContractTest(unittest.TestCase):
         rng = np.random.RandomState(seed)
         return [float(v) for v in np.concatenate([rng.normal(-4, 1, n), rng.normal(4, 1, n)])]
 
-    def _proto(self, lr=0.05, lr_decay=None, m_steps=25):
+    def _proto(self, lr=0.05, lr_decay=None, m_steps=25, optimizer=None):
         from mixle.models import GradLeaf
 
         torch.manual_seed(0)
         return MixtureDistribution(
             [
-                GradLeaf(self.DiagGauss(0.5), m_steps=m_steps, lr=lr, lr_decay=lr_decay),
+                GradLeaf(self.DiagGauss(0.5), m_steps=m_steps, lr=lr, lr_decay=lr_decay, optimizer=optimizer),
                 GaussianDistribution(-1.0, 3.0),
             ],
             [0.5, 0.5],
@@ -156,7 +156,7 @@ class MutableModeContractTest(unittest.TestCase):
         # lr=25 diverges; the GradLeaf guard recovers and the receipt says so, while the fit's
         # objective stays finite -- a failed M-step is distinguishable from a true decline.
         data = self._bimodal()
-        fitted, trace = _trace_fit(self._proto(lr=25.0, m_steps=40), data, max_its=8, delta=None)
+        fitted, trace = _trace_fit(self._proto(lr=25.0, m_steps=40, optimizer="adam"), data, max_its=8, delta=None)
         self.assertTrue(all(np.isfinite(v) for v in trace))
         self.assertTrue(np.isfinite(_ll(fitted, data)))
         self.assertGreaterEqual(fitted.components[0].fit_receipt["nonfinite_recoveries_total"], 1)

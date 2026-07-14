@@ -2,7 +2,7 @@
 
 Pins the four changes: (1) per-component FUSED scoring inside the freeze-rollup column builders
 (parity-gated against the host path, with non-fusible components falling back per component);
-(2) measured per-component seconds from the timing receipts feeding the scheduler's cost model
+(2) measured end-to-end per-component seconds from the timing receipts feeding the scheduler's cost model
 (all-or-nothing, disclosed via the assumptions receipt's cost_basis); (3) reduced-precision
 column scoring threaded through run_block_em(compute_dtype=...); (4) the certificate-aware
 "auto" audit cadence and the schedule="auto" dispatch rule.
@@ -16,8 +16,9 @@ import pytest
 pytest.importorskip("numba")
 
 from mixle.inference.block_em import run_block_em
+from mixle.inference.estimation import optimize
 from mixle.inference.freeze_rollup import FreezeRollupCache, _component_log_density_matrix_profiled
-from mixle.inference.fusion_policy import prefer_block_schedule
+from mixle.inference.fusion_policy import prefer_block_schedule, prefer_compiled_mixture
 from mixle.stats import (
     GaussianDistribution,
     GaussianEstimator,
@@ -75,7 +76,18 @@ class MeasuredCostTest:
         _, history = run_block_em(enc, estimator, start, max_its=5, delta=None, cost_model="measured")
         bases = [h.assumptions.cost_basis for h in history]
         assert bases[0] == "structural_parameter_count"  # nothing measured before round 0 runs
-        assert "measured_seconds" in bases[1:]
+        assert "measured_block_seconds" in bases[1:]
+
+    def test_measured_block_cost_includes_parameter_updates(self):
+        start, estimator, enc, _ = _problem()
+        _, history = run_block_em(enc, estimator, start, max_its=2, delta=None, cost_model="measured")
+        timing = history[0].timing
+        updates = dict(timing.component_update_seconds)
+        blocks = dict(timing.component_block_seconds)
+        assert set(updates) == set(range(start.num_components))
+        assert set(blocks) == set(range(start.num_components))
+        assert all(updates[idx] > 0.0 for idx in updates)
+        assert all(blocks[idx] >= updates[idx] for idx in updates)
 
     def test_structural_default_is_unchanged(self):
         start, estimator, enc, _ = _problem()
@@ -130,6 +142,8 @@ class AuditCadenceAndDispatchTest:
         enc = seq_encode(rng.normal(0.0, 4.0, 20_000), model=deepish)
         # only 3 components, but each is an expensive subtree: block scheduling qualifies
         assert prefer_block_schedule(deepish, enc, max_its=100)
+        # Most expensive child subtrees compile even though the heterogeneous root cannot.
+        assert prefer_compiled_mixture(deepish, enc, max_its=100)
         assert not prefer_block_schedule(deepish, enc, max_its=1)  # weighted-work floor still applies
         cheap = MixtureDistribution([GaussianDistribution(-4.0, 1.0), LaplaceDistribution(4.0, 2.0)], [0.5, 0.5])
         enc_cheap = seq_encode(rng.normal(0.0, 4.0, 20_000), model=cheap)
@@ -224,6 +238,25 @@ class FusedMStepEngagementTest:
 
         monkeypatch.setattr(fr, "_FUSED_SCORING", (fused_seq_log_density, fusible, counting_accumulate, fusible_estep))
         return calls
+
+    def test_optimize_full_dispatch_engages_compiled_component_kernels(self, monkeypatch):
+        start, estimator, enc, _ = _deep_mixed_problem(n=900)
+        calls = self._counting_resolver(monkeypatch)
+        monkeypatch.setattr("mixle.inference.fusion_policy.prefer_compiled_mixture", lambda *_: True)
+
+        fitted = optimize(
+            None,
+            estimator,
+            enc_data=enc,
+            prev_estimate=start,
+            max_its=2,
+            delta=None,
+            schedule="full",
+            out=None,
+        )
+
+        assert isinstance(fitted, MixtureDistribution)
+        assert calls["n"] > 0
 
     def test_flat_subcombinator_components_engage_and_match_host(self, monkeypatch):
         import mixle.inference.freeze_rollup as fr

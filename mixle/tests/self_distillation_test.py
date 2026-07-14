@@ -196,6 +196,8 @@ class J3CompressibilityAcceptanceTest(unittest.TestCase):
             seed=seed,
         )
         j3_model.eval()
+        families = j3_model.self_distillation_receipt["optimizer"]["plan"]["families"]
+        self.assertFalse(any("adam" in family for family in families))
 
         # G3's coarsen(), called directly as the compressibility proxy for the not-yet-built J2 ladder --
         # SAME budget, trust region, and (per-model, but identically-constructed) input_law for both.

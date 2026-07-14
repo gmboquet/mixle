@@ -10,9 +10,9 @@ optimization only. Any interleaving of a partial E-step (fresh log-density for t
 blocks, cached log-density for the inactive ones) and a per-block conditional M-step (only the
 active blocks are re-estimated; every other block's model object is carried forward byte-for-
 byte unchanged) is a generalized-EM coordinate update. A nonnegative complete-data Q gain
-certifies that the observed objective cannot decrease. Periodic and final exact observed-
-likelihood audits verify that certificate; a candidate without a finite certificate falls back
-to an exact observed-objective gate.
+certifies that the observed objective cannot decrease. Periodic and final exact objective audits
+verify that certificate; a candidate without a finite certificate falls back to an exact gate.
+With parameter priors, every round is gated on the MAP objective.
 
 The scheduler reuses :class:`~mixle.inference.freeze_rollup.FreezeRollupCache` only for blocks
 left inactive in the current round. It does not permanently freeze a component from a heuristic
@@ -114,6 +114,8 @@ class BlockEMTimingReceipt:
     accounting_seconds: float
     total_seconds: float
     component_density_seconds: tuple[tuple[str, int, float], ...] = ()
+    component_update_seconds: tuple[tuple[int, float], ...] = ()
+    component_block_seconds: tuple[tuple[int, float], ...] = ()
 
     @property
     def density_seconds(self) -> float:
@@ -130,7 +132,7 @@ class BlockEMStats:
     """One round's accounting for the block-EM scheduler -- the acceptance-criteria receipt.
 
     ``n_log_density_evals`` records removed model work, while ``wall_time_seconds`` records actual
-    elapsed time. ``objective`` is either the exact observed-data likelihood or its certified EM
+    elapsed time. ``objective`` is either the exact observed-data MLE/MAP objective or its certified EM
     lower bound, as disclosed by ``objective_exact``; ``measured_q_gain`` is the complete-data
     gain used for the next scheduling decision.
 
@@ -176,16 +178,17 @@ def _block_scores(
 ) -> tuple[dict[int, float], dict[int, float], dict[int, float], dict[int, float], str]:
     """Return last measured data-Q gain per cost unit for eligible blocks.
 
-    Cost is the MEASURED per-component density seconds from earlier rounds' timing receipts when
-    every eligible block has one (``cost_model="measured"``); otherwise the structural parameter
-    count proxy. Mixed units are never compared: measured pricing engages all-or-nothing.
+    Cost is the measured end-to-end block work from earlier rounds when every eligible block has
+    one: density evaluation, responsibility construction, and sufficient-statistic/parameter
+    update. Otherwise the structural parameter-count proxy is used. Mixed units are never
+    compared: measured pricing engages all-or-nothing.
     """
     gain_per_cost: dict[int, float] = {}
     cost: dict[int, float] = {}
     residual: dict[int, float] = {}
     q_gain: dict[int, float] = {}
     use_measured = measured_cost is not None and all(measured_cost.get(idx, 0.0) > 0.0 for idx in eligible)
-    basis = "measured_seconds" if use_measured and eligible else "structural_parameter_count"
+    basis = "measured_block_seconds" if use_measured and eligible else "structural_parameter_count"
     for idx in eligible:
         gain = max(float(last_q_gain.get(idx, 0.0)), 0.0)
         if use_measured:
@@ -328,6 +331,7 @@ def _sparse_block_m_step(
     responsibilities: np.ndarray,
     boundary_weight_step: float,
     compute_dtype: Any = None,
+    component_update_seconds: dict[int, float] | None = None,
 ) -> tuple[MixtureDistribution, np.ndarray, float]:
     """Re-estimate active leaves and the active-plus-inactive-mass weight block."""
 
@@ -336,11 +340,14 @@ def _sparse_block_m_step(
     for position, idx in enumerate(active):
         if model.zw[idx] or counts[position] <= 0.0:
             continue
+        started = time.perf_counter()
         enc_i = _component_enc(enc_data, idx)
         suff_stat = _component_suff_stat(
             estimator.estimators[idx], model.components[idx], enc_i, responsibilities[:, position], compute_dtype
         )
         components[idx] = estimator.estimators[idx].estimate(float(counts[position]), suff_stat)
+        if component_update_seconds is not None:
+            component_update_seconds[idx] = time.perf_counter() - started
     weights, inactive_scale = _constrained_block_weights(
         estimator,
         model,
@@ -499,7 +506,7 @@ def run_block_em(
     The first round updates every component. Later rounds rank blocks by the observed Q gain from
     their last update per structural-cost unit, select the highest-value blocks within
     ``budget_fraction``, reuse cached component scores for untouched blocks, and transactionally
-    gate the resulting partial M-step on observed likelihood.
+    gate the resulting partial M-step on the exact MLE or MAP objective.
 
     ``schedule="auto"`` at the :func:`mixle.inference.estimation.optimize` layer dispatches here;
     ``budget_fraction=1.0`` or ``full_tree_every_round=True`` both degenerate this to (numerically
@@ -650,6 +657,14 @@ def run_block_em(
     current_log_density: np.ndarray | None = None
     current_impossible: np.ndarray | None = None
     mutable_state = has_mutable_state(model, estimator)
+    map_objective = estimator.get_prior() is not None
+
+    def objective_value(log_density: np.ndarray, candidate_model: MixtureDistribution) -> float:
+        value = float(np.sum(log_density))
+        if map_objective:
+            value += float(estimator.model_log_density(candidate_model))
+        return value
+
     if objective_audit_interval == "auto":
         # Certificate-aware audit cadence: a tree of exact/GEM updates carries the monotone
         # certificate, so its Q-certified rounds need only sparse exact audits; stochastic
@@ -787,7 +802,7 @@ def run_block_em(
             log_density, gamma = _combine(ll_mat, model.log_w)
             gamma_active = gamma[:, active_indices]
             responsibility_columns = model.num_components
-        current_value = float(np.sum(log_density))
+        current_value = objective_value(log_density, model)
         responsibility_seconds = time.perf_counter() - responsibility_started
         exact_delta = None if old_value is None else current_value - old_value
 
@@ -795,6 +810,7 @@ def run_block_em(
         transaction = MutableStateSnapshot.capture(model, estimator) if mutable_state else None
         snapshot_seconds = time.perf_counter() - snapshot_started
         mstep_started = time.perf_counter()
+        component_update_seconds: dict[int, float] = {}
         if sparse_round:
             candidate, active_counts, inactive_scale = _sparse_block_m_step(
                 enc_payload,
@@ -804,12 +820,21 @@ def run_block_em(
                 gamma_active,
                 boundary_weight_step,
                 compute_dtype=compute_dtype,
+                component_update_seconds=component_update_seconds,
             )
             counts = None
         else:
             if gamma is None:  # pragma: no cover - established by the branch above
                 raise RuntimeError("dense block M-step requires dense responsibilities.")
-            candidate = _m_step(enc_payload, estimator, model, gamma, scheduled_inactive, compute_dtype=compute_dtype)
+            candidate = _m_step(
+                enc_payload,
+                estimator,
+                model,
+                gamma,
+                scheduled_inactive,
+                compute_dtype=compute_dtype,
+                component_update_seconds=component_update_seconds,
+            )
             counts = gamma.sum(axis=0)
             active_counts = counts[list(active_indices)]
             inactive_scale = 1.0
@@ -906,7 +931,7 @@ def run_block_em(
                 raise RuntimeError("dense candidate validation requires a component-score matrix.")
             candidate_log_density = _log_density_from_matrix(ll_mat_c, candidate.log_w)
             candidate_impossible = np.all(np.isneginf(ll_mat_c + candidate.log_w), axis=1)
-        candidate_value = float(np.sum(candidate_log_density))
+        candidate_value = objective_value(candidate_log_density, candidate)
         validation_seconds = time.perf_counter() - validation_started
         post_validation_accounting_started = time.perf_counter()
         audit_failed = q_accepted and candidate_value + accept_tolerance < current_value
@@ -916,9 +941,13 @@ def run_block_em(
         # closed-form leaves; deliberate take-the-step semantics for stochastic ones) -- gating it
         # would just re-reject the proposal the livelock keeps regenerating.
         accepted = (
-            (escape_round and np.isfinite(candidate_value))
-            or (q_accepted and not audit_failed)
-            or (not q_accepted and observed_accepted)
+            observed_accepted
+            if map_objective
+            else (
+                (escape_round and np.isfinite(candidate_value))
+                or (q_accepted and not audit_failed)
+                or (not q_accepted and observed_accepted)
+            )
         )
         if accepted:
             model = candidate
@@ -931,7 +960,9 @@ def run_block_em(
             current_impossible = candidate_impossible
             round_value = candidate_value
             objective_exact = True
-            if escape_round:
+            if map_objective:
+                acceptance_basis = "map_observed_gate"
+            elif escape_round:
                 acceptance_basis = "vanilla_escape"
             elif not q_accepted:
                 acceptance_basis = "observed_fallback"
@@ -955,9 +986,20 @@ def run_block_em(
                 last_q_gain[idx] = 0.0
             rejected_streak += 1
 
+        component_block_cost: dict[int, float] = {}
+        for profile in (estep_profile, candidate_profile):
+            for cost_idx, seconds in profile.component_evaluation_seconds:
+                component_block_cost[cost_idx] = component_block_cost.get(cost_idx, 0.0) + float(seconds)
+        for cost_idx, seconds in component_update_seconds.items():
+            component_block_cost[cost_idx] = component_block_cost.get(cost_idx, 0.0) + float(seconds)
+        if active_indices:
+            responsibility_share = responsibility_seconds / len(active_indices)
+            for cost_idx in active_indices:
+                component_block_cost[cost_idx] = component_block_cost.get(cost_idx, 0.0) + responsibility_share
+
         if controller is not None and controller_state is not None and controller_action is not None:
             realized_gain = max(0.0, round_value - current_value)
-            realized_cost = float(evals_e + evals_c)
+            realized_cost = float(sum(component_block_cost.get(idx, 0.0) for idx in active))
             controller.update(controller_state, controller_action, realized_gain, realized_cost)
 
         selected_cost = float(sum(cost[idx] for idx in active))
@@ -992,10 +1034,11 @@ def run_block_em(
             and forced_cost <= budget_cost + 1.0e-12
         ):
             failures.append("scheduler_budget_exceeded_without_forced_work")
-        for profile in (estep_profile, candidate_profile):
-            for cost_idx, seconds in profile.component_evaluation_seconds:
-                if seconds > 0.0:
-                    measured_cost[cost_idx] = float(seconds)
+        for cost_idx, seconds in component_block_cost.items():
+            if seconds <= 0.0:
+                continue
+            previous = measured_cost.get(cost_idx)
+            measured_cost[cost_idx] = float(seconds) if previous is None else 0.5 * (previous + float(seconds))
         assumptions = BlockEMAssumptionReceipt(
             declared_budget_fraction=round_budget_fraction,
             cost_basis=cost_basis,
@@ -1033,6 +1076,8 @@ def run_block_em(
                 ("estep", idx, seconds) for idx, seconds in estep_profile.component_evaluation_seconds
             )
             + tuple(("candidate", idx, seconds) for idx, seconds in candidate_profile.component_evaluation_seconds),
+            component_update_seconds=tuple(sorted(component_update_seconds.items())),
+            component_block_seconds=tuple(sorted(component_block_cost.items())),
         )
         n_zero = int(np.count_nonzero(model.zw)) if not accepted else int(np.count_nonzero(candidate.zw))
         history.append(
@@ -1069,7 +1114,7 @@ def run_block_em(
 
     if history and current_ll_mat is not None:
         audit_started = time.perf_counter()
-        final_value = float(np.sum(_log_density_from_matrix(current_ll_mat, model.log_w)))
+        final_value = objective_value(_log_density_from_matrix(current_ll_mat, model.log_w), model)
         audit_seconds = time.perf_counter() - audit_started
         if final_value + accept_tolerance < history[-1].objective:
             raise RuntimeError("final observed objective violated the certified EM lower bound.")

@@ -45,6 +45,8 @@ class DistillTest(unittest.TestCase):
         train = _make_corpus(seed=1)
         student = distill(_teacher, train, n=4, dim=512, hidden=[64], epochs=300, lr=1e-2, seed=0)
         self.assertGreaterEqual(student.meta["train_agreement"], 0.8)
+        families = student.meta["recipe"]["optimizer"]["plan"]["families"]
+        self.assertFalse(any("adam" in family for family in families))
 
         test = _make_corpus(seed=99)
         held_out = agreement(student, _teacher(test), test)

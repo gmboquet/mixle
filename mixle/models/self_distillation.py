@@ -238,8 +238,9 @@ def train_with_self_distillation(
     model.to(device).train()
     ema_teacher = EMATeacher(model, decay=ema_decay)
 
-    params = [p for p in model.parameters() if p.requires_grad]
-    opt = optimizer(params) if optimizer is not None else torch.optim.Adam(params, lr=lr)
+    from mixle.models.optimizer_routing import resolve_neural_optimizer
+
+    opt, optimizer_receipt = resolve_neural_optimizer(model, optimizer, lr=lr, sign_stable=False)
 
     sd_weight = float(consistency_weight if stochastic_depth_weight is None else stochastic_depth_weight)
     ema_w = float(consistency_weight if ema_weight is None else ema_weight)
@@ -281,4 +282,10 @@ def train_with_self_distillation(
             log(step, stats)
 
     model.eval()
+    model.self_distillation_receipt = {
+        "optimizer": optimizer_receipt,
+        "steps": int(steps),
+        "ema_decay": float(ema_decay),
+        "drop_prob": float(drop_prob),
+    }
     return model

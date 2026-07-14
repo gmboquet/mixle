@@ -27,9 +27,11 @@ from mixle.stats import (
     seq_encode,
     seq_log_density_sum,
 )
+from mixle.stats.compute.sequence import seq_estimate
 from mixle.stats.latent.mixture import (
     MixtureEstimator,
     _HeteroMixtureEncoded,
+    _SharedMixtureEncoded,
 )
 
 
@@ -98,6 +100,30 @@ class HeterogeneousMixtureTestCase(unittest.TestCase):
         _, ll = seq_log_density_sum(seq_encode(data, model=model), model)
         self.assertTrue(np.isfinite(ll))
         self.assertTrue(model.dist_to_encoder().homogeneous)
+
+    def test_nested_homogeneous_mixture_preserves_heterogeneous_encoding_depth(self):
+        rng = np.random.RandomState(29)
+        data = rng.gamma(3.0, 1.2, 300).tolist()
+        outer = MixtureDistribution(
+            [
+                MixtureDistribution(
+                    [GaussianDistribution(float(center), 1.5), GammaDistribution(2.0, 1.0)],
+                    [0.6, 0.4],
+                )
+                for center in (1.0, 2.0, 3.0, 4.0)
+            ],
+            [0.25] * 4,
+        )
+        encoder = outer.dist_to_encoder()
+        self.assertTrue(encoder.homogeneous)
+        encoded = encoder.seq_encode(data)
+        self.assertIsInstance(encoded, _SharedMixtureEncoded)
+
+        seq_values = outer.seq_log_density(encoded)
+        scalar_values = np.asarray([outer.log_density(value) for value in data])
+        np.testing.assert_allclose(seq_values, scalar_values, rtol=1e-11, atol=1e-11)
+        candidate = seq_estimate([(len(data), encoded)], outer.estimator(), outer)
+        self.assertTrue(np.isfinite(candidate.seq_log_density(encoded)).all())
 
 
 if __name__ == "__main__":
