@@ -82,6 +82,22 @@ This is a coherent neural-composition example: the latent mixture separates
 token-stream regimes, while ``CategoricalEmbedding`` prevents every expert from
 learning an independent vocabulary table.
 
+Analytic and Routed Fitting
+---------------------------
+
+``GradLeaf`` does not default to Adam. If a module defines
+``mixle_analytic_m_step(*fields, weights=..., batch_size=...)``, Mixle runs that
+exact or symbolically generated update and skips autograd. Otherwise it plans
+updates per parameter: embeddings and routers use AdaGrad, large matrices use
+Muon, stable full-batch blocks use Rprop, and sign-unstable small blocks use
+momentum or AdaGrad. The returned leaf's ``fit_receipt`` records the selected
+families and reasons.
+
+Pass ``optimizer="adam"`` or another named/callable optimizer only when the
+automatic plan is inappropriate. A module-owned analytic M-step has priority
+because eliminating an iterative solve is generally more valuable than tuning
+the iterative optimizer.
+
 Neural Density Leaves
 ---------------------
 
