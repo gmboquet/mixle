@@ -33,6 +33,12 @@ from mixle.analysis.extreme import (
     record_times,
     return_level,
 )
+from mixle.analysis.health_risk import (
+    DOSE_RESPONSE_MODELS,
+    DoseResponse,
+    cumulative_exposure,
+    population_risk,
+)
 from mixle.analysis.kde import (
     KDE,
     intensity,
@@ -74,6 +80,11 @@ __all__ = [
     "endpoint_estimator",
     "n_records",
     "record_times",
+    # dose-response / health-risk models (K3)
+    "DOSE_RESPONSE_MODELS",
+    "DoseResponse",
+    "cumulative_exposure",
+    "population_risk",
     # kernel density estimation
     "KDE",
     "kde",
