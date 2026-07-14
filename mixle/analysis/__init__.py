@@ -1,10 +1,10 @@
 """Applied statistical methods that are not probability-distribution families.
 
 These are estimators / analysis routines (extreme-value, kernel density, species coverage, geostatistics,
-rank aggregation, spatial mixtures, max-stable processes, covariance shrinkage, mine economics) that
-operate on data but are not ``SequenceEncodableProbabilityDistribution`` families and are not used by any
-distribution. They were previously scattered under ``mixle.stats``; collected here so the distributions
-package stays focused on distribution families.
+rank aggregation, spatial mixtures, max-stable processes, covariance shrinkage, mine economics,
+health/exposure monitoring) that operate on data but are not ``SequenceEncodableProbabilityDistribution``
+families and are not used by any distribution. They were previously scattered under ``mixle.stats``;
+collected here so the distributions package stays focused on distribution families.
 """
 
 from __future__ import annotations
@@ -37,8 +37,10 @@ from mixle.analysis.extreme import (
 from mixle.analysis.health_risk import (
     DOSE_RESPONSE_MODELS,
     DoseResponse,
+    ExceedanceReport,
     cumulative_exposure,
     exposure_constraints,
+    exposure_exceedance_monitor,
     health_liability,
     incident_probability,
     population_risk,
@@ -160,4 +162,7 @@ __all__ = [
     # safety-risk / geotechnical hazard modeling
     "safety_risk_surface",
     "incident_probability",
+    # health/exposure monitoring: calibrated exceedance alerts
+    "ExceedanceReport",
+    "exposure_exceedance_monitor",
 ]
