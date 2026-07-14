@@ -328,7 +328,7 @@ class DivergenceRecoveryTest(unittest.TestCase):
         # state, the fit completes, and the recovery is disclosed in the fit receipt.
         torch.manual_seed(0)
         proto = MixtureDistribution(
-            [GradLeaf(DiagGauss(1, mu0=0.5), m_steps=40, lr=25.0), GaussianDistribution(-1.0, 3.0)],
+            [GradLeaf(DiagGauss(1, mu0=0.5), m_steps=40, lr=25.0, optimizer="adam"), GaussianDistribution(-1.0, 3.0)],
             [0.5, 0.5],
         )
         data = self._bimodal()

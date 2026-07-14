@@ -6,6 +6,10 @@ trained torch teacher and an untrained torch student, transfer knowledge through
 
 - :func:`response_distill` -- Hinton dark-knowledge: temperature-softened ``KL(teacher || student)`` mixed with
   the hard-label loss.
+- :func:`analytic_response_distill` -- fit a student's final linear head to teacher logits by one regularized
+  least-squares solve, without sampling, autograd, or an iterative optimizer.
+- :func:`planned_response_distill` -- analytic head projection followed by optional minibatched, automatically
+  routed refinement of the remaining mismatch.
 - :func:`multi_teacher_distill` -- distill from several teachers via averaged (or weighted) soft targets.
 - :func:`hint_distill` -- FitNets feature/hint transfer: match an intermediate student feature to a teacher
   feature (a learned linear regressor bridges a dimensionality gap), read out with forward hooks.
@@ -155,6 +159,9 @@ def response_distill(
     lr: float = 1e-2,
     seed: int = 0,
     baseline: bool = True,
+    batch_size: int | None = None,
+    optimizer: Any = "auto",
+    reset_student: bool = True,
 ) -> DistillResult:
     """Distill ``teacher``'s soft outputs into ``student`` on inputs ``x`` (labels ``y`` optional for the hard mix).
 
@@ -166,27 +173,149 @@ def response_distill(
     x, teacher_logits = _teacher_logits(teacher, x)
 
     torch.manual_seed(seed)
-    student = _reset(student, seed)
+    if reset_student:
+        student = _reset(student, seed)
     before = _agreement(_forward(student, x), teacher_logits)
 
-    hist = _train(
+    hist, optimizer_receipt = _train_response(
         student,
-        lambda: kd_loss(_forward(student, x), teacher_logits, y, temperature=temperature, alpha=alpha),
+        x,
+        teacher_logits,
+        y,
         epochs,
         lr,
+        temperature=temperature,
+        alpha=alpha,
+        batch_size=batch_size,
+        optimizer=optimizer,
     )
     after = _agreement(_forward(student, x), teacher_logits)
 
-    extra: dict[str, Any] = {"soft_kl": _soft_kl(_forward(student, x), teacher_logits, temperature)}
+    extra: dict[str, Any] = {
+        "soft_kl": _soft_kl(_forward(student, x), teacher_logits, temperature),
+        "optimizer": optimizer_receipt,
+    }
     if baseline:
         base = _clone_untrained(student, seed)
         if y is not None:
-            _train(base, lambda: torch.nn.functional.cross_entropy(_forward(base, x), y), epochs, lr)
+            _train(base, lambda: torch.nn.functional.cross_entropy(_forward(base, x), y), epochs, lr, optimizer)
         extra["baseline_agreement"] = _agreement(_forward(base, x), teacher_logits)
         extra["baseline_soft_kl"] = _soft_kl(_forward(base, x), teacher_logits, temperature)
     if y is not None:
         extra["student_accuracy"] = _accuracy(_forward(student, x), y)
     return DistillResult(student, "teacher_agreement", before, after, lower_is_better=False, extra=extra, history=hist)
+
+
+def analytic_response_distill(
+    student: Any,
+    teacher: Any,
+    x: Any,
+    *,
+    temperature: float = 4.0,
+    ridge: float = 1.0e-6,
+    weights: Any | None = None,
+    seed: int = 0,
+    reset_student: bool = True,
+) -> DistillResult:
+    """Project teacher logits into the student's final linear feature space in one exact solve.
+
+    The teacher is evaluated once. The student's body is held fixed and its final ``Linear`` head is solved by
+    weighted ridge regression against row-centered teacher logits (softmax is invariant to a row-wise logit
+    shift). This is the useful symbolic path: recognize a block whose optimum is available analytically, eliminate
+    it, and reserve iterative differentiation for any residual mismatch.
+    """
+
+    torch = _torch()
+    if temperature <= 0.0:
+        raise ValueError("temperature must be positive.")
+    if ridge < 0.0:
+        raise ValueError("ridge must be non-negative.")
+    x, teacher_logits = _teacher_logits(teacher, x)
+    torch.manual_seed(seed)
+    if reset_student:
+        student = _reset(student, seed)
+    before_logits = _forward(student, x)
+    before = _soft_kl(before_logits, teacher_logits, temperature)
+    receipt = _project_linear_head(student, x, teacher_logits, ridge=ridge, weights=weights)
+    after_logits = _forward(student, x)
+    after = _soft_kl(after_logits, teacher_logits, temperature)
+    receipt.update(
+        {
+            "teacher_queries": 1,
+            "autograd_steps": 0,
+            "optimizer": "none",
+            "agreement_before": _agreement(before_logits, teacher_logits),
+            "agreement_after": _agreement(after_logits, teacher_logits),
+        }
+    )
+    return DistillResult(
+        student,
+        "soft_kl",
+        before,
+        after,
+        lower_is_better=True,
+        extra={"analytic_projection": receipt},
+    )
+
+
+def planned_response_distill(
+    student: Any,
+    teacher: Any,
+    x: Any,
+    y: Any | None = None,
+    *,
+    temperature: float = 4.0,
+    alpha: float = 0.9,
+    ridge: float = 1.0e-6,
+    weights: Any | None = None,
+    refinement_epochs: int = 0,
+    lr: float = 1.0e-2,
+    batch_size: int | None = None,
+    optimizer: Any = "auto",
+    seed: int = 0,
+) -> DistillResult:
+    """Run analytic head elimination, then optionally refine all student blocks on cached teacher logits."""
+
+    torch = _torch()
+    x, teacher_logits = _teacher_logits(teacher, x)
+    torch.manual_seed(seed)
+    student = _reset(student, seed)
+    initial_logits = _forward(student, x)
+    before = _soft_kl(initial_logits, teacher_logits, temperature)
+    analytic_receipt = _project_linear_head(student, x, teacher_logits, ridge=ridge, weights=weights)
+    projected_kl = _soft_kl(_forward(student, x), teacher_logits, temperature)
+    history: list[float] = []
+    optimizer_receipt: dict[str, Any] | None = None
+    if refinement_epochs > 0:
+        history, optimizer_receipt = _train_response(
+            student,
+            x,
+            teacher_logits,
+            y,
+            refinement_epochs,
+            lr,
+            temperature=temperature,
+            alpha=alpha,
+            batch_size=batch_size,
+            optimizer=optimizer,
+        )
+    final_logits = _forward(student, x)
+    after = _soft_kl(final_logits, teacher_logits, temperature)
+    return DistillResult(
+        student,
+        "soft_kl",
+        before,
+        after,
+        lower_is_better=True,
+        extra={
+            "analytic_projection": analytic_receipt,
+            "projected_soft_kl": projected_kl,
+            "optimizer": optimizer_receipt,
+            "teacher_queries": 1,
+            "agreement": _agreement(final_logits, teacher_logits),
+        },
+        history=history,
+    )
 
 
 # --------------------------------------------------------------------------------------------------
@@ -206,6 +335,7 @@ def multi_teacher_distill(
     epochs: int = 300,
     lr: float = 1e-2,
     seed: int = 0,
+    optimizer: Any = "auto",
 ) -> DistillResult:
     """Distill an averaged (or ``weights``-weighted) ensemble of ``teachers`` into ``student``.
 
@@ -224,11 +354,12 @@ def multi_teacher_distill(
     student = _reset(student, seed)
     before = _ensemble_agreement(_forward(student, x), ens_argmax)
 
-    hist = _train(
+    hist, optimizer_receipt = _train(
         student,
         lambda: _ensemble_kd_loss(_forward(student, x), ens_prob, y, temperature, alpha),
         epochs,
         lr,
+        optimizer,
     )
     after = _ensemble_agreement(_forward(student, x), ens_argmax)
 
@@ -236,11 +367,18 @@ def multi_teacher_distill(
     single = []
     for li in logits:
         s = _clone_untrained(student, seed)
-        _train(s, lambda s=s, li=li: kd_loss(_forward(s, x), li, y, temperature=temperature, alpha=alpha), epochs, lr)
+        _train(
+            s,
+            lambda s=s, li=li: kd_loss(_forward(s, x), li, y, temperature=temperature, alpha=alpha),
+            epochs,
+            lr,
+            optimizer,
+        )
         single.append(_ensemble_agreement(_forward(s, x), ens_argmax))
     extra = {
         "mean_single_teacher_agreement": float(sum(single) / len(single)),
         "single_teacher_agreements": single,
+        "optimizer": optimizer_receipt,
     }
     return DistillResult(student, "ensemble_agreement", before, after, lower_is_better=False, extra=extra, history=hist)
 
@@ -294,6 +432,7 @@ def hint_distill(
     epochs: int = 300,
     lr: float = 1e-2,
     seed: int = 0,
+    optimizer: Any = "auto",
 ) -> DistillResult:
     """FitNets hint transfer: drive ``student``'s ``student_layer`` feature toward ``teacher``'s ``teacher_layer``.
 
@@ -328,8 +467,8 @@ def hint_distill(
 
     before = feat_gap()
 
-    params = list(student.parameters()) + list(regressor.parameters())
-    opt = torch.optim.Adam(params, lr=lr)
+    trainable = torch.nn.ModuleList([student, regressor])
+    opt, optimizer_receipt = _make_optimizer(trainable, optimizer, lr, sign_stable=False)
     hist = []
     for _ in range(int(epochs)):
         opt.zero_grad()
@@ -342,7 +481,13 @@ def hint_distill(
     after = feat_gap()
     sh.remove()
     return DistillResult(
-        student, "feature_gap", before, after, lower_is_better=True, extra={"regressor": regressor}, history=hist
+        student,
+        "feature_gap",
+        before,
+        after,
+        lower_is_better=True,
+        extra={"regressor": regressor, "optimizer": optimizer_receipt},
+        history=hist,
     )
 
 
@@ -385,6 +530,7 @@ def attention_transfer(
     epochs: int = 300,
     lr: float = 1e-2,
     seed: int = 0,
+    optimizer: Any = "auto",
 ) -> DistillResult:
     """Match the spatial attention map of ``student_layer`` to ``teacher_layer`` (Zagoruyko-Komodakis).
 
@@ -411,7 +557,7 @@ def attention_transfer(
             return float((_attention_map(sh.value) - teach_att).norm(dim=-1).mean().cpu().item())
 
     before = att_gap()
-    opt = torch.optim.Adam(student.parameters(), lr=lr)
+    opt, optimizer_receipt = _make_optimizer(student, optimizer, lr, sign_stable=False)
     hist = []
     for _ in range(int(epochs)):
         opt.zero_grad()
@@ -422,7 +568,15 @@ def attention_transfer(
         hist.append(float(loss.detach().cpu().item()))
     after = att_gap()
     sh.remove()
-    return DistillResult(student, "attention_gap", before, after, lower_is_better=True, history=hist)
+    return DistillResult(
+        student,
+        "attention_gap",
+        before,
+        after,
+        lower_is_better=True,
+        extra={"optimizer": optimizer_receipt},
+        history=hist,
+    )
 
 
 # --------------------------------------------------------------------------------------------------
@@ -462,6 +616,7 @@ def relational_distill(
     epochs: int = 300,
     lr: float = 1e-2,
     seed: int = 0,
+    optimizer: Any = "auto",
 ) -> DistillResult:
     """RKD: match the pairwise *distance* (and optionally *angle*) structure of a batch in feature space.
 
@@ -491,7 +646,7 @@ def relational_distill(
             return float((_pairwise_distances(_flatten_feat(sh.value)) - teach_dist).abs().mean().cpu().item())
 
     before = dist_gap()
-    opt = torch.optim.Adam(student.parameters(), lr=lr)
+    opt, optimizer_receipt = _make_optimizer(student, optimizer, lr, sign_stable=False)
     hist = []
     huber = torch.nn.functional.smooth_l1_loss
     for _ in range(int(epochs)):
@@ -506,7 +661,15 @@ def relational_distill(
         hist.append(float(loss.detach().cpu().item()))
     after = dist_gap()
     sh.remove()
-    return DistillResult(student, "distance_gap", before, after, lower_is_better=True, history=hist)
+    return DistillResult(
+        student,
+        "distance_gap",
+        before,
+        after,
+        lower_is_better=True,
+        extra={"optimizer": optimizer_receipt},
+        history=hist,
+    )
 
 
 # --------------------------------------------------------------------------------------------------
@@ -525,6 +688,7 @@ def sequence_level_distill(
     lr: float = 1e-2,
     seed: int = 0,
     baseline: bool = True,
+    optimizer: Any = "auto",
 ) -> DistillResult:
     """Kim-Rush sequence-level KD for a compact autoregressive LM.
 
@@ -554,7 +718,7 @@ def sequence_level_distill(
     full = torch.cat([prompts, targets], dim=1)  # (N, L0 + gen_length)
     inp = full[:, :-1]
     tgt = full[:, 1:]
-    opt = torch.optim.Adam(student.parameters(), lr=lr)
+    opt, optimizer_receipt = _make_optimizer(student, optimizer, lr, sign_stable=True)
     hist = []
     for _ in range(int(epochs)):
         opt.zero_grad()
@@ -565,7 +729,7 @@ def sequence_level_distill(
         hist.append(float(loss.detach().cpu().item()))
     after = match()
 
-    extra: dict[str, Any] = {}
+    extra: dict[str, Any] = {"optimizer": optimizer_receipt}
     if baseline:
         base = _clone_untrained(student, seed + 1)
         extra["baseline_match"] = float(
@@ -640,6 +804,90 @@ def _reset(student: Any, seed: int) -> Any:
     return student
 
 
+def _project_linear_head(
+    student: Any, x: Any, teacher_logits: Any, *, ridge: float, weights: Any | None
+) -> dict[str, Any]:
+    """Solve the terminal linear head against teacher logits with the body held fixed."""
+
+    torch = _torch()
+    if ridge < 0.0:
+        raise ValueError("ridge must be non-negative.")
+    linear_layers = [(name, layer) for name, layer in student.named_modules() if isinstance(layer, torch.nn.Linear)]
+    if not linear_layers:
+        raise ValueError("analytic response distillation requires a student with a Linear output head.")
+    head_name, head = linear_layers[-1]
+    captured: dict[str, Any] = {}
+
+    def capture_input(_module: Any, inputs: tuple[Any, ...]) -> None:
+        captured["features"] = inputs[0].detach()
+
+    def capture_output(_module: Any, _inputs: tuple[Any, ...], output: Any) -> None:
+        captured["output"] = output.detach()
+
+    was_training = bool(student.training)
+    student.eval()
+    pre_handle = head.register_forward_pre_hook(capture_input)
+    post_handle = head.register_forward_hook(capture_output)
+    try:
+        with torch.no_grad():
+            student_output = student(x).detach()
+    finally:
+        pre_handle.remove()
+        post_handle.remove()
+        student.train(was_training)
+    if "features" not in captured or "output" not in captured:
+        raise ValueError("the student's last registered Linear layer was not executed.")
+    head_output = captured["output"]
+    if student_output.shape != head_output.shape or not torch.allclose(student_output, head_output):
+        raise ValueError("the final Linear layer must produce the student's logits without a later transform.")
+    if teacher_logits.shape != student_output.shape:
+        raise ValueError("teacher and student logits must have the same shape for analytic head projection.")
+
+    features = captured["features"].reshape(-1, head.in_features).detach().to(device="cpu", dtype=torch.float64)
+    targets = teacher_logits.reshape(-1, head.out_features).detach().to(device="cpu", dtype=torch.float64)
+    if not bool(torch.isfinite(features).all()) or not bool(torch.isfinite(targets).all()):
+        raise ValueError("analytic head projection requires finite features and teacher logits.")
+    targets = targets - targets.mean(dim=1, keepdim=True)
+    if weights is None:
+        row_weights = torch.ones(features.shape[0], dtype=torch.float64)
+    else:
+        row_weights = torch.as_tensor(weights, dtype=torch.float64).reshape(-1).cpu()
+        if row_weights.numel() != features.shape[0]:
+            raise ValueError("weights must have one value per teacher-logit row.")
+        if bool((row_weights < 0.0).any()) or not bool(row_weights.sum() > 0.0):
+            raise ValueError("weights must be non-negative with positive total mass.")
+    design = features
+    if head.bias is not None:
+        design = torch.cat([features, torch.ones((features.shape[0], 1), dtype=torch.float64)], dim=1)
+    root_weights = row_weights.sqrt().unsqueeze(1)
+    weighted_design = design * root_weights
+    weighted_targets = targets * root_weights
+    if ridge == 0.0:
+        coefficients = torch.linalg.lstsq(weighted_design, weighted_targets).solution
+        solver = "lstsq"
+    else:
+        regularizer = torch.eye(design.shape[1], dtype=torch.float64) * float(ridge)
+        if head.bias is not None:
+            regularizer[-1, -1] = 0.0
+        coefficients = torch.linalg.solve(
+            weighted_design.T @ weighted_design + regularizer,
+            weighted_design.T @ weighted_targets,
+        )
+        solver = "ridge_normal_equations"
+    with torch.no_grad():
+        head.weight.copy_(coefficients[: head.in_features].T.to(device=head.weight.device, dtype=head.weight.dtype))
+        if head.bias is not None:
+            head.bias.copy_(coefficients[-1].to(device=head.bias.device, dtype=head.bias.dtype))
+    return {
+        "head": head_name,
+        "solver": solver,
+        "ridge": float(ridge),
+        "rows": int(features.shape[0]),
+        "features": int(features.shape[1]),
+        "outputs": int(targets.shape[1]),
+    }
+
+
 def _norm_weights(weights: Sequence[float] | None, k: int) -> list[float]:
     if weights is None:
         return [1.0 / k] * k
@@ -652,10 +900,62 @@ def _norm_weights(weights: Sequence[float] | None, k: int) -> list[float]:
     return [x / s for x in w]
 
 
-def _train(student: Any, loss_fn: Callable[[], Any], epochs: int, lr: float) -> list[float]:
-    """Adam-train ``student`` for ``epochs`` steps against ``loss_fn`` (recomputed each step); return loss history."""
+def _make_optimizer(module: Any, optimizer: Any, lr: float, *, sign_stable: bool) -> tuple[Any, dict[str, Any]]:
+    from mixle.models.optimizer_routing import resolve_neural_optimizer
+
+    return resolve_neural_optimizer(module, optimizer, lr=lr, sign_stable=sign_stable)
+
+
+def _train_response(
+    student: Any,
+    x: Any,
+    teacher_logits: Any,
+    y: Any | None,
+    epochs: int,
+    lr: float,
+    *,
+    temperature: float,
+    alpha: float,
+    batch_size: int | None,
+    optimizer: Any,
+) -> tuple[list[float], dict[str, Any]]:
     torch = _torch()
-    opt = torch.optim.Adam(student.parameters(), lr=lr)
+    n = int(x.shape[0])
+    bs = n if batch_size is None else int(batch_size)
+    if bs <= 0:
+        raise ValueError("batch_size must be positive when supplied.")
+    labels = None if y is None else _as_long(y)
+    opt, receipt = _make_optimizer(student, optimizer, lr, sign_stable=False)
+    student.train()
+    history = []
+    for _ in range(int(epochs)):
+        permutation = torch.randperm(n, device=x.device) if bs < n else torch.arange(n, device=x.device)
+        losses = []
+        for start in range(0, n, bs):
+            indices = permutation[start : start + bs]
+            opt.zero_grad()
+            loss = kd_loss(
+                _forward(student, x[indices]),
+                teacher_logits[indices],
+                None if labels is None else labels[indices],
+                temperature=temperature,
+                alpha=alpha,
+            )
+            loss.backward()
+            opt.step()
+            losses.append(float(loss.detach().cpu().item()))
+        history.append(sum(losses) / len(losses))
+    receipt.update({"batch_size": int(bs), "steps": int(epochs) * ((n + bs - 1) // bs)})
+    return history, receipt
+
+
+def _train(
+    student: Any, loss_fn: Callable[[], Any], epochs: int, lr: float, optimizer: Any = "auto"
+) -> tuple[list[float], dict[str, Any]]:
+    """Train ``student`` against a recomputed full-batch loss with automatically routed updates."""
+
+    torch = _torch()
+    opt, receipt = _make_optimizer(student, optimizer, lr, sign_stable=False)
     student.train()
     hist = []
     for _ in range(int(epochs)):
@@ -664,4 +964,5 @@ def _train(student: Any, loss_fn: Callable[[], Any], epochs: int, lr: float) -> 
         loss.backward()
         opt.step()
         hist.append(float(loss.detach().cpu().item()))
-    return hist
+    receipt["steps"] = int(epochs)
+    return hist, receipt
