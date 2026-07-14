@@ -822,8 +822,12 @@ def optimize(
             If None, estimator is used. Must be consistent with estimator.
         init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
         rng (RandomState): RandomState used to set seed for initializing EM algorithm. ``None`` resolves to
-            a FIXED seed, so an un-seeded ``optimize``/``fit`` is deterministic by default; pass your own
-            RandomState when you WANT different initializations across calls (e.g. hand-rolled restarts).
+            a FIXED seed, so the NumPy-driven parts of an un-seeded ``optimize``/``fit`` (initialization,
+            EM, subsampling) are deterministic by default; pass your own RandomState when you WANT
+            different initializations across calls (e.g. hand-rolled restarts). Torch-backed leaves are
+            the deliberate exception: modules that consume torch's global RNG (dropout, VAE
+            reparameterization draws, minibatch shuffling) follow torch's own default non-determinism --
+            call ``torch.manual_seed`` yourself when a torch-backed fit must be exactly reproducible.
             An integer is accepted and coerced to ``RandomState(rng)``. Mutually exclusive with ``seed``.
         vdata (Optional[Sequence[T]]): Optional validation set.
         prev_estimate (Optional[SeqeuenceEncodableProbabilityDistribution]): Optional model estimate used from prior
@@ -983,7 +987,7 @@ def optimize(
     estimator = _coerce_estimator(estimator, data)
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
-    rng = RandomState(0) if rng is None else rng  # fixed default: an un-seeded fit is deterministic
+    rng = RandomState(0) if rng is None else rng  # fixed default: the numpy side of an un-seeded fit is deterministic
     minimal_precision_pending = False
     if precision == "minimal":
         # Data-aware allocation: inspect the data + model and run the reduced-precision fused kernel only
@@ -1515,7 +1519,9 @@ class BayesianStreamingEstimator:
             raise ValueError("mode must be 'posterior_carry' or 'forgetting'.")
         self.model = model
         self.init_p = init_p
-        self.rng = RandomState(0) if rng is None else rng  # fixed default: an un-seeded fit is deterministic
+        self.rng = (
+            RandomState(0) if rng is None else rng
+        )  # fixed default: the numpy side of an un-seeded fit is deterministic
         self.num_chunks = num_chunks
         self.step = 0
         self.nobs = 0.0
