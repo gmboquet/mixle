@@ -252,6 +252,9 @@ from mixle.inference.resampling import (
     wild_bootstrap,
 )
 
+# risk / tail metrics over a Monte-Carlo outcome distribution (VaR, CVaR, stress-scenario ranking)
+from mixle.inference.risk import conditional_value_at_risk, stress_rank, value_at_risk
+
 # robust / sandwich covariance for M-estimators and regression (misspecification-robust SEs)
 from mixle.inference.robust import (
     cluster_robust_covariance,
@@ -558,6 +561,10 @@ __all__ = [
     "wild_bootstrap",
     "permutation_test",
     "PermutationResult",
+    # risk / tail metrics over a Monte-Carlo outcome distribution (VaR, CVaR, stress-scenario ranking)
+    "value_at_risk",
+    "conditional_value_at_risk",
+    "stress_rank",
     # robust / sandwich covariance (HC0-3, cluster-robust, Newey-West HAC, generic M-estimator)
     "sandwich_covariance",
     "ols_robust_covariance",
