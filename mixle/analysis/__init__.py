@@ -1,10 +1,10 @@
 """Applied statistical methods that are not probability-distribution families.
 
 These are estimators / analysis routines (extreme-value, kernel density, species coverage, geostatistics,
-rank aggregation, spatial mixtures, max-stable processes, covariance shrinkage) that operate on data but
-are not ``SequenceEncodableProbabilityDistribution`` families and are not used by any distribution. They
-were previously scattered under ``mixle.stats``; collected here so the distributions package stays focused
-on distribution families.
+rank aggregation, spatial mixtures, max-stable processes, covariance shrinkage, mine economics) that
+operate on data but are not ``SequenceEncodableProbabilityDistribution`` families and are not used by any
+distribution. They were previously scattered under ``mixle.stats``; collected here so the distributions
+package stays focused on distribution families.
 """
 
 from __future__ import annotations
@@ -59,6 +59,7 @@ from mixle.analysis.rank_aggregation import (
     spearman_footrule,
 )
 from mixle.analysis.spatial_mixture import SpatialMixture
+from mixle.analysis.valuation import capex_opex, cost_curve
 
 __all__ = [
     # extreme-value & boundary estimation (GPD/POT, tail index, endpoints, records)
@@ -109,4 +110,7 @@ __all__ = [
     "SmithMaxStableSampler",
     "fit_smith_maxstable",
     "LedoitWolfEstimator",
+    # mine economics: cost curves and capex/opex roll-up
+    "cost_curve",
+    "capex_opex",
 ]
