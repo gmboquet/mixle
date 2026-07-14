@@ -61,6 +61,7 @@ from mixle.reason.llm import (
     sentence_claims,
 )
 from mixle.reason.modality import ModalityGraph, ModalityView
+from mixle.reason.model_fusion import fuse_models
 from mixle.reason.ontology import (
     AXIOMS,
     ConstrainedDecode,
@@ -112,6 +113,7 @@ __all__ = [
     "content_overlap",
     "ModalityView",
     "ModalityGraph",
+    "fuse_models",
     "TaskReadout",
     "task_sufficient_projection",
     "read_out",
