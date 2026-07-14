@@ -21,6 +21,7 @@
     "what_supports"
   ],
   "mixle.analysis": [
+    "CohortAttribution",
     "DOSE_RESPONSE_MODELS",
     "DoseResponse",
     "EmissionFactors",
@@ -46,6 +47,7 @@
     "cayley_distance",
     "chao1",
     "chao2",
+    "cohort_attribution",
     "copeland",
     "cost_curve",
     "cumulative_exposure",
