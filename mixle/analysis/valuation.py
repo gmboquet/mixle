@@ -12,22 +12,37 @@ draws into an NPV distribution, and before H's block-level optimizers (`mixle.st
   * :func:`capex_opex` -- rolls a period-by-period mine plan (tonnage, depth, grade, throughput, plus
     any lumpy capital spend) up into total capital and total operating cost, via :func:`cost_curve`.
 
-This module is created here (J4, Wave 1) and extended by J2 (Wave 2) with `monte_carlo_npv` /
-`NPVDistribution` once J1's price paths exist -- see that task's docstring for the DCF assembly. Both
-:func:`cost_curve`'s output (a plain `$/t` array, one entry per block/period) and :func:`capex_opex`'s
-totals are ordinary ``numpy``/``float`` values with no dependency on J1/J2/H1, so they slot directly
-into `mixle.stochastic_opt.two_stage_stochastic_plan`'s `block_cost` argument today (H1's
-`mixle.relations.min_cost_flow` had not landed on `release/0.8.0` as of this PR -- see that function's
-own docstring for the same repo-boundary note).
+This module is created by J4 (Wave 1) and extended here by J2 (Wave 2) with :func:`monte_carlo_npv` /
+`NPVDistribution`, the risk-neutral expected-DCF distribution H4's objective is priced against:
+
+  * :func:`monte_carlo_npv` -- Monte-Carlo DCF over ``posterior.samples(n, rng) x price scenarios``
+    (DR-ALG J2): grade draws come straight off an IC-1 `Posterior` (frozen `mixle.reason
+    .posterior_protocol.Posterior`), price scenarios come from J1's ``PriceForecast.paths`` (or any
+    array-like of per-period price paths), and per-period tonnage/capex come off ``schedule``. Returns
+    the full `NPVDistribution` (mean, P10/P50/P90, and a grade-vs-price variance decomposition) --
+    a distribution, never a single point estimate.
+
+Repo-boundary note (see the PR body for the full explanation): as of this PR, J1
+(`mixle.inference.price_forecast.forecast_price`, whose `PriceForecast.paths` this task's own Algorithm
+text names as the price-scenario source) and A5 (`mixle_pde.decision_quantities`, IC-8's calibrated
+net-pay/tonnage quantities) had not landed. `monte_carlo_npv` therefore consumes ``price_paths`` and
+``schedule`` structurally (an ``(n_paths, n_periods)`` array-like and a tonnage/capex-per-period
+mapping or array-like, respectively) rather than importing either concrete module by name -- exactly
+what its frozen Public API signature already commits to (``price_paths: Any``, ``schedule: Any``). A
+real `PriceForecast.paths` / A5 decision-quantity slots in without any change to this function once
+those tasks land, since both already produce array-likes of that shape.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import Any, NamedTuple
 
 import numpy as np
 
-__all__ = ["capex_opex", "cost_curve"]
+from mixle.reason.posterior_protocol import Posterior
+
+__all__ = ["NPVDistribution", "capex_opex", "cost_curve", "monte_carlo_npv"]
 
 # Default parameters, used for any key the caller's `params` dict omits. Chosen to be dimensionally
 # sane toy defaults ($/t and $/t-per-metre in the low single digits), not a claim about any real mine.
@@ -129,3 +144,211 @@ def capex_opex(plan: Any, *, params: dict) -> tuple[float, float]:
         capex_total += float(np.sum(np.asarray(capex_schedule, dtype=np.float64)))
 
     return capex_total, opex_total
+
+
+class NPVDistribution(NamedTuple):
+    """A Monte-Carlo DCF outcome: the full NPV sample, not just a point estimate.
+
+    ``samples`` is the length-``n`` array of per-draw NPVs (real dollars, one entry per Monte-Carlo
+    trial) that :func:`value_at_risk` / :func:`conditional_value_at_risk` (J5) consume directly.
+    ``mean``/``p10``/``p50``/``p90`` are the usual project-finance summary of that distribution.
+    ``sensitivity`` decomposes the NPV variance into the grade- and price-uncertainty contributions
+    (each factor's share of variance when the *other* factor is frozen at its mean; see
+    :func:`monte_carlo_npv`), keyed ``"grade"`` / ``"price"`` (fraction of total variance, in
+    ``[0, 1]``) plus the raw ``"grade_variance"`` / ``"price_variance"`` / ``"total_variance"``.
+    """
+
+    samples: np.ndarray
+    mean: float
+    p10: float
+    p50: float
+    p90: float
+    sensitivity: dict
+
+
+def _unpack_schedule(schedule: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Read per-period ``(tonnage, capex)`` off ``schedule``.
+
+    ``schedule`` is a mapping or attribute-bearing object with a required ``tonnage`` (recoverable
+    tonnage per period, before any grade scaling) and an optional ``capex`` (lumpy capital spend per
+    period; defaults to zero). A bare array-like is accepted too and treated as ``tonnage`` with no
+    capex, so a plain per-period tonnage vector is enough for a project with all cost carried in
+    ``cost_model``.
+    """
+    if isinstance(schedule, dict):
+        tonnage = np.asarray(schedule["tonnage"], dtype=np.float64)
+        capex = schedule.get("capex")
+    else:
+        tonnage_val = getattr(schedule, "tonnage", None)
+        if tonnage_val is not None:
+            tonnage = np.asarray(tonnage_val, dtype=np.float64)
+            capex = getattr(schedule, "capex", None)
+        else:
+            tonnage = np.asarray(schedule, dtype=np.float64)
+            capex = None
+
+    tonnage = np.atleast_1d(tonnage)
+    capex_arr = np.zeros_like(tonnage) if capex is None else np.atleast_1d(np.asarray(capex, dtype=np.float64))
+    if capex_arr.shape != tonnage.shape:
+        raise ValueError("monte_carlo_npv: schedule 'capex' must have the same shape as 'tonnage' (per period)")
+    return tonnage, capex_arr
+
+
+def _grade_per_period(grade: np.ndarray, n_periods: int, *, what: str) -> np.ndarray:
+    """Broadcast a ``(n_draws, d)`` (or length-``d``) grade array onto ``n_periods`` periods.
+
+    ``d == 1`` is one grade draw for the project's whole life (a single-deposit head grade), broadcast
+    unchanged across every period; ``d == n_periods`` is one draw per scheduling period. Any other ``d``
+    is a genuine mismatch between the posterior's dimensionality and the schedule's period count.
+    """
+    g = np.atleast_1d(grade)
+    if g.ndim == 1:
+        d = g.shape[0]
+        if d == 1:
+            return np.broadcast_to(g, (n_periods,)).astype(np.float64, copy=True)
+        if d == n_periods:
+            return g.astype(np.float64, copy=False)
+        raise ValueError(
+            f"monte_carlo_npv: {what} has {d} grade dimension(s) but schedule has {n_periods} period(s); "
+            f"expected 1 (a single project-life grade draw) or {n_periods} (one grade draw per period)"
+        )
+    n_draws, d = g.shape
+    if d == 1:
+        return np.broadcast_to(g, (n_draws, n_periods)).astype(np.float64, copy=True)
+    if d == n_periods:
+        return g.astype(np.float64, copy=False)
+    raise ValueError(
+        f"monte_carlo_npv: {what} has {d} grade dimension(s) but schedule has {n_periods} period(s); "
+        f"expected 1 (a single project-life grade draw) or {n_periods} (one grade draw per period)"
+    )
+
+
+def _align_price_paths(price_paths: Any, n: int, n_periods: int, rng: np.random.Generator) -> np.ndarray:
+    """Coerce ``price_paths`` (J1 ``PriceForecast.paths``-shaped) to exactly ``(n, n_periods)``.
+
+    Accepts a ``(m, n_periods)`` scenario matrix (one row per price path, one column per period) and
+    resamples with replacement to ``n`` rows when ``m != n`` (the "align" step of DR-ALG J2); a
+    ``(m,)`` vector is treated as ``m`` single-period draws when ``n_periods == 1``, or as one
+    deterministic ``n_periods``-long path shared by every draw otherwise.
+    """
+    prices = np.asarray(price_paths, dtype=np.float64)
+    if prices.ndim == 1:
+        prices = prices[:, None] if n_periods == 1 else prices[None, :]
+    if prices.ndim != 2 or prices.shape[1] != n_periods:
+        raise ValueError(
+            f"monte_carlo_npv: price_paths must be shaped (m, {n_periods}) (one row per scenario, one "
+            f"column per period); got {prices.shape}"
+        )
+    m = prices.shape[0]
+    if m == n:
+        return prices
+    idx = rng.integers(0, m, size=n)
+    return prices[idx]
+
+
+def _call_cost_model(cost_model: Callable, t: int, tonnage_t: float) -> float:
+    """Call ``cost_model`` as ``cost_model(t, tonnage_t)``, falling back to ``cost_model(t)``.
+
+    ``cost_model`` is opaque to this module (DR-ALG J2 writes it simply as ``opex_t(cost_model)``); a
+    caller closing over :func:`cost_curve` (J4) typically needs the period's tonnage too, so the two-arg
+    form is tried first and a plain ``TypeError`` (arity mismatch) falls back to the one-arg form.
+    """
+    try:
+        return float(cost_model(t, tonnage_t))
+    except TypeError:
+        return float(cost_model(t))
+
+
+def _npv_samples(
+    grade_per_period: np.ndarray,
+    price_per_period: np.ndarray,
+    tonnage: np.ndarray,
+    opex: np.ndarray,
+    capex: np.ndarray,
+    discount: np.ndarray,
+) -> np.ndarray:
+    """``sum_t (tonnage_t * grade_{i,t} * price_{i,t} - opex_t - capex_t) / (1 + r) ** t``, vectorized."""
+    cashflow = tonnage[None, :] * grade_per_period * price_per_period - opex[None, :] - capex[None, :]
+    return cashflow @ discount
+
+
+def monte_carlo_npv(
+    posterior: Posterior,
+    price_paths: Any,
+    cost_model: Callable,
+    schedule: Any,
+    *,
+    discount_rate: float,
+    n: int = 10000,
+    rng: np.random.Generator,
+) -> NPVDistribution:
+    """Monte-Carlo discounted-cash-flow NPV distribution (DR-ALG J2).
+
+    Draws ``n`` grade realizations off the IC-1 ``posterior`` and pairs them, draw for draw, with ``n``
+    (resampled/aligned as needed) price scenarios from ``price_paths``; for each draw and each of the
+    ``schedule``'s periods, ``cashflow_t = tonnage_t * grade_t * price_t - opex_t - capex_t``, discounted
+    at ``discount_rate`` (period ``0`` undiscounted, period ``t`` divided by ``(1 + discount_rate) ** t``)
+    and summed into one ``NPV`` per draw:
+
+    - ``posterior``: an IC-1 `Posterior` (frozen `mixle.reason.posterior_protocol.Posterior`); its
+      ``.samples(n, rng)`` are the grade draws. A single project-life grade (``d == 1``) broadcasts
+      across every period; a per-period posterior (``d == len(schedule)``) is used period by period.
+    - ``price_paths``: a J1 ``PriceForecast.paths``-shaped array-like, ``(m, n_periods)`` (one row per
+      scenario). Resampled with replacement to ``n`` rows when ``m != n``.
+    - ``cost_model``: called per period as ``cost_model(t, tonnage_t)`` (falling back to
+      ``cost_model(t)``) to get that period's deterministic ``opex_t``.
+    - ``schedule``: per-period ``tonnage`` (required) and ``capex`` (optional, default zero); see
+      :func:`_unpack_schedule`. ``len(schedule)``'s tonnage vector fixes ``n_periods``.
+    - ``discount_rate``: the DCF discount rate per period.
+    - ``n`` / ``rng``: Monte-Carlo draw count and the shared `numpy.random.Generator`.
+
+    Returns an `NPVDistribution` with the raw ``samples``, ``mean``/``p10``/``p50``/``p90``, and a
+    ``sensitivity`` dict decomposing NPV variance into grade vs. price contributions: each factor's
+    share of variance with the *other* factor frozen at its mean (posterior mean for grade, per-period
+    mean price path for price) — not a full ANOVA decomposition, but the frozen-factor sensitivity the
+    task's Algorithm calls for.
+    """
+    if n <= 0:
+        raise ValueError("monte_carlo_npv: n must be a positive integer")
+
+    tonnage, capex = _unpack_schedule(schedule)
+    n_periods = tonnage.shape[0]
+
+    grade_draws = np.asarray(posterior.samples(n, rng), dtype=np.float64)
+    if grade_draws.ndim == 1:
+        # IC-1 promises shape (n, d); a conforming posterior that squeezes a d == 1 draw matrix down to
+        # (n,) is unambiguous here (we requested exactly n draws), unlike the mean/param case below.
+        grade_draws = grade_draws.reshape(n, 1)
+    grade_per_period = _grade_per_period(grade_draws, n_periods, what="posterior.samples(n, rng)")
+
+    price_per_period = _align_price_paths(price_paths, n, n_periods, rng)
+
+    opex = np.array([_call_cost_model(cost_model, t, float(tonnage[t])) for t in range(n_periods)])
+    discount = 1.0 / (1.0 + float(discount_rate)) ** np.arange(n_periods, dtype=np.float64)
+
+    npv = _npv_samples(grade_per_period, price_per_period, tonnage, opex, capex, discount)
+
+    mean = float(np.mean(npv))
+    p10, p50, p90 = (float(q) for q in np.quantile(npv, [0.1, 0.5, 0.9]))
+
+    # Sensitivity: freeze one factor at its mean, vary the other, compare the resulting variance to the
+    # joint distribution's total variance.
+    mean_price_per_period = np.broadcast_to(price_per_period.mean(axis=0), (n, n_periods))
+    npv_grade_only = _npv_samples(grade_per_period, mean_price_per_period, tonnage, opex, capex, discount)
+
+    mean_grade_per_period = _grade_per_period(np.atleast_1d(posterior.mean), n_periods, what="posterior.mean")
+    mean_grade_broadcast = np.broadcast_to(mean_grade_per_period, (n, n_periods))
+    npv_price_only = _npv_samples(mean_grade_broadcast, price_per_period, tonnage, opex, capex, discount)
+
+    total_variance = float(np.var(npv))
+    grade_variance = float(np.var(npv_grade_only))
+    price_variance = float(np.var(npv_price_only))
+    sensitivity = {
+        "grade": grade_variance / total_variance if total_variance > 0.0 else 0.0,
+        "price": price_variance / total_variance if total_variance > 0.0 else 0.0,
+        "grade_variance": grade_variance,
+        "price_variance": price_variance,
+        "total_variance": total_variance,
+    }
+
+    return NPVDistribution(samples=npv, mean=mean, p10=p10, p50=p50, p90=p90, sensitivity=sensitivity)

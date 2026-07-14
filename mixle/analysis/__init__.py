@@ -67,7 +67,7 @@ from mixle.analysis.rank_aggregation import (
     spearman_footrule,
 )
 from mixle.analysis.spatial_mixture import SpatialMixture
-from mixle.analysis.valuation import capex_opex, cost_curve
+from mixle.analysis.valuation import NPVDistribution, capex_opex, cost_curve, monte_carlo_npv
 
 __all__ = [
     # extreme-value & boundary estimation (GPD/POT, tail index, endpoints, records)
@@ -123,9 +123,11 @@ __all__ = [
     "SmithMaxStableSampler",
     "fit_smith_maxstable",
     "LedoitWolfEstimator",
-    # mine economics: cost curves and capex/opex roll-up
+    # mine economics: cost curves, capex/opex roll-up, and Monte-Carlo DCF valuation
     "cost_curve",
     "capex_opex",
+    "NPVDistribution",
+    "monte_carlo_npv",
     # emissions / carbon accounting (Scope 1/2/3 GHG footprint)
     "EmissionFactors",
     "Footprint",
