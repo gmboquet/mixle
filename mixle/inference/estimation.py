@@ -254,6 +254,14 @@ def _engine_fused_step(
             have_ll = False
         else:
             ll += float(chunk_ll)
+    # The key_merge/key_replace pass every other EM driver runs after accumulation (seq_estimate,
+    # _local_fused_step; #432 added it to the posterior-transform strategies). Without it, KEYED
+    # (tied) parameters silently untie on the engine-kernel path -- and the auto-fusion gate routes
+    # large fused-eligible fits here, so a tied-variance mixture at scale estimated per-component
+    # stats instead of pooled ones (proven: sigma2 1.36 vs 3.18 where the host ties both at 1.36).
+    stats_dict: dict = {}
+    accumulator.key_merge(stats_dict)
+    accumulator.key_replace(stats_dict)
     return estimator.estimate(nobs, accumulator.value()), (ll if have_ll else None)
 
 
