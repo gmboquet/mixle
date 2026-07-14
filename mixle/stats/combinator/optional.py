@@ -592,12 +592,14 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace keyed statistics in ``stats_dict`` with this accumulator state."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].from_value(self.value())
-            else:
-                stats_dict[self.keys] = self
+        """Replace this accumulator's state from the pooled keyed statistics when present."""
+        # The pull direction matters: this used to PUSH self.value() INTO the dict-held pool,
+        # which overwrote the pooled statistics with the last site's own and left the site itself
+        # untouched -- tied sites never received the pool (caught by the keyed-protocol sweep).
+        if self.keys is not None and self.keys in stats_dict:
+            pooled = stats_dict[self.keys]
+            if pooled is not self:
+                self.from_value(pooled.value())
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge this accumulator into ``stats_dict`` under the configured key."""

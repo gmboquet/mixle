@@ -1256,6 +1256,43 @@ def _collect_accumulator_keys(
                     _collect_accumulator_keys(child, registry, "%s.%s[%d]" % (path, name, i), visited)
 
 
+def _flag_annotation_mismatched_keys(estimator: ParameterEstimator, path: str, visited: set[int]) -> None:
+    """Raise when a ``keys`` value's shape contradicts the family's own ctor declaration.
+
+    Scalar families declare ``keys: str | None`` and use the value WHOLE as the shared-statistics
+    dict key, while combinator families declare ``keys: tuple[...]`` and split it across their
+    sub-accumulators. A tuple handed to a scalar family therefore never means what the caller
+    intended (it ties as one opaque composite key instead of per-slot keys) -- and it used to slip
+    through silently. The family's ``__init__`` annotation is the source of truth, so no per-family
+    churn; families without an annotation are skipped.
+    """
+    import inspect
+
+    obj_id = id(estimator)
+    if obj_id in visited:
+        return
+    visited.add(obj_id)
+    keys = getattr(estimator, "keys", None)
+    if isinstance(keys, (list, tuple)):
+        try:
+            ann = inspect.signature(type(estimator).__init__).parameters["keys"].annotation
+        except (ValueError, KeyError, TypeError):
+            ann = inspect.Parameter.empty
+        ann_text = ann if isinstance(ann, str) else str(ann)
+        if ann is not inspect.Parameter.empty and "tuple" not in ann_text.lower() and "any" not in ann_text.lower():
+            raise ValueError(
+                "%s (%s) declares keys: %s but got the %s %r -- pass one shared string per site; "
+                "tuple keys are the combinator convention only"
+                % (path, type(estimator).__name__, ann_text, type(keys).__name__, keys)
+            )
+    for name, value in sorted(vars(estimator).items()):
+        for child in _iter_children(value):
+            if isinstance(child, ParameterEstimator):
+                _flag_annotation_mismatched_keys(child, "%s.%s" % (path, name), visited)
+        if isinstance(value, ParameterEstimator):
+            _flag_annotation_mismatched_keys(value, "%s.%s" % (path, name), visited)
+
+
 def validate_estimator_keys(estimator: ParameterEstimator) -> None:
     """Validate keyed estimator and accumulator sites before EM folds stats.
 
@@ -1264,6 +1301,7 @@ def validate_estimator_keys(estimator: ParameterEstimator) -> None:
     key string.  Validation is intentionally protocol-level and best-effort; a
     family can still perform stricter checks in its own factory if needed.
     """
+    _flag_annotation_mismatched_keys(estimator, type(estimator).__name__, set())
     estimator_registry: dict[Any, tuple[Any, str]] = {}
     _collect_estimator_keys(estimator, estimator_registry, type(estimator).__name__, set())
 

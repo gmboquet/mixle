@@ -1398,6 +1398,7 @@ def best_of(
     reuse_estep_ll: bool = True,
     objective: str = "auto",
     seed: int | None = None,
+    fused_options: dict[str, Any] | None = None,
 ) -> tuple[float, SequenceEncodableProbabilityDistribution]:
     """Performs EM algorithm for trials-number of randomized initial conditions. Returns the best model fit in terms of
         maximum log-likelihood value from validation data.
@@ -1426,6 +1427,8 @@ def best_of(
             ``'auto'`` (default) selects MLE / MAP / variational Bayes from the prior (see ``optimize``).
         seed (Optional[int]): Integer seed -- shorthand for ``rng=RandomState(seed)``. Mutually
             exclusive with ``rng`` (passing both raises ``TypeError``).
+        fused_options (Optional[dict]): Fused-kernel tuning knobs forwarded to every trial's
+            ``optimize`` call -- see ``optimize(fused_options=...)`` for the recognized keys.
 
     Returns:
         Tuple of log-likelihood of best fitting model and the best fitting model from number of trials.
@@ -1468,6 +1471,7 @@ def best_of(
             print_iter=print_iter,
             reuse_estep_ll=reuse_estep_ll,
             objective=objective,
+            fused_options=fused_options,
         )
         _, vll = seq_log_density_sum(score_data, mm)
         if out is not None:
