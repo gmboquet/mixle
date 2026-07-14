@@ -71,7 +71,7 @@ def prefer_compiled_mixture(model: Any, enc_data: Any, max_its: int) -> bool:
             return False
         from mixle.stats.compute.fused_codegen import fusible, fusible_estep
 
-        if fusible(model) and fusible_estep(model):
+        if fusible(model, bare_bridge=False) and fusible_estep(model, bare_bridge=False):
             return False
         from mixle.inference.block_em import _parameter_count
 
@@ -83,7 +83,7 @@ def prefer_compiled_mixture(model: Any, enc_data: Any, max_its: int) -> bool:
             is_combinator = (
                 getattr(component, "components", None) is not None or getattr(component, "dists", None) is not None
             )
-            if is_combinator and fusible(component) and fusible_estep(component):
+            if is_combinator and fusible(component, bare_bridge=False) and fusible_estep(component, bare_bridge=False):
                 compiled_cost += cost
         if compiled_cost == 0 or compiled_cost / max(total_cost, 1) < 0.25:
             return False
@@ -116,7 +116,11 @@ def prefer_block_schedule(model: Any, enc_data: Any, max_its: int) -> bool:
         if HAS_NUMBA:
             from mixle.stats.compute.fused_codegen import fusible
 
-            if fusible(model):
+            # bare_bridge=False: only the FAST fused paths beat block scheduling. The bare-bridge
+            # last resort scores each component through its own native seq_log_density (host-speed
+            # columns + a fused softmax), so it does NOT capture the cross-component win the
+            # docstring numbers are about -- sparse block selection still pays off there.
+            if fusible(model, bare_bridge=False):
                 return False  # the whole-model fused kernel wins outright; see the docstring numbers
     except Exception:  # noqa: BLE001 - fusibility probe must never break dispatch
         pass

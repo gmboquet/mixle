@@ -316,6 +316,11 @@ class SkellamAccumulator(SequenceEncodableStatisticAccumulator):
                 self.count += c
                 self.sum += s
                 self.sum2 += s2
+                # write the POOL back: without this, the dict keeps the FIRST site's stats and
+                # key_replace hands every tied site that truncated pool -- later sites' data was
+                # silently discarded (order-dependent wrong fits; found by the compiler review's
+                # keyed-tying probe, present in 8 families vs the combine-into-dict families)
+                stats_dict[self.keys] = (self.count, self.sum, self.sum2)
             else:
                 stats_dict[self.keys] = (self.count, self.sum, self.sum2)
 

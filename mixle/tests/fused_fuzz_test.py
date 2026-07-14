@@ -10,7 +10,11 @@ sample must satisfy, against the untouched host path:
   P2  score parity at 1e-9;
   P3  M-step parity: estimate(fused stats) and estimate(host stats) score identically at 1e-9;
   P4  the parallel scorer matches and its reruns are bit-identical;
-  P5  three manual EM steps through the fused path are monotone (the E-step normalizer never lies).
+  P5  three manual EM steps through the fused path are monotone (the E-step normalizer never lies);
+  P6  keyed tying: with every gaussian site sharing one key, the fused ENGINE DRIVER step matches the
+      host driver and actually ties -- driver-level (the merge pass a driver can forget) and
+      family-level (a key_merge that truncates the pool) keying bugs both existed and both escaped
+      the P1-P5 kernel-parity net, because keys live in the drivers, not the kernels.
 
 Compile-cost discipline: kernels cache by STRUCTURE signature (factor-type sequence), so the
 generator draws many samples over a bounded signature pool -- parameters, component counts, and data
@@ -174,6 +178,53 @@ def check_sample(tc, rng, sig=None):
     tc.assertTrue(
         all(b - a >= -1e-9 * max(1.0, abs(a)) for a, b in zip(lls, lls[1:])),
         f"{label}: EM through the fused E-step must be monotone, got {lls}",
+    )
+
+    # P6 keyed tying through the DRIVERS (kernel parity can't see keys -- they pool in the driver)
+    if "gaussian" in sig:
+        check_keyed_tying(tc, model, data, sig, label)
+
+
+def _keyed_estimator(model, sig, key):
+    """The model's estimator with every gaussian site keyed to ``key`` (whole-state tying)."""
+    from mixle.stats.combinator.composite import CompositeEstimator
+    from mixle.stats.latent.mixture import MixtureEstimator
+    from mixle.stats.univariate.continuous.gaussian import GaussianEstimator
+
+    comp_ests = []
+    for comp in model.components:
+        factors = comp.dists if len(sig) > 1 else (comp,)
+        fests = [GaussianEstimator(keys=key) if name == "gaussian" else f.estimator() for name, f in zip(sig, factors)]
+        comp_ests.append(CompositeEstimator(fests) if len(sig) > 1 else fests[0])
+    return MixtureEstimator(comp_ests)
+
+
+def check_keyed_tying(tc, model, data, sig, label):
+    from mixle.engines import FUSED_NUMPY_ENGINE
+    from mixle.inference.estimation import _engine_fused_step
+    from mixle.stats.compute.sequence import seq_estimate
+
+    keyed = _keyed_estimator(model, sig, key="fz_shared")
+    enc = model.dist_to_encoder().seq_encode(data)
+    enc_data = [(len(data), enc)]
+    host_fit = seq_estimate(enc_data, keyed, model)
+    fused_fit, _ll = _engine_fused_step(enc_data, keyed, model, FUSED_NUMPY_ENGINE)
+
+    def gaussian_params(fit):
+        out = []
+        for comp in fit.components:
+            factors = comp.dists if len(sig) > 1 else (comp,)
+            out.append([(f.mu, f.sigma2) for name, f in zip(sig, factors) if name == "gaussian"])
+        return out
+
+    hp, fp = gaussian_params(host_fit), gaussian_params(fused_fit)
+    tc.assertEqual(len(set(map(tuple, hp))), 1, f"{label}: host must tie all shared-key gaussian sites")
+    tc.assertEqual(len(set(map(tuple, fp))), 1, f"{label}: fused driver must tie all shared-key gaussian sites")
+    np.testing.assert_allclose(
+        np.asarray(fp, dtype=np.float64),
+        np.asarray(hp, dtype=np.float64),
+        rtol=1e-9,
+        err_msg=f"{label}: keyed M-step parity (driver merge pass or family key_merge pooling broke)",
     )
 
 

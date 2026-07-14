@@ -89,7 +89,10 @@ def recommend_compute_precision(
         from mixle.stats.compute.fused_codegen import fusible
     except Exception:  # pragma: no cover - numba optional  # noqa: BLE001
         return PrecisionPlan(np.float64, "fused codegen unavailable -> float64")
-    if not fusible(model):
+    # bare_bridge=False: bare-bridge fusion computes its per-component score tables through each
+    # factor's native float64 seq_log_density, so a float32 band would touch only the softmax --
+    # no real reduced-precision win to recommend there.
+    if not fusible(model, bare_bridge=False):
         return PrecisionPlan(np.float64, "model has no fused reduced-precision kernel -> float64")
 
     # look at the COMPUTATION: leaf families + per-leaf conditioning

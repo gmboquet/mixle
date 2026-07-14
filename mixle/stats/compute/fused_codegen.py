@@ -50,11 +50,14 @@ kernels (:mod:`fused_nested`) carry the same contracts.
 
 Principled exclusions, deliberate and documented rather than pending: E-steps always use EXACT exp (a
 delta-grid perturbation could flip a monotone-gate accept); bare nested mixtures keep fused_nested's
-in-kernel path (faster than bridging); GradLeaf M-steps stay eager torch (torch.compile measured 0.79-
-0.93x on CPU -- see the GradLeaf docstring).
+in-kernel path (faster than bridging), and only when fused_nested itself declines (e.g. minmax leaves
+like Pareto) does a LAST-RESORT bare-bridge pass cover the shape -- host-exact semantics, one softmax
+kernel; GradLeaf M-steps stay eager torch (torch.compile measured 0.79-0.93x on CPU -- see the GradLeaf
+docstring).
 
 Generated kernels are compiled once and disk-cached (see :func:`_njit`), so the compile cost is paid once
-per structure *ever*, not per process.
+per structure *ever*, not per process; :func:`clean_fused_cache` garbage-collects entries stranded by
+structure changes or digest-salt bumps.
 """
 
 from __future__ import annotations
@@ -867,6 +870,7 @@ class FusedPlan:
     leaf_templates: tuple[LeafTemplate, ...]  # one per factor (composite factor order)
     signature: tuple
     component_is_composite: bool = False  # whether each leaf-bearing node is a Composite (vs a bare leaf)
+    bare_bridge: bool = False  # last-resort plan: bare combinator components bridged whole (see _node_factors)
 
     @property
     def has_matrix(self) -> bool:
@@ -887,21 +891,23 @@ class FusedPlan:
         return any(t.kind in ("matrix", "chain", "bridge") for t in self.leaf_templates)
 
 
-def _node_factors(node: Any) -> list[Any] | None:
+def _node_factors(node: Any, bare_bridge: bool = False) -> list[Any] | None:
     """The leaf factors of a fusible *node* (an exact Composite, or a templated bare leaf), else None.
 
-    The bare-node check deliberately excludes the bridge template: a bare Mixture-of-Mixtures (no
+    The bare-node check excludes the bridge template BY DEFAULT: a bare Mixture-of-Mixtures (no
     Composite anywhere) belongs to fused_nested's in-kernel nested-tree path, which is faster than
-    bridging. Bridge factors exist for combinators sitting INSIDE a composite, where no in-kernel
-    path exists at all."""
+    bridging. ``bare_bridge=True`` is the LAST-RESORT pass the public entry points try only after
+    both the template plan and fused_nested have declined -- it lets hierarchical mixtures whose
+    inner components are chain/bridge-bearing composites (which neither other path can take) fuse
+    through per-component native scoring instead of falling all the way to the host walk."""
     if type(node).__name__ == "CompositeDistribution":
         return list(node.dists)
-    if _template_for(node, allow_bridge=False) is not None:
+    if _template_for(node, allow_bridge=bare_bridge) is not None:
         return [node]
     return None
 
 
-def analyze(model: Any) -> FusedPlan | None:
+def analyze(model: Any, bare_bridge: bool = False) -> FusedPlan | None:
     """Return a :class:`FusedPlan` if ``model`` is a fusible mixture/composite of templated leaves, else None.
 
     Handles: a single leaf, a Composite of leaves, a Mixture of leaves, and a Mixture of Composites
@@ -914,7 +920,7 @@ def analyze(model: Any) -> FusedPlan | None:
     tname = type(model).__name__
     if tname == "MixtureDistribution":
         comps = list(model.components)
-        per = [_node_factors(c) for c in comps]
+        per = [_node_factors(c, bare_bridge=bare_bridge) for c in comps]
         if any(p is None for p in per):  # a component is not a plain Composite / templated leaf
             return None
         templates = [_template_for(f) for f in per[0]]  # type: ignore[union-attr]
@@ -924,26 +930,40 @@ def analyze(model: Any) -> FusedPlan | None:
         if any([_template_for(f) for f in p] != templates for p in per):  # type: ignore[union-attr]
             return None
         comp_is_composite = type(comps[0]).__name__ == "CompositeDistribution"
-        sig = ("mix", tuple(t.name for t in templates), comp_is_composite)  # type: ignore[union-attr]
-        return FusedPlan(len(comps), True, tuple(templates), sig, comp_is_composite)  # type: ignore[arg-type]
-    factors = _node_factors(model)
+        sig = ("mix", tuple(t.name for t in templates), comp_is_composite, bare_bridge)  # type: ignore[union-attr]
+        return FusedPlan(len(comps), True, tuple(templates), sig, comp_is_composite, bare_bridge)  # type: ignore[arg-type]
+    # The bare-bridge allowance never applies to the ROOT itself: bridging a bare leaf/combinator
+    # root is one native scoring pass wrapped in a kernel -- no softmax, no templated siblings,
+    # nothing fused. It exists solely so a MIXTURE's components can be bridged whole (above).
+    factors = _node_factors(model, bare_bridge=False)
     if factors is None:
         return None
     templates = [_template_for(f) for f in factors]
     if any(t is None for t in templates):  # a composite factor has no leaf template
         return None
     is_composite = tname == "CompositeDistribution"
-    sig = ("comp", tuple(t.name for t in templates), is_composite)  # type: ignore[union-attr]
-    return FusedPlan(1, False, tuple(templates), sig, is_composite)  # type: ignore[arg-type]
+    sig = ("comp", tuple(t.name for t in templates), is_composite, bare_bridge)  # type: ignore[union-attr]
+    return FusedPlan(1, False, tuple(templates), sig, is_composite, bare_bridge)  # type: ignore[arg-type]
 
 
-def fusible(model: Any) -> bool:
-    """Return whether ``model`` can use a fused scoring kernel."""
+def fusible(model: Any, bare_bridge: bool = True) -> bool:
+    """Return whether ``model`` can use a fused scoring kernel.
+
+    ``bare_bridge=False`` restricts the answer to the FAST paths (flat template, nested in-kernel):
+    the bare-bridge last resort scores each component through its own native ``seq_log_density``, so
+    it is host-speed with a fused softmax, not a single-pass win. Policy call sites that use
+    fusibility as a proxy for "a fused kernel would beat this schedule" (block-EM's scheduler, the
+    precision planner) must pass ``bare_bridge=False``; correctness call sites keep the default.
+    """
     if analyze(model) is not None:
         return True
     from mixle.stats.compute.fused_nested import fusible_nested  # nested scalar trees (Mixture-of-Mixture, ...)
 
-    return fusible_nested(model)
+    if fusible_nested(model):
+        return True
+    # last resort: hierarchical mixtures whose inner components carry chain/bridge factors -- the
+    # nested path declines them (non-scalar leaves), so bridge the inner combinators per component
+    return bare_bridge and analyze(model, bare_bridge=True) is not None
 
 
 def _dummy(t: LeafTemplate) -> Any:
@@ -1213,6 +1233,52 @@ def _njit(src: str, fname: str, parallel: bool = False) -> Callable:
             return numba.njit(fastmath={"reassoc", "contract", "arcp", "afn", "nsz"}, parallel=parallel)(ns[fname])
 
 
+def clean_fused_cache(max_age_days: float = 30.0, dry_run: bool = False) -> dict[str, Any]:
+    """Garbage-collect the fused kernel disk cache; returns ``{"removed": [...], "bytes": n, "dir": path}``.
+
+    The cache grows one small module (plus numba's compiled ``__pycache__`` artifacts, the bulk of the
+    bytes) per distinct (structure, decorator-config) forever -- nothing retires entries when a digest
+    salt bump or a structure change strands them. This removes cache-owned files whose modification
+    time is older than ``max_age_days`` (a re-used kernel is re-written/re-compiled cheaply on next
+    use, so an over-aggressive age costs one compile, never correctness), plus crashed writers'
+    ``*.tmp`` leftovers after a day. Only files matching the cache's own naming pattern inside the
+    private cache directory are candidates; everything else is ignored. ``dry_run=True`` reports
+    without deleting.
+    """
+    import glob
+    import time
+
+    report: dict[str, Any] = {"removed": [], "bytes": 0, "dir": None}
+    cache_dir = _private_cache_dir()
+    if cache_dir is None:
+        return report
+    report["dir"] = cache_dir
+    now = time.time()
+    cutoff = now - max_age_days * 86400.0
+    candidates = glob.glob(os.path.join(cache_dir, "_pysp_fused_*.py"))
+    candidates += glob.glob(os.path.join(cache_dir, "__pycache__", "_pysp_fused_*"))
+    candidates += glob.glob(os.path.join(cache_dir, "_pysp_fused_*.py.*.tmp"))
+    for path in candidates:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        limit = now - 86400.0 if path.endswith(".tmp") else cutoff
+        if info.st_mtime >= limit:
+            continue
+        report["removed"].append(path)
+        report["bytes"] += int(info.st_size)
+        if not dry_run:
+            try:
+                os.remove(path)
+            except OSError:
+                report["removed"].pop()
+                report["bytes"] -= int(info.st_size)
+    return report
+
+
 def _score_body(indent: str, row_lines: list[str], llbuf_name: str) -> list[str]:
     """The per-row score+log-sum-exp block shared by the sequential and parallel scorers."""
     lines = [f"{indent}for k in range(kc):", f"{indent}    acc = logw[k]"]
@@ -1408,8 +1474,8 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
 # --- marshalling ----------------------------------------------------------------------------------
 def _component_factor_lists(model: Any, plan: FusedPlan) -> list[list[Any]]:
     if plan.is_mixture:
-        return [_node_factors(c) for c in model.components]  # type: ignore[misc]
-    return [_node_factors(model)]  # type: ignore[list-item]
+        return [_node_factors(c, bare_bridge=plan.bare_bridge) for c in model.components]  # type: ignore[misc]
+    return [_node_factors(model, bare_bridge=plan.bare_bridge)]  # type: ignore[list-item]
 
 
 def _data_and_params(
@@ -1515,13 +1581,17 @@ def fused_seq_log_density(
     """
     plan = analyze(model)
     if plan is None:
-        from mixle.stats.compute.fused_nested import fused_nested_seq_log_density
+        from mixle.stats.compute.fused_nested import fused_nested_seq_log_density, fusible_nested
 
-        # nested scalar tree (raises if not that either); same dtype/parallel/quantized-LSE contract
-        # (nested error bound compounds per mixture level -- see the nested wrapper's docstring)
-        return fused_nested_seq_log_density(
-            model, enc, compute_dtype=compute_dtype, parallel=parallel, lse_bits=lse_bits, lse_span=lse_span
-        )
+        if fusible_nested(model):
+            # nested scalar tree; same dtype/parallel/quantized-LSE contract (nested error bound
+            # compounds per mixture level -- see the nested wrapper's docstring)
+            return fused_nested_seq_log_density(
+                model, enc, compute_dtype=compute_dtype, parallel=parallel, lse_bits=lse_bits, lse_span=lse_span
+            )
+        plan = analyze(model, bare_bridge=True)  # hierarchical mixtures over chain/bridge composites
+        if plan is None:
+            raise ValueError("%s is not fusible on any path (template, nested, bridge)." % type(model).__name__)
     data_arrays, param_arrays, _, n = _data_and_params(model, plan, enc, compute_dtype)
     logw = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
     out = np.empty(n, dtype=np.float64)
@@ -1549,13 +1619,20 @@ def fused_seq_log_density(
 
 
 # --- fused E-step (score + responsibilities + per-leaf weighted sufficient statistics, one njit) ----
-def fusible_estep(model: Any) -> bool:
-    """Return whether ``model`` can use a fused E-step accumulation kernel."""
+def fusible_estep(model: Any, bare_bridge: bool = True) -> bool:
+    """Return whether ``model`` can use a fused E-step accumulation kernel.
+
+    ``bare_bridge=False`` restricts to the fast paths, exactly as in :func:`fusible`.
+    """
     plan = analyze(model)
     if plan is None:
         from mixle.stats.compute.fused_nested import fusible_nested  # nested scalar trees fit the E-step too
 
-        return fusible_nested(model)
+        if fusible_nested(model):
+            return True
+        plan = analyze(model, bare_bridge=True) if bare_bridge else None
+        if plan is None:
+            return False
     hook = {
         "scalar": lambda t: t.acc_stmt,
         "vector": lambda t: t.vec_accumulate,
@@ -1594,11 +1671,15 @@ def fused_accumulate(
     """
     plan = analyze(model)
     if plan is None:
-        from mixle.stats.compute.fused_nested import fused_nested_accumulate
+        from mixle.stats.compute.fused_nested import fused_nested_accumulate, fusible_nested
 
-        return fused_nested_accumulate(
-            model, enc, weights, return_ll=return_ll, compute_dtype=compute_dtype, parallel=parallel
-        )  # nested scalar tree
+        if fusible_nested(model):
+            return fused_nested_accumulate(
+                model, enc, weights, return_ll=return_ll, compute_dtype=compute_dtype, parallel=parallel
+            )  # nested scalar tree
+        plan = analyze(model, bare_bridge=True)  # hierarchical mixtures over chain/bridge composites
+        if plan is None:
+            raise ValueError("%s is not fusible on any path (template, nested, bridge)." % type(model).__name__)
     if not fusible_estep(model):
         raise ValueError("%s is not a fusible E-step (an unsupported leaf)." % type(model).__name__)
     K = plan.num_components
@@ -1777,6 +1858,12 @@ class FusedKernel:
         edt = getattr(engine, "dtype", None)
         self.compute_dtype = edt if edt is not None and np.dtype(edt) != np.float64 else None
         self.last_ll: float | None = None  # data LL of the last accumulate() pass (posterior normalizer)
+        # Tuning knobs (``optimize(fused_options=...)`` sets these). ``parallel`` overrides the
+        # observation-count auto-gate in both directions; ``lse_bits``/``lse_span`` opt scoring into
+        # quantized LSE. E-steps stay exact by design, so accumulate() never sees the lse knobs.
+        self.parallel: bool | None = None
+        self.lse_bits: int | None = None
+        self.lse_span: float = 24.0
 
     def encode(self, data: Any) -> Any:
         """Encode raw data through the distribution's sequence encoder."""
@@ -1784,13 +1871,25 @@ class FusedKernel:
 
     def score(self, enc: Any) -> np.ndarray:
         """Score encoded data with the fused log-density kernel."""
-        return fused_seq_log_density(self.dist, getattr(enc, "engine_payload", enc), self.compute_dtype)
+        return fused_seq_log_density(
+            self.dist,
+            getattr(enc, "engine_payload", enc),
+            self.compute_dtype,
+            parallel=self.parallel,
+            lse_bits=self.lse_bits,
+            lse_span=self.lse_span,
+        )
 
     def accumulate(self, enc: Any, weights: Any) -> Any:
         """Accumulate weighted sufficient statistics with the fused E-step kernel."""
         w = np.asarray(self.engine.to_numpy(weights) if hasattr(self.engine, "to_numpy") else weights, dtype=np.float64)
         suff, self.last_ll = fused_accumulate(
-            self.dist, getattr(enc, "engine_payload", enc), w, return_ll=True, compute_dtype=self.compute_dtype
+            self.dist,
+            getattr(enc, "engine_payload", enc),
+            w,
+            return_ll=True,
+            compute_dtype=self.compute_dtype,
+            parallel=self.parallel,
         )
         return suff
 
@@ -1833,6 +1932,7 @@ __all__ = [
     "fusible_estep",
     "fused_seq_log_density",
     "fused_accumulate",
+    "clean_fused_cache",
     "FusedKernel",
     "FusedKernelFactory",
     "FusedPlan",

@@ -2,8 +2,9 @@
 
 merge_accumulator_keys is the pass every EM driver must run exactly once after accumulation.
 _engine_fused_step -- the path optimize()'s auto-fusion gate routes large fits onto -- skipped it,
-so shared-key estimators silently untied: a tied-variance mixture estimated per-component variances
-(1.36 vs 3.18) where the host pools both at 1.36. Found by a compiler review's live probe; fixed by
+so shared-key estimators silently untied: a shared-key (whole-state-tied) Gaussian mixture estimated
+per-component variances (1.36 vs 3.18) where the host pools both. Found by a compiler review's live
+probe; fixed by
 running the same pass the local step and seq_estimate run. These tests pin both the engine step and
 the end-to-end optimize route.
 """
@@ -28,7 +29,7 @@ def _tied_fixture(n_per=4000):
     rng = np.random.RandomState(0)
     data = [float(v) for v in np.concatenate([rng.normal(-3, 1.0, n_per), rng.normal(3, 2.0, n_per)])]
     model = MixtureDistribution([GaussianDistribution(-2.0, 1.5), GaussianDistribution(2.0, 1.5)], [0.5, 0.5])
-    est = MixtureEstimator([GaussianEstimator(keys=(None, "shared_var")), GaussianEstimator(keys=(None, "shared_var"))])
+    est = MixtureEstimator([GaussianEstimator(keys="shared"), GaussianEstimator(keys="shared")])
     enc_data = [(len(data), model.dist_to_encoder().seq_encode(data))]
     return model, est, enc_data, data
 
@@ -44,6 +45,14 @@ class FusedKeyedTyingTest(unittest.TestCase):
         self.assertAlmostEqual(hv[0], hv[1], places=12, msg="host must tie the shared-key variances")
         self.assertAlmostEqual(fv[0], fv[1], places=12, msg="the fused engine path must tie them too")
         np.testing.assert_allclose(fv, hv, rtol=1e-9)
+
+    def test_engine_seq_estimate_pools_shared_keys_too(self):
+        from mixle.inference.estimation import _engine_seq_estimate
+
+        model, est, enc_data, _ = _tied_fixture()
+        host = seq_estimate(enc_data, est, model)
+        fused = _engine_seq_estimate(enc_data, est, model, FUSED_NUMPY_ENGINE)
+        np.testing.assert_allclose([c.sigma2 for c in fused.components], [c.sigma2 for c in host.components], rtol=1e-9)
 
     def test_optimize_with_the_fused_engine_keeps_tying_end_to_end(self):
         model, est, enc_data, data = _tied_fixture(n_per=2500)
