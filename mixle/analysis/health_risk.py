@@ -55,6 +55,25 @@ never re-derived here.
 
 Non-goals: no deformation physics (`mixle_pde.poroelastic` owns the InSAR inversion itself), no
 economic liability (`health_liability`, K6).
+
+K5 (this file's fourth addition) turns a scalar monitoring series into a calibrated real-time
+exceedance alert -- the sibling of :mod:`mixle.analysis.coverage` / :mod:`mixle.analysis.extreme` for
+the health & safety pillar. It answers a monitoring-shift question -- "is this reading trending
+toward, or past, a regulatory/occupational exposure limit, and can I trust the alert?" -- without
+pretending a single noisy reading settles it:
+
+  * :func:`exposure_exceedance_monitor` -- per-timestep ``P(exposure > limit)`` from a local predictive
+    fit around each reading (the same *distribution-over-a-threshold* idea as IC-8's
+    ``mixle_pde.decision_quantities.prob_exceed``, here applied to a scalar monitoring series rather
+    than a spatial posterior field, since a live sensor stream is not itself an IC-1 ``Posterior``).
+    The raw probability is then run through :func:`mixle.inference.conformal.split_conformal` against a
+    held-out ``calib`` reference (known-safe, sub-limit history) so the alert threshold is
+    distribution-free calibrated: under exchangeability with ``calib``, the empirical false-alarm rate
+    is bounded by ``alpha``, not just "probably fine" from an untested normal-theory cutoff.
+
+An alert firing (``ExceedanceReport.alerts.any()``) is the hook the mlops drift/retrain half (G7,
+``mixle_mlops.drift_retrain``) watches for a re-check/retrain trigger -- that wiring is a *signal*
+(read this array), not a code dependency: this module never imports anything from ``mixle_mlops``.
 """
 
 from __future__ import annotations
@@ -64,6 +83,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from scipy import stats
+
+from mixle.inference.conformal import split_conformal
 
 if TYPE_CHECKING:
     from mixle.reason.posterior_protocol import DerivedQuantity, Posterior
@@ -448,6 +470,104 @@ def incident_probability(
     raise ValueError(f"unknown incident_probability model {model!r}; expected 'logit' or 'linear'")
 
 
+# Causal look-back window for the local predictive fit. Not part of the public signature (the work
+# order freezes ``exposure_exceedance_monitor``'s parameters); kept as an internal constant so the
+# window can be retuned later without touching callers.
+_LOCAL_WINDOW = 30
+_MIN_LOCAL_HISTORY = 5
+_MIN_SCALE = 1e-9
+
+
+@dataclass
+class ExceedanceReport:
+    """Per-timestep exceedance call: which points alert, their raw probability, and the target rate.
+
+    ``alerts`` is the boolean array the caller (or the mlops drift/retrain wiring) acts on; it is
+    already conformal-calibrated -- do not re-threshold ``prob_exceed`` again downstream.
+    """
+
+    alerts: np.ndarray
+    prob_exceed: np.ndarray
+    false_alarm_target: float
+
+
+def _causal_local_stats(x: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:
+    """Causal (past-only) rolling mean/std per index, falling back to the global fit while warming up.
+
+    ``x[t]`` never looks at itself or the future: the local predictive at ``t`` is built from
+    ``x[max(0, t - window):t]``. Early indices (fewer than ``_MIN_LOCAL_HISTORY`` prior points) fall
+    back to the series' global mean/std so the predictive is never built from a near-empty window.
+    """
+    x = np.asarray(x, dtype=float)
+    n = x.shape[0]
+    mean = np.empty(n)
+    std = np.empty(n)
+    global_mean = float(x.mean()) if n > 0 else 0.0
+    global_std = max(float(x.std(ddof=1)), _MIN_SCALE) if n > 1 else _MIN_SCALE
+    for t in range(n):
+        hist = x[max(0, t - window) : t]
+        if hist.shape[0] >= _MIN_LOCAL_HISTORY:
+            mean[t] = hist.mean()
+            std[t] = max(float(hist.std(ddof=1)), _MIN_SCALE)
+        else:
+            mean[t] = global_mean
+            std[t] = global_std
+    return mean, std
+
+
+def exposure_exceedance_monitor(
+    series: np.ndarray,
+    limit: float,
+    *,
+    alpha: float = 0.05,
+    calib: np.ndarray | None = None,
+) -> ExceedanceReport:
+    """Flag exceedance excursions in ``series`` against ``limit`` at a calibrated false-alarm rate.
+
+    Args:
+        series: ``(n,)`` monitoring readings (e.g. silica PM4 concentration over time).
+        limit: the occupational/community exposure limit being monitored against.
+        alpha: target false-alarm rate (``ExceedanceReport.false_alarm_target``); the empirical alert
+            rate on exchangeable, non-exceeding data is bounded by this via conformal calibration.
+        calib: ``(m,)`` held-out reference readings known to be exposure-compliant (sub-limit). When
+            omitted, ``series`` calibrates itself -- a graceful degradation for callers with no
+            separate holdout, at the cost of a slightly less independent calibration set.
+
+    Returns:
+        An :class:`ExceedanceReport`.
+
+    Algorithm:
+        1. Fit a causal local Gaussian predictive at every timestep of ``series`` (and, separately, of
+           ``calib``) via :func:`_causal_local_stats`, then read off ``P(reading > limit)`` under that
+           predictive with :func:`scipy.stats.norm.sf` -- the IC-8 ``prob_exceed`` idea (probability
+           mass of a distribution above a threshold) applied pointwise instead of over a spatial
+           posterior region.
+        2. Calibrate the alert threshold: treat each calibration timestep's ``prob_exceed`` value as a
+           one-sided conformal nonconformity score (:func:`mixle.inference.conformal.split_conformal`,
+           ``side="upper"``, against a constant zero "prediction") on the *known-safe* ``calib`` set.
+           The returned upper bound is the smallest cutoff such that, under exchangeability with
+           ``calib``, at most an ``alpha`` fraction of non-exceeding timesteps would clear it --
+           a distribution-free false-alarm-rate guarantee, not a normal-theory approximation.
+        3. Alert wherever ``series``'s ``prob_exceed`` clears that calibrated threshold.
+    """
+    series = np.asarray(series, dtype=float)
+    calib_arr = np.asarray(calib, dtype=float) if calib is not None else series
+
+    mean, std = _causal_local_stats(series, _LOCAL_WINDOW)
+    prob_exceed = stats.norm.sf(limit, loc=mean, scale=std)
+
+    cal_mean, cal_std = _causal_local_stats(calib_arr, _LOCAL_WINDOW)
+    prob_exceed_calib = stats.norm.sf(limit, loc=cal_mean, scale=cal_std)
+
+    zero_calib_pred = np.zeros_like(prob_exceed_calib)
+    zero_test_pred = np.zeros_like(prob_exceed)
+    _, calibrated_upper = split_conformal(zero_calib_pred, prob_exceed_calib, zero_test_pred, alpha=alpha, side="upper")
+    threshold = float(calibrated_upper[0]) if calibrated_upper.size else float("inf")
+
+    alerts = prob_exceed > threshold
+    return ExceedanceReport(alerts=alerts, prob_exceed=prob_exceed, false_alarm_target=alpha)
+
+
 __all__ = [
     "DOSE_RESPONSE_MODELS",
     "DoseResponse",
@@ -457,4 +577,6 @@ __all__ = [
     "exposure_constraints",
     "safety_risk_surface",
     "incident_probability",
+    "ExceedanceReport",
+    "exposure_exceedance_monitor",
 ]
