@@ -32,6 +32,29 @@ things J's objective/optimizer actually need -- a priced cost term and a hard fe
     occupational/community exposure ``limits``, marking each ``feasible`` (or not, naming the
     ``binding`` limit(s)) so H4's ``two_stage_stochastic_plan`` (``stochastic_opt.py``) only ever
     optimizes over the surviving, feasible candidate set.
+
+K4 (this file's third addition) turns a G4 ground-deformation posterior into a spatial safety-risk
+surface and a people-weighted incident probability:
+
+  * :func:`safety_risk_surface` -- the spatial gradient (tilt) of a deformation field, pushed through
+    the field's own IC-1 `Posterior.derived_quantity` pushforward so `P(tilt > gradient_limit)` per
+    cell comes back as a `DerivedQuantity` (samples + credible interval + the `prior_dominated`
+    honesty flag), not a point estimate. An optional static terrain `slope` adds to the
+    deformation-induced tilt before the exceedance test -- a location that is already steep needs
+    less differential settlement to become unsafe.
+  * :func:`incident_probability` -- combines a per-cell hazard probability surface with a people-
+    `exposure_map` (who is where) through a logistic link into a per-cell probability that a hazard
+    cell becomes an actual incident (nobody is at risk on a steep-but-empty cell).
+
+`safety_risk_surface` accepts either a raw `np.ndarray` deformation field (a deterministic,
+already-inverted grid -- treated as a single degenerate draw with `prior_dominated=False`) or an IC-1
+`Posterior` over deformation (the intended G4 case). The frozen `Posterior.derived_quantity` method
+does the sampling and the honesty-flag bookkeeping; this module only supplies the gradient/exceedance
+pushforward function, so the uncertainty accounting is always the posterior implementation's own (A2),
+never re-derived here.
+
+Non-goals: no deformation physics (`mixle_pde.poroelastic` owns the InSAR inversion itself), no
+economic liability (`health_liability`, K6).
 """
 
 from __future__ import annotations
@@ -53,6 +76,13 @@ if TYPE_CHECKING:
 
 DOSE_RESPONSE_MODELS = ("loglinear", "logit", "hill", "threshold_linear")
 
+# `safety_risk_surface`'s signature is frozen by the K4 work order with no `n`/`rng` parameters, so the
+# Monte-Carlo sample count and seed used to push an IC-1 posterior through the gradient/exceedance
+# functional live here instead of on the call site. Fixed seed => repeated calls on the same posterior
+# reproduce the same surface.
+_MC_SAMPLES = 2000
+_MC_SEED = 0
+
 
 @dataclass
 class _SampleDerivedQuantity:
@@ -69,6 +99,26 @@ class _SampleDerivedQuantity:
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         a = (1.0 - level) / 2.0
         return np.quantile(self.samples, a, axis=0), np.quantile(self.samples, 1.0 - a, axis=0)
+
+
+@dataclass
+class _DeterministicRisk:
+    """A degenerate `DerivedQuantity` for a plain-`ndarray` (no-UQ) deformation input.
+
+    Satisfies the IC-1 `DerivedQuantity` protocol with a single replicate: there is no posterior to
+    sample from, so the exceedance is either 0 or 1 per cell and the credible interval collapses to a
+    point. `prior_dominated` is always False -- there is no prior/regulariser in play, only a direct
+    threshold test on the supplied field. `grid_shape` is extra (not part of IC-1) so a caller that
+    knows it received an ndarray can reshape `samples` back into the original spatial layout.
+    """
+
+    samples: np.ndarray  # (1, n_cells), 0.0/1.0 exceedance indicator
+    grid_shape: tuple[int, ...]
+    prior_dominated: bool = field(default=False)
+
+    def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
+        point = self.samples[0]
+        return point, point
 
 
 def _dose_response_fn(model: str, params: dict[str, Any]) -> Callable[[np.ndarray], np.ndarray]:
@@ -256,6 +306,148 @@ def exposure_constraints(options: list[dict], limits: dict[str, float]) -> list[
     return annotated
 
 
+def _grid_shape_for(posterior: Posterior, slope: np.ndarray | None) -> tuple[int, ...]:
+    """Infer the spatial grid shape backing a flat `(d,)` posterior mean.
+
+    Prefers `slope`'s shape (the caller already knows the grid geometry whenever it supplies terrain
+    slope), then an optional `grid_shape` attribute some posteriors may carry (additive -- not part of
+    IC-1, but structural typing does not forbid extra attributes), then falls back to a square grid if
+    `d` is a perfect square, else treats the field as a 1-D transect.
+    """
+    d = int(np.asarray(posterior.mean).shape[0])
+    if slope is not None:
+        shape = tuple(np.asarray(slope).shape)
+        if int(np.prod(shape)) != d:
+            raise ValueError(f"slope shape {shape} does not match deformation dimension {d}")
+        return shape
+    grid_shape = getattr(posterior, "grid_shape", None)
+    if grid_shape is not None:
+        shape = tuple(grid_shape)
+        if int(np.prod(shape)) != d:
+            raise ValueError(f"posterior.grid_shape {shape} does not match deformation dimension {d}")
+        return shape
+    side = int(round(np.sqrt(d)))
+    if side * side == d:
+        return (side, side)
+    return (d,)
+
+
+def _gradient_magnitude(grid: np.ndarray) -> np.ndarray:
+    """Per-sample spatial-gradient magnitude of a `(n, *spatial_shape)` batch, one value per cell.
+
+    `spatial_shape` may be 1-D (a transect) or 2-D+ (a true surface); the magnitude is the Euclidean
+    norm of the per-axis finite-difference gradient (`np.gradient`), computed over the spatial axes
+    only -- never across the leading Monte-Carlo/sample axis.
+    """
+    spatial_axes = tuple(range(1, grid.ndim))
+    if not spatial_axes:
+        return np.zeros_like(grid)
+    grads = np.gradient(grid, axis=spatial_axes)
+    if len(spatial_axes) == 1:
+        grads = (grads,)
+    return np.sqrt(sum(g**2 for g in grads))
+
+
+def safety_risk_surface(
+    deformation: Posterior | np.ndarray,
+    *,
+    gradient_limit: float,
+    slope: np.ndarray | None = None,
+) -> DerivedQuantity:
+    """Map a deformation field into a per-cell `P(tilt > gradient_limit)` safety-risk surface.
+
+    Args:
+        deformation: an IC-1 `Posterior` over a flattened `(d,)` subsidence/deformation field (the
+            G4 `poroelastic` InSAR-inversion case), or a plain `np.ndarray` spatial grid (any shape) of
+            already-point-estimated deformation values.
+        gradient_limit: the tilt/gradient magnitude above which a cell is considered geotechnically
+            unsafe (e.g. an angular-distortion or differential-settlement limit).
+        slope: an optional static terrain-slope field, same spatial shape as the deformation grid.
+            When given, it is added to the deformation-induced gradient magnitude before the
+            exceedance test: a cell that is already steep needs less additional differential movement
+            to cross `gradient_limit`.
+
+    Returns:
+        A `DerivedQuantity` whose `samples` are the per-cell exceedance indicator (0.0/1.0) drawn over
+        the posterior's Monte-Carlo replicates (or a single deterministic replicate for an `ndarray`
+        input), flattened in the grid's row-major (C) order, together with a credible interval and the
+        `prior_dominated` flag. The per-cell risk probability is `samples.mean(axis=0)`.
+    """
+    from mixle.reason.posterior_protocol import Posterior
+
+    if isinstance(deformation, np.ndarray):
+        grid = np.asarray(deformation, dtype=float)
+        grid_shape = grid.shape
+        tilt = _gradient_magnitude(grid[np.newaxis, ...])[0]
+        if slope is not None:
+            slope_arr = np.asarray(slope, dtype=float)
+            if slope_arr.shape != grid_shape:
+                raise ValueError(f"slope shape {slope_arr.shape} does not match deformation shape {grid_shape}")
+            tilt = tilt + slope_arr
+        exceed = (tilt > gradient_limit).astype(float).reshape(1, -1)
+        return _DeterministicRisk(samples=exceed, grid_shape=grid_shape)
+
+    if not isinstance(deformation, Posterior):
+        raise TypeError("deformation must be an IC-1 Posterior or an np.ndarray field")
+
+    grid_shape = _grid_shape_for(deformation, slope)
+    slope_arr = None if slope is None else np.asarray(slope, dtype=float).reshape(grid_shape)
+
+    def _pushforward(draws: np.ndarray) -> np.ndarray:
+        n = draws.shape[0]
+        grid = draws.reshape((n, *grid_shape))
+        tilt = _gradient_magnitude(grid)
+        if slope_arr is not None:
+            tilt = tilt + slope_arr[np.newaxis, ...]
+        exceed = (tilt > gradient_limit).astype(float)
+        return exceed.reshape(n, -1)
+
+    rng = np.random.default_rng(_MC_SEED)
+    return deformation.derived_quantity(_pushforward, _MC_SAMPLES, rng)
+
+
+def incident_probability(
+    hazard: np.ndarray,
+    exposure_map: np.ndarray,
+    *,
+    model: str = "logit",
+) -> np.ndarray:
+    """Combine a per-cell hazard probability surface with a people-`exposure_map` into incident risk.
+
+    A hazard exceedance is only a safety *incident* if someone is exposed to it: an empty, unstable
+    cell and a busy, unstable cell are not the same risk. `hazard` is expected in `[0, 1]` (e.g. the
+    per-cell mean of `safety_risk_surface(...).samples`); `exposure_map` is a non-negative people-
+    density/occupancy weight of the same shape.
+
+    Args:
+        hazard: per-cell hazard probability, shape `(*grid_shape,)`, values in `[0, 1]`.
+        exposure_map: per-cell non-negative occupancy/exposure weight, same shape as `hazard`.
+        model: `"logit"` (default) combines the hazard's own log-odds with `log1p(exposure_map)` so an
+            unoccupied cell (`exposure_map == 0`) leaves the hazard probability unchanged and denser
+            occupancy monotonically raises it; `"linear"` is the simple product `hazard * exposure_map`
+            clipped to `[0, 1]`.
+
+    Returns:
+        Per-cell incident probability, same shape as `hazard`, values in `[0, 1]`.
+    """
+    hazard_arr = np.asarray(hazard, dtype=float)
+    exposure_arr = np.asarray(exposure_map, dtype=float)
+    if hazard_arr.shape != exposure_arr.shape:
+        raise ValueError(f"hazard shape {hazard_arr.shape} does not match exposure_map shape {exposure_arr.shape}")
+    if np.any(exposure_arr < 0):
+        raise ValueError("exposure_map must be non-negative (a people-density/occupancy weight)")
+
+    if model == "logit":
+        eps = 1e-9
+        p_hazard = np.clip(hazard_arr, eps, 1.0 - eps)
+        logit_hazard = np.log(p_hazard / (1.0 - p_hazard))
+        z = logit_hazard + np.log1p(exposure_arr)
+        return 1.0 / (1.0 + np.exp(-z))
+    if model == "linear":
+        return np.clip(hazard_arr * exposure_arr, 0.0, 1.0)
+    raise ValueError(f"unknown incident_probability model {model!r}; expected 'logit' or 'linear'")
+
+
 __all__ = [
     "DOSE_RESPONSE_MODELS",
     "DoseResponse",
@@ -263,4 +455,6 @@ __all__ = [
     "population_risk",
     "health_liability",
     "exposure_constraints",
+    "safety_risk_surface",
+    "incident_probability",
 ]
