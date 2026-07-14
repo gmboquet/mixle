@@ -95,6 +95,9 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # nested), the nested wants_minmax decline, and per-component weighted Pareto support minima --
     # numba-gated like its siblings; the numba-free halves live in fastmath_policy_test.py.
     "fused_out_of_support_test.py": ("numba", "optional"),
+    # Keyed (tied) parameters through the fused ENGINE path: the #432 bug class's fused edition
+    # (merge_accumulator_keys was skipped exactly where the auto-fusion gate routes large fits).
+    "fused_keyed_tying_test.py": ("numba", "optional"),
     "jax_engine_test.py": ("jax", "optional"),
     # Backward-compatibility-only tests (renamed class / kwarg aliases). Tagged `legacy` so a product-only
     # run can exclude them with `-m "not legacy"`; they still run in the default `fast` gate.

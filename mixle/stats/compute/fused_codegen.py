@@ -1002,7 +1002,9 @@ _ESTEP_COMPILED: dict[tuple, Callable] = {}
 # cross-row reduction, but sequential and parallel are DIFFERENT fastmath binaries, and LLVM vectorizes
 # each loop nest differently (measured max 4.7e-16 relative). Bit-identity holds within each variant,
 # never across variants.
-_PARALLEL_MIN_OBS = 262_144  # below this the fork/join overhead eats the win
+_PARALLEL_MIN_OBS = (
+    65_536  # measured crossover ~48k on a 3-component composite (0.89x at 32k, 1.49x at 64k, 2.44x at 262k)
+)
 _PARALLEL_MAX_CHUNKS = 256
 _PARALLEL_CHUNK_TARGET = 16_384
 
@@ -1496,7 +1498,7 @@ def fused_seq_log_density(
     ``compute_dtype`` (e.g. ``np.float32``) runs the row arithmetic in reduced precision while the
     log-sum-exp accumulator and output stay float64; ``None`` keeps the byte-identical float64 path.
 
-    ``parallel``: ``None`` auto-engages the chunked prange scorer for large inputs (>= 262144 rows and
+    ``parallel``: ``None`` auto-engages the chunked prange scorer for large inputs (>= 65536 rows -- the measured crossover -- and
     more than one numba worker); ``True``/``False`` force it. Rows are disjoint (no cross-row
     reduction), so the parallel scorer is bit-identical across runs and worker counts; against the
     sequential kernel it agrees to 1-2 ULP (different fastmath binaries vectorize differently --
@@ -1583,7 +1585,7 @@ def fused_accumulate(
     ``(suff_stat, ll)`` so the EM loop can skip a separate scoring pass. Raises ``ValueError`` if not
     fusible.
 
-    ``parallel``: ``None`` auto-engages the chunked prange E-step for large inputs (>= 262144 rows and
+    ``parallel``: ``None`` auto-engages the chunked prange E-step for large inputs (>= 65536 rows -- the measured crossover -- and
     more than one numba worker); ``True``/``False`` force it. Chunk boundaries are a pure function of n
     and chunk partials combine in fixed order, so parallel results are bit-identical across runs AND
     across worker counts; they differ from the sequential kernel only by float re-association across
