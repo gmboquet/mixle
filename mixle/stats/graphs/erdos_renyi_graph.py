@@ -331,19 +331,6 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self.edge_count = float(x[1])
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge tied edge-count statistics into ``stats_dict``."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace tied edge-count statistics from ``stats_dict``."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> GraphDataEncoder:
         """Return the encoder associated with this accumulator."""
         return GraphDataEncoder(directed=self.directed)

@@ -581,40 +581,6 @@ class LogGaussianAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merges LogGaussianAccumulator sufficient statistics with sufficient statistics contained in suff_stat dict
-        that share the same key.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dict containing 'key' string for LogGaussianAccumulator
-                objects to combine sufficient statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Set the sufficient statistics of LogGaussianAccumulator to stats_key sufficient statistics if key is in
-            stats_dict.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dictionary mapping keys string ids to LogGaussianAccumulator
-                objects.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> "LogGaussianDataEncoder":
         """Return the encoder associated with this accumulator."""
         return LogGaussianDataEncoder()

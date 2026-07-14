@@ -722,34 +722,6 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Combines the sufficient statistics of CategoricalAccumulators that have the same key value.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dictionary for mapping keys to CategoricalAccumulators.
-
-        Returns:
-            None
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace sufficient statistics from another accumulator with the same key.
-
-        Args:
-            stats_dict: Mapping from merge keys to categorical accumulators.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> "CategoricalDataEncoder":
         """Return an encoder compatible with categorical observations."""
         return CategoricalDataEncoder()

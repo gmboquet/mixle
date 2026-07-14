@@ -408,21 +408,6 @@ class IntegerBernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
         self.tot_sum *= c
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge this accumulator's state into ``stats_dict`` under its configured key."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                temp = stats_dict[self.keys]
-                stats_dict[self.keys] = (temp[0] + self.pcnt, temp[1] + self.tot_sum)
-            else:
-                stats_dict[self.keys] = (self.pcnt, self.tot_sum)
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator's state from keyed statistics when present."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.pcnt, self.tot_sum = stats_dict[self.keys]
-
     def acc_to_encoder(self) -> "IntegerBernoulliSetDataEncoder":
         """Return the encoder compatible with Bernoulli-set sufficient statistics."""
         return IntegerBernoulliSetDataEncoder()

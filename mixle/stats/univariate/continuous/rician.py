@@ -256,19 +256,6 @@ class RicianAccumulator(SequenceEncodableStatisticAccumulator):
         self.count, self.s2, self.s4 = float(x[0]), float(x[1]), float(x[2])
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator from keyed statistics when available."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> "RicianDataEncoder":
         """Return the encoder used by this accumulator."""
         return RicianDataEncoder()

@@ -592,22 +592,23 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator's state from the pooled keyed statistics when present."""
+        """Replace own + wrapped-child statistics from the pooled ``stats_dict`` (see key_merge)."""
         # The pull direction matters: this used to PUSH self.value() INTO the dict-held pool,
         # which overwrote the pooled statistics with the last site's own and left the site itself
         # untouched -- tied sites never received the pool (caught by the keyed-protocol sweep).
-        if self.keys is not None and self.keys in stats_dict:
-            pooled = stats_dict[self.keys]
-            if pooled is not self:
-                self.from_value(pooled.value())
+        super().key_replace(stats_dict)
+        self.accumulator.key_replace(stats_dict)
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge this accumulator into ``stats_dict`` under the configured key."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-            else:
-                stats_dict[self.keys] = self
+        """Merge own statistics under ``self.keys`` and DELEGATE to the wrapped child.
+
+        The delegation is the point of the override: without it, a keyed estimator nested under an
+        Optional never pooled at all (its key pass was unreachable -- the dead-keys shape the
+        keyed-protocol sweep hunts). The own-key pooling itself is the base-class canonical
+        protocol.
+        """
+        super().key_merge(stats_dict)
+        self.accumulator.key_merge(stats_dict)
 
     def acc_to_encoder(self) -> OptionalDataEncoder:
         """Return the optional encoder matching the wrapped child accumulator."""

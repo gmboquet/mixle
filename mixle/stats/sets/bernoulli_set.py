@@ -664,30 +664,6 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
         self.tot_sum = x[1]
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge this accumulator's statistics into stats_dict under its key, if keyed.
-
-        Args:
-            stats_dict (Dict[str, Any]): Maps keys to merged accumulators or sufficient statistics.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator's statistics with the keyed statistics in stats_dict, if keyed.
-
-        Args:
-            stats_dict (Dict[str, Any]): Maps keys to merged accumulators or sufficient statistics.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> "BernoulliSetDataEncoder":
         """Return a data encoder for Bernoulli set observations."""
         return BernoulliSetDataEncoder()

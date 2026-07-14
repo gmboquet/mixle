@@ -259,28 +259,6 @@ class InhomogeneousPoissonProcessAccumulator(SequenceEncodableStatisticAccumulat
         self.n_realizations *= c
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge this accumulator into a keyed statistics dictionary."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                bc, nr = stats_dict[self.keys]
-                self.bin_counts += bc
-                self.n_realizations += nr
-                # write the POOL back: without this, the dict keeps the FIRST site's stats and
-                # key_replace hands every tied site that truncated pool -- later sites' data was
-                # silently discarded (order-dependent wrong fits; found by the compiler review's
-                # keyed-tying probe, present in 8 families vs the combine-into-dict families)
-                stats_dict[self.keys] = (self.bin_counts, self.n_realizations)
-            else:
-                stats_dict[self.keys] = (self.bin_counts.copy(), self.n_realizations)
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator from a keyed statistics dictionary."""
-        if self.keys is not None and self.keys in stats_dict:
-            bc, nr = stats_dict[self.keys]
-            self.bin_counts = np.asarray(bc, dtype=np.float64).copy()
-            self.n_realizations = float(nr)
-
     def acc_to_encoder(self) -> "InhomogeneousPoissonProcessDataEncoder":
         """Return an encoder that bins event times on this accumulator's edges."""
         return InhomogeneousPoissonProcessDataEncoder(self.edges)

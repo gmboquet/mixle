@@ -20,7 +20,6 @@ statistic) and fits theta by matching the mean Kendall distance to its closed-fo
 
 import math
 from collections.abc import Sequence
-from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -298,19 +297,6 @@ class MallowsAccumulator(SequenceEncodableStatisticAccumulator):
         self.count, self.precede = x[0], np.asarray(x[1])
         self.dim = self.precede.shape[0]
         return self
-
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge this accumulator into a keyed statistics dictionary."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator from a keyed statistics dictionary."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "MallowsDataEncoder":
         """Return an encoder compatible with the accumulated ordering dimension."""

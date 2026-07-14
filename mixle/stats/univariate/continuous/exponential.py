@@ -483,47 +483,6 @@ class ExponentialAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merges ExponentialAccumulator sufficient statistics with sufficient statistics contained in suff_stat dict
-        that share the same key.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dict containing 'key' string for ExponentialAccumulator
-                objects that represent the same distribution.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                x0, x1 = stats_dict[self.keys]
-                self.count += x0
-                self.sum += x1
-                # write the POOL back: without this, the dict keeps the FIRST site's stats and
-                # key_replace hands every tied site that truncated pool -- later sites' data was
-                # silently discarded (order-dependent wrong fits; found by the compiler review's
-                # keyed-tying probe, present in 8 families vs the combine-into-dict families)
-                stats_dict[self.keys] = (self.count, self.sum)
-            else:
-                stats_dict[self.keys] = (self.count, self.sum)
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Set the sufficient statistics of ExponentialAccumulator to stats_key sufficient statistics if key is in
-            stats_dict.
-
-        Args:
-            stats_dict (Dict[str, Any]): Map key to sufficient statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.count = stats_dict[self.keys][0]
-                self.sum = stats_dict[self.keys][1]
-
     def acc_to_encoder(self) -> "ExponentialDataEncoder":
         """Return the encoder associated with this accumulator."""
         return ExponentialDataEncoder()

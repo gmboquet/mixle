@@ -655,46 +655,6 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge sufficient statistics from ``stats_dict`` when this accumulator's key is present.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dict mapping keys to sufficient statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                x0, x1, x2, x3 = stats_dict[self.keys]
-                self.sum += x0
-                self.sum2 += x1
-                self.count += x2
-                self.count2 += x3
-                # write the POOL back: without this, the dict keeps the FIRST site's stats and
-                # key_replace hands every tied site that truncated pool -- later sites' data was
-                # silently discarded (order-dependent wrong fits; found by the compiler review's
-                # keyed-tying probe, present in 8 families vs the combine-into-dict families)
-                stats_dict[self.keys] = (self.sum, self.sum2, self.count, self.count2)
-
-            else:
-                stats_dict[self.keys] = (self.sum, self.sum2, self.count, self.count2)
-
-    def key_replace(self, stats_dict: dict[str, "GaussianAccumulator"]) -> None:
-        """Replace sufficient statistics from ``suff_stats`` when this accumulator's key is present.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dict mapping keys to sufficient statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.sum, self.sum2, self.count, self.count2 = stats_dict[self.keys]
-
     def acc_to_encoder(self) -> "GaussianDataEncoder":
         """Return an encoder compatible with Gaussian scalar observations."""
         return GaussianDataEncoder()

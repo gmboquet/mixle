@@ -218,19 +218,6 @@ class LowRankPermutationAccumulator(SequenceEncodableStatisticAccumulator):
         self.dim = self.counts.shape[0]
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge this accumulator into ``stats_dict`` under its configured key."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator's state from keyed statistics when present."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> LowRankPermutationDataEncoder:
         """Return the encoder compatible with item-by-rank sufficient statistics."""
         return LowRankPermutationDataEncoder(dim=self.dim)

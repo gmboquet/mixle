@@ -308,27 +308,6 @@ class SkellamAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 *= c
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge keyed statistics into ``stats_dict`` when keys are configured."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                c, s, s2 = stats_dict[self.keys]
-                self.count += c
-                self.sum += s
-                self.sum2 += s2
-                # write the POOL back: without this, the dict keeps the FIRST site's stats and
-                # key_replace hands every tied site that truncated pool -- later sites' data was
-                # silently discarded (order-dependent wrong fits; found by the compiler review's
-                # keyed-tying probe, present in 8 families vs the combine-into-dict families)
-                stats_dict[self.keys] = (self.count, self.sum, self.sum2)
-            else:
-                stats_dict[self.keys] = (self.count, self.sum, self.sum2)
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator from keyed statistics when available."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.count, self.sum, self.sum2 = stats_dict[self.keys]
-
     def acc_to_encoder(self) -> "SkellamDataEncoder":
         """Return the encoder used by this accumulator."""
         return SkellamDataEncoder()

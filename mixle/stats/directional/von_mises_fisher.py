@@ -604,40 +604,6 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
         self.dim = None if self.ssum is None else len(self.ssum)
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge sufficient statistics from ``stats_dict`` when this accumulator's key is present.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dict mapping keys to accumulators with shared sufficient statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.combine(stats_dict[self.keys].value())
-                # write the POOL back: the dict must end holding the pooled accumulator, else
-                # key_replace hands every tied site the FIRST site's statistics (later sites'
-                # data silently discarded -- caught by the keyed-protocol sweep)
-                stats_dict[self.keys] = self
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace sufficient statistics from ``stats_dict`` when this accumulator's key is present.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dict mapping keys to accumulators with shared sufficient statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> "VonMisesFisherDataEncoder":
         """Return the encoder associated with this accumulator."""
         return VonMisesFisherDataEncoder()

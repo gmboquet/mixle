@@ -712,37 +712,6 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
             self.count_vec *= c
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Aggregate member sufficient statistics with sufficient statistics of objects with matching keys.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dict mapping keys to corresponding sufficient stats.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Set member sufficient statistics to suff stats with matching keys.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dict mapping keys to corresponding sufficient stats.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> "IntegerCategoricalDataEncoder":
         """Return the encoder associated with this accumulator."""
         return IntegerCategoricalDataEncoder()

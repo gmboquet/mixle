@@ -163,16 +163,6 @@ class PairWinAccumulator(SequenceEncodableStatisticAccumulator):
         self.dim = self.wins.shape[0]
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge tied win-count statistics into ``stats_dict``."""
-        if self.keys is not None:
-            stats_dict[self.keys] = stats_dict[self.keys].combine(self.value()) if self.keys in stats_dict else self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace tied win-count statistics from ``stats_dict``."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> PairDataEncoder:
         """Return the encoder associated with this accumulator."""
         return PairDataEncoder(dim=self.dim)
@@ -314,16 +304,6 @@ class _TieAccumulator(SequenceEncodableStatisticAccumulator):
         self.count, self.wins, self.ties = x[0], np.asarray(x[1]), np.asarray(x[2])
         self.dim = self.wins.shape[0]
         return self
-
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge tied win-and-tie statistics into ``stats_dict``."""
-        if self.keys is not None:
-            stats_dict[self.keys] = stats_dict[self.keys].combine(self.value()) if self.keys in stats_dict else self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace tied win-and-tie statistics from ``stats_dict``."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> _TieEncoder:
         """Return the encoder associated with this accumulator."""

@@ -285,23 +285,6 @@ class ResponsibilityAttentionAccumulator(SequenceEncodableStatisticAccumulator):
         self.query_sq = float(x[4])
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge this accumulator into ``stats_dict`` under its configured key."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.combine(stats_dict[self.keys])
-                # write the POOL back: without this the dict keeps the FIRST site's value and
-                # key_replace hands that truncated pool to every tied site (later sites' data
-                # silently discarded -- caught by the keyed-protocol sweep)
-                stats_dict[self.keys] = self.value()
-            else:
-                stats_dict[self.keys] = self.value()
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator's state from keyed statistics when present."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.from_value(stats_dict[self.keys])
-
     def acc_to_encoder(self) -> ResponsibilityAttentionDataEncoder:
         """Return the encoder compatible with this accumulator."""
         return ResponsibilityAttentionDataEncoder()
