@@ -1147,6 +1147,7 @@
     "fit_conditional_transport",
     "fit_cycle_transport",
     "fit_fact_calibrator",
+    "fuse_models",
     "fusion_flops",
     "information_corroborator",
     "joint_cycle_consistency_receipt",
