@@ -22,11 +22,22 @@ where relational interactions are part of the signal.
 mixle.reason's exact core (:class:`GaussianBelief`) does this fusion in closed form for *inference*; this is the
 torch, end-to-end-trainable version -- the encoders that emit the experts are learned, the fusion stays exact.
 Torch is imported lazily.
+
+Workstream L (cross-model adjudication): the same precision-weighted product-of-experts rule above, applied
+not to learned tokens but to scalar claims from independent *external* models (a CMIP climate projection, a
+hydrology emulator, ...). :func:`fuse_claims` fuses a list of :class:`ModelClaim` into one :class:`FusedBelief`,
+flags when two models disagree beyond a standardized-distance threshold, and -- on disagreement -- adjudicates
+via an IC-6-shaped ``verifier`` plus the ``language_bridge`` conformal claim score before ever emitting a fused
+point, so a driller-facing cross-model number is never quietly averaged out of a real disagreement.
 """
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from typing import Any
+
+import numpy as np
 
 
 def fusion_flops(n_tokens: int, latent_dim: int, *, attention: bool = False) -> int:
@@ -37,6 +48,160 @@ def fusion_flops(n_tokens: int, latent_dim: int, *, attention: bool = False) -> 
     if attention:
         return n_tokens * n_tokens * latent_dim  # the QK^T score matrix dominates
     return n_tokens * latent_dim  # one precision-weighted accumulate per token
+
+
+@dataclass(frozen=True)
+class ModelClaim:
+    """One external model's scalar claim about a shared quantity, with the provenance it must carry.
+
+    ``variance`` is that model's own uncertainty about ``value`` (physical units, not log-precision);
+    ``reliability`` is a prior trust weight (1.0 = taken at face value) folded into the fused precision
+    the same way L8's per-member ``skill`` later will. ``model_id``/``version``/``content_hash`` mirror
+    IC-7's ``ProvenancedResult`` fields so every fused belief traces back to the calls that produced it.
+    """
+
+    value: float
+    variance: float
+    model_id: str
+    version: str
+    content_hash: str
+    reliability: float = 1.0
+
+
+@dataclass(frozen=True)
+class FusedBelief:
+    """The precision-weighted fusion of several :class:`ModelClaim`, with attribution and an honesty gate.
+
+    ``weights`` is each model's share of the fused precision (sums to 1). ``disagreement`` fires when the
+    worst pairwise standardized distance between two claims exceeds ``sigma_flag`` (default 3-sigma);
+    ``abstained`` is only ever ``True`` when ``disagreement`` is ``True`` AND no single claim clears the
+    conformal accept bar under cross-model adjudication -- the mean/variance are still the precision-weighted
+    values even then, but callers MUST check ``abstained`` before surfacing ``mean`` as a driller-facing number.
+    """
+
+    mean: float
+    variance: float
+    weights: dict[str, float]
+    disagreement: bool
+    abstained: bool
+    provenance: dict[str, Any]
+
+
+def _max_pairwise_standardized_distance(claims: list[ModelClaim]) -> float:
+    """``max_{i<j} |value_i - value_j| / sqrt(variance_i + variance_j)`` -- 0.0 for a single claim."""
+    worst = 0.0
+    for i in range(len(claims)):
+        for j in range(i + 1, len(claims)):
+            a, b = claims[i], claims[j]
+            z = abs(a.value - b.value) / math.sqrt(a.variance + b.variance)
+            worst = max(worst, z)
+    return worst
+
+
+def _any_claim_clears_accept_bar(
+    claims: list[ModelClaim], *, verifier: Any = None, n_samples: int = 200, seed: int = 0, width_sigma: float = 1.0
+) -> bool:
+    """Cross-model adjudication for a disagreeing claim set: does *any* claim survive scrutiny?
+
+    Two independent checks, either of which can clear a claim (so it is not folded into an abstain):
+
+    1. IC-6 ``verifier`` (if supplied): ``verifier.verify(claim, context) -> Verdict``-shaped, duck-typed
+       so this module never imports ``mixle_mlops`` (E10 owns the real physical/calibration verifiers).
+    2. ``language_bridge.claim_score`` (frozen at ``reason/language_bridge.py:146``): build a
+       ``width_sigma``-sigma interval :class:`~mixle.reason.language_bridge.Claim` around each model's value
+       and score it -- via the *other* models' synthetic posteriors -- for coverage-per-unit-width. Under
+       real disagreement (the only path that reaches this function) every other model's mass sits many sigma
+       away from a claim's own interval, so its cross-model coverage is 0 and the score cannot clear any
+       positive bar; near-agreeing claims (the common case that never reaches here because disagreement is
+       False) would instead see substantial cross-coverage. A claim "clears the bar" iff its score against at
+       least one other model's posterior is strictly positive.
+    """
+    from mixle.reason.language_bridge import Claim, claim_score
+
+    if len(claims) < 2:
+        return True  # nothing to adjudicate against -- a lone claim cannot disagree with itself
+
+    rng = np.random.default_rng(seed)
+    posteriors = {c.model_id: rng.normal(c.value, math.sqrt(c.variance), n_samples) for c in claims}
+
+    for claim in claims:
+        if verifier is not None:
+            context = {
+                "claims": [
+                    {"model_id": o.model_id, "value": o.value, "variance": o.variance} for o in claims if o is not claim
+                ]
+            }
+            candidate = {"model_id": claim.model_id, "value": claim.value, "variance": claim.variance}
+            verdict = verifier.verify(candidate, context)
+            if getattr(verdict, "passed", False):
+                return True
+
+        sd = math.sqrt(claim.variance)
+        interval = Claim(field=claim.model_id, lo=claim.value - width_sigma * sd, hi=claim.value + width_sigma * sd)
+        for other in claims:
+            if other.model_id == claim.model_id:
+                continue
+            score = claim_score(interval, posterior=posteriors[other.model_id], n_samples=n_samples, seed=seed)
+            if score > 0.0:
+                return True
+    return False
+
+
+def fuse_claims(
+    claims: list[ModelClaim],
+    *,
+    prior_prec: float = 0.0,
+    sigma_flag: float = 3.0,
+    verifier: Any = None,
+) -> FusedBelief:
+    """Precision-weighted product-of-experts fusion of independent external-model claims (workstream L5).
+
+    Exactly the rule stated at the top of this module (``prec_fused = sum(prec_i) + prior_prec``,
+    ``mean = sum(prec_i * value_i) / prec_fused``), applied to scalar :class:`ModelClaim`\\ s instead of
+    learned tokens: ``prec_i = reliability_i / variance_i``. On disagreement (worst pairwise standardized
+    distance ``> sigma_flag``), the fused point is only trusted once at least one claim clears cross-model
+    adjudication (:func:`_any_claim_clears_accept_bar`); otherwise ``abstained=True`` and the caller must not
+    surface ``mean`` as a resolved answer. ``provenance`` records every claim's id/version/content_hash/weight
+    so a fused belief is always attributable back to the models that produced it.
+    """
+    if not claims:
+        raise ValueError("fuse_claims needs at least one ModelClaim")
+    for c in claims:
+        if c.variance <= 0:
+            raise ValueError(f"ModelClaim {c.model_id!r} has non-positive variance {c.variance!r}")
+
+    precisions = [c.reliability / c.variance for c in claims]
+    total_prec = sum(precisions)
+    prec_fused = total_prec + prior_prec
+    mean = sum(p * c.value for p, c in zip(precisions, claims)) / prec_fused
+    variance = 1.0 / prec_fused
+    weights = {c.model_id: p / total_prec for p, c in zip(precisions, claims)}
+
+    max_z = _max_pairwise_standardized_distance(claims)
+    disagreement = max_z > sigma_flag
+    abstained = disagreement and not _any_claim_clears_accept_bar(claims, verifier=verifier)
+
+    provenance = {
+        "claims": [
+            {
+                "model_id": c.model_id,
+                "version": c.version,
+                "content_hash": c.content_hash,
+                "weight": weights[c.model_id],
+            }
+            for c in claims
+        ],
+        "max_pairwise_standardized_distance": max_z,
+        "sigma_flag": sigma_flag,
+    }
+    return FusedBelief(
+        mean=mean,
+        variance=variance,
+        weights=weights,
+        disagreement=disagreement,
+        abstained=abstained,
+        provenance=provenance,
+    )
 
 
 def _build():
