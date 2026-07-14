@@ -18,7 +18,6 @@ Reference: Nelsen, *An Introduction to Copulas* (2nd ed., Springer, 2006).
 
 import math
 from collections.abc import Sequence
-from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -155,19 +154,6 @@ class GaussianCopulaAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = float(x[2])
         self.dim = self.sum_z.shape[0]
         return self
-
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge this accumulator into a keyed statistics dictionary."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator from a keyed statistics dictionary."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.from_value(stats_dict[self.keys].value())
 
     def acc_to_encoder(self) -> "GaussianCopulaDataEncoder":
         """Return an encoder that produces normal-score observations."""

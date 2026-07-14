@@ -468,39 +468,6 @@ class SpearmanRankingAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = x[0]
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge sufficient statistics from ``stats_dict`` when this accumulator's key is present.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dict mapping keys to shared sufficient statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                vals = stats_dict[self.keys]
-                stats_dict[self.keys] = (vals[0] + self.count, vals[1] + self.sum)
-            else:
-                stats_dict[self.keys] = (self.count, self.sum)
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace sufficient statistics from ``stats_dict`` when this accumulator's key is present.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dict mapping keys to shared sufficient statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                vals = stats_dict[self.keys]
-                self.count = vals[0]
-                self.sum = vals[1]
-
     def acc_to_encoder(self) -> "SpearmanRankingDataEncoder":
         """Return the encoder associated with this accumulator."""
         return SpearmanRankingDataEncoder()

@@ -211,19 +211,6 @@ class RandomDotProductGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self.count, self.adj_sum = x[0], (None if x[1] is None else np.asarray(x[1], dtype=float))
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge this accumulator into a keyed statistics dictionary."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator from a keyed statistics dictionary."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> GraphDataEncoder:
         """Return the undirected graph encoder used by the accumulator."""
         return GraphDataEncoder(directed=False)

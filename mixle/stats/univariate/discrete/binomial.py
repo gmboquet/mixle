@@ -854,36 +854,6 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum *= c
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Combines the sufficient statistics of BinomialAccumulators that have the same key value.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dictionary for mapping keys to BinomialAccumulators.
-
-        Returns:
-            None
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace sufficient statistics when matching keyed statistics are present.
-
-        Args:
-            stats_dict (Dict[str, Any]): Maps member variable key to BinomialAccumualator with same key.
-
-        Returns:
-            None
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> "BinomialDataEncoder":
         """Create the encoder for binomial observations.
 

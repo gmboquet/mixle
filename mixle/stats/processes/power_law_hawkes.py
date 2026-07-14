@@ -265,21 +265,11 @@ class PowerLawHawkesAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x):
         """Restore stored realizations, window, and alpha constraint."""
-        self.realizations, self.window, self.alpha_fixed = x
+        # copy on restore: assigning the pooled LIST reference would alias every tied site to one
+        # list, so a later in-place extend at any site mutates all of them (copy-on-adopt precedent)
+        self.realizations = list(x[0])
+        self.window, self.alpha_fixed = x[1], x[2]
         return self
-
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge stored realizations into ``stats_dict`` under the configured key."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].realizations.extend(self.realizations)
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace stored realizations from keyed statistics when present."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.realizations = stats_dict[self.keys].realizations
 
     def acc_to_encoder(self):
         """Return the encoder compatible with raw Hawkes realizations."""

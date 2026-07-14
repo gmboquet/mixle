@@ -584,20 +584,6 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
         self.count *= c
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge this accumulator's sufficient statistics into stats_dict under its key."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator's sufficient statistics from stats_dict under its key."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> "IntegerUniformSpikeDataEncoder":
         """Returns an IntegerUniformSpikeDataEncoder for encoding sequences of iid integer observations."""
         return IntegerUniformSpikeDataEncoder()
