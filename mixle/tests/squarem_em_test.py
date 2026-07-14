@@ -12,13 +12,14 @@ import unittest
 
 import numpy as np
 
-from mixle.inference import SquaremEM, squarem_packer
+from mixle.inference import CompiledEM, SquaremEM, squarem_packer
 from mixle.inference.em import StandardEM, observed_log_likelihood
 from mixle.stats import (
     CategoricalDistribution,
     CompositeDistribution,
     ExponentialDistribution,
     GaussianDistribution,
+    LaplaceDistribution,
     MixtureDistribution,
     PoissonDistribution,
 )
@@ -91,6 +92,30 @@ class SquaremGateTest(unittest.TestCase):
         self.assertGreater(result.objective, observed_log_likelihood(enc_data)(model))
 
 
+class CompiledEMTest(unittest.TestCase):
+    def test_compiled_full_sweep_matches_standard_em(self):
+        model, est, enc_data = _overlapping_gmm(n=6_000)
+        expected = StandardEM().step(enc_data, est, model).model
+        result = CompiledEM().step(enc_data, est, model)
+        probe = model.dist_to_encoder().seq_encode([-1.0, 0.0, 1.0, 3.0, 5.0])
+        np.testing.assert_allclose(
+            result.model.seq_log_density(probe), expected.seq_log_density(probe), rtol=1e-11, atol=1e-11
+        )
+        self.assertTrue(result.metadata["compiled"])
+        self.assertGreater(result.metadata["mstep_seconds"], 0.0)
+        self.assertAlmostEqual(
+            result.metadata["input_data_objective"],
+            observed_log_likelihood(enc_data)(model),
+            places=9,
+        )
+
+    def test_squarem_accepts_compiled_base_strategy(self):
+        model, est, enc_data = _overlapping_gmm(n=6_000)
+        result = SquaremEM(base_strategy=CompiledEM()).step(enc_data, est, model)
+        self.assertIn(result.metadata["sweeps"], (2, 3))
+        self.assertTrue(np.isfinite(result.objective))
+
+
 class SquaremPackerTest(unittest.TestCase):
     def test_pack_unpack_round_trips_the_supported_families(self):
         model = MixtureDistribution(
@@ -112,6 +137,28 @@ class SquaremPackerTest(unittest.TestCase):
         data = [(0.3, 1.2, 2, "b"), (1.5, 0.4, 4, "a")]
         enc = model.dist_to_encoder().seq_encode(data)
         np.testing.assert_allclose(rebuilt.seq_log_density(enc), model.seq_log_density(enc), rtol=1e-12)
+
+    def test_pack_unpack_round_trips_nested_mixtures_and_laplace(self):
+        inner = MixtureDistribution(
+            [LaplaceDistribution(-1.0, 0.7), GaussianDistribution(1.5, 1.2)],
+            [0.35, 0.65],
+            name="inner",
+        )
+        model = MixtureDistribution(
+            [
+                CompositeDistribution((inner, PoissonDistribution(3.0))),
+                CompositeDistribution((LaplaceDistribution(2.0, 1.1), PoissonDistribution(5.0))),
+            ],
+            [0.4, 0.6],
+            name="outer",
+        )
+        pack, unpack = squarem_packer(model)
+        rebuilt = unpack(pack(model))
+        data = [(-0.5, 2), (1.2, 4), (2.5, 7)]
+        enc = model.dist_to_encoder().seq_encode(data)
+        np.testing.assert_allclose(rebuilt.seq_log_density(enc), model.seq_log_density(enc), rtol=1e-12)
+        self.assertEqual(rebuilt.name, "outer")
+        self.assertEqual(rebuilt.components[0].dists[0].name, "inner")
 
     def test_unsupported_and_map_models_are_refused_with_the_escape_hatch_named(self):
         with self.assertRaises(NotImplementedError) as ctx:

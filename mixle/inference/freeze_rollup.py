@@ -12,8 +12,8 @@ Correctness backbone (unchanged from the rest of the D-track): freeze/roll-up is
 optimization only. It never changes what is computed, only how often -- a cached per-datum
 log-density is byte-identical to a freshly recomputed one for the SAME parameters, and the cache
 is invalidated (recomputed) the instant a subtree's parameters move again. This module tracks the
-observed-data log likelihood from :func:`mixle.inference.em.observed_log_likelihood`; that directly
-computed objective is the audit receipt that the cache never silently drifted from a real EM trajectory.
+observed-data MLE or MAP objective; that directly computed objective is the audit receipt that the
+cache never silently drifted from a real EM trajectory.
 
 Scope: this module targets :class:`mixle.stats.latent.mixture.MixtureDistribution`, the
 combinator with the clearest "some subtrees stop mattering" story (a component whose mixture
@@ -142,7 +142,7 @@ class FreezeRollupStats:
     ``n_log_density_evals`` is the model-work receipt this module actually optimizes: the count of
     real ``component.seq_log_density(...)`` calls issued this round (each ``O(nobs)``), as opposed
     to a cache hit (``O(1)``, a dict lookup + signature compare). ``objective`` is the directly
-    evaluated, transactionally monotone observed-data log likelihood for this round.
+    evaluated, transactionally monotone observed-data MLE or MAP objective for this round.
     """
 
     round_index: int
@@ -630,19 +630,31 @@ def _component_log_density_matrix(
     return ll_mat, evals
 
 
-def _mixture_weights(estimator: MixtureEstimator, counts: np.ndarray) -> np.ndarray:
+def _mixture_weight_update(estimator: MixtureEstimator, counts: np.ndarray) -> tuple[np.ndarray, Any | None]:
     """Replicate :meth:`MixtureEstimator.estimate`'s weight-update arithmetic from raw ``counts``.
 
     Needed because the freeze/roll-up M-step (:func:`_m_step`) cannot call
     ``MixtureEstimator.estimate`` directly -- that method unconditionally re-estimates every
     component from its own sufficient statistics, which is exactly the per-round cost D2 exists
     to skip for frozen components. Supports the plain-MLE / ``fixed_weights`` / ``pseudo_count`` /
-    ``w_min``-floor paths (byte-identical arithmetic to the corresponding branches in
-    ``MixtureEstimator.estimate``); a conjugate Dirichlet weight prior is out of scope for the
-    skip-frozen path (see :func:`_m_step`).
+    ``w_min``-floor and conjugate Dirichlet MAP paths (byte-identical arithmetic to the
+    corresponding branches in ``MixtureEstimator.estimate``). The second result is the posterior
+    weight prior that must be attached to the returned model.
     """
     num_components = estimator.num_components
-    if estimator.fixed_weights is not None:
+    posterior = None
+    if estimator.has_conj_prior and estimator.fixed_weights is None:
+        from mixle.stats.bayes.dirichlet import DirichletDistribution
+        from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
+
+        if isinstance(estimator.prior, SymmetricDirichletDistribution):
+            alpha = np.ones(num_components) * float(estimator.prior.get_parameters())
+        else:
+            alpha = np.asarray(estimator.prior.get_parameters(), dtype=float)
+        cpp = np.maximum(np.add(counts, alpha) - 1.0, 0.0)
+        w = np.ones(num_components) / float(num_components) if cpp.sum() == 0.0 else cpp / cpp.sum()
+        posterior = DirichletDistribution(np.add(counts, alpha))
+    elif estimator.fixed_weights is not None:
         w = np.asarray(estimator.fixed_weights, dtype=float)
     elif estimator.pseudo_count is not None and estimator.suff_stat is None:
         p = estimator.pseudo_count / num_components
@@ -657,11 +669,17 @@ def _mixture_weights(estimator: MixtureEstimator, counts: np.ndarray) -> np.ndar
         else:
             w = counts / counts.sum()
     w = np.asarray(w, dtype=float)
-    if estimator.w_min > 0.0 and estimator.fixed_weights is None:
+    if estimator.w_min > 0.0 and estimator.fixed_weights is None and not estimator.has_conj_prior:
         w = np.where(np.isfinite(w), w, 0.0)
         w = np.maximum(w, estimator.w_min)
         w = w / w.sum()
-    return w
+    return w, posterior
+
+
+def _mixture_weights(estimator: MixtureEstimator, counts: np.ndarray) -> np.ndarray:
+    """Return only the updated weight vector for compatibility with existing callers."""
+
+    return _mixture_weight_update(estimator, counts)[0]
 
 
 def _m_step(
@@ -671,6 +689,7 @@ def _m_step(
     gamma: np.ndarray,
     frozen_idx: set[int],
     compute_dtype: Any = None,
+    component_update_seconds: dict[int, float] | None = None,
 ) -> MixtureDistribution:
     """One freeze/roll-up M-step: only ``frozen_idx``-excluded (active) components are re-estimated.
 
@@ -678,23 +697,76 @@ def _m_step(
     ``estimate`` call -- which is what makes its next-round cache lookup a guaranteed hit (its
     parameter signature cannot have moved because nothing touched it).
     """
-    if getattr(estimator, "has_conj_prior", False) and estimator.fixed_weights is None:
-        raise NotImplementedError(
-            "freeze_rollup does not support a conjugate Dirichlet weight prior; use a plain "
-            "MixtureEstimator(...) (no `prior=`) or mixle.inference.em.run_em for that path."
-        )
     counts = gamma.sum(axis=0)
     new_components = list(model.components)
     for idx in range(model.num_components):
         if idx in frozen_idx or model.zw[idx]:
             continue
+        started = time.perf_counter()
         enc_i = _component_enc(enc_data, idx)
         suff_stat = _component_suff_stat(
             estimator.estimators[idx], model.components[idx], enc_i, gamma[:, idx], compute_dtype
         )
         new_components[idx] = estimator.estimators[idx].estimate(float(counts[idx]), suff_stat)
-    w = _mixture_weights(estimator, counts)
-    return MixtureDistribution(new_components, w, name=estimator.name)
+        if component_update_seconds is not None:
+            component_update_seconds[idx] = time.perf_counter() - started
+    w, posterior = _mixture_weight_update(estimator, counts)
+    return MixtureDistribution(new_components, w, name=estimator.name, prior=posterior)
+
+
+def is_compiled_em_eligible(model: Any, estimator: Any) -> bool:
+    """Whether the local fused full-sweep adapter can execute this model/estimator pair."""
+
+    return isinstance(model, MixtureDistribution) and isinstance(estimator, MixtureEstimator)
+
+
+def compiled_em_step(
+    enc_data: Any,
+    estimator: MixtureEstimator,
+    model: MixtureDistribution,
+    *,
+    compute_dtype: Any = None,
+    cache: FreezeRollupCache | None = None,
+) -> tuple[MixtureDistribution, dict[str, Any]]:
+    """Run one full mixture E/M sweep through the reusable fused component path."""
+
+    if not is_compiled_em_eligible(model, estimator):
+        raise TypeError("compiled_em_step requires a MixtureDistribution/MixtureEstimator pair")
+    cache = FreezeRollupCache() if cache is None else cache
+    payload = _resolve_payload(enc_data)
+    density_started = time.perf_counter()
+    matrix, _, density_profile = _component_log_density_matrix_profiled(
+        model,
+        payload,
+        cache,
+        set(),
+        compute_dtype=compute_dtype,
+    )
+    density_seconds = time.perf_counter() - density_started
+    responsibility_started = time.perf_counter()
+    log_density, gamma = _combine(matrix, model.log_w)
+    responsibility_seconds = time.perf_counter() - responsibility_started
+    update_seconds: dict[int, float] = {}
+    mstep_started = time.perf_counter()
+    candidate = _m_step(
+        payload,
+        estimator,
+        model,
+        gamma,
+        set(),
+        compute_dtype=compute_dtype,
+        component_update_seconds=update_seconds,
+    )
+    mstep_seconds = time.perf_counter() - mstep_started
+    return candidate, {
+        "compiled": True,
+        "input_data_objective": float(np.sum(log_density)),
+        "density_profile": density_profile,
+        "density_seconds": density_seconds,
+        "responsibility_seconds": responsibility_seconds,
+        "mstep_seconds": mstep_seconds,
+        "component_update_seconds": tuple(sorted(update_seconds.items())),
+    }
 
 
 def run_em_freeze_rollup(
@@ -728,7 +800,7 @@ def run_em_freeze_rollup(
        receipt, not just an assumption.
 
     Returns ``(final_model, history)`` where ``history[i]`` is round ``i``'s
-    :class:`FreezeRollupStats` (including ``objective``, the observed-data log likelihood for that round,
+    :class:`FreezeRollupStats` (including ``objective``, the observed-data MLE/MAP objective for that round,
     and ``n_log_density_evals``, the component-evaluation work receipt this module optimizes).
     """
     if not isinstance(initial_model, MixtureDistribution):
@@ -748,12 +820,19 @@ def run_em_freeze_rollup(
     model = initial_model
     history: list[FreezeRollupStats] = []
     old_value: float | None = None
+    map_objective = estimator.get_prior() is not None
+
+    def objective_value(log_density: np.ndarray, candidate_model: MixtureDistribution) -> float:
+        value = float(np.sum(log_density))
+        if map_objective:
+            value += float(estimator.model_log_density(candidate_model))
+        return value
 
     for round_index in range(max(1, int(max_its))):
         frozen_idx = detect_frozen(cache, model)
         ll_mat, evals_e = _component_log_density_matrix(model, enc_payload, cache, frozen_idx)
         log_density, gamma = _combine(ll_mat, model.log_w)
-        current_value = float(np.sum(log_density))
+        current_value = objective_value(log_density, model)
         if old_value is None:
             old_value = current_value
 
@@ -762,7 +841,7 @@ def run_em_freeze_rollup(
         candidate_frozen = detect_frozen(cache, candidate)
         ll_mat_c, evals_c = _component_log_density_matrix(candidate, enc_payload, cache, candidate_frozen)
         candidate_log_density = _log_density_from_matrix(ll_mat_c, candidate.log_w)
-        candidate_value = float(np.sum(candidate_log_density))
+        candidate_value = objective_value(candidate_log_density, candidate)
 
         accepted = np.isfinite(candidate_value) and candidate_value + accept_tolerance >= current_value
         if accepted:

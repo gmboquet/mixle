@@ -16,7 +16,14 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from mixle.models.moe import MoEBlock, expert_collapse_receipt, upcycle_dense_to_moe
+from mixle.models.moe import (
+    MoEBlock,
+    SharedResidualMoEMLP,
+    expert_collapse_receipt,
+    factorize_dense_mlp_to_moe,
+    upcycle_dense_to_moe,
+    upcycle_dense_to_shared_residual_moe,
+)
 from mixle.models.transformer import Block, CausalLM
 
 
@@ -227,3 +234,84 @@ class UpcyclingReceiptTest:
         _, large_noise_receipt = upcycle_dense_to_moe(dense, n_experts=4, top_k=1, seed=0, noise_std=0.2)
 
         assert small_noise_receipt["relative_output_diff"] < large_noise_receipt["relative_output_diff"]
+
+
+class SharedResidualMoETest:
+    def test_dense_factorization_is_function_preserving_at_matched_active_width(self):
+        torch.manual_seed(19)
+        dense = Block(24, 4).mlp
+        factored, receipt = factorize_dense_mlp_to_moe(
+            dense,
+            n_experts=4,
+            common_fraction=0.5,
+            top_k=1,
+        )
+        probe = torch.randn(3, 11, 24)
+        with torch.no_grad():
+            expected = dense(probe)
+            actual = factored(probe)
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+        assert receipt["relative_output_diff"] < 1e-5
+        assert factored.active_hidden == dense[0].out_features
+
+    def test_only_routed_residual_experts_execute(self):
+        module = SharedResidualMoEMLP(
+            8,
+            4,
+            shared_hidden=16,
+            residual_hidden=16,
+            top_k=1,
+        )
+        calls = [0, 0, 0, 0]
+        handles = []
+        for idx, expert in enumerate(module.residual_experts):
+            handles.append(
+                expert.register_forward_hook(lambda _m, _i, _o, idx=idx: calls.__setitem__(idx, calls[idx] + 1))
+            )
+        module(torch.ones(32, 8))
+        for handle in handles:
+            handle.remove()
+        assert sum(calls) == 1
+
+    def test_disjoint_penalty_prefers_peaked_routing(self):
+        module = SharedResidualMoEMLP(
+            4,
+            3,
+            shared_hidden=4,
+            residual_hidden=4,
+            top_k=1,
+        )
+        x = torch.ones(16, 4)
+        with torch.no_grad():
+            module.gate.weight.zero_()
+            module(x)
+            uniform = float(module.last_disjoint_loss)
+            module.gate.weight[0].fill_(4.0)
+            module.gate.weight[1:].fill_(-4.0)
+            module(x)
+            peaked = float(module.last_disjoint_loss)
+        assert peaked < uniform * 0.01
+
+    def test_top1_task_loss_reaches_the_gate(self):
+        dense = Block(12, 3).mlp
+        module, _ = factorize_dense_mlp_to_moe(dense, n_experts=3, top_k=1)
+        loss = module(torch.randn(10, 12)).square().mean()
+        loss.backward()
+        assert module.gate.weight.grad is not None
+        assert torch.linalg.vector_norm(module.gate.weight.grad) > 0.0
+
+    def test_block_upcycle_preserves_the_full_block(self):
+        torch.manual_seed(23)
+        dense = Block(24, 4)
+        moe, receipt = upcycle_dense_to_shared_residual_moe(
+            dense,
+            n_experts=4,
+            common_fraction=0.5,
+            top_k=1,
+        )
+        probe = torch.randn(2, 13, 24)
+        with torch.no_grad():
+            expected = dense(probe)
+            actual = moe(probe)
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+        assert receipt["active_hidden"] == dense.mlp[0].out_features
