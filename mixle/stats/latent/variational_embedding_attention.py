@@ -296,6 +296,10 @@ class VariationalEmbeddingAttentionAccumulator(SequenceEncodableStatisticAccumul
         if self.keys is not None:
             if self.keys in stats_dict:
                 self.combine(stats_dict[self.keys])
+                # write the POOL back: without this the dict keeps the FIRST site's value and
+                # key_replace hands that truncated pool to every tied site (later sites' data
+                # silently discarded -- caught by the keyed-protocol sweep)
+                stats_dict[self.keys] = self.value()
             else:
                 stats_dict[self.keys] = self.value()
 

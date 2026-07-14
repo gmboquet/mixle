@@ -697,8 +697,11 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             self.count += suff_stat[2]
 
         elif suff_stat[0] is not None and self.sum is None:
-            self.sum = suff_stat[0]
-            self.sum2 = suff_stat[1]
+            # copy on adopt: value() hands out the LIVE arrays, so adopting the caller's reference
+            # makes every later in-place += here mutate the DONOR accumulator too (chunk combines
+            # and keyed pooling both hit this -- caught by the keyed-protocol sweep)
+            self.sum = np.asarray(suff_stat[0], dtype=np.float64).copy()
+            self.sum2 = np.asarray(suff_stat[1], dtype=np.float64).copy()
             self.count = suff_stat[2]
 
         return self
@@ -718,8 +721,8 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             This accumulator.
 
         """
-        self.sum = x[0]
-        self.sum2 = x[1]
+        self.sum = None if x[0] is None else np.asarray(x[0], dtype=np.float64).copy()
+        self.sum2 = None if x[1] is None else np.asarray(x[1], dtype=np.float64).copy()
         self.count = x[2]
         return self
 

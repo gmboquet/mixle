@@ -580,7 +580,10 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
             self.count += suff_stat[0]
 
         elif suff_stat[1] is not None and self.ssum is None:
-            self.ssum = suff_stat[1]
+            # copy on adopt: value() hands out the LIVE array, so adopting the caller's reference
+            # makes every later in-place += here mutate the DONOR accumulator too (chunk combines
+            # and keyed pooling both hit this -- caught by the keyed-protocol sweep)
+            self.ssum = np.asarray(suff_stat[1], dtype=np.float64).copy()
             self.count = suff_stat[0]
 
         return self
@@ -596,7 +599,7 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
             x (Tuple[float, np.ndarray]): Tuple of count and weighted vector sum.
 
         """
-        self.ssum = x[1]
+        self.ssum = None if x[1] is None else np.asarray(x[1], dtype=np.float64).copy()
         self.count = x[0]
         self.dim = None if self.ssum is None else len(self.ssum)
         return self
@@ -614,6 +617,10 @@ class VonMisesFisherAccumulator(SequenceEncodableStatisticAccumulator):
         if self.keys is not None:
             if self.keys in stats_dict:
                 self.combine(stats_dict[self.keys].value())
+                # write the POOL back: the dict must end holding the pooled accumulator, else
+                # key_replace hands every tied site the FIRST site's statistics (later sites'
+                # data silently discarded -- caught by the keyed-protocol sweep)
+                stats_dict[self.keys] = self
             else:
                 stats_dict[self.keys] = self
 
