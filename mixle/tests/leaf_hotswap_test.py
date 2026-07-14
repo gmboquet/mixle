@@ -119,6 +119,7 @@ def _fit_bimodal_near_convergence(data, seed, m_steps=400, max_its=60):
 def _fit_near_convergence(mu=3.0, sigma=1.0, n=600, seed=0, m_steps=200, max_its=40):
     """Fit a DiagGauss GradLeaf close to its optimum -- the "plateaued" starting point every test
     in this module needs (Q-gain genuinely near zero, not merely assumed)."""
+    torch.manual_seed(seed)  # the torch side of the fixture, like _fit_bimodal_near_convergence
     data = _data(mu, sigma, n, seed)
     fitted = optimize(data, DiagGauss(1, mu0=mu + 1.0), max_its=max_its, out=None, prev_estimate=None)
     # re-run a handful of extra gradient rounds explicitly via GradEstimator so the residual has

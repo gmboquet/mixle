@@ -109,6 +109,15 @@ _DEFAULT_PLATEAU_PATIENCE = 3
 _DEFAULT_PLATEAU_N_MC = 2000
 _DEFAULT_MISFIT_TOL = 0.15  # relative NLL degradation tolerated before swapping back
 _DEFAULT_ACCEPT_TOLERANCE = 1.0e-9
+# The accept gate compares a float32 torch leaf's density sum against a float64 closed-form
+# surrogate's, so the two paths legitimately differ by ~1e-7 RELATIVE of the objective magnitude
+# (per-point float32 rounding, summed; measured 5.5e-9 relative on the shipped 600-point fixture).
+# An absolute-only tolerance below that noise floor makes acceptance a coin flip decided by
+# ambient torch runtime state (thread count / kernel dispatch changing the summation order): the
+# same swap proposal passed or failed depending on which xdist worker the test landed on. The
+# relative term keeps the gate deaf to float-path noise while remaining nine-plus orders of
+# magnitude below any REAL degradation (the adversarial bad-swap fixture loses >0.5 relative).
+_DEFAULT_REL_ACCEPT_TOLERANCE = 1.0e-7
 _SCORE_SEED = 0  # fixed, shared across rounds/components -- see mixle.inference.block_em
 
 
@@ -454,6 +463,7 @@ def run_em_with_hotswap(
     plateau_n_mc: int = _DEFAULT_PLATEAU_N_MC,
     misfit_tol: float = _DEFAULT_MISFIT_TOL,
     accept_tolerance: float = _DEFAULT_ACCEPT_TOLERANCE,
+    rel_accept_tolerance: float = _DEFAULT_REL_ACCEPT_TOLERANCE,
 ) -> tuple[MixtureDistribution, list[LeafHotswapStats], dict[int, SwapRecord]]:
     """Run EM over a :class:`MixtureDistribution` with D4 leaf hot-swap: any component D1 reports
     as a plateaued gradient leaf (see :class:`PlateauMonitor`) is swapped for a moment-matched
@@ -563,7 +573,10 @@ def run_em_with_hotswap(
         candidate_log_density, _ = _combine(ll_mat_c, candidate.log_w)
         candidate_value = float(np.sum(candidate_log_density))
 
-        accepted = np.isfinite(candidate_value) and candidate_value + accept_tolerance >= current_value
+        # the slack's relative term absorbs float32-leaf-vs-float64-surrogate path noise (see
+        # _DEFAULT_REL_ACCEPT_TOLERANCE); real degradations are orders of magnitude above it
+        accept_slack = max(accept_tolerance, rel_accept_tolerance * abs(current_value))
+        accepted = np.isfinite(candidate_value) and candidate_value + accept_slack >= current_value
         if accepted:
             model = candidate
             round_value = candidate_value
