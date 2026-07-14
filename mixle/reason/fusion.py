@@ -29,6 +29,13 @@ hydrology emulator, ...). :func:`fuse_claims` fuses a list of :class:`ModelClaim
 flags when two models disagree beyond a standardized-distance threshold, and -- on disagreement -- adjudicates
 via an IC-6-shaped ``verifier`` plus the ``language_bridge`` conformal claim score before ever emitting a fused
 point, so a driller-facing cross-model number is never quietly averaged out of a real disagreement.
+
+L8 (multi-climate-model ensemble fusion) does not add new fusion math: a real climate question is never
+answered by one model, it is answered by an ensemble (CMIP members, AI emulators, ...) with uneven skill
+against held-out observations. :func:`skill_weighted_fuse` maps each :class:`ClimateMember`'s ``skill`` onto
+:func:`fuse_claims`'s ``reliability`` slot, so the ensemble posterior is the same precision-weighted
+product-of-experts rule with higher-skill members earning proportionally more weight -- disagreement/abstention
+are inherited unchanged from L5.
 """
 
 from __future__ import annotations
@@ -202,6 +209,66 @@ def fuse_claims(
         abstained=abstained,
         provenance=provenance,
     )
+
+
+@dataclass(frozen=True)
+class ClimateMember:
+    """One external climate model's projection in a multi-model ensemble (workstream L8).
+
+    A ``ClimateMember`` is a CMIP ensemble member or an AI emulator's projection of a shared climate quantity.
+    ``skill`` is a per-member inverse validation error against held-out observations (1.0 = neutral trust) --
+    it plays exactly the role :class:`ModelClaim`'s ``reliability`` plays in L5, because L8 folds skill into
+    L5's frozen precision-weighted rule rather than inventing new fusion math. ``model_id``/``version``/
+    ``content_hash`` mirror IC-7's ``ProvenancedResult`` fields so every ensemble member traces back to the
+    domain-model call that produced it.
+    """
+
+    value: float
+    variance: float
+    model_id: str
+    version: str
+    content_hash: str
+    skill: float = 1.0
+
+
+def skill_weighted_fuse(
+    members: list[ClimateMember],
+    *,
+    sigma_flag: float = 3.0,
+    verifier: Any = None,
+) -> FusedBelief:
+    """Skill-weighted Bayesian model averaging of a multi-climate-model ensemble (workstream L8/DR-ALG L8).
+
+    Each :class:`ClimateMember` maps onto an L5 :class:`ModelClaim` with ``reliability = skill``, then
+    :func:`fuse_claims` (the frozen precision-weighted product-of-experts rule) does the actual fusion:
+    ``prec_i = skill_i / variance_i`` and the BMA posterior weight is ``skill_i * prec_i / sum_j skill_j *
+    prec_j``, so a higher-skill ensemble member earns proportionally more weight in the fused projection.
+    Disagreement/abstention are inherited unchanged from L5: the max pairwise standardized distance flags at
+    ``sigma_flag`` (default 3-sigma) and, on disagreement, routes through the same IC-6 ``verifier`` +
+    ``language_bridge`` adjudication before a fused ensemble point is ever trusted. ``provenance`` records
+    every member's ``{model_id, version, content_hash, weight, skill}`` so the fused projection driving
+    L2/L3/L7 is always attributable back to the ensemble members that produced it.
+    """
+    if not members:
+        raise ValueError("skill_weighted_fuse needs at least one ClimateMember")
+
+    claims = [
+        ModelClaim(
+            value=m.value,
+            variance=m.variance,
+            model_id=m.model_id,
+            version=m.version,
+            content_hash=m.content_hash,
+            reliability=m.skill,
+        )
+        for m in members
+    ]
+    fused = fuse_claims(claims, sigma_flag=sigma_flag, verifier=verifier)
+
+    skill_by_id = {m.model_id: m.skill for m in members}
+    for entry in fused.provenance["claims"]:
+        entry["skill"] = skill_by_id[entry["model_id"]]
+    return fused
 
 
 def _build():
