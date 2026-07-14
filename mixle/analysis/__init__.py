@@ -10,6 +10,12 @@ collected here so the distributions package stays focused on distribution famili
 from __future__ import annotations
 
 from mixle.analysis.biodiversity import habitat_offset_liability, no_net_loss_constraint
+from mixle.analysis.carcinogenic_risk import (
+    RiskQuantity,
+    SlopeFactor,
+    excess_lifetime_cancer_risk,
+    radon_wlm_risk,
+)
 from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator
 from mixle.analysis.coverage import (
     ace,
@@ -165,4 +171,9 @@ __all__ = [
     # health/exposure monitoring: calibrated exceedance alerts
     "ExceedanceReport",
     "exposure_exceedance_monitor",
+    # carcinogenic risk: linear no-threshold slope-factor / unit-risk models
+    "SlopeFactor",
+    "RiskQuantity",
+    "excess_lifetime_cancer_risk",
+    "radon_wlm_risk",
 ]
