@@ -9,6 +9,7 @@ package stays focused on distribution families.
 
 from __future__ import annotations
 
+from mixle.analysis.biodiversity import habitat_offset_liability, no_net_loss_constraint
 from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator
 from mixle.analysis.coverage import (
     ace,
@@ -129,4 +130,7 @@ __all__ = [
     "EmissionFactors",
     "Footprint",
     "emissions_footprint",
+    # reclamation ecology / biodiversity offsets (priced habitat-offset liability + no-net-loss constraint)
+    "habitat_offset_liability",
+    "no_net_loss_constraint",
 ]
