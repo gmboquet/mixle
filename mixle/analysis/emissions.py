@@ -1,4 +1,5 @@
-"""Scope 1/2/3 GHG (carbon) accounting for an operation's production activity.
+"""Scope 1/2/3 GHG (carbon) accounting for an operation's production activity, plus the L6 climate
+objective + risk terms folded into J's objective and H's optimizer (work-plan Sec.7-L).
 
 Maps a production ``activity`` schedule -- direct fuel combustion and blasting, purchased-grid
 electricity draw, and upstream reagents / downstream haulage -- onto CO2e emissions via
@@ -14,23 +15,40 @@ GHG-Protocol-style :class:`EmissionFactors`.
     scenario paths and subtracts the resulting per-scenario carbon cost from a J2 ``npv_samples``
     distribution, returning an IC-1 `DerivedQuantity` that carries the carbon-adjusted NPV samples
     (uncertainty-aware, not just a point estimate) plus a mean-value scenario ranking.
+  * :func:`climate_terms` -- folds a :class:`Footprint` and an optional water budget into the two
+    numbers J6's objective (``analysis/valuation.py``) and H4's optimizer (``stochastic_opt.py``)
+    need: a priced carbon cost, and a hard water-feasibility flag, plus a probability-of-shortfall
+    downside term.
 
 Emission factors are always supplied by the caller (or an upstream knowledge store) -- this module
-vendors no lifecycle-inventory database; see the work-plan Non-goals for L1. A full risk-adjusted
-mining objective that also folds in water constraints is out of scope here too -- see
-:mod:`mixle.analysis.emissions`'s ``climate_terms`` (L6), which builds on :class:`Footprint` and
-:func:`transition_risk` alongside L2's water balance.
+vendors no lifecycle-inventory database; see the work-plan Non-goals for L1.
+
+Repo-boundary note (L6): L2's `WaterBudget` (a dataclass in the separate `mixle-pde` repo) had not
+landed on this branch as of L6's PR and is never imported here; ``water`` is typed as the forward-
+reference string ``"WaterBudget | None"`` exactly as the frozen signature specifies, and any object
+exposing a ``.shortfall_m3`` float and (optionally) a ``.storage`` array and/or ``.provenance`` dict
+duck-types against it, so this module has no runtime dependency on `mixle-pde` landing first.
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
 from mixle.data.hashing import _canonical
 from mixle.reason.posterior_protocol import DerivedQuantity
+
+__all__ = [
+    "EmissionFactors",
+    "Footprint",
+    "emissions_footprint",
+    "TransitionRiskResult",
+    "transition_risk",
+    "climate_terms",
+]
 
 _VALID_SCOPES = (1, 2, 3)
 
@@ -59,18 +77,20 @@ class Footprint:
     """A Scope 1/2/3 CO2e footprint with an optional 90% credible interval and full provenance.
 
     ``scope1``/``scope2``/``scope3``/``total`` are in the same physical CO2e units as the emission
-    factors (typically kg CO2e). ``ci`` is the ``(lo, hi)`` 90% Monte-Carlo interval on ``total`` when
-    factor uncertainties were propagated, else ``None``. ``provenance`` carries ``factor_source``,
-    the 64-hex ``activity_content_hash`` (sha256 of the canonical activity encoding, the same hashing
-    convention IC-2 uses for field artifacts), and the ``scopes`` actually included in ``total``.
+    factors (typically kg CO2e / tCO2e). ``ci`` is the ``(lo, hi)`` 90% Monte-Carlo interval on
+    ``total`` when factor uncertainties were propagated, else ``None`` (the default -- a caller that
+    only needs :func:`climate_terms`' point costs can construct one without ``ci``/``provenance``).
+    ``provenance`` carries ``factor_source``, the 64-hex ``activity_content_hash`` (sha256 of the
+    canonical activity encoding, the same hashing convention IC-2 uses for field artifacts), and the
+    ``scopes`` actually included in ``total``.
     """
 
     scope1: float
     scope2: float
     scope3: float
     total: float
-    ci: tuple[float, float] | None
-    provenance: dict
+    ci: tuple[float, float] | None = None
+    provenance: dict = field(default_factory=dict)
 
 
 def _scope_dict(factors: EmissionFactors, scope: int) -> dict[str, float]:
@@ -270,3 +290,90 @@ def transition_risk(
         carbon_cost=carbon_cost,
         provenance=provenance,
     )
+
+
+def _water_demand_m3(water: Any) -> float | None:
+    """Best-effort scalar water demand off an L2 `WaterBudget`-shaped object, or ``None`` if absent.
+
+    Checks a direct ``.demand_m3`` attribute first (a convenience some callers may attach), then falls
+    back to ``water.provenance["demand_m3"]`` -- `water_balance`'s own ``demand_m3`` argument (L2) is
+    exactly the kind of input the provenance dict is documented to retain.
+    """
+    demand = getattr(water, "demand_m3", None)
+    if demand is not None:
+        return float(demand)
+    provenance = getattr(water, "provenance", None)
+    if isinstance(provenance, dict) and "demand_m3" in provenance:
+        return float(provenance["demand_m3"])
+    return None
+
+
+def _shortfall_probability(water: Any, shortfall_m3: float) -> float:
+    """Fraction of the water budget's own per-step trajectory sitting at a binding (zero) storage.
+
+    Uses the `WaterBudget.storage` per-step array L2's algorithm always populates (one entry per routed
+    time step) as the empirical distribution for a shortfall-downside probability -- the storage march
+    already *is* a discretized sample path over the planning horizon, so no separate Monte-Carlo layer
+    is needed here. Falls back to a 0/1 point estimate keyed on ``shortfall_m3`` when no ``storage``
+    trajectory is available (e.g. a caller-supplied summary rather than a full `WaterBudget`).
+    """
+    storage = getattr(water, "storage", None)
+    if storage is not None:
+        arr = np.asarray(storage, dtype=np.float64)
+        if arr.size:
+            return float(np.mean(arr <= 0.0))
+    return 1.0 if shortfall_m3 > 0.0 else 0.0
+
+
+def climate_terms(
+    footprint: Footprint,
+    water: "WaterBudget | None",  # noqa: F821, UP037  -- L2's WaterBudget (mixle-pde); duck-typed, not imported
+    *,
+    carbon_price: float,
+    water_limit_m3: float | None = None,
+) -> dict:
+    """Fold an emissions footprint and a water budget into J6's carbon cost + H4's water constraint.
+
+    Returns ``{"carbon_cost": float, "water_feasible": bool, "water_binding": bool, "shortfall_prob":
+    float}``:
+
+    - ``carbon_cost = footprint.total * carbon_price`` -- the priced carbon term J6's objective
+      (`analysis/valuation.py`) subtracts alongside `capex_opex`'s cost roll-up.
+    - ``water_binding`` is set when the L2 `WaterBudget.shortfall_m3 > 0` (the routed water balance
+      already ran dry at some point over the plan) OR when a caller-supplied ``water_limit_m3`` is given
+      and the budget's demand exceeds it; ``water_feasible`` is its negation -- a hard constraint H4
+      (`stochastic_opt.py`) folds into a per-option cost (derating or dropping the option) rather than
+      into the mean-grade objective.
+    - ``shortfall_prob`` is the fraction of the water budget's own per-step storage trajectory sitting at
+      a binding zero (:func:`_shortfall_probability`) -- a climate-physical downside term that is
+      reported independently of ``water_limit_m3`` even for options that are feasible on average but
+      fragile.
+
+    When ``water`` is ``None`` (no water budget available for this option -- e.g. an inland option with
+    no catchment exposure), the water terms take the permissive defaults: feasible, non-binding, zero
+    shortfall probability. Climate risk for that option is carbon-only.
+    """
+    carbon_cost = float(footprint.total) * float(carbon_price)
+
+    if water is None:
+        return {
+            "carbon_cost": carbon_cost,
+            "water_feasible": True,
+            "water_binding": False,
+            "shortfall_prob": 0.0,
+        }
+
+    shortfall_m3 = float(getattr(water, "shortfall_m3", 0.0) or 0.0)
+    water_binding = shortfall_m3 > 0.0
+
+    if water_limit_m3 is not None:
+        demand = _water_demand_m3(water)
+        if demand is not None and demand > float(water_limit_m3):
+            water_binding = True
+
+    return {
+        "carbon_cost": carbon_cost,
+        "water_feasible": not water_binding,
+        "water_binding": water_binding,
+        "shortfall_prob": _shortfall_probability(water, shortfall_m3),
+    }
