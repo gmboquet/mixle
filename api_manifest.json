@@ -21,6 +21,8 @@
     "what_supports"
   ],
   "mixle.analysis": [
+    "EmissionFactors",
+    "Footprint",
     "GPDFit",
     "KDE",
     "LedoitWolfEstimator",
@@ -37,6 +39,7 @@
     "chao2",
     "copeland",
     "cost_curve",
+    "emissions_footprint",
     "empirical_variogram",
     "endpoint_estimator",
     "fit_smith_maxstable",
