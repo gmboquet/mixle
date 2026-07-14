@@ -83,7 +83,21 @@ def build_manifest(repo_root: Path = REPO_ROOT) -> dict[str, object]:
     that assembles ``__all__`` at runtime (``mixle``, ``mixle.stats``, ``mixle.utils``) is resolved by
     importing it; if that import fails (a missing optional dependency in the current env) it is
     recorded as ``{"unresolved": <ExceptionType>}`` so the drift test can skip it rather than falsely
-    diff against a manifest generated in a fuller env."""
+    diff against a manifest generated in a fuller env.
+
+    ``mixle.stats.bayes.dirichlet`` and ``mixle.reason`` have a real circular import between them
+    (``mixle.stats.bayes.dirichlet`` -> ``mixle.inference`` -> ``mixle.analysis`` ->
+    ``mixle.reason.posterior_protocol`` -> ... -> ``mixle.stats.latent.mixture`` -> back to
+    ``mixle.stats.bayes.dirichlet``). Importing ``mixle.stats`` first re-enters
+    ``mixle.stats.bayes.dirichlet`` while it is still mid-init and raises a spurious ImportError;
+    importing ``mixle.reason`` first lets that module finish completely before anything re-enters it,
+    so warm it here before resolving the runtime packages below.
+    """
+    try:
+        importlib.import_module("mixle.reason")
+    except Exception:  # noqa: BLE001 -- a genuinely missing dependency still surfaces per-package below
+        pass
+
     pkg_root = repo_root / "mixle"
     manifest: dict[str, object] = {}
     for init in sorted(pkg_root.rglob("__init__.py")):
@@ -105,7 +119,7 @@ def build_manifest(repo_root: Path = REPO_ROOT) -> dict[str, object]:
 def main() -> int:
     manifest = build_manifest()
     MANIFEST_PATH.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    total = sum(len(v if isinstance(v, list) else v["names"]) for v in manifest.values())
+    total = sum(len(v) for v in manifest.values() if isinstance(v, list))
     print(f"wrote {MANIFEST_PATH.relative_to(REPO_ROOT)}: {len(manifest)} packages, {total} public names")
     return 0
 
