@@ -357,19 +357,6 @@ class HawkesProcessAccumulator(SequenceEncodableStatisticAccumulator):
         self.total_window *= c
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge this accumulator into a keyed statistics dictionary."""
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys] = tuple(a + b for a, b in zip(stats_dict[self.keys], self.value()))
-            else:
-                stats_dict[self.keys] = self.value()
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator from a keyed statistics dictionary."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.from_value(stats_dict[self.keys])
-
     def acc_to_encoder(self) -> "HawkesProcessDataEncoder":
         """Return an encoder that pads event-time realizations for this window."""
         return HawkesProcessDataEncoder(self.window)

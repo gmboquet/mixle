@@ -215,23 +215,6 @@ class ContinuousTimeMarkovChainAccumulator(SequenceEncodableStatisticAccumulator
         self.dwell *= c
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge keyed transition and dwell statistics into ``stats_dict`` (the pool lives in the dict)."""
-        # Must INSERT when the key is absent: the old shape only merged when another site had already
-        # registered, but no site ever inserted -- so keyed CTMCs never pooled at all (key_merge and
-        # key_replace were both silent no-ops and every tied site kept its own statistics).
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                c, d = stats_dict[self.keys]
-                stats_dict[self.keys] = (c + self.counts, d + self.dwell)
-            else:
-                stats_dict[self.keys] = (self.counts.copy(), self.dwell.copy())
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace this accumulator's state from keyed statistics when present."""
-        if self.keys is not None and self.keys in stats_dict:
-            self.counts, self.dwell = (np.asarray(v, dtype=np.float64).copy() for v in stats_dict[self.keys])
-
     def acc_to_encoder(self) -> ContinuousTimeMarkovChainDataEncoder:
         """Return the encoder compatible with CTMC sufficient statistics."""
         return ContinuousTimeMarkovChainDataEncoder(self.num_states)

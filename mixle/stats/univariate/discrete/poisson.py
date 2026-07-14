@@ -626,30 +626,6 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge this accumulator into ``stats_dict`` under its configured key.
-
-        Args:
-            stats_dict: Mapping from merge keys to Poisson accumulators.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                stats_dict[self.keys].combine(self.value())
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace sufficient statistics from ``stats_dict`` when this accumulator's key is present.
-
-        Args:
-            stats_dict: Mapping from keys to compatible sufficient statistics.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> "PoissonDataEncoder":
         """Return an encoder compatible with Poisson observations."""
         return PoissonDataEncoder()

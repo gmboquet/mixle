@@ -897,8 +897,23 @@ class StatisticAccumulator(ABC, Generic[SS]):
 
         The structural default implements the common single-key pattern: store the accumulator
         under ``self.keys`` the first time the key is seen, else ``combine`` into the one already
-        there. Accumulators with several named keys (e.g. an HMM's init/trans/state keys) or a
-        non-accumulator stats payload override this. A ``keys`` of ``None`` (the default) is a no-op.
+        there. Accumulators whose key does not cover their whole state (several named keys, a
+        wrapped child accumulator, a non-accumulator payload) override this -- and ONLY those:
+        as of 2026-07-14 every whole-state family uses this default, after a sweep found sixteen
+        hand-rolled copies that had drifted into three broken shapes. If you are tempted to
+        reimplement this per family, don't; extend the base or override with ``super()`` calls.
+        A ``keys`` of ``None`` (the default) is a no-op.
+
+        Why this exact shape is correct -- and the drifted shapes are not: the POOL must live in
+        the dict. Combining INTO the dict-held accumulator (below) mutates the pool in place, so
+        after all sites merge, the dict entry holds everyone's statistics and ``key_replace``
+        hands that pool to every site. The observed broken variants each violate one half:
+        pulling the dict's stats into ``self`` without writing back (the dict keeps the FIRST
+        site only -- later sites' data silently discarded); merging only when the key is already
+        present (nobody ever inserts: both passes are no-ops and tying does nothing); and
+        replacing by pushing ``self`` INTO the dict (the LAST site overwrites the pool). The
+        keyed-protocol sweep (`keyed_protocol_sweep_test.py`) enforces this behaviorally for
+        every catalog family.
         """
         keys = getattr(self, "keys", None)
         if keys is not None:

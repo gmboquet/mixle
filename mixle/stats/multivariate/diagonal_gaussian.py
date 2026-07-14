@@ -609,42 +609,6 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = x[2]
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Combine sufficient statistics with other accumulators sharing a matching key.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dictionary mapping keys to aggregated statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                self.combine(stats_dict[self.keys].value())
-                # write the POOL back: the dict must end holding the pooled accumulator, else
-                # key_replace hands every tied site the FIRST site's statistics (later sites'
-                # data silently discarded -- caught by the keyed-protocol sweep)
-                stats_dict[self.keys] = self
-            else:
-                stats_dict[self.keys] = self
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace sufficient statistics with values from stats_dict for a matching key.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dictionary mapping keys to aggregated statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                # the dict holds the pooled ACCUMULATOR (see key_merge); passing it whole made
-                # from_value subscript an accumulator object -- keyed use crashed with TypeError
-                self.from_value(stats_dict[self.keys].value())
-
     def acc_to_encoder(self) -> "DiagonalGaussianDataEncoder":
         """Return an encoder compatible with this accumulator's dimension."""
         return DiagonalGaussianDataEncoder(dim=self.dim)

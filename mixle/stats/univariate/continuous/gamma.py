@@ -542,48 +542,6 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
-    def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        """Merge sufficient statistics from ``stats_dict`` when this accumulator's key is present.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dict mapping keys to sufficient statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                x0, x1, x2 = stats_dict[self.keys]
-                self.count += x0
-                self.sum += x1
-                self.sum_of_logs += x2
-                # write the POOL back: without this, the dict keeps the FIRST site's stats and
-                # key_replace hands every tied site that truncated pool -- later sites' data was
-                # silently discarded (order-dependent wrong fits; found by the compiler review's
-                # keyed-tying probe, present in 8 families vs the combine-into-dict families)
-                stats_dict[self.keys] = (self.count, self.sum, self.sum_of_logs)
-
-            else:
-                stats_dict[self.keys] = (self.count, self.sum, self.sum_of_logs)
-
-    def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        """Replace sufficient statistics from ``suff_stats`` when this accumulator's key is present.
-
-        Args:
-            stats_dict (Dict[str, Any]): Dict mapping keys to sufficient statistics.
-
-        Returns:
-            None.
-
-        """
-        if self.keys is not None:
-            if self.keys in stats_dict:
-                x0, x1, x2 = stats_dict[self.keys]
-                self.count = x0
-                self.sum = x1
-                self.sum_of_logs = x2
-
     def acc_to_encoder(self) -> "GammaDataEncoder":
         """Return an encoder compatible with Gamma observations."""
         return GammaDataEncoder()

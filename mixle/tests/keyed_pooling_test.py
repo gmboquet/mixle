@@ -144,3 +144,51 @@ class KeyedPoolingProtocolTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BaseProtocolAdoptionTest(unittest.TestCase):
+    """Families normalized onto the base-class canonical protocol (2026-07-14 centralization)."""
+
+    def test_power_law_hawkes_pools_through_the_base_protocol_without_aliasing(self):
+        # Previously pooled by ALIASING (stored itself; key_replace assigned the pool's list
+        # reference to every site). Now the base protocol + a copying from_value: sites hold
+        # independent copies of the pooled realizations.
+        from mixle.stats.processes.power_law_hawkes import PowerLawHawkesAccumulator
+
+        acc_a = PowerLawHawkesAccumulator(window=10.0, alpha_fixed=None, keys="h")
+        acc_b = PowerLawHawkesAccumulator(window=10.0, alpha_fixed=None, keys="h")
+        acc_a.realizations.extend([[0.1, 0.5], [1.0, 2.0]])
+        acc_b.realizations.extend([[3.0, 4.0]])
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        self.assertEqual(len(acc_a.realizations), 3)
+        self.assertEqual(len(acc_b.realizations), 3)
+        self.assertIsNot(acc_a.realizations, acc_b.realizations, "tied sites must not share one list")
+        acc_a.realizations.append([9.9])  # mutating one site must not leak into the other
+        self.assertEqual(len(acc_b.realizations), 3)
+
+    def test_optional_delegates_the_key_pass_to_its_wrapped_child(self):
+        # A keyed estimator nested under an Optional never pooled: Optional's key pass did not
+        # delegate to the wrapped child accumulator (the dead-keys shape, combinator edition).
+        from mixle.stats.combinator.optional import OptionalEstimator
+        from mixle.stats.univariate.continuous.gaussian import GaussianEstimator
+
+        def site(data):
+            est = OptionalEstimator(estimator=GaussianEstimator(keys="inner"))
+            acc = est.accumulator_factory().make()
+            enc = acc.acc_to_encoder()
+            acc.seq_update(enc.seq_encode(data), np.ones(len(data)), None)
+            return acc
+
+        acc_a, acc_b = site([1.0, 2.0, 3.0]), site([10.0, 20.0])
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        self.assertIn("inner", stats, "the wrapped child's key must reach the stats dict")
+        np.testing.assert_allclose(_flat(acc_a.accumulator.value()), _flat(acc_b.accumulator.value()), rtol=1e-12)
+        self.assertAlmostEqual(float(acc_a.accumulator.count), 5.0, places=12)
