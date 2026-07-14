@@ -40,7 +40,9 @@ from mixle.analysis.health_risk import (
     cumulative_exposure,
     exposure_constraints,
     health_liability,
+    incident_probability,
     population_risk,
+    safety_risk_surface,
 )
 from mixle.analysis.kde import (
     KDE,
@@ -155,4 +157,7 @@ __all__ = [
     "OptionValue",
     "real_option_value",
     "voi_dollars",
+    # safety-risk / geotechnical hazard modeling
+    "safety_risk_surface",
+    "incident_probability",
 ]
