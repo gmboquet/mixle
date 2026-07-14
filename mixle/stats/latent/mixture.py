@@ -1423,7 +1423,13 @@ class MixtureEstimator(ParameterEstimator):
             robust: Enable the robust default path: k-means++ initialization
                 where applicable plus a small data-independent weight floor.
             init: Initialization strategy for the accumulator. ``None`` selects
-                ``"kmeans++"`` in robust mode and ``"dirichlet"`` otherwise.
+                ``"kmeans++"`` in robust mode and ``"dirichlet"`` otherwise. The ``"dirichlet"``
+                default draws per-observation responsibilities from a deliberately degenerate
+                Dirichlet (``alpha = 1/K**2``) -- sparse random assignments, the standard
+                responsibility init. Because random subsets of a large dataset share its pooled
+                moments, every component still starts near the global law as ``n`` grows; for
+                well-separated location families prefer ``init="kmeans++"`` (or ``robust=True`` /
+                :func:`~mixle.inference.best_of` restarts) when a single default fit must separate.
         """
         self.num_components = len(estimators)
         self.estimators = estimators
