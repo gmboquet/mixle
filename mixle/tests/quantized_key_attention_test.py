@@ -237,3 +237,99 @@ class ProtocolAndTrainingTest:
         spine = QuantizedKeyAttentionSpine(13, d_model=16, n_layer=1, n_head=2, window=4, max_cells=1)
         state = _stream(spine, spine.init_state(1), torch.randint(0, 13, (1, 64)), 4)
         assert spine.occupancy_receipt(state)["dropped_tokens"] > 0
+
+
+class EmaCodebookTest:
+    """codebook_update="ema": cluster-mean tracking, dead-code reseeding, encoder path unchanged."""
+
+    def test_ema_codebooks_track_assigned_cluster_means(self):
+        torch.manual_seed(11)
+        pq = ProductQuantizer(8, n_blocks=2, codes_per_block=4, codebook_update="ema", ema_decay=0.5)
+        pq.train()
+        centers = torch.tensor([[2.0] * 8, [-2.0] * 8])
+        keys = centers.repeat_interleave(32, dim=0) + 0.05 * torch.randn(64, 8)
+        for _ in range(30):
+            pq(keys)
+        quant = pq.reconstruct(pq.encode(keys))
+        err = float((quant - keys).pow(2).mean())
+        assert err < 0.01, f"EMA codes failed to reach the cluster means (mse {err:.4f})"
+
+    def test_ema_mode_keeps_codebooks_out_of_autograd_but_encoder_grads_flow(self):
+        pq = ProductQuantizer(8, n_blocks=2, codes_per_block=4, codebook_update="ema")
+        assert not pq.codebooks.requires_grad
+        pq.train()
+        k = torch.randn(16, 8, requires_grad=True)
+        k_q, _, commit = pq(k)
+        (k_q.sum() + commit).backward()
+        assert k.grad is not None and float(k.grad.abs().sum()) > 0, "straight-through must reach the encoder"
+
+    def test_gradient_mode_is_the_unchanged_default(self):
+        pq = ProductQuantizer(8, n_blocks=2, codes_per_block=4)
+        assert pq.codebook_update == "gradient"
+        assert pq.codebooks.requires_grad
+        assert not hasattr(pq, "_ema_cluster_size")
+
+    def test_dead_codes_reseed_from_the_batch(self):
+        torch.manual_seed(12)
+        pq = ProductQuantizer(8, n_blocks=2, codes_per_block=4, codebook_update="ema", ema_decay=0.1)
+        pq.train()
+        keys = torch.full((32, 8), 3.0) + 0.01 * torch.randn(32, 8)  # everything hits ONE code
+        for _ in range(25):  # decayed occupancy of the other codes collapses below the threshold
+            pq(keys)
+        sizes = pq._ema_cluster_size
+        # reseeding keeps refreshing dead codes to batch vectors (near 3.0), never leaves them stale
+        reseeded = (pq.codebooks.data - 3.0).abs().mean(-1) < 0.5
+        assert bool(reseeded.any()), "no dead code was ever reseeded to a batch sub-vector"
+        assert float(sizes.min()) >= 0.0
+
+
+class QuantizedReadoutTest:
+    """Q-LSE beyond scoring: the attention readout through one 2^bits exp table, bound + qlut parity."""
+
+    def test_row_normalizers_match_the_qlut_kernel_exactly(self):
+        from mixle.engines.qlut import quantized_logsumexp
+        from mixle.experimental.quantized_key_attention import quantized_softmax_weights
+
+        torch.manual_seed(13)
+        bits, span = 12, 24.0
+        logits = torch.randn(5, 40, dtype=torch.float64) * 4.0
+        logits[:, 25:] = float("-inf")  # masked slots, as in the joint softmax
+        w = quantized_softmax_weights(logits, bits=bits, span=span)
+        for row in range(logits.shape[0]):
+            r = logits[row].numpy()
+            m = float(np.max(r[np.isfinite(r)]))
+            expected_mass = np.exp(quantized_logsumexp(r, bits=bits, span=span) - m)
+            assert float(w[row].sum()) == pytest.approx(expected_mass, rel=1e-12), (
+                "the torch readout grid must be the qlut kernel's grid, bit for bit"
+            )
+
+    def test_readout_error_is_within_the_grid_bound(self):
+        from mixle.engines.qlut import lse_error_bound
+        from mixle.experimental.quantized_key_attention import quantized_softmax_weights
+
+        torch.manual_seed(14)
+        bits, span = 12, 24.0
+        logits = torch.randn(8, 64, dtype=torch.float64) * 3.0
+        values = torch.randn(64, 16, dtype=torch.float64)
+        exact = logits.softmax(-1) @ values
+        w = quantized_softmax_weights(logits, bits=bits, span=span)
+        quant = (w / w.sum(-1, keepdim=True)) @ values
+        # each weight is perturbed by <= exp(+-bound) in numerator and denominator
+        tol = (np.exp(2.0 * lse_error_bound(bits, span)) - 1.0) * float(values.abs().max()) * 2.0
+        assert float((quant - exact).abs().max()) <= tol
+
+    def test_spine_quantized_inference_close_to_exact_and_training_stays_exact(self):
+        torch.manual_seed(15)
+        exact_spine = QuantizedKeyAttentionSpine(7, d_model=16, n_layer=1, n_head=2, window=4, max_cells=32)
+        torch.manual_seed(15)
+        q_spine = QuantizedKeyAttentionSpine(7, d_model=16, n_layer=1, n_head=2, window=4, max_cells=32, lse_bits=12)
+        chunk = (torch.randint(0, 7, (1, 12)), torch.randint(0, 7, (1, 12)))
+        with torch.no_grad():
+            _, loss_exact = exact_spine.step(exact_spine.init_state(1), chunk)
+            _, loss_quant = q_spine.step(q_spine.init_state(1), chunk)
+        assert float(loss_quant) == pytest.approx(float(loss_exact), abs=1e-2)
+        assert float(loss_quant) != float(loss_exact), "the quantized readout must actually engage"
+        # grad-enabled steps bypass the quantized readout entirely: training is exact by design
+        _, train_exact = exact_spine.step(exact_spine.init_state(1), chunk)
+        _, train_quant = q_spine.step(q_spine.init_state(1), chunk)
+        assert float(train_quant.detach()) == pytest.approx(float(train_exact.detach()), rel=1e-12)
