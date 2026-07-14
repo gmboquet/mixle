@@ -21,6 +21,8 @@
     "what_supports"
   ],
   "mixle.analysis": [
+    "DOSE_RESPONSE_MODELS",
+    "DoseResponse",
     "EmissionFactors",
     "Footprint",
     "GPDFit",
@@ -39,6 +41,7 @@
     "chao2",
     "copeland",
     "cost_curve",
+    "cumulative_exposure",
     "emissions_footprint",
     "empirical_variogram",
     "endpoint_estimator",
@@ -60,6 +63,7 @@
     "n_records",
     "ordinary_kriging",
     "peaks_over_threshold",
+    "population_risk",
     "rarefaction_curve",
     "record_times",
     "return_level",
