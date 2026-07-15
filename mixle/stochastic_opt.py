@@ -90,6 +90,8 @@ def cvar_epigraph(losses: Any, alpha: float) -> tuple[np.ndarray, np.ndarray, np
     if not (0.0 < alpha < 1.0):
         raise ValueError("alpha must be in (0, 1)")
     k_scenarios, n = loss.shape
+    if k_scenarios == 0:
+        raise ValueError("losses must have at least one scenario (K >= 1); CVaR of zero scenarios is undefined")
     coef = 1.0 / ((1.0 - alpha) * k_scenarios)
     var_index = n
     width = n + 1 + k_scenarios
