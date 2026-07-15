@@ -173,6 +173,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
    module-ownership
    package-map
    lifecycle
+   capability-lifecycle
    tutorials/index
 
 .. toctree::
