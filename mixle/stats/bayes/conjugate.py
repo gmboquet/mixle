@@ -127,7 +127,7 @@ class ConjugatePosteriorSampler:
         self.posterior = posterior
         self.rng = np.random.RandomState(seed)
 
-    def sample(self, size: int | None = None) -> dict[str, Any]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> dict[str, Any]:
         """Draw one parameter set when ``size`` is ``None`` or a batch otherwise."""
         draws = self.posterior.sample(n=1 if size is None else int(size), rng=self.rng)
         if size is None:

@@ -111,7 +111,7 @@ class SymmetricDirichletSampler(DistributionSampler):
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw symmetric-Dirichlet-distributed probability vectors (requires dist.dim)."""
         a = self.dist.alpha
         n = getattr(self.dist, "dim", None)

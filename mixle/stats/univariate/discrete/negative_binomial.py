@@ -306,7 +306,7 @@ class NegativeBinomialSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> int | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> int | np.ndarray:
         """Draw one sample or an array of iid samples."""
         scale = (1.0 - self.dist.p) / self.dist.p
         lam = self.rng.gamma(shape=self.dist.r, scale=scale, size=size)

@@ -240,7 +240,7 @@ class MallowsSampler(DistributionSampler):
             perm.insert(i - j, int(self.dist.sigma0[i]))
         return perm
 
-    def sample(self, size: int | None = None) -> list[int] | list[list[int]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | list[list[int]]:
         """Draw orderings (permutations of 0,...,n-1); a single list when size is None."""
         if size is None:
             return self._sample_one()

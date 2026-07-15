@@ -287,7 +287,7 @@ class IntegerChowLiuTreeSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> list[int | None] | Sequence[list[int | None]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int | None] | Sequence[list[int | None]]:
         """Draw iid integer vectors from the integer Chow-Liu tree distribution.
 
         Features are drawn in dependency order: the root from its marginal, each remaining

@@ -227,7 +227,7 @@ class RVineCopulaSampler(DistributionSampler):
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         # Generic (family-agnostic) inverse Rosenblatt: sample variables one at a time, inverting each new
         # variable's conditional CDF (built from the vine) against a uniform via bisection. O(d^2) h-evals
         # per accepted variable; correct for any pair-copula families.
