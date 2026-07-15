@@ -40,6 +40,7 @@ _NAMESPACES = (
     "ops",
     "contracts",
     "semantics",
+    "causal",
 )
 
 
