@@ -28,8 +28,9 @@ manufactures confidence the data cannot justify, and it never claims to.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -84,8 +85,9 @@ class CalibrationVerdict:
         return float(max(0.0, 1.0 - self.pit_error / (2.0 * self.null_threshold)))
 
 
-def _uniformity_null_threshold(n: int, *, bins: int = 10, quantile: float = 0.99, n_null: int = 500,
-                               seed: int = 12345) -> float:
+def _uniformity_null_threshold(
+    n: int, *, bins: int = 10, quantile: float = 0.99, n_null: int = 500, seed: int = 12345
+) -> float:
     """The value :func:`~mixle.inference.calibration.pit_calibration_error` would reach on genuinely
     uniform data of size ``n`` -- Monte-Carlo'd at the ``quantile`` upper tail. Comparing an observed
     PIT/rank error against THIS (rather than a fixed constant) is what makes the gate a proper
@@ -142,7 +144,9 @@ def posterior_predictive_calibration(
     k = int(y.shape[0])
     pit = pit_ensemble(y, ens, randomize=True, seed=pit_seed)
     pit_err = float(pit_calibration_error(pit, bins=bins))
-    threshold = float(pit_tol) if pit_tol is not None else _uniformity_null_threshold(k, bins=bins, quantile=null_quantile)
+    threshold = (
+        float(pit_tol) if pit_tol is not None else _uniformity_null_threshold(k, bins=bins, quantile=null_quantile)
+    )
     low_power = pit_tol is None and threshold >= low_power_threshold
 
     curve = coverage_curve(ens, y)
@@ -155,7 +159,11 @@ def posterior_predictive_calibration(
     passed = pit_err <= threshold
     reasons: list[str] = []
     if not passed:
-        direction = "overconfident (intervals too narrow -- reports false certainty)" if coverage_at_ref < reference_level else "underconfident (intervals too wide)"
+        direction = (
+            "overconfident (intervals too narrow -- reports false certainty)"
+            if coverage_at_ref < reference_level
+            else "underconfident (intervals too wide)"
+        )
         reasons.append(
             f"miscalibrated: PIT error {pit_err:.3f} > null threshold {threshold:.3f} for k={k}; "
             f"{reference_level:.0%} interval covers {coverage_at_ref:.1%} of held-out points -- {direction}"
@@ -173,9 +181,16 @@ def posterior_predictive_calibration(
         )
 
     return CalibrationVerdict(
-        passed=passed, pit_error=pit_err, null_threshold=threshold, coverage_error=coverage_error,
-        reference_level=float(reference_level), coverage_at_reference=coverage_at_ref,
-        mean_interval_width=float(ref["mean_width"]), n_points=k, low_power=low_power, reasons=reasons,
+        passed=passed,
+        pit_error=pit_err,
+        null_threshold=threshold,
+        coverage_error=coverage_error,
+        reference_level=float(reference_level),
+        coverage_at_reference=coverage_at_ref,
+        mean_interval_width=float(ref["mean_width"]),
+        n_points=k,
+        low_power=low_power,
+        reasons=reasons,
     )
 
 
@@ -224,7 +239,11 @@ def simulation_based_calibration(
     # a uniform rank histogram means calibrated inference; reuse the same PIT-uniformity metric,
     # judged against the same sample-size-aware null threshold (n_sims here plays the role of k).
     sbc_error = float(pit_calibration_error(np.clip(ranks, 0.0, 1.0), bins=bins))
-    threshold = float(error_tol) if error_tol is not None else _uniformity_null_threshold(int(n_sims), bins=bins, quantile=null_quantile)
+    threshold = (
+        float(error_tol)
+        if error_tol is not None
+        else _uniformity_null_threshold(int(n_sims), bins=bins, quantile=null_quantile)
+    )
     passed = sbc_error <= threshold
     reason = (
         f"SBC ranks consistent with uniform (error {sbc_error:.3f} <= null threshold {threshold:.3f} for "
@@ -234,9 +253,16 @@ def simulation_based_calibration(
         f"mis-dispersed (over/under-confident) under its own generative model"
     )
     return CalibrationVerdict(
-        passed=passed, pit_error=sbc_error, null_threshold=threshold, coverage_error=float("nan"),
-        reference_level=float("nan"), coverage_at_reference=float("nan"), mean_interval_width=float("nan"),
-        n_points=int(n_sims), reasons=[reason], kind="calibration-sbc",
+        passed=passed,
+        pit_error=sbc_error,
+        null_threshold=threshold,
+        coverage_error=float("nan"),
+        reference_level=float("nan"),
+        coverage_at_reference=float("nan"),
+        mean_interval_width=float("nan"),
+        n_points=int(n_sims),
+        reasons=[reason],
+        kind="calibration-sbc",
     )
 
 
@@ -253,8 +279,9 @@ class CalibrationVerifier:
     passes anything it can't actually check would defeat its own purpose.
     """
 
-    def __init__(self, *, reference_level: float = 0.90, null_quantile: float = 0.99,
-                 pit_tol: float | None = None) -> None:
+    def __init__(
+        self, *, reference_level: float = 0.90, null_quantile: float = 0.99, pit_tol: float | None = None
+    ) -> None:
         self.reference_level = reference_level
         self.null_quantile = null_quantile
         self.pit_tol = pit_tol
@@ -266,14 +293,24 @@ class CalibrationVerifier:
         held_out_y = source.get("held_out_y") if isinstance(source, dict) else None
         if ensemble is None or held_out_y is None:
             return {
-                "passed": False, "score": 0.0, "kind": "calibration",
-                "reasons": ["no ensemble/held_out_y to calibrate against -- failing closed rather than passing an unchecked posterior"],
+                "passed": False,
+                "score": 0.0,
+                "kind": "calibration",
+                "reasons": [
+                    "no ensemble/held_out_y to calibrate against -- failing closed rather than passing an unchecked posterior"
+                ],
             }
         verdict = posterior_predictive_calibration(
-            np.asarray(ensemble), np.asarray(held_out_y),
-            reference_level=self.reference_level, null_quantile=self.null_quantile, pit_tol=self.pit_tol,
+            np.asarray(ensemble),
+            np.asarray(held_out_y),
+            reference_level=self.reference_level,
+            null_quantile=self.null_quantile,
+            pit_tol=self.pit_tol,
         )
         return {
-            "passed": verdict.passed, "score": verdict.score, "kind": verdict.kind,
-            "reasons": verdict.reasons, "low_power": verdict.low_power,
+            "passed": verdict.passed,
+            "score": verdict.score,
+            "kind": verdict.kind,
+            "reasons": verdict.reasons,
+            "low_power": verdict.low_power,
         }

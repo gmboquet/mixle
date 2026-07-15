@@ -39,6 +39,7 @@ _NAMESPACES = (
     "inference",
     "ops",
     "contracts",
+    "semantics",
 )
 
 

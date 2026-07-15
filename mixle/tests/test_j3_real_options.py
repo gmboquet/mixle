@@ -143,7 +143,11 @@ def test_voi_stopping_decision_says_keep_sampling_when_voi_exceeds_a_cheap_cost(
     posterior = _ToyPosterior(mean=1.0, std=5.0)
     rng = np.random.default_rng(0)
     decision = voi_stopping_decision(
-        posterior, _decision_value, {"variance_reduction": 0.8}, sample_cost=0.01, rng=rng,
+        posterior,
+        _decision_value,
+        {"variance_reduction": 0.8},
+        sample_cost=0.01,
+        rng=rng,
     )
     assert decision.voi_dollars > 0.0
     assert decision.keep_sampling is True
@@ -156,7 +160,11 @@ def test_voi_stopping_decision_says_stop_when_the_sample_costs_more_than_it_is_w
     posterior = _ToyPosterior(mean=1.0, std=0.05)
     rng = np.random.default_rng(0)
     decision = voi_stopping_decision(
-        posterior, _decision_value, {"variance_reduction": 0.05}, sample_cost=1_000_000.0, rng=rng,
+        posterior,
+        _decision_value,
+        {"variance_reduction": 0.05},
+        sample_cost=1_000_000.0,
+        rng=rng,
     )
     assert decision.keep_sampling is False
     assert decision.net_value < 0.0
@@ -167,5 +175,7 @@ def test_voi_stopping_decision_is_consistent_with_voi_dollars_directly():
     posterior = _ToyPosterior(mean=1.0, std=5.0)
     drill_info = {"variance_reduction": 0.6}
     direct = voi_dollars(posterior, _decision_value, drill_info, rng=np.random.default_rng(7))
-    decision = voi_stopping_decision(posterior, _decision_value, drill_info, sample_cost=0.0, rng=np.random.default_rng(7))
+    decision = voi_stopping_decision(
+        posterior, _decision_value, drill_info, sample_cost=0.0, rng=np.random.default_rng(7)
+    )
     assert decision.voi_dollars == pytest.approx(direct)

@@ -4,14 +4,13 @@ composes with the real voi_stopping_decision rule from mixle.analysis.real_optio
 session's decision machinery snaps together instead of being hand-wired per demo."""
 
 import numpy as np
-import pytest
 
 from mixle.doe.sequential import DesignRound, sequential_design
 
 # --- a genuinely Bayesian toy: estimate a scalar theta from noisy iid measurements ---
 _THETA_TRUE = 2.0
-_TAU = 5.0     # prior sd
-_SIGMA = 1.0   # measurement noise sd
+_TAU = 5.0  # prior sd
+_SIGMA = 1.0  # measurement noise sd
 
 
 class _ScalarPosterior:
@@ -55,6 +54,7 @@ def _threshold_controller(threshold: float):
     def should_continue(history: list[DesignRound]):
         sd = history[-1].summary["post_sd"]
         return {"keep_going": sd > threshold, "reason": f"post_sd={sd:.3f} vs threshold {threshold}"}
+
     return should_continue
 
 
@@ -65,9 +65,14 @@ def _propose_next_measurement(state, history):
 
 def test_uncertainty_actually_shrinks_and_the_loop_stops_when_tight_enough():
     result = sequential_design(
-        _initial(), fit=_fit, summarize=_summarize,
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
         should_continue=_threshold_controller(0.15),
-        propose=_propose_next_measurement, acquire=_acquire, combine=_combine, max_rounds=50,
+        propose=_propose_next_measurement,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=50,
     )
     assert result.stopped_reason == "controller_stop"
     sds = [r.summary["post_sd"] for r in result.rounds]
@@ -80,9 +85,14 @@ def test_uncertainty_actually_shrinks_and_the_loop_stops_when_tight_enough():
 
 def test_budget_exhausted_when_threshold_is_never_reached():
     result = sequential_design(
-        _initial(), fit=_fit, summarize=_summarize,
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
         should_continue=_threshold_controller(1e-6),  # unreachable
-        propose=_propose_next_measurement, acquire=_acquire, combine=_combine, max_rounds=3,
+        propose=_propose_next_measurement,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=3,
     )
     assert result.stopped_reason == "budget_exhausted"
     assert result.n_rounds == 4  # round 0 (initial) + 3 adaptive rounds
@@ -90,10 +100,14 @@ def test_budget_exhausted_when_threshold_is_never_reached():
 
 def test_no_proposal_stops_the_loop_even_if_controller_wants_to_continue():
     result = sequential_design(
-        _initial(), fit=_fit, summarize=_summarize,
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
         should_continue=lambda h: {"keep_going": True, "reason": "always"},
         propose=lambda state, history: None,  # no admissible next sample
-        acquire=_acquire, combine=_combine, max_rounds=10,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=10,
     )
     assert result.stopped_reason == "no_proposal"
     assert result.n_rounds == 1
@@ -101,9 +115,14 @@ def test_no_proposal_stops_the_loop_even_if_controller_wants_to_continue():
 
 def test_history_is_complete_and_ordered():
     result = sequential_design(
-        _initial(), fit=_fit, summarize=_summarize,
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
         should_continue=_threshold_controller(0.2),
-        propose=_propose_next_measurement, acquire=_acquire, combine=_combine, max_rounds=50,
+        propose=_propose_next_measurement,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=50,
     )
     assert [r.index for r in result.rounds] == list(range(result.n_rounds))
     assert all("post_sd" in r.summary and r.decision for r in result.rounds)
@@ -122,14 +141,27 @@ def test_composes_with_the_real_voi_stopping_decision_rule():
         state = history[-1].state
         rng = np.random.default_rng(len(history))
         decision = voi_stopping_decision(
-            state, _decision_value, {"variance_reduction": 0.5}, sample_cost=0.05, rng=rng,
+            state,
+            _decision_value,
+            {"variance_reduction": 0.5},
+            sample_cost=0.05,
+            rng=rng,
         )
-        return {"keep_going": bool(decision.keep_sampling), "reason": f"voi={decision.voi_dollars:.4f}",
-                "voi": decision.voi_dollars}
+        return {
+            "keep_going": bool(decision.keep_sampling),
+            "reason": f"voi={decision.voi_dollars:.4f}",
+            "voi": decision.voi_dollars,
+        }
 
     result = sequential_design(
-        _initial(), fit=_fit, summarize=_summarize, should_continue=voi_controller,
-        propose=_propose_next_measurement, acquire=_acquire, combine=_combine, max_rounds=25,
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
+        should_continue=voi_controller,
+        propose=_propose_next_measurement,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=25,
     )
     assert result.stopped_reason in ("controller_stop", "budget_exhausted")
     assert result.n_rounds >= 1

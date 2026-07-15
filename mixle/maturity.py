@@ -34,6 +34,7 @@ class Maturity(StrEnum):
 MATURITY_REGISTRY: dict[str, tuple[Maturity, str]] = {
     "mixle.stats": (Maturity.STABLE, "Stable core"),
     "mixle.inference": (Maturity.STABLE, "Stable core (optimize + direct estimation)"),
+    "mixle.semantics": (Maturity.STABLE, "Stable core shared quantitative semantics"),
     "mixle.inference.production": (Maturity.PROVISIONAL, "Practical helpers, not a platform"),
     "mixle.enumeration": (Maturity.PROVISIONAL, "Usable, evolving"),
     "mixle.ops": (Maturity.PROVISIONAL, "Usable, evolving"),
