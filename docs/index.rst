@@ -169,6 +169,8 @@ reference under :doc:`api/modules` covers the broad public module surface;
    whats-new-0-6-2
    quickstart
    concepts
+   quantitative-semantics
+   module-ownership
    package-map
    lifecycle
    tutorials/index

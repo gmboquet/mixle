@@ -13,6 +13,14 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Added
 
+- Stable ``mixle.semantics`` contracts for value roles, units, transforms and
+  Jacobians, constraints, priors, observations, posterior/predictive identity,
+  uncertainty, calibration, decisions, capability extensions, and trace sinks;
+  plus a packaged cross-project Bayesian-inversion fixture whose semantic
+  identity excludes backend, job, and storage-location metadata.
+- A machine-readable ownership decision for every top-level public module,
+  with drift coverage and migration destinations that preserve compatibility
+  until replacement and deprecation gates are satisfied.
 - A public-API manifest (`api_manifest.json`) and a drift gate so any change to the exported surface
   is a reviewed diff.
 - Release-engineering gates: a weighted-estimation contract test, a base-install optional-import guard,

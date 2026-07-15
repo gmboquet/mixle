@@ -119,6 +119,7 @@ include = ["mixle*"]
 # Ship the Cython kernel sources so an installed mixle can self-compile them (the `kernels` extra);
 # MANIFEST.in carries the same rule for sdists.
 "mixle.engines" = ["*.pyx"]
+"mixle" = ["fixtures/*.json"]
 
 [tool.importlinter]
 # Y4.4 architecture dependency checks. Each contract below is a bar the tree PASSES today, wired as
