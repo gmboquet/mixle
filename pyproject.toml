@@ -98,7 +98,7 @@ sympy = ["sympy>=1.12"]
 sage = ["passagemath-symbolics>=10.4"]
 test = ["pytest>=8", "pytest-xdist>=3.0", "pytest-cov>=5.0"]
 # ruff is pinned: a newer release could add rules and break the blocking lint check unexpectedly.
-lint = ["ruff==0.15.20", "mypy>=1.0"]
+lint = ["ruff==0.15.21", "mypy>=1.0"]
 all = ["numba>=0.59", "tbb>=2021.6; platform_machine == 'x86_64'", "pyspark>=3.4", "dask>=2023.5.0", "distributed>=2023.5.0", "torch>=2.0", "safetensors>=0.4", "mpi4py>=3.1", "umap-learn>=0.5.4", "pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "networkx>=3.0", "ray>=2.9", "lightning>=2.1"]
 
 [project.urls]
