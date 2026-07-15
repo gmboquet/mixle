@@ -24,7 +24,6 @@ from mixle.analysis.carcinogenic_risk import (
     radon_wlm_risk,
 )
 from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator
-from mixle.analysis.developmental_risk import BMDResult, benchmark_dose, rfd_exceedance
 from mixle.analysis.coverage import (
     ace,
     chao1,
@@ -35,6 +34,7 @@ from mixle.analysis.coverage import (
     rarefaction_curve,
     turing_coverage,
 )
+from mixle.analysis.developmental_risk import BMDResult, benchmark_dose, rfd_exceedance
 from mixle.analysis.emissions import (
     EmissionFactors,
     Footprint,
