@@ -23,7 +23,7 @@ from typing import NamedTuple
 import numpy as np
 import pytest
 
-from mixle.analysis.real_options import OptionValue, real_option_value, voi_dollars
+from mixle.analysis.real_options import OptionValue, real_option_value, voi_dollars, voi_stopping_decision
 
 
 class _FakeNPVDistribution(NamedTuple):
@@ -133,3 +133,39 @@ def test_voi_dollars_grows_with_variance_reduction():
     voi_small = voi_dollars(posterior, _decision_value, {"variance_reduction": 0.1}, rng=np.random.default_rng(1))
     voi_large = voi_dollars(posterior, _decision_value, {"variance_reduction": 0.9}, rng=np.random.default_rng(1))
     assert voi_large >= voi_small
+
+
+def test_voi_stopping_decision_says_keep_sampling_when_voi_exceeds_a_cheap_cost():
+    """A real decision-theoretic replacement for the arbitrary CI-width thresholds hand-picked in
+    experiments/adaptive-groundwater-monitoring and experiments/adaptive-gravity-survey-design: a
+    wide, uncertain posterior with an informative (high variance-reduction) next sample and a cheap
+    sample cost should say to keep sampling."""
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    rng = np.random.default_rng(0)
+    decision = voi_stopping_decision(
+        posterior, _decision_value, {"variance_reduction": 0.8}, sample_cost=0.01, rng=rng,
+    )
+    assert decision.voi_dollars > 0.0
+    assert decision.keep_sampling is True
+    assert decision.net_value == pytest.approx(decision.voi_dollars - 0.01)
+
+
+def test_voi_stopping_decision_says_stop_when_the_sample_costs_more_than_it_is_worth():
+    """A tight, already-confident posterior (tiny std, small variance-reduction left to gain) against
+    an expensive next sample should say to stop -- the mirror case of the test above."""
+    posterior = _ToyPosterior(mean=1.0, std=0.05)
+    rng = np.random.default_rng(0)
+    decision = voi_stopping_decision(
+        posterior, _decision_value, {"variance_reduction": 0.05}, sample_cost=1_000_000.0, rng=rng,
+    )
+    assert decision.keep_sampling is False
+    assert decision.net_value < 0.0
+
+
+def test_voi_stopping_decision_is_consistent_with_voi_dollars_directly():
+    """The wrapper must not silently compute something different from voi_dollars itself."""
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    drill_info = {"variance_reduction": 0.6}
+    direct = voi_dollars(posterior, _decision_value, drill_info, rng=np.random.default_rng(7))
+    decision = voi_stopping_decision(posterior, _decision_value, drill_info, sample_cost=0.0, rng=np.random.default_rng(7))
+    assert decision.voi_dollars == pytest.approx(direct)
