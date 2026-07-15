@@ -305,6 +305,8 @@ def voi_stopping_decision(
     """
     voi = voi_dollars(posterior, decision_fn, drill_info, rng=rng, n_outer=n_outer, n_inner=n_inner)
     return VoiStoppingDecision(
-        voi_dollars=voi, sample_cost=float(sample_cost), net_value=voi - float(sample_cost),
+        voi_dollars=voi,
+        sample_cost=float(sample_cost),
+        net_value=voi - float(sample_cost),
         keep_sampling=voi > float(sample_cost),
     )
