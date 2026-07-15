@@ -281,7 +281,7 @@ class InverseGammaSampler(DistributionSampler):
         self.dist = dist
         self.seed = seed
 
-    def sample(self, size: int | None = None) -> float | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw ``size`` iid observations (a float when ``size`` is None)."""
         return 1.0 / self.rng.gamma(shape=self.dist.alpha, scale=1.0 / self.dist.beta, size=size)
 

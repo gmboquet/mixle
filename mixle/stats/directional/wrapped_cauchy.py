@@ -183,7 +183,7 @@ class WrappedCauchySampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> float | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw one angle or an array of iid angles."""
         d = self.dist
         n = 1 if size is None else int(size)

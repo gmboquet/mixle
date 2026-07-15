@@ -229,7 +229,9 @@ class SpanningTreeSampler(DistributionSampler):
         edges = [(min(v, int(next_node[v])), max(v, int(next_node[v]))) for v in range(n) if v != 0]
         return sorted(edges)
 
-    def sample(self, size: int | None = None) -> list[tuple[int, int]] | list[list[tuple[int, int]]]:
+    def sample(
+        self, size: int | None = None, *, batched: bool = True
+    ) -> list[tuple[int, int]] | list[list[tuple[int, int]]]:
         """Draw spanning trees (each a sorted edge list); a single tree when size is None."""
         if size is None:
             return self._sample_one()

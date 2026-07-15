@@ -305,7 +305,7 @@ class SparseMarkovAssociationSampler(DistributionSampler):
         self.dist = dist
         self.size_sampler = self.dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample(self, size: int | None = None) -> T | Sequence[T]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> T | Sequence[T]:
         """Draw 'size' iid observations from the sparse Markov association model.
 
         Each observation is a tuple (S1, S2) of lists of (value, count) pairs. If size is None a single

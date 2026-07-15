@@ -113,7 +113,7 @@ class ZeroInflatedSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.base_sampler = dist.base.sampler(seed=self.rng.randint(0, 2**31 - 1))
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw one observation or a list of ``size`` observations."""
         if size is None:
             return 0 if self.rng.uniform() < self.dist.pi else self.base_sampler.sample()

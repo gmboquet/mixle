@@ -89,7 +89,7 @@ class StudentTCopulaSampler(DistributionSampler):
         self.dist = dist
         self.rng = RandomState(seed)
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         n = 1 if size is None else int(size)
         nu, d = self.dist.df, self.dist.dim
         g = self.rng.multivariate_normal(np.zeros(d), self.dist.corr, size=n)

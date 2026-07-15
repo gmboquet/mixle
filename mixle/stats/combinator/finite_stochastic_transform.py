@@ -157,7 +157,7 @@ class FiniteStochasticTransformSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.source_sampler = dist.dist.sampler(seed=self.rng.randint(0, 2**31 - 1))
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw one output (or a list of ``size`` outputs)."""
         if size is None:
             x = int(self.source_sampler.sample())

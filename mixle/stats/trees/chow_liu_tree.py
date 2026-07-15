@@ -298,7 +298,7 @@ class ChowLiuTreeSampler(DistributionSampler):
             None if d is None else d.sampler(seed=self.rng.randint(maxrandint)) for d in dist.default_dists
         ]
 
-    def sample(self, size: int | None = None) -> tuple[Any, ...] | list[tuple[Any, ...]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> tuple[Any, ...] | list[tuple[Any, ...]]:
         """Draw one tuple, or ``size`` iid tuples, from the tree."""
         if size is not None:
             return [self.sample() for _ in range(int(size))]
