@@ -33,6 +33,10 @@ sync, so this table and the registry cannot drift apart.
      - Stable core
      - MLE/EM/conjugate fitting for ordinary distribution and latent-model
        workflows.
+   * - ``mixle.semantics``
+     - Stable core shared contract
+     - Domain-neutral value roles, units, transforms, priors, observations,
+       posterior/predictive identity, uncertainty, calibration, and decisions.
    * - ``mixle.enumeration`` and core ``mixle.ops``
      - Usable, evolving
      - Ranking, top-k, support traversal, quantization, conditioning,
@@ -83,6 +87,7 @@ For ordinary work, start with:
 
 * ``mixle.stats`` for model families and estimators;
 * ``mixle.inference.optimize`` for fitting;
+* ``mixle.semantics`` for cross-package values, priors, observations, and results;
 * ``mixle.describe`` to inspect what the fitted object supports;
 * ``mixle.enumeration`` and ``mixle.ops`` only after checking capabilities.
 

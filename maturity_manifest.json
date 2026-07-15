@@ -129,6 +129,10 @@
       "maturity": "provisional",
       "status": "Unclassified (provisional by default)"
     },
+    "mixle.semantics": {
+      "maturity": "stable",
+      "status": "Stable core shared quantitative semantics"
+    },
     "mixle.spend": {
       "maturity": "provisional",
       "status": "Unclassified (provisional by default)"
