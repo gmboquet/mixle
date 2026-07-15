@@ -60,7 +60,9 @@ def _quantal_p(model: str, dose: np.ndarray, coef: np.ndarray) -> np.ndarray:
     raise ValueError(f"unknown model {model!r}; expected one of {_MODELS}")
 
 
-def _neg_log_likelihood(coef: np.ndarray, model: str, dose: np.ndarray, n_affected: np.ndarray, n_total: np.ndarray) -> float:
+def _neg_log_likelihood(
+    coef: np.ndarray, model: str, dose: np.ndarray, n_affected: np.ndarray, n_total: np.ndarray
+) -> float:
     p = np.clip(_quantal_p(model, dose, coef), 1e-9, 1 - 1e-9)
     ll = n_affected * np.log(p) + (n_total - n_affected) * np.log(1 - p)
     return -float(np.sum(ll))
@@ -116,7 +118,10 @@ def benchmark_dose(
 
     init = np.array([-1.0, 1.0])
     result = optimize.minimize(
-        _neg_log_likelihood, init, args=(model, dose, n_affected, n_total), method="Nelder-Mead",
+        _neg_log_likelihood,
+        init,
+        args=(model, dose, n_affected, n_total),
+        method="Nelder-Mead",
         options={"xatol": 1e-8, "fatol": 1e-10, "maxiter": 5000},
     )
     coef = result.x
@@ -132,7 +137,7 @@ def benchmark_dose(
             b_bg = float(_quantal_p(model, np.array([dose.min() if dose.min() > 0 else 1e-9]), free_coef)[0])
             try:
                 implied = _solve_bmd(model, free_coef, b_bg, bmr, risk, dose_hi)
-            except Exception:
+            except (FloatingPointError, OverflowError, RuntimeError, ValueError):
                 return 1e12
             penalty = 1e6 * (implied - d) ** 2
             return _neg_log_likelihood(free_coef, model, dose, n_affected, n_total) + penalty
@@ -147,7 +152,7 @@ def benchmark_dose(
         if f_lo * f_hi > 0:
             raise ValueError("no bracket")
         bmdl = float(optimize.brentq(lambda d: nll_at_bmd(d) - chi2_1 / 2.0, lo_search, hi_search, xtol=1e-6))
-    except Exception:
+    except (FloatingPointError, OverflowError, RuntimeError, ValueError):
         eps = max(bmd * 1e-3, 1e-9)
         se_proxy = abs(_solve_bmd(model, coef, background, bmr + eps, risk, dose_hi) - bmd) / eps
         z = stats.norm.ppf(ci_level)
@@ -169,13 +174,13 @@ def _as_dose_samples(exposure: Any, n: int, rng: np.random.Generator) -> np.ndar
 
 
 def rfd_exceedance(
-    exposure: "Posterior | np.ndarray",
+    exposure: Posterior | np.ndarray,
     bmd: BMDResult,
     *,
     uf: float = 100.0,
     n: int = 2000,
     rng: np.random.Generator | None = None,
-) -> "DerivedQuantity":
+) -> DerivedQuantity:
     """`P(exposure > RfD)` as an IC-8 `DerivedQuantity`, where `RfD = BMDL / uf` (EPA convention).
 
     ``exposure`` may be an IC-1 `Posterior` (the pushforward runs through its own

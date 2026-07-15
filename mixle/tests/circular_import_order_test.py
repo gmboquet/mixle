@@ -21,7 +21,9 @@ def test_dirichlet_module_imports_standalone_in_a_fresh_process():
     first) must not raise ImportError."""
     result = subprocess.run(
         [sys.executable, "-c", "import mixle.stats.bayes.dirichlet"],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
 
@@ -31,6 +33,8 @@ def test_inference_risk_names_are_reachable_after_plain_import_mixle():
     must still be reachable -- lazily-exported, not silently dropped."""
     result = subprocess.run(
         [sys.executable, "-c", "import mixle.inference as m; assert callable(m.value_at_risk)"],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
