@@ -368,7 +368,8 @@ def min_cost_flow(cap: Any, cost: Any, supply: Any) -> Flow:
     n = supply.shape[0]
     if cap.shape != (n, n) or cost.shape != (n, n):
         raise ValueError("cap/cost must be (n, n), matching supply's length n")
-    assert abs(float(supply.sum())) < 1.0e-6, "supply must sum to (approximately) zero"
+    if abs(float(supply.sum())) >= 1.0e-6:
+        raise ValueError("supply must sum to (approximately) zero")
 
     ss, tt, m = n, n + 1, n + 2  # super-source, super-sink, extended node count
     big_cap = np.zeros((m, m))

@@ -33,6 +33,7 @@ that score is produced.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -259,6 +260,11 @@ def optimize_mixture(
     if budget < 2:
         raise ValueError("budget must allow at least two proxy runs.")
     kwargs = dict(proxy_kwargs or {})
+    if kwargs.get("return_detail"):
+        # the search loop needs a bare scalar loss (bandit.update(reward=-loss), opt.tell(x, loss));
+        # return_detail=True makes proxy_run_score return a (loss, per_domain_dict) tuple instead,
+        # which crashes the loop far from this call site with an opaque TypeError.
+        raise ValueError("proxy_kwargs['return_detail']=True is incompatible with optimize_mixture's search loop.")
     if method == "bandit":
         return _bandit_search(domains, proxy_steps, budget, kwargs, seed)
     if method == "doe":
@@ -269,11 +275,22 @@ def optimize_mixture(
 # --- corpus dedup / quality receipt --------------------------------------------------------------------
 
 
+def _stable_hash(tokens: Sequence[str]) -> int:
+    """A ``hash()``-alike that is stable across processes/runs.
+
+    ``hash()`` on a tuple of strings is salted by ``PYTHONHASHSEED``, so two runs (or two workers)
+    would assign different MinHash signatures to identical shingles -- silently breaking the
+    near-duplicate estimate's determinism (and any cross-process comparison of signatures).
+    """
+    digest = hashlib.sha256(" ".join(tokens).encode()).hexdigest()
+    return int(digest, 16)
+
+
 def _shingles(text: str, k: int) -> frozenset[int]:
     toks = text.lower().split()
     if len(toks) < k:
-        return frozenset({hash(tuple(toks))})
-    return frozenset(hash(tuple(toks[i : i + k])) for i in range(len(toks) - k + 1))
+        return frozenset({_stable_hash(toks)})
+    return frozenset(_stable_hash(toks[i : i + k]) for i in range(len(toks) - k + 1))
 
 
 def _minhash_signature(shingle_set: frozenset[int], a: np.ndarray, b: np.ndarray, prime: int) -> np.ndarray:

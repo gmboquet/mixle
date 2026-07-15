@@ -133,3 +133,16 @@ def test_voi_dollars_grows_with_variance_reduction():
     voi_small = voi_dollars(posterior, _decision_value, {"variance_reduction": 0.1}, rng=np.random.default_rng(1))
     voi_large = voi_dollars(posterior, _decision_value, {"variance_reduction": 0.9}, rng=np.random.default_rng(1))
     assert voi_large >= voi_small
+
+
+def test_real_option_value_type_hints_are_resolvable():
+    # npv_dist's annotation used to live behind a TYPE_CHECKING-only import, so typing.get_type_hints
+    # (and any other runtime introspection) raised NameError even though NPVDistribution has been a
+    # real, importable module for a while now.
+    import typing
+
+    from mixle.analysis.real_options import real_option_value
+    from mixle.analysis.valuation import NPVDistribution
+
+    hints = typing.get_type_hints(real_option_value)
+    assert hints["npv_dist"] is NPVDistribution
