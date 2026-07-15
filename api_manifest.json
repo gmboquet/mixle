@@ -4,6 +4,7 @@
     "__version__",
     "capabilities",
     "catalog",
+    "causal",
     "contracts",
     "describe",
     "dist",
