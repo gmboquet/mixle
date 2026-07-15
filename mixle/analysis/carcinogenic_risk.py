@@ -85,9 +85,29 @@ class RiskQuantity:
 
 def _lnt_risk(dose: np.ndarray, slope: np.ndarray | float) -> np.ndarray:
     """EPA-IRIS linear no-threshold form: ``dose * slope``, falling back to ``1 - exp(-dose*slope)``
-    once the linear approximation would exceed ~0.01 (the point EPA guidance treats it as unsafe)."""
+    once the linear approximation would exceed ~0.01 (the point EPA guidance treats it as unsafe).
+
+    A risk measure -- always in ``[0, 1)`` for a nonnegative ``dose * slope``, which is why callers
+    validate both factors are nonnegative before this runs: for a negative product this formula
+    returns a negative "risk" (the linear branch) or a risk above 1 is impossible by construction
+    once the ``exp`` branch engages, but the LINEAR branch has no such ceiling, so an unvalidated
+    caller could still see an unbounded, meaningless value from it."""
     product = dose * slope
     return np.where(product < 0.01, product, 1.0 - np.exp(-product))
+
+
+def _require_finite_nonnegative(value: np.ndarray | float, name: str) -> None:
+    """Raise a clear error for a negative or non-finite physical quantity (dose, slope, exposure).
+
+    These feed a risk model whose output is only meaningful as a probability in ``[0, 1]``; a
+    negative or non-finite input (a data error, not a valid domain value -- exposure and potency are
+    never negative) produces a negative or meaningless "risk" with no warning otherwise, exactly the
+    silent failure mode this validates against."""
+    arr = np.asarray(value, dtype=float)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    if np.any(arr < 0):
+        raise ValueError(f"{name} must be non-negative, got {value!r}")
 
 
 def excess_lifetime_cancer_risk(
@@ -108,8 +128,13 @@ def excess_lifetime_cancer_risk(
         exposure: the lifetime-average dose/concentration. An IC-1 ``Posterior`` (its
             ``derived_quantity`` pushforward is used, so ``prior_dominated`` propagates from the
             exposure posterior), a plain array of exposure samples (already representing exposure
-            uncertainty), or a single deterministic scalar.
-        sf: the chemical's :class:`SlopeFactor`.
+            uncertainty), or a single deterministic scalar. A scalar or array ``exposure`` must be
+            finite and non-negative (exposure cannot be negative); a ``Posterior``'s own draws are
+            NOT validated here (the posterior's support is the caller's modeling choice), so a
+            mis-specified exposure posterior with mass below zero can still yield a negative risk
+            sample from the linear branch of :func:`_lnt_risk`.
+        sf: the chemical's :class:`SlopeFactor`. Its potency coefficient for ``route`` must be finite
+            and non-negative.
         route: ``"oral"`` or ``"inhalation"``.
         n: number of posterior draws to take when ``exposure`` is a ``Posterior``, or the number of
             slope-factor draws to take when ``exposure`` is a bare scalar and ``sf.sigma_log > 0``.
@@ -123,6 +148,9 @@ def excess_lifetime_cancer_risk(
     csf = sf.oral_csf if route == "oral" else sf.inhalation_iur
     if csf is None:
         raise ValueError(f"SlopeFactor has no {route} potency coefficient set.")
+    _require_finite_nonnegative(csf, f"SlopeFactor.{'oral_csf' if route == 'oral' else 'inhalation_iur'}")
+    if not isinstance(exposure, Posterior):
+        _require_finite_nonnegative(exposure, "exposure")
     rng = rng if rng is not None else np.random.default_rng()
 
     def _apply(draws: np.ndarray) -> np.ndarray:
@@ -160,8 +188,13 @@ def radon_wlm_risk(
 ) -> DerivedQuantity:
     """Radon lung-cancer risk from cumulative working-level-months (BEIR-VI linear coefficient).
 
-    ``risk = wlm * risk_per_wlm``, the BEIR-VI committee's linear excess-relative-risk coefficient
-    per WLM of cumulative radon-progeny exposure (default ``5.38e-4`` per WLM).
+    ``risk = wlm * risk_per_wlm`` for small products (the BEIR-VI committee's linear
+    excess-relative-risk coefficient per WLM of cumulative radon-progeny exposure, default
+    ``5.38e-4`` per WLM), saturating via the same ``1 - exp(-x)`` low-dose-linear-no-threshold form
+    :func:`_lnt_risk` uses once that product would exceed ~0.01 -- without it, cumulative exposures
+    large enough to be realistic over a working lifetime push the bare linear form above 1, which is
+    not a valid probability. Both ``wlm`` and ``risk_per_wlm`` must be finite and non-negative
+    (exposure and potency are never negative).
 
     Args:
         wlm: cumulative working-level-months, a scalar or an array of samples (already representing
@@ -175,8 +208,10 @@ def radon_wlm_risk(
     """
     # n / rng are accepted for signature symmetry with excess_lifetime_cancer_risk and to leave room
     # for a future posterior-valued wlm; the deterministic BEIR-VI formula needs neither.
+    _require_finite_nonnegative(wlm, "wlm")
+    _require_finite_nonnegative(risk_per_wlm, "risk_per_wlm")
     if isinstance(wlm, np.ndarray):
-        samples = np.atleast_1d(np.asarray(wlm, dtype=float)) * risk_per_wlm
+        samples = _lnt_risk(np.atleast_1d(np.asarray(wlm, dtype=float)), risk_per_wlm)
     else:
-        samples = np.array([float(wlm) * risk_per_wlm])
+        samples = _lnt_risk(np.array([float(wlm)]), risk_per_wlm)
     return RiskQuantity(samples=samples, prior_dominated=False)
