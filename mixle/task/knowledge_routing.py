@@ -204,7 +204,8 @@ def _accepts_known_items(invoke: Any) -> bool:
         return False
     known = params.get("known_items")
     return known is not None and known.kind in (
-        known.POSITIONAL_OR_KEYWORD, known.KEYWORD_ONLY,
+        known.POSITIONAL_OR_KEYWORD,
+        known.KEYWORD_ONLY,
     )
 
 
