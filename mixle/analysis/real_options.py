@@ -49,7 +49,7 @@ from mixle.reason.posterior_protocol import Posterior
 if TYPE_CHECKING:
     from mixle.analysis.valuation import NPVDistribution
 
-__all__ = ["OptionValue", "real_option_value", "voi_dollars"]
+__all__ = ["OptionValue", "real_option_value", "voi_dollars", "VoiStoppingDecision", "voi_stopping_decision"]
 
 _KINDS = ("defer", "expand", "abandon")
 
@@ -260,3 +260,51 @@ def voi_dollars(
     value_with_info = float(np.mean(values_with_info))
 
     return max(value_with_info - value_no_info, 0.0)
+
+
+class VoiStoppingDecision(NamedTuple):
+    """A real decision-theoretic answer to "should we sample again?": compare the value of one more
+    sample against its cost, rather than an arbitrary uncertainty threshold picked by hand."""
+
+    voi_dollars: float
+    sample_cost: float
+    net_value: float
+    keep_sampling: bool
+
+
+def voi_stopping_decision(
+    posterior: Posterior,
+    decision_fn: Callable[[np.ndarray], float],
+    drill_info: dict[str, Any],
+    *,
+    sample_cost: float,
+    rng: np.random.Generator,
+    n_outer: int = 64,
+    n_inner: int = 256,
+) -> VoiStoppingDecision:
+    """Should the next sample (drillhole, monitoring well, survey station, ...) actually be taken?
+
+    A real, principled alternative to picking an uncertainty threshold by hand and telling an LLM
+    loop-controller to stop when it's cleared (the pattern used, and flagged as a real gap, in
+    ``experiments/adaptive-groundwater-monitoring`` and ``experiments/adaptive-gravity-survey-design``):
+    sample again iff :func:`voi_dollars` -- the actual expected dollar value the next sample would add
+    to the decision -- exceeds what that sample costs. As uncertainty tightens, ``voi_dollars`` shrinks
+    toward zero (there's less left to learn that would change the decision), so this converges to a
+    stopping rule on its own without any separately-chosen threshold; the only free parameter is
+    ``sample_cost``, which is an actual real-world number (drilling/survey cost) rather than an
+    arbitrary uncertainty width.
+
+    Args:
+        posterior, decision_fn, drill_info, rng, n_outer, n_inner: forwarded to :func:`voi_dollars`
+            unchanged -- see its docstring for what each means.
+        sample_cost: the real dollar cost of taking the next sample.
+
+    Returns:
+        A :class:`VoiStoppingDecision`: the computed VOI, the cost it was compared against, their
+        difference, and whether sampling should continue (``voi_dollars > sample_cost``).
+    """
+    voi = voi_dollars(posterior, decision_fn, drill_info, rng=rng, n_outer=n_outer, n_inner=n_inner)
+    return VoiStoppingDecision(
+        voi_dollars=voi, sample_cost=float(sample_cost), net_value=voi - float(sample_cost),
+        keep_sampling=voi > float(sample_cost),
+    )
