@@ -13,6 +13,10 @@
       "maturity": "provisional",
       "status": "Unclassified (provisional by default)"
     },
+    "mixle.capability_lifecycle": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
     "mixle.contracts": {
       "maturity": "provisional",
       "status": "Unclassified (provisional by default)"

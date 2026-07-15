@@ -13,10 +13,11 @@ to persist, audit, replay, and exchange between projects.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any
 
 __all__ = [
     "AuthorizationDecision",
