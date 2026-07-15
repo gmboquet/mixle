@@ -218,12 +218,20 @@ def test_a_gap_can_opt_into_seeing_another_gaps_real_resolved_result():
 
     catalog = [
         CatalogEntry(
-            id="physics_survey", schema={"invoke": _physics_tool_recorded, "output": {}},
-            owner="physics", cost=0.1, reliability=0.9, verifier=_PassVerifier(),
+            id="physics_survey",
+            schema={"invoke": _physics_tool_recorded, "output": {}},
+            owner="physics",
+            cost=0.1,
+            reliability=0.9,
+            verifier=_PassVerifier(),
         ),
         CatalogEntry(
-            id="dependent_economic_model", schema={"invoke": _dependent_economic_tool, "output": {}},
-            owner="economic", cost=0.1, reliability=0.9, verifier=_PassVerifier(),
+            id="dependent_economic_model",
+            schema={"invoke": _dependent_economic_tool, "output": {}},
+            owner="economic",
+            cost=0.1,
+            reliability=0.9,
+            verifier=_PassVerifier(),
         ),
     ]
     seed = [["physics", "economic"]] * 20
@@ -242,8 +250,16 @@ def test_a_one_arg_invoke_is_completely_unaffected():
     def _plain_tool(gap):
         return {"tonnage_mt": 7.0}
 
-    catalog = [CatalogEntry(id="physics_survey", schema={"invoke": _plain_tool, "output": {}},
-                             owner="physics", cost=0.1, reliability=0.9, verifier=_PassVerifier())]
+    catalog = [
+        CatalogEntry(
+            id="physics_survey",
+            schema={"invoke": _plain_tool, "output": {}},
+            owner="physics",
+            cost=0.1,
+            reliability=0.9,
+            verifier=_PassVerifier(),
+        )
+    ]
     proposer = init_decomposition_proposer([["physics"]] * 20)
     result = route_task("plain question", catalog, proposer=proposer, budget=3)
     assert result.answer["resolved_gap_ids"] == ["gap-0-physics"]

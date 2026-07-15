@@ -4,7 +4,6 @@ posteriors, fails overconfident and underconfident ones, catches a broken infere
 closed when handed nothing to check."""
 
 import numpy as np
-import pytest
 
 from mixle.inference.calibration_gate import (
     CalibrationVerifier,
@@ -72,9 +71,9 @@ def test_calibration_score_orders_calibrated_above_miscalibrated():
 
 # --- simulation-based calibration: catches a broken inference with no held-out real data at all ---
 
-_TAU = 2.0      # prior sd on theta
-_SIGMA = 1.0    # obs noise sd
-_NOBS = 5       # observations per simulated dataset
+_TAU = 2.0  # prior sd on theta
+_SIGMA = 1.0  # obs noise sd
+_NOBS = 5  # observations per simulated dataset
 _POST_VAR = 1.0 / (1.0 / _TAU**2 + _NOBS / _SIGMA**2)
 _POST_SD = np.sqrt(_POST_VAR)
 
@@ -111,6 +110,7 @@ def test_sbc_fails_a_deliberately_overconfident_inference():
 
 
 # --- the IC-6 verifier adapter (route_task drop-in) ---
+
 
 def test_verifier_passes_a_calibrated_payload():
     ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=1.0)

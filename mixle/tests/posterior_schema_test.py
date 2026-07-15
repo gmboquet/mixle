@@ -20,9 +20,7 @@ from mixle.reason.posterior_schema import (
 def test_adapt_plus_join_reproduces_the_handwritten_g2_to_g6_bridge():
     # G2's real (x, y, rate) posterior + a separately-estimated onset belief.
     mean3 = np.array([3.0, 7.0, 6.0])
-    cov3 = np.array([[0.030, -0.007, 0.0010],
-                     [-0.007, 0.0036, 0.0005],
-                     [0.0010, 0.0005, 0.0200]])
+    cov3 = np.array([[0.030, -0.007, 0.0010], [-0.007, 0.0036, 0.0005], [0.0010, 0.0005, 0.0200]])
     onset_mean, onset_sd = 0.5, 0.22
 
     # what SourcePosterior.to_doe_prior computes by hand (minus its 1e-6 PD jitter):

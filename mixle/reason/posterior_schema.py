@@ -132,7 +132,9 @@ class _SchemaDerivedQuantity:
         return np.quantile(self.samples, a, axis=0), np.quantile(self.samples, 1.0 - a, axis=0)
 
 
-def _transform_axis(mean: np.ndarray, cov: np.ndarray, i: int, from_space: str, to_space: str) -> tuple[np.ndarray, np.ndarray]:
+def _transform_axis(
+    mean: np.ndarray, cov: np.ndarray, i: int, from_space: str, to_space: str
+) -> tuple[np.ndarray, np.ndarray]:
     """Delta-method coordinate change of a single axis ``i`` from ``from_space`` to ``to_space``,
     updating both the mean and the full covariance row/column for that axis. Only linear<->log is
     implemented (the case that actually arises); anything else raises rather than silently no-op'ing."""
@@ -227,6 +229,6 @@ def join_independent(*blocks: tuple[np.ndarray, np.ndarray, PosteriorSchema]) ->
     offset = 0
     for c in covs:
         k = c.shape[0]
-        joined_cov[offset:offset + k, offset:offset + k] = c
+        joined_cov[offset : offset + k, offset : offset + k] = c
         offset += k
     return SchematizedPosterior(np.concatenate(means), joined_cov, PosteriorSchema(tuple(all_axes)))
