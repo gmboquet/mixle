@@ -89,6 +89,39 @@ def test_unknown_kind_raises():
         real_option_value(npv_dist, volatility=0.3, horizon=4, kind="bogus", rate=0.05)
 
 
+def test_expand_option_collapses_to_its_own_intrinsic_at_zero_volatility():
+    # At zero dispersion every kind must collapse to ITS OWN immediate-exercise payoff, not a
+    # kind-independent max(mean, 0) -- "expand" pays mean + expand_fraction * max(mean, 0), strictly
+    # more than the naive floor whenever mean > 0.
+    npv_dist = _npv_dist(mean=100.0)
+    opt = real_option_value(npv_dist, volatility=1e-9, horizon=5, kind="expand", rate=0.05, expand_fraction=0.3)
+    expected = 100.0 + 0.3 * 100.0
+    assert opt.value == pytest.approx(expected, abs=1e-6)
+    assert opt.value != pytest.approx(max(npv_dist.mean, 0.0), abs=1e-3)
+
+
+def test_expand_option_collapses_to_its_own_intrinsic_at_zero_horizon():
+    # horizon=0 forces dt=0 -> h=0 through the SAME branch, independent of volatility.
+    npv_dist = _npv_dist(mean=100.0)
+    opt = real_option_value(npv_dist, volatility=0.6, horizon=0, kind="expand", rate=0.05, expand_fraction=0.3)
+    assert opt.value == pytest.approx(130.0, abs=1e-6)
+
+
+def test_defer_and_abandon_zero_volatility_intrinsic_is_unchanged():
+    # Regression guard: the fix must not change the already-correct defer/abandon zero-vol value.
+    npv_dist = _npv_dist(mean=10.0)
+    for kind in ("defer", "abandon"):
+        opt = real_option_value(npv_dist, volatility=1e-9, horizon=5, kind=kind, rate=0.05)
+        assert opt.value == pytest.approx(max(npv_dist.mean, 0.0), abs=1e-6)
+
+
+@pytest.mark.parametrize("bad_n_steps", [0, -1, -5])
+def test_non_positive_n_steps_raises_a_clear_error(bad_n_steps):
+    npv_dist = _npv_dist(mean=10.0)
+    with pytest.raises(ValueError, match="n_steps"):
+        real_option_value(npv_dist, volatility=0.3, horizon=5, kind="defer", rate=0.05, n_steps=bad_n_steps)
+
+
 class _ToyPosterior:
     """A minimal IC-1-conforming posterior: an independent Gaussian belief over one grade parameter."""
 

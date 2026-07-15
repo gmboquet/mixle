@@ -160,3 +160,46 @@ def test_monte_carlo_npv_rejects_period_dimension_mismatch():
             n=N,
             rng=np.random.default_rng(0),
         )
+
+
+def test_monte_carlo_npv_accepts_price_forecast_paths_directly():
+    # The documented J1 -> J2 workflow is `monte_carlo_npv(..., price_paths=pf.paths, ...)`, and
+    # mixle.inference.price_forecast.PriceForecast.paths is (n_periods, m) -- time-major -- not the
+    # (m, n_periods) scenario-major shape monte_carlo_npv's own docstring required. A 5-period,
+    # non-square schedule makes the two orientations unambiguous (and would previously raise).
+    n_periods = 5
+    posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
+    m = 777  # != n_periods and != N, so both resampling AND the transpose are exercised together
+    price_forecast_paths = np.random.default_rng(3).normal(PRICE_MEAN, PRICE_STD, size=(n_periods, m))
+
+    def cost_model(t: int, tonnage_t: float) -> float:
+        return OPEX_PER_TONNE * tonnage_t
+
+    schedule = {"tonnage": np.full(n_periods, TONNAGE), "capex": np.array([CAPEX] + [0.0] * (n_periods - 1))}
+
+    result = monte_carlo_npv(
+        posterior,
+        price_forecast_paths,  # (n_periods, m): PriceForecast.paths' own orientation, unmodified
+        cost_model,
+        schedule,
+        discount_rate=DISCOUNT_RATE,
+        n=N,
+        rng=np.random.default_rng(3),
+    )
+    assert isinstance(result, NPVDistribution)
+    assert result.samples.shape == (N,)
+    assert np.all(np.isfinite(result.samples))
+
+    # Passing the manually pre-transposed (m, n_periods) form must give the identical distribution
+    # (same seed): proves the auto-detected transpose is not just "doesn't crash" but scores the
+    # correct axis as "period", not merely a differently-shaped one.
+    result_pretransposed = monte_carlo_npv(
+        posterior,
+        price_forecast_paths.T,
+        cost_model,
+        schedule,
+        discount_rate=DISCOUNT_RATE,
+        n=N,
+        rng=np.random.default_rng(3),
+    )
+    np.testing.assert_array_equal(result.samples, result_pretransposed.samples)
