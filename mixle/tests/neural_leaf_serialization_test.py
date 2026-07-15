@@ -115,11 +115,14 @@ class PickleRoundTripTest(unittest.TestCase):
 
 class DictJsonRoundTripTest(unittest.TestCase):
     def _check(self, cls, dist, enc):
+        from mixle.utils.serialization import trusted_deserialization
+
         ll = dist.seq_log_density(enc)
-        d = cls.from_dict(dist.to_dict())
-        self.assertTrue(np.allclose(d.seq_log_density(enc), ll, atol=1e-5), "to_dict")
-        j = cls.from_json(dist.to_json())
-        self.assertTrue(np.allclose(j.seq_log_density(enc), ll, atol=1e-5), "to_json")
+        with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+            d = cls.from_dict(dist.to_dict())
+            self.assertTrue(np.allclose(d.seq_log_density(enc), ll, atol=1e-5), "to_dict")
+            j = cls.from_json(dist.to_json())
+            self.assertTrue(np.allclose(j.seq_log_density(enc), ll, atol=1e-5), "to_json")
 
     def test_unconditional_leaves_dict_json(self):
         classes = {"energy": EnergyModel}
@@ -140,9 +143,48 @@ class DictJsonRoundTripTest(unittest.TestCase):
         x = np.random.RandomState(0).randn(5, 2)
         enc = mix.dist_to_encoder().seq_encode([r for r in x])
         ll = mix.seq_log_density(enc)
-        m2 = st.MixtureDistribution.from_json(mix.to_json())
+        from mixle.utils.serialization import trusted_deserialization
+
+        with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+            m2 = st.MixtureDistribution.from_json(mix.to_json())
         got = m2.seq_log_density(m2.dist_to_encoder().seq_encode([r for r in x]))
         self.assertTrue(np.allclose(got, ll, atol=1e-5))
+
+
+class ModuleDeserializationTrustGateTest(unittest.TestCase):
+    """A NeuralLeaf's JSON round-trip must refuse to execute its embedded module without explicit trust."""
+
+    def test_from_json_refuses_without_trusted_deserialization(self):
+        from mixle.utils.serialization import SerializationError
+
+        dist = NeuralGaussian(_mlp_gaussian())
+        payload = dist.to_json()
+        with self.assertRaises(SerializationError):
+            NeuralGaussian.from_json(payload)  # gate closed by default: no trust context entered
+
+    def test_module_from_bytes_refuses_directly(self):
+        from mixle.models._neural_serial import module_from_bytes, module_to_bytes
+        from mixle.utils.serialization import SerializationError
+
+        data = module_to_bytes(_mlp_gaussian())
+        with self.assertRaises(SerializationError):
+            module_from_bytes(data)
+
+    def test_module_from_bytes_succeeds_inside_trusted_deserialization(self):
+        from mixle.models._neural_serial import module_from_bytes, module_to_bytes
+        from mixle.utils.serialization import trusted_deserialization
+
+        module = _mlp_gaussian()
+        data = module_to_bytes(module)
+        with trusted_deserialization():
+            restored = module_from_bytes(data)
+        self.assertEqual(type(restored).__name__, type(module).__name__)
+
+
+def _mlp_gaussian():
+    from mixle.models.neural import make_mlp
+
+    return make_mlp(input_dim=1, hidden_dims=[4], output_dim=2)
 
 
 class NeuralCategoricalMinibatchTest(unittest.TestCase):
