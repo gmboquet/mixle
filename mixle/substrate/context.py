@@ -34,6 +34,9 @@ GENERIC_KNOWLEDGE_SCHEMA = "mixle://schema/substrate-item/1"
 PROPERTY_GRAPH_SCHEMA = "mixle://schema/property-graph/1"
 TYPED_TABLE_SCHEMA = "mixle://schema/typed-table/1"
 SPATIAL_MEDIA_SCHEMA = "mixle://schema/spatial-media/1"
+TENSOR_SCHEMA = "mixle://schema/tensor/1"
+SIGNAL_SCHEMA = "mixle://schema/signal/1"
+MESH_SCHEMA = "mixle://schema/mesh/1"
 
 # substrate kind -> (IC-13 ResourceKind value, IC-13 Modality value). An unmapped/future kind falls back
 # to a generic artifact/structured pair rather than raising, so the bridge degrades instead of breaking.
@@ -44,6 +47,10 @@ _RESOURCE_KIND_BY_SUBSTRATE_KIND: dict[str, tuple[str, str]] = {
     "signal": ("timeseries", "timeseries"),
     "graph": ("artifact", "graph"),
     "field": ("geospatial_layer", "raster"),
+    "mesh": ("mesh", "mesh"),
+    "tensor": ("tensor", "tensor"),
+    "volume": ("tensor", "volume"),
+    "spectrum": ("signal", "spectrum"),
     "event_stream": ("dataset", "timeseries"),
     "artifact": ("artifact", "structured"),
     "trace": ("trace", "structured"),
@@ -95,6 +102,12 @@ def _infer_schema_uri(item: SubstrateItem, raw_payload: dict[str, Any]) -> str:
         return PROPERTY_GRAPH_SCHEMA
     if item.kind in ("image", "field"):
         return SPATIAL_MEDIA_SCHEMA
+    if item.kind in ("tensor", "volume"):
+        return TENSOR_SCHEMA
+    if item.kind in ("signal", "spectrum"):
+        return SIGNAL_SCHEMA
+    if item.kind == "mesh":
+        return MESH_SCHEMA
     if item.kind == "record" and _looks_like_typed_table(raw_payload):
         return TYPED_TABLE_SCHEMA
     return GENERIC_KNOWLEDGE_SCHEMA
@@ -332,6 +345,9 @@ class ContextPacket:
         target_id: str | None = None,
         expected_output_schema: dict[str, Any] | None = None,
         gaps: list[dict[str, Any]] | None = None,
+        required_capability_ids: list[str] | None = None,
+        handoff_policy: dict[str, Any] | None = None,
+        continuation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return a plain dict shaped like ``mixle_knowledge.contracts.KnowledgeBundle`` (IC-13, M0b).
 
@@ -362,6 +378,9 @@ class ContextPacket:
             "token_budget": None,
             "byte_budget": self.budget.max_chars,
             "lineage": [],
+            "required_capability_ids": required_capability_ids or [],
+            "handoff_policy": handoff_policy or {},
+            "continuation": continuation,
             "renderings": {
                 "legacy_text": {
                     "text": self.render(),
