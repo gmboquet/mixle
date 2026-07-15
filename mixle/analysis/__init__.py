@@ -94,7 +94,13 @@ from mixle.analysis.rank_aggregation import (
     mallows_fit,
     spearman_footrule,
 )
-from mixle.analysis.real_options import OptionValue, VoiStoppingDecision, real_option_value, voi_dollars, voi_stopping_decision
+from mixle.analysis.real_options import (
+    OptionValue,
+    VoiStoppingDecision,
+    real_option_value,
+    voi_dollars,
+    voi_stopping_decision,
+)
 from mixle.analysis.sdm import HabitatModel, SpeciesObservation, fit_sdm
 from mixle.analysis.spatial_mixture import SpatialMixture
 from mixle.analysis.valuation import NPVDistribution, capex_opex, cost_curve, monte_carlo_npv
