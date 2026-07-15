@@ -52,7 +52,6 @@ from mixle.utils.special import digamma
 
 if TYPE_CHECKING:
     from mixle.stats.bayes.dirichlet import DirichletDistribution
-    from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 
 
 def _dirichlet_types() -> tuple[type, type]:
@@ -98,7 +97,7 @@ def mixture_prior(
     return weight_prior, tuple(component_priors)
 
 
-def _default_weight_prior(num_components: int) -> "DirichletDistribution":
+def _default_weight_prior(num_components: int) -> DirichletDistribution:
     """Flat (concentration-one) Dirichlet weight prior of the given dimension."""
     DirichletDistribution, _ = _dirichlet_types()
     return DirichletDistribution(np.ones(num_components))
