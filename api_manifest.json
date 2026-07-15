@@ -41,6 +41,7 @@
     "SpatialMixture",
     "SpeciesObservation",
     "Variogram",
+    "VoiStoppingDecision",
     "ace",
     "benchmark_dose",
     "borda_count",
@@ -104,7 +105,8 @@
     "transition_risk",
     "turing_coverage",
     "universal_kriging",
-    "voi_dollars"
+    "voi_dollars",
+    "voi_stopping_decision"
   ],
   "mixle.data": [
     "Boolean",
