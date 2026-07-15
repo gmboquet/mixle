@@ -88,7 +88,11 @@ class Registry:
         ``header`` defaults to ``model.header`` if present. The model is serialized with the safe mixle
         registry; the header (a :class:`Header` or dict) and ``metadata`` are stored alongside."""
         d = self._dir(name)
-        ver = f"v{len(self.versions(name)) + 1}"
+        # the NEXT version number, not the current COUNT: a deleted version (v2 removed from v1,v2,v3)
+        # must not free up its number for reuse, or the next register() overwrites the surviving v3.
+        existing = self.versions(name)
+        next_n = max((int(v[1:]) for v in existing if v[1:].isdigit()), default=0) + 1
+        ver = f"v{next_n}"
         attached = getattr(model, "header", None)
         if header is None:
             header = attached
@@ -183,11 +187,21 @@ class Registry:
             return json.load(f).get("metadata") or {}
 
     def promote(self, name: str, version: str, alias: str = "production") -> None:
-        """Point ``alias`` (e.g. ``"production"``) at ``version`` -- the atomic model swap."""
+        """Point ``alias`` (e.g. ``"production"``) at ``version`` -- the atomic model swap.
+
+        Written via a temp file + ``os.replace`` in the same directory (same filesystem, so the
+        rename is atomic): a concurrent reader of :meth:`current` either sees the old alias target or
+        the new one, never a truncated/partial write, and a crash mid-write leaves the old alias
+        file untouched rather than corrupted.
+        """
         if version not in self.versions(name):
             raise KeyError(f"{name!r} has no version {version!r}")
-        with open(os.path.join(self._dir(name), _safe_segment(alias, "alias") + ".alias"), "w") as f:
+        d = self._dir(name)
+        target = os.path.join(d, _safe_segment(alias, "alias") + ".alias")
+        tmp = os.path.join(d, f".{_safe_segment(alias, 'alias')}.{os.getpid()}.tmp")
+        with open(tmp, "w") as f:
             f.write(version)
+        os.replace(tmp, target)
 
     def current(self, name: str, alias: str = "production") -> tuple[Any, dict | None]:
         """Load the model an ``alias`` points at (falls back to ``latest`` if the alias is unset)."""
