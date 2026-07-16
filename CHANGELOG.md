@@ -104,7 +104,7 @@ with a regression test that fails on the unfixed code):
   discrete, and vector/multivariate families). Families with no declaration, a declaration
   describing a natural/scoring parameterization instead of the constructor's (e.g. von Mises), or
   an exotic constraint with no generic reparameterization yet (a covariance matrix, a coupled
-  bound) still raise a clear `NotImplementedError` rather than silently guessing (F-5; #TBD).
+  bound) still raise a clear `NotImplementedError` rather than silently guessing (F-5; #510).
 
 ### Changed
 
