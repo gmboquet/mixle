@@ -31,6 +31,8 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import digamma, gammaln, logsumexp
 
+from mixle.utils.optional_deps import HAS_PANDAS, pandas, require
+
 # Canonical guarded softmax (all-(-inf) slices -> uniform). For the finite 1-D inputs used here this
 # matches the previous local `_softmax`; the guard only changes the degenerate all-(-inf) case.
 from mixle.utils.special import softmax as _softmax
@@ -227,6 +229,31 @@ class MarkovChainLatentPosterior(LatentPosterior):
                 h_k = -np.sum(np.where(cond > 0.0, cond * np.log(cond), 0.0), axis=0)  # (k,)
             h += float(np.sum(gamma[t + 1] * h_k))
         return h
+
+    def to_dataframe(self) -> Any:
+        """Return the per-position state posterior as a ``pandas.DataFrame``.
+
+        One row per sequence position ``t`` with columns ``t`` (position), ``state`` (the Viterbi MAP
+        state from :meth:`mode`), and one ``state_{k}_prob`` column per latent state holding the
+        forward-backward smoothing probability from :meth:`marginals`. Deterministic: unlike
+        :meth:`sample`, ``mode``/``marginals`` are exact closed-form quantities, not random draws.
+        Requires the ``pandas`` extra (``pip install mixle[pandas]``).
+        """
+        if not HAS_PANDAS:
+            require("pandas", "pandas")
+        marginals = self.marginals()
+        data = {"t": np.arange(self.t), "state": self.mode()}
+        for k in range(self.k):
+            data[f"state_{k}_prob"] = marginals[:, k]
+        return pandas.DataFrame(data)
+
+    def to_parquet(self, path: Any, **kwargs: Any) -> None:
+        """Write the per-position state posterior to a Parquet file; see :meth:`to_dataframe`.
+
+        ``kwargs`` forward to ``DataFrame.to_parquet`` (e.g. ``engine=``, ``compression=``). Needs a
+        Parquet engine in addition to pandas -- ``pip install mixle[arrow]`` (pyarrow) or fastparquet.
+        """
+        self.to_dataframe().to_parquet(path, **kwargs)
 
 
 class MeanFieldLDAPosterior(LatentPosterior):

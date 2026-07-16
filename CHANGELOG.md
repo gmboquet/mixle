@@ -28,6 +28,13 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 - `CompiledEM` as a reusable fused full-mixture strategy, automatically selected by `optimize()` for
   eligible partially fusible heterogeneous mixtures; recursive SQUAREM packing for nested
   mixtures/composites; and function-preserving shared-trunk/residual-expert MoE upcycling.
+- Write-side result egress: `to_dataframe()`/`to_parquet()` on `ParameterPosterior` (posterior
+  parameter draws, one row per draw), `CalibrationReport` (its PIT histogram, one row per bin, or a
+  one-row summary when there is no scalar predictive CDF), and `MarkovChainLatentPosterior` (an HMM's
+  per-position state posterior -- the Viterbi state and every state's smoothing probability). mixle
+  had nine read-side data connectors and no supported way to move a result back into
+  pandas/Parquet; `pandas` is an optional extra (`pip install mixle[pandas]`), guarded the same way
+  as the other optional dependencies and never imported by the base install.
 
 ### Fixed
 
