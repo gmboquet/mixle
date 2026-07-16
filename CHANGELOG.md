@@ -35,6 +35,12 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   treating density time as the whole block cost; learned controllers receive the same measured cost.
 - Dirichlet-prior block and freeze/roll-up updates now use the exact MAP objective and carry the
   posterior weight prior; nested homogeneous mixtures preserve heterogeneous encoding depth.
+- `task.regress`'s internal MLP student (`solve_regression`, `RegressionSolution.improve`, and any
+  downstream distillation built on it, e.g. `mixle_pde.surrogate.distill_forward`) now builds its
+  network at an explicit float32 instead of following `torch.get_default_dtype()`. A caller that had
+  changed the process-global default dtype (mixle-pde's PDE code routinely does, for numerical
+  precision) left the student's own weights at that ambient dtype while its inputs stayed explicitly
+  float32, crashing with "mat1 and mat2 must have the same dtype, but got Float and Double".
 
 ### Fixed
 
