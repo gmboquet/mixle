@@ -28,6 +28,7 @@ _OPTIONAL_TOP_LEVEL = frozenset(
         "gmpy2",
         "zarr",
         "h5py",
+        "pandas",
         "mpi4py",
         "torch",
         "jax",
