@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from mixle.inference import optimize
 from mixle.inference.mcmc import (
     AdaptiveCovarianceProposal,
     AdaptiveRandomWalkProposal,
@@ -23,10 +24,22 @@ from mixle.inference.mcmc import (
 )
 from mixle.stats import (
     BernoulliDistribution,
+    BinomialDistribution,
     CategoricalDistribution,
+    DiagonalGaussianDistribution,
+    DirichletDistribution,
     GammaDistribution,
     GaussianDistribution,
+    GeometricDistribution,
+    GumbelDistribution,
+    HalfNormalDistribution,
+    IntegerCategoricalDistribution,
+    LaplaceDistribution,
+    NegativeBinomialDistribution,
     PoissonDistribution,
+    StudentTDistribution,
+    UniformDistribution,
+    WeibullDistribution,
 )
 
 
@@ -632,6 +645,254 @@ class ParameterPosteriorTestCase(unittest.TestCase):
                     self.assertAlmostEqual(a, b, places=8)
             else:
                 self.assertAlmostEqual(theta, bridge.initial_theta, places=8)
+
+
+class GenericParameterBridgeTestCase(unittest.TestCase):
+    """Real posterior-sampling scenarios for families reachable only through the generic
+    declaration-driven bridge (``_generic_declared_bridge`` in ``parameter_bridge.py``), not one
+    of the 7 hand-tuned branches in ``build_parameter_bridge``. Each test fits an independent
+    reference -- the generalized-EM ``optimize()`` MLE, or (for Binomial, where ``optimize()``
+    also estimates the trial count ``n``) a closed-form formula -- and checks the MCMC posterior
+    mean agrees with it within a comfortable multiple of the posterior's own standard error, plus
+    domain-validity checks (positivity, unit interval, simplex). This is meant to catch a wrong
+    Jacobian sign or a wrong reparameterization, not just confirm dispatch doesn't raise."""
+
+    def test_weibull_shape_scale_posterior_matches_mle(self):
+        truth = WeibullDistribution(2.0, 3.0)
+        data = truth.sampler(1).sample(800)
+        fitted = optimize(data, truth.estimator(), max_its=100)
+
+        result = sample_parameter_posterior(
+            WeibullDistribution(1.0, 1.0),
+            data,
+            prior=None,
+            sampler="mh",
+            steps=5000,
+            burn_in=2000,
+            seed=27,
+            proposal=RandomWalkProposal(scale=[0.05, 0.05]),
+        )
+        shapes = np.asarray([t["shape"] for t in result.samples], dtype=float)
+        scales = np.asarray([t["scale"] for t in result.samples], dtype=float)
+        self.assertTrue(np.all(shapes > 0.0))
+        self.assertTrue(np.all(scales > 0.0))
+        self.assertLess(abs(float(shapes.mean()) - fitted.shape), 6.0 * float(shapes.std()))
+        self.assertLess(abs(float(scales.mean()) - fitted.scale), 6.0 * float(scales.std()))
+
+    def test_student_t_df_loc_scale_posterior_matches_mle(self):
+        truth = StudentTDistribution(6.0, 1.0, 2.0)
+        data = truth.sampler(2).sample(1500)
+        fitted = optimize(data, truth.estimator(), max_its=100)
+
+        result = sample_parameter_posterior(
+            StudentTDistribution(3.0, 0.0, 1.0),
+            data,
+            prior=None,
+            sampler="mh",
+            steps=5000,
+            burn_in=2000,
+            seed=22,
+            proposal=RandomWalkProposal(scale=[0.05, 0.05, 0.05]),
+        )
+        dfs = np.asarray([t["df"] for t in result.samples], dtype=float)
+        locs = np.asarray([t["loc"] for t in result.samples], dtype=float)
+        scales = np.asarray([t["scale"] for t in result.samples], dtype=float)
+        self.assertTrue(np.all(dfs > 0.0))
+        self.assertTrue(np.all(scales > 0.0))
+        self.assertLess(abs(float(dfs.mean()) - fitted.df), 6.0 * float(dfs.std()))
+        self.assertLess(abs(float(locs.mean()) - fitted.loc), 6.0 * float(locs.std()))
+        self.assertLess(abs(float(scales.mean()) - fitted.scale), 6.0 * float(scales.std()))
+
+    def test_laplace_posterior_matches_mle(self):
+        truth = LaplaceDistribution(1.0, 2.0)
+        data = truth.sampler(3).sample(800)
+        fitted = optimize(data, truth.estimator(), max_its=100)
+
+        result = sample_parameter_posterior(
+            LaplaceDistribution(0.0, 1.0), data, prior=None, sampler="mh", steps=4000, burn_in=2000, seed=29
+        )
+        mus = np.asarray([t["mu"] for t in result.samples], dtype=float)
+        bs = np.asarray([t["b"] for t in result.samples], dtype=float)
+        self.assertTrue(np.all(bs > 0.0))
+        self.assertLess(abs(float(mus.mean()) - fitted.mu), 6.0 * float(mus.std()))
+        self.assertLess(abs(float(bs.mean()) - fitted.b), 6.0 * float(bs.std()))
+
+    def test_gumbel_posterior_matches_mle(self):
+        truth = GumbelDistribution(0.0, 1.5)
+        data = truth.sampler(4).sample(800)
+        fitted = optimize(data, truth.estimator(), max_its=100)
+
+        result = sample_parameter_posterior(
+            GumbelDistribution(1.0, 1.0), data, prior=None, sampler="mh", steps=4000, burn_in=2000, seed=28
+        )
+        locs = np.asarray([t["loc"] for t in result.samples], dtype=float)
+        scales = np.asarray([t["scale"] for t in result.samples], dtype=float)
+        self.assertTrue(np.all(scales > 0.0))
+        self.assertLess(abs(float(locs.mean()) - fitted.loc), 6.0 * float(locs.std()))
+        self.assertLess(abs(float(scales.mean()) - fitted.scale), 6.0 * float(scales.std()))
+
+    def test_geometric_posterior_matches_mle(self):
+        truth = GeometricDistribution(0.3)
+        data = truth.sampler(5).sample(800)
+        fitted = optimize(data, truth.estimator(), max_its=100)
+
+        result = sample_parameter_posterior(
+            GeometricDistribution(0.5), data, prior=None, sampler="mh", steps=4000, burn_in=2000, seed=30
+        )
+        ps = np.asarray([t["p"] for t in result.samples], dtype=float)
+        self.assertTrue(np.all(ps > 0.0))
+        self.assertTrue(np.all(ps < 1.0))
+        self.assertLess(abs(float(ps.mean()) - fitted.p), 6.0 * float(ps.std()))
+
+    def test_negative_binomial_posterior_matches_mle(self):
+        truth = NegativeBinomialDistribution(4.0, 0.4)
+        data = truth.sampler(6).sample(1500)
+        fitted = optimize(data, truth.estimator(), max_its=100)
+
+        result = sample_parameter_posterior(
+            NegativeBinomialDistribution(2.0, 0.5),
+            data,
+            prior=None,
+            sampler="mh",
+            steps=5000,
+            burn_in=2000,
+            seed=31,
+            proposal=RandomWalkProposal(scale=[0.05, 0.05]),
+        )
+        rs = np.asarray([t["r"] for t in result.samples], dtype=float)
+        ps = np.asarray([t["p"] for t in result.samples], dtype=float)
+        self.assertTrue(np.all(rs > 0.0))
+        self.assertTrue(np.all((ps > 0.0) & (ps < 1.0)))
+        self.assertLess(abs(float(rs.mean()) - fitted.r), 6.0 * float(rs.std()))
+        self.assertLess(abs(float(ps.mean()) - fitted.p), 6.0 * float(ps.std()))
+
+    def test_binomial_posterior_matches_analytic_with_fixed_trial_count(self):
+        # Binomial's n is a non-differentiable (fixed) declared parameter: the bridge must hold
+        # it at the prototype's value rather than sample it, so every rebuilt distribution keeps
+        # n == 20 and the posterior mean of p should track the closed-form flat-prior-on-logit(p)
+        # reference sum(data) / (n * count). optimize() is not used as the reference here because
+        # Binomial's estimator also fits n from data (a much noisier joint problem).
+        truth = BinomialDistribution(0.35, 20)
+        data = truth.sampler(7).sample(800)
+        reference_p = float(np.sum(data)) / (20.0 * len(data))
+
+        result = sample_parameter_posterior(
+            BinomialDistribution(0.5, 20),
+            data,
+            prior=None,
+            sampler="mh",
+            steps=4000,
+            burn_in=2000,
+            seed=26,
+            return_distributions=True,
+        )
+        ps = np.asarray([d.p for d in result.samples], dtype=float)
+        ns = {int(d.n) for d in result.samples}
+        self.assertEqual(ns, {20})  # fixed nuisance parameter never moves
+        self.assertTrue(np.all(ps > 0.0))
+        self.assertTrue(np.all(ps < 1.0))
+        self.assertLess(abs(float(ps.mean()) - reference_p), 0.03)
+
+    def test_dirichlet_posterior_matches_mle(self):
+        truth = DirichletDistribution([2.0, 3.0, 4.0])
+        data = truth.sampler(8).sample(1000)
+        fitted = optimize(data, truth.estimator(), max_its=100)
+
+        result = sample_parameter_posterior(
+            DirichletDistribution([1.0, 1.0, 1.0]),
+            data,
+            prior=None,
+            sampler="mh",
+            steps=5000,
+            burn_in=2000,
+            seed=23,
+            proposal=RandomWalkProposal(scale=[0.04, 0.04, 0.04]),
+        )
+        alphas = np.stack([np.asarray(t["alpha"], dtype=float) for t in result.samples])
+        self.assertTrue(np.all(alphas > 0.0))
+        post_mean = alphas.mean(axis=0)
+        post_std = alphas.std(axis=0)
+        np.testing.assert_array_less(np.abs(post_mean - np.asarray(fitted.alpha)), 6.0 * post_std)
+
+    def test_diagonal_gaussian_posterior_matches_mle(self):
+        truth = DiagonalGaussianDistribution([1.0, -1.0], [1.0, 2.0])
+        data = truth.sampler(9).sample(1000)
+        fitted = optimize(data, truth.estimator(), max_its=100)
+
+        result = sample_parameter_posterior(
+            DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0]),
+            data,
+            prior=None,
+            sampler="mh",
+            steps=5000,
+            burn_in=2000,
+            seed=24,
+            proposal=RandomWalkProposal(scale=[0.05, 0.05, 0.05, 0.05]),
+        )
+        mus = np.stack([np.asarray(t["mu"], dtype=float) for t in result.samples])
+        covars = np.stack([np.asarray(t["covar"], dtype=float) for t in result.samples])
+        self.assertTrue(np.all(covars > 0.0))
+        np.testing.assert_array_less(np.abs(mus.mean(axis=0) - np.asarray(fitted.mu)), 6.0 * mus.std(axis=0))
+        np.testing.assert_array_less(np.abs(covars.mean(axis=0) - np.asarray(fitted.covar)), 6.0 * covars.std(axis=0))
+
+    def test_integer_categorical_posterior_matches_mle(self):
+        truth = IntegerCategoricalDistribution(0, [0.2, 0.3, 0.5])
+        data = truth.sampler(10).sample(1000)
+        fitted = optimize(data, truth.estimator(), max_its=100)
+
+        result = sample_parameter_posterior(
+            IntegerCategoricalDistribution(0, [1.0 / 3, 1.0 / 3, 1.0 / 3]),
+            data,
+            prior=None,
+            sampler="mh",
+            steps=4000,
+            burn_in=2000,
+            seed=25,
+        )
+        p_vecs = np.stack([np.asarray(t["p_vec"], dtype=float) for t in result.samples])
+        self.assertTrue(np.all(p_vecs > 0.0))
+        np.testing.assert_allclose(p_vecs.sum(axis=1), 1.0, atol=1.0e-9)
+        post_mean = p_vecs.mean(axis=0)
+        post_std = p_vecs.std(axis=0)
+        np.testing.assert_array_less(np.abs(post_mean - np.asarray(fitted.p_vec)), 6.0 * post_std)
+
+    def test_half_normal_posterior_matches_mle(self):
+        truth = HalfNormalDistribution(2.0)
+        data = truth.sampler(11).sample(800)
+        fitted = optimize(data, truth.estimator(), max_its=100)
+
+        result = sample_parameter_posterior(
+            HalfNormalDistribution(1.0), data, prior=None, sampler="mh", steps=4000, burn_in=2000, seed=32
+        )
+        sigmas = np.asarray([t["sigma"] for t in result.samples], dtype=float)
+        self.assertTrue(np.all(sigmas > 0.0))
+        self.assertLess(abs(float(sigmas.mean()) - fitted.sigma), 6.0 * float(sigmas.std()))
+
+    def test_return_distributions_rebuilds_generic_family(self):
+        truth = WeibullDistribution(2.0, 3.0)
+        data = truth.sampler(35).sample(100)
+        result = sample_parameter_posterior(
+            WeibullDistribution(1.0, 1.0),
+            data,
+            sampler="mh",
+            steps=50,
+            burn_in=50,
+            seed=35,
+            return_distributions=True,
+            proposal=RandomWalkProposal(scale=[0.05, 0.05]),
+        )
+        self.assertEqual(len(result.samples), 50)
+        for dist in result.samples:
+            self.assertIsInstance(dist, WeibullDistribution)
+            self.assertGreater(dist.shape, 0.0)
+            self.assertGreater(dist.scale, 0.0)
+
+    def test_declared_family_with_coupled_bound_still_raises(self):
+        # UniformDistribution declares a coupled `greater_than:low` bound on `high`; the generic
+        # bridge deliberately excludes coupled bounds (see build_parameter_bridge's docstring),
+        # so this must still raise -- a regression guard against silently mis-dispatching it.
+        with self.assertRaisesRegex(NotImplementedError, "does not support"):
+            build_parameter_bridge(UniformDistribution(0.0, 1.0))
 
 
 class ConjugatePosteriorTestCase(unittest.TestCase):
