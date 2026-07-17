@@ -14,8 +14,8 @@ Exploratory ``mixle.experimental`` code.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
 
 import numpy as np
 
@@ -99,7 +99,7 @@ def discover_law(
 
     # interleaved holdout: every k-th point spans the whole domain, so validation isn't just extrapolation.
     k = max(2, int(round(1.0 / max(holdout_fraction, 1e-6))))
-    is_holdout = (np.arange(n_samples) % k == 1)
+    is_holdout = np.arange(n_samples) % k == 1
     x_tr, y_tr = xs[~is_holdout], ys[~is_holdout]
     x_ho, y_ho = xs[is_holdout], ys[is_holdout]
 
@@ -125,8 +125,13 @@ def discover_law(
     results.sort(key=lambda r: r[2], reverse=True)  # rank by the referee: held-out R^2
     best_name, best_train, best_holdout, best_params = results[0]
     return DiscoveredLaw(
-        form=best_name, expression=CANDIDATE_FORMS[best_name][2], params=best_params,
-        train_r2=round(best_train, 4), holdout_r2=round(best_holdout, 4),
-        n_train=len(x_tr), n_holdout=len(x_ho), passed=best_holdout >= min_holdout_r2,
+        form=best_name,
+        expression=CANDIDATE_FORMS[best_name][2],
+        params=best_params,
+        train_r2=round(best_train, 4),
+        holdout_r2=round(best_holdout, 4),
+        n_train=len(x_tr),
+        n_holdout=len(x_ho),
+        passed=best_holdout >= min_holdout_r2,
         ranking=[(n, round(h, 4)) for n, _t, h, _p in results],
     )
