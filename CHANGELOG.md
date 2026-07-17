@@ -139,6 +139,13 @@ with a regression test that fails on the unfixed code):
   describing a natural/scoring parameterization instead of the constructor's (e.g. von Mises), or
   an exotic constraint with no generic reparameterization yet (a covariance matrix, a coupled
   bound) still raise a clear `NotImplementedError` rather than silently guessing (F-5; #510).
+- `tests/base_dist_test.py` now exercises 40 of its 41 base-distribution families end to end (was
+  1 of 41 -- every `dists.append(...)` but `TreeHiddenMarkovModelDistribution`'s had been commented
+  out since at latest the pysp->mixle rename); fixed the stale-argument constructor calls this
+  uncovered plus a genuine `IntegerChowLiuTreeDistribution.__str__` bug (per-feature table strings
+  were never joined and lost their shape via a blind `.flatten()`, so `eval(str(dist))` could not
+  reconstruct a real instance), and the README's overclaim that this file exercises "each family"
+  end to end (F-3; #516).
 
 ### Changed
 

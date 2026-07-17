@@ -67,7 +67,7 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
 
     def __init__(
         self,
-        dependency_list: list[tuple[int, int | None]],
+        dependency_list: list[int | None],
         conditional_log_densities: Sequence[float] | np.ndarray,
         feature_order: Sequence[int] | None = None,
         name: str | None = None,
@@ -75,8 +75,8 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
         """Create an integer Chow-Liu tree distribution.
 
         Args:
-            dependency_list (List[Tuple[int, Optional[int]]]): List of Tuples containing node id and parent dependence
-                if any dependence is present.
+            dependency_list (List[Optional[int]]): Parent feature id for each feature in feature_order, or None
+                for the (exactly one) root feature with no parent.
             conditional_log_densities (Union[Sequence[float], np.ndarray]): Conditional log densities for each features
                 dependency split.
             feature_order (Optional[Sequence[int]]): Ordering of features. If None, ordering is assumed as entered.
@@ -84,8 +84,8 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
 
         Attributes:
             feature_order (Sequence[int]): Ordering of features. If None, ordering is assumed as entered.
-            dependency_list (List[ Tuple[int, Tuple[int, Optional[int]]]]): List of Tuples containing features
-                order id and Tuple of feature and feature dep.
+            dependency_list (List[ Tuple[int, Optional[int]]]): List of Tuples containing each feature's
+                order id and its parent id (or None for the root).
             conditional_log_densities (Union[Sequence[float], np.ndarray]): Conditional log densities for each features
                 dependency split.
             conditional_densities (np.ndarray): Conditional densities as numpy array.
@@ -95,16 +95,28 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
         """
         self.feature_order = range(len(dependency_list)) if feature_order is None else feature_order
         self.dependency_list = list(zip(self.feature_order, dependency_list))
-        self.conditional_log_densities = conditional_log_densities
+        # Normalized to ndarrays (mirroring MultivariateGaussianDistribution's np.asarray convention) so a
+        # feature table is always 2-d-indexable regardless of whether the caller passed lists or arrays --
+        # log_density/seq_log_density index these with `table[parent_val, child_val]`, which raises "list
+        # indices must be integers or slices, not tuple" on a plain (unconverted) nested list.
+        self.conditional_log_densities = [np.asarray(u) for u in conditional_log_densities]
         self.conditional_densities = [np.exp(u) for u in conditional_log_densities]
         self.num_features = len(dependency_list)
         self.name = name
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the distribution."""
+
+        def _fmt(u: np.ndarray) -> str:
+            # Recursively render as a bracketed literal that preserves shape (1-d root tables vs.
+            # 2-d parent/child tables), so eval(str(dist)) reconstructs the same table shapes.
+            if u.ndim <= 1:
+                return "[" + ",".join(map(str, u)) + "]"
+            return "[" + ",".join(_fmt(row) for row in u) + "]"
+
         f1 = ",".join([str(u[1]) for u in self.dependency_list])
         f3 = ",".join([str(u[0]) for u in self.dependency_list])
-        f2 = ["[" + ",".join(map(str, u.flatten())) + "]" for u in self.conditional_log_densities]
+        f2 = ",".join(_fmt(u) for u in self.conditional_log_densities)
         f4 = repr(self.name)
         return "IntegerChowLiuTreeDistribution([%s], [%s], feature_order=[%s], name=%s)" % (f1, f2, f3, f4)
 
