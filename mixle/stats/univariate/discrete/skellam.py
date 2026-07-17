@@ -242,7 +242,7 @@ class SkellamSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> int | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> int | np.ndarray:
         """Draw ``size`` iid Skellam samples (a single int if ``size`` is None)."""
         n1 = self.rng.poisson(lam=self.dist.mu1, size=size)
         n2 = self.rng.poisson(lam=self.dist.mu2, size=size)

@@ -191,7 +191,7 @@ class NormalWishartSampler(DistributionSampler):
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
-    def sample(self, size=None) -> Any:
+    def sample(self, size=None, *, batched: bool = True) -> Any:
         """Draw size samples (a single (mu, Lambda) pair when size is None).
 
         Lambda is drawn from the Wishart factor, then mu from

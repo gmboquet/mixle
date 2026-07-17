@@ -292,7 +292,7 @@ class LogSeriesSampler(DistributionSampler):
         self.dist = dist
         self.seed = seed
 
-    def sample(self, size: int | None = None) -> int | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> int | np.ndarray:
         """Draw ``size`` iid positive integers (an int when ``size`` is None)."""
         rv = self.rng.logseries(self.dist.p, size=size)
         return int(rv) if size is None else rv

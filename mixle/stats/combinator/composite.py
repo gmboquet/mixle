@@ -709,7 +709,7 @@ class CompositeSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist_samplers = [d.sampler(seed=self.rng.randint(maxrandint)) for d in dist.dists]
 
-    def sample(self, size: int | None = None) -> list[tuple[Any, ...]] | tuple[Any, ...]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[tuple[Any, ...]] | tuple[Any, ...]:
         """Generate independent samples from a CompositeDistribution.
 
         If size is None, draw one sample and return as Tuple of length = len(dists). If size > 0,

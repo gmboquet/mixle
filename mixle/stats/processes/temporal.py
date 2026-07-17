@@ -150,7 +150,7 @@ class PeriodicTimeSampler(DistributionSampler):
         self.dist = dist
         self.von_mises_sampler = dist.von_mises.sampler(seed)
 
-    def sample(self, size: int | None = None) -> np.ndarray | float:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray | float:
         """Draw cycle position(s) in seconds, ``[0, period_seconds)`` (the phase mapped back to time)."""
         phi = self.von_mises_sampler.sample(size)
         secs = np.mod(np.asarray(phi), 2.0 * np.pi) / (2.0 * np.pi) * self.dist.period_s

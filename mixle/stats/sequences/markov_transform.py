@@ -326,7 +326,7 @@ class MarkovTransformSampler(DistributionSampler):
         # self.flat_sampler  = np.random.RandomState(self.rng.tomaxint())
         self.size_sampler = self.dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw 'size' iid observations from the Markov transform model.
 
         Each observation is a tuple (S1, S2, S3) of lists of (value, count) pairs. If size is None a single

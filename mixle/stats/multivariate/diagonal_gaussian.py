@@ -441,7 +441,7 @@ class DiagonalGaussianSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> Sequence[np.ndarray] | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Sequence[np.ndarray] | np.ndarray:
         """Draw iid samples from the diagonal Gaussian distribution.
 
         Args:

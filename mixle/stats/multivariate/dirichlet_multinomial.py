@@ -154,7 +154,7 @@ class DirichletMultinomialSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw one count vector or a stack of iid count vectors."""
         d = self.dist
         n_draws = 1 if size is None else int(size)

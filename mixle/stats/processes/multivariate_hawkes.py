@@ -202,7 +202,7 @@ class MultivariateHawkesProcessSampler(DistributionSampler):
                 s[m] += 1.0
         return events
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw one marked-event realization, or ``size`` iid realizations."""
         if size is None:
             return self._sample_one()

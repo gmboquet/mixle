@@ -166,7 +166,7 @@ class KentSampler(DistributionSampler):
             filled += k
         return out
 
-    def sample(self, size: int | None = None) -> Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one unit vector or ``size`` iid unit vectors."""
         if size is None:
             return self._batch(1)[0]
