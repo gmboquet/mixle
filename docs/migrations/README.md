@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Migration index
 
 Document ID: CORE-DOC-MIGRATIONS-001

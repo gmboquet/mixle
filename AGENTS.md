@@ -43,10 +43,10 @@ targets release 0.8.0 on release/0.8.0.
 - Project purpose and boundaries: docs/charter.md
 - Architecture and failure modes: docs/architecture.md
 - Public contracts and compatibility: docs/contracts.md
-- Development and testing: docs/development.md and docs/testing.md
+- Development and testing: docs/development.rst and docs/testing.md
 - Security and scientific validity: docs/security.md and
   docs/scientific-validity.md
-- Operations, releases, and migrations: docs/operations.md,
+- Operations, releases, and migrations: docs/operations.rst,
   docs/releases.md, and docs/migrations/
 - User guides and generated API reference: docs/index.rst and docs/api/
 
