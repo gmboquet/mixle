@@ -8,6 +8,11 @@ fp <= 256 prefer the vectorized ``extended`` path.
 
 So: spectrum coverage is complete (fp1..fp1024+), with the fast pure-numpy backends below fp256 and the
 correct MPFR backend above it.
+
+Both backends are optional extras (neither is a base dependency, per worklist P2.2): install the faster
+one with ``pip install mixle[gmpy2]``, or the pure-Python fallback with ``pip install mixle[highprec]``.
+With neither installed, :func:`available` returns False and any call requiring fp>256 raises a clear
+``RuntimeError`` naming the ``extended`` fallback -- see :func:`_require`.
 """
 
 from __future__ import annotations
@@ -16,12 +21,12 @@ from typing import Any
 
 import numpy as np
 
-try:  # gmpy2 (MPFR) is the preferred backend; mpmath is the pure-Python fallback.
+try:  # gmpy2 (MPFR) is the preferred backend (pip install mixle[gmpy2]).
     import gmpy2
 
     _BACKEND = "gmpy2"
 except ImportError:  # pragma: no cover - environment dependent
-    try:
+    try:  # mpmath is the pure-Python fallback (pip install mixle[highprec]).
         import mpmath
 
         _BACKEND = "mpmath"

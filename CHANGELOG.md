@@ -52,6 +52,11 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 - Sequential-design acquisition budgets reject invalid values and explicitly count the initial fit;
   root lazy imports preserve nested dependency failures.
 - Ordinary Pytest collection recognizes both supported test filename conventions.
+- `mpmath` moves from a base runtime dependency to the new `highprec` extra (`pip install
+  mixle[highprec]`); its one non-test consumer (`mixle.engines.highprec`) already treated it as an
+  optional fallback behind `gmpy2`, so forcing it into every install left the module's `_BACKEND=None`
+  degrade path practically unreachable and contradicted the base-install optional-dependency convention
+  (worklist P2.2).
 
 ### Fixed
 
