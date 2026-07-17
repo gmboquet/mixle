@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-![python](https://img.shields.io/badge/python-3.10%2B-blue)
+![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![tests](https://img.shields.io/badge/tests-5000%2B-brightgreen)
 [![docs](https://img.shields.io/badge/docs-gmboquet.github.io%2Fmixle-blue)](https://gmboquet.github.io/mixle/)

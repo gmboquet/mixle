@@ -11,22 +11,23 @@ pip install -e ".[test,lint,docs]"  # add other extras (torch, numba, spark, ...
 git config core.hooksPath .githooks # auto-format + lint-fix staged files before every commit
 ```
 
-Python 3.10+ is required; CI tests against 3.10, 3.11, and 3.12.
+Python 3.11+ is required; the release matrix tests Python 3.11 and 3.12.
 
 ## Running tests
 
 ```sh
-pytest                                        # the fast gate (default addopts): < 30s
-pytest -m "not optional and not benchmark"    # the full non-optional suite (what CI's `full` job runs)
-pytest -m "optional or torch or numba or jax" # optional-extras tests (needs the matching extras installed)
-pytest path/to/some_test.py -n0 -m ""         # a single file, serial, ignoring the fast-gate filter
-pytest --cov --cov-report=term-missing        # with coverage
+# Local work: select the affected node and enforce a 30-second deadline.
+perl -e 'alarm shift; exec @ARGV' 30 python -m pytest -q -n0 -m "" path/to/some_test.py::test_name
+
+# Hosted checks run the broader fast, full, packaging, and environment matrix.
+python -m pytest -m fast -n auto
+python -m pytest -m "not optional and not benchmark" -n auto
 ```
 
 New tests default to the `fast` gate automatically (see `mixle/tests/conftest.py`) unless they need a
-heavier tag (`slow`, `optional`, `torch`, `numba`, `jax`, `benchmark`, ...) — tag anything that takes
-more than a couple seconds or needs an optional dependency, so the default `pytest` invocation stays
-fast for everyone.
+heavier tag (`slow`, `optional`, `torch`, `numba`, `jax`, `benchmark`, ...). Local
+diagnostics must remain narrowly selected and terminate at 30 seconds; broader suites belong in hosted
+checks.
 
 ## Linting and formatting
 
@@ -46,13 +47,12 @@ commit.
 - Write the commit/PR title and body around *why*, not just *what*; the diff already shows what
   changed.
 - Include a test plan: what you ran, what passed, what you narrowed the test selection to and why.
-- Target `main` unless you're told otherwise; release branches (`release/X.Y.Z-*`) are used for
-  large in-flight bodies of work and merged back per the checklist in
-  [`release-checklists/`](release-checklists/README.md).
-- Update `CHANGELOG.md`'s `[Unreleased]` section for any user-visible change (new public API, fixed
+- Resolve the active target from the Mixle status repository. Current 0.8.0 work targets
+  `release/0.8.0` and milestone `0.8.0`.
+- Update `CHANGELOG.md`'s `[0.8.0] — Unreleased` section for any user-visible change (new public API, fixed
   bug, behavior change). Purely internal refactors with no visible effect don't need an entry.
-- CI must be green (lint, fast, full) before merge; the `optional` and `security` jobs are informative
-  but not currently required.
+- Required hosted checks must be green before merge. Optional-backend and security evidence is required
+  when the changed surface or release gate makes it applicable.
 
 ## Deprecation policy
 
