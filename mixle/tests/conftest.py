@@ -460,6 +460,14 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "distill_methods_test.py": ("torch", "integration", "slow"),
     "doe_amplify_test.py": ("doe", "stochastic", "slow"),
     "duplicate_body_scan_test.py": ("integration", "slow"),
+    # Network-gated real-data flagship (worklist F10.2): fetches the real sunspot series and, when
+    # hmmlearn is installed, refits an independent HMM baseline; a seed-stability sweep and a
+    # runtime/memory characterization each do several more real EM fits on top of that. Explicitly
+    # triaged (matching real_receipt_banking77_smoke_test.py, F10.3's sibling flagship) rather than
+    # relying solely on skipUnless/skipTest, so it stays out of the default fast gate even in an
+    # environment where hmmlearn happens to be installed. CI's optional lane still runs it in full via
+    # its own explicit `-m ""` invocation.
+    "flagship_temporal_sunspots_smoke_test.py": ("optional", "slow"),
     "frontier_family_showcase_smoke_test.py": ("torch", "integration", "slow"),
     "geoscience_inversion_report_test.py": ("integration", "slow"),
     "hmm_steady_state_test.py": ("hmm", "slow"),
