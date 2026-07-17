@@ -127,6 +127,18 @@ with a regression test that fails on the unfixed code):
   Verified against independent numerical integration/Monte Carlo, not only scipy: scipy's own
   generic `entropy()` silently returns a wrong value ("sum did not converge") for NegativeBinomial
   and LogSeries at strongly over-dispersed parameters (F-9; #512).
+- The MCMC parameter-posterior bridge (`sample_parameter_posterior`, reachable through
+  `inference.posterior(..., over="params")`) hardcoded exactly 7 scalar families
+  (`mcmc/parameter_bridge.py:287-290`) and raised `NotImplementedError` for every other
+  distribution, despite the README reading as general ("a `prior=` is the only switch"). It now
+  dispatches generically against each family's existing
+  `mixle.stats.compute.declarations.DistributionDeclaration` -- the same per-parameter
+  `constraint`/`differentiable` metadata `mixle.inference.gradient_fit` already uses for autograd
+  fitting -- covering 33 families total (the 7 original plus 26 more, spanning continuous,
+  discrete, and vector/multivariate families). Families with no declaration, a declaration
+  describing a natural/scoring parameterization instead of the constructor's (e.g. von Mises), or
+  an exotic constraint with no generic reparameterization yet (a covariance matrix, a coupled
+  bound) still raise a clear `NotImplementedError` rather than silently guessing (F-5; #510).
 
 ### Changed
 
