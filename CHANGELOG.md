@@ -66,6 +66,11 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   despite appearing in `mixle.utils.__all__` and `dir(mixle.utils)`. The public-API drift test now
   resolves every declared dynamic-package name via `getattr` instead of only diffing `__all__` as
   strings, so a stale export like this cannot pass silently again.
+- `mixle.inference.structure`'s `dependency_gain`, `learn_structure`, and `learn_mixture_structure`
+  (via `_init_matrix`) crashed with `TypeError: '<' not supported between instances of 'NoneType' and
+  'str'` whenever a discrete parent/child column mixed a missing-value sentinel (`None`) with
+  str/int/bool levels -- the same class of bug already fixed in `bayesian_network.py`'s
+  `learn_bayesian_network`; all three sites now sort on `key=repr`.
 
 ### Fixed
 
