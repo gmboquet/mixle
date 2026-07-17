@@ -30,5 +30,5 @@ invariant and tolerance.
 
 Pull requests targeting 0.8.0 identify the active release, work ID, change ID,
 requirements, focused validation, and limitations. The canonical requirement,
-work, change, evidence, capability, and release records are maintained under
-/Users/grantboquet/mixle/status.
+work, change, evidence, capability, and release records are maintained in the
+Mixle status repository.
