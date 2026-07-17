@@ -163,11 +163,22 @@ class Registry:
             raise KeyError(f"{name!r} has no version {version!r}")
         return version
 
-    def get(self, name: str, version: str = "latest") -> tuple[Any, dict | None]:
-        """Load ``(model, header)`` for a version (``"latest"`` = highest-numbered)."""
+    def get(self, name: str, version: str = "latest", *, trust_code: bool = False) -> tuple[Any, dict | None]:
+        """Load ``(model, header)`` for a version (``"latest"`` = highest-numbered).
+
+        A registered model containing a NeuralLeaf-family component embeds its weights as a pickle
+        blob (see :mod:`mixle.models._neural_serial`); deserializing that executes code, so ``get``
+        requires ``trust_code=True`` for such an entry -- trust the registry root, not just the JSON
+        extension. A pure-statistical entry loads either way.
+        """
         version = self._resolve_version(name, version)
         with open(os.path.join(self._model_dir(name, create=False), version + ".json")) as f:
             payload = json.load(f)
+        if trust_code:
+            from mixle.utils.serialization import trusted_deserialization
+
+            with trusted_deserialization():
+                return from_serializable(payload["model"]), payload.get("header")
         return from_serializable(payload["model"]), payload.get("header")
 
     def header(self, name: str, version: str = "latest") -> dict | None:
@@ -189,13 +200,16 @@ class Registry:
         with open(os.path.join(self._dir(name), _safe_segment(alias, "alias") + ".alias"), "w") as f:
             f.write(version)
 
-    def current(self, name: str, alias: str = "production") -> tuple[Any, dict | None]:
-        """Load the model an ``alias`` points at (falls back to ``latest`` if the alias is unset)."""
+    def current(self, name: str, alias: str = "production", *, trust_code: bool = False) -> tuple[Any, dict | None]:
+        """Load the model an ``alias`` points at (falls back to ``latest`` if the alias is unset).
+
+        See :meth:`get` -- ``trust_code`` is required in the same way and for the same reason.
+        """
         p = os.path.join(self._model_dir(name, create=False), _safe_segment(alias, "alias") + ".alias")
         # the version READ FROM the alias file is still resolved against the known version list by get(),
         # so a tampered alias file cannot traverse either.
         version = open(p).read().strip() if os.path.exists(p) else "latest"
-        return self.get(name, version)
+        return self.get(name, version, trust_code=trust_code)
 
     def verify_chain(self, name: str) -> bool:
         """Verify the persisted checkpoint lineage for ``name`` (see :meth:`checkpointer`).
