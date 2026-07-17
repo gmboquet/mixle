@@ -93,6 +93,13 @@ with a regression test that fails on the unfixed code):
   entropies filled across the univariate catalog; `mixle.ppl` exports `waic`/`loo`;
   `ScheduledHMM.estimator()` restores the prototype convention (F-1, F-2, F-4, F-6, F-7, F-9, F-11,
   F-12; #434).
+- `tests/base_dist_test.py` now exercises 40 of its 41 base-distribution families end to end (was
+  1 of 41 -- every `dists.append(...)` but `TreeHiddenMarkovModelDistribution`'s had been commented
+  out since at latest the pysp->mixle rename); fixed the stale-argument constructor calls this
+  uncovered plus a genuine `IntegerChowLiuTreeDistribution.__str__` bug (per-feature table strings
+  were never joined and lost their shape via a blind `.flatten()`, so `eval(str(dist))` could not
+  reconstruct a real instance), and the README's overclaim that this file exercises "each family"
+  end to end (F-3; #512).
 
 ### Changed
 
