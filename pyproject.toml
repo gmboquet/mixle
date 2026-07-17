@@ -192,7 +192,7 @@ forbidden_modules = [
 
 [tool.pytest.ini_options]
 testpaths = ["mixle/tests"]
-python_files = ["*_test.py"]
+python_files = ["*_test.py", "test_*.py"]
 python_classes = ["*Test", "*TestCase"]
 python_functions = ["test_*"]
 # Fast + parallel by default: plain `pytest` runs the `fast` gate under `-n auto` in a few minutes on a
