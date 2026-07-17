@@ -38,10 +38,14 @@ classifiers = [
 # and scipy < 1.13 loses von Mises / wrapped Cauchy normalization precision (scipy >=1.16 also pairs
 # with numpy 2.4). These pins move together and are enforced by the `min-versions` CI job
 # (constraints-min.txt on the oldest supported Python). newer majors are allowed.
+# mpmath is deliberately NOT here: its one non-test consumer (mixle.engines.highprec) already treats it
+# as an optional fallback behind gmpy2 (try/except ImportError, degrading to `_BACKEND=None`), so forcing
+# it into every install contradicted the base-install optional-dependency convention this project
+# otherwise enforces (worklist P2.2; mixle/tests/optional_import_guard_test.py). See the `highprec` extra
+# below -- `mpmath>=1.3` moved there with its floor unchanged.
 dependencies = [
     "numpy>=2.4",
     "scipy>=1.16",
-    "mpmath>=1.3",
 ]
 
 [project.optional-dependencies]
@@ -71,6 +75,11 @@ data = ["pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "pymongo>=4.3", "fsspec
 grammar = ["networkx>=3.0"]
 # GMP-backed (FFT) big-integer multiply for the structural count-DP's large histogram convolutions.
 gmpy2 = ["gmpy2>=2.1"]
+# mixle.engines.highprec's arbitrary-precision (fp>256) tail: the pure-Python MPFR-equivalent fallback
+# used when the faster `gmpy2` extra above is absent. Either extra makes `highprec.available()` True;
+# with neither installed the module degrades to `_BACKEND=None` (RuntimeError only if fp>256 is actually
+# requested -- the pure-numpy `mixle.engines.extended` path still covers up to fp256 either way).
+highprec = ["mpmath>=1.3"]
 spark = ["pyspark>=3.4"]
 dask = ["dask>=2023.5.0", "distributed>=2023.5.0"]
 # mixle.utils.parallel.ray_data's "ray" encoded-data backend (map/fold sufficient statistics over a
