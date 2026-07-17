@@ -148,6 +148,19 @@ def ensure_pysp_serialization_registry() -> None:
         # Optional: the core stats registry above is enough for pure-stats models.
         pass
 
+    # Heterogeneous Bayesian networks (HeterogeneousBayesianNetwork + its per-child factor classes) live
+    # in mixle.inference.bayesian_network -- same opt-in mechanism, same reason: optimize(data)'s automatic
+    # structure-discovery path (F10.1) returns one of these, and it must survive a save/reload round trip
+    # through the same safe json artifact path as everything else, not fall back to raw pickle.
+    try:
+        bn = importlib.import_module("mixle.inference.bayesian_network")
+        for _, cls in inspect.getmembers(bn, inspect.isclass):
+            if cls.__module__ == bn.__name__ and getattr(cls, "__pysp_serializable__", False):
+                register_serializable_class(cls)
+    except Exception:  # noqa: BLE001
+        # Optional: the core stats registry above is enough for pure-stats models.
+        pass
+
     _REGISTRY_READY = True
 
 

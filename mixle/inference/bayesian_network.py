@@ -34,6 +34,8 @@ _LOG_2PI = float(np.log(2.0 * np.pi))
 class _MarginalFactor:
     """A root field: ``P(x_i)`` under a fitted marginal distribution."""
 
+    __pysp_serializable__ = True
+
     def __init__(self, child: int, dist: Any) -> None:
         self.child = child
         self.parents: list[int] = []
@@ -52,6 +54,14 @@ class _MarginalFactor:
     def n_params(self) -> int:
         return _num_free_params(self.dist)
 
+    def describe(self, field_names: Sequence[str] | None = None) -> dict[str, Any]:
+        """A real summary of the fitted root marginal: its family/parameters via ``str()``, not a placeholder."""
+        return {"field": _name(self.child, field_names), "kind": "marginal", "parents": [], "fitted": str(self.dist)}
+
+
+def _name(i: int, field_names: Sequence[str] | None) -> str:
+    return str(field_names[i]) if field_names is not None else str(i)
+
 
 def _design_row(parents: list[int], values: Sequence[Any], discrete: dict, vec_dims: dict) -> np.ndarray:
     """A design row from a record's parent values: vector parents contribute all components, discrete
@@ -68,8 +78,30 @@ def _design_row(parents: list[int], values: Sequence[Any], discrete: dict, vec_d
     return np.asarray(feats, dtype=np.float64)
 
 
+def _design_feature_names(
+    parents: list[int], discrete: dict[int, list[Any]], vec_dims: dict[int, int], field_names: Sequence[str] | None
+) -> list[str]:
+    """Feature-column names for a fitted ``coef``/``weights`` vector, in the exact order :func:`_design_row`
+    builds it -- so a :meth:`describe` report can label each coefficient by the parent (and, for a
+    multi-level categorical or vector parent, the specific level/component) it belongs to, not just a bare
+    index. Mirrors ``_design_row``'s three branches one-for-one, plus the trailing intercept term."""
+    names: list[str] = []
+    for p in parents:
+        pname = _name(p, field_names)
+        if p in vec_dims:
+            names.extend(f"{pname}[{k}]" for k in range(vec_dims[p]))
+        elif p in discrete:
+            names.extend(f"{pname}={lv!r}" for lv in discrete[p][1:])  # drop-first, matches _design_row
+        else:
+            names.append(pname)
+    names.append("intercept")
+    return names
+
+
 class _VectorMarginalFactor:
     """A vector-valued field's marginal: a multivariate Gaussian (closed-form mean + covariance)."""
+
+    __pysp_serializable__ = True
 
     def __init__(self, child: int, mean: np.ndarray, cov: np.ndarray) -> None:
         self.child = child
@@ -94,6 +126,18 @@ class _VectorMarginalFactor:
 
     def sample(self, x: list, rng: np.random.RandomState) -> np.ndarray:
         return self.mean + self._chol @ rng.randn(self.mean.shape[0])
+
+    def describe(self, field_names: Sequence[str] | None = None) -> dict[str, Any]:
+        """The fitted multivariate-Gaussian marginal: mean vector and the covariance diagonal (variance
+        per component) -- enough to see each component's scale without dumping the full covariance matrix."""
+        return {
+            "field": _name(self.child, field_names),
+            "kind": "vector-marginal",
+            "parents": [],
+            "dim": int(self.mean.shape[0]),
+            "mean": [round(float(v), 6) for v in self.mean],
+            "variance": [round(float(v), 6) for v in np.diag(self.cov)],
+        }
 
     @classmethod
     def fit(cls, child: int, cols: list[list[Any]], weights: np.ndarray | None = None):
@@ -121,6 +165,8 @@ class _VectorCLGFactor:
     Closed-form multivariate least squares for ``[W|b]`` and a residual covariance for ``Sigma`` --
     the vector-valued generalization of :class:`_LinearGaussianFactor`, so an embedding field can be
     driven by (or drive) any other field in the graph."""
+
+    __pysp_serializable__ = True
 
     def __init__(self, child, parents, discrete, vec_dims, coef, cov) -> None:
         self.child = child
@@ -183,9 +229,24 @@ class _VectorCLGFactor:
         d = self.coef.shape[1]
         return int(self.coef.size) + d * (d + 1) // 2
 
+    def describe(self, field_names: Sequence[str] | None = None) -> dict[str, Any]:
+        """The fitted multivariate linear-Gaussian edge: ``coef`` labeled by feature name (rows) and output
+        component index (columns), plus the residual variance per output component (the diagonal of ``cov``)."""
+        feat_names = _design_feature_names(self.parents, self.discrete, self.vec_dims, field_names)
+        return {
+            "field": _name(self.child, field_names),
+            "kind": "vector-linear-gaussian",
+            "parents": [_name(p, field_names) for p in self.parents],
+            "output_dim": int(self.coef.shape[1]),
+            "coefficients": {n: [round(float(v), 6) for v in row] for n, row in zip(feat_names, self.coef)},
+            "residual_variance": [round(float(v), 6) for v in np.diag(self.cov)],
+        }
+
 
 class _LinearGaussianFactor:
     """A continuous child as a linear-Gaussian of its parents (continuous raw + one-hot discrete): the CLG node."""
+
+    __pysp_serializable__ = True
 
     def __init__(
         self,
@@ -251,6 +312,20 @@ class _LinearGaussianFactor:
     def n_params(self) -> int:
         return self.coef.shape[0] + 1
 
+    def describe(self, field_names: Sequence[str] | None = None) -> dict[str, Any]:
+        """The fitted linear-Gaussian edge: every regression coefficient labeled by the exact feature it
+        weights (a continuous parent's raw value, or ``parent=level`` for a one-hot discrete level), plus
+        the intercept and residual noise scale -- e.g. ``{"hours.per.week": 2.3, "intercept": 40.1}``
+        means each extra weekly hour raises the fitted mean by 2.3, holding the other parents fixed."""
+        feat_names = _design_feature_names(self.parents, self.discrete, self.vec_dims, field_names)
+        return {
+            "field": _name(self.child, field_names),
+            "kind": "linear-gaussian",
+            "parents": [_name(p, field_names) for p in self.parents],
+            "coefficients": {n: round(float(c), 6) for n, c in zip(feat_names, self.coef)},
+            "sigma": round(float(self.sigma), 6),
+        }
+
 
 class _GLMFactor:
     """A discrete child with at least one CONTINUOUS parent — the edge the greedy search used to refuse.
@@ -260,6 +335,8 @@ class _GLMFactor:
     with a small ridge so perfectly separable data keeps a finite, deterministic optimum. The design
     matrix mirrors the CLG node: continuous parents raw + one-hot(drop-first) discrete parents + 1.
     """
+
+    __pysp_serializable__ = True
 
     def __init__(
         self,
@@ -363,6 +440,31 @@ class _GLMFactor:
     def n_params(self) -> int:
         return int(self.weights.size)
 
+    def describe(self, field_names: Sequence[str] | None = None) -> dict[str, Any]:
+        """The fitted GLM edge: coefficients labeled by feature name, plus the family (binomial ->
+        logistic log-odds of ``levels[1]`` vs. the ``levels[0]`` reference; poisson -> log-rate; multinomial
+        -> one log-odds row per non-reference level, vs. ``levels[0]``). Real fitted numbers, not a
+        placeholder -- e.g. a positive binomial coefficient means that feature raises the odds of the
+        positive level, holding the others fixed."""
+        feat_names = _design_feature_names(self.parents, self.discrete, self.vec_dims, field_names)
+        base = {
+            "field": _name(self.child, field_names),
+            "kind": f"glm-{self.kind}",
+            "parents": [_name(p, field_names) for p in self.parents],
+        }
+        if self.kind == "multinomial":
+            base["reference_level"] = self.levels[0]
+            base["coefficients"] = {
+                str(level): {n: round(float(w), 6) for n, w in zip(feat_names, row)}
+                for level, row in zip(self.levels[1:], self.weights)
+            }
+        else:
+            base["coefficients"] = {n: round(float(w), 6) for n, w in zip(feat_names, self.weights)}
+            if self.kind == "binomial":
+                base["positive_level"] = self.levels[1]
+                base["reference_level"] = self.levels[0]
+        return base
+
 
 def _logsumexp_rows(a: np.ndarray) -> np.ndarray:
     m = np.max(a, axis=1)
@@ -395,6 +497,8 @@ def _fit_multinomial_logistic(
 
 class _DiscreteConditionalFactor:
     """A discrete/count child: a fitted child distribution per joint configuration of its (discrete) parents."""
+
+    __pysp_serializable__ = True
 
     def __init__(self, child: int, parents: list[int], table: dict[tuple, Any], backoff: Any) -> None:
         self.child = child
@@ -451,6 +555,25 @@ class _DiscreteConditionalFactor:
     def n_params(self) -> int:
         return _num_free_params(self.backoff) * max(1, len(self.table))
 
+    def describe(self, field_names: Sequence[str] | None = None, *, max_configurations: int = 20) -> dict[str, Any]:
+        """The fitted per-configuration table: how many distinct parent-value combinations were observed,
+        the marginal fallback used for any unseen combination, and (up to ``max_configurations``) each
+        observed combination's own fitted child distribution -- real fitted distributions, not a placeholder."""
+        parent_names = [_name(p, field_names) for p in self.parents]
+        items = sorted(self.table.items(), key=lambda kv: repr(kv[0]))
+        configurations = [
+            {"given": dict(zip(parent_names, cfg)), "fitted": str(dist)} for cfg, dist in items[:max_configurations]
+        ]
+        return {
+            "field": _name(self.child, field_names),
+            "kind": "discrete-conditional",
+            "parents": parent_names,
+            "n_configurations": len(self.table),
+            "backoff_for_unseen_configurations": str(self.backoff),
+            "configurations": configurations,
+            "configurations_truncated": len(self.table) > max_configurations,
+        }
+
 
 def _leaf_fit(values: list, template: Any, max_its: int, weights: np.ndarray | None) -> Any:
     """Fit a leaf template to ``values``; with ``weights`` the sufficient statistics are accumulated
@@ -467,6 +590,8 @@ def _leaf_fit(values: list, template: Any, max_its: int, weights: np.ndarray | N
 class HeterogeneousBayesianNetwork:
     """A DAG joint over a heterogeneous record: ``log p(x) = sum_i log P(x_i | parents(i))`` over fitted factors."""
 
+    __pysp_serializable__ = True
+
     def __init__(self, factors: Sequence[Any]) -> None:
         self.factors = list(sorted(factors, key=lambda f: f.child))
         self.order = _topo_order([f.parents for f in self.factors])
@@ -478,6 +603,26 @@ class HeterogeneousBayesianNetwork:
     def edges(self) -> list[tuple[int, int]]:
         """Return DAG edges as ``(parent_field, child_field)`` pairs."""
         return [(p, f.child) for f in self.factors for p in f.parents]
+
+    def describe(self, field_names: Sequence[str] | None = None) -> dict[str, Any]:
+        """A real, structured explanation of what the fit found -- every field's per-factor report
+        (:meth:`_MarginalFactor.describe` and friends: fitted regression coefficients, GLM weights, the
+        conditional table, or the marginal summary), split into ``edges`` (fields with >=1 parent) and
+        ``roots`` (independent fields). Pass ``field_names`` (e.g. the tuple position -> column name map)
+        to label everything by name instead of integer index. Every value is read off this network's own
+        fitted parameters -- nothing here is a placeholder or a re-derived approximation.
+        """
+        if field_names is not None and len(field_names) != len(self.factors):
+            raise ValueError(
+                f"field_names has {len(field_names)} entries but this network has {len(self.factors)} fields"
+            )
+        fields = [f.describe(field_names) for f in self.factors]
+        return {
+            "model_type": type(self).__name__,
+            "n_fields": len(self.factors),
+            "edges": [f for f in fields if f["parents"]],
+            "roots": [f for f in fields if not f["parents"]],
+        }
 
     def log_density(self, x: tuple) -> float:
         """Evaluate the joint log density of one record."""
@@ -773,7 +918,10 @@ def learn_bayesian_network(
         None if i in vec_dims else (_field_estimator(cols[i]) if discrete[i] else st.GaussianEstimator())
         for i in range(n_fields)
     ]
-    levels = {i: sorted(set(cols[i])) for i in range(n_fields) if discrete[i]}
+    # key=repr (not bare comparison): a discrete column may carry a missing sentinel (``None``) beside
+    # str/int/bool levels, and ``None`` has no ``<`` against those types (TypeError). repr gives a total,
+    # deterministic order regardless of level type mix -- same guard `_GLMFactor.fit` already applies below.
+    levels = {i: sorted(set(cols[i]), key=repr) for i in range(n_fields) if discrete[i]}
 
     def _wsum(ll: np.ndarray) -> float:
         return float(np.sum(ll) if w is None else np.dot(w, ll))
