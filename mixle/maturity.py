@@ -49,6 +49,24 @@ MATURITY_REGISTRY: dict[str, tuple[Maturity, str]] = {
     "mixle.scientist": (Maturity.PROVISIONAL, "Optional assembled workflow"),
     "mixle.doe": (Maturity.PROVISIONAL, "Active application/research workflows"),
     "mixle.evolve": (Maturity.PROVISIONAL, "Active application/research workflows"),
+    # H-series mine-planning worklist: active, tested acceptance-DoD modules (each has a dedicated
+    # test_h*.py in mixle/tests/) with zero non-test callers elsewhere in the tree today, which made them
+    # look dead in an earlier pass -- they are simply new and not yet wired into a consumer. Real worklist
+    # IDs confirmed against their own module docstrings/tests and this repo's commit history, not guessed:
+    # H2 landed in #448 "Ore blending & grade control", H3 in #452 "Production scheduling & block
+    # sequencing", H8 in #461 "Digital-twin simulation of the pipeline".
+    "mixle.blending": (
+        Maturity.PROVISIONAL,
+        "Active mine-planning workflow (worklist H2: ore blending & grade control)",
+    ),
+    "mixle.mine_planning": (
+        Maturity.PROVISIONAL,
+        "Active mine-planning workflow (worklist H3: production scheduling & block sequencing)",
+    ),
+    "mixle.pipeline_twin": (
+        Maturity.PROVISIONAL,
+        "Active mine-planning workflow (worklist H8: digital-twin pipeline simulation)",
+    ),
     "mixle.experimental": (Maturity.EXPERIMENTAL, "No compatibility guarantee"),
 }
 
