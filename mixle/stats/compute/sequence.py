@@ -138,7 +138,7 @@ def seq_log_density_sum(
 
     """
     if hasattr(enc_data, "pysp_seq_log_density_sum"):
-        # parallel-backend handle (mixle.utils.parallel.multiprocessing / parallel_mpi)
+        # parallel-backend handle (mixle.utils.parallel.multiprocessing / mixle.utils.parallel.mpi)
         return enc_data.pysp_seq_log_density_sum(estimate)
 
     if isinstance(enc_data, RDD_TYPES):
@@ -277,7 +277,7 @@ def seq_estimate(
     validate_estimator_keys(estimator)
 
     if hasattr(enc_data, "pysp_seq_estimate"):
-        # parallel-backend handle (mixle.utils.parallel.multiprocessing / parallel_mpi)
+        # parallel-backend handle (mixle.utils.parallel.multiprocessing / mixle.utils.parallel.mpi)
         return enc_data.pysp_seq_estimate(estimator, prev_estimate)
 
     if isinstance(enc_data, RDD_TYPES):
@@ -379,7 +379,7 @@ def seq_initialize(
     validate_estimator_keys(estimator)
 
     if hasattr(enc_data, "pysp_seq_initialize"):
-        # parallel-backend handle (mixle.utils.parallel.multiprocessing / parallel_mpi)
+        # parallel-backend handle (mixle.utils.parallel.multiprocessing / mixle.utils.parallel.mpi)
         return enc_data.pysp_seq_initialize(estimator, rng, p)
 
     if isinstance(enc_data, RDD_TYPES):

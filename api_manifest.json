@@ -2068,18 +2068,11 @@
   "mixle.utils": [
     "analyze_structure",
     "automatic",
-    "em",
-    "enumeration",
-    "estimation",
     "htsne",
-    "mcmc",
     "metrics",
-    "objectives",
     "optional_deps",
     "optsutil",
     "parallel",
-    "parallel_mpi",
-    "priors",
     "pvalues",
     "special",
     "vector"
