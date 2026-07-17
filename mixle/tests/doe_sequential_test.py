@@ -4,6 +4,7 @@ composes with the real voi_stopping_decision rule from mixle.analysis.real_optio
 session's decision machinery snaps together instead of being hand-wired per demo."""
 
 import numpy as np
+import pytest
 
 from mixle.doe.sequential import DesignRound, sequential_design
 
@@ -96,6 +97,21 @@ def test_budget_exhausted_when_threshold_is_never_reached():
     )
     assert result.stopped_reason == "budget_exhausted"
     assert result.n_rounds == 4  # round 0 (initial) + 3 adaptive rounds
+
+
+@pytest.mark.parametrize("max_rounds", [-1, 1.5, True])
+def test_invalid_round_budgets_are_rejected(max_rounds):
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        sequential_design(
+            _initial(),
+            fit=_fit,
+            summarize=_summarize,
+            should_continue=_threshold_controller(0.15),
+            propose=_propose_next_measurement,
+            acquire=_acquire,
+            combine=_combine,
+            max_rounds=max_rounds,
+        )
 
 
 def test_no_proposal_stops_the_loop_even_if_controller_wants_to_continue():
