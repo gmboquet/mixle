@@ -52,6 +52,11 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 - Sequential-design acquisition budgets reject invalid values and explicitly count the initial fit;
   root lazy imports preserve nested dependency failures.
 - Ordinary Pytest collection recognizes both supported test filename conventions.
+- `mixle.inference.structure`'s `dependency_gain`, `learn_structure`, and `learn_mixture_structure`
+  (via `_init_matrix`) crashed with `TypeError: '<' not supported between instances of 'NoneType' and
+  'str'` whenever a discrete parent/child column mixed a missing-value sentinel (`None`) with
+  str/int/bool levels -- the same class of bug already fixed in `bayesian_network.py`'s
+  `learn_bayesian_network`; all three sites now sort on `key=repr`.
 
 ### Fixed
 
