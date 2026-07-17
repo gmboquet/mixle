@@ -28,6 +28,18 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 - `CompiledEM` as a reusable fused full-mixture strategy, automatically selected by `optimize()` for
   eligible partially fusible heterogeneous mixtures; recursive SQUAREM packing for nested
   mixtures/composites; and function-preserving shared-trunk/residual-expert MoE upcycling.
+- Worklist F10.1 (Flagship A, heterogeneous records in native form) completed end to end:
+  `examples/flagship_heterogeneous_adult.py` now splits real UCI Adult records into disjoint
+  train/calibration/test before any model-selection decision; fits two genuinely different ways (the
+  automatic `optimize()` route and an explicit `learn_bayesian_network` inspect/edit/fit route selected
+  by held-out calibration log-density); compares both against a transparent independent-fields baseline;
+  reports held-out log score plus a task-relevant income-prediction accuracy; calls a real, substantive
+  `explain_fit` (fitted regression coefficients, GLM weights, and conditional tables, not a placeholder);
+  and saves/reloads the selected model, verified bit-identical in a fresh OS process. Backing this:
+  `HeterogeneousBayesianNetwork` and its factor classes gained a `describe()` method and a JSON
+  serialization registration (`mixle.utils.serialization`), so a heterogeneous structured model now
+  persists through the same safe artifact path as every other mixle distribution;
+  `serialization_schema_manifest.json` regenerated to record the 7 newly-registered types (M11.1).
 
 ### Fixed
 
@@ -41,6 +53,12 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   changed the process-global default dtype (mixle-pde's PDE code routinely does, for numerical
   precision) left the student's own weights at that ambient dtype while its inputs stayed explicitly
   float32, crashing with "mat1 and mat2 must have the same dtype, but got Float and Double".
+- `learn_bayesian_network` (and therefore `optimize()`'s automatic structure-discovery path) raised
+  `TypeError: '<' not supported between instances of 'NoneType' and 'str'` on any discrete field mixing
+  a missing-value sentinel (`None`) with string/int/bool levels -- `sorted(set(...))` compared `None`
+  against those types directly. Found while wiring real missingness (`None`, not a `"?"` placeholder
+  string) into the F10.1 flagship above; fixed by sorting on `repr()`, the same guard `_GLMFactor.fit`
+  already used a few lines away.
 
 ### Fixed
 

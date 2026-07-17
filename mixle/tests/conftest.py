@@ -460,6 +460,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "distill_methods_test.py": ("torch", "integration", "slow"),
     "doe_amplify_test.py": ("doe", "stochastic", "slow"),
     "duplicate_body_scan_test.py": ("integration", "slow"),
+    "flagship_heterogeneous_adult_smoke_test.py": ("integration", "slow"),
     "frontier_family_showcase_smoke_test.py": ("torch", "integration", "slow"),
     "geoscience_inversion_report_test.py": ("integration", "slow"),
     "hmm_steady_state_test.py": ("hmm", "slow"),
