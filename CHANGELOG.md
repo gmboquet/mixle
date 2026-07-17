@@ -76,6 +76,10 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   optional fallback behind `gmpy2`, so forcing it into every install left the module's `_BACKEND=None`
   degrade path practically unreachable and contradicted the base-install optional-dependency convention
   (worklist P2.2).
+- `docs/development` and `docs/operations` no longer collide between their `.rst` and `.md` source
+  twins (both are registered Sphinx source suffixes). Sphinx was silently building the `.md` file for
+  each docname; for `operations` this meant the published site was missing the `mixle.ops` API
+  reference entirely, since `docs/operations.rst` never won the build.
 
 ### Fixed
 

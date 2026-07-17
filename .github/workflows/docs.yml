@@ -12,6 +12,13 @@ name: Docs
 #
 # One-time setup (repo Settings > Pages): set the source to "GitHub Actions". This workflow already has the
 # permissions the deploy step needs.
+#
+# Pull requests only run pr-check below: a single-revision `sphinx-build -W` of the current tree, no
+# versioning and no deploy. That is what would have caught the docname collision fixed alongside this
+# job (docs/development.md + docs/development.rst, and docs/operations.md + docs/operations.rst, both
+# registered source suffixes resolving to the same docname): the push-to-main build job never treats
+# warnings as errors, so "multiple files found for the document" silently passed through it for as
+# long as this repo has built docs.
 
 on:
   push:
@@ -21,15 +28,24 @@ on:
       - "mixle/**"
       - "pyproject.toml"
       - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "mixle/**"
+      - "pyproject.toml"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
-# Least-privilege token plus the OIDC + pages permissions the deploy-pages action requires.
+# Least-privilege token plus the OIDC + pages permissions the deploy-pages action requires. pr-check
+# needs none of this; it only reads the checkout, so it runs fine under the same block.
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# One Pages deployment at a time; let an in-progress deploy finish rather than cancelling it.
+# One Pages deployment at a time; let an in-progress deploy finish rather than cancelling it. This
+# only ever applies to push/workflow_dispatch runs (build/deploy below skip pull_request), so PRs
+# never queue behind a Pages deploy or each other here -- see pr-check's own concurrency group.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -38,6 +54,9 @@ jobs:
   build:
     name: Build versioned HTML
     runs-on: ubuntu-latest
+    # The full multi-version build + Pages upload is for push/workflow_dispatch only; PRs get the
+    # faster single-revision pr-check job instead.
+    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,9 +86,33 @@ jobs:
     name: Deploy to Pages
     needs: build
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  pr-check:
+    name: PR check (single-revision, warnings as errors)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    # Independent group so PR checks never queue behind a Pages deploy or behind each other; only
+    # the latest push on a given PR ref needs to run.
+    concurrency:
+      group: docs-pr-check-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install package with docs extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[docs]"
+      - name: sphinx-build -W (current revision only, no polyversion, no deploy)
+        run: python -m sphinx -b html -W --keep-going docs "$RUNNER_TEMP/docs-build-check"
