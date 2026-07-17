@@ -22,7 +22,9 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   with drift coverage and migration destinations that preserve compatibility
   until replacement and deprecation gates are satisfied.
 - A public-API manifest (`api_manifest.json`) and a drift gate so any change to the exported surface
-  is a reviewed diff.
+  is a reviewed diff. Each package entry is tagged with its maturity tier from the `mixle.maturity`
+  registry, so the gate blocks on stable/provisional drift while expected `mixle.experimental` churn is
+  reported instead of failing the freeze.
 - Release-engineering gates: a weighted-estimation contract test, a base-install optional-import guard,
   a tracked benchmark harness, a pull-request template, and the 0.8.0 release checklist.
 - A maintained project documentation set covering charter, requirements, architecture, contracts,
