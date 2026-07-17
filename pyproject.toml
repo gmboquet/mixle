@@ -233,6 +233,7 @@ markers = [
     "benchmark: timing-oriented tests; not part of correctness gates.",
     "experimental: tests for mixle.experimental mechanisms without graduation receipts yet (see mixle/experimental/README.md).",
     "legacy: backward-compatibility tests for renamed/aliased APIs; run product-only with -m 'not legacy'.",
+    "worklist: domain-vertical acceptance tests for a numbered credibility-worklist item (H/J/K/L/N/IC/E/T series under mixle/tests/test_*.py); run product-only with -m 'not worklist'.",
     "stochastic: tests whose assertions depend on random sampling.",
     "integration: end-to-end workflow tests across multiple modules.",
     "distribution: distribution interface, density, sampler, estimator, and encoder tests.",
