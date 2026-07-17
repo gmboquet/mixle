@@ -52,6 +52,10 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 - Sequential-design acquisition budgets reject invalid values and explicitly count the initial fit;
   root lazy imports preserve nested dependency failures.
 - Ordinary Pytest collection recognizes both supported test filename conventions.
+- `docs/development` and `docs/operations` no longer collide between their `.rst` and `.md` source
+  twins (both are registered Sphinx source suffixes). Sphinx was silently building the `.md` file for
+  each docname; for `operations` this meant the published site was missing the `mixle.ops` API
+  reference entirely, since `docs/operations.rst` never won the build.
 
 ### Fixed
 
