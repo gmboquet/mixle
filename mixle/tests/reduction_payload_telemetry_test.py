@@ -1,12 +1,12 @@
 """Worklist D8.4 -- measure reduction/serialization overhead so scale-out claims are grounded.
 
 When a fit is distributed, each worker reduces its shard to a *sufficient-statistic
-payload* -- exactly ``pickle.dumps((count, accumulator.value()))`` -- which is gathered to
-the root, folded, and the re-estimated model broadcast back (see
-``mixle/utils/parallel/mpi.py``). The economics of distribution hinge on one fact: that
-payload is O(model parameters), **independent of the dataset size N**, while per-worker
-compute is O(N / workers). So distribution pays off once per-shard compute dominates the
-fixed gather + fold + broadcast overhead.
+payload* -- exactly ``pickle.dumps((count, accumulator.value()))`` -- which is reduced to
+the root (a gather-and-fold or an O(log W) reduce tree, backend-dependent), and the
+re-estimated model broadcast back (see ``mixle/utils/parallel/mpi.py``). The economics of
+distribution hinge on one fact: that payload is O(model parameters), **independent of the
+dataset size N**, while per-worker compute is O(N / workers). So distribution pays off once
+per-shard compute dominates the fixed reduce + fold + broadcast overhead.
 
 This test measures the payload directly (no cluster needed) and pins the property the
 scale-out guidance depends on: the payload does not grow with N. It also checks the
