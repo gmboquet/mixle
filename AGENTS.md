@@ -16,10 +16,10 @@ and evidence primitives shared across the Mixle portfolio. Domain physics,
 data acquisition, deployment orchestration, and project-specific policy belong
 in their owning projects.
 
-Before governed work, read and follow
-/Users/grantboquet/mixle/status/AGENTS.md. Resolve the active release and task
-profile from status instead of inferring them from a branch name. As of this
-document version, development targets release 0.8.0 on release/0.8.0.
+Before governed work, read and follow AGENTS.md in the Mixle status
+repository. Resolve the active release and task profile from status instead of
+inferring them from a branch name. As of this document version, development
+targets release 0.8.0 on release/0.8.0.
 
 ## Local boundaries
 
