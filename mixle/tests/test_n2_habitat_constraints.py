@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from mixle_knowledge.contracts import CriticalHabitatDesignation, ListedSpecies, SourceRef, SpatialBounds
+
+knowledge_contracts = pytest.importorskip(
+    "mixle_knowledge.contracts",
+    reason="cross-project habitat contracts require the optional mixle-knowledge package",
+)
+CriticalHabitatDesignation = knowledge_contracts.CriticalHabitatDesignation
+ListedSpecies = knowledge_contracts.ListedSpecies
+SourceRef = knowledge_contracts.SourceRef
+SpatialBounds = knowledge_contracts.SpatialBounds
 
 from mixle.analysis.habitat_constraints import apply_habitat_constraints, critical_habitat_exclusion
 from mixle.analysis.sdm import HabitatModel
