@@ -26,6 +26,7 @@ _OPTIONAL_TOP_LEVEL = frozenset(
         "numba",
         "pyspark",
         "gmpy2",
+        "mpmath",
         "zarr",
         "h5py",
         "mpi4py",
