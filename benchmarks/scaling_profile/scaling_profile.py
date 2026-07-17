@@ -142,14 +142,17 @@ MPI_RUNNER = """
 import json, time, numpy as np
 from mpi4py import MPI
 import mixle.stats as st
-from mixle.inference.mpi_executor import mpi_fit
+from mixle.inference.estimation import optimize
+from mixle.utils.parallel.mpi import MPIEncodedData, mpi_out
 comm = MPI.COMM_WORLD
 rng = np.random.RandomState(0)
 comps=[st.GaussianDistribution(float(8*rng.randn()), float(0.5+rng.rand())) for _ in range(16)]
 m=st.MixtureDistribution(comps, list(rng.dirichlet(np.ones(16))))
 data=m.sampler(1).sample(200000)
+est = m.estimator()
 comm.Barrier(); t0=time.perf_counter()
-fit=mpi_fit(comm, m, data, max_its=8)
+enc = MPIEncodedData(data, estimator=est)
+fit=optimize(None, est, enc_data=enc, prev_estimate=m, max_its=8, delta=None, out=mpi_out())
 dt=time.perf_counter()-t0
 if comm.Get_rank()==0: print("MPITIME", json.dumps({"w": comm.Get_size(), "sec": dt}))
 """
