@@ -10,18 +10,11 @@ import importlib
 
 _SUBMODULES = [
     "automatic",
-    "enumeration",
-    "estimation",
-    "em",
     "metrics",
-    "mcmc",
-    "objectives",
     "optional_deps",
     "optsutil",
     "parallel",
-    "parallel_mpi",
     "pvalues",
-    "priors",
     "special",
     "vector",
 ]
