@@ -98,6 +98,23 @@ def _uniformity_null_threshold(
     return float(np.quantile(errs, quantile))
 
 
+def _validate_gate_parameters(
+    *,
+    reference_level: float | None = None,
+    null_quantile: float,
+    tolerance: float | None,
+    bins: int,
+) -> None:
+    if reference_level is not None and (not np.isfinite(reference_level) or not 0.0 < reference_level < 1.0):
+        raise ValueError("reference_level must be finite and strictly between 0 and 1")
+    if not np.isfinite(null_quantile) or not 0.0 < null_quantile < 1.0:
+        raise ValueError("null_quantile must be finite and strictly between 0 and 1")
+    if tolerance is not None and (not np.isfinite(tolerance) or tolerance < 0.0):
+        raise ValueError("calibration tolerance must be finite and nonnegative")
+    if isinstance(bins, bool) or not isinstance(bins, (int, np.integer)) or bins < 2:
+        raise ValueError("bins must be an integer greater than one")
+
+
 def posterior_predictive_calibration(
     ensemble: np.ndarray,
     held_out_y: np.ndarray,
@@ -136,10 +153,26 @@ def posterior_predictive_calibration(
     """
     ens = np.asarray(ensemble, dtype=float)
     y = np.asarray(held_out_y, dtype=float)
+    _validate_gate_parameters(
+        reference_level=reference_level,
+        null_quantile=null_quantile,
+        tolerance=pit_tol,
+        bins=bins,
+    )
+    if not np.isfinite(low_power_threshold) or low_power_threshold < 0.0:
+        raise ValueError("low_power_threshold must be finite and nonnegative")
     if ens.ndim != 2:
         raise ValueError(f"ensemble must be (k, m); got shape {ens.shape}")
+    if y.ndim != 1:
+        raise ValueError(f"held_out_y must be a one-dimensional (k,) array; got shape {y.shape}")
+    if ens.shape[0] == 0:
+        raise ValueError("calibration requires at least one held-out point")
+    if ens.shape[1] == 0:
+        raise ValueError("calibration requires at least one posterior-predictive draw per point")
     if y.shape[0] != ens.shape[0]:
         raise ValueError(f"held_out_y has {y.shape[0]} points but ensemble has {ens.shape[0]}")
+    if not np.all(np.isfinite(ens)) or not np.all(np.isfinite(y)):
+        raise ValueError("ensemble and held_out_y must contain only finite values")
 
     k = int(y.shape[0])
     pit = pit_ensemble(y, ens, randomize=True, seed=pit_seed)
@@ -221,16 +254,40 @@ def simulation_based_calibration(
     look perfectly fit. (It does not test whether the model matches *reality* -- that is
     :func:`posterior_predictive_calibration`'s job, on real held-out data.)
     """
+    _validate_gate_parameters(
+        null_quantile=null_quantile,
+        tolerance=error_tol,
+        bins=bins,
+    )
+    if isinstance(n_sims, bool) or not isinstance(n_sims, (int, np.integer)) or n_sims <= 0:
+        raise ValueError("n_sims must be a positive integer")
+    if isinstance(param_index, bool) or not isinstance(param_index, (int, np.integer)) or param_index < 0:
+        raise ValueError("param_index must be a nonnegative integer")
+
     rng = seed if isinstance(seed, RandomState) else RandomState(seed)
     ranks = np.empty(n_sims, dtype=float)
     for i in range(n_sims):
         theta = np.atleast_1d(np.asarray(prior_sampler(rng), dtype=float))
+        if theta.ndim != 1 or theta.size == 0 or not np.all(np.isfinite(theta)):
+            raise ValueError("prior_sampler must return a non-empty finite scalar or one-dimensional vector")
+        if param_index >= theta.size:
+            raise ValueError(f"param_index {param_index} is outside the sampled parameter vector")
         y = simulate(theta, rng)
+        try:
+            simulated = np.asarray(y, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("simulate must return numeric data") from exc
+        if simulated.size == 0 or not np.all(np.isfinite(simulated)):
+            raise ValueError("simulate must return non-empty finite data")
         draws = np.atleast_1d(np.asarray(fit(y), dtype=float))
+        if draws.ndim not in (1, 2) or draws.size == 0 or not np.all(np.isfinite(draws)):
+            raise ValueError("fit must return non-empty finite one- or two-dimensional posterior draws")
         if draws.ndim == 1:
             draws_param = draws
             theta_param = float(theta[0]) if theta.shape[0] == 1 else float(theta[param_index])
         else:
+            if param_index >= draws.shape[1]:
+                raise ValueError(f"param_index {param_index} is outside the fitted posterior draws")
             draws_param = draws[:, param_index]
             theta_param = float(theta[param_index])
         n_draws = draws_param.shape[0]
@@ -300,13 +357,21 @@ class CalibrationVerifier:
                     "no ensemble/held_out_y to calibrate against -- failing closed rather than passing an unchecked posterior"
                 ],
             }
-        verdict = posterior_predictive_calibration(
-            np.asarray(ensemble),
-            np.asarray(held_out_y),
-            reference_level=self.reference_level,
-            null_quantile=self.null_quantile,
-            pit_tol=self.pit_tol,
-        )
+        try:
+            verdict = posterior_predictive_calibration(
+                np.asarray(ensemble),
+                np.asarray(held_out_y),
+                reference_level=self.reference_level,
+                null_quantile=self.null_quantile,
+                pit_tol=self.pit_tol,
+            )
+        except (TypeError, ValueError, FloatingPointError) as exc:
+            return {
+                "passed": False,
+                "score": 0.0,
+                "kind": "calibration",
+                "reasons": [f"calibration input rejected: {exc}"],
+            }
         return {
             "passed": verdict.passed,
             "score": verdict.score,
