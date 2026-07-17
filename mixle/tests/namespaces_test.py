@@ -1,6 +1,9 @@
 """The concern-oriented namespace structure resolves and re-exports faithfully (no behavior change)."""
 
 import importlib
+from unittest.mock import patch
+
+import pytest
 
 
 def test_object_namespaces_alias_the_families():
@@ -56,3 +59,17 @@ def test_pysp_dir_advertises_the_namespaces():
 
     for ns in ("dist", "process", "models", "enumeration", "inference", "ops", "contracts"):
         assert ns in dir(mixle)
+
+
+def test_lazy_import_only_translates_a_missing_requested_module():
+    import mixle
+
+    requested = ModuleNotFoundError("missing requested module", name="mixle.not_present")
+    with patch("importlib.import_module", side_effect=requested):
+        with pytest.raises(AttributeError):
+            mixle.__getattr__("not_present")
+
+    nested = ModuleNotFoundError("missing nested dependency", name="required_dependency")
+    with patch("importlib.import_module", side_effect=nested):
+        with pytest.raises(ModuleNotFoundError, match="nested dependency"):
+            mixle.__getattr__("broken")
