@@ -93,6 +93,15 @@ with a regression test that fails on the unfixed code):
   entropies filled across the univariate catalog; `mixle.ppl` exports `waic`/`loo`;
   `ScheduledHMM.estimator()` restores the prototype convention (F-1, F-2, F-4, F-6, F-7, F-9, F-11,
   F-12; #434).
+- Completeness follow-up: #434's "entropies filled across the univariate catalog" covered 5 of the
+  11 families F-9 actually names. `SkewNormal`, `NegativeBinomial`, `Rician`, `Nakagami`, `Skellam`,
+  and `LogSeries` now have `entropy()` too -- a closed form for Nakagami (via the Gamma-entropy
+  identity under `X = sqrt(Y)`), a closed-form reduction plus one adaptively-quadrated term for
+  SkewNormal, adaptive quadrature for Rician, and exact series summation (truncated at each
+  distribution's own quantile, not a fixed-width heuristic) for NegativeBinomial/Skellam/LogSeries.
+  Verified against independent numerical integration/Monte Carlo, not only scipy: scipy's own
+  generic `entropy()` silently returns a wrong value ("sum did not converge") for NegativeBinomial
+  and LogSeries at strongly over-dispersed parameters (F-9; #512).
 
 ### Changed
 

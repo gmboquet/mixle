@@ -177,6 +177,27 @@ class RicianDistribution(SequenceEncodableProbabilityDistribution):
         mu = self.mean()
         return float(self.nu * self.nu + 2.0 * self._sig2 - mu * mu)
 
+    def entropy(self) -> float:
+        """Differential entropy in nats, by adaptive quadrature of -f(x) log f(x) over x > 0.
+
+        At ``nu = 0`` the Rician is exactly the Rayleigh, whose entropy is the closed form
+        ``1 + log(sigma / sqrt(2)) + euler_gamma / 2``. For ``nu > 0`` the density's
+        ``log I0(x nu / sigma^2)`` term has no closed-form expectation (Rice, 'Mathematical
+        analysis of random noise', 1944/1945), so the integral is evaluated numerically against
+        the exact log-density.
+        """
+        if self.nu == 0.0:
+            return float(1.0 + math.log(self.sigma / math.sqrt(2.0)) + np.euler_gamma / 2.0)
+
+        from scipy import integrate
+
+        def integrand(x: float) -> float:
+            logf = self.log_density(x)
+            return 0.0 if not np.isfinite(logf) else -math.exp(logf) * logf
+
+        val, _ = integrate.quad(integrand, 0.0, np.inf, limit=200)
+        return float(val)
+
     def sampler(self, seed: int | None = None) -> "RicianSampler":
         """Return a sampler (the envelope of a 2-D Gaussian offset by ``nu``)."""
         return RicianSampler(self, seed)
