@@ -224,20 +224,31 @@ def _grade_per_period(grade: np.ndarray, n_periods: int, *, what: str) -> np.nda
 
 
 def _align_price_paths(price_paths: Any, n: int, n_periods: int, rng: np.random.Generator) -> np.ndarray:
-    """Coerce ``price_paths`` (J1 ``PriceForecast.paths``-shaped) to exactly ``(n, n_periods)``.
+    """Coerce ``price_paths`` to exactly ``(n, n_periods)`` -- accepting EITHER orientation of a J1
+    :class:`~mixle.inference.price_forecast.PriceForecast`.
 
-    Accepts a ``(m, n_periods)`` scenario matrix (one row per price path, one column per period) and
-    resamples with replacement to ``n`` rows when ``m != n`` (the "align" step of DR-ALG J2); a
+    A scenario-major ``(m, n_periods)`` matrix (one row per price path, one column per period) is used
+    as-is; ``mixle.inference.price_forecast.PriceForecast.paths`` is documented and produced as
+    ``(n_periods, m)`` (time-major, mirroring how ``forecast_price`` builds it one horizon step at a
+    time) -- passing ``pf.paths`` straight in used to raise, or (worse) silently score the wrong axis
+    as "period" whenever ``m`` happened to equal ``n_periods``. Detected here from ``n_periods``
+    (known independently, from ``schedule``) and transposed automatically; only genuinely ambiguous
+    when ``m == n_periods`` too, where a square matrix is accepted as scenario-major -- its existing,
+    tested behavior -- since no shape-only check can disambiguate a square matrix.
+
+    Resamples with replacement to ``n`` rows when ``m != n`` (the "align" step of DR-ALG J2); a
     ``(m,)`` vector is treated as ``m`` single-period draws when ``n_periods == 1``, or as one
     deterministic ``n_periods``-long path shared by every draw otherwise.
     """
     prices = np.asarray(price_paths, dtype=np.float64)
     if prices.ndim == 1:
         prices = prices[:, None] if n_periods == 1 else prices[None, :]
+    if prices.ndim == 2 and prices.shape[1] != n_periods and prices.shape[0] == n_periods:
+        prices = prices.T  # PriceForecast.paths orientation: (n_periods, m) -> (m, n_periods)
     if prices.ndim != 2 or prices.shape[1] != n_periods:
         raise ValueError(
             f"monte_carlo_npv: price_paths must be shaped (m, {n_periods}) (one row per scenario, one "
-            f"column per period); got {prices.shape}"
+            f"column per period) or its transpose ({n_periods}, m) (PriceForecast.paths); got {prices.shape}"
         )
     m = prices.shape[0]
     if m == n:
@@ -293,8 +304,10 @@ def monte_carlo_npv(
     - ``posterior``: an IC-1 `Posterior` (frozen `mixle.reason.posterior_protocol.Posterior`); its
       ``.samples(n, rng)`` are the grade draws. A single project-life grade (``d == 1``) broadcasts
       across every period; a per-period posterior (``d == len(schedule)``) is used period by period.
-    - ``price_paths``: a J1 ``PriceForecast.paths``-shaped array-like, ``(m, n_periods)`` (one row per
-      scenario). Resampled with replacement to ``n`` rows when ``m != n``.
+    - ``price_paths``: a scenario-major ``(m, n_periods)`` array-like (one row per scenario), OR a J1
+      ``PriceForecast.paths`` passed directly -- ``(n_periods, m)``, time-major -- detected and
+      transposed automatically (see :func:`_align_price_paths`). Resampled with replacement to ``n``
+      rows when ``m != n``.
     - ``cost_model``: called per period as ``cost_model(t, tonnage_t)`` (falling back to
       ``cost_model(t)``) to get that period's deterministic ``opex_t``.
     - ``schedule``: per-period ``tonnage`` (required) and ``capex`` (optional, default zero); see
