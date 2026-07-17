@@ -67,8 +67,9 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         # axis (DDP/FSDP2 above). The plan is validated against the real module in `pysp_seq_estimate`
         # (fails fast on a bad plan); wiring it into real per-axis NCCL process groups alongside FSDP2 is
         # the multi-GPU piece that this CPU/gloo-validated handle does not execute -- see
-        # `tensor_pipeline_context_parallel.py` for the sharding/reconstruction mechanism itself, which
-        # IS implemented and tested at small scale.
+        # `mixle/experimental/tensor_pipeline_context_parallel.py` for the sharding/reconstruction
+        # mechanism itself, which IS implemented and tested at small scale (kept under
+        # mixle.experimental: its own NotImplementedError gate below is the reason why).
         self.tp_size = int(tp_size)
         self.pp_size = int(pp_size)
         self.cp_size = int(cp_size)
@@ -143,7 +144,15 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         lr = float(getattr(estimator, "lr", 3e-3))
         module = estimator.module.to(device)
         if self.tp_size > 1 or self.pp_size > 1 or self.cp_size > 1:
-            from mixle.utils.parallel.tensor_pipeline_context_parallel import validate_tp_pp_cp_plan
+            # This module is stable-namespace, so it must not pull mixle.experimental into the stable
+            # import graph via a static import (enforced by experimental_boundary_test) -- resolve the
+            # validator dynamically through importlib on a string instead, same bridge mixle/program.py
+            # uses to reach mixle.experimental.program.
+            import importlib
+
+            validate_tp_pp_cp_plan = importlib.import_module(
+                "mixle.experimental.tensor_pipeline_context_parallel"
+            ).validate_tp_pp_cp_plan
 
             validate_tp_pp_cp_plan(module, self.tp_size, self.pp_size, self.cp_size)
             # The plan is validated but per-axis process groups are NOT integrated into training here:
