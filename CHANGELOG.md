@@ -52,6 +52,13 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 - Sequential-design acquisition budgets reject invalid values and explicitly count the initial fit;
   root lazy imports preserve nested dependency failures.
 - Ordinary Pytest collection recognizes both supported test filename conventions.
+- `mixle.utils` no longer lists `parallel_mpi`, `em`, `enumeration`, `estimation`, `mcmc`, `objectives`,
+  or `priors` as importable submodules. Each was a stale name left over from earlier `pysp.utils`
+  reorganizations (the real code lives at `mixle.utils.parallel.mpi`, `mixle.inference.*`, and
+  `mixle.enumeration.algorithms`), so accessing any of them raised `ModuleNotFoundError`/`AttributeError`
+  despite appearing in `mixle.utils.__all__` and `dir(mixle.utils)`. The public-API drift test now
+  resolves every declared dynamic-package name via `getattr` instead of only diffing `__all__` as
+  strings, so a stale export like this cannot pass silently again.
 
 ### Fixed
 
