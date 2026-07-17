@@ -145,3 +145,37 @@ def test_radon_wlm_risk_matches_beir_vi_coefficient():
 
     custom_coefficient = radon_wlm_risk(4.0, risk_per_wlm=1e-3)
     assert custom_coefficient.mean == pytest.approx(4.0 * 1e-3)
+
+
+def test_radon_wlm_risk_saturates_instead_of_exceeding_one():
+    # A cumulative exposure large enough that the bare linear form would exceed 1 (a probability
+    # cannot). risk_per_wlm chosen so wlm * risk_per_wlm = 5.38, far past where the linear
+    # approximation is valid; the LNT exp form must cap it below 1.
+    huge = radon_wlm_risk(10_000.0, risk_per_wlm=5.38e-4)
+    assert 0.0 <= float(huge.mean) < 1.0
+    assert float(huge.mean) == pytest.approx(1.0 - np.exp(-10_000.0 * 5.38e-4), rel=1e-9)
+
+
+def test_radon_wlm_risk_rejects_negative_or_non_finite_inputs():
+    with pytest.raises(ValueError):
+        radon_wlm_risk(-1.0)
+    with pytest.raises(ValueError):
+        radon_wlm_risk(4.0, risk_per_wlm=-5.38e-4)
+    with pytest.raises(ValueError):
+        radon_wlm_risk(np.array([1.0, -2.0, 3.0]))
+    with pytest.raises(ValueError):
+        radon_wlm_risk(float("nan"))
+    with pytest.raises(ValueError):
+        radon_wlm_risk(float("inf"))
+
+
+def test_excess_lifetime_cancer_risk_rejects_negative_or_non_finite_inputs():
+    sf = SlopeFactor(oral_csf=1.5)
+    with pytest.raises(ValueError):
+        excess_lifetime_cancer_risk(-1e-4, sf, route="oral")
+    with pytest.raises(ValueError):
+        excess_lifetime_cancer_risk(np.array([1e-4, -1e-4]), sf, route="oral")
+    with pytest.raises(ValueError):
+        excess_lifetime_cancer_risk(1e-4, SlopeFactor(oral_csf=-1.5), route="oral")
+    with pytest.raises(ValueError):
+        excess_lifetime_cancer_risk(float("nan"), sf, route="oral")
