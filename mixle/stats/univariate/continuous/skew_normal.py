@@ -126,6 +126,28 @@ class SkewNormalDistribution(SequenceEncodableProbabilityDistribution):
         delta = self.shape / math.sqrt(1.0 + self.shape * self.shape)
         return float(self.scale * self.scale * (1.0 - 2.0 * delta * delta / math.pi))
 
+    def entropy(self) -> float:
+        """Differential entropy log(scale) + 0.5 log(2 pi e) - log(2) - E[log Phi(alpha Y)].
+
+        ``Y`` is the standard skew-normal(alpha); ``E[Y^2] = 1`` for every alpha (a property of the
+        two-Gaussian stochastic representation) collapses the Gaussian part of the log-density to a
+        closed form, leaving ``E[log Phi(alpha Y)]``. That term has no closed form for general alpha
+        (Arellano-Valle, Contreras-Reyes & Genton, 'Shannon entropy and mutual information for
+        multivariate skew-elliptical distributions', Scand. J. Statist. 40 (2013)), so it is
+        evaluated by adaptive quadrature against the standard skew-normal density itself.
+        """
+        from scipy import integrate
+
+        alpha = self.shape
+
+        def integrand(y: float) -> float:
+            log_phi = -_HALF_LOG_2PI - 0.5 * y * y
+            log_cdf = float(log_ndtr(alpha * y))
+            return 2.0 * math.exp(log_phi + log_cdf) * log_cdf
+
+        e_log_cdf, _ = integrate.quad(integrand, -np.inf, np.inf, limit=200)
+        return float(self.log_scale + 0.5 * math.log(2.0 * math.pi * math.e) - math.log(2.0) - e_log_cdf)
+
     def sampler(self, seed: int | None = None) -> "SkewNormalSampler":
         """Return a sampler for drawing observations from this distribution."""
         return SkewNormalSampler(self, seed)
