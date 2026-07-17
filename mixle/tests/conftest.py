@@ -365,10 +365,15 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # over several seeds (needle receipt + auxiliary-loss ablation) plus a re-chunking topology check
     # -- several TBPTT training loops, tagged slow for the same reason as context_spine_test.py.
     "summary_tree_test.py": ("torch", "experimental", "slow"),
-    # E8 context parallelism (mixle/utils/parallel/context_parallel_spine.py): parametrized exact-match
+    # E8 context parallelism (mixle/experimental/context_parallel_spine.py): parametrized exact-match
     # correctness sweeps plus a real torch.multiprocessing.spawn/gloo 4-process test -- tagged slow so it
     # leaves the fast gate while still running in full CI under the `parallel` marker's own tests.
     "context_parallel_spine_test.py": ("torch", "experimental", "parallel", "slow"),
+    # F1 tensor/pipeline/context parallelism (mixle/experimental/tensor_pipeline_context_parallel.py):
+    # in-process sharding/reconstruction correctness at small scale (subsecond per case) plus a
+    # >=2-real-CUDA-device NCCL class that skips cleanly here -- unlike its E8 sibling above, this stays
+    # in the fast gate (no multi-round training sweep driving it into `slow`).
+    "tensor_pipeline_context_parallel_test.py": ("torch", "experimental", "parallel"),
     # GP-surrogate active-learning + multi-fidelity placement (roadmap M4): each test fits several torch
     # GPs across a sequential design loop, mirroring doe_active_test.py / doe_multifidelity_test.py.
     "task_emulate_test.py": ("doe", "torch", "slow"),

@@ -171,7 +171,7 @@ class LM:
         (DDP on CPU, FSDP2/ZeRO-3 on CUDA) this handle already runs. They default to 1 (off): the plan is
         validated against the model's real dimensions (``n_head % tp_size``, ``pp_size <= n_layer``,
         ``block % cp_size``) so a bad plan fails fast, using the sharding/reconstruction mechanism in
-        ``mixle.utils.parallel.tensor_pipeline_context_parallel`` (tested there at small scale against the
+        ``mixle.experimental.tensor_pipeline_context_parallel`` (tested there at small scale against the
         dense forward). Composing the validated plan into real per-axis multi-GPU process groups is the
         piece that needs actual hardware this environment does not have -- see that module's docstring.
         """
