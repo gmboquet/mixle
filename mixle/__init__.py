@@ -28,7 +28,6 @@ try:
 except PackageNotFoundError:  # running from a source tree with no installed distribution metadata
     __version__ = "0+unknown"
 
-# Top-level namespaces resolved lazily so ``import mixle`` stays cheap and ``mixle.dist`` / ``mixle.ops``
 # Top-level namespaces resolved lazily so ``import mixle`` stays lightweight and ``mixle.dist`` / ``mixle.ops``
 # / ``mixle.enumeration`` work without importing the whole tree up front.
 _NAMESPACES = (
@@ -51,10 +50,12 @@ def __getattr__(name: str):  # PEP 562 — resolve any mixle submodule (incl. th
     if not name.startswith("_"):
         import importlib
 
+        module_name = "mixle." + name
         try:
-            return importlib.import_module("mixle." + name)
-        except ModuleNotFoundError:
-            pass
+            return importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            if exc.name != module_name:
+                raise
     raise AttributeError("module 'mixle' has no attribute %r" % name)
 
 

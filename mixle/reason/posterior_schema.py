@@ -80,12 +80,23 @@ class PosteriorSchema:
     def validate(self, mean: np.ndarray, cov: np.ndarray) -> None:
         """Raise if ``mean``/``cov`` don't match this schema's arity -- the check that turns a silent
         convention mismatch into a loud, early error."""
-        mean = np.asarray(mean)
-        cov = np.asarray(cov)
+        try:
+            mean = np.asarray(mean, dtype=float)
+            cov = np.asarray(cov, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("posterior mean and covariance must be numeric") from exc
         if mean.shape != (self.arity,):
             raise ValueError(f"mean has shape {mean.shape} but schema declares {self.arity} axes {self.names}")
         if cov.shape != (self.arity, self.arity):
             raise ValueError(f"cov has shape {cov.shape} but schema declares {self.arity} axes {self.names}")
+        if not np.all(np.isfinite(mean)) or not np.all(np.isfinite(cov)):
+            raise ValueError("posterior mean and covariance must contain only finite values")
+        if not np.allclose(cov, cov.T, rtol=1e-10, atol=1e-12):
+            raise ValueError("posterior covariance must be symmetric")
+        eigenvalues = np.linalg.eigvalsh((cov + cov.T) / 2.0)
+        tolerance = 1e-12 * max(1.0, float(np.max(np.abs(eigenvalues))))
+        if float(np.min(eigenvalues)) < -tolerance:
+            raise ValueError("posterior covariance must be positive semidefinite")
 
 
 @dataclass
@@ -110,8 +121,10 @@ class SchematizedPosterior:
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         from scipy.stats import norm
 
+        if not np.isfinite(level) or not 0.0 < level < 1.0:
+            raise ValueError("credible interval level must be finite and strictly between 0 and 1")
         z = float(norm.ppf(0.5 + level / 2.0))
-        sd = np.sqrt(np.clip(np.diag(self.cov), 0.0, None))
+        sd = np.sqrt(np.diag(self.cov))
         return self.mean - z * sd, self.mean + z * sd
 
     def derived_quantity(self, fn: Any, n: int, rng: np.random.Generator) -> Any:
@@ -128,6 +141,8 @@ class _SchemaDerivedQuantity:
     prior_dominated: bool = False
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
+        if not np.isfinite(level) or not 0.0 < level < 1.0:
+            raise ValueError("credible interval level must be finite and strictly between 0 and 1")
         a = (1.0 - level) / 2.0
         return np.quantile(self.samples, a, axis=0), np.quantile(self.samples, 1.0 - a, axis=0)
 
