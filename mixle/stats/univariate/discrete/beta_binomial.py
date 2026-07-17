@@ -142,7 +142,7 @@ class BetaBinomialSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> int | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> int | np.ndarray:
         """Draw one count or an array of iid counts."""
         d = self.dist
         p = self.rng.beta(d.a, d.b, size=size)

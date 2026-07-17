@@ -177,7 +177,7 @@ class GatedMixtureSampler(DistributionSampler):
         k = int(self.rng.choice(self.dist.num_components, p=gate_p / gate_p.sum()))
         return self._comp_samplers[k].sample()
 
-    def sample(self, size: int | None = None) -> Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Raise because unconditional sampling requires caller-supplied covariates."""
         raise NotImplementedError("GatedMixture is conditional p(y|z); use sampler().sample_given(z).")
 

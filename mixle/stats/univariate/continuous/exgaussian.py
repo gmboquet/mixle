@@ -176,7 +176,7 @@ class ExponentiallyModifiedGaussianSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> float | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw ``size`` iid EMG samples (a single float if ``size`` is None)."""
         d = self.dist
         normal = self.rng.normal(loc=d.mu, scale=d.sigma, size=size)

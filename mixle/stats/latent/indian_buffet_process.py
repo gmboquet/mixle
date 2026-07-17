@@ -388,7 +388,7 @@ class IndianBuffetProcessSampler(DistributionSampler):
             return list(np.flatnonzero(z).astype(int))
         return z.astype(int).tolist()
 
-    def sample(self, size: int | None = None) -> list[int] | list[list[int]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | list[list[int]]:
         """Draw one feature row or ``size`` iid feature rows."""
         if size is None:
             z = self.rng.rand(self.dist.num_features) <= self.dist.feature_probs

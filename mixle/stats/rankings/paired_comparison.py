@@ -113,7 +113,7 @@ class ThurstoneMostellerSampler(DistributionSampler):
         p = 0.5 * (1.0 + math.erf((self.dist.mu[i] - self.dist.mu[j]) / 2.0))  # Phi((mu_i-mu_j)/sqrt2)
         return (int(i), int(j)) if self.rng.rand() < p else (int(j), int(i))
 
-    def sample(self, size: int | None = None) -> tuple[int, int] | list[tuple[int, int]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> tuple[int, int] | list[tuple[int, int]]:
         """Draw one comparison or a list of comparisons."""
         if size is None:
             return self._sample_one()
@@ -386,7 +386,7 @@ class _TieSampler(DistributionSampler):
         i, j = sorted(self.rng.choice(k, size=2, replace=False))
         return (int(i), int(j), int(self.dist._sample_outcome(int(i), int(j), self.rng)))
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw one comparison triple or a list of triples."""
         if size is None:
             return self._sample_one()

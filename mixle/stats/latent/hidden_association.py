@@ -386,7 +386,7 @@ class HiddenAssociationSampler(DistributionSampler):
         self.given_sampler = self.dist.given_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
     def sample(
-        self, size: int | None = None
+        self, size: int | None = None, *, batched: bool = True
     ) -> (
         Sequence[tuple[list[tuple[Any, float]], list[tuple[Any, float]]]]
         | tuple[list[tuple[Any, float]], list[tuple[Any, float]]]

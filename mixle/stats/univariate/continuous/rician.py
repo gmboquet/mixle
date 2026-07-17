@@ -197,7 +197,7 @@ class RicianSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> float | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw one sample or an array of iid samples."""
         d = self.dist
         n = 1 if size is None else int(size)
