@@ -112,3 +112,24 @@ def test_join_independent_rejects_duplicate_axis_names():
     s = PosteriorSchema((AxisSpec("x"),))
     with pytest.raises(ValueError, match="duplicate axis name"):
         join_independent((np.array([1.0]), np.array([[1.0]]), s), (np.array([2.0]), np.array([[1.0]]), s))
+
+
+@pytest.mark.parametrize(
+    "covariance",
+    [
+        np.array([[-1.0]]),
+        np.array([[1.0, 0.5], [0.1, 1.0]]),
+        np.array([[float("nan")]]),
+    ],
+)
+def test_schematized_posterior_rejects_invalid_covariance(covariance):
+    schema = PosteriorSchema(tuple(AxisSpec(f"x{i}") for i in range(covariance.shape[0])))
+    with pytest.raises(ValueError, match="covariance|finite"):
+        SchematizedPosterior(np.zeros(covariance.shape[0]), covariance, schema)
+
+
+@pytest.mark.parametrize("level", [-0.1, 0.0, 1.0, 1.1, float("nan")])
+def test_credible_interval_rejects_invalid_levels(level):
+    posterior = SchematizedPosterior(np.zeros(1), np.ones((1, 1)), PosteriorSchema((AxisSpec("x"),)))
+    with pytest.raises(ValueError, match="strictly between"):
+        posterior.credible_interval(level)
