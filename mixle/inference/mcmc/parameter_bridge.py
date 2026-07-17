@@ -7,10 +7,23 @@ by running Metropolis-Hastings or Hamiltonian Monte Carlo in an unconstrained
 reparameterization (log for positive scales, stick-breaking for probability
 simplices) and mapping the retained samples back to parameter space (or to
 rebuilt distribution objects).
+
+Seven families (Gaussian, Gamma, Beta, Exponential, Poisson, Bernoulli,
+Categorical) get a hand-tuned bridge below.  Every other family that declares a
+:class:`~mixle.stats.compute.declarations.DistributionDeclaration` -- the same
+per-parameter ``constraint``/``differentiable`` metadata
+:mod:`mixle.inference.gradient_fit` already reads for autograd fitting -- is
+bridged generically by :func:`_generic_declared_bridge`, so adding a new
+supported family here is a matter of the family declaring itself, not editing
+this module.  See :func:`build_parameter_bridge`'s docstring for exactly which
+constraints have a generic reparameterization and why some declared families
+(a covariance matrix, a coupled bound, a natural/scoring parameterization that
+differs from the constructor) are still excluded.
 """
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -102,6 +115,23 @@ def _stick_breaking_log_det(phi: np.ndarray) -> float:
     return float(total)
 
 
+def _stick_breaking_inverse(p: np.ndarray) -> np.ndarray:
+    """Return the ``phi`` that :func:`_stick_breaking_forward` maps to ``p``.
+
+    ``p`` must be a length-``k`` probability vector (strictly positive,
+    summing to one); the returned vector has length ``k - 1``.
+    """
+    k = p.shape[0]
+    phi = np.empty(k - 1, dtype=float)
+    remaining = 1.0
+    for i in range(k - 1):
+        z = p[i] / remaining
+        z = min(max(z, 1.0e-12), 1.0 - 1.0e-12)
+        phi[i] = np.log(z) - np.log1p(-z) + np.log(float(k - 1 - i))
+        remaining = remaining - p[i]
+    return phi
+
+
 def _seq_log_density_sum(dist: Any, encoded: Any) -> float:
     """Return ``sum_i log p(x_i | dist)`` for a stats distribution."""
     return float(np.sum(dist.seq_log_density(encoded)))
@@ -131,7 +161,7 @@ def _make_builder(prototype: Any, ctor_kwargs: dict[str, Any]) -> Callable[..., 
 def build_parameter_bridge(prototype: Any) -> ParameterBridge:
     """Build a :class:`ParameterBridge` for a prototype distribution.
 
-    Supported ``mixle.stats`` families:
+    Seven families get a hand-tuned bridge below:
 
     * Gaussian ``(mu, sigma2)`` -> ``(mu, log sigma2)``
     * Gamma ``(k, theta)`` -> ``(log k, log theta)``
@@ -140,6 +170,30 @@ def build_parameter_bridge(prototype: Any) -> ParameterBridge:
     * Bernoulli ``p`` -> ``logit p``
     * Beta ``(a, b)`` -> ``(log a, log b)``
     * Categorical probability map -> stick-breaking over the simplex
+
+    Every other family falls through to :func:`_generic_declared_bridge`, which reads the
+    same :class:`~mixle.stats.compute.declarations.DistributionDeclaration` that
+    :mod:`mixle.inference.gradient_fit` already uses for autograd fitting. A declared
+    parameter is sampled -- included in ``theta`` (a ``{name: value}`` dict here, unlike the
+    tuple/scalar shapes above) -- when it is ``differentiable`` and its ``constraint`` is one
+    of ``real`` (identity), ``positive``/``positive_vector`` (log), ``unit_interval`` (logit),
+    ``real_vector`` (identity), or ``simplex_vector``/``simplex_map`` (stick-breaking);
+    non-differentiable declared parameters (e.g. a Binomial's ``n``) are carried as fixed
+    constructor keywords taken from ``prototype``, the same nuisance-parameter treatment
+    :mod:`mixle.stats.bayes.conjugate` uses. This covers 33 families as of this writing
+    (the 7 above plus 26 more -- see ``mcmc_test.py``'s ``GenericParameterBridgeTestCase``
+    for the current list).
+
+    Still unsupported, deliberately: families with no declaration at all (compositional/
+    structured models -- mixtures, HMMs, copulas, ... -- for which a single flat parameter
+    vector isn't the right shape); families whose declaration describes an exponential-family
+    natural/scoring parameterization rather than the constructor's (e.g. von Mises' ``eta1``/
+    ``eta2``/``log_const`` vs. its ``mu``/``kappa`` constructor -- the declared names aren't
+    constructor keywords, so there's nothing safe to dispatch on); and declared-but-exotic
+    constraints with no generic reparameterization yet (a covariance/precision matrix's
+    ``positive_matrix``, or a coupled ``greater_than:``/``less_than:`` bound such as Uniform's
+    ``high``). These need a family-specific bridge (or a matrix/coupled-bound generalization)
+    rather than a generic one and are out of scope here.
 
     Raises:
         NotImplementedError: if the family or a parameter shape is unsupported.
@@ -260,15 +314,7 @@ def build_parameter_bridge(prototype: Any) -> ParameterBridge:
             p = np.asarray([float(theta[label]) for label in labels], dtype=float)
             p = np.clip(p, 1.0e-12, None)
             p = p / p.sum()
-            # invert stick-breaking
-            phi = np.empty(k - 1, dtype=float)
-            remaining = 1.0
-            for i in range(k - 1):
-                z = p[i] / remaining
-                z = min(max(z, 1.0e-12), 1.0 - 1.0e-12)
-                phi[i] = np.log(z) - np.log1p(-z) + np.log(float(k - 1 - i))
-                remaining = remaining - p[i]
-            return phi
+            return _stick_breaking_inverse(p)
 
         def from_u(phi):
             p = _stick_breaking_forward(np.asarray(phi, dtype=float))
@@ -284,20 +330,262 @@ def build_parameter_bridge(prototype: Any) -> ParameterBridge:
             initial_theta={label: float(prob_map[label]) for label in labels},
         )
 
+    generic = _generic_declared_bridge(prototype, kw)
+    if generic is not None:
+        return generic
+
     raise NotImplementedError(
-        "sample_parameter_posterior does not support %s; supported families are "
-        "Gaussian, Gamma, Exponential, Poisson, Bernoulli, Beta, and Categorical." % cls_name
+        "sample_parameter_posterior does not support %s. Explicitly hand-tuned: Gaussian, Gamma, "
+        "Exponential, Poisson, Bernoulli, Beta, Categorical. Every other distribution that declares a "
+        "mixle.stats.compute.declarations.DistributionDeclaration is bridged automatically as long as "
+        "every declared parameter name is also a constructor keyword and every differentiable "
+        "parameter's constraint is one of real/positive/unit_interval/real_vector/positive_vector/"
+        "simplex_vector/simplex_map (see build_parameter_bridge's docstring). %s has none of a "
+        "declaration, or fails one of those two conditions -- most likely because it has no "
+        "declaration at all, its declaration describes a natural/scoring parameterization rather than "
+        "its constructor's, or a differentiable parameter's constraint (e.g. a covariance matrix or a "
+        "coupled bound) has no generic reparameterization yet." % (cls_name, cls_name)
     )
 
 
 def _ctor_param_names(prototype: Any) -> tuple[str, ...]:
-    import inspect
-
     try:
         sig = inspect.signature(type(prototype).__init__)
         return tuple(sig.parameters.keys())
     except (TypeError, ValueError):
         return ()
+
+
+# ---------------------------------------------------------------------------
+# Generic bridge: dispatch against the mixle.stats declaration registry
+# ---------------------------------------------------------------------------
+#
+# mixle.stats.compute.declarations.DistributionDeclaration already records, per family,
+# the constructor parameters generated scoring kernels need: a name, a `constraint` (its
+# domain -- "positive", "unit_interval", a simplex, ...), and a `differentiable` flag that
+# mixle.inference.gradient_fit already uses to separate free parameters from cached/nuisance
+# ones for autograd fitting. That is exactly the metadata this module's hand-written 7-family
+# table was duplicating per family, so a declared family is bridged generically instead of
+# needing its own branch above.
+
+
+@dataclass(frozen=True)
+class _ParamBlock:
+    """One sampled parameter's slice of the combined unconstrained ``phi`` vector."""
+
+    name: str
+    dim: int
+    to_unconstrained: Callable[[Any], np.ndarray]
+    from_unconstrained: Callable[[np.ndarray], Any]
+    log_abs_det_jacobian: Callable[[np.ndarray], float]
+
+
+def _real_block(name: str, length: int | None) -> _ParamBlock:
+    if length is None:
+        return _ParamBlock(
+            name=name,
+            dim=1,
+            to_unconstrained=lambda v: np.asarray([float(v)], dtype=float),
+            from_unconstrained=lambda phi: float(phi[0]),
+            log_abs_det_jacobian=lambda phi: 0.0,
+        )
+    return _ParamBlock(
+        name=name,
+        dim=length,
+        to_unconstrained=lambda v: np.asarray(v, dtype=float).reshape(-1),
+        from_unconstrained=lambda phi: np.asarray(phi, dtype=float).copy(),
+        log_abs_det_jacobian=lambda phi: 0.0,
+    )
+
+
+def _positive_block(name: str, length: int | None) -> _ParamBlock:
+    if length is None:
+        return _ParamBlock(
+            name=name,
+            dim=1,
+            to_unconstrained=lambda v: np.asarray([float(np.log(v))], dtype=float),
+            from_unconstrained=lambda phi: float(np.exp(phi[0])),
+            log_abs_det_jacobian=lambda phi: float(phi[0]),
+        )
+    return _ParamBlock(
+        name=name,
+        dim=length,
+        to_unconstrained=lambda v: np.log(np.asarray(v, dtype=float)),
+        from_unconstrained=lambda phi: np.exp(np.asarray(phi, dtype=float)),
+        log_abs_det_jacobian=lambda phi: float(np.sum(phi)),
+    )
+
+
+def _unit_interval_block(name: str) -> _ParamBlock:
+    def to_u(v: Any) -> np.ndarray:
+        v = float(v)
+        return np.asarray([np.log(v) - np.log1p(-v)], dtype=float)
+
+    def from_u(phi: np.ndarray) -> float:
+        return float(1.0 / (1.0 + np.exp(-phi[0])))
+
+    def log_det(phi: np.ndarray) -> float:
+        # d p / d logit = p (1 - p); log = -softplus(-phi) - softplus(phi)
+        return float(-_softplus(-phi[0]) - _softplus(phi[0]))
+
+    return _ParamBlock(name=name, dim=1, to_unconstrained=to_u, from_unconstrained=from_u, log_abs_det_jacobian=log_det)
+
+
+def _simplex_vector_block(name: str, length: int) -> _ParamBlock | None:
+    if length < 2:
+        return None
+
+    def to_u(v: Any) -> np.ndarray:
+        p = np.clip(np.asarray(v, dtype=float), 1.0e-12, None)
+        p = p / p.sum()
+        return _stick_breaking_inverse(p)
+
+    return _ParamBlock(
+        name=name,
+        dim=length - 1,
+        to_unconstrained=to_u,
+        from_unconstrained=lambda phi: _stick_breaking_forward(np.asarray(phi, dtype=float)),
+        log_abs_det_jacobian=lambda phi: _stick_breaking_log_det(np.asarray(phi, dtype=float)),
+    )
+
+
+def _simplex_map_block(name: str, labels: tuple[Any, ...]) -> _ParamBlock | None:
+    if len(labels) < 2:
+        return None
+
+    def to_u(prob_map: Any) -> np.ndarray:
+        p = np.asarray([float(prob_map[label]) for label in labels], dtype=float)
+        p = np.clip(p, 1.0e-12, None)
+        p = p / p.sum()
+        return _stick_breaking_inverse(p)
+
+    def from_u(phi: np.ndarray) -> dict[Any, float]:
+        p = _stick_breaking_forward(np.asarray(phi, dtype=float))
+        return {label: float(p[i]) for i, label in enumerate(labels)}
+
+    return _ParamBlock(
+        name=name,
+        dim=len(labels) - 1,
+        to_unconstrained=to_u,
+        from_unconstrained=from_u,
+        log_abs_det_jacobian=lambda phi: _stick_breaking_log_det(np.asarray(phi, dtype=float)),
+    )
+
+
+def _declared_parameter_block(name: str, constraint: str, value: Any) -> _ParamBlock | None:
+    """Return the unconstrained-space block for one declared, differentiable parameter.
+
+    Returns ``None`` when ``constraint`` has no generic reparameterization yet (a matrix, a
+    coupled ``greater_than:``/``less_than:`` bound, or anything else outside the set below).
+    """
+    if constraint == "real":
+        return _real_block(name, None)
+    if constraint == "positive":
+        return _positive_block(name, None)
+    if constraint == "unit_interval":
+        return _unit_interval_block(name)
+    if constraint == "real_vector":
+        return _real_block(name, len(value))
+    if constraint == "positive_vector":
+        return _positive_block(name, len(value))
+    if constraint == "simplex_vector":
+        return _simplex_vector_block(name, len(value))
+    if constraint == "simplex_map":
+        if not isinstance(value, Mapping):
+            return None
+        return _simplex_map_block(name, tuple(value.keys()))
+    return None
+
+
+def _generic_declared_bridge(prototype: Any, kw: dict[str, Any]) -> ParameterBridge | None:
+    """Build a :class:`ParameterBridge` from ``prototype``'s ``DistributionDeclaration``, or
+    return ``None`` (never raise) when the family cannot be bridged generically.
+
+    A family is bridged when (1) it has a declaration, (2) every declared parameter name is
+    also a constructor keyword of ``type(prototype)`` -- ruling out families whose declaration
+    describes an exponential-family natural/scoring parameterization instead (e.g. von Mises
+    declares ``eta1``/``eta2``/``log_const`` for generated scoring kernels, but its constructor
+    takes ``mu``/``kappa``: nothing here would be safe to dispatch on), (3) every constructor
+    argument the declaration doesn't cover has a default, and (4) every *differentiable*
+    declared parameter's constraint has a generic transform (see
+    :func:`_declared_parameter_block`). Non-differentiable declared parameters (e.g. a
+    Binomial's ``n``, an ErdosRenyiGraph's ``directed``) are carried as fixed constructor
+    keywords taken from ``prototype`` rather than sampled -- the same treatment
+    :mod:`mixle.stats.bayes.conjugate` gives a known nuisance parameter.
+    """
+    from mixle.stats.compute.declarations import declaration_for
+
+    cls = type(prototype)
+    declaration = declaration_for(prototype)
+    if declaration is None:
+        return None
+
+    try:
+        ctor_params = inspect.signature(cls.__init__).parameters
+    except (TypeError, ValueError):
+        return None
+
+    declared_names = {spec.name for spec in declaration.parameters}
+    for pname, param in ctor_params.items():
+        if pname == "self" or param.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
+            continue
+        if param.kind == inspect.Parameter.POSITIONAL_ONLY and pname in declared_names:
+            return None  # can't pass a positional-only constructor argument by keyword
+        if param.default is inspect.Parameter.empty and pname not in declared_names and pname != "name":
+            return None  # a required constructor argument the declaration doesn't cover
+
+    fixed_kwargs: dict[str, Any] = {}
+    blocks: list[_ParamBlock] = []
+    for spec in declaration.parameters:
+        if spec.name not in ctor_params:
+            return None  # declaration describes a natural/scoring parameterization, not the ctor
+        value = getattr(prototype, spec.name)
+        if not spec.differentiable:
+            fixed_kwargs[spec.name] = value
+            continue
+        block = _declared_parameter_block(spec.name, spec.constraint, value)
+        if block is None:
+            return None
+        blocks.append(block)
+
+    if not blocks:
+        return None  # nothing to sample a posterior over
+
+    offsets: list[int] = []
+    total = 0
+    for block in blocks:
+        offsets.append(total)
+        total += block.dim
+
+    def to_u(theta: dict[str, Any]) -> np.ndarray:
+        parts = [block.to_unconstrained(theta[block.name]) for block in blocks]
+        return np.concatenate(parts) if parts else np.zeros(0, dtype=float)
+
+    def from_u(phi: np.ndarray) -> dict[str, Any]:
+        phi = np.asarray(phi, dtype=float)
+        return {
+            block.name: block.from_unconstrained(phi[offset : offset + block.dim])
+            for block, offset in zip(blocks, offsets)
+        }
+
+    def log_det(phi: np.ndarray) -> float:
+        phi = np.asarray(phi, dtype=float)
+        return float(
+            sum(block.log_abs_det_jacobian(phi[offset : offset + block.dim]) for block, offset in zip(blocks, offsets))
+        )
+
+    def build(theta: dict[str, Any]) -> Any:
+        return cls(**fixed_kwargs, **theta, **kw)
+
+    return ParameterBridge(
+        dim=total,
+        to_unconstrained=to_u,
+        from_unconstrained=from_u,
+        log_abs_det_jacobian=log_det,
+        build=build,
+        param_names=tuple(block.name for block in blocks),
+        initial_theta={block.name: getattr(prototype, block.name) for block in blocks},
+    )
 
 
 def _coerce_prior_logpdf(prior: Any, bridge: ParameterBridge) -> Callable[[Any], float]:
