@@ -1,6 +1,6 @@
 """mixle — a capability-oriented probability/statistics library.
 
-The structure (see ``docs/ARCHITECTURE.md`` and ``docs/CAPABILITIES.md``):
+The structure (see ``docs/architecture.md`` and ``docs/contracts.md``):
 
 * **Objects** — the families: :mod:`mixle.dist` (the umbrella over every distribution, including the
   graph / ranking / set / Markov families), :mod:`mixle.process` (stochastic processes),

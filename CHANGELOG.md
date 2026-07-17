@@ -25,6 +25,8 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   is a reviewed diff.
 - Release-engineering gates: a weighted-estimation contract test, a base-install optional-import guard,
   a tracked benchmark harness, a pull-request template, and the 0.8.0 release checklist.
+- A maintained project documentation set covering charter, requirements, architecture, contracts,
+  development, testing, security, scientific validity, operations, releases, and migrations.
 - `CompiledEM` as a reusable fused full-mixture strategy, automatically selected by `optimize()` for
   eligible partially fusible heterogeneous mixtures; recursive SQUAREM packing for nested
   mixtures/composites; and function-preserving shared-trunk/residual-expert MoE upcycling.
@@ -41,6 +43,15 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   changed the process-global default dtype (mixle-pde's PDE code routinely does, for numerical
   precision) left the student's own weights at that ambient dtype while its inputs stayed explicitly
   float32, crashing with "mat1 and mat2 must have the same dtype, but got Float and Double".
+- Calibration, quantitative-semantics, and posterior-schema boundaries now reject empty, malformed,
+  non-finite, asymmetric, or non-positive-semidefinite inputs instead of passing or clipping them.
+- Reproducibility-sensitive modality reductions and corpus shingles now use portable digest-based
+  hashes rather than process-randomized values.
+- Empirical law discovery selects candidates on validation data and confirms the winner on a separate
+  untouched holdout; invalid ranges, budgets, forms, and simulator outputs are rejected.
+- Sequential-design acquisition budgets reject invalid values and explicitly count the initial fit;
+  root lazy imports preserve nested dependency failures.
+- Ordinary Pytest collection recognizes both supported test filename conventions.
 
 ### Fixed
 

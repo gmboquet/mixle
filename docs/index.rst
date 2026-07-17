@@ -223,6 +223,23 @@ reference under :doc:`api/modules` covers the broad public module surface;
    changelog
 
 .. toctree::
+   :caption: Project Governance
+   :hidden:
+   :maxdepth: 2
+
+   charter
+   requirements
+   architecture
+   contracts
+   development
+   testing
+   security
+   scientific-validity
+   operations
+   releases
+   migrations/0.8.0
+
+.. toctree::
    :caption: Reference Guides
    :hidden:
    :maxdepth: 2
