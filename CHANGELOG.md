@@ -112,6 +112,13 @@ with a regression test that fails on the unfixed code):
   GMM config, identical likelihoods); the torch objective fitters evaluate one forward per Adam
   iteration instead of two, with NaN-aware best-state tracking; `seq_encode` chunking uses stride
   slices (~76x on ndarray inputs) (E-1, E-2/G-3, E-3, I-2; #436).
+- The MPI backend (`MPIEncodedData`, `optimize(..., backend="mpi")`'s underlying handle) now folds
+  per-rank sufficient statistics with an `O(log W)` `comm.reduce` binary tree instead of a
+  gather-to-root loop, so no single rank folds more than `O(log W)` payloads — matching the technique
+  already used by the Spark and local-heterogeneous executors. The standalone
+  `mixle.inference.mpi_executor` transport (`mpi_fit`/`mpi_em_step`), a second, non-canonical MPI entry
+  point kept only to preserve that tree-reduce technique, is removed now that the canonical backend
+  uses it directly; verified equivalent to the removed transport under real `mpirun` before removal.
 
 ## [0.7.0] — 2026-07-09
 

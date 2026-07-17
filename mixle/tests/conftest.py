@@ -431,7 +431,6 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "language_model_dense_fit_test.py": ("torch", "integration", "slow"),
     "memory_efficient_training_test.py": ("torch", "integration", "slow"),
     "mixture_density_test.py": ("torch", "integration", "slow"),
-    "mpi_route_equivalence_test.py": ("parallel", "integration", "slow"),
     "mup_test.py": ("torch", "integration", "slow"),
     "neural_density_test.py": ("torch", "integration", "slow"),
     "ppl_density_test.py": ("ppl", "stochastic", "slow"),
