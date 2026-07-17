@@ -230,6 +230,19 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
         l1m = math.log(1.0 - p)
         return float(-p * (p + l1m) / ((1.0 - p) ** 2 * l1m * l1m))
 
+    def entropy(self) -> float:
+        """Shannon entropy in nats, by exact summation of the standard series.
+
+        The log-series entropy ``-sum_k p_k log p_k`` has no closed form (Fisher, Corbet &
+        Williams, 1943). The series is summed from ``k = 1`` up to this distribution's own
+        quantile at ``1 - 1e-16`` (plus a safety margin), beyond which the remaining tail mass is
+        far below double rounding.
+        """
+        kmax = int(self.quantile(1.0 - 1.0e-16)) + 50
+        k = np.arange(1, kmax + 1, dtype=np.float64)
+        lp = k * self.log_p - np.log(k) - self.log_norm
+        return float(-np.sum(np.exp(lp) * lp))
+
     def cdf(self, x: float) -> float:
         """Cumulative distribution function P(X <= x), support x >= 1 (via scipy logser)."""
         import math
