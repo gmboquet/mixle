@@ -476,6 +476,24 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "reproduce_receipt_test.py": ("integration", "slow"),
     "sorted_profile_quantizer_test.py": ("integration", "slow"),
     "task_quantize_test.py": ("integration", "slow"),
+    # 2026-07-17: mixle/tests/reason/test_model_fusion.py, mixle/tests/task/test_catalog_router.py, and
+    # mixle/tests/task/test_knowledge_routing.py were missing from this registry for the same reason the
+    # flat mixle/tests/test_*.py domain-vertical acceptance files were before their own retriage (PR #522):
+    # they match the same test_*.py collection convention but live in subdirectories, so that pass named
+    # them as a follow-up instead of folding them in. Profiled individually via the documented single-file
+    # pattern (`pytest <path> -n0 -m "" --durations=0`), 3 runs each: every call in all three lands under
+    # 0.1s (max observed 0.07s, a one-off fixture setup in test_model_fusion.py; everything else <=0.02s).
+    # test_model_fusion.py is a closed-form linear-Gaussian evidence fusion over 1x1 matrices (no
+    # iteration); test_catalog_router.py is tier-routing logic over a mocked verifier; test_knowledge_routing.py
+    # fits a MarkovChainEstimator on a 20-sequence, length-3 seed corpus (one counting pass, not an
+    # EM/MCMC/torch loop). The several-second total each run reports is fixed pytest/import startup cost,
+    # not test cost: a `--collect-only` pass over the same three files alone accounts for it, and an
+    # unrelated already-fast file in this suite (api_naming_aliases_test.py) shows the identical few-second
+    # total. None comes anywhere near the ~5s slow threshold used throughout this registry, so none gets an
+    # entry here; all three correctly stay on the fast default. Also not tagged `worklist`: PR #522's own
+    # registration of that marker scopes it explicitly to the H/J/K/L/N/IC/E/T-series flat files under
+    # mixle/tests/test_*.py -- these three are an M-series pair (reason, task) living in subdirectories,
+    # outside that definition, so this PR does not register or use that marker.
 }
 
 
