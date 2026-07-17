@@ -99,7 +99,7 @@ with a regression test that fails on the unfixed code):
   uncovered plus a genuine `IntegerChowLiuTreeDistribution.__str__` bug (per-feature table strings
   were never joined and lost their shape via a blind `.flatten()`, so `eval(str(dist))` could not
   reconstruct a real instance), and the README's overclaim that this file exercises "each family"
-  end to end (F-3; #512).
+  end to end (F-3; #516).
 
 ### Changed
 
