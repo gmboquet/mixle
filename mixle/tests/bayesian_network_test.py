@@ -19,6 +19,7 @@ from mixle.inference.bayesian_network import (
     learn_bayesian_network,
     learn_mixture_bayesian_network,
 )
+from mixle.utils.serialization import from_json, to_json
 
 
 def _ll(model, data):
@@ -350,6 +351,173 @@ class NumFreeParamsTest(unittest.TestCase):
         data = list(zip(c1, c2))
         net = learn_bayesian_network(data, max_parents=2, min_gain=0.0)
         self.assertEqual(net.edges(), [])
+
+
+class SerializationTest(unittest.TestCase):
+    """HeterogeneousBayesianNetwork + its factor classes round-trip through the safe JSON artifact path
+    (mixle.utils.serialization), not just pickle -- worklist F10.1 needs a fresh-process save/reload with
+    identical scores, and every factor kind the structure search can produce must actually support it."""
+
+    def _records_with_missing_categorical(self, n=500, seed=0):
+        # workclass-like field: a categorical parent with a missing sentinel (None), driving a continuous
+        # child -- the exact shape real heterogeneous tabular data (e.g. UCI Adult) exercises.
+        r = np.random.RandomState(seed)
+        cats = ["Private", "Self-emp", "Gov"]
+        out = []
+        for _ in range(n):
+            workclass = None if r.rand() < 0.1 else cats[r.randint(0, 3)]
+            base = 45.0 if workclass == "Self-emp" else 38.0
+            hours = float(r.randn() * 3 + base)
+            income = ">50K" if hours > 42 else "<=50K"
+            out.append((workclass, hours, income))
+        return out
+
+    def _assert_roundtrip_identical(self, net, probes):
+        text = to_json(net)
+        reloaded = from_json(text)
+        self.assertIsInstance(reloaded, type(net))
+        self.assertIsNot(reloaded, net)
+        self.assertEqual(reloaded.edges(), net.edges())
+        ll = np.array([net.log_density(x) for x in probes])
+        ll2 = np.array([reloaded.log_density(x) for x in probes])
+        np.testing.assert_array_equal(ll2, ll)  # bit-identical, not just close
+        enc = net.dist_to_encoder().seq_encode(probes)
+        enc2 = reloaded.dist_to_encoder().seq_encode(probes)
+        np.testing.assert_array_equal(reloaded.seq_log_density(enc2), net.seq_log_density(enc))
+        return reloaded
+
+    def test_roundtrip_with_missing_categorical_and_mixed_factors(self):
+        data = self._records_with_missing_categorical()
+        net = learn_bayesian_network(data, max_parents=2)
+        self.assertGreater(len(net.edges()), 0)  # the planted workclass -> hours dependence is found
+        missing_row = next(x for x in data if x[0] is None)
+        reloaded = self._assert_roundtrip_identical(net, data[:50] + [missing_row])
+        # the reloaded sampler works and produces the same field shape
+        sample = reloaded.sampler(seed=1).sample(3)
+        self.assertEqual(len(sample[0]), 3)
+
+    def test_roundtrip_glm_factor(self):
+        rng = np.random.RandomState(1)
+        x = rng.randn(600) * 1.5
+        data = [(float(v), "hi" if rng.rand() < 1.0 / (1.0 + np.exp(-3.0 * (v - 0.5))) else "lo") for v in x]
+        net = learn_bayesian_network(data)
+        kinds = {type(f).__name__ for f in net.factors}
+        self.assertIn("_GLMFactor", kinds)
+        self._assert_roundtrip_identical(net, data[:60])
+
+    def test_roundtrip_vector_nodes(self):
+        r = np.random.RandomState(2)
+        data = []
+        for _ in range(400):
+            cat = ["a", "b", "c"][r.randint(0, 3)]
+            center = {"a": [2, 0, 0, 0], "b": [0, 2, 0, 0], "c": [0, 0, 2, 0]}[cat]
+            vec = np.asarray(center, dtype=float) + 0.3 * r.randn(4)
+            price = float(2.0 * vec[0] - 1.0 * vec[1] + 0.4 * r.randn())
+            data.append((cat, vec, price))
+        net = learn_bayesian_network(data, max_parents=2)
+        kinds = {type(f).__name__ for f in net.factors}
+        self.assertTrue({"_VectorCLGFactor", "_VectorMarginalFactor"} & kinds)
+        self._assert_roundtrip_identical(net, data[:40])
+
+    def test_roundtrip_independent_composite_baseline(self):
+        # the transparent baseline (structure="off") is a plain mixle.stats CompositeDistribution --
+        # already registered, but confirm it round-trips through the same call our flagship example uses.
+        from mixle.inference import optimize
+
+        data = self._records_with_missing_categorical()
+        baseline = optimize(data, out=None, structure="off")
+        self.assertEqual(type(baseline).__name__, "CompositeDistribution")
+        text = to_json(baseline)
+        reloaded = from_json(text)
+        missing_row = next(x for x in data if x[0] is None)
+        for row in data[:20] + [missing_row]:
+            self.assertEqual(reloaded.log_density(row), baseline.log_density(row))
+
+
+class DescribeTest(unittest.TestCase):
+    """``HeterogeneousBayesianNetwork.describe()`` (worklist F10.1's explain_fit building block): every
+    factor kind must report REAL fitted numbers that match the planted ground truth, not just avoid
+    crashing -- a describe() that silently mislabeled a coefficient would be worse than none."""
+
+    def test_linear_gaussian_coefficient_matches_planted_effect(self):
+        # workclass shifts hours.per.week's mean by a known, exact amount -- describe() must recover it.
+        r = np.random.RandomState(0)
+        cats = ["Private", "Self-emp"]
+        data = []
+        for _ in range(2000):
+            w = cats[r.randint(0, 2)]
+            hours = (45.0 if w == "Self-emp" else 38.0) + 0.5 * r.randn()
+            data.append((w, hours))
+        net = learn_bayesian_network(data, max_parents=1)
+        report = net.describe(("workclass", "hours"))
+        edge = next(f for f in report["edges"] if f["field"] == "hours")
+        self.assertEqual(edge["kind"], "linear-gaussian")
+        self.assertIn("workclass='Self-emp'", edge["coefficients"])
+        # Private is the dropped-first level (folded into the intercept); Self-emp's coefficient is the
+        # planted +7 offset relative to it.
+        self.assertAlmostEqual(edge["coefficients"]["workclass='Self-emp'"], 7.0, delta=0.3)
+        self.assertAlmostEqual(edge["sigma"], 0.5, delta=0.1)
+
+    def test_glm_binomial_reports_correct_direction_and_levels(self):
+        # levels sort alphabetically ("down" < "up"); _GLMFactor's own convention is levels[0]=reference,
+        # levels[1]=positive -- describe() must report exactly that pairing, whichever wins the sort, and
+        # the coefficient sign must match the planted direction (higher x -> more "up").
+        rng = np.random.RandomState(1)
+        x = rng.randn(1500) * 1.5
+        data = [(float(v), "up" if rng.rand() < 1.0 / (1.0 + np.exp(-3.0 * v)) else "down") for v in x]
+        net = learn_bayesian_network(data, max_parents=1)
+        report = net.describe(("x", "label"))
+        edge = next(f for f in report["edges"] if f["field"] == "label")
+        self.assertEqual(edge["kind"], "glm-binomial")
+        self.assertEqual(edge["reference_level"], "down")
+        self.assertEqual(edge["positive_level"], "up")
+        self.assertGreater(edge["coefficients"]["x"], 0.0)  # higher x -> more "up", the planted direction
+
+    def test_root_marginal_reports_the_fitted_distribution(self):
+        r = np.random.RandomState(2)
+        data = [(float(r.randn()), float(r.randn())) for _ in range(300)]  # independent -- both stay roots
+        net = learn_bayesian_network(data, max_parents=1)
+        report = net.describe()
+        self.assertEqual(len(report["edges"]), 0)
+        self.assertEqual(len(report["roots"]), 2)
+        self.assertTrue(all("GaussianDistribution" in f["fitted"] for f in report["roots"]))
+
+    def test_root_marginal_surfaces_missingness(self):
+        r = np.random.RandomState(3)
+        col = [None if r.rand() < 0.2 else "a" for _ in range(300)]
+        net = learn_bayesian_network([(v,) for v in col], max_parents=0)
+        report = net.describe(("cat",))
+        self.assertEqual(report["roots"][0]["field"], "cat")
+        self.assertIn("OptionalDistribution", report["roots"][0]["fitted"])
+
+    def test_discrete_conditional_reports_configurations(self):
+        r = np.random.RandomState(4)
+        data = []
+        for _ in range(1500):
+            a = "x" if r.rand() < 0.5 else "y"
+            b = int(r.poisson(8 if a == "x" else 2))
+            data.append((a, b))
+        net = learn_bayesian_network(data, max_parents=1)
+        report = net.describe(("a", "b"))
+        edge = next(f for f in report["edges"] if f["field"] == "b")
+        self.assertEqual(edge["kind"], "discrete-conditional")
+        self.assertEqual(edge["n_configurations"], 2)
+        self.assertEqual({c["given"]["a"] for c in edge["configurations"]}, {"x", "y"})
+
+    def test_wrong_field_names_length_raises(self):
+        net = learn_bayesian_network([(1.0, 2.0) for _ in range(50)], max_parents=1)
+        with self.assertRaises(ValueError):
+            net.describe(("only_one_name",))
+
+    def test_describe_is_json_serializable(self):
+        # explain_fit's whole point is a report a caller can print/save -- it must not carry back numpy
+        # scalars or other non-plain-json types.
+        import json
+
+        r = np.random.RandomState(5)
+        data = [("a" if r.rand() < 0.5 else "b", float(r.randn())) for _ in range(300)]
+        net = learn_bayesian_network(data, max_parents=1)
+        json.dumps(net.describe(("cat", "value")))  # raises TypeError if anything isn't plain-JSON
 
 
 if __name__ == "__main__":
