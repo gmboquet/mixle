@@ -207,3 +207,36 @@ def test_extension_and_trace_contracts_are_structural_and_provider_neutral():
     )
     sink.emit(event)
     assert sink.event.semantic_identity == semantic_digest(extension)
+
+
+def test_quantitative_contracts_reject_nonfinite_values():
+    _, _, _, observation = _fixture_contracts()
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        dataclasses.replace(observation, measurement_uncertainty=float("nan"))
+    posterior = _posterior()
+    with pytest.raises(ValueError, match="utility values must be finite"):
+        DecisionArtifact(
+            "decision",
+            ("monitor", "stop"),
+            "monitor",
+            {"monitor": float("nan"), "stop": 1.0},
+            posterior.identity,
+            "expected-utility",
+        )
+
+
+def test_extensions_and_trace_events_reject_invalid_identity_fields():
+    with pytest.raises(ValueError, match="extension id"):
+        CapabilityExtension("", "PRJ-INQUIRY", "input", "output", "development")
+    with pytest.raises(ValueError, match="schema URIs"):
+        CapabilityExtension("reader", "PRJ-INQUIRY", "", "output", "development")
+    with pytest.raises(ValueError, match="sequence"):
+        TraceEvent("trace", -1, "read", "a" * 64, {}, "2026-07-15T00:00:00Z")
+    with pytest.raises(ValueError, match="RFC 3339"):
+        TraceEvent("trace", 0, "read", "a" * 64, {}, "yesterday")
+
+
+def test_logit_inverse_is_stable_for_extreme_finite_inputs():
+    transform = TransformSpec(TransformKind.LOGIT)
+    assert transform.inverse(-1000.0) == 0.0
+    assert transform.inverse(1000.0) == 1.0

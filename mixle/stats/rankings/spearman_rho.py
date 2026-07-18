@@ -347,7 +347,7 @@ class SpearmanRankingSampler(DistributionSampler):
         encoder = self.dist.dist_to_encoder()
         self.probs = np.exp(dist.seq_log_density(encoder.seq_encode(self.perms)))
 
-    def sample(self, size: int | None = None) -> list[int] | Sequence[list[int]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | Sequence[list[int]]:
         """Draw iid samples (permutations of 0,...,K-1) from the Spearman ranking distribution.
 
         Args:

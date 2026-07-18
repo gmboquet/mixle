@@ -7,13 +7,17 @@
     },
     "mixle.blending": {
       "maturity": "provisional",
-      "status": "Unclassified (provisional by default)"
+      "status": "Active mine-planning workflow (worklist H2: ore blending & grade control)"
     },
     "mixle.capability": {
       "maturity": "provisional",
       "status": "Unclassified (provisional by default)"
     },
     "mixle.capability_lifecycle": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.causal": {
       "maturity": "provisional",
       "status": "Unclassified (provisional by default)"
     },
@@ -79,7 +83,7 @@
     },
     "mixle.mine_planning": {
       "maturity": "provisional",
-      "status": "Unclassified (provisional by default)"
+      "status": "Active mine-planning workflow (worklist H3: production scheduling & block sequencing)"
     },
     "mixle.models": {
       "maturity": "provisional",
@@ -91,7 +95,7 @@
     },
     "mixle.pipeline_twin": {
       "maturity": "provisional",
-      "status": "Unclassified (provisional by default)"
+      "status": "Active mine-planning workflow (worklist H8: digital-twin pipeline simulation)"
     },
     "mixle.pool": {
       "maturity": "provisional",

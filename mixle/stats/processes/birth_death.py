@@ -191,7 +191,7 @@ class BirthDeathSamplingSampler(DistributionSampler):
                 events.append((t, _SAMPLING))
         return d.initial_population, d.horizon, events
 
-    def sample(self, size: int | None = None) -> Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one trajectory ``(n0, T, events)`` or a list of ``size`` trajectories."""
         if size is None:
             return self._sample_one()

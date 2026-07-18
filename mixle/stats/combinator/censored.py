@@ -167,7 +167,7 @@ class CensoredSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.base_sampler = dist.base.sampler(seed=self.rng.randint(0, 2**31 - 1))
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw exact value(s) from the base distribution."""
         return self.base_sampler.sample(size=size)
 

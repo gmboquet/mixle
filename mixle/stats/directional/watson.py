@@ -141,7 +141,7 @@ class WatsonSampler(DistributionSampler):
         u_, sv_, _ = np.linalg.svd(q)
         self._tangent = u_[:, sv_ > 1e-9]  # (p, p-1)
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw one unit vector or a stack of iid unit vectors."""
         d = self.dist
         n = 1 if size is None else int(size)

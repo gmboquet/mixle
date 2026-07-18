@@ -24,6 +24,7 @@ and :func:`mixle.describe`. It adds no new inference -- only one place to stand.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import pickle
 import time
@@ -279,30 +280,46 @@ class Model:
         return "json"
 
     @classmethod
-    def load(cls, path: str) -> Model:
+    def load(cls, path: str, *, trust_code: bool = False) -> Model:
         """Restore a :class:`Model` from an artifact directory created by :meth:`deploy`.
 
         .. warning::
 
-           A ``pickle``-format artifact (a torch-backed model, or one written by an older mixle) is loaded
-           with :func:`pickle.load`, which **executes arbitrary code** from the file -- only load such an
-           artifact from a source you trust. JSON-format artifacts (the default for pure mixle models) are
-           deserialized through the type-tagged registry and do not execute arbitrary code.
+           A ``pickle``-format artifact (a torch-backed model, or one written by an older mixle)
+           executes arbitrary code from the file when loaded, exactly like ``pickle.load`` on any
+           untrusted input. JSON-format artifacts are deserialized through a type-tagged registry that
+           never imports or executes code from the payload -- **unless** the model contains a
+           NeuralLeaf-family component, whose weights are embedded as a pickle blob inside the
+           otherwise-safe JSON (see :mod:`mixle.models._neural_serial`); loading one of those also
+           executes code. There is no way to tell which case applies without attempting the load.
+
+           Because of this, ``load`` refuses to run any code-executing path unless the caller passes
+           ``trust_code=True`` -- an explicit statement that the artifact's source is trusted. Without
+           it, a pickle-format artifact raises immediately, and a JSON artifact raises only if it
+           actually contains an embedded module (a pure-statistical model still loads normally).
         """
+        from mixle.utils.serialization import SerializationError, trusted_deserialization
+
         p = Path(path)
         try:
             manifest = json.loads((p / "manifest.json").read_text())
         except (OSError, ValueError):
             manifest = {}
         fmt = manifest.get("format", "pickle")  # artifacts predating the format field are pickle-only
-        if fmt == "json":
-            from mixle.utils.serialization import ensure_pysp_serialization_registry, from_serializable
+        with trusted_deserialization() if trust_code else contextlib.nullcontext():
+            if fmt == "json":
+                from mixle.utils.serialization import ensure_pysp_serialization_registry, from_serializable
 
-            ensure_pysp_serialization_registry()
-            fitted = from_serializable(json.loads((p / "model.json").read_text()))
-        else:
-            with open(p / "model.pkl", "rb") as f:
-                fitted = pickle.load(f)  # noqa: S301 - trusted-source only; see the warning above
+                ensure_pysp_serialization_registry()
+                fitted = from_serializable(json.loads((p / "model.json").read_text()))
+            else:
+                if not trust_code:
+                    raise SerializationError(
+                        f"{path!r} is a pickle-format artifact: loading it executes arbitrary code from "
+                        "the file. Pass trust_code=True to Model.load() only if you trust its source."
+                    )
+                with open(p / "model.pkl", "rb") as f:
+                    fitted = pickle.load(f)  # noqa: S301 - trust_code=True required by the caller above
         m = cls(fitted)
         m.fitted = fitted
         m.notes = list(manifest.get("notes", []))

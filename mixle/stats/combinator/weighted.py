@@ -228,7 +228,9 @@ class WeightedSampler(DistributionSampler):
         super().__init__(dist, seed)
         self.dist_sampler = dist.dist.sampler(seed=self.new_seed())
 
-    def sample(self, size: int | None = None) -> tuple[Any, float] | Sequence[tuple[Any, float]]:
+    def sample(
+        self, size: int | None = None, *, batched: bool = True
+    ) -> tuple[Any, float] | Sequence[tuple[Any, float]]:
         """Draw iid (value, weight) samples, each with weight 1.0.
 
         Args:

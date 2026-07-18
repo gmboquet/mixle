@@ -231,6 +231,21 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X]: r(1-p)/p^2."""
         return float(self.r * (1.0 - self.p) / (self.p * self.p))
 
+    def entropy(self) -> float:
+        """Shannon entropy in nats, by exact summation of the standard series.
+
+        The negative-binomial entropy ``-sum_k p_k log p_k`` has no closed form (Johnson, Kemp &
+        Kotz, *Univariate Discrete Distributions*, ch. 5). The series is summed over the support
+        up to this distribution's own quantile at ``1 - 1e-16`` (plus a safety margin), beyond
+        which the tail mass is far below double rounding -- the same effective-support truncation
+        PoissonDistribution.entropy() uses, but driven by the exact CDF (via ``betainc``) rather
+        than a Gaussian-tail heuristic, since the negative binomial can be heavy-tailed.
+        """
+        kmax = int(self.quantile(1.0 - 1.0e-16)) + 50
+        k = np.arange(kmax + 1, dtype=np.float64)
+        lp = gammaln(k + self.r) - self.log_gamma_r - gammaln(k + 1.0) + self.r * self.log_p + k * self.log_1p
+        return float(-np.sum(np.exp(lp) * lp))
+
     def cdf(self, x: float) -> float:
         """Cumulative distribution function P(X <= x) = I_p(r, floor(x)+1)."""
         import math
@@ -306,7 +321,7 @@ class NegativeBinomialSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> int | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> int | np.ndarray:
         """Draw one sample or an array of iid samples."""
         scale = (1.0 - self.dist.p) / self.dist.p
         lam = self.rng.gamma(shape=self.dist.r, scale=scale, size=size)
