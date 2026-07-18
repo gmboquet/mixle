@@ -152,7 +152,7 @@ class ContinuousTimeMarkovChainSampler(DistributionSampler):
             cur = nxt
         return d.initial_state, jumps
 
-    def sample(self, size: int | None = None) -> Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one trajectory or a list of trajectories over the configured horizon."""
         if size is None:
             return self._sample_one()

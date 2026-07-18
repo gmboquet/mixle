@@ -168,7 +168,7 @@ class DictDirichletSampler(DistributionSampler):
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
-    def sample(self, size: int | None = None) -> dict | list[dict]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> dict | list[dict]:
         """Draw Dirichlet-distributed probability maps over the alpha keys (dict alpha only)."""
         if self.dist.is_unbounded:
             raise ValueError(

@@ -74,6 +74,11 @@ sync, so this table and the registry cannot drift apart.
      - Active application/research workflows
      - Scientific design, Bayesian optimization, model-improvement loops, and
        anti-regression experiments.
+   * - ``mixle.blending``, ``mixle.mine_planning``, and ``mixle.pipeline_twin``
+     - Active mine-planning workflows (worklist H2, H3, H8)
+     - Blend-to-spec LP/MILP with IIS feasibility diagnostics; ultimate-pit
+       and time-phased extraction scheduling; and digital-twin, period-stepped
+       re-solve simulation of the mine-to-plant-to-customer pipeline.
    * - ``mixle.inference.production``
      - Practical helpers, not a platform
      - Provenance headers, filesystem registries, scoring wrappers, activity

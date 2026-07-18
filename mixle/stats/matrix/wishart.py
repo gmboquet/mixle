@@ -119,7 +119,7 @@ class WishartSampler(DistributionSampler):
         la = d._chol @ a
         return la @ la.T
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw one SPD matrix or a stacked batch of independent Wishart samples."""
         if size is None:
             return self._one()

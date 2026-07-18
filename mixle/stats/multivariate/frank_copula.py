@@ -78,7 +78,7 @@ class FrankCopulaSampler(DistributionSampler):
         self.dist = dist
         self.rng = RandomState(seed)
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         n = 1 if size is None else int(size)
         th = self.dist.theta
         u1 = self.rng.uniform(_CLIP, 1.0 - _CLIP, size=n)

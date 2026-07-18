@@ -213,7 +213,7 @@ class PlackettLuceSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> list[int] | list[list[int]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | list[list[int]]:
         """Draw orderings (permutations of 0,...,K-1); a single list when size is None."""
         sz = 1 if size is None else size
         k = self.dist.dim

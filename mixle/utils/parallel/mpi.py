@@ -4,12 +4,19 @@ Every MPI rank runs the same script; rank 0 plays the Spark driver. Each rank
 holds a shard of the raw data, encodes it locally once, and keeps the encoded
 chunks resident (process persistence is free under MPI). Per EM iteration the
 model is broadcast from the root for bitwise consistency, every rank
-accumulates sufficient statistics over its shard, the per-rank
-``(count, accumulator.value())`` payloads are gathered to the root, the root
-folds them with ``combine()``, applies ``key_merge``/``key_replace`` once
-globally, runs the M-step, and broadcasts the new model - so every rank
-returns an identical distribution and the surrounding ``optimize`` loop stays
-in lockstep across ranks with no further coordination.
+accumulates sufficient statistics over its shard, and the per-rank
+``(count, accumulator.value())`` payloads fold with ``comm.reduce`` -- mpi4py's
+lowercase, pickle-based object-mode reduce, which performs a genuine ``O(log W)``
+binary reduction tree rather than a gather-to-root: each internal tree node
+combines two already-deserialized payloads via a fresh accumulator's
+``combine()``, so no single rank ever folds more than ``O(log W)`` payloads.
+This is the same technique the Spark transport uses via ``RDD.treeReduce`` and
+the local executor uses via its in-process combine tree (see
+:mod:`mixle.inference.spark_executor` and :mod:`mixle.inference.heterogeneous_executor`).
+The root then applies ``key_merge``/``key_replace`` once globally, runs the
+M-step, and broadcasts the new model - so every rank returns an identical
+distribution and the surrounding ``optimize`` loop stays in lockstep across
+ranks with no further coordination.
 
 Usage (run with ``mpiexec -n 4 python script.py``)::
 
@@ -27,14 +34,11 @@ other ranks so iteration logging is printed once. Log-density sums are
 mpi4py is an optional dependency (``pip install mixle[mpi]``); importing
 this module without it raises ImportError.
 
-Relationship to the other MPI route (worklist D8.5). This is the **canonical, integrated** MPI EM path:
-an :class:`~mixle.utils.parallel.planner.EncodedDataHandle` that plugs into ``optimize``, inheriting its
-convergence loop and logging, using a gather-to-root reduction. The standalone
-:func:`mixle.inference.mpi_executor.mpi_fit` runs the *same* sharded EM (same ``combine`` +
-``estimator.estimate`` M-step) as a small direct loop with an ``O(log W)`` tree ``reduce``; the two reach
-the same fit to floating-point precision (see ``mixle/tests/mpi_route_equivalence_test.py``). Prefer this
-backend for real fits; ``mpi_fit`` is the direct-transport option, and its tree reduce is the reduction this
-backend should adopt.
+This is mixle's one MPI EM transport: an :class:`~mixle.utils.parallel.planner.EncodedDataHandle` that
+plugs directly into ``optimize``, inheriting its convergence loop and logging. (A second, standalone
+``comm.reduce``-based transport lived at ``mixle.inference.mpi_executor`` pre-0.8.0; it was folded in
+here -- its ``O(log W)`` tree-reduce technique is what ``_fold_and_share``/``_fold_value_and_share``
+now use, in place of the old gather-to-root loop -- and removed as a redundant second entry point.)
 """
 
 import io
@@ -137,16 +141,26 @@ class MPIEncodedData(EncodedDataHandle):
             accumulator.seq_update(x, np.ones(sz), model)
         return count, accumulator.value()
 
+    def _tree_combine(self, estimator):
+        """A pairwise ``(count, value)`` combiner for ``comm.reduce``: fresh accumulator per tree node,
+        seeded via ``from_value`` and folded via ``combine`` -- the same shape used by
+        :func:`mixle.inference.heterogeneous_executor.tree_reduce_values` and the Spark transport, so a
+        shared-reference ``value()`` is never mutated in place (the HMM-stat aliasing hazard)."""
+        factory = estimator.accumulator_factory()
+
+        def combine(a: tuple[float, Any], b: tuple[float, Any]) -> tuple[float, Any]:
+            acc = factory.make().from_value(a[1])
+            acc.combine(b[1])
+            return a[0] + b[0], acc.value()
+
+        return combine
+
     def _fold_and_share(self, estimator, local: tuple[float, Any]):
-        """Gather per-rank stats, fold+M-step on the root, broadcast the model."""
-        gathered = self.comm.gather(pickle.dumps(local, protocol=_PROTO), root=self.root)
+        """Fold per-rank stats with an O(log W) reduction tree, M-step + broadcast the model from the root."""
+        folded = self.comm.reduce(local, op=self._tree_combine(estimator), root=self.root)
         if self.rank == self.root:
-            accumulator = estimator.accumulator_factory().make()
-            nobs = 0.0
-            for raw in gathered:
-                count, stats = pickle.loads(raw)
-                nobs += count
-                accumulator.combine(stats)
+            nobs, value = folded
+            accumulator = estimator.accumulator_factory().make().from_value(value)
             stats_dict = dict()
             accumulator.key_merge(stats_dict)
             accumulator.key_replace(stats_dict)
@@ -156,15 +170,11 @@ class MPIEncodedData(EncodedDataHandle):
         return pickle.loads(self.comm.bcast(model_b, root=self.root))
 
     def _fold_value_and_share(self, estimator, local: tuple[float, Any]) -> tuple[float, Any]:
-        """Gather per-rank stats, fold/key-tie on root, broadcast folded value."""
-        gathered = self.comm.gather(pickle.dumps(local, protocol=_PROTO), root=self.root)
+        """Fold per-rank stats with an O(log W) reduction tree, key-tie on root, broadcast the folded value."""
+        folded = self.comm.reduce(local, op=self._tree_combine(estimator), root=self.root)
         if self.rank == self.root:
-            accumulator = estimator.accumulator_factory().make()
-            nobs = 0.0
-            for raw in gathered:
-                count, stats = pickle.loads(raw)
-                nobs += count
-                accumulator.combine(stats)
+            nobs, value = folded
+            accumulator = estimator.accumulator_factory().make().from_value(value)
             stats_dict = dict()
             accumulator.key_merge(stats_dict)
             accumulator.key_replace(stats_dict)

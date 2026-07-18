@@ -19,6 +19,15 @@ on-disk zarr and HDF5 volumes without materializing them. Both are ``None`` when
 instead of an ``ImportError`` on import. numpy-memmap volumes need no extra dependency. Install with:
 
     pip install mixle[arrays]
+
+pandas: ``mixle.data.sources.pandas_source`` reads a caller-supplied DataFrame by duck-typing (it never
+imports pandas itself), but the write-side result-egress methods (``ParameterPosterior.to_dataframe``,
+``CalibrationReport.to_dataframe``, ``MarkovChainLatentPosterior.to_dataframe``, and each type's
+``to_parquet``) construct a real ``pandas.DataFrame``, so they need the library itself. ``pandas`` is
+``None`` when missing and ``HAS_PANDAS`` is ``False``, so those methods raise the standard
+``require(...)`` message at call time instead of an ``ImportError`` on import. Install with:
+
+    pip install mixle[pandas]
 """
 
 __all__ = [
@@ -33,6 +42,8 @@ __all__ = [
     "HAS_ZARR",
     "h5py",
     "HAS_H5PY",
+    "pandas",
+    "HAS_PANDAS",
     "MPI",
     "HAS_MPI4PY",
     "require",
@@ -111,6 +122,15 @@ try:
 except ImportError:
     h5py = None
     HAS_H5PY = False
+
+
+try:
+    import pandas
+
+    HAS_PANDAS = True
+except ImportError:
+    pandas = None
+    HAS_PANDAS = False
 
 
 # mpi4py: the "mpi" distributed backend (mixle.utils.parallel.mpi) needs an actual MPI runtime to do

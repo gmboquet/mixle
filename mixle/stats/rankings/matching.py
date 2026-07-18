@@ -214,7 +214,7 @@ class MatchingSampler(DistributionSampler):
             sigma[i] = available.pop(choice)
         return sigma
 
-    def sample(self, size: int | None = None) -> list[int] | list[list[int]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | list[list[int]]:
         """Draw matchings (each a permutation); a single matching when size is None."""
         if size is None:
             return self._sample_one()

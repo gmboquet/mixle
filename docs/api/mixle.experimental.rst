@@ -11,6 +11,7 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.experimental.context_parallel_spine
    mixle.experimental.context_spine
    mixle.experimental.graduation
    mixle.experimental.growth_operators
@@ -24,4 +25,5 @@ Submodules
    mixle.experimental.ssm_hybrid
    mixle.experimental.structure_edit_schedule
    mixle.experimental.summary_tree
+   mixle.experimental.tensor_pipeline_context_parallel
    mixle.experimental.tying_discovery

@@ -254,7 +254,7 @@ class SemiSupervisedHiddenMarkovSampler(DistributionSampler):
             states.append(z)
         return ([self.state_samplers[st].sample() for st in states], None)
 
-    def sample(self, size=None):
+    def sample(self, size=None, *, batched: bool = True):
         """Draw one observation or a list of observations with ``None`` state priors."""
         if self.dist.terminal_states is not None:
             return self._sample_terminal() if size is None else [self._sample_terminal() for _ in range(size)]
