@@ -336,7 +336,7 @@ class SegmentalHiddenMarkovSampler(DistributionSampler):
         t_map = {i: {j: dist.transitions[i, j] for j in range(dist.n_states)} for i in range(dist.n_states)}
         self.state_sampler = MarkovChainDistribution(p_map, t_map).sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample(self, size: int | None = None) -> list[Any] | list[list[Any]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[Any] | list[list[Any]]:
         """Draw one segment sequence, or ``size`` iid segment sequences."""
         if size is not None:
             return [self.sample() for _ in range(size)]

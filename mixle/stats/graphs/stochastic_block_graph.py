@@ -366,6 +366,8 @@ class StochasticBlockGraphSampler(DistributionSampler):
         num_nodes: int | None = None,
         block_assignments: Any | None = None,
         return_assignments: bool = False,
+        *,
+        batched: bool = True,
     ) -> Any:
         """Draw one graph or a list of graphs from the SBM."""
         if size is None:

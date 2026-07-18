@@ -94,7 +94,7 @@ class GaussianCopulaSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw one copula sample or a batch of independent copula samples."""
         n = 1 if size is None else int(size)
         z = self.rng.multivariate_normal(np.zeros(self.dist.dim), self.dist.corr, size=n)

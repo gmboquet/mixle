@@ -77,7 +77,7 @@ class ClaytonCopulaSampler(DistributionSampler):
         self.dist = dist
         self.rng = RandomState(seed)
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         n = 1 if size is None else int(size)
         th = self.dist.theta
         v = self.rng.gamma(shape=1.0 / th, scale=1.0, size=(n, 1))

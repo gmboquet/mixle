@@ -15,6 +15,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from importlib.resources import files
 from typing import Any, Protocol, runtime_checkable
@@ -170,6 +171,8 @@ class TransformSpec:
             raise ValueError("logit transform requires lower < upper")
 
     def forward(self, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("transform input must be finite")
         if self.kind is TransformKind.IDENTITY:
             return float(value)
         if self.kind is TransformKind.LOG:
@@ -183,17 +186,26 @@ class TransformSpec:
         return self.scale * value + self.offset
 
     def inverse(self, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("transform input must be finite")
         if self.kind is TransformKind.IDENTITY:
             return float(value)
         if self.kind is TransformKind.LOG:
             return math.exp(value)
         if self.kind is TransformKind.LOGIT:
-            probability = 1.0 / (1.0 + math.exp(-value))
+            if value >= 0.0:
+                exp_neg = math.exp(-value)
+                probability = 1.0 / (1.0 + exp_neg)
+            else:
+                exp_pos = math.exp(value)
+                probability = exp_pos / (1.0 + exp_pos)
             return self.lower + (self.upper - self.lower) * probability
         return (value - self.offset) / self.scale
 
     def log_abs_det_jacobian(self, value: float) -> float:
         """Log absolute derivative of ``forward`` at a natural-space value."""
+        if not math.isfinite(value):
+            raise ValueError("transform input must be finite")
         if self.kind is TransformKind.IDENTITY:
             return 0.0
         if self.kind is TransformKind.LOG:
@@ -330,8 +342,10 @@ class ObservationSpec:
             raise ValueError("observation content digest and data reference are required")
         if self.id not in self.likelihood.observation_ids:
             raise ValueError("observation likelihood must reference the observation id")
-        if self.measurement_uncertainty is not None and self.measurement_uncertainty < 0:
-            raise ValueError("measurement uncertainty cannot be negative")
+        if self.measurement_uncertainty is not None and (
+            not math.isfinite(self.measurement_uncertainty) or self.measurement_uncertainty < 0
+        ):
+            raise ValueError("measurement uncertainty must be finite and nonnegative")
 
     @classmethod
     def from_record(cls, value: Mapping[str, Any]) -> ObservationSpec:
@@ -467,6 +481,8 @@ class DecisionArtifact:
             raise ValueError("decision selection and utility must close over the alternatives")
         if not _SHA256.fullmatch(self.posterior_identity) or not self.risk_measure:
             raise ValueError("decision posterior identity and risk measure are required")
+        if any(not math.isfinite(value) for value in self.utility.values()):
+            raise ValueError("decision utility values must be finite")
 
 
 @dataclass(frozen=True)
@@ -478,6 +494,13 @@ class CapabilityExtension:
     maturity: str
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
+    def __post_init__(self) -> None:
+        _require_id(self.id, "capability extension id")
+        _require_id(self.owner_project, "capability extension owner")
+        _require_id(self.maturity, "capability extension maturity")
+        if not self.input_schema_uri.strip() or not self.output_schema_uri.strip():
+            raise ValueError("capability extension input and output schema URIs are required")
+
 
 @dataclass(frozen=True)
 class TraceEvent:
@@ -488,6 +511,21 @@ class TraceEvent:
     payload: Mapping[str, Any]
     occurred_at: str
     schema_version: str = SEMANTICS_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        _require_id(self.trace_id, "trace id")
+        _require_id(self.event_type, "trace event type")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 0:
+            raise ValueError("trace sequence must be a nonnegative integer")
+        if not _SHA256.fullmatch(self.semantic_identity):
+            raise ValueError("trace semantic identity must be SHA-256")
+        canonical_json(self.payload)
+        try:
+            timestamp = datetime.fromisoformat(self.occurred_at.replace("Z", "+00:00"))
+        except (AttributeError, ValueError) as exc:
+            raise ValueError("trace occurred_at must be an RFC 3339 timestamp") from exc
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError("trace occurred_at must include a timezone")
 
 
 @runtime_checkable

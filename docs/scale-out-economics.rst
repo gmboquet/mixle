@@ -13,7 +13,8 @@ Each EM iteration on a distributed backend does three things:
 1. **Compute** -- every worker folds its data shard into sufficient statistics.
    This is O(N / workers) per iteration.
 2. **Reduce** -- each worker's sufficient-statistic *payload*, exactly
-   ``pickle.dumps((count, accumulator.value()))``, is gathered to the root and
+   ``pickle.dumps((count, accumulator.value()))``, is reduced to the root (a
+   gather-and-fold or an O(log W) reduce tree, backend-dependent) and
    combined. See ``mixle/utils/parallel/mpi.py``.
 3. **Broadcast** -- the root re-estimates the model and sends it back to every
    worker.
@@ -44,7 +45,7 @@ When distribution is expected to help
 
 Because the reduce payload is tiny and fixed while compute scales with N,
 distribution pays off when **per-shard compute time dominates the fixed
-gather + fold + broadcast overhead**. Concretely:
+reduce + fold + broadcast overhead**. Concretely:
 
 * **Helps:** large N *and* non-trivial per-row work -- a rich model (large
   mixtures, HMMs, neural leaves), an expensive encoder, or per-row scoring that

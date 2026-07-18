@@ -15,6 +15,7 @@ From a clone:
    python -m venv .venv
    . .venv/bin/activate
    pip install -e ".[test,lint]"
+   git config core.hooksPath .githooks
 
 Use all optional dependencies only when you need to exercise integrations:
 
@@ -44,6 +45,18 @@ Run the broader non-optional suite:
 
    python -m pytest -m "not optional and not benchmark"
 
+Local runs must target the affected behavior and keep to a hard 30-second
+process deadline; broader matrices belong in the hosted CI jobs. On macOS or
+Linux, one portable way to enforce the deadline is:
+
+.. code-block:: sh
+
+   perl -e 'alarm shift; exec @ARGV' 30 python -m pytest -q -n0 -m '' path/to/file_test.py::test_name
+
+If a useful test cannot finish within that deadline, stop it, record the
+limitation, and rely on the appropriate hosted job instead of running the full
+suite locally.
+
 When touching a distribution family, include focused tests for:
 
 * sampler reproducibility;
@@ -71,12 +84,28 @@ Linting and Typing
    ruff check .
    mypy mixle
 
+For a fast local loop, scope these to the files you changed instead of the
+whole tree:
+
+.. code-block:: sh
+
+   ruff check path/to/changed.py
+   ruff format --check path/to/changed.py
+
 The project allows incremental typing in places. Treat existing configuration
 in ``pyproject.toml`` as canonical rather than broadening ignores locally.
 
 Formatting-only changes should be kept separate from behavioral or
 documentation changes when possible. This keeps review focused and helps
 release notes name what actually changed.
+
+Debugging
+---------
+
+Start with the smallest failing node, invalid input, or import boundary.
+Record the exact command, Python version, revision, and result. Preserve the
+original exception and data; do not broaden exception handling merely to make
+a test green.
 
 Documentation Build
 -------------------
@@ -140,6 +169,16 @@ When changing an existing public symbol, also check whether serialized artifacts
 registry entries, examples, and tutorials mention its old name or call shape.
 Compatibility shims are preferred when users may have stored fully-qualified
 class names in artifacts.
+
+Change Control
+--------------
+
+Resolve the active release and any governed work or change records before
+editing. Use an isolated worktree when the primary checkout is dirty or
+ownership of the working tree is unclear. Stage explicit, owned paths rather
+than the whole tree, review the staged diff and commit identity, commit one
+coherent change, and open a pull request against the active release branch
+with the required metadata.
 
 Release Checklist
 -----------------

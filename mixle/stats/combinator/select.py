@@ -558,7 +558,7 @@ class SelectSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist_samplers = [d.sampler(seed=self.rng.randint(maxint)) for d in dist.dists]
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw from the select distribution.
 
         Dispatch-mixture mode (``weights`` set): a branch is drawn from the weights and a single
