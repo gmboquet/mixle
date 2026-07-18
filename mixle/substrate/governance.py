@@ -14,13 +14,21 @@ ordinary sharing.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 from mixle.substrate.core import Substrate, SubstrateItem
+
+if TYPE_CHECKING:
+    from mixle.capability_lifecycle import AuthorizationDecision
 
 PENDING = "pending"
 APPROVED = "approved"
 REJECTED = "rejected"
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 @dataclass
@@ -63,7 +71,7 @@ def propose(substrate: Substrate, ids: list[str], *, to: str, by: str | None = N
         if item is None:
             continue
         prov = dict(item.provenance)
-        prov["proposal"] = {"to": to, "by": by, "status": PENDING}
+        prov["proposal"] = {"to": to, "by": by, "status": PENDING, "proposed_at": _now()}
         _restamp(substrate, item, prov)  # scope unchanged: proposing does not share
         proposed.append(item_id)
     return proposed
@@ -100,7 +108,7 @@ def approve(substrate: Substrate, item_id: str, *, by: str, governance: Governan
     publish(substrate, [item_id], to=target, by=by, from_scope=item.scope)
     promoted = substrate.get(item_id)
     prov = dict(promoted.provenance)
-    prov["proposal"] = {**prop, "status": APPROVED, "approved_by": by, "to": target}
+    prov["proposal"] = {**prop, "status": APPROVED, "approved_by": by, "to": target, "decided_at": _now()}
     _restamp(substrate, promoted, prov)  # keep the just-published scope
     return True
 
@@ -114,6 +122,44 @@ def reject(substrate: Substrate, item_id: str, *, by: str, reason: str = "") -> 
     if not prop or prop.get("status") != PENDING:
         return False
     prov = dict(item.provenance)
-    prov["proposal"] = {**prop, "status": REJECTED, "rejected_by": by, "reason": reason}
+    prov["proposal"] = {**prop, "status": REJECTED, "rejected_by": by, "reason": reason, "decided_at": _now()}
     _restamp(substrate, item, prov)
     return True
+
+
+def authorization_decision(
+    substrate: Substrate,
+    item_id: str,
+    *,
+    capability_id: str,
+    version: str,
+    digest: str | None = None,
+) -> AuthorizationDecision:
+    """Adapt a completed legacy scope proposal to the shared authorization contract.
+
+    Pending or missing proposals have no decision and raise :class:`ValueError`.
+    This adapter keeps the substrate API compatible while allowing orchestrators
+    to exchange one authorization representation with other Mixle projects.
+    """
+    from mixle.capability_lifecycle import AuthorizationDecision, AuthorizationOutcome, CapabilityIdentity
+
+    item = substrate.get(item_id)
+    if item is None:
+        raise ValueError(f"unknown substrate item: {item_id}")
+    proposal = item.provenance.get("proposal")
+    if not proposal or proposal.get("status") not in {APPROVED, REJECTED}:
+        raise ValueError("proposal does not have a completed authorization decision")
+    approved = proposal["status"] == APPROVED
+    principal_field = "approved_by" if approved else "rejected_by"
+    decided_at = proposal.get("decided_at")
+    if not decided_at:
+        raise ValueError("completed proposal is missing decided_at")
+    return AuthorizationDecision(
+        decision_id=f"substrate:{item_id}:{proposal['status']}",
+        capability=CapabilityIdentity(capability_id, version, digest),
+        outcome=AuthorizationOutcome.GRANTED if approved else AuthorizationOutcome.DENIED,
+        issued_by=str(proposal[principal_field]),
+        scopes=frozenset({str(proposal["to"])}),
+        decided_at=datetime.fromisoformat(str(decided_at).replace("Z", "+00:00")),
+        reason=str(proposal.get("reason", "")),
+    )

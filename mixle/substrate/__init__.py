@@ -48,7 +48,7 @@ from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
 from mixle.substrate.eig_retrieve import eig_retrieve
 from mixle.substrate.factuality import ClaimVerdict, FactualityReceipt, check_factuality
 from mixle.substrate.freshness import Freshness, check_freshness, content_hash, freshness_report
-from mixle.substrate.governance import Governance, approve, pending, propose, reject
+from mixle.substrate.governance import Governance, approve, authorization_decision, pending, propose, reject
 from mixle.substrate.harness import (
     Harness,
     HarnessResult,
@@ -137,6 +137,7 @@ __all__ = [
     "Governance",
     "propose",
     "approve",
+    "authorization_decision",
     "reject",
     "pending",
     "detect_secrets",

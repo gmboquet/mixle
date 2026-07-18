@@ -39,6 +39,7 @@ _NAMESPACES = (
     "ops",
     "contracts",
     "semantics",
+    "capability_lifecycle",
     "causal",
 )
 
