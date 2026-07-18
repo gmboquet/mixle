@@ -112,7 +112,7 @@ class MatrixNormalSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw one matrix or a batch of independent matrix-normal samples."""
         d = self.dist
         n = 1 if size is None else int(size)

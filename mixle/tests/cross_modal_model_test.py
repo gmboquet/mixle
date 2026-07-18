@@ -145,6 +145,31 @@ class CrossModalModelTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             m.predict_interval({"A": xA[0]}, target="B")
 
+    def test_inference_before_fit_raises_instead_of_scoring_random_weights(self):
+        # _fitted was tracked but never checked: a freshly constructed model's encoders/decoder
+        # carry their random init weights, so belief()/encode()/predict() could silently return a
+        # meaningless "result" that looks like real output. All four inference entry points route
+        # through belief(), so one check there covers them.
+        from mixle.reason import CrossModalModel
+
+        rng = np.random.RandomState(9)
+        _, xA, xB = _two_view_data(rng, 10, k=2, dA=4, dB=3)
+        m = CrossModalModel(latent_dim=3, seed=7)
+        m.add_modality("A", 4).add_modality("B", 3)
+
+        with self.assertRaises(RuntimeError):
+            m.belief({"A": xA[0]})
+        with self.assertRaises(RuntimeError):
+            m.encode({"A": xA[0]})
+        with self.assertRaises(RuntimeError):
+            m.predict({"A": xA[0]}, target="B")
+        with self.assertRaises(RuntimeError):
+            m.calibrate({"A": xA, "B": xB}, target="B")
+
+        # fit() clears the block; the model is usable afterward exactly as before
+        m.fit({"A": xA, "B": xB}, epochs=5)
+        m.belief({"A": xA[0]})  # no longer raises
+
 
 if __name__ == "__main__":
     unittest.main()

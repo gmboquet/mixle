@@ -161,7 +161,16 @@ class CrossModalModel:
 
     # -- inference ----------------------------------------------------------------------------
     def belief(self, obs: dict[str, Any]) -> GaussianBelief:
-        """The belief ``q(z | available modalities)`` as a :class:`GaussianBelief` (product of experts)."""
+        """The belief ``q(z | available modalities)`` as a :class:`GaussianBelief` (product of experts).
+
+        Requires a prior :meth:`fit` call. ``_fitted`` was tracked but never checked: a freshly
+        constructed model's encoders carry their random init weights, so every downstream consumer
+        of this method -- :meth:`encode`, :meth:`predict`, :meth:`calibrate`, :meth:`predict_interval`
+        -- could silently return a meaningless, randomly-initialized "belief" with no indication
+        anything was wrong. Checked here once, since all four route through this method.
+        """
+        if not self._fitted:
+            raise RuntimeError("CrossModalModel.belief() called before fit(): the encoders are untrained.")
         torch = _torch()
         if not obs:
             return GaussianBelief(np.zeros(self.latent_dim), np.eye(self.latent_dim))

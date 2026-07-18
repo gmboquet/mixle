@@ -169,7 +169,7 @@ class IgnoredSampler(DistributionSampler):
         self.dist_sampler = dist.dist.sampler(seed)
         self.null_sampler = isinstance(self.dist_sampler, NullSampler)
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw from the wrapped sampler, preserving null-distribution ``None`` samples."""
         if self.null_sampler:
             if size is None:

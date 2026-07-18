@@ -156,7 +156,7 @@ class PointMassSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> Any | Sequence[Any]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any | Sequence[Any]:
         """Return the fixed atom once or repeated ``size`` times."""
         if size is None:
             return self.dist.value

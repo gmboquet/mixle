@@ -174,7 +174,7 @@ class UniformSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> float | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw one sample or an array of iid samples."""
         return self.rng.uniform(self.dist.low, self.dist.high, size=size)
 

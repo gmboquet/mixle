@@ -476,7 +476,7 @@ class IntegerCategoricalSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> int | list[int]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> int | list[int]:
         """Draw iid samples from the integer-categorical distribution.
 
         Args:

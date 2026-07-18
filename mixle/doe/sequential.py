@@ -93,15 +93,20 @@ def sequential_design(
             ``stopped_reason`` is then ``"no_proposal"``.
         acquire: action -> the new observation(s) from actually taking that sample.
         combine: (data, new_data) -> the updated dataset for the next round.
-        max_rounds: hard cap on rounds (the loop always terminates).
+        max_rounds: maximum number of adaptive acquisitions after the initial fit. The audit trail
+            therefore contains at most max_rounds + 1 fitted states: index 0 for the initial data,
+            followed by one state per acquired sample.
 
     Returns:
         A :class:`SequentialDesignResult` -- every :class:`DesignRound` in order plus ``stopped_reason``.
     """
+    if isinstance(max_rounds, bool) or not isinstance(max_rounds, int) or max_rounds < 0:
+        raise ValueError("max_rounds must be a nonnegative integer")
+
     result = SequentialDesignResult()
     data = initial_data
 
-    for i in range(int(max_rounds) + 1):  # +1: round 0 is the initial fit before any adaptive sample
+    for i in range(max_rounds + 1):  # round 0 is the initial fit before any adaptive sample
         state = fit(data)
         summary = summarize(state, i)
         this_round = DesignRound(index=i, state=state, summary=summary, decision={}, proposed_action=None)
@@ -113,7 +118,7 @@ def sequential_design(
         if not decision.get("keep_going", False):
             result.stopped_reason = "controller_stop"
             return result
-        if i >= int(max_rounds):
+        if i >= max_rounds:
             result.stopped_reason = "budget_exhausted"
             return result
 
