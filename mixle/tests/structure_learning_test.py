@@ -367,5 +367,56 @@ class GLMEdgeTest(unittest.TestCase):
         self.assertEqual(len(seq), 2)
 
 
+def _dependent_with_missing_categorical(seed, n=600):
+    """Same shape as _dependent, but the category carries a missing sentinel (None) alongside its str
+    levels -- the exact real-heterogeneous-data case (e.g. UCI Adult's workclass field) that crashed
+    dependency_gain/learn_structure's bare ``sorted(set(...))`` calls before they compared on ``key=repr``."""
+    r = np.random.RandomState(seed)
+    out = []
+    for _ in range(n):
+        c = None if r.rand() < 0.1 else ("hi" if r.rand() < 0.5 else "lo")
+        base = 5.0 if c == "hi" else (-5.0 if c == "lo" else 0.0)
+        x = base + r.randn()
+        out.append((c, float(x)))
+    return out
+
+
+class MissingCategoricalSentinelTest(unittest.TestCase):
+    """dependency_gain and learn_structure must not crash when a discrete column mixes a ``None``
+    sentinel with str/int/bool levels -- ``sorted(set(...))`` has no ``<`` between ``None`` and those
+    types. Regression coverage for the same bug learn_bayesian_network hit in bayesian_network.py
+    (fixed there via PR #520) at the analogous sites in mixle.inference.structure."""
+
+    def test_dependency_gain_does_not_crash_on_none_sentinel(self):
+        data = _dependent_with_missing_categorical(0)
+        cat = [d[0] for d in data]
+        real = [d[1] for d in data]
+        self.assertTrue(any(c is None for c in cat))  # the planted sentinel is actually present
+        gain = dependency_gain(cat, real, st.GaussianEstimator())
+        self.assertTrue(np.isfinite(gain))
+        self.assertGreater(gain, 50.0)  # the planted hi/lo/None -> real dependence is still found
+
+    def test_learn_structure_does_not_crash_on_none_sentinel(self):
+        data = _dependent_with_missing_categorical(1)
+        model = learn_structure(data)
+        self.assertIsInstance(model, DependencyTreeDistribution)
+        self.assertIn((0, 1), model.edges())  # category(0, incl. None) -> real(1) still discovered
+        missing_rows = [r for r in data if r[0] is None]
+        present_rows = [r for r in data if r[0] is not None]
+        self.assertTrue(missing_rows)  # the planted sentinel survived into the fitted data
+        for row in missing_rows[:10] + present_rows[:10]:
+            self.assertTrue(np.isfinite(model.log_density(row)))  # sensible score, missing or not
+
+    def test_init_matrix_one_hot_does_not_crash_on_none_sentinel(self):
+        # exercises _init_matrix's own sorted(set(...)) site indirectly via learn_mixture_structure,
+        # which calls it during k-means initialization over the discrete (possibly None-containing) fields
+        r = np.random.RandomState(2)
+        data = [
+            (None if i % 7 == 0 else ("hi" if i % 2 == 0 else "lo"), float(i % 2) * 5.0 + r.randn()) for i in range(200)
+        ]
+        model = learn_mixture_structure(data, 2, max_iter=10)
+        self.assertTrue(np.isfinite(model.log_density(data[0])))
+
+
 if __name__ == "__main__":
     unittest.main()

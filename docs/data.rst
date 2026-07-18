@@ -212,6 +212,35 @@ For distributed sources, record sampling policy and partition boundaries. A
 small local sample is useful for model shape, but it is not evidence that the
 distributed source has the same schema everywhere.
 
+Result Egress
+-------------
+
+The adapters above move data *into* mixle. Three result types move data back *out*, into a
+``pandas.DataFrame`` or a Parquet file, for the callers who need to hand a result to
+ordinary data-science tooling instead of consuming it in Python:
+
+.. code-block:: python
+
+   from mixle.inference import posterior, calibration_report
+
+   # posterior parameter draws -> one row per draw
+   theta = posterior(model, data, over="params")
+   theta.to_dataframe(1000).describe()
+   theta.to_parquet("theta.parquet", 1000)
+
+   # a calibration report's PIT histogram -> one row per bin
+   calibration_report(model, holdout).to_dataframe()
+
+   # an HMM's per-position state posterior -> one row per sequence position
+   model.latent_posterior(sequence).to_dataframe()
+
+``to_dataframe``/``to_parquet`` are methods on :class:`~mixle.inference.ParameterPosterior`,
+:class:`~mixle.inference.CalibrationReport`, and
+:class:`~mixle.stats.compute.posterior.MarkovChainLatentPosterior` -- not a general
+``sample(n)``-to-DataFrame facility across every distribution family yet. Both need the
+``pandas`` extra (``pip install mixle[pandas]``); ``to_parquet`` additionally needs a Parquet
+engine (``pip install mixle[arrow]`` for pyarrow, or fastparquet).
+
 Graph Data
 ----------
 

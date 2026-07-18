@@ -193,7 +193,7 @@ class InhomogeneousPoissonProcessSampler(DistributionSampler):
         events.sort()
         return events
 
-    def sample(self, size: int | None = None) -> np.ndarray | list[np.ndarray]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray | list[np.ndarray]:
         """Draw one realization (event-time array) or a list of ``size`` realizations."""
         if size is None:
             return self._sample_one()

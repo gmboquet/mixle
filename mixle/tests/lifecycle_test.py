@@ -113,14 +113,40 @@ class LifecycleTest(unittest.TestCase):
             back = mixle.Model.load(path)
             self.assertAlmostEqual(back.fitted.log_density("a"), m.fitted.log_density("a"), places=10)
 
+    @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+    def test_neural_json_artifact_requires_trust_code(self):
+        # A "json"-format artifact whose model embeds a NeuralLeaf carries a pickle-backed torch module
+        # inside otherwise-safe JSON; loading it must require the same explicit trust as a pickle
+        # artifact, or the "JSON does not execute code" claim above would be false for this case.
+        import os
+
+        import mixle
+        from mixle.models.neural import make_mlp
+        from mixle.models.neural_leaf import NeuralGaussian
+        from mixle.utils.serialization import SerializationError
+
+        module = make_mlp(input_dim=1, hidden_dims=[8], output_dim=2)
+        dist = NeuralGaussian(module)
+        m = mixle.Model(dist)
+        m.fitted = dist
+        with tempfile.TemporaryDirectory() as d:
+            path = m.deploy(d + "/neural")
+            self.assertIn("model.json", os.listdir(path))  # registry-serializable, so still "json" format
+            with self.assertRaises(SerializationError):
+                mixle.Model.load(path)
+            back = mixle.Model.load(path, trust_code=True)
+            self.assertIsInstance(back.fitted, NeuralGaussian)
+
     def test_legacy_pickle_artifact_still_loads(self):
-        # Artifacts written before the JSON format (manifest without a "format" field) still load via pickle.
+        # Artifacts written before the JSON format (manifest without a "format" field) still load via
+        # pickle -- but only when the caller explicitly trusts the source (pickle execs arbitrary code).
         import json
         import os
         import pickle
 
         import mixle
         from mixle.stats import CategoricalEstimator
+        from mixle.utils.serialization import SerializationError
 
         fitted = mixle.Model(CategoricalEstimator()).fit(["a", "b", "a"]).fitted
         with tempfile.TemporaryDirectory() as d:
@@ -128,7 +154,9 @@ class LifecycleTest(unittest.TestCase):
                 pickle.dump(fitted, f)
             with open(os.path.join(d, "manifest.json"), "w") as f:
                 f.write(json.dumps({"notes": ["legacy"]}))  # no "format" -> defaults to pickle
-            back = mixle.Model.load(d)
+            with self.assertRaises(SerializationError):
+                mixle.Model.load(d)  # refuses without an explicit trust_code=True
+            back = mixle.Model.load(d, trust_code=True)
             self.assertEqual(back.notes, ["legacy"])
             self.assertAlmostEqual(back.fitted.log_density("a"), fitted.log_density("a"), places=10)
 

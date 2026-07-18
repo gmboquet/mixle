@@ -4,6 +4,7 @@ posteriors, fails overconfident and underconfident ones, catches a broken infere
 closed when handed nothing to check."""
 
 import numpy as np
+import pytest
 
 from mixle.inference.calibration_gate import (
     CalibrationVerifier,
@@ -129,3 +130,31 @@ def test_verifier_fails_closed_when_given_nothing_to_check():
     verdict = CalibrationVerifier().verify(claim={"payload": {"some_number": 42}})
     assert verdict["passed"] is False
     assert any("unchecked" in r or "no ensemble" in r for r in verdict["reasons"])
+
+
+@pytest.mark.parametrize(
+    ("ensemble", "held_out_y", "message"),
+    [
+        (np.empty((0, 4)), np.empty(0), "at least one held-out"),
+        (np.empty((2, 0)), np.zeros(2), "at least one posterior"),
+        (np.ones((2, 3)), np.array(1.0), "one-dimensional"),
+        (np.array([[1.0, np.nan]]), np.ones(1), "finite"),
+    ],
+)
+def test_predictive_calibration_rejects_malformed_inputs(ensemble, held_out_y, message):
+    with pytest.raises(ValueError, match=message):
+        posterior_predictive_calibration(ensemble, held_out_y)
+
+
+def test_verifier_fails_closed_on_malformed_calibration_data():
+    verdict = CalibrationVerifier().verify(claim={"payload": {"ensemble": [[1.0, float("nan")]], "held_out_y": [1.0]}})
+    assert verdict["passed"] is False
+    assert verdict["score"] == 0.0
+    assert any("rejected" in reason and "finite" in reason for reason in verdict["reasons"])
+
+
+def test_sbc_rejects_empty_simulations_and_draws():
+    with pytest.raises(ValueError, match="n_sims"):
+        simulation_based_calibration(_prior, _simulate, _correct_fit, n_sims=0)
+    with pytest.raises(ValueError, match="posterior draws"):
+        simulation_based_calibration(_prior, _simulate, lambda _y: np.array([]), n_sims=1)

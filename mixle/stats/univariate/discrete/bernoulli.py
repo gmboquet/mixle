@@ -304,7 +304,7 @@ class BernoulliSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> bool | Sequence[bool]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> bool | Sequence[bool]:
         """Draw one sample or a list of iid samples."""
         rv = self.rng.rand() < self.dist.p if size is None else self.rng.rand(size) < self.dist.p
         return bool(rv) if size is None else rv.tolist()

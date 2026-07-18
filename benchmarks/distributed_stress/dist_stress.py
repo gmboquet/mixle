@@ -167,13 +167,16 @@ MPI_RUNNER = """
 import json, numpy as np
 from mpi4py import MPI
 import mixle.stats as st
-from mixle.inference.mpi_executor import mpi_fit
+from mixle.inference.estimation import optimize
+from mixle.utils.parallel.mpi import MPIEncodedData, mpi_out
 comm = MPI.COMM_WORLD
 rng = np.random.RandomState(0)
 comps=[st.GaussianDistribution(float(6*rng.randn()), float(0.5+rng.rand())) for _ in range(4)]
 m=st.MixtureDistribution(comps, list(rng.dirichlet(np.ones(4))))
 data=m.sampler(1).sample(4000)
-fit=mpi_fit(comm, m, data, max_its=10)
+est = m.estimator()
+enc = MPIEncodedData(data, estimator=est)
+fit=optimize(None, est, enc_data=enc, prev_estimate=m, max_its=10, delta=None, out=mpi_out())
 if comm.Get_rank()==0:
     print("MPIRESULT", json.dumps({"w": list(map(float, fit.w)), "size": comm.Get_size()}))
 """

@@ -6,6 +6,7 @@
     "mixle.blending": {"decision": "narrow", "owner": "PRJ-CORE", "destination": null},
     "mixle.capability": {"decision": "retain", "owner": "PRJ-CORE", "destination": null},
     "mixle.capability_lifecycle": {"decision": "retain", "owner": "PRJ-CORE", "destination": null},
+    "mixle.causal": {"decision": "retain", "owner": "PRJ-CORE", "destination": null},
     "mixle.contracts": {"decision": "retain", "owner": "PRJ-CORE", "destination": null},
     "mixle.data": {"decision": "migrate", "owner": "PRJ-CORE", "destination": "PRJ-DATA"},
     "mixle.dist": {"decision": "retain", "owner": "PRJ-CORE", "destination": null},

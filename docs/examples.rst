@@ -188,12 +188,20 @@ Complete Inventory
    * - ``extensibility_seams_example.py``
      - Extension
      - Show where new families and backends attach.
+   * - ``flagship_heterogeneous_adult.py``
+     - Real-data evidence
+     - Fit heterogeneous UCI Adult census-income fields in one call and
+       report train/held-out log-density as the generalization receipt.
    * - ``flagship_kg_agent.py``
      - Reasoning ecosystem
      - Ontology-constrained graph facts, KG completion, and cited KG-RAG.
    * - ``flagship_physics_inverse.py``
      - Scientific inference
      - Bayesian inverse problem with coverage-oriented uncertainty checks.
+   * - ``flagship_temporal_sunspots.py``
+     - Real-data evidence
+     - Discrete-emission HMM on real monthly sunspot counts (1749-1983),
+       cross-checked against hmmlearn on the same held-out split.
    * - ``flagship_triage_app.py``
      - Reasoning ecosystem
      - Support triage over substrate, skills, pool-style jobs, monitoring, and

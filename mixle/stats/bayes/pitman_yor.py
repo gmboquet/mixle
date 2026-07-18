@@ -174,7 +174,7 @@ class PitmanYorProcessSampler(DistributionSampler):
             labels.append(choice)
         return labels
 
-    def sample(self, size: int | None = None) -> list[int] | list[list[int]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | list[list[int]]:
         """Draw partitions of ``num_elements`` elements; a single label vector when size is None."""
         n = self.dist.num_elements
         if n is None or n < 1:

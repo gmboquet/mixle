@@ -156,7 +156,7 @@ class ProbabilisticPCASampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw ``size`` iid vectors (shape (d,) when size is None, else (size, d))."""
         sz = 1 if size is None else size
         d, q = self.dist.dim, self.dist.latent_dim

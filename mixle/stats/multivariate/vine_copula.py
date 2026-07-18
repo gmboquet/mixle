@@ -382,7 +382,7 @@ class CVineCopulaSampler(DistributionSampler):
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         n = 1 if size is None else int(size)
         d = self.dist.dim
         p = self.dist.pairs
@@ -550,7 +550,7 @@ class DVineCopulaSampler(DistributionSampler):
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         n = 1 if size is None else int(size)
         d = self.dist.dim
         p = self.dist.pairs

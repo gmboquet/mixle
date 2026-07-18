@@ -153,6 +153,25 @@ class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
         mu = self.mean()
         return float(self.omega - mu * mu)
 
+    def entropy(self) -> float:
+        """Differential entropy m + lgamma(m) + (1/2 - m) psi(m) + (1/2) log(omega/m) - log(2).
+
+        Derived via the entropy of a monotone transform: ``X = sqrt(Y)`` with
+        ``Y = X^2 ~ Gamma(m, omega/m)`` (Nakagami, 'The m-distribution', 1960), so
+        ``h(X) = h(Y) - log(2) - E[log X] = h(Y) - log(2) - (1/2)(E[log Y])`` and both ``h(Y)``
+        and ``E[log Y]`` are standard Gamma-distribution identities. Reduces exactly to the
+        Rayleigh entropy at ``m = 1``.
+        """
+        from scipy.special import digamma
+
+        return float(
+            self.m
+            + gammaln(self.m)
+            + (0.5 - self.m) * digamma(self.m)
+            + 0.5 * math.log(self.omega / self.m)
+            - math.log(2.0)
+        )
+
     def sampler(self, seed: int | None = None) -> "NakagamiSampler":
         """Return a sampler (``X = sqrt(Gamma(m, omega/m))``)."""
         return NakagamiSampler(self, seed)
@@ -173,7 +192,7 @@ class NakagamiSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> float | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw one sample or an array of iid samples."""
         d = self.dist
         n = 1 if size is None else int(size)

@@ -23,6 +23,7 @@ import numpy as np
 from scipy.special import logsumexp
 
 from mixle.engines import NUMPY_ENGINE
+from mixle.inference import optimize
 from mixle.stats import (
     CategoricalDistribution,
     CategoricalEstimator,
@@ -188,6 +189,69 @@ class HierarchicalMixtureMonotoneEMTest(unittest.TestCase):
                 self.assertGreaterEqual(
                     float(deltas.min()), -1.0e-9, "seed %d: EM decreased the log-likelihood: %s" % (seed, trace)
                 )
+
+
+class HierarchicalMixtureBoundedConvergenceTest(unittest.TestCase):
+    """L-2 follow-up: hierarchical-mixture EM must actually REACH the estimator's default
+    ``delta=1.0e-9`` tolerance within a bounded, generous-but-finite iteration count on a small,
+    well-separated synthetic corpus with variable-length documents -- not merely avoid decreasing
+    (that's ``HierarchicalMixtureMonotoneEMTest`` above).
+
+    This is a regression guard for EM performance/correctness: a future change that makes
+    convergence pathologically slow (or reintroduces the token-level outer-weight non-monotonicity
+    L-2 fixed) should fail here on a corpus of 500 short documents, long before it is next noticed
+    via a visibly slow example script (see ``examples/hierarchical_mixture_example.py``, which hit
+    exactly this failure mode on a much larger, weakly-identified 2000-document configuration).
+
+    Confirmed to fail pre-L-2-fix: on the commit immediately before #435, this exact scenario
+    (through both the fused and the standard EM loop) rejects a candidate step around iteration
+    163-164 for decreasing the log-likelihood, and stops well short of ``delta<1.0e-9``.
+    """
+
+    def test_converges_within_bounded_iterations(self):
+        topics = [
+            CategoricalDistribution({"a": 0.9, "b": 0.05, "c": 0.05}),
+            CategoricalDistribution({"a": 0.05, "b": 0.9, "c": 0.05}),
+            CategoricalDistribution({"a": 0.05, "b": 0.05, "c": 0.9}),
+        ]
+        w = [0.25, 0.25, 0.25, 0.25]
+        taus = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.34, 0.33, 0.33]]
+        len_dist = CategoricalDistribution({8: 0.1, 9: 0.2, 10: 0.7})
+        dist = HierarchicalMixtureDistribution(topics, w, taus, len_dist=len_dist)
+        data = dist.sampler(1).sample(500)
+
+        est = HierarchicalMixtureEstimator(
+            [CategoricalEstimator(), CategoricalEstimator(), CategoricalEstimator()], num_mixtures=4
+        )
+
+        max_its = 500  # observed convergence at iteration 181 (fused, default reuse_estep_ll) /
+        # 180 (standard loop) on the current implementation -- ~2.7x headroom.
+        trace = []
+        optimize(
+            data,
+            est,
+            max_its=max_its,
+            delta=1.0e-9,
+            print_iter=0,
+            rng=np.random.RandomState(3),
+            on_step=lambda step: trace.append(step),
+        )
+
+        self.assertTrue(trace, "optimize() never called on_step")
+        last = trace[-1]
+        self.assertLess(
+            last.iter,
+            max_its,
+            "hierarchical-mixture EM used all %d iterations without recording convergence "
+            "(last delta=%s) -- convergence-speed regression?" % (max_its, last.delta),
+        )
+        self.assertGreaterEqual(last.delta, 0.0, "final step was not a genuine non-decreasing gain: %s" % (last,))
+        self.assertLess(
+            last.delta,
+            1.0e-9,
+            "hierarchical-mixture EM stopped at iteration %d without reaching delta<1e-9 (delta=%s)"
+            % (last.iter, last.delta),
+        )
 
 
 class TausMixtureEmissionTest(unittest.TestCase):

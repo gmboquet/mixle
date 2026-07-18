@@ -515,7 +515,7 @@ class HierarchicalMixtureSampler(DistributionSampler):
         self.dist = dist
         self.sampler = dist.to_mixture().sampler(seed)
 
-    def sample(self, size: int | None = None) -> Sequence[Any] | Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Sequence[Any] | Any:
         """Return samples from the underlying mixture sampler."""
         return self.sampler.sample(size=size)
 
