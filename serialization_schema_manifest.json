@@ -2,6 +2,13 @@
   "artifact": "mixle.serialization_schema_manifest/v1",
   "registered_types": [
     "mixle.analysis.covariance_shrinkage.LedoitWolfEstimator",
+    "mixle.inference.bayesian_network.HeterogeneousBayesianNetwork",
+    "mixle.inference.bayesian_network._DiscreteConditionalFactor",
+    "mixle.inference.bayesian_network._GLMFactor",
+    "mixle.inference.bayesian_network._LinearGaussianFactor",
+    "mixle.inference.bayesian_network._MarginalFactor",
+    "mixle.inference.bayesian_network._VectorCLGFactor",
+    "mixle.inference.bayesian_network._VectorMarginalFactor",
     "mixle.inference.structure.DependencyTreeDistribution",
     "mixle.inference.structure.GLMEdge",
     "mixle.inference.structure.LinearGaussianEdge",

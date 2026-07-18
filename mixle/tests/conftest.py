@@ -464,6 +464,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "distill_methods_test.py": ("torch", "integration", "slow"),
     "doe_amplify_test.py": ("doe", "stochastic", "slow"),
     "duplicate_body_scan_test.py": ("integration", "slow"),
+    "flagship_heterogeneous_adult_smoke_test.py": ("integration", "slow"),
     # Network-gated real-data flagship (worklist F10.2): fetches the real sunspot series and, when
     # hmmlearn is installed, refits an independent HMM baseline; a seed-stability sweep and a
     # runtime/memory characterization each do several more real EM fits on top of that. Explicitly
