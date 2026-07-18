@@ -30,6 +30,13 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 - `CompiledEM` as a reusable fused full-mixture strategy, automatically selected by `optimize()` for
   eligible partially fusible heterogeneous mixtures; recursive SQUAREM packing for nested
   mixtures/composites; and function-preserving shared-trunk/residual-expert MoE upcycling.
+- Write-side result egress: `to_dataframe()`/`to_parquet()` on `ParameterPosterior` (posterior
+  parameter draws, one row per draw), `CalibrationReport` (its PIT histogram, one row per bin, or a
+  one-row summary when there is no scalar predictive CDF), and `MarkovChainLatentPosterior` (an HMM's
+  per-position state posterior -- the Viterbi state and every state's smoothing probability). mixle
+  had nine read-side data connectors and no supported way to move a result back into
+  pandas/Parquet; `pandas` is an optional extra (`pip install mixle[pandas]`), guarded the same way
+  as the other optional dependencies and never imported by the base install.
 
 ### Fixed
 
@@ -52,6 +59,27 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 - Sequential-design acquisition budgets reject invalid values and explicitly count the initial fit;
   root lazy imports preserve nested dependency failures.
 - Ordinary Pytest collection recognizes both supported test filename conventions.
+- `mixle.utils` no longer lists `parallel_mpi`, `em`, `enumeration`, `estimation`, `mcmc`, `objectives`,
+  or `priors` as importable submodules. Each was a stale name left over from earlier `pysp.utils`
+  reorganizations (the real code lives at `mixle.utils.parallel.mpi`, `mixle.inference.*`, and
+  `mixle.enumeration.algorithms`), so accessing any of them raised `ModuleNotFoundError`/`AttributeError`
+  despite appearing in `mixle.utils.__all__` and `dir(mixle.utils)`. The public-API drift test now
+  resolves every declared dynamic-package name via `getattr` instead of only diffing `__all__` as
+  strings, so a stale export like this cannot pass silently again.
+- `mixle.inference.structure`'s `dependency_gain`, `learn_structure`, and `learn_mixture_structure`
+  (via `_init_matrix`) crashed with `TypeError: '<' not supported between instances of 'NoneType' and
+  'str'` whenever a discrete parent/child column mixed a missing-value sentinel (`None`) with
+  str/int/bool levels -- the same class of bug already fixed in `bayesian_network.py`'s
+  `learn_bayesian_network`; all three sites now sort on `key=repr`.
+- `mpmath` moves from a base runtime dependency to the new `highprec` extra (`pip install
+  mixle[highprec]`); its one non-test consumer (`mixle.engines.highprec`) already treated it as an
+  optional fallback behind `gmpy2`, so forcing it into every install left the module's `_BACKEND=None`
+  degrade path practically unreachable and contradicted the base-install optional-dependency convention
+  (worklist P2.2).
+- `docs/development` and `docs/operations` no longer collide between their `.rst` and `.md` source
+  twins (both are registered Sphinx source suffixes). Sphinx was silently building the `.md` file for
+  each docname; for `operations` this meant the published site was missing the `mixle.ops` API
+  reference entirely, since `docs/operations.rst` never won the build.
 
 ### Fixed
 
@@ -104,6 +132,34 @@ with a regression test that fails on the unfixed code):
   entropies filled across the univariate catalog; `mixle.ppl` exports `waic`/`loo`;
   `ScheduledHMM.estimator()` restores the prototype convention (F-1, F-2, F-4, F-6, F-7, F-9, F-11,
   F-12; #434).
+- Completeness follow-up: #434's "entropies filled across the univariate catalog" covered 5 of the
+  11 families F-9 actually names. `SkewNormal`, `NegativeBinomial`, `Rician`, `Nakagami`, `Skellam`,
+  and `LogSeries` now have `entropy()` too -- a closed form for Nakagami (via the Gamma-entropy
+  identity under `X = sqrt(Y)`), a closed-form reduction plus one adaptively-quadrated term for
+  SkewNormal, adaptive quadrature for Rician, and exact series summation (truncated at each
+  distribution's own quantile, not a fixed-width heuristic) for NegativeBinomial/Skellam/LogSeries.
+  Verified against independent numerical integration/Monte Carlo, not only scipy: scipy's own
+  generic `entropy()` silently returns a wrong value ("sum did not converge") for NegativeBinomial
+  and LogSeries at strongly over-dispersed parameters (F-9; #512).
+- The MCMC parameter-posterior bridge (`sample_parameter_posterior`, reachable through
+  `inference.posterior(..., over="params")`) hardcoded exactly 7 scalar families
+  (`mcmc/parameter_bridge.py:287-290`) and raised `NotImplementedError` for every other
+  distribution, despite the README reading as general ("a `prior=` is the only switch"). It now
+  dispatches generically against each family's existing
+  `mixle.stats.compute.declarations.DistributionDeclaration` -- the same per-parameter
+  `constraint`/`differentiable` metadata `mixle.inference.gradient_fit` already uses for autograd
+  fitting -- covering 33 families total (the 7 original plus 26 more, spanning continuous,
+  discrete, and vector/multivariate families). Families with no declaration, a declaration
+  describing a natural/scoring parameterization instead of the constructor's (e.g. von Mises), or
+  an exotic constraint with no generic reparameterization yet (a covariance matrix, a coupled
+  bound) still raise a clear `NotImplementedError` rather than silently guessing (F-5; #510).
+- `tests/base_dist_test.py` now exercises 40 of its 41 base-distribution families end to end (was
+  1 of 41 -- every `dists.append(...)` but `TreeHiddenMarkovModelDistribution`'s had been commented
+  out since at latest the pysp->mixle rename); fixed the stale-argument constructor calls this
+  uncovered plus a genuine `IntegerChowLiuTreeDistribution.__str__` bug (per-feature table strings
+  were never joined and lost their shape via a blind `.flatten()`, so `eval(str(dist))` could not
+  reconstruct a real instance), and the README's overclaim that this file exercises "each family"
+  end to end (F-3; #516).
 
 ### Changed
 
@@ -112,6 +168,13 @@ with a regression test that fails on the unfixed code):
   GMM config, identical likelihoods); the torch objective fitters evaluate one forward per Adam
   iteration instead of two, with NaN-aware best-state tracking; `seq_encode` chunking uses stride
   slices (~76x on ndarray inputs) (E-1, E-2/G-3, E-3, I-2; #436).
+- The MPI backend (`MPIEncodedData`, `optimize(..., backend="mpi")`'s underlying handle) now folds
+  per-rank sufficient statistics with an `O(log W)` `comm.reduce` binary tree instead of a
+  gather-to-root loop, so no single rank folds more than `O(log W)` payloads — matching the technique
+  already used by the Spark and local-heterogeneous executors. The standalone
+  `mixle.inference.mpi_executor` transport (`mpi_fit`/`mpi_em_step`), a second, non-canonical MPI entry
+  point kept only to preserve that tree-reduce technique, is removed now that the canonical backend
+  uses it directly; verified equivalent to the removed transport under real `mpirun` before removal.
 
 ## [0.7.0] — 2026-07-09
 

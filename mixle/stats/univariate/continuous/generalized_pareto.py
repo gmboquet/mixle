@@ -224,7 +224,7 @@ class GeneralizedParetoSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> float | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw one sample or an array of iid samples by inverse CDF."""
         d = self.dist
         u = self.rng.uniform(size=size)  # uniform; 1-U is also uniform, so use U directly below

@@ -321,7 +321,7 @@ class HierarchicalDirichletProcessMixtureSampler(DistributionSampler):
         states = self.rng.choice(self.dist.num_components, size=n, p=pi)
         return [self.comp_samplers[k].sample() for k in states]
 
-    def sample(self, size: int | None = None) -> Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw size groups (a single group when size is None)."""
         if size is None:
             return self.sample_group()

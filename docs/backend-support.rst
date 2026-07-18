@@ -84,7 +84,7 @@ workers under the same estimation contract.
      - ``mpi``
      - Tree-fold reduction of sufficient statistics across ranks.
      - Tested, not CI-gated
-     - E1 — ``mpi_executor_test`` exists; mpi4py not installed in CI.
+     - E1 — ``parallel_test.MPIBackendTestCase`` exists; mpi4py not installed in CI.
    * - Spark
      - ``spark``
      - Map/fold over an RDD.

@@ -54,7 +54,6 @@ Submodules
    mixle.inference.jit
    mixle.inference.leaf_hotswap
    mixle.inference.model_comparison
-   mixle.inference.mpi_executor
    mixle.inference.multiple_testing
    mixle.inference.node_precision_plan
    mixle.inference.node_report

@@ -286,7 +286,7 @@ class IntegerBernoulliSetSampler(DistributionSampler):
         self.rng = np.random.RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> list[Sequence[int]] | Sequence[int]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[Sequence[int]] | Sequence[int]:
         """Draw one subset or ``size`` iid subsets."""
         if size is None:
             log_u = np.log(self.rng.rand(self.dist.num_vals))

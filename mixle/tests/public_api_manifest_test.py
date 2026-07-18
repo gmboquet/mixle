@@ -84,6 +84,32 @@ class PublicApiManifestTest(unittest.TestCase):
                 "here -- likely an import-ordering regression, not a genuinely missing optional dep",
             )
 
+    def test_dynamic_package_names_actually_resolve(self):
+        """A name in a lazy ``__getattr__``-built ``__all__`` (``mixle``, ``mixle.stats``,
+        ``mixle.utils``) can sit there forever without ever being verified importable: the manifest
+        generator reads ``__all__`` as a plain list of strings, so a stale entry left behind by a
+        rename (e.g. ``mixle.utils.parallel_mpi`` after ``parallel_mpi.py`` became
+        ``parallel/mpi.py``, with the old flat name never dropped from ``_SUBMODULES``) diffs clean
+        against the committed manifest forever, even though ``getattr(mixle.utils, "parallel_mpi")``
+        has raised ``ModuleNotFoundError`` since the rename. Actually resolve every declared name here,
+        the same way a user importing it would."""
+        import importlib
+
+        for key in ("mixle", "mixle.stats", "mixle.utils"):
+            module = importlib.import_module(key)
+            names = getattr(module, "__all__", [])
+            failures = []
+            for name in names:
+                try:
+                    getattr(module, name)
+                except Exception as exc:  # noqa: BLE001 -- report every broken name, not just the first
+                    failures.append(f"  {name}: {type(exc).__name__}: {exc}")
+            self.assertFalse(
+                failures,
+                f"{key}.__all__ declares names that do not actually resolve via getattr "
+                "(stale export left behind by a rename/removal, or a genuine bug):\n" + "\n".join(failures),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

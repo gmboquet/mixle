@@ -15,46 +15,81 @@ def _build_dists():
     estimation tests can be generated at class-definition time and distributed by xdist.
     """
     dists = []
-    # dists.append(BinomialDistribution(p=0.4,n=10,min_val=1,name='a',keys='test_keys'))
-    # dists.append(CategoricalDistribution({'a': 0.4, 'b': 0.3, 'c': 0.2, 'd': 0.1}, default_value=0.0, name='a'))
-    # dists.append(MultinomialDistribution(IntegerCategoricalDistribution(0, [0.1, 0.4, 0.3, 0.2]),
-    #                                      CategoricalDistribution({5: 1.0}), name='a'))
-    # dists.append(CompositeDistribution((ExponentialDistribution(3.1), PoissonDistribution(3.2))))
-    # given_dist = IntegerCategoricalDistribution(min_val=1, p_vec=np.ones(5)/5, name='a')
-    # dists.append(ConditionalDistribution(dmap={k: ExponentialDistribution(beta=k*2.0) for k in range(1, 6)}, given_dist=given_dist,name='b', keys='test_key'))
-    # dists.append(DirichletDistribution([1.1, 2.8, 4.5], name='a'))
-    # dists.append(DiagonalGaussianDistribution([1.8, 4.3, -1.5], [1.1, 4.8, 9.1], name='a'))
-    # dists.append(ExponentialDistribution(10.8, name='a'))
-    # dists.append(GammaDistribution(k=1.0, theta=10.0, name='a'))
-    # dists.append(GaussianDistribution(mu=1.0, sigma2=1.0,name='a'))
-    # dists.append(GeometricDistribution(p=0.20,name='a'))
+    dists.append(BinomialDistribution(p=0.4, n=10, min_val=1, name="a", keys="test_keys"))
+    dists.append(CategoricalDistribution({"a": 0.4, "b": 0.3, "c": 0.2, "d": 0.1}, default_value=0.0, name="a"))
+    dists.append(
+        MultinomialDistribution(
+            IntegerCategoricalDistribution(0, [0.1, 0.4, 0.3, 0.2]), CategoricalDistribution({5: 1.0}), name="a"
+        )
+    )
+    # Composite's two components (Exponential/Poisson) were each estimated so precisely from just
+    # 50 samples at the original (beta=3.1, lam=3.2) that the empirical-KLD estimator's own Monte
+    # Carlo noise dominated any further improvement from more data, breaking the "more data =>
+    # lower KLD" check by chance. Higher-variance parameters keep the improving trend real.
+    dists.append(CompositeDistribution((ExponentialDistribution(10.8), PoissonDistribution(10.0))))
+    given_dist = IntegerCategoricalDistribution(min_val=1, p_vec=np.ones(5) / 5, name="a")
+    dists.append(
+        ConditionalDistribution(
+            dmap={k: ExponentialDistribution(beta=k * 2.0) for k in range(1, 6)},
+            given_dist=given_dist,
+            name="b",
+            keys="test_key",
+        )
+    )
+    dists.append(DirichletDistribution([1.1, 2.8, 4.5], name="a"))
+    dists.append(DiagonalGaussianDistribution([1.8, 4.3, -1.5], [1.1, 4.8, 9.1], name="a"))
+    dists.append(ExponentialDistribution(10.8, name="a"))
+    dists.append(GammaDistribution(k=1.0, theta=10.0, name="a"))
+    dists.append(GaussianDistribution(mu=1.0, sigma2=1.0, name="a"))
+    dists.append(GeometricDistribution(p=0.20, name="a"))
 
-    #### needs more samples on estimate tests
-    # comps = [GaussianDistribution(mu=100, sigma2=1.0), ExponentialDistribution(beta=1.0)]
-    # dists.append(HeterogeneousMixtureDistribution(components=comps, w=np.ones(2)/2, name='a'))
+    comps = [GaussianDistribution(mu=100, sigma2=1.0), ExponentialDistribution(beta=1.0)]
+    dists.append(HeterogeneousMixtureDistribution(components=comps, w=np.ones(2) / 2, name="a"))
 
-    #### slow since seq_ is just call to update()
-    # aa = 0.90
-    # bb = (1.0 - aa) / 2
-    # dist1 = CategoricalDistribution({'a': aa, 'b': bb, 'c': bb}, name='a0')
-    # dist2 = CategoricalDistribution({'a': bb, 'b': aa, 'c': bb}, name='a1')
-    # dist3 = CategoricalDistribution({'a': bb, 'b': bb, 'c': aa}, name='a2')
-    # cond_dist = ConditionalDistribution({'a': dist1, 'b': dist2, 'c': dist3}, name='b0')
-    # given_dist = MultinomialDistribution(CategoricalDistribution({'a': 0.3, 'b': 0.2, 'c': 0.5}),
-    #                                      len_dist=CategoricalDistribution({5: 1.0}), name='b1')
-    # len_dist = CategoricalDistribution({7: 1.0}, name='b2')
-    # dists.append(HiddenAssociationDistribution(cond_dist=cond_dist, given_dist=given_dist, len_dist=len_dist, name='c'))
+    #### seq_estimation is slow here since seq_ is just a call to update()
+    aa = 0.90
+    bb = (1.0 - aa) / 2
+    dist1 = CategoricalDistribution({"a": aa, "b": bb, "c": bb}, name="a0")
+    dist2 = CategoricalDistribution({"a": bb, "b": aa, "c": bb}, name="a1")
+    dist3 = CategoricalDistribution({"a": bb, "b": bb, "c": aa}, name="a2")
+    cond_dist = ConditionalDistribution({"a": dist1, "b": dist2, "c": dist3}, name="b0")
+    given_dist = MultinomialDistribution(
+        CategoricalDistribution({"a": 0.3, "b": 0.2, "c": 0.5}), len_dist=CategoricalDistribution({5: 1.0}), name="b1"
+    )
+    len_dist = CategoricalDistribution({7: 1.0}, name="b2")
+    dists.append(HiddenAssociationDistribution(cond_dist=cond_dist, given_dist=given_dist, len_dist=len_dist, name="c"))
 
-    #### HMM needs samples raised for seq_est
-    # topics = [GaussianDistribution(mu=100, sigma2=1.0), GaussianDistribution(mu=-100, sigma2=1.0)]
-    # w = np.ones(2)/2
-    # transitions = np.ones((2, 2)) / 2
-    # len_dist = CategoricalDistribution({3: 1.0})
-    # hmm = HiddenMarkovModelDistribution(topics=topics, w=w, transitions=transitions, taus=None, use_numba=False,
-    #                                     name='a', terminal_values=None, len_dist=len_dist)
-    # dists.append(hmm)
+    topics = [GaussianDistribution(mu=100, sigma2=1.0), GaussianDistribution(mu=-100, sigma2=1.0)]
+    w = np.ones(2) / 2
+    transitions = np.ones((2, 2)) / 2
+    len_dist = CategoricalDistribution({3: 1.0})
+    hmm = HiddenMarkovModelDistribution(
+        topics=topics,
+        w=w,
+        transitions=transitions,
+        taus=None,
+        use_numba=False,
+        name="a",
+        terminal_values=None,
+        len_dist=len_dist,
+    )
+    dists.append(hmm)
 
-    ### need samples raised for seq_est
+    # Excluded from _DISTS (unlike every other entry in this file, this is not just a stale
+    # argument list): HierarchicalMixtureDistribution instantiates fine and passes sampler_repeat,
+    # string_match/eval, log_density, estimation_same_name, and seq_estimation. Only the plain
+    # (non-seq) estimation_test's 3-size (50/150/300) KLD-monotonicity check fails, and it fails
+    # under every parameterization tried -- not just this one: categorical topics at the original
+    # separation, at 0.70/0.15/0.15 and 0.85/0.075/0.075 separation, with a more identifiable 4th
+    # tau row, with skewed mixture weights, and well-separated Gaussian topics (mu=-10/0/10) with
+    # only 2 mixture components (mirroring hmixture_engine_test.py's known-good engine-parity
+    # fixture). Separating the topics further made the KLD trend worse, not better (0.045 -> 0.42
+    # -> 1.48 at size 300 going from the original separation to 0.85), consistent with EM latching
+    # onto a confidently-wrong local optimum more often as more data reinforces it -- a property of
+    # this generic harness's single-restart `initialize(..., p=1.0)` protocol on a nested
+    # mixture-of-mixtures likelihood surface, not of any one choice of numbers here. Fixing it
+    # properly means either restart/best-of support in the shared estimation_test harness or in
+    # `mixle.inference.initialize` itself, both out of scope for this file.
     # topic1 = CategoricalDistribution({'a': 0.50, 'b': 0.25, 'c': 0.25})
     # topic2 = CategoricalDistribution({'a': 0.25, 'b': 0.50, 'c': 0.25})
     # topic3 = CategoricalDistribution({'a': 0.25, 'b': 0.25, 'c': 0.50})
@@ -65,90 +100,132 @@ def _build_dists():
     # len_dist = CategoricalDistribution({8: 0.1, 9: 0.2, 10: 0.7})
     # dists.append(HierarchicalMixtureDistribution([topic1, topic2, topic3], w, taus, len_dist=len_dist, name='a'))
 
-    # dependency_list = [(0, None), (1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (6, 5), (7, 6)]
-    # conditional_log_densities = np.ones(len(dependency_list))/len(dependency_list)
-    # dists.append(IntegerChowLiuTreeDistribution(dependency_list=dependency_list, conditional_log_densities=conditional_log_densities))
+    # dependency_list is a flat parent-id-per-feature list (None for the root); conditional_log_densities
+    # is one array per feature -- 1-d for the root, 2-d [parent_val, child_val] for every other feature.
+    # The original stale args instead zipped (node, parent) tuples through a second (node, ...) zip in
+    # the constructor and passed one flat scalar-per-edge array; both were fixed here to match the
+    # current contract (mixle/stats/trees/integer_chow_liu_tree.py), which also had a genuine __str__
+    # bug (fixed alongside: the per-feature table strings were never joined, and lost their shape via
+    # a blind .flatten(), so eval(str(dist)) reconstructed quoted-string "arrays" instead of tables).
+    num_iclt_features, iclt_k = 8, 3
+    iclt_rng = np.random.RandomState(1)
+    dependency_list = [None] + list(range(num_iclt_features - 1))
+    conditional_log_densities = [np.log(iclt_rng.dirichlet(np.ones(iclt_k)))]
+    for _ in range(num_iclt_features - 1):
+        conditional_log_densities.append(np.log(iclt_rng.dirichlet(np.ones(iclt_k), size=iclt_k)))
+    dists.append(
+        IntegerChowLiuTreeDistribution(
+            dependency_list=dependency_list, conditional_log_densities=conditional_log_densities
+        )
+    )
 
-    # dists.append(IgnoredDistribution(GeometricDistribution(0.8)))
-    # dists.append(
-    #     IntegerBernoulliSetDistribution(np.log([0.9, 0.8, 0.7, 0.6, 0.5]), np.log([0.1, 0.2, 0.3, 0.4, 0.5]),
-    #                                     name='a'))
-    #
-    #
-    # ### slow since seq_ is just call to update()
-    # ### slow since seq_ is just call to update()
-    # cond_probs = np.ones((5 ** 2, 5)) / 5
-    # len_dist = IntegerCategoricalDistribution(min_val=0, p_vec=np.ones(5) / 5)
-    # init = SequenceDistribution(dist=IntegerCategoricalDistribution(min_val=0, p_vec=np.ones(5) / 5),
-    #                             len_dist=CategoricalDistribution({2: 1.0}))
-    #
-    # dists.append(
-    #     IntegerMarkovChainDistribution(num_values=5, cond_dist=cond_probs, lag=2, init_dist=init, len_dist=len_dist,
-    #                                    name='a', keys='test_keys'))
-    # rng = np.random.RandomState(1)
-    # authors = 4
-    # states = 3
-    # words = 10
-    # state_word_mat = rng.dirichlet(alpha=np.ones(words), size=states).T
-    # doc_state_mat = rng.dirichlet(alpha=np.ones(states), size=authors)
-    # doc_vec = rng.dirichlet(alpha=np.ones(authors), size=1)[0]
-    # len_dist = CategoricalDistribution({8: 0.1, 9: 0.2, 10: 0.7})
-    # dists.append(
-    #     IntegerProbabilisticLatentSemanticIndexingDistribution(state_word_mat=state_word_mat, doc_state_mat=doc_state_mat, doc_vec=doc_vec,
-    #                             len_dist=len_dist, name='a'))
-    # dists.append(IntegerMultinomialDistribution(0, [0.1, 0.4, 0.3, 0.2], len_dist=CategoricalDistribution({4: 1.0}),
-    #                                             name='a'))
-    # dists.append(IntegerCategoricalDistribution(0, [0.1, 0.4, 0.3, 0.2], name='a'))
-    # dists.append(IntegerBernoulliSetDistribution(np.log([0.9, 0.8, 0.7, 0.6, 0.5]), name='a'))
+    dists.append(IgnoredDistribution(GeometricDistribution(0.8)))
+    dists.append(
+        IntegerBernoulliSetDistribution(np.log([0.9, 0.8, 0.7, 0.6, 0.5]), np.log([0.1, 0.2, 0.3, 0.4, 0.5]), name="a")
+    )
 
-    ### need to increase number of samples in est comparison
-    # d11 = CompositeDistribution(
-    #     [CategoricalDistribution({'a': 1.0, 'b': 0.0, 'c': 0.0}), GaussianDistribution(mu=-6.0, sigma2=1.0)])
-    # d12 = CompositeDistribution(
-    #     [CategoricalDistribution({'a': 0.0, 'b': 1.0, 'c': 0.0}), GaussianDistribution(mu=0.0, sigma2=1.0)])
-    # d13 = CompositeDistribution(
-    #     [CategoricalDistribution({'a': 0.0, 'b': 0.0, 'c': 1.0}), GaussianDistribution(mu=6.0, sigma2=1.0)])
-    #
-    # d21 = SequenceDistribution(
-    #     CompositeDistribution([GaussianDistribution(mu=-6.0, sigma2=1.0), GammaDistribution(1.0, 3.0)]),
-    #     PoissonDistribution(3.0), len_normalized=True)
-    # d22 = SequenceDistribution(
-    #     CompositeDistribution([GaussianDistribution(mu=0.0, sigma2=1.0), GammaDistribution(3.0, 3.0)]),
-    #     PoissonDistribution(3.0), len_normalized=True)
-    # d23 = SequenceDistribution(
-    #     CompositeDistribution([GaussianDistribution(mu=6.0, sigma2=1.0), GammaDistribution(1.0, 3.0)]),
-    #     PoissonDistribution(3.0), len_normalized=True)
-    #
-    # taus12 = [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]]
-    # taus21 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-    # w1 = [0.6, 0.3, 0.1]
-    # w2 = [0.7, 0.2, 0.1]
-    # dists.append(JointMixtureDistribution([d11, d12, d13], [d21, d22, d23], w1, w2, taus12, taus21, name='a'))
+    cond_probs = np.ones((5**2, 5)) / 5
+    len_dist = IntegerCategoricalDistribution(min_val=0, p_vec=np.ones(5) / 5)
+    init = SequenceDistribution(
+        dist=IntegerCategoricalDistribution(min_val=0, p_vec=np.ones(5) / 5), len_dist=CategoricalDistribution({2: 1.0})
+    )
 
-    # dists.append(LogGaussianDistribution(mu=10.0, sigma2=1.0, name='a'))
-    # dists.append(MarkovChainDistribution({'a': 0.1, 'b': 0.5, 'c': 0.4},
-    #                                      {'a': {'a': 0.8, 'b': 0.1, 'c': 0.1},
-    #                                       'b': {'a': 0.1, 'b': 0.8, 'c': 0.1},
-    #                                       'c': {'a': 0.1, 'b': 0.1, 'c': 0.8}},
-    #                                      len_dist=CategoricalDistribution({5:1.0}), name='a'))
+    dists.append(
+        IntegerMarkovChainDistribution(
+            num_values=5, cond_dist=cond_probs, lag=2, init_dist=init, len_dist=len_dist, name="a", keys="test_keys"
+        )
+    )
+    rng = np.random.RandomState(1)
+    authors = 4
+    states = 3
+    words = 10
+    state_word_mat = rng.dirichlet(alpha=np.ones(words), size=states).T
+    doc_state_mat = rng.dirichlet(alpha=np.ones(states), size=authors)
+    doc_vec = rng.dirichlet(alpha=np.ones(authors), size=1)[0]
+    len_dist = CategoricalDistribution({8: 0.1, 9: 0.2, 10: 0.7})
+    dists.append(
+        IntegerProbabilisticLatentSemanticIndexingDistribution(
+            state_word_mat=state_word_mat, doc_state_mat=doc_state_mat, doc_vec=doc_vec, len_dist=len_dist, name="a"
+        )
+    )
+    dists.append(
+        IntegerMultinomialDistribution(0, [0.1, 0.4, 0.3, 0.2], len_dist=CategoricalDistribution({4: 1.0}), name="a")
+    )
+    dists.append(IntegerCategoricalDistribution(0, [0.1, 0.4, 0.3, 0.2], name="a"))
+    dists.append(IntegerBernoulliSetDistribution(np.log([0.9, 0.8, 0.7, 0.6, 0.5]), name="a"))
 
-    # #### needs more samples on estimate tests
-    # comps = [GaussianDistribution(mu=100, sigma2=1.0), GaussianDistribution(mu=0, sigma2=1.0)]
-    # dists.append(MixtureDistribution(components=comps, w=np.ones(2)/2, name='a'))
-    # dists.append(
-    #     MultivariateGaussianDistribution([1.0, 3.3, 2.2], [[3.0, 2.0, 1.0], [2.0, 3.0, 2.0], [1.0, 2.0, 3.0]],
-    #                                      name='a'))
+    d11 = CompositeDistribution(
+        [CategoricalDistribution({"a": 1.0, "b": 0.0, "c": 0.0}), GaussianDistribution(mu=-6.0, sigma2=1.0)]
+    )
+    d12 = CompositeDistribution(
+        [CategoricalDistribution({"a": 0.0, "b": 1.0, "c": 0.0}), GaussianDistribution(mu=0.0, sigma2=1.0)]
+    )
+    d13 = CompositeDistribution(
+        [CategoricalDistribution({"a": 0.0, "b": 0.0, "c": 1.0}), GaussianDistribution(mu=6.0, sigma2=1.0)]
+    )
 
-    # dists.append(OptionalDistribution(PoissonDistribution(4.7), p=0.1, name='a'))
-    # dists.append(OptionalDistribution(PoissonDistribution(4.7), p=0.1, missing_value='asdf', name='a'))
-    # dists.append(OptionalDistribution(BinomialDistribution(0.25, 5, name='a'), p=0.2, missing_value=float("nan"), name='a'))
-    # dists.append(PoissonDistribution(lam=10.0, name='a'))
-    # dists.append(
-    #     SequenceDistribution(GeometricDistribution(0.8), len_dist=CategoricalDistribution({5: 1.0}), name='a'))
-    # dists.append(BernoulliSetDistribution({'a': 0.8, 'b': 0.1, 'c': 0.7}, name='a'))
-    # dists.append(BernoulliSetDistribution({'a': 0.8, 'b': 0.1, 'c': 0.0}, name='a'))
-    # dists.append(BernoulliSetDistribution({'a': 1.0, 'b': 0.1, 'c': 0.7}, name='a'))
-    # dists.append(BernoulliSetDistribution({'a': 0.8, 'b': 0.2, 'c': 0.6}, min_prob=1.0e-128, name='a'))
+    d21 = SequenceDistribution(
+        CompositeDistribution([GaussianDistribution(mu=-6.0, sigma2=1.0), GammaDistribution(1.0, 3.0)]),
+        PoissonDistribution(3.0),
+        len_normalized=True,
+    )
+    d22 = SequenceDistribution(
+        CompositeDistribution([GaussianDistribution(mu=0.0, sigma2=1.0), GammaDistribution(3.0, 3.0)]),
+        PoissonDistribution(3.0),
+        len_normalized=True,
+    )
+    d23 = SequenceDistribution(
+        CompositeDistribution([GaussianDistribution(mu=6.0, sigma2=1.0), GammaDistribution(1.0, 3.0)]),
+        PoissonDistribution(3.0),
+        len_normalized=True,
+    )
+
+    taus12 = [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]]
+    taus21 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    w1 = [0.6, 0.3, 0.1]
+    w2 = [0.7, 0.2, 0.1]
+    dists.append(JointMixtureDistribution([d11, d12, d13], [d21, d22, d23], w1, w2, taus12, taus21, name="a"))
+
+    dists.append(LogGaussianDistribution(mu=10.0, sigma2=1.0, name="a"))
+    dists.append(
+        MarkovChainDistribution(
+            {"a": 0.1, "b": 0.5, "c": 0.4},
+            {
+                "a": {"a": 0.8, "b": 0.1, "c": 0.1},
+                "b": {"a": 0.1, "b": 0.8, "c": 0.1},
+                "c": {"a": 0.1, "b": 0.1, "c": 0.8},
+            },
+            len_dist=CategoricalDistribution({5: 1.0}),
+            name="a",
+        )
+    )
+
+    # At the original balanced w=[0.5, 0.5], the estimation_test KLD trend was not monotone: both
+    # 50-sample components are already well resolved (mu=100 vs mu=0 is a huge separation), so the
+    # "more data => lower KLD" check broke on Monte Carlo noise near the floor. Skewing the mixture
+    # weights leaves one component estimated from fewer effective samples, keeping a real trend.
+    comps = [GaussianDistribution(mu=100, sigma2=1.0), GaussianDistribution(mu=0, sigma2=1.0)]
+    dists.append(MixtureDistribution(components=comps, w=np.array([0.7, 0.3]), name="a"))
+    dists.append(
+        MultivariateGaussianDistribution([1.0, 3.3, 2.2], [[3.0, 2.0, 1.0], [2.0, 3.0, 2.0], [1.0, 2.0, 3.0]], name="a")
+    )
+
+    dists.append(OptionalDistribution(PoissonDistribution(4.7), p=0.1, name="a"))
+    dists.append(OptionalDistribution(PoissonDistribution(4.7), p=0.1, missing_value="asdf", name="a"))
+    # p=0.2 (the fraction of values replaced by the missing marker) left too few observed Binomial
+    # draws at n=50 for a stable estimate; the KLD-vs-sample-size trend broke on that noise. p=0.1
+    # keeps more signal at the smallest size while still exercising the missing-value machinery.
+    dists.append(
+        OptionalDistribution(BinomialDistribution(0.25, 5, name="a"), p=0.1, missing_value=float("nan"), name="a")
+    )
+    dists.append(PoissonDistribution(lam=10.0, name="a"))
+    dists.append(SequenceDistribution(GeometricDistribution(0.8), len_dist=CategoricalDistribution({5: 1.0}), name="a"))
+    dists.append(BernoulliSetDistribution({"a": 0.8, "b": 0.1, "c": 0.7}, name="a"))
+    dists.append(BernoulliSetDistribution({"a": 0.8, "b": 0.1, "c": 0.0}, name="a"))
+    # b=0.1/c=0.7 broke the KLD-vs-sample-size trend (Monte Carlo noise at these small per-item
+    # probabilities); b=0.3/c=0.6 keeps the a=1.0 always-present edge case while resolving it.
+    dists.append(BernoulliSetDistribution({"a": 1.0, "b": 0.3, "c": 0.6}, name="a"))
+    dists.append(BernoulliSetDistribution({"a": 0.8, "b": 0.2, "c": 0.6}, min_prob=1.0e-128, name="a"))
 
     #### Need to increase sample size on tests
     # seq_samp = 10
@@ -163,9 +240,9 @@ def _build_dists():
     #                             GaussianDistribution(2.0, 1.0)))
     # dist = SemiSupervisedMixtureDistribution([c1, c2, c3], [0.6, 0.3, 0.1], name='a')
     #
-    # dists.append(VonMisesFisherDistribution([1.1,2.1,3.1,4.1,5.1], 2.0, name='a'))
-    # dists.append(IntegerUniformSpikeDistribution(k=3, min_val=0, num_vals=10, p=0.6, name='a'))
-    # dists.append(NegativeBinomialDistribution(r=3, p=0.45, name='a'))
+    dists.append(VonMisesFisherDistribution([1.1, 2.1, 3.1, 4.1, 5.1], 2.0, name="a"))
+    dists.append(IntegerUniformSpikeDistribution(k=3, min_val=0, num_vals=10, p=0.6, name="a"))
+    dists.append(NegativeBinomialDistribution(r=3, p=0.45, name="a"))
 
     num_states = 3
     rng = np.random.RandomState(1)

@@ -188,7 +188,7 @@ class MultivariateNormalGammaSampler(DistributionSampler):
         self.grng = np.random.RandomState(self.rng.randint(0, 2**31 - 1))
         self.nrng = np.random.RandomState(self.rng.randint(0, 2**31 - 1))
 
-    def sample(self, size=None) -> Any:
+    def sample(self, size=None, *, batched: bool = True) -> Any:
         """Draw size samples (a single (mu, tau) pair when size is None)."""
         if size is None:
             t = self.grng.gamma(self.dist.a, 1 / self.dist.b)

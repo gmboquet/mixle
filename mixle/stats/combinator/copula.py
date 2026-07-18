@@ -152,7 +152,7 @@ class CopulaSampler(DistributionSampler):
                 hi = mid
         return 0.5 * (lo + hi)
 
-    def sample(self, size: int | None = None) -> Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one joint observation or ``size`` iid observations."""
         n = 1 if size is None else int(size)
         u = np.atleast_2d(self._cop_sampler.sample(n)).reshape(n, self.dist.dim)

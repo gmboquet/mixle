@@ -548,7 +548,9 @@ class MultinomialSampler(DistributionSampler):
         self.dist_sampler = self.dist.dist.sampler(seed=self.rng.randint(0, maxrandint))
         self.len_sampler = self.dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample(self, size: int | None = None) -> Sequence[Sequence[tuple[Any, float]]] | Sequence[tuple[Any, float]]:
+    def sample(
+        self, size: int | None = None, *, batched: bool = True
+    ) -> Sequence[Sequence[tuple[Any, float]]] | Sequence[tuple[Any, float]]:
         """Draw samples from multinomial distribution.
 
         Note: If len_sampler can draw n=0, an empty list is returned for that sample.

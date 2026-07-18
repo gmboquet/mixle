@@ -30,6 +30,7 @@ jobs:
           - hadoop
           - arrays
           - grammar
+          - highprec
           - spark
           - dask
           - ray

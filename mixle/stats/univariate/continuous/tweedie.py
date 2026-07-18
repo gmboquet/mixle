@@ -208,7 +208,7 @@ class TweedieSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> float | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw ``size`` iid Tweedie samples (a single float if ``size`` is None).
 
         ``Y | N`` is a sum of ``N`` iid ``Gamma(shape, scale)``, which is ``Gamma(N*shape, scale)``;

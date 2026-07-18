@@ -17,6 +17,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.optional_deps import HAS_PANDAS, pandas, require
+
 __all__ = ["CalibrationReport", "calibration_report"]
 
 
@@ -59,6 +61,48 @@ class CalibrationReport:
             "note": self.note,
         }
         return d
+
+    def to_dataframe(self) -> Any:
+        """Return this report as a ``pandas.DataFrame``.
+
+        When a PIT histogram was computed (``method == "PIT"``), returns one row per bin --
+        ``bin_left``, ``bin_right``, ``count``, ``density``, ``uniform`` -- the natural columnar shape
+        of a calibration report (a table you'd plot). Otherwise (no scalar predictive CDF, so no PIT
+        histogram) returns a single summary row with the same unrounded fields as :meth:`as_dict`.
+        Requires the ``pandas`` extra (``pip install mixle[pandas]``).
+        """
+        if not HAS_PANDAS:
+            require("pandas", "pandas")
+        if self.pit_histogram is not None:
+            edges = np.asarray(self.pit_histogram["edges"], dtype=float)
+            return pandas.DataFrame(
+                {
+                    "bin_left": edges[:-1],
+                    "bin_right": edges[1:],
+                    "count": np.asarray(self.pit_histogram["counts"]),
+                    "density": np.asarray(self.pit_histogram["density"], dtype=float),
+                    "uniform": np.asarray(self.pit_histogram["uniform"], dtype=float),
+                }
+            )
+        return pandas.DataFrame(
+            [
+                {
+                    "n": self.n,
+                    "mean_log_density": self.mean_log_density,
+                    "pit_error": self.pit_error,
+                    "method": self.method,
+                    "note": self.note,
+                }
+            ]
+        )
+
+    def to_parquet(self, path: Any, **kwargs: Any) -> None:
+        """Write this report to a Parquet file; see :meth:`to_dataframe`.
+
+        ``kwargs`` forward to ``DataFrame.to_parquet`` (e.g. ``engine=``, ``compression=``). Needs a
+        Parquet engine in addition to pandas -- ``pip install mixle[arrow]`` (pyarrow) or fastparquet.
+        """
+        self.to_dataframe().to_parquet(path, **kwargs)
 
     def __str__(self) -> str:
         pit = "n/a (no CDF)" if self.pit_error is None else f"{self.pit_error:.4f}"
