@@ -220,7 +220,7 @@ class NullSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> None:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> None:
         """Returns None for any requested size.
 
         Args:

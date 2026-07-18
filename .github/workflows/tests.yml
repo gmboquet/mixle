@@ -65,10 +65,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: pyproject.toml
+      # `highprec` (mpmath) is installed alongside `test` here so vmf_test.py / kent_test.py /
+      # lkj_test.py / bingham_test.py's exact-normalizer checks keep actually running (not skipping) now
+      # that mpmath is an optional extra rather than a base dependency (worklist P2.2).
       - name: Install package and test harness
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[test]"
+          python -m pip install -e ".[test,highprec]"
       - name: Run fast tests
         run: python -m pytest -m fast -n auto
 
@@ -91,7 +94,7 @@ jobs:
       - name: Install package and test harness
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[test]"
+          python -m pip install -e ".[test,highprec]"
       - name: Run fast tests
         run: python -m pytest -m fast -n auto
 
@@ -111,7 +114,7 @@ jobs:
       - name: Install package at the declared minimum dependency versions
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -c constraints-min.txt -e ".[test]"
+          python -m pip install -c constraints-min.txt -e ".[test,highprec]"
           python -c "import numpy, scipy, mpmath; print('numpy', numpy.__version__, 'scipy', scipy.__version__, 'mpmath', mpmath.__version__)"
       - name: Run fast tests at the minimum floors
         run: python -m pytest -m fast -n auto
@@ -130,7 +133,7 @@ jobs:
       - name: Install package and test harness
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[test]"
+          python -m pip install -e ".[test,highprec]"
       - name: Run full non-optional suite with coverage
         # --cov-fail-under=45 is a deliberately conservative CATASTROPHIC-REGRESSION floor, not a coverage
         # target. This base install skips every optional backend (torch/numba/spark/dask/jax/...), so line

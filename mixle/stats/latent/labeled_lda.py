@@ -403,7 +403,7 @@ class LabeledLDASampler(DistributionSampler):
         self.len_dist = self.dist.len_dist.sampler(seed=self.rng.randint(maxint))
         self.set_dist = self.dist.set_dist.sampler(seed=self.rng.randint(maxint))
 
-    def sample(self, size=None):
+    def sample(self, size=None, *, batched: bool = True):
         """Draw iid labeled documents from the LabeledLDA model.
 
         If size is None, a single Tuple[List[T], List[int]] is returned containing the sampled document

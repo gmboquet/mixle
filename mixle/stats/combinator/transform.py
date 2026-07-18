@@ -398,7 +398,7 @@ class TransformSampler(DistributionSampler):
         self.dist = dist
         self.child_sampler = dist.dist.sampler(seed=self.new_seed())
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw child samples and map them through the transform."""
         x = self.child_sampler.sample(size=size)
         if size is None:

@@ -84,17 +84,23 @@ def test_neural_density_estimator_is_directly_constructible():
 
 
 def test_family_json_round_trip_preserves_type_and_scores():
+    from mixle.utils.serialization import trusted_deserialization
+
     a = VAE(dim=4, latent=2)
-    b = from_json(to_json(a))
+    with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+        b = from_json(to_json(a))
     assert type(b).__name__ == "VAE"
     xs = np.atleast_2d(np.asarray(_data(), dtype=float))
     assert np.allclose(a.seq_log_density(xs), b.seq_log_density(xs))
 
 
 def test_mixture_with_a_family_round_trips():
+    from mixle.utils.serialization import trusted_deserialization
+
     x = _data()
     g = MultivariateGaussianDistribution(np.zeros(4), np.eye(4))
     fitted = optimize(x, MixtureDistribution([VAE(dim=4, latent=2), g], [0.5, 0.5]).estimator(), max_its=2, out=None)
-    back = from_json(to_json(fitted))
+    with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+        back = from_json(to_json(fitted))
     enc = fitted.dist_to_encoder().seq_encode(x)
     assert np.allclose(fitted.seq_log_density(enc), back.seq_log_density(back.dist_to_encoder().seq_encode(x)))

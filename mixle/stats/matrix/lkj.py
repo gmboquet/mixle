@@ -135,7 +135,7 @@ class LKJSampler(DistributionSampler):
             corr = nxt
         return corr
 
-    def sample(self, size: int | None = None) -> Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one correlation matrix or a list of independent correlation matrices."""
         if size is None:
             return self._batch(1)[0]

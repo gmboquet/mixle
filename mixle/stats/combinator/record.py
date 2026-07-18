@@ -404,7 +404,7 @@ class RecordSampler(DistributionSampler):
         self.dist = dist
         self.samplers = [d.sampler(seed=self.new_seed()) for d in dist.dists]
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw one record or a list of records from the child samplers."""
         if size is None:
             return {source: sampler.sample() for source, sampler in zip(self.dist.sources, self.samplers)}
