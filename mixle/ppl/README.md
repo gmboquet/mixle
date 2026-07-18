@@ -39,7 +39,7 @@ through — nothing else to change:
 
 ```python
 Normal(free, free).fit(data, backend="mp", num_workers=8)     # multiprocess EM
-# backend="mpi" / "dask" also supported (see mixle.utils.estimation.optimize)
+# backend="mpi" / "dask" also supported (see mixle.inference.estimation.optimize)
 ```
 
 ## Regression & GLMs (covariates with `Field`)
@@ -324,7 +324,7 @@ message-passing core.
 | `"map"` | maximize joint (scipy) | priors, point estimate |
 | `"vi"` | ADVI — `family='meanfield'|'fullrank'`, tilted Renyi `alpha=`, `batch_size=` (SGVB) | non-conjugate priors, scalable approximate posterior |
 | `"vmp"` | variational message passing (closed-form, ELBO) | conjugate-exponential models (e.g. Gaussian mean+precision) |
-| `"mcmc"` | adaptive Metropolis (`mixle.utils.mcmc`) | full posterior, fast throughput |
+| `"mcmc"` | adaptive Metropolis (`mixle.inference.mcmc.metropolis_hastings`) | full posterior, fast throughput |
 | `"hmc"` | Hamiltonian MC, preconditioned (fixed step) | full posterior |
 | `"nuts"` | No-U-Turn Sampler (auto-tuned HMC, dual-averaging) | correlated / higher-dim posteriors |
 | `"ensemble"` | affine-invariant ensemble (Goodman & Weare) | low/medium-dim, highest ESS/sec |

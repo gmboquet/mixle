@@ -23,7 +23,7 @@ torchrun --nproc_per_node=2 dtensor_torchrun.py
 | group | what |
 |---|---|
 | A | data-parallel EM (`num_chunks`, `backend="model_parallel"`) bit-identical to serial, across GMM / categorical-mixture / composite / HMM |
-| B | MPI data-parallel EM (`mpi_fit` under `mpirun -n W`) vs serial |
+| B | MPI data-parallel EM (`MPIEncodedData` + `optimize()` under `mpirun -n W`) vs serial |
 | C | torch engine parity (CPU/CUDA), per-GPU placement, DTensor component-sharding |
 | D | `model_sharding_plan` / `auto_parallel_estimator` correctness + more-shards-than-components |
 | E | determinism (repeated distributed fits identical) |

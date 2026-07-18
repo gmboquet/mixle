@@ -151,7 +151,7 @@ class AitchisonNormalSampler(DistributionSampler):
         self.dist = dist
         self.gaussian_sampler = dist.gaussian.sampler(seed)
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw one composition or ``size`` iid compositions on the simplex."""
         y = self.gaussian_sampler.sample(size)
         return ilr_inv(np.atleast_2d(y))[0] if size is None else ilr_inv(np.asarray(y))

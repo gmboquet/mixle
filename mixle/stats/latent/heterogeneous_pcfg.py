@@ -758,7 +758,7 @@ class HeterogeneousPCFGSampler(DistributionSampler):
         right = int(self.dist.binary_right[rule_idx])
         return self._sample_nt(left, depth + 1, budget) + self._sample_nt(right, depth + 1, budget)
 
-    def sample(self, size: int | None = None) -> list[Any] | list[list[Any]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[Any] | list[list[Any]]:
         """Draw one sequence, or ``size`` independent sequences, from the grammar."""
         if size is not None:
             return [self.sample() for _ in range(size)]

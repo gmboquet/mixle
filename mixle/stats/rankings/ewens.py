@@ -157,7 +157,7 @@ class EwensSampler(DistributionSampler):
         self.dist = dist
         self.rng = RandomState(seed)
 
-    def sample(self, size: int | None = None) -> list[int] | list[list[int]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | list[list[int]]:
         """Draw one permutation or ``size`` iid permutations."""
         k = 1 if size is None else size
         seed = int(self.rng.randint(0, 2**31 - 1))

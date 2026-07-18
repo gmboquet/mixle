@@ -144,7 +144,7 @@ class BradleyTerrySampler(DistributionSampler):
         pi = 1.0 / (1.0 + math.exp(-(self.dist.log_w[i] - self.dist.log_w[j])))
         return (int(i), int(j)) if self.rng.rand() < pi else (int(j), int(i))
 
-    def sample(self, size: int | None = None) -> tuple[int, int] | list[tuple[int, int]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> tuple[int, int] | list[tuple[int, int]]:
         """Draw one comparison outcome or ``size`` iid comparison outcomes."""
         if size is None:
             return self._sample_one()

@@ -536,7 +536,7 @@ class DirichletSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw iid samples from the Dirichlet distribution.
 
         Entries with non-positive alpha are fixed at zero and the remaining entries are sampled

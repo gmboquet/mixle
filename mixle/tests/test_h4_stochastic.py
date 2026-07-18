@@ -158,3 +158,9 @@ def test_cvar_epigraph_rejects_bad_alpha():
         cvar_epigraph(np.zeros((3, 2)), 1.5)
     with pytest.raises(ValueError):
         cvar_epigraph(np.zeros((3, 2)), 0.0)
+
+
+def test_cvar_epigraph_rejects_zero_scenarios():
+    # coef = 1 / ((1 - alpha) * K) divides by K with no guard -- K=0 must raise, not ZeroDivisionError.
+    with pytest.raises(ValueError):
+        cvar_epigraph(np.zeros((0, 2)), 0.95)

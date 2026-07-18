@@ -322,7 +322,7 @@ class ExponentialTiltedSampler(DistributionSampler):
             else:
                 self.base_sampler = dist.base.sampler(seed=self.rng.randint(0, 2**31 - 1))
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw one tilted value (or a list of ``size``)."""
         if size is not None:
             return [self.sample() for _ in range(size)]

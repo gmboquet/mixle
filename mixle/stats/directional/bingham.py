@@ -162,7 +162,7 @@ class BinghamSampler(DistributionSampler):
             filled += take
         return out
 
-    def sample(self, size: int | None = None) -> Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one axial unit vector or ``size`` iid vectors."""
         if size is None:
             return self._batch(1)[0]

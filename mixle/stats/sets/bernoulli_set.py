@@ -492,7 +492,7 @@ class BernoulliSetSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> Sequence[Any] | list[Sequence[Any]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Sequence[Any] | list[Sequence[Any]]:
         """Draw iid set observations from the BernoulliSetDistribution instance.
 
         Args:

@@ -441,7 +441,7 @@ class GeometricSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> int | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> int | np.ndarray:
         """Generate iid samples from geometric distribution.
 
         Generates a single geometric sample (int) if size is None, else a numpy array of integers of length size,

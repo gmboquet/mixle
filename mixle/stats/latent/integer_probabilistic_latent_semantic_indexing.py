@@ -473,7 +473,7 @@ class IntegerProbabilisticLatentSemanticIndexingSampler(DistributionSampler):
         self.size_rng = self.dist.len_dist.sampler(self.rng.randint(0, maxrandint))
 
     def sample(
-        self, size: int | None = None
+        self, size: int | None = None, *, batched: bool = True
     ) -> tuple[int, Sequence[tuple[int, float]]] | Sequence[tuple[int, Sequence[tuple[int, float]]]]:
         """Generate iid samples from PLSI model.
 
