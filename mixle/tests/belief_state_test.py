@@ -4,7 +4,24 @@ import unittest
 
 import numpy as np
 
-from mixle.inference.belief import GaussianBelief, as_belief
+from mixle.inference.belief import CategoricalBelief, GaussianBelief, as_belief
+
+
+class CategoricalBeliefBasicsTest(unittest.TestCase):
+    def test_construct_update_map_entropy(self):
+        b = CategoricalBelief([0.5, 0.5], labels=["a", "b"])
+        post = b.update([0.0, np.log(3.0)])  # evidence favors "b" 3:1
+        np.testing.assert_allclose(post.probs, [0.25, 0.75])
+        self.assertEqual(post.map(), "b")
+        self.assertLess(post.entropy(), b.entropy())
+
+    def test_rejects_mismatched_labels(self):
+        with self.assertRaises(ValueError):
+            CategoricalBelief([0.5, 0.3, 0.2], labels=["a", "b"])  # 3 probs, 2 labels
+
+    def test_rejects_too_many_labels(self):
+        with self.assertRaises(ValueError):
+            CategoricalBelief([0.5, 0.5], labels=["a", "b", "c"])  # 2 probs, 3 labels
 
 
 class GaussianBeliefBasicsTest(unittest.TestCase):

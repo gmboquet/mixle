@@ -76,6 +76,17 @@ class MMDTest(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             mmd(np.zeros(5), np.zeros(5), kernel="polynomial")
 
+    def test_empty_samples_raises_instead_of_nan(self):
+        with self.assertRaises(ValueError):
+            mmd(np.array([]), np.array([1.0, 2.0, 3.0]))
+        with self.assertRaises(ValueError):
+            mmd(np.array([1.0, 2.0, 3.0]), np.array([]))
+
+    def test_nonpositive_bandwidth_raises_instead_of_silently_using_gamma_one(self):
+        for bad_bandwidth in (0.0, -1.0):
+            with self.subTest(bandwidth=bad_bandwidth), self.assertRaises(ValueError):
+                mmd(np.zeros(5), np.ones(5), bandwidth=bad_bandwidth)
+
 
 class DiscrepancyReportTest(unittest.TestCase):
     def test_not_degraded_for_registered_closed_form_pair(self):

@@ -137,13 +137,17 @@ def mmd(samples_p: np.ndarray, samples_q: np.ndarray, *, kernel: str = "rbf", ba
 
     x = _prepare(samples_p)
     y = _prepare(samples_q)
+    if x.shape[0] == 0 or y.shape[0] == 0:
+        raise ValueError("mmd requires at least one sample on each side, got %d and %d." % (x.shape[0], y.shape[0]))
+    if bandwidth is not None and bandwidth <= 0:
+        raise ValueError(f"bandwidth must be positive, got {bandwidth!r}.")
     if bandwidth is None:
         pooled = np.vstack([x, y])
         diffs = pooled[:, None, :] - pooled[None, :, :]
         dists = np.sqrt(np.sum(diffs**2, axis=-1))
         nonzero = dists[dists > 0]
         bandwidth = float(np.median(nonzero)) if nonzero.size else 1.0
-    gamma = 1.0 / (2.0 * bandwidth**2) if bandwidth > 0 else 1.0
+    gamma = 1.0 / (2.0 * bandwidth**2)
 
     def _rbf(a: np.ndarray, b: np.ndarray) -> np.ndarray:
         diffs = a[:, None, :] - b[None, :, :]
