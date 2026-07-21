@@ -31,6 +31,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.vector import cholesky_logdet
 
 _CLIP = 1.0e-12  # keep Phi^{-1}(u) finite at the open-interval boundary
 
@@ -42,14 +43,18 @@ class GaussianCopulaDistribution(SequenceEncodableProbabilityDistribution):
         r = np.asarray(corr, dtype=np.float64)
         if r.ndim != 2 or r.shape[0] != r.shape[1]:
             raise ValueError("corr must be a square correlation matrix")
+        if not np.allclose(r, r.T):
+            raise ValueError("corr must be symmetric")
+        if not np.allclose(np.diag(r), 1.0):
+            raise ValueError("corr must have a unit diagonal (it is a correlation, not a covariance, matrix)")
         self.corr = r
         self.dim = r.shape[0]
         self.name = name
         self.keys = keys
-        sign, logdet = np.linalg.slogdet(r)
-        if sign <= 0:
+        logdet = cholesky_logdet(r)
+        if logdet is None:
             raise ValueError("corr must be positive definite")
-        self._logdet = float(logdet)
+        self._logdet = logdet
         self._inv_minus_i = np.linalg.inv(r) - np.eye(self.dim)
 
     def __str__(self) -> str:

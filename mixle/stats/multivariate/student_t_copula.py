@@ -32,6 +32,7 @@ from mixle.stats.multivariate._copula_common import (
     BufferedUScoreAccumulatorFactory,
     UScoreEncoder,
 )
+from mixle.utils.vector import cholesky_logdet
 
 _CLIP = 1.0e-12
 _NU_GRID = (2.5, 3.0, 4.0, 5.0, 7.0, 10.0, 15.0, 25.0, 50.0)  # profile-likelihood grid for the tail-heaviness
@@ -44,15 +45,21 @@ class StudentTCopulaDistribution(SequenceEncodableProbabilityDistribution):
         r = np.asarray(corr, dtype=np.float64)
         if r.ndim != 2 or r.shape[0] != r.shape[1] or r.shape[0] < 2:
             raise ValueError("corr must be a square correlation matrix of size >= 2")
-        sign, logdet = np.linalg.slogdet(r)
-        if sign <= 0:
+        if not np.allclose(r, r.T):
+            raise ValueError("corr must be symmetric")
+        if not np.allclose(np.diag(r), 1.0):
+            raise ValueError("corr must have a unit diagonal (it is a correlation, not a covariance, matrix)")
+        if not df > 0:
+            raise ValueError("df must be > 0 (got df=%s)" % (df,))
+        logdet = cholesky_logdet(r)
+        if logdet is None:
             raise ValueError("corr must be positive definite")
         self.corr = r
         self.dim = r.shape[0]
         self.df = float(df)
         self.name = name
         self.keys = keys
-        self._logdet = float(logdet)
+        self._logdet = logdet
         self._inv = np.linalg.inv(r)
 
     def __str__(self) -> str:
