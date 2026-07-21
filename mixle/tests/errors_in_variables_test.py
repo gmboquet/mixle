@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from mixle.inference.errors_in_variables import deming_regression
+from mixle.inference.errors_in_variables import deming_regression, propagate_uncertainty
 
 
 class DemingRegressionTest(unittest.TestCase):
@@ -38,6 +38,42 @@ class DemingRegressionTest(unittest.TestCase):
         np.testing.assert_allclose(
             fit.conditional_mean(np.array([0.0, 1.0])), [fit.intercept, fit.intercept + fit.slope]
         )
+
+    def test_rejects_degenerate_input_instead_of_dividing_by_zero(self):
+        with self.assertRaises(ValueError):
+            deming_regression([1.0], [2.0])  # n=1
+        with self.assertRaises(ValueError):
+            deming_regression([3.0, 3.0, 3.0], [1.0, 2.0, 3.0])  # constant x
+
+    def test_uncorrelated_nonconstant_data_gives_slope_zero_not_inf(self):
+        # x varies but is exactly uncorrelated with y: sxy == 0 divides the old formula by zero.
+        x = np.array([-2.0, -1.0, 0.0, 1.0, 2.0])
+        y = np.array([1.0, -1.0, 1.0, -1.0, 1.0])
+        fit = deming_regression(x, y)
+        self.assertEqual(fit.slope, 0.0)
+        self.assertTrue(np.isfinite(fit.intercept))
+
+
+class PropagateUncertaintyTest(unittest.TestCase):
+    def test_scalar_vectorized_function_matches_per_row_loop(self):
+        samples = np.random.RandomState(0).normal(3.0, 1.0, (500, 1))
+        out = propagate_uncertainty(lambda s: s[:, 0] ** 2, samples)
+        np.testing.assert_allclose(out["mean"], np.mean(samples[:, 0] ** 2))
+
+    def test_per_row_function_with_unqualified_reduction_is_not_silently_wrong(self):
+        # A realistic per-draw function that forgot `axis=`: intended to normalize EACH row to sum
+        # to 1, but summing the whole (n, d) array at once when handed the full batch. Before the
+        # fix, matching the outer shape alone was accepted as "vectorized, correct" -- silently
+        # dividing every row by the GLOBAL sum instead of falling back to the (correct) per-row loop.
+        def bad_normalizer(row_or_batch):
+            return row_or_batch / row_or_batch.sum()
+
+        rng = np.random.RandomState(0)
+        samples = rng.uniform(0.1, 1.0, (50, 4))
+        out = propagate_uncertainty(bad_normalizer, samples)
+        want = samples / samples.sum(axis=1, keepdims=True)
+        np.testing.assert_allclose(out["mean"], want.mean(axis=0))
+        np.testing.assert_allclose(out["samples"], want)
 
 
 if __name__ == "__main__":
