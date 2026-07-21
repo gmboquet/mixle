@@ -188,7 +188,10 @@ def challenger_beats_champion(
             if not (vuong["favored"] == "A" and clarke["favored"] == "A"):
                 favored = "tie"
         except Exception as exc:  # noqa: BLE001
+            # a required cross-check that could not run is not a pass: refuse promotion rather than
+            # silently keeping the earlier paired-test "challenger" verdict unverified.
             evidence["nonnested_error"] = str(exc)
+            favored = "tie"
 
     # ELPD 2-SE band (Bayesian models with LOO/WAIC pointwise arrays)
     if favored == "challenger" and elpd_pointwise is not None:
