@@ -124,6 +124,7 @@ def _nuts_core(value_and_grad, theta0, num_samples, warmup, mass, target_accept,
 
     n_keep = num_samples  # retained draws; num_samples * thin post-warmup iterations, keep every thin-th
     samples = np.empty((n_keep, d))
+    log_probs = np.empty(n_keep)
     kept = 0
     total = warmup + num_samples * thin
 
@@ -175,14 +176,18 @@ def _nuts_core(value_and_grad, theta0, num_samples, warmup, mass, target_accept,
             eta = m1 ** (-kappa)
             log_eps_bar = eta * log_eps + (1.0 - eta) * log_eps_bar
             eps = np.exp(log_eps)
-        elif it == warmup:
+        elif it == warmup and warmup > 0:
+            # warmup == 0: `it < warmup` never ran, so log_eps_bar is still its zero-initial value
+            # -- exp(0.0) == 1.0 would silently overwrite the properly-tuned eps found before this
+            # loop with a fixed constant unrelated to the target's actual scale.
             eps = np.exp(log_eps_bar)
 
         if it >= warmup and ((it - warmup) % thin == 0) and kept < n_keep:
             samples[kept] = cur
+            log_probs[kept] = cur_lp
             kept += 1
 
-    return samples[:kept], eps, eval_count
+    return samples[:kept], log_probs[:kept], eps, eval_count
 
 
 def nuts_numba(
@@ -224,7 +229,7 @@ def nuts_numba(
         raise ValueError("initial state has non-finite log target.")
     seed = int(np.random.randint(1, 2**31 - 1)) if seed is None else int(seed)
 
-    samples, eps, num_evals = _nuts_core(
+    samples, log_probs, eps, num_evals = _nuts_core(
         value_and_grad,
         theta0,
         int(num_samples),
@@ -238,7 +243,7 @@ def nuts_numba(
     sample_list = [samples[i].copy() for i in range(samples.shape[0])]
     res = MCMCResult(
         samples=sample_list,
-        log_probs=np.zeros(len(sample_list), dtype=float),
+        log_probs=np.asarray(log_probs, dtype=float),
         accepted=np.ones(len(sample_list), dtype=bool),
         transition_labels=tuple("nuts" for _ in sample_list),
     )

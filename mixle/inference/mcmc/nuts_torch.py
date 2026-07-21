@@ -206,7 +206,10 @@ def nuts_torch(
             eta = m1 ** (-kappa)
             log_eps_bar = eta * log_eps + (1.0 - eta) * log_eps_bar
             eps = math.exp(log_eps)
-        elif it == warmup:
+        elif it == warmup and warmup > 0:
+            # warmup == 0: `it < warmup` never ran, so log_eps_bar is still its zero-initial value
+            # -- exp(0.0) == 1.0 would silently overwrite the properly-tuned eps found before this
+            # loop with a fixed constant unrelated to the target's actual scale.
             eps = math.exp(log_eps_bar)
 
         if it >= warmup and ((it - warmup) % thin == 0):
