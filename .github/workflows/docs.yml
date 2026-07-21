@@ -1,8 +1,9 @@
 name: Docs
 
 # Build versioned Sphinx documentation (every v* tag with a docs/ tree, plus main) and deploy it to
-# GitHub Pages. Runs on pushes to main that touch the docs or the documented package, and on manual
-# dispatch. The site source stays as .rst under docs/; the built HTML is never committed
+# GitHub Pages. Main pushes and manual dispatches build and deploy the versioned site. Every push to
+# the active release branch runs the strict single-revision check without deploying. The site source
+# stays as .rst under docs/; the built HTML is never committed
 # (docs/_build/ is gitignored) -- it is produced here and served from Pages.
 #
 # sphinx-polyversion (docs/poly.py) drives the multi-version build: it discovers matching tags/
@@ -13,7 +14,7 @@ name: Docs
 # One-time setup (repo Settings > Pages): set the source to "GitHub Actions". This workflow already has the
 # permissions the deploy step needs.
 #
-# Pull requests only run pr-check below: a single-revision `sphinx-build -W` of the current tree, no
+# Pull requests and active-release pushes run revision-check below: a single-revision `sphinx-build -W`, no
 # versioning and no deploy. That is what would have caught the docname collision fixed alongside this
 # job (docs/development.md + docs/development.rst, and docs/operations.md + docs/operations.rst, both
 # registered source suffixes resolving to the same docname): the push-to-main build job never treats
@@ -22,12 +23,7 @@ name: Docs
 
 on:
   push:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - "mixle/**"
-      - "pyproject.toml"
-      - ".github/workflows/docs.yml"
+    branches: [main, release/0.8.0]
   pull_request:
     paths:
       - "docs/**"
@@ -36,7 +32,7 @@ on:
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
-# Least-privilege token plus the OIDC + pages permissions the deploy-pages action requires. pr-check
+# Least-privilege token plus the OIDC + pages permissions the deploy-pages action requires. revision-check
 # needs none of this; it only reads the checkout, so it runs fine under the same block.
 permissions:
   contents: read
@@ -45,7 +41,7 @@ permissions:
 
 # One Pages deployment at a time; let an in-progress deploy finish rather than cancelling it. This
 # only ever applies to push/workflow_dispatch runs (build/deploy below skip pull_request), so PRs
-# never queue behind a Pages deploy or each other here -- see pr-check's own concurrency group.
+# never queue behind a Pages deploy or each other here -- see revision-check's own concurrency group.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -55,8 +51,8 @@ jobs:
     name: Build versioned HTML
     runs-on: ubuntu-latest
     # The full multi-version build + Pages upload is for push/workflow_dispatch only; PRs get the
-    # faster single-revision pr-check job instead.
-    if: github.event_name != 'pull_request'
+    # faster single-revision revision-check job instead.
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -86,7 +82,7 @@ jobs:
     name: Deploy to Pages
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -94,14 +90,14 @@ jobs:
       - id: deployment
         uses: actions/deploy-pages@v4
 
-  pr-check:
-    name: PR check (single-revision, warnings as errors)
+  revision-check:
+    name: Revision check (single-revision, warnings as errors)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/release/0.8.0'
     # Independent group so PR checks never queue behind a Pages deploy or behind each other; only
     # the latest push on a given PR ref needs to run.
     concurrency:
-      group: docs-pr-check-${{ github.ref }}
+      group: docs-revision-check-${{ github.ref }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
