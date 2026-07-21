@@ -631,7 +631,17 @@ class SparseMarkovAssociationAccumulator(InitTransKeyedAccumulator, SequenceEnco
 
         self.size_accumulator.combine(size_acc)
         self.init_count += init_count
-        self.trans_count += trans_count
+        # trans_count is lazily created on the first update()/seq_update() call (its sparse matrix type
+        # depends on which one), so a freshly-made accumulator populated only via combine() -- the
+        # reduce pattern parallel/Spark/engine drivers use -- has self.trans_count still None here,
+        # unlike init_count (eagerly a zero array). Take the incoming matrix directly on a first combine
+        # (copied, so this accumulator doesn't alias and later mutate the source's); a None incoming
+        # side (the other accumulator was also never updated) contributes nothing.
+        if trans_count is not None:
+            if self.trans_count is None:
+                self.trans_count = trans_count.copy()
+            else:
+                self.trans_count += trans_count
 
         return self
 

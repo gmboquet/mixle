@@ -51,6 +51,63 @@ def encode(data, low_memory):
     return encoder.seq_encode(data)
 
 
+def _bootstrap_estimate():
+    """A real (arbitrary) fitted model, needed as seq_update's `estimate` arg to assign responsibility."""
+    est = SparseMarkovAssociationEstimator(num_vals=NUM_VALS, alpha=0.3, low_memory=False)
+    seed_acc = make_accumulator(low_memory=False)
+    seed_acc.seq_initialize(encode(DATA, low_memory=False), WEIGHTS.copy(), np.random.RandomState(1))
+    return est.estimate(None, seed_acc.value())
+
+
+class SparseMarkovAssociationCombineTestCase(unittest.TestCase):
+    def test_fresh_host_accumulator_populated_only_via_combine(self):
+        # The real parallel/Spark/engine reduce pattern: each worker gets its own accumulator, calls
+        # seq_update on its own data shard, and a separate HOST accumulator -- which never calls
+        # update()/seq_update() itself -- combines the workers' value()s together. trans_count is only
+        # lazily created inside update()/seq_update(), so the host's stayed None and `self.trans_count
+        # += trans_count` crashed with a bare TypeError on the very first combine().
+        model = _bootstrap_estimate()
+        worker_a = make_accumulator(low_memory=False)
+        worker_a.seq_update(encode(DATA[:1], low_memory=False), WEIGHTS[:1].copy(), model)
+        worker_b = make_accumulator(low_memory=False)
+        worker_b.seq_update(encode(DATA[1:], low_memory=False), WEIGHTS[1:].copy(), model)
+
+        host = make_accumulator(low_memory=False)  # never updated directly -- host.trans_count is None
+        host.combine(worker_a.value())
+        host.combine(worker_b.value())
+
+        trans = host.trans_count.toarray()
+        self.assertTrue(np.all(np.isfinite(trans)))
+
+        # the real invariant: combining sharded seq_updates must exactly match one accumulator
+        # seq_updating the whole batch directly -- what parallel/map-reduce correctness requires.
+        direct = make_accumulator(low_memory=False)
+        direct.seq_update(encode(DATA, low_memory=False), WEIGHTS.copy(), model)
+        np.testing.assert_allclose(trans, direct.trans_count.toarray())
+
+    def test_combining_into_an_already_populated_host_still_adds(self):
+        # Once trans_count exists, combine() must still add (not overwrite) -- guards against a fix
+        # that only handles the None case and regresses the ordinary already-populated path.
+        model = _bootstrap_estimate()
+        host = make_accumulator(low_memory=False)
+        host.seq_update(encode(DATA[:1], low_memory=False), WEIGHTS[:1].copy(), model)
+        before = host.trans_count.toarray().copy()
+
+        worker = make_accumulator(low_memory=False)
+        worker.seq_update(encode(DATA[1:], low_memory=False), WEIGHTS[1:].copy(), model)
+        host.combine(worker.value())
+
+        np.testing.assert_allclose(host.trans_count.toarray(), before + worker.trans_count.toarray())
+
+    def test_combining_two_never_updated_accumulators_stays_none(self):
+        # Both sides lack trans_count -- combine() must not crash, and there is genuinely nothing to
+        # accumulate yet.
+        host = make_accumulator(low_memory=False)
+        other = make_accumulator(low_memory=False)
+        host.combine(other.value())
+        self.assertIsNone(host.trans_count)
+
+
 class SparseMarkovAssociationSeqInitializeTestCase(unittest.TestCase):
     def test_seq_initialize_fast_path_is_finite_and_warning_free(self):
         acc = make_accumulator(low_memory=False)
