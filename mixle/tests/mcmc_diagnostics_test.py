@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from mixle.inference import ess_bulk, ess_tail, folded_split_rhat, mcse_mean, rhat_max, split_rhat
+from mixle.inference import ess_bulk, ess_tail, folded_split_rhat, geweke_z, mcse_mean, rhat, rhat_max, split_rhat
 
 
 class MCMCDiagnosticsTest(unittest.TestCase):
@@ -51,6 +51,35 @@ class MCMCDiagnosticsTest(unittest.TestCase):
         chains = np.random.RandomState(3).randn(4, 2000, 3)
         for fn in (split_rhat, ess_bulk, ess_tail, folded_split_rhat, rhat_max, mcse_mean):
             self.assertEqual(fn(chains).shape, (3,))
+
+
+class ZeroWithinChainVarianceTest(unittest.TestCase):
+    """Regression: rhat()/geweke_z() hardcoded their "converged" value (R-hat=1.0, z=0.0) whenever
+    within-chain variance was exactly zero, regardless of whether the chains actually agreed --
+    exactly masking "each chain is individually constant, but they're constant at DIFFERENT values",
+    the textbook non-convergence signature these diagnostics exist to catch."""
+
+    def test_rhat_flags_chains_stuck_at_different_constant_values(self):
+        # 2 chains, each perfectly constant (within-chain variance exactly 0), but at different
+        # values -- severe non-convergence, not the 1.0 the old code reported.
+        chains = np.array([[5.0] * 10, [10.0] * 10])
+        self.assertTrue(np.isinf(rhat(chains)[0]))
+
+    def test_rhat_is_one_when_chains_agree_and_are_each_constant(self):
+        chains = np.array([[5.0] * 10, [5.0] * 10])
+        self.assertEqual(rhat(chains)[0], 1.0)
+
+    def test_geweke_z_flags_a_constant_chain_that_jumps_to_a_different_constant(self):
+        # first 10% constant at 5.0, last 50% constant at 10.0 -- each segment has zero variance,
+        # but the chain plainly is not stationary.
+        chain = np.array([5.0] * 20 + [10.0] * 80)
+        z = geweke_z(chain, first=0.1, last=0.5)
+        self.assertTrue(np.isinf(z[0]))
+
+    def test_geweke_z_is_zero_for_a_genuinely_constant_chain(self):
+        chain = np.full(100, 5.0)
+        z = geweke_z(chain, first=0.1, last=0.5)
+        self.assertEqual(z[0], 0.0)
 
 
 if __name__ == "__main__":

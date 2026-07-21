@@ -24,6 +24,23 @@ import numpy as np
 from scipy import stats
 
 
+def _validate_paired(a: np.ndarray, b: np.ndarray, *, min_n: int = 2) -> None:
+    """Common guard for every paired per-observation comparison in this module.
+
+    Without this, mismatched-length inputs silently broadcast (numpy raises only when the shapes
+    are not broadcast-compatible at all) into a confidently-wrong verdict instead of an error, and
+    n<min_n starves the ddof=1 standard deviation these functions all compute into NaN, which then
+    propagates through a comparison (`stat > 0`, `p >= 0.05`) that is False for NaN either way and
+    so silently resolves to a specific, seemingly-decisive favored side instead of "tie"/an error.
+    """
+    if a.shape != b.shape:
+        raise ValueError(f"paired arrays must have the same shape, got {a.shape} and {b.shape}.")
+    if a.shape[0] < min_n:
+        raise ValueError(f"need at least {min_n} paired observations, got {a.shape[0]}.")
+    if not np.isfinite(a).all() or not np.isfinite(b).all():
+        raise ValueError("paired arrays must be finite (no NaN/Inf).")
+
+
 def paired_score_difference(
     scores_a: np.ndarray,
     scores_b: np.ndarray,
@@ -46,6 +63,7 @@ def paired_score_difference(
     """
     a = np.asarray(scores_a, dtype=float).ravel()
     b = np.asarray(scores_b, dtype=float).ravel()
+    _validate_paired(a, b)
     d = a - b
     n = d.shape[0]
     mean_diff = float(d.mean())
@@ -103,6 +121,7 @@ def vuong_test(
     """
     la = np.asarray(loglik_a, dtype=float).ravel()
     lb = np.asarray(loglik_b, dtype=float).ravel()
+    _validate_paired(la, lb)
     m = la - lb
     n = m.shape[0]
     lr = m.sum() - _complexity_correction(correction, k_a, k_b, n)
@@ -138,6 +157,7 @@ def clarke_test(
     """
     la = np.asarray(loglik_a, dtype=float).ravel()
     lb = np.asarray(loglik_b, dtype=float).ravel()
+    _validate_paired(la, lb)
     n = la.shape[0]
     d = la - lb - _complexity_correction(correction, k_a, k_b, n) / n
     b = int(np.sum(d > 0))
@@ -163,6 +183,7 @@ def compare_elpd(pointwise_a: np.ndarray, pointwise_b: np.ndarray) -> dict:
     """
     a = np.asarray(pointwise_a, dtype=float).ravel()
     b = np.asarray(pointwise_b, dtype=float).ravel()
+    _validate_paired(a, b)
     d = a - b
     n = d.shape[0]
     elpd_diff = float(d.sum())
