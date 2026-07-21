@@ -33,7 +33,11 @@ duplicating it.
 | `TODO` | Required, no evidence yet. |
 | `PARTIAL` | Some evidence exists but doesn't cover the exact release commit, or is otherwise incomplete. |
 | `DONE` | Verified against the exact commit that will be (or was) released, with evidence recorded inline. |
+| `COMPLETE` | Implementation/local preparation is complete; exact-tip hosted or external evidence may still be separate. |
+| `HOSTED` | Must pass in hosted CI on the exact candidate. |
+| `EXTERNAL` | Requires a named human, external system, registry, or designated hardware. |
 | `EXCLUDED` | Explicitly out of scope for this release, with a one-line reason. Silence is not the same as excluded. |
+| `POST-RELEASE` | Can only be performed after publication. |
 
 ## Evidence discipline
 
@@ -52,8 +56,8 @@ SHA is not evidence about the current one.
 
 The gate categories run pre-flight → verify → publish → post-publish:
 
-- **Branch / CI state** — no open PRs, `main` not ahead, no pre-existing tag, CI green *on the exact
-  tip*.
+- **Branch / CI state** — no unrelated open PRs, the final preparation PR is the sole candidate,
+  `main` is not ahead, no pre-existing tag exists, and CI is green *on the exact tip*.
 - **Version and metadata** — the version string is actually bumped, semver is right, changelog and
   migration notes are current.
 - **Build and install clean** — a fresh venv installing the *built wheel* (not the dev tree, not

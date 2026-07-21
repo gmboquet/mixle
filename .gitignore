@@ -49,6 +49,10 @@ pip-delete-this-directory.txt
 # Downloaded example datasets
 /data/
 
+# Research experiments are developed outside the release repository. Promote reusable code into
+# mixle/ with tests and documentation before it enters a release branch.
+/experiments/
+
 # audit ledgers + Sphinx build output stay local; the docs source (.rst) is published
 docs/_build/
 audit/
@@ -67,6 +71,7 @@ mixle/engines/_lns_kernel.c
 coverage.xml
 htmlcov/
 
-# benchmark smoke-run artifacts (results.json is the tracked full-sweep reference; quick runs must not clobber it)
+# Benchmark smoke output is local. A full current-release result may be reviewed and committed separately;
+# historical pre-0.8 artifacts live under benchmarks/archive/ and are never current release evidence.
 benchmarks/results/results_quick.json
 benchmarks/*.html

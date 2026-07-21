@@ -1,4 +1,4 @@
-"""Generate ``serialization_schema_manifest.json``: the versioned catalog of serializable schema types.
+"""Generate ``manifests/serialization_schema_manifest.json``: the versioned catalog of serializable schema types.
 
 Worklist M11.1 -- a versioned schema manifest. mixle's persistence format is type-tagged JSON: every
 serializable class registers a stable ``__pysp_type__`` id (:func:`mixle.utils.serialization.
@@ -18,12 +18,15 @@ import json
 import os
 import sys
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Pin imports to this checkout rather than whichever editable Mixle install happens to be active.
+sys.path.insert(0, _REPO_ROOT)
+
 from mixle.utils.serialization import TAG, serializable_class_ids
 
 # Bump when the manifest's own shape changes, not when the type set changes (that shows in registered_types).
 SCHEMA_MANIFEST_VERSION = "1"
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MANIFEST_PATH = os.path.join(_REPO_ROOT, "serialization_schema_manifest.json")
+MANIFEST_PATH = os.path.join(_REPO_ROOT, "manifests", "serialization_schema_manifest.json")
 
 
 def build_manifest() -> dict:
@@ -50,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
             current = None
         if current != text:
             print(
-                "serialization_schema_manifest.json is stale; run: python scripts/gen_schema_manifest.py",
+                "manifests/serialization_schema_manifest.json is stale; run: python scripts/gen_schema_manifest.py",
                 file=sys.stderr,
             )
             return 1

@@ -88,9 +88,11 @@ class CheckpointChainTest(unittest.TestCase):
             # corrupt the stored fingerprint of the latest checkpoint: the re-hash of the loaded model
             # no longer matches what was recorded
             path = os.path.join(d, "run", reg.versions("run")[-1] + ".json")
-            payload = json.load(open(path))
+            with open(path, encoding="utf-8") as f:
+                payload = json.load(f)
             payload["metadata"]["model_hash"] = "0" * 64
-            json.dump(payload, open(path, "w"))
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
             self.assertFalse(reg.verify_chain("run"))
 
 

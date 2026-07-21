@@ -222,7 +222,11 @@ class Registry:
         p = os.path.join(self._model_dir(name, create=False), _safe_segment(alias, "alias") + ".alias")
         # the version READ FROM the alias file is still resolved against the known version list by get(),
         # so a tampered alias file cannot traverse either.
-        version = open(p).read().strip() if os.path.exists(p) else "latest"
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as f:
+                version = f.read().strip()
+        else:
+            version = "latest"
         return self.get(name, version, trust_code=trust_code)
 
     def verify_chain(self, name: str) -> bool:

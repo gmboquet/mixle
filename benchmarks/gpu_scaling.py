@@ -10,10 +10,16 @@ before the batched-covariance fix) now fit in a few GB. Emits gpu_results.json.
 """
 
 import json
+import os
+import sys
 import time
 
 import numpy as np
 import torch
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
+from benchmark_provenance import stamp_result  # noqa: E402
 
 import mixle.stats as st
 from mixle.engines import TorchEngine
@@ -103,9 +109,10 @@ def main():
             pts.append({"dim": dim, "n": n, "k": k, "gpu": None, "oom": True})
     out["panels"]["scale_dim"] = {"axis": "dim", "fixed": {"n": n, "k": k, "its": its}, "points": pts}
 
-    with open("gpu_results.json", "w") as f:
-        json.dump(out, f, indent=2)
-    print("\nwrote gpu_results.json")
+    path = os.path.join(HERE, "results", "gpu_results.json")
+    with open(path, "w") as f:
+        json.dump(stamp_result(out), f, indent=2)
+    print(f"\nwrote {path}")
 
 
 if __name__ == "__main__":
