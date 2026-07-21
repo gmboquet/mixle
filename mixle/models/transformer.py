@@ -159,6 +159,9 @@ def build_causal_lm(
     per-block list/tuple of bools (one per ``n_layer``) rather than a single all-or-nothing bool, for F6's
     cost-model-driven selective policy (``mixle.models.memory_efficient_training.SelectiveRecomputePolicy``).
     """
+    if not _HAS_TORCH:
+        raise ImportError("build_causal_lm requires torch.")
+
     from mixle.models.embedding import resolve_embedding
 
     embedding = resolve_embedding(embedding, vocab, d_model)  # CategoricalEmbedding | nn.Embedding | None -> module
