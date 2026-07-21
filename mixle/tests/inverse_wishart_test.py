@@ -26,6 +26,20 @@ class InverseWishartTest(unittest.TestCase):
     def test_non_pd_is_minus_inf(self):
         self.assertEqual(self.d.log_density(np.array([[1.0, 2.0], [2.0, 1.0]])), -np.inf)
 
+    def test_negative_definite_with_positive_determinant_is_minus_inf(self):
+        # -I in an even dimension has determinant (-1)^2 = +1 while every eigenvalue is negative;
+        # a determinant-sign check alone would wrongly accept this as positive definite.
+        neg_i = -np.eye(2)
+        self.assertGreater(np.linalg.det(neg_i), 0.0)
+        self.assertEqual(self.d.log_density(neg_i), -np.inf)
+        seq = self.d.seq_log_density(np.array([neg_i, self.P]))
+        self.assertEqual(seq[0], -np.inf)
+        self.assertAlmostEqual(seq[1], self.d.log_density(self.P), places=9)
+
+    def test_negative_definite_scale_with_positive_determinant_raises(self):
+        with self.assertRaises(ValueError):
+            InverseWishartDistribution(self.df, -np.eye(2))
+
     def test_sampler_is_spd_with_correct_mean(self):
         s = self.d.sampler(seed=0).sample(40000)
         self.assertTrue(np.all(np.linalg.eigvalsh(s[:300]) > 0))

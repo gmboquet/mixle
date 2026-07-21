@@ -612,6 +612,20 @@ class NormalWishartTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             NormalWishartDistribution(np.zeros(2), 1.0, np.array([[1.0, 2.0], [2.0, 1.0]]), 4.0)  # indefinite
 
+    def test_negative_definite_scale_with_positive_determinant_raises(self):
+        # -I in an even dimension has determinant (-1)^2 = +1 while every eigenvalue is negative;
+        # a determinant-sign check alone would wrongly accept this as positive definite.
+        neg_i = -np.eye(2)
+        self.assertGreater(np.linalg.det(neg_i), 0.0)
+        with self.assertRaises(ValueError):
+            NormalWishartDistribution(np.zeros(2), 1.0, neg_i, 4.0)
+
+    def test_log_density_negative_definite_precision_is_minus_inf(self):
+        nw = NormalWishartDistribution(np.zeros(2), 1.0, np.eye(2), 4.0)
+        neg_i = -np.eye(2)
+        self.assertGreater(np.linalg.det(neg_i), 0.0)
+        self.assertEqual(nw.log_density((np.zeros(2), neg_i)), -np.inf)
+
 
 class MultivariateGaussianTestCase(unittest.TestCase):
     def make_dist(self):

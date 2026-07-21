@@ -33,6 +33,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.vector import batched_pd_logdet, cholesky_logdet
 
 
 class WishartDistribution(SequenceEncodableProbabilityDistribution):
@@ -45,8 +46,8 @@ class WishartDistribution(SequenceEncodableProbabilityDistribution):
         self.dim = v.shape[0]
         if df < self.dim:
             raise ValueError("df must be >= the matrix dimension p")
-        sign, logdet = np.linalg.slogdet(v)
-        if sign <= 0:
+        logdet = cholesky_logdet(v)
+        if logdet is None:
             raise ValueError("scale must be positive definite")
         self.df = float(df)
         self.scale = v
@@ -74,8 +75,8 @@ class WishartDistribution(SequenceEncodableProbabilityDistribution):
     def log_density(self, x: np.ndarray) -> float:
         """Return the log-density at a single ``(p, p)`` SPD matrix (``-inf`` if not positive definite)."""
         xx = np.asarray(x, dtype=np.float64)
-        sign, logdet = np.linalg.slogdet(xx)
-        if sign <= 0:
+        logdet = cholesky_logdet(xx)
+        if logdet is None:
             return -np.inf
         tr = np.trace(self._scale_inv @ xx)
         return float(self._log_norm + (self.df - self.dim - 1.0) / 2.0 * logdet - 0.5 * tr)
@@ -83,10 +84,10 @@ class WishartDistribution(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized log-density for a stack of SPD matrices, shape ``(N, p, p)``."""
         xx = np.asarray(x, dtype=np.float64)
-        sign, logdet = np.linalg.slogdet(xx)
+        is_pd, logdet = batched_pd_logdet(xx)
         tr = np.einsum("ab,nba->n", self._scale_inv, xx, optimize=True)
         rv = self._log_norm + (self.df - self.dim - 1.0) / 2.0 * logdet - 0.5 * tr
-        return np.where(sign <= 0, -np.inf, rv)
+        return np.where(is_pd, rv, -np.inf)
 
     def sampler(self, seed: int | None = None) -> "WishartSampler":
         """Return a sampler for drawing SPD matrices from this distribution."""
@@ -198,8 +199,8 @@ class WishartAccumulator(_MeanScatterAccumulator):
 
     @staticmethod
     def _logdet(xx: np.ndarray) -> np.ndarray:
-        sign, logdet = np.linalg.slogdet(xx)
-        return np.where(sign > 0, logdet, -np.inf)
+        is_pd, logdet = batched_pd_logdet(xx)
+        return np.where(is_pd, logdet, -np.inf)
 
     def update(self, x: np.ndarray, weight: float, estimate: Any | None) -> None:
         """Accumulate matrix scatter and log-determinant statistics for one observation."""
