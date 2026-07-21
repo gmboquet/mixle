@@ -244,6 +244,10 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             # sampler dies later, far from the mistake), so fail at the constructor like the
             # scalar families do.
             raise ValueError("MixtureDistribution requires len(components) == len(w).")
+        if np.any(self.w < 0.0):
+            # A negative weight silently propagates into log_density() as nan (only a RuntimeWarning),
+            # so reject it at the constructor like the scalar families do.
+            raise ValueError("MixtureDistribution requires non-negative weights.")
 
         self.zw = self.w == 0.0
         self.log_w = np.log(w + self.zw)

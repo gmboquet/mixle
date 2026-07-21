@@ -162,13 +162,17 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 ``None`` (default) is a plain point model.
 
         Attributes:
-            p_vec: Probability vector, normalized by the constructor.
+            p_vec: Probability vector, stored as given (not renormalized by the constructor).
             min_val: Minimum supported integer value.
             max_val: Maximum supported integer value.
             log_p_vec: Elementwise log probabilities.
             num_vals: Number of integer values in the support.
         """
         p_vec = coalesce_alias("p_vec", p_vec, "prob_vec", prob_vec, default=MISSING)
+        if any(v < 0.0 for v in p_vec):
+            # A negative "probability" silently propagates into density()/log_density() answers,
+            # so reject it at the constructor like the scalar families do.
+            raise ValueError("IntegerCategoricalDistribution requires non-negative probabilities.")
         with np.errstate(divide="ignore"):
             self.p_vec = np.asarray(p_vec, dtype=np.float64)
             self.min_val = min_val
