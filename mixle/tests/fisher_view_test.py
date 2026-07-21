@@ -735,6 +735,21 @@ class FisherViewTestCase(unittest.TestCase):
         self.assertEqual(mat.shape[0], 2)
         self.assertTrue(np.all(np.isfinite(mat)))
 
+    def test_fisher_information_rejects_a_single_observation(self):
+        # centering by the sample's OWN mean makes a single observation's centered statistic
+        # exactly zero, so fisher_information/observed_fisher_information used to silently return
+        # just the ridge term (zero real information) instead of raising -- dangerous since this
+        # feeds confidence intervals and standard errors directly.
+        view = FisherView(GaussianDistribution(0.0, 1.0))
+        stats = view.expected_statistics_matrix(data=[1.0, 2.0, 3.0])
+        with self.assertRaises(ValueError):
+            view.fisher_information(stats=stats[:1], diagonal=False, ridge=0.0)
+        with self.assertRaises(ValueError):
+            view.observed_fisher_information(stats=stats[:1], diagonal=False, ridge=0.0)
+        # 2 observations is the minimum that should still work
+        info = view.fisher_information(stats=stats[:2], diagonal=False, ridge=0.0)
+        self.assertTrue(np.all(np.isfinite(info)))
+
 
 if __name__ == "__main__":
     unittest.main()

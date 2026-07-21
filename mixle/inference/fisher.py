@@ -315,7 +315,14 @@ class FisherView:
         if stats is None:
             stats = self.expected_statistics_matrix(**kwargs)
         centered, _ = self._center(stats)
-        n = max(centered.shape[0], 1)
+        if centered.shape[0] < 2:
+            # centering by the sample's OWN mean makes a single observation's centered statistic
+            # exactly zero, so `n = max(shape[0], 1)` used to silently return just the ridge term
+            # (zero real information) rather than signal "not enough data for a covariance estimate".
+            raise ValueError(
+                f"fisher_information needs at least 2 observations to estimate a covariance, got {centered.shape[0]}."
+            )
+        n = centered.shape[0]
         if diagonal:
             return np.mean(centered * centered, axis=0) + ridge
         return np.dot(centered.T, centered) / float(n) + np.eye(centered.shape[1]) * ridge
@@ -375,7 +382,12 @@ class FisherView:
         x = np.asarray(stats, dtype=np.float64)
         mu = self.score_center(stats=x) if center is None else np.asarray(center, dtype=np.float64)
         centered = x - mu.reshape((1, -1))
-        n = max(centered.shape[0], 1)
+        if centered.shape[0] < 2:
+            raise ValueError(
+                f"observed_fisher_information needs at least 2 observations to estimate a "
+                f"covariance, got {centered.shape[0]}."
+            )
+        n = centered.shape[0]
         if diagonal:
             return np.mean(centered * centered, axis=0) + ridge
         return np.dot(centered.T, centered) / float(n) + np.eye(centered.shape[1]) * ridge

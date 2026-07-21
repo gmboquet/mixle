@@ -191,6 +191,13 @@ def _bca_interval(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Bias-corrected and accelerated interval endpoints (Efron 1987)."""
     n = _n_units(data)
+    if n < 2:
+        # the jackknife loop below leaves one observation out per iteration; at n=1 that computes
+        # the statistic on an EMPTY sample (NaN, usually with its own RuntimeWarning), and since
+        # `nan != 0` is True in numpy the `den != 0` guard a few lines down does not catch it either
+        # -- the NaN silently propagated through norm.cdf/np.quantile and surfaced downstream as an
+        # unrelated "Quantiles must be in the range [0, 1]" ValueError instead of this clear one.
+        raise ValueError(f"BCa interval needs at least 2 observations for the jackknife acceleration term, got {n}.")
     # bias correction z0 from the fraction of replicates below the point estimate
     prop = np.mean(reps < estimate, axis=0)
     prop = np.clip(prop, 1.0 / (reps.shape[0] + 1), 1.0 - 1.0 / (reps.shape[0] + 1))

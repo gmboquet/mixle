@@ -52,6 +52,17 @@ class BootstrapTest(unittest.TestCase):
         r = bootstrap(x, lambda d: float(np.mean(d)), n_boot=500, method="bca", clusters=clusters, seed=4)
         self.assertEqual(r.method, "percentile")
 
+    def test_bca_single_observation_raises_a_clear_error(self):
+        # the jackknife loop leaves one observation out per iteration; at n=1 that used to compute
+        # the statistic on an EMPTY sample (NaN), which `den != 0` (NaN != 0 is True in numpy) did
+        # not catch either -- the NaN silently propagated and surfaced downstream as an unrelated
+        # "Quantiles must be in the range [0, 1]" ValueError instead of this clear one. Checking the
+        # message (not just the exception type) matters here: the old code eventually raised A
+        # ValueError too, just the wrong, confusing one -- asserting only the type would not have
+        # distinguished the fix from the bug.
+        with self.assertRaisesRegex(ValueError, "at least 2 observations"):
+            bootstrap(np.array([1.0]), lambda d: float(np.mean(d)), n_boot=50, method="bca", seed=5)
+
     def test_cluster_bootstrap_widens_with_intracluster_correlation(self):
         # strongly correlated within clusters -> effective n is the #clusters, so CI is wider
         rng = np.random.RandomState(4)
