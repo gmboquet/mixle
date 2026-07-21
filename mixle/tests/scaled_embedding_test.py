@@ -58,6 +58,22 @@ class ScaledEmbeddingTest(unittest.TestCase):
         tight = ScaledEmbedding(12, max_dim=10, beta=8.0, seed=2).fit(X, epochs=700)
         self.assertGreater(loose.active_dim(X).mean(), tight.active_dim(X).mean())
 
+    def test_encode_before_fit_raises_instead_of_returning_untrained_output(self):
+        # _fitted was set but never checked -- encode/coordinate_kl/active_dim/rate_nats on a fresh
+        # (randomly initialized, untrained) network used to silently return a code as if it meant
+        # something.
+        from mixle.reason import ScaledEmbedding
+
+        emb = ScaledEmbedding(in_dim=4, max_dim=6, seed=0)
+        with self.assertRaises(RuntimeError):
+            emb.encode(np.zeros((1, 4)))
+        with self.assertRaises(RuntimeError):
+            emb.coordinate_kl(np.zeros((1, 4)))
+        with self.assertRaises(RuntimeError):
+            emb.active_dim(np.zeros((1, 4)))
+        with self.assertRaises(RuntimeError):
+            emb.rate_nats(np.zeros((1, 4)))
+
     def test_reconstructs_and_code_is_shared(self):
         # Similar inputs get nearby codes (a usable common coordinate system for retrieval).
         from mixle.reason import ScaledEmbedding

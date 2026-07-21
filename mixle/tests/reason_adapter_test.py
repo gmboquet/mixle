@@ -59,6 +59,15 @@ class StructuredAdapterTest(unittest.TestCase):
         self.assertEqual(full.n_params(), dim * dim)  # 262144
         self.assertLess(structured.n_params() * 25, full.n_params())
 
+    def test_transform_before_fit_raises_instead_of_a_bare_attributeerror(self):
+        # self._built was only ever assigned inside fit(), never in __init__ -- transform()/scores()/
+        # predict() before fit() used to crash with an unguarded, unhelpful AttributeError.
+        from mixle.reason import StructuredAdapter
+
+        ad = StructuredAdapter(8, rank=2)
+        with self.assertRaises(RuntimeError):
+            ad.transform(np.zeros((1, 8)))
+
     def test_strong_weight_decay_keeps_the_map_near_identity(self):
         import torch
 

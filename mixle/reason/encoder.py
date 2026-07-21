@@ -93,6 +93,11 @@ class AmortizedEncoder:
 
     def _encode_std(self, X: Any) -> tuple[np.ndarray, np.ndarray]:
         """Batched encode -> (means, vars) in *original* latent units, as numpy arrays."""
+        if not self._fitted:
+            raise RuntimeError(
+                "AmortizedEncoder.encode/encode_batch/evidence called before .fit(X, Z) -- the network "
+                "is still at its random initialization, so the returned belief would be meaningless."
+            )
         torch = _torch()
         Xs = (np.atleast_2d(np.asarray(X, dtype=float)) - self._x_mean) / self._x_scale
         with torch.no_grad():

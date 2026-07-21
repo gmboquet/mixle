@@ -80,6 +80,19 @@ class AmortizedEncoderTest(unittest.TestCase):
         attr = fused.attribution()
         self.assertGreater(attr["clean"], attr["noisy"])  # cleaner modality contributes more
 
+    def test_encode_before_fit_raises_instead_of_returning_untrained_output(self):
+        # _fitted was set but never checked -- encode/encode_batch/evidence on a fresh (randomly
+        # initialized, untrained) network used to silently return a belief as if it meant something.
+        from mixle.reason import AmortizedEncoder
+
+        enc = AmortizedEncoder(in_dim=2, latent_dim=1, seed=0)
+        with self.assertRaises(RuntimeError):
+            enc.encode(np.zeros(2))
+        with self.assertRaises(RuntimeError):
+            enc.encode_batch(np.zeros((3, 2)))
+        with self.assertRaises(RuntimeError):
+            enc.evidence(np.zeros(2))
+
     def test_evidence_onto_selects_sublatent(self):
         # An encoder targeting a 1-d property can inform coordinate 1 of a 3-d shared latent via onto.
         from mixle.reason import AmortizedEncoder
