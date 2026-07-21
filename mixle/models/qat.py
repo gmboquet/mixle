@@ -37,8 +37,6 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task.quantize import _QMAX, quantize_dequantize_array
-
 try:
     import torch
     import torch.nn as nn
@@ -67,6 +65,8 @@ if _HAS_TORCH:
 
         @staticmethod
         def forward(ctx: Any, x: Any, bits: int, clip_percentile: float | None) -> Any:
+            from mixle.task.quantize import quantize_dequantize_array
+
             w = x.detach().cpu().numpy().astype(np.float64)
             wq, scale = quantize_dequantize_array(w, bits=bits, clip_percentile=clip_percentile)
             dq = (wq.astype(np.float64) * scale).astype(np.float32)
@@ -90,6 +90,8 @@ if _HAS_TORCH:
         def __init__(
             self, base: Any, *, bits: int = 4, clip_percentile: float | None = None, enabled: bool = True
         ) -> None:
+            from mixle.task.quantize import _QMAX
+
             super().__init__()
             if not isinstance(base, nn.Linear):
                 raise TypeError(f"QATWrapper wraps an nn.Linear, got {type(base).__name__}")

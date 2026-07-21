@@ -13,7 +13,7 @@ Iterate locally with ``sphinx-polyversion -l docs/poly.py`` (builds only the wor
 refs) before running the real multi-version build, which is slower (one venv + full doc build per ref).
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sphinx_polyversion.api import apply_overrides
@@ -42,8 +42,8 @@ PIP_ARGS = ["-e", ".[docs]"]
 #: Mock data used for `-l`/`--local` fast-iteration builds (working tree only, no other refs checked
 #: out). The version-switcher partial just sees a single "local" entry in that case.
 MOCK_DATA = {
-    "revisions": [GitRef("local", "", "", GitRefType.BRANCH, datetime.now(timezone.utc))],
-    "current": GitRef("local", "", "", GitRefType.BRANCH, datetime.now(timezone.utc)),
+    "revisions": [GitRef("local", "", "", GitRefType.BRANCH, datetime.now(UTC))],
+    "current": GitRef("local", "", "", GitRefType.BRANCH, datetime.now(UTC)),
 }
 
 #: Whether to build using only local files and mock data (set via `-l`/`--local`, for fast iteration).

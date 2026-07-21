@@ -19,12 +19,23 @@ regression or mode collapse; it is reused here rather than reimplemented.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from mixle.doe.designs import Bounds, random_design
 from mixle.doe.oracle import DesignCandidate, DesignRun, VerifiableOracle, optimize_under_oracle
-from mixle.task.collapse import CollapseVerdict, collapse_monitor
+
+if TYPE_CHECKING:
+    # mixle.doe (package init, via amplify) <-> mixle.task (package init, via emulate/propose) is a
+    # live, bidirectional, eager import cycle: a top-level import here of mixle.task.collapse closes
+    # it. It currently "works" only because each package's __init__.py happens to load its own
+    # unaffected submodules before reaching the one that reaches into the other -- reorder either
+    # list (e.g. an alphabetize-imports pass) and it breaks exactly like the epistemic<->task cycle
+    # already fixed for pilot_ladder.py. CollapseVerdict is only ever used as a type annotation here
+    # (deferred to a string by the `from __future__ import annotations` above); collapse_monitor is
+    # a local import inside amplify_and_capture(), at call time, once both packages have loaded.
+    from mixle.task.collapse import CollapseVerdict
 
 
 def _design_matrix(xs: np.ndarray, degree: int) -> np.ndarray:
@@ -148,6 +159,8 @@ def amplify_and_capture(
         result = oracle(x)  # the oracle supplies the accepted score; the student only proposes where to look
         run2.history.append(DesignCandidate(x=x, result=result))
     round2 = AmplificationRound(run=run2, best_score=float(run2.best.result.score), xs=[c.x for c in run2.history])
+
+    from mixle.task.collapse import collapse_monitor
 
     collapse = collapse_monitor(
         [
