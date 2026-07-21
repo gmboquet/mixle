@@ -58,6 +58,29 @@ class PowerLawHawkesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             PLH(mu=0.2, A=1.0, c=0.1, p=0.5, window=100.0)  # p must exceed 1
 
+    def test_estimator_preserves_name_and_keys(self):
+        d = PLH(mu=0.2, A=1.0, c=0.1, p=1.5, window=100.0, name="my-hawkes", keys="shared-key")
+        est = d.estimator()
+        self.assertEqual(est.name, "my-hawkes")
+        self.assertEqual(est.keys, "shared-key")
+        acc = est.accumulator_factory().make()
+        self.assertEqual(acc.name, "my-hawkes")
+        self.assertEqual(acc.keys, "shared-key")
+
+    def test_accumulator_value_is_not_aliased_to_later_updates(self):
+        # value() previously returned self.realizations directly, so a value() taken before a later
+        # update()/seq_update()/combine() on the SAME accumulator would silently grow too (the exact
+        # aliasing hazard from_value's own copy-on-restore already guards against, on the other side).
+        est = self.d.estimator()
+        acc = est.accumulator_factory().make()
+        ts, ms = self.d.sampler(seed=2).sample()
+        acc.update((ts, ms), 1.0, None)
+        snapshot = acc.value()
+        self.assertEqual(len(snapshot[0]), 1)
+        acc.update((ts, ms), 1.0, None)
+        self.assertEqual(len(snapshot[0]), 1, "value() snapshot mutated by a later update()")
+        self.assertEqual(len(acc.value()[0]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
