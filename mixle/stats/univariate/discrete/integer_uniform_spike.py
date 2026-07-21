@@ -81,6 +81,11 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
             name (Optional[str]): Optional distribution name.
 
         """
+        if not 0.0 <= p <= 1.0:
+            # An out-of-range "probability" silently propagates into density()/log_density() answers
+            # (e.g. exp(log_density) > 1), so reject it at the constructor like the scalar families do.
+            raise ValueError("IntegerUniformSpikeDistribution requires p in [0, 1], not %s." % repr(p))
+
         self.p = p
         self.min_val = min_val
         self.max_val = min_val + num_vals - 1
