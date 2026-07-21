@@ -102,6 +102,12 @@ class VarianceSplitTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             decompose_variance(np.zeros((3, 2)), np.zeros((3, 4)))
 
+    def test_negative_variance_raises_instead_of_a_negative_total(self):
+        # unguarded, member_vars=[-5,-5,-5] used to give aleatoric=-5.0 and total=-4.33 -- a
+        # mathematically impossible negative "total variance", silently.
+        with self.assertRaises(ValueError):
+            decompose_variance(np.array([1.0, 2.0, 3.0]), np.array([-5.0, -5.0, -5.0]))
+
 
 class FrontDoorAndBuildersTest(unittest.TestCase):
     def test_front_door_dispatch(self):
