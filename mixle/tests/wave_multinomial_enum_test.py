@@ -6,9 +6,10 @@ tiny base (3 categories, trial counts <= 3): non-increasing order, exact multise
 de-duplication, log_prob == log_density, and top-k agreement with the brute-force top-k.
 
 Note the density forms actually implemented: neither distribution includes the
-multinomial coefficient in log_density, and IntegerMultinomialDistribution.log_density
-also omits the len_dist contribution (its support is therefore infinite and ordered by
-sum_k n_k * log p_k alone).
+multinomial coefficient in log_density. IntegerMultinomialDistribution's support is
+countably infinite on the category term alone (sum_k n_k * log p_k); with the default
+Null len_dist that term IS the full log_density, but a real len_dist adds its own
+log-density of the total trial count, exactly like the sibling MultinomialDistribution.
 """
 
 import itertools
@@ -191,15 +192,22 @@ class IntegerMultinomialEnumeratorTestCase(unittest.TestCase):
             if lp > cutoff + TOL:
                 self.assertIn(canon(v), seen, "missing %r" % (v,))
 
-    def test_len_dist_does_not_affect_log_density_scores(self):
-        # log_density ignores len_dist, so the enumeration must too (contract: lp == log_density).
+    def test_len_dist_is_included_in_enumeration_scores(self):
+        # log_density includes len_dist's log-density of the total trial count (like the sibling
+        # MultinomialDistribution), so the enumeration must too: lp == log_density still holds, but
+        # scores now genuinely differ from the Null-len_dist baseline (self.items) rather than matching
+        # it, since a real len_dist changes which count vectors are most probable.
         with_len = IntegerMultinomialDistribution(
             1, [0.5, 0.3, 0.2], len_dist=IntegerCategoricalDistribution(0, [0.25, 0.25, 0.25, 0.25])
         )
         items = with_len.enumerator().top_k(10)
-        np.testing.assert_allclose([lp for _, lp in items], [lp for _, lp in self.items[:10]], atol=TOL)
+        lps = [lp for _, lp in items]
+        for i in range(len(lps) - 1):
+            self.assertGreaterEqual(lps[i], lps[i + 1] - TOL, "order violated at %d" % i)
         for v, lp in items:
             self.assertAlmostEqual(lp, with_len.log_density(v), delta=TOL)
+        # a real len_dist must change the scores -- this is NOT expected to match the Null baseline.
+        self.assertGreater(np.max(np.abs(np.asarray(lps) - np.asarray([lp for _, lp in self.items[:10]]))), TOL)
 
     def test_zero_probability_category_skipped(self):
         dist = IntegerMultinomialDistribution(0, [0.6, 0.0, 0.4])
