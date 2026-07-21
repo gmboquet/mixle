@@ -730,7 +730,7 @@ class ConditionalDistributionSampler(ConditionalSampler, DistributionSampler):
             x1 = self.default_sampler.sample()
         return x0, x1
 
-    def sample(self, size: int | None = None) -> tuple[Any, Any] | list[tuple[Any, Any]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> tuple[Any, Any] | list[tuple[Any, Any]]:
         """Sample 'size' independent samples from ConditionalDistribution.
 
         Sequence of 'size' calls to single_sample(). If size is None, size is taken to be 1.

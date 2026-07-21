@@ -24,7 +24,6 @@ from mixle.analysis.carcinogenic_risk import (
     radon_wlm_risk,
 )
 from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator
-from mixle.analysis.developmental_risk import BMDResult, benchmark_dose, rfd_exceedance
 from mixle.analysis.coverage import (
     ace,
     chao1,
@@ -35,6 +34,7 @@ from mixle.analysis.coverage import (
     rarefaction_curve,
     turing_coverage,
 )
+from mixle.analysis.developmental_risk import BMDResult, benchmark_dose, rfd_exceedance
 from mixle.analysis.emissions import (
     EmissionFactors,
     Footprint,
@@ -94,7 +94,13 @@ from mixle.analysis.rank_aggregation import (
     mallows_fit,
     spearman_footrule,
 )
-from mixle.analysis.real_options import OptionValue, real_option_value, voi_dollars
+from mixle.analysis.real_options import (
+    OptionValue,
+    VoiStoppingDecision,
+    real_option_value,
+    voi_dollars,
+    voi_stopping_decision,
+)
 from mixle.analysis.sdm import HabitatModel, SpeciesObservation, fit_sdm
 from mixle.analysis.spatial_mixture import SpatialMixture
 from mixle.analysis.valuation import NPVDistribution, capex_opex, cost_curve, monte_carlo_npv
@@ -195,6 +201,8 @@ __all__ = [
     "OptionValue",
     "real_option_value",
     "voi_dollars",
+    "VoiStoppingDecision",
+    "voi_stopping_decision",
     # safety-risk / geotechnical hazard modeling
     "safety_risk_surface",
     "incident_probability",

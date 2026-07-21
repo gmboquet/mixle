@@ -23,7 +23,7 @@ from typing import NamedTuple
 import numpy as np
 import pytest
 
-from mixle.analysis.real_options import OptionValue, real_option_value, voi_dollars
+from mixle.analysis.real_options import OptionValue, real_option_value, voi_dollars, voi_stopping_decision
 
 
 class _FakeNPVDistribution(NamedTuple):
@@ -89,6 +89,39 @@ def test_unknown_kind_raises():
         real_option_value(npv_dist, volatility=0.3, horizon=4, kind="bogus", rate=0.05)
 
 
+def test_expand_option_collapses_to_its_own_intrinsic_at_zero_volatility():
+    # At zero dispersion every kind must collapse to ITS OWN immediate-exercise payoff, not a
+    # kind-independent max(mean, 0) -- "expand" pays mean + expand_fraction * max(mean, 0), strictly
+    # more than the naive floor whenever mean > 0.
+    npv_dist = _npv_dist(mean=100.0)
+    opt = real_option_value(npv_dist, volatility=1e-9, horizon=5, kind="expand", rate=0.05, expand_fraction=0.3)
+    expected = 100.0 + 0.3 * 100.0
+    assert opt.value == pytest.approx(expected, abs=1e-6)
+    assert opt.value != pytest.approx(max(npv_dist.mean, 0.0), abs=1e-3)
+
+
+def test_expand_option_collapses_to_its_own_intrinsic_at_zero_horizon():
+    # horizon=0 forces dt=0 -> h=0 through the SAME branch, independent of volatility.
+    npv_dist = _npv_dist(mean=100.0)
+    opt = real_option_value(npv_dist, volatility=0.6, horizon=0, kind="expand", rate=0.05, expand_fraction=0.3)
+    assert opt.value == pytest.approx(130.0, abs=1e-6)
+
+
+def test_defer_and_abandon_zero_volatility_intrinsic_is_unchanged():
+    # Regression guard: the fix must not change the already-correct defer/abandon zero-vol value.
+    npv_dist = _npv_dist(mean=10.0)
+    for kind in ("defer", "abandon"):
+        opt = real_option_value(npv_dist, volatility=1e-9, horizon=5, kind=kind, rate=0.05)
+        assert opt.value == pytest.approx(max(npv_dist.mean, 0.0), abs=1e-6)
+
+
+@pytest.mark.parametrize("bad_n_steps", [0, -1, -5])
+def test_non_positive_n_steps_raises_a_clear_error(bad_n_steps):
+    npv_dist = _npv_dist(mean=10.0)
+    with pytest.raises(ValueError, match="n_steps"):
+        real_option_value(npv_dist, volatility=0.3, horizon=5, kind="defer", rate=0.05, n_steps=bad_n_steps)
+
+
 class _ToyPosterior:
     """A minimal IC-1-conforming posterior: an independent Gaussian belief over one grade parameter."""
 
@@ -146,3 +179,49 @@ def test_real_option_value_type_hints_are_resolvable():
 
     hints = typing.get_type_hints(real_option_value)
     assert hints["npv_dist"] is NPVDistribution
+
+
+def test_voi_stopping_decision_says_keep_sampling_when_voi_exceeds_a_cheap_cost():
+    """A real decision-theoretic replacement for the arbitrary CI-width thresholds hand-picked in
+    experiments/adaptive-groundwater-monitoring and experiments/adaptive-gravity-survey-design: a
+    wide, uncertain posterior with an informative (high variance-reduction) next sample and a cheap
+    sample cost should say to keep sampling."""
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    rng = np.random.default_rng(0)
+    decision = voi_stopping_decision(
+        posterior,
+        _decision_value,
+        {"variance_reduction": 0.8},
+        sample_cost=0.01,
+        rng=rng,
+    )
+    assert decision.voi_dollars > 0.0
+    assert decision.keep_sampling is True
+    assert decision.net_value == pytest.approx(decision.voi_dollars - 0.01)
+
+
+def test_voi_stopping_decision_says_stop_when_the_sample_costs_more_than_it_is_worth():
+    """A tight, already-confident posterior (tiny std, small variance-reduction left to gain) against
+    an expensive next sample should say to stop -- the mirror case of the test above."""
+    posterior = _ToyPosterior(mean=1.0, std=0.05)
+    rng = np.random.default_rng(0)
+    decision = voi_stopping_decision(
+        posterior,
+        _decision_value,
+        {"variance_reduction": 0.05},
+        sample_cost=1_000_000.0,
+        rng=rng,
+    )
+    assert decision.keep_sampling is False
+    assert decision.net_value < 0.0
+
+
+def test_voi_stopping_decision_is_consistent_with_voi_dollars_directly():
+    """The wrapper must not silently compute something different from voi_dollars itself."""
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    drill_info = {"variance_reduction": 0.6}
+    direct = voi_dollars(posterior, _decision_value, drill_info, rng=np.random.default_rng(7))
+    decision = voi_stopping_decision(
+        posterior, _decision_value, drill_info, sample_cost=0.0, rng=np.random.default_rng(7)
+    )
+    assert decision.voi_dollars == pytest.approx(direct)

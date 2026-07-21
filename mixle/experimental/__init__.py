@@ -25,6 +25,25 @@ Current contents:
   the ``train_tbptt`` driver, and :class:`~mixle.experimental.context_spine.SlidingWindowSpine` -- the baseline
   mechanism (RoPE + sliding-window attention with a stop-gradient carried KV cache, Transformer-XL style) every
   later Track-E mechanism (E2-E6) is compared against. See ``notes/designs/E1.md`` for the design.
+- :mod:`mixle.experimental.context_parallel_spine` -- E8, context parallelism for
+  :class:`~mixle.experimental.context_spine.SlidingWindowSpine`: :func:`~mixle.experimental.context_parallel_spine.cp_shard_kv`
+  shards the current step's KV axis across ``cp_size`` simulated ranks and
+  :func:`~mixle.experimental.context_parallel_spine.cp_window_attention_forward` reconstructs the dense
+  sliding-window attention output from them (RoPE applied per shard, before the all-gather). Reuses F1's CP
+  pattern (chunk, all-gather once, reconstruct with an explicit offset mask) rather than its entry points,
+  because ``SlidingWindowSpine.step`` carries state across calls where F1's CP shards a stateless whole-block
+  forward. Exact-match tested at ``cp_size`` up to 8, including a real multi-process ``torch.distributed``
+  (gloo) run -- not a wall-clock/MFU scaling receipt (no GPUs here); see the module docstring.
+- :mod:`mixle.experimental.tensor_pipeline_context_parallel` -- F1, tensor/pipeline/context parallelism
+  (:func:`~mixle.experimental.tensor_pipeline_context_parallel.tp_shard_causal_lm` / ``tp_forward_causal_lm``,
+  :func:`~mixle.experimental.tensor_pipeline_context_parallel.pp_partition_causal_lm` / ``pipeline_forward``,
+  :func:`~mixle.experimental.tensor_pipeline_context_parallel.cp_shard_sequence` / ``cp_forward_causal_lm``)
+  for :class:`~mixle.models.transformer.CausalLM`, the three sharding dimensions a frontier trainer composes
+  orthogonally with the FSDP2 data-parallel axis :mod:`mixle.utils.parallel.torch_neural` already provides.
+  The sharding/reconstruction math is exact and tested against the dense forward at small scale (plus a real
+  2-GPU NCCL receipt where hardware allows); wiring the validated plan into real per-axis process groups
+  needs hardware this environment does not have, which is why ``torch_neural.py`` requires
+  ``MIXLE_EXPERIMENTAL_NDPARALLEL=1`` to opt into the data-parallel-only execution of a validated plan.
 - :mod:`mixle.experimental.retrieval_memory_spine` -- E6, retrieval memory over frozen past:
   :class:`~mixle.experimental.retrieval_memory_spine.RetrievalMemorySpine` pairs E1's local sliding window
   with a brute-force kNN index of detached past chunks, retrieving the top-k per query each step. Gradients

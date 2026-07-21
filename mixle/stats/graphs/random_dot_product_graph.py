@@ -150,7 +150,7 @@ class RandomDotProductGraphSampler(DistributionSampler):
         upper = np.triu(draws, 1)
         return upper + upper.T
 
-    def sample(self, size: int | None = None) -> np.ndarray | list[np.ndarray]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray | list[np.ndarray]:
         """Draw graphs (adjacency matrices); a single matrix when size is None."""
         if size is None:
             return self.sample_graph()

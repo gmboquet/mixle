@@ -275,28 +275,22 @@ def optimize_mixture(
 # --- corpus dedup / quality receipt --------------------------------------------------------------------
 
 
-def _stable_hash(tokens: Sequence[str]) -> int:
-    """A ``hash()``-alike that is stable across processes/runs.
-
-    ``hash()`` on a tuple of strings is salted by ``PYTHONHASHSEED``, so two runs (or two workers)
-    would assign different MinHash signatures to identical shingles -- silently breaking the
-    near-duplicate estimate's determinism (and any cross-process comparison of signatures).
-    """
-    digest = hashlib.sha256(" ".join(tokens).encode()).hexdigest()
-    return int(digest, 16)
+def _stable_token_hash(tokens: Sequence[str]) -> int:
+    payload = "\x1f".join(tokens).encode("utf-8")
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
 
 
 def _shingles(text: str, k: int) -> frozenset[int]:
     toks = text.lower().split()
     if len(toks) < k:
-        return frozenset({_stable_hash(toks)})
-    return frozenset(_stable_hash(toks[i : i + k]) for i in range(len(toks) - k + 1))
+        return frozenset({_stable_token_hash(toks)})
+    return frozenset(_stable_token_hash(toks[i : i + k]) for i in range(len(toks) - k + 1))
 
 
 def _minhash_signature(shingle_set: frozenset[int], a: np.ndarray, b: np.ndarray, prime: int) -> np.ndarray:
     if not shingle_set:
         return np.zeros(len(a), dtype=np.int64)
-    hashes = np.array([abs(hash(s)) % prime for s in shingle_set], dtype=np.int64)
+    hashes = np.array([s % prime for s in shingle_set], dtype=np.int64)
     sig = (np.outer(a, hashes) + b[:, None]) % prime  # (num_hashes, n_shingles)
     return sig.min(axis=1)
 
@@ -319,6 +313,12 @@ def estimate_near_duplicate_rate(
     fine for the receipt-sized corpora this is meant for, not a production LSH dedup pipeline.
     """
     docs = list(corpus)
+    if isinstance(shingle_size, bool) or not isinstance(shingle_size, int) or shingle_size <= 0:
+        raise ValueError("shingle_size must be a positive integer")
+    if isinstance(num_hashes, bool) or not isinstance(num_hashes, int) or num_hashes <= 0:
+        raise ValueError("num_hashes must be a positive integer")
+    if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("threshold must be finite and between 0 and 1")
     n = len(docs)
     if n == 0:
         return 0.0

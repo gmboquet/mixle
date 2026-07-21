@@ -331,7 +331,7 @@ class DeterminizedSampler:
                 return out
             q = nxt[i]
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw one terminal-ended sequence or a list of independent sequences."""
         if size is None:
             return self._one()

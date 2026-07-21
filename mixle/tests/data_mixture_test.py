@@ -214,6 +214,14 @@ class NearDuplicateReceiptTest(unittest.TestCase):
             )
             self.assertAlmostEqual(float(out.stdout.strip()), here, delta=1.0e-9)
 
+    def test_invalid_minhash_parameters_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "shingle_size"):
+            estimate_near_duplicate_rate(["one", "two"], shingle_size=0)
+        with self.assertRaisesRegex(ValueError, "num_hashes"):
+            estimate_near_duplicate_rate(["one", "two"], num_hashes=0)
+        with self.assertRaisesRegex(ValueError, "threshold"):
+            estimate_near_duplicate_rate(["one", "two"], threshold=float("nan"))
+
 
 if __name__ == "__main__":
     unittest.main()

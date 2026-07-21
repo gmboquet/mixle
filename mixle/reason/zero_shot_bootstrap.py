@@ -320,8 +320,8 @@ def _generic_scalar_reduction(sample: Any) -> float:
     vec = _extract_numeric_vector(sample)
     if vec is not None and vec.size:
         return float(np.mean(vec))
-    digest = hashlib.sha256(repr(sample).encode()).hexdigest()
-    return float(int(digest, 16) % 1000) / 1000.0
+    digest = hashlib.sha256(repr(sample).encode("utf-8")).digest()
+    return float(int.from_bytes(digest[:8], "big") % 1000) / 1000.0
 
 
 def _model_typicality(model: Any, value: float) -> float:

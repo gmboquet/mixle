@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-![python](https://img.shields.io/badge/python-3.10%2B-blue)
+![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![tests](https://img.shields.io/badge/tests-5000%2B-brightgreen)
 [![docs](https://img.shields.io/badge/docs-gmboquet.github.io%2Fmixle-blue)](https://gmboquet.github.io/mixle/)
@@ -326,9 +326,10 @@ python -m pytest                                       # fast gate (parallel), ~
 python -m pytest -m "not optional and not benchmark"   # full suite incl. slow tests
 ```
 
-`base_dist_test.py` exercises each family end to end: sampler repeatability, `str`/`eval` round-trips,
-vectorized-vs-scalar density agreement, EM convergence. See
-[`mixle/tests/README.md`](https://github.com/gmboquet/mixle/blob/main/mixle/tests/README.md).
+`base_dist_test.py` exercises 40 of its 41 base-distribution families end to end: sampler repeatability,
+`str`/`eval` round-trips, vectorized-vs-scalar density agreement, EM convergence. (The one exception,
+`HierarchicalMixtureDistribution`, is excluded with the reason documented at its `_build_dists()` entry.)
+See [`mixle/tests/README.md`](https://github.com/gmboquet/mixle/blob/main/mixle/tests/README.md).
 
 ## Maintainers & contributors
 

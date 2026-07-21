@@ -891,7 +891,7 @@ class TreeHiddenMarkovSampler(DistributionSampler):
         else:
             return [self.sample_tree() for xx in range(size)]
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw iid tree observations from the tree HMM.
 
         Args:

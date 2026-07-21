@@ -29,6 +29,10 @@ MODALITIES = (
     "signal",
     "graph",
     "field",
+    "mesh",
+    "tensor",
+    "volume",
+    "spectrum",
     "event_stream",
     "artifact",  # a fitted model / dataset / simulator artifact (payload is a path + manifest)
     "trace",  # a harvested agent/interaction trace

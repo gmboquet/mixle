@@ -1,0 +1,29 @@
+{
+  "artifact": "mixle.quantitative-semantics-fixture/v1",
+  "value": {
+    "id": "source-rate",
+    "role": "latent",
+    "unit": "kg/s",
+    "dtype": "float64",
+    "shape": [],
+    "transform": {"kind": "log", "scale": 1.0, "offset": 0.0, "lower": 0.0, "upper": 1.0, "schema_version": "1.0.0"},
+    "constraint": {"lower": 0.0, "upper": 1000.0, "lower_inclusive": false, "upper_inclusive": true, "allowed_values": [], "schema_version": "1.0.0"},
+    "prior": {"id": "source-rate-prior", "family": "lognormal", "parameters": {"log_mean": 2.0, "log_std": 0.5}, "unit": "kg/s", "source_ref": "knowledge://claim/source-rate-prior", "schema_version": "1.0.0"},
+    "value": null,
+    "expression": null,
+    "dependencies": [],
+    "description": "Unknown positive source release rate",
+    "schema_version": "1.0.0"
+  },
+  "observation": {
+    "id": "sensor-rate-obs",
+    "value_spec_id": "source-rate",
+    "content_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "data_ref": "artifact://sensor-rate-observation",
+    "likelihood": {"id": "sensor-rate-likelihood", "family": "normal", "observation_ids": ["sensor-rate-obs"], "parameters": {"sigma": 0.2}, "discrepancy_ref": "knowledge://claim/sensor-discrepancy", "schema_version": "1.0.0"},
+    "measurement_uncertainty": 0.2,
+    "unit": "kg/s",
+    "schema_version": "1.0.0"
+  },
+  "inference": {"method": "reference-bayesian-inversion", "random_seed": 17, "required_uncertainty_kinds": ["measurement", "epistemic", "numerical", "model_discrepancy"]}
+}
