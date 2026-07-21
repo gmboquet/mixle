@@ -446,8 +446,16 @@ class NodeBackend:
         """Apply ``decision``'s chosen action, actually building whatever machinery it implies."""
         self.decision = decision
         if decision.action == RespecializationAction.COMPILE:
-            self._compiled_forward = compile_forward(self._eager_forward, engine=self.engine)
-            self.action = RespecializationAction.COMPILE
+            compiled = compile_forward(self._eager_forward, engine=self.engine)
+            if compiled is self._eager_forward:
+                # compile_forward silently no-ops (no compile-enabled engine, or torch lacks
+                # .compile) and returns the SAME eager callable -- report the action actually
+                # taken, not the one requested, so a downstream learned controller (D5) does not
+                # train on a false "compile happened, should be faster" signal.
+                self.action = RespecializationAction.NONE
+            else:
+                self._compiled_forward = compiled
+                self.action = RespecializationAction.COMPILE
         elif decision.action == RespecializationAction.DENSITY_TABLE:
             self._table = DensityTable(self._eager_forward, table_seed_points)
             self.action = RespecializationAction.DENSITY_TABLE
