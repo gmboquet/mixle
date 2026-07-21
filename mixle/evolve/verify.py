@@ -15,7 +15,11 @@ the calibration no-regression rule, multiplicity) and never edits the underlying
 5. **ELPD band** -- when LOO/WAIC pointwise arrays are supplied, :func:`compare_elpd`'s 2-SE band is the
    conservative tie rule.
 6. **Calibration no-regression** -- a more-accurate-but-less-calibrated challenger is refused: its
-   calibration scalar must not exceed the champion's by ``calib_tol``.
+   calibration scalar must not exceed the champion's by ``calib_tol``. Best-effort: :attr:`Verdict.
+   calibration_status` is ``'unavailable'`` (not ``'failed'``) when the comparison could not even be
+   computed -- e.g. the calibration objective is PIT-based and needs a continuous predictive
+   distribution, so it does not apply to a categorical/discrete model -- since that is not itself
+   evidence of a regression.
 7. **Multiplicity** -- when many challengers are tested at once, ``multiplicity`` adjusts ``alpha`` via
    :func:`mixle.inference.multiple_testing.adjust_pvalues` before the gate.
 """
@@ -45,12 +49,25 @@ class Verdict:
     delta: float  # objective improvement, champion_scalar - challenger_scalar (>0 == challenger better)
     p_value: float
     ci: tuple[float, float]
-    calibrated: bool  # passed the calibration no-regression gate
+    calibration_status: str  # 'passed' | 'failed' | 'unavailable' -- see _calibration_no_regression
     evidence: dict = field(default_factory=dict)
 
     @property
+    def calibrated(self) -> bool:
+        """True unless calibration was actually computed and found to have regressed.
+
+        Kept for callers that only need the promotion-relevant boolean; ``calibration_status``
+        carries the more precise three-way state a bare bool cannot: 'unavailable' (calibration
+        wasn't requested, or couldn't be computed for this model/objective -- not itself evidence
+        of a regression, so it does not block promotion, the same as 'passed') is distinct from
+        'failed' (calibration was computed for both models and the challenger's is worse by more
+        than ``calib_tol`` -- the only status that blocks promotion).
+        """
+        return self.calibration_status != "failed"
+
+    @property
     def promote(self) -> bool:
-        """True iff the challenger is favored *and* passed calibration -- the promotion predicate."""
+        """True iff the challenger is favored *and* calibration didn't fail -- the promotion predicate."""
         return self.favored == "challenger" and self.calibrated
 
     def as_dict(self) -> dict[str, Any]:
@@ -61,6 +78,7 @@ class Verdict:
             "p_value": self.p_value,
             "ci": list(self.ci),
             "calibrated": self.calibrated,
+            "calibration_status": self.calibration_status,
             "evidence": self.evidence,
         }
 
@@ -72,16 +90,28 @@ def _calibration_no_regression(
     *,
     calib_tol: float,
     seed: int,
-) -> tuple[bool, dict]:
-    """Challenger calibration must not be worse than the champion's by more than ``calib_tol``."""
+) -> tuple[str, dict]:
+    """Challenger calibration must not be worse than the champion's by more than ``calib_tol``.
+
+    Returns ('passed' | 'failed' | 'unavailable', evidence). 'unavailable' covers both "this
+    objective doesn't apply to this model" (e.g. calibration_objective is PIT-based and needs a
+    numeric, continuous predictive distribution -- a categorical/discrete model has no such thing)
+    and any other failure to even compute the comparison; there is no exception type that reliably
+    tells those apart (a missing .sampler() raises AttributeError, but a categorical model's labels
+    failing float conversion raises ValueError -- the same exception a genuine bug in the
+    calibration computation itself could raise), so this is deliberately best-effort and does not
+    block promotion on its own, the same as 'passed'. Only 'failed' -- calibration was actually
+    computed for both models, and the challenger's is worse -- blocks promotion.
+    """
     try:
         obj = calibration_objective(seed=seed)
         champ_cal = obj.scalar(champion, data)
         chal_cal = obj.scalar(challenger, data)
-    except Exception as exc:  # calibration is best-effort: no sampler/cdf -> treat as a pass  # noqa: BLE001
-        return True, {"calibration": "unavailable", "reason": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return "unavailable", {"calibration": "unavailable", "reason": str(exc)}
     ok = bool(chal_cal <= champ_cal + calib_tol)
-    return ok, {"champion_calib": champ_cal, "challenger_calib": chal_cal, "calib_tol": calib_tol, "ok": ok}
+    status = "passed" if ok else "failed"
+    return status, {"champion_calib": champ_cal, "challenger_calib": chal_cal, "calib_tol": calib_tol, "ok": ok}
 
 
 def challenger_beats_champion(
@@ -132,12 +162,14 @@ def challenger_beats_champion(
         chal_s = objective.scalar(challenger, data)
         delta = (champ_s - chal_s) if objective.lower_is_better else (chal_s - champ_s)
         favored = "challenger" if delta > max(min_effect, 0.0) else "champion" if delta < -min_effect else "tie"
-        calibrated = True
+        calibration_status = "unavailable"
         if require_calibration:
-            calibrated, cal_ev = _calibration_no_regression(champion, challenger, data, calib_tol=calib_tol, seed=seed)
+            calibration_status, cal_ev = _calibration_no_regression(
+                champion, challenger, data, calib_tol=calib_tol, seed=seed
+            )
             evidence["calibration"] = cal_ev
         evidence["scalar_only"] = {"champion": champ_s, "challenger": chal_s}
-        return Verdict(favored, float(delta), float("nan"), (float("nan"), float("nan")), calibrated, evidence)
+        return Verdict(favored, float(delta), float("nan"), (float("nan"), float("nan")), calibration_status, evidence)
 
     champ_vec = np.asarray(champ_vec, dtype=float).reshape(-1)
     chal_vec = np.asarray(chal_vec, dtype=float).reshape(-1)
@@ -201,13 +233,15 @@ def challenger_beats_champion(
         if elpd["favored"] != "A":  # challenger is 'A' here
             favored = "tie"
 
-    calibrated = True
+    calibration_status = "unavailable"
     if require_calibration:
-        calibrated, cal_ev = _calibration_no_regression(champion, challenger, data, calib_tol=calib_tol, seed=seed)
+        calibration_status, cal_ev = _calibration_no_regression(
+            champion, challenger, data, calib_tol=calib_tol, seed=seed
+        )
         evidence["calibration"] = cal_ev
 
     ci = (float(paired["ci_low"]), float(paired["ci_high"]))
-    return Verdict(favored, float(delta), p_value, ci, calibrated, evidence)
+    return Verdict(favored, float(delta), p_value, ci, calibration_status, evidence)
 
 
 __all__ = ["Verdict", "challenger_beats_champion"]

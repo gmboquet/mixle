@@ -141,5 +141,68 @@ class FailOpenGuardTest(unittest.TestCase):
         self.assertIn("nonnested_error", verdict.evidence)
 
 
+class CalibrationStatusTest(unittest.TestCase):
+    """Verdict.calibration_status carries the honest three-way state _calibration_no_regression
+    can produce; Verdict.calibrated is a derived, backward-compatible view of it (True for both
+    'passed' and 'unavailable', False only for 'failed' -- the only status that blocks promotion)."""
+
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        self.data = list(rng.normal(3.0, 2.0, 600))
+        self.champion = GaussianDistribution(0.0, 1.0)
+        self.challenger = _fit(self.data, 3.0, 2.0)
+
+    def test_not_requested_is_unavailable(self):
+        verdict = challenger_beats_champion(
+            self.champion, self.challenger, self.data, objective=nll_objective(), require_calibration=False
+        )
+        self.assertEqual(verdict.calibration_status, "unavailable")
+        self.assertTrue(verdict.calibrated)
+        self.assertTrue(verdict.promote)
+        self.assertNotIn("calibration", verdict.evidence)
+
+    def test_genuinely_computed_and_better_is_passed(self):
+        # the well-fit challenger's calibration is (correctly) better than the badly-fit champion's.
+        verdict = challenger_beats_champion(self.champion, self.challenger, self.data, objective=nll_objective())
+        self.assertEqual(verdict.calibration_status, "passed")
+        self.assertTrue(verdict.calibrated)
+        self.assertTrue(verdict.promote)
+
+    def test_genuinely_computed_and_worse_is_failed_and_blocks_promotion(self):
+        # NLL alone still favors this challenger (same well-fit model), but its predictive ensemble
+        # is deliberately degenerate (a point mass) -- accurate on average, badly calibrated. This
+        # is the real scenario calib_tol exists to catch: favored="challenger" from the paired test,
+        # yet a genuine calibration regression must still refuse promotion.
+        class _DegenerateSampler:
+            def sample(self, m, seed=None):
+                return np.full(m, 3.0)
+
+        badly_calibrated = _DelegatingWrapper(self.challenger, sampler=lambda seed=None: _DegenerateSampler())
+        verdict = challenger_beats_champion(self.champion, badly_calibrated, self.data, objective=nll_objective())
+        self.assertEqual(verdict.favored, "challenger")
+        self.assertEqual(verdict.calibration_status, "failed")
+        self.assertFalse(verdict.calibrated)
+        self.assertFalse(verdict.promote)
+
+    def test_inapplicable_to_this_model_is_unavailable_not_failed(self):
+        # the legitimate skip case: calibration can't even be attempted for this model, which must
+        # not itself count as a calibration regression -- promotion proceeds as if it passed.
+        def _raise_attribute_error(*_a, **_kw):
+            raise AttributeError("'GaussianDistribution' object has no attribute 'sampler'")
+
+        no_sampler = _DelegatingWrapper(self.challenger, sampler=_raise_attribute_error)
+        verdict = challenger_beats_champion(self.champion, no_sampler, self.data, objective=nll_objective())
+        self.assertEqual(verdict.calibration_status, "unavailable")
+        self.assertTrue(verdict.calibrated)
+        self.assertTrue(verdict.promote)
+        self.assertEqual(verdict.evidence["calibration"]["calibration"], "unavailable")
+
+    def test_as_dict_carries_both_the_derived_bool_and_the_raw_status(self):
+        verdict = challenger_beats_champion(self.champion, self.challenger, self.data, objective=nll_objective())
+        d = verdict.as_dict()
+        self.assertEqual(d["calibration_status"], "passed")
+        self.assertEqual(d["calibrated"], True)
+
+
 if __name__ == "__main__":
     unittest.main()
