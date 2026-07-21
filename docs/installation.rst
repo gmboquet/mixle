@@ -1,7 +1,7 @@
 Installation
 ============
 
-``mixle`` supports Python 3.10 and newer. The PyPI package and import package
+``mixle`` supports Python 3.11 and newer. The PyPI package and import package
 are both named ``mixle``.
 
 Base Install
@@ -51,6 +51,9 @@ Install only the optional integrations you need:
    * - ``jax``
      - JAX and NumPyro-backed routes
      - differentiable or probabilistic-programming experiments
+   * - ``highprec``
+     - mpmath arbitrary-precision fallback
+     - high-precision engine operations without ``gmpy2``
    * - ``data``
      - pandas, Arrow, SQL, Mongo, fsspec connectors
      - loading from structured external data sources
@@ -69,6 +72,7 @@ Common installs:
 .. code-block:: sh
 
    pip install "mixle[torch]"
+   pip install "mixle[highprec]"
    pip install "mixle[scientist]"
    pip install "mixle[spark]"
    pip install "mixle[all]"
