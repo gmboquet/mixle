@@ -1,10 +1,10 @@
 name: Tests
 
 on:
-  # Pushes to main run CI; pushes to PR branches are covered by the pull_request event,
-  # so feature branches don't trigger two identical runs.
+  # Main and the active release branch run exact-tip CI. Pull-request branches are covered by the
+  # pull_request event, so ordinary work branches do not trigger duplicate runs.
   push:
-    branches: [main]
+    branches: [main, release/0.8.0]
   pull_request:
   workflow_dispatch:
   schedule:
