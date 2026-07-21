@@ -102,6 +102,17 @@ class EventStudyTest(unittest.TestCase):
         r = hierarchical_event_study(np.array(te), np.array(tv))
         self.assertAlmostEqual(r.effect, np.log(2), delta=0.05)
 
+    def test_rejects_nonpositive_variance_and_empty_input(self):
+        # a zero or negative per-subject sampling variance is physically impossible -- before this
+        # guard, it silently produced a fully-formed, confidently-wrong "significant" result instead
+        # of surfacing the impossible input.
+        with self.assertRaises(ValueError):
+            hierarchical_event_study(np.array([0.5, 0.3]), np.array([1.0, 0.0]))  # zero variance
+        with self.assertRaises(ValueError):
+            hierarchical_event_study(np.array([0.5, 0.3]), np.array([1.0, -0.2]))  # negative variance
+        with self.assertRaises(ValueError):
+            hierarchical_event_study(np.array([]), np.array([]))  # n=0
+
     def test_gaussian_effect_and_tipping_drift(self):
         e, v = gaussian_effect([1.0, 2.0, 1.5, 1.2], [3.0, 3.5, 2.8, 3.1])
         self.assertAlmostEqual(e, np.mean([3.0, 3.5, 2.8, 3.1]) - np.mean([1.0, 2.0, 1.5, 1.2]))

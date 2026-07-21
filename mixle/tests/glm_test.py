@@ -12,6 +12,7 @@ from mixle.inference import (
     ridge_regression,
     robust_regression,
 )
+from mixle.inference.glm import Link  # not re-exported at the package level (see glm_test docstring)
 
 
 class GLMTest(unittest.TestCase):
@@ -75,6 +76,32 @@ class GLMTest(unittest.TestCase):
         self.assertEqual(r.family, "negativebinomial")
         self.assertTrue(np.all(np.isfinite(r.coef)))
 
+    def test_negative_binomial_theta_is_configurable(self):
+        # theta genuinely changes the IRLS variance weighting (var = mu + mu^2/theta) -- before
+        # this fix it was silently hardcoded to 1.0 with no way to pass any other value through
+        # the public API, so real overdispersed count data always got the wrong dispersion/SEs.
+        beta = np.array([0.3, 0.4, -0.2])
+        mu = np.exp(self.X @ beta)
+        y = self.rng.poisson(mu).astype(float)
+        r_theta1 = glm(self.X, y, family="negativebinomial", theta=1.0)
+        r_theta_big = glm(self.X, y, family="negativebinomial", theta=1000.0)
+        self.assertFalse(np.allclose(r_theta1.se, r_theta_big.se, rtol=0.05))
+
+    def test_custom_link_instance_accepted(self):
+        # Link is exported specifically so callers can build a custom link, but glm(link=...)
+        # only ever looked it up in the internal name->Link table -- passing an actual Link
+        # instance raised a bare KeyError.
+        identity_link = Link("my_identity", lambda mu: mu, lambda eta: eta, lambda eta: np.ones_like(eta))
+        y = self.X @ np.array([1.0, 2.0, -1.0]) + self.rng.normal(0, 1, self.n)
+        r = glm(self.X, y, family="gaussian", link=identity_link)
+        self.assertEqual(r.link, "my_identity")
+        ols = np.linalg.lstsq(self.X, y, rcond=None)[0]
+        np.testing.assert_allclose(r.coef, ols, atol=1e-6)
+
+    def test_rejects_empty_design_matrix(self):
+        with self.assertRaises(ValueError):
+            glm(np.empty((0, 2)), np.empty(0), family="gaussian")
+
     def test_predict(self):
         beta = np.array([0.5, 1.5, -1.0])
         p = 1.0 / (1.0 + np.exp(-self.X @ beta))
@@ -113,6 +140,16 @@ class PenalizedTest(unittest.TestCase):
         nonzero = int(np.sum(np.abs(r.coef) > 1e-6))
         self.assertLessEqual(nonzero, 10)
         self.assertGreaterEqual(nonzero, 3)
+
+    def test_ridge_rejects_negative_alpha(self):
+        with self.assertRaises(ValueError):
+            ridge_regression(self.X, self.y, alpha=-1.0)
+
+    def test_elastic_net_rejects_negative_alpha_and_out_of_range_l1_ratio(self):
+        with self.assertRaises(ValueError):
+            elastic_net(self.X, self.y, alpha=-1.0)
+        with self.assertRaises(ValueError):
+            elastic_net(self.X, self.y, alpha=1.0, l1_ratio=1.5)
 
 
 class RobustQuantileTest(unittest.TestCase):

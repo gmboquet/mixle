@@ -59,3 +59,73 @@ def test_interval_covers_simulated_continuations():
 def test_rejects_non_hmm():
     with pytest.raises(TypeError):
         forecast(GaussianDistribution(0.0, 1.0), [1.0, 2.0], horizon=3)
+
+
+class _FlatTopic:
+    """A minimal duck-typed topic: every history point scores with the SAME (zero) log-density
+    under every state, so ``_filtered_state_posterior`` reduces to the model's own prior/transition
+    structure (no real emission discrimination needed) -- lets the test below fully control the
+    per-step state marginal via `w`/`transitions` alone."""
+
+    def __init__(self, sample_fn):
+        self._sample_fn = sample_fn
+
+    def dist_to_encoder(self):
+        return self
+
+    def seq_encode(self, hist):
+        return list(hist)
+
+    def seq_log_density(self, enc):
+        return np.zeros(len(enc))
+
+    def sampler(self, seed):
+        return self
+
+    def sample(self, n):
+        return self._sample_fn(n)
+
+
+class _AlternatingHMM:
+    """A minimal duck-typed stand-in for a fitted HMM, good enough for ``forecast()`` /
+    ``_filtered_state_posterior``: state 0 emits real floats (a scalar emission), state 1 emits
+    strings (never coercible to a numeric array -- a genuinely non-scalar emission). A REAL
+    ``HiddenMarkovModelDistribution`` cannot mix these -- every topic must share one scalar-real
+    observation domain -- so this fake is what it takes to reproduce the scalar/non-scalar MIX
+    across horizon steps that ``forecast()``'s per-step flag has to get right. The transition
+    matrix is a pure swap and the start state is deterministic, so the state marginal at each
+    horizon step is EXACTLY state 0 or state 1 in alternation, with no Monte Carlo noise.
+    """
+
+    n_states = 2
+    w = np.array([1.0, 0.0])
+    transitions = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    def __init__(self):
+        self.topics = [
+            _FlatTopic(lambda n: np.random.RandomState(0).normal(3.0, 1.0, size=n)),
+            _FlatTopic(lambda n: [f"cat_{i}" for i in range(n)]),
+        ]
+
+
+def test_a_non_scalar_step_does_not_corrupt_a_later_scalar_step():
+    """The per-step scalar/non-scalar decision used to latch globally via one shared flag: the
+    FIRST non-scalar step set it, and every LATER step was then misrouted too regardless of its
+    own outcome -- even a step whose own emission was perfectly scalar had its computed mean/lo/hi
+    silently discarded in favor of raw draws. `_AlternatingHMM` alternates every horizon step
+    between the scalar and non-scalar state, so step 0 is non-scalar and step 1 is scalar --
+    exactly the sequence that exposes the bug.
+    """
+    model = _AlternatingHMM()
+    f = forecast(model, [0.0], horizon=4, level=0.9, n=200, seed=0)
+
+    # step 0: state 1 (strings) -- genuinely non-scalar
+    assert f.lo[0] is None and f.hi[0] is None
+    assert isinstance(f.mean[0], list)
+    # step 1: state 0 (floats) -- must still be a real computed interval, not corrupted by step 0
+    assert isinstance(f.mean[1], float)
+    assert f.lo[1] is not None and f.hi[1] is not None
+    assert f.lo[1] <= f.mean[1] <= f.hi[1]
+    # steps 2/3 continue the alternation -- confirms it's not a one-off, order-dependent fluke
+    assert f.lo[2] is None and isinstance(f.mean[2], list)
+    assert isinstance(f.mean[3], float) and f.lo[3] is not None and f.hi[3] is not None
