@@ -53,6 +53,33 @@ def _composite(data):
     return fit(data, est, max_its=30, out=None)
 
 
+class DirectConstructionCycleTest(unittest.TestCase):
+    def test_hand_built_cycle_raises_a_clean_error_not_a_recursion_error(self):
+        # learn_structure's search guards against cycles as it builds (union-find over undirected
+        # links); direct construction from a hand-built parents list bypasses that guard entirely.
+        # Before the fix, _topo_order's DFS had no notion of "currently on the recursion stack"
+        # separate from "fully visited", so a 2-cycle sent it back and forth forever.
+        f0 = LinearGaussianEdge(0.0, 1.0, 1.0)
+        f1 = LinearGaussianEdge(0.0, 1.0, 1.0)
+        with self.assertRaises(ValueError):
+            DependencyTreeDistribution([1, 0], [f0, f1])
+
+
+class MixtureNComponentsGuardTest(unittest.TestCase):
+    def test_rejects_nonpositive_n_components(self):
+        with self.assertRaises(ValueError):
+            learn_mixture_structure(_dependent(1, n=100), 0)
+
+    def test_handles_min_size_exceeding_a_small_dataset(self):
+        # n=8, n_components=3 -> the old min_size = max(10, 8 // 12) = 10 > n=8, and a starved
+        # cluster's rescue draws min_size DISTINCT points via replace=False -- impossible from a
+        # population of 8. Verified this raises ValueError("Cannot take a larger sample...") on
+        # the prior code; the fix caps min_size at n.
+        model = learn_mixture_structure(_dependent(2, n=8), 3, restarts=1, max_iter=2, seed=0)
+        self.assertIsInstance(model, MixtureOfDependencyTrees)
+        self.assertEqual(model.n_components, 3)
+
+
 class DependencyGainTest(unittest.TestCase):
     def test_positive_when_dependent(self):
         data = _dependent(0)
