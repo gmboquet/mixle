@@ -717,6 +717,7 @@ def _resolve_monotone(
     monotone: bool | None,
     estimator: ParameterEstimator,
     model: SequenceEncodableProbabilityDistribution,
+    strategy: Any | None = None,
 ) -> bool:
     """Resolve whether every proposed update must improve the outer objective.
 
@@ -731,7 +732,16 @@ def _resolve_monotone(
     if monotone is not None:
         return bool(monotone)
 
+    from mixle.inference.em import MonteCarloEM, OnlineEM
     from mixle.inference.transaction import has_mutable_state
+
+    if isinstance(strategy, (MonteCarloEM, OnlineEM)):
+        # Both are genuinely stochastic by construction (MonteCarloEM samples latent completions;
+        # OnlineEM is "decay-mode stochastic/online EM" per its own docstring) over an otherwise
+        # ordinary immutable estimator/model that the three checks below would not catch -- the
+        # strict gate previously defaulted to True here and broke the very first noisy step,
+        # silently terminating the whole run after one iteration regardless of max_its.
+        return False
 
     return (
         not has_mutable_state(model, estimator)
@@ -1152,7 +1162,7 @@ def optimize(
         # objective whether the caller reaches for optimize() or fit().
         resolved_objective = _resolve_objective(objective, estimator, mm)
         surrogate_update = _contains_surrogate_update(estimator)
-        strict_monotone = _resolve_monotone(monotone, estimator, mm)
+        strict_monotone = _resolve_monotone(monotone, estimator, mm, strategy)
         select_best = _resolve_track_best(track_best, estimator)
         loop_delta = None if surrogate_update else delta
         from mixle.inference.transaction import has_mutable_state

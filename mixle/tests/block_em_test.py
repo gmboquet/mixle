@@ -287,6 +287,32 @@ class BlockEMSpeedupTestCase(unittest.TestCase):
         self.assertEqual(logspace_rows, 2)
         np.testing.assert_allclose(incremental, exact, rtol=0.0, atol=1.0e-15)
 
+    def test_impossible_row_is_marked_negative_infinity_not_zero(self):
+        # An impossible row (relative_mass <= 0, i.e. zero density under the candidate) used to be
+        # patched to 0.0 (log(1.0), the OPPOSITE extreme -- perfectly likely) instead of -inf. Fed
+        # into objective_value()'s plain sum, a 0.0 contributes nothing (as if this row were absent
+        # from the objective), letting a candidate that collapses even one real observation to zero
+        # density be silently accepted; -inf correctly forces the candidate's whole objective to
+        # -inf so the accept/reject gate rejects it.
+        current_log_density = np.array([-1.0])
+        old_active_responsibilities = np.array([[1.0]])  # full responsibility -> zero old inactive mass
+        old_inactive_scores = np.empty((1, 0))
+        old_inactive_log_w = np.empty(0)
+        new_active_scores = np.array([[-np.inf]])  # this component is impossible under the candidate
+        new_active_log_w = np.array([0.0])
+
+        incremental, impossible, _ = _incremental_candidate_log_density(
+            current_log_density,
+            old_active_responsibilities,
+            old_inactive_scores,
+            old_inactive_log_w,
+            new_active_scores,
+            new_active_log_w,
+            inactive_scale=1.0,
+        )
+        self.assertTrue(bool(impossible[0]))
+        self.assertEqual(float(incremental[0]), float("-inf"))
+
     def test_starvation_updates_replace_lower_value_work_inside_the_budget(self):
         eligible = list(range(8))
         scores = {idx: float(8 - idx) for idx in eligible}
