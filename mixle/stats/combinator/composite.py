@@ -1124,10 +1124,12 @@ class CompositeDataEncoder(DataSequenceEncoder):
         if not isinstance(other, CompositeDataEncoder):
             return False
 
-        else:
-            for i, encoder in enumerate(self.encoders):
-                if not encoder == other.encoders[i]:
-                    return False
+        if len(self.encoders) != len(other.encoders):
+            return False
+
+        for i, encoder in enumerate(self.encoders):
+            if not encoder == other.encoders[i]:
+                return False
 
         return True
 
