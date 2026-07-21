@@ -118,7 +118,7 @@ class SurvivalSampler(DistributionSampler):
         self.dist = dist
         self.base_sampler = dist.base.sampler(seed=self.rng.randint(0, 2**31 - 1))
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw one uncensored event-time pair or a list of pairs."""
         if size is None:
             return (self.base_sampler.sample(), 1)

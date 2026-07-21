@@ -365,10 +365,15 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # over several seeds (needle receipt + auxiliary-loss ablation) plus a re-chunking topology check
     # -- several TBPTT training loops, tagged slow for the same reason as context_spine_test.py.
     "summary_tree_test.py": ("torch", "experimental", "slow"),
-    # E8 context parallelism (mixle/utils/parallel/context_parallel_spine.py): parametrized exact-match
+    # E8 context parallelism (mixle/experimental/context_parallel_spine.py): parametrized exact-match
     # correctness sweeps plus a real torch.multiprocessing.spawn/gloo 4-process test -- tagged slow so it
     # leaves the fast gate while still running in full CI under the `parallel` marker's own tests.
     "context_parallel_spine_test.py": ("torch", "experimental", "parallel", "slow"),
+    # F1 tensor/pipeline/context parallelism (mixle/experimental/tensor_pipeline_context_parallel.py):
+    # in-process sharding/reconstruction correctness at small scale (subsecond per case) plus a
+    # >=2-real-CUDA-device NCCL class that skips cleanly here -- unlike its E8 sibling above, this stays
+    # in the fast gate (no multi-round training sweep driving it into `slow`).
+    "tensor_pipeline_context_parallel_test.py": ("torch", "experimental", "parallel"),
     # GP-surrogate active-learning + multi-fidelity placement (roadmap M4): each test fits several torch
     # GPs across a sequential design loop, mirroring doe_active_test.py / doe_multifidelity_test.py.
     "task_emulate_test.py": ("doe", "torch", "slow"),
@@ -431,7 +436,6 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "language_model_dense_fit_test.py": ("torch", "integration", "slow"),
     "memory_efficient_training_test.py": ("torch", "integration", "slow"),
     "mixture_density_test.py": ("torch", "integration", "slow"),
-    "mpi_route_equivalence_test.py": ("parallel", "integration", "slow"),
     "mup_test.py": ("torch", "integration", "slow"),
     "neural_density_test.py": ("torch", "integration", "slow"),
     "ppl_density_test.py": ("ppl", "stochastic", "slow"),
@@ -460,6 +464,15 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "distill_methods_test.py": ("torch", "integration", "slow"),
     "doe_amplify_test.py": ("doe", "stochastic", "slow"),
     "duplicate_body_scan_test.py": ("integration", "slow"),
+    "flagship_heterogeneous_adult_smoke_test.py": ("integration", "slow"),
+    # Network-gated real-data flagship (worklist F10.2): fetches the real sunspot series and, when
+    # hmmlearn is installed, refits an independent HMM baseline; a seed-stability sweep and a
+    # runtime/memory characterization each do several more real EM fits on top of that. Explicitly
+    # triaged (matching real_receipt_banking77_smoke_test.py, F10.3's sibling flagship) rather than
+    # relying solely on skipUnless/skipTest, so it stays out of the default fast gate even in an
+    # environment where hmmlearn happens to be installed. CI's optional lane still runs it in full via
+    # its own explicit `-m ""` invocation.
+    "flagship_temporal_sunspots_smoke_test.py": ("optional", "slow"),
     "frontier_family_showcase_smoke_test.py": ("torch", "integration", "slow"),
     "geoscience_inversion_report_test.py": ("integration", "slow"),
     "hmm_steady_state_test.py": ("hmm", "slow"),
@@ -476,6 +489,77 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "reproduce_receipt_test.py": ("integration", "slow"),
     "sorted_profile_quantizer_test.py": ("integration", "slow"),
     "task_quantize_test.py": ("integration", "slow"),
+    # 2026-07-17 bloat-audit retriage: the domain-vertical worklist acceptance suite (H = mine-planning
+    # ops, J = economics/finance, K = health/safety, L = climate, N = biodiversity, plus the IC/E/T infra
+    # items that share the same convention) uses pytest's OTHER collected filename convention
+    # (`test_*.py`, see python_files in pyproject.toml) and was never triaged into this registry at all --
+    # all 31 files silently defaulted into the fast gate regardless of actual cost. Individually profiled
+    # via `pytest mixle/tests/test_*.py -n0 -m "" --durations=0` (the documented single-file/serial
+    # pattern), repeated several times per file given this box's variable background load. 28 of the 31
+    # are comfortably sub-2s per call every time and stay in the default fast gate; tagged `worklist`
+    # (not a tier marker -- see pyproject.toml) purely so `-m 'not worklist'` can exclude the whole batch,
+    # mirroring `legacy`. 3 have a real, repeatedly-reproduced multi-second call and are tagged `slow`
+    # below. (test_e7_provenance.py showed one 8.6s outlier in an early pass -- investigated rather than
+    # taken at face value: its own code is O(1) hashing/dict/one small JSON write with no loop or model
+    # fit, and 6 of 7 repeat measurements landed at 0.6-3.2s, so the outlier is contention noise from this
+    # shared dev box, not real cost; it stays fast/worklist-only.)
+    "test_carcinogenic_risk.py": ("worklist",),
+    "test_climate_ensemble.py": ("worklist",),
+    "test_climate_objective.py": ("worklist",),
+    "test_cross_model_fusion.py": ("worklist",),
+    # +slow 2026-07-17: 30-trial BMD/RfD loop, each trial a loglogistic dose-response fit plus a
+    # 2000-sample rfd_exceedance draw -- 4.4-8.4s across 7 repeated runs (mean ~6s), never sub-1s.
+    "test_developmental_risk.py": ("worklist", "slow"),
+    "test_e7_provenance.py": ("worklist",),
+    "test_emissions.py": ("worklist",),
+    # +slow 2026-07-17: repeated-seed CI-coverage recovery -- 10.8-12.9s across repeated runs.
+    "test_epidemiology.py": ("worklist", "slow"),
+    "test_exposure_monitor.py": ("worklist",),
+    "test_h1_flows.py": ("worklist",),
+    "test_h2_blending.py": ("worklist",),
+    "test_h3_scheduling.py": ("worklist",),
+    "test_h4_stochastic.py": ("worklist",),
+    "test_h6_distribution.py": ("worklist",),
+    "test_h8_twin.py": ("worklist",),
+    "test_health_constraints.py": ("worklist",),
+    "test_health_risk.py": ("worklist",),
+    "test_ic_trace_record.py": ("worklist",),
+    # +slow 2026-07-17: out-of-sample conformal-coverage-vs-nominal-level check -- 9.9-11.0s across
+    # repeated runs.
+    "test_j1_price_forecast.py": ("worklist", "slow"),
+    "test_j2_valuation.py": ("worklist",),
+    "test_j3_real_options.py": ("worklist",),
+    "test_j4_costs.py": ("worklist",),
+    "test_j5_risk.py": ("worklist",),
+    "test_j6_objective.py": ("worklist",),
+    "test_n1_sdm.py": ("worklist",),
+    # requires the optional mixle-knowledge package (pytest.importorskip); timed via a local
+    # in-process compat shim since the installed sibling package predates two of its symbols --
+    # 0.17s setup, sub-5ms calls, comfortably fast.
+    "test_n2_habitat_constraints.py": ("worklist",),
+    "test_n4_connectivity.py": ("worklist",),
+    "test_n6_offsets.py": ("worklist",),
+    "test_safety_risk.py": ("worklist",),
+    "test_tiers_test.py": ("worklist",),
+    "test_transition_risk.py": ("worklist",),
+    # 2026-07-17: mixle/tests/reason/test_model_fusion.py, mixle/tests/task/test_catalog_router.py, and
+    # mixle/tests/task/test_knowledge_routing.py were missing from this registry for the same reason the
+    # flat mixle/tests/test_*.py domain-vertical acceptance files were before their own retriage (PR #522):
+    # they match the same test_*.py collection convention but live in subdirectories, so that pass named
+    # them as a follow-up instead of folding them in. Profiled individually via the documented single-file
+    # pattern (`pytest <path> -n0 -m "" --durations=0`), 3 runs each: every call in all three lands under
+    # 0.1s (max observed 0.07s, a one-off fixture setup in test_model_fusion.py; everything else <=0.02s).
+    # test_model_fusion.py is a closed-form linear-Gaussian evidence fusion over 1x1 matrices (no
+    # iteration); test_catalog_router.py is tier-routing logic over a mocked verifier; test_knowledge_routing.py
+    # fits a MarkovChainEstimator on a 20-sequence, length-3 seed corpus (one counting pass, not an
+    # EM/MCMC/torch loop). The several-second total each run reports is fixed pytest/import startup cost,
+    # not test cost: a `--collect-only` pass over the same three files alone accounts for it, and an
+    # unrelated already-fast file in this suite (api_naming_aliases_test.py) shows the identical few-second
+    # total. None comes anywhere near the ~5s slow threshold used throughout this registry, so none gets an
+    # entry here; all three correctly stay on the fast default. Also not tagged `worklist`: PR #522's own
+    # registration of that marker scopes it explicitly to the H/J/K/L/N/IC/E/T-series flat files under
+    # mixle/tests/test_*.py -- these three are an M-series pair (reason, task) living in subdirectories,
+    # outside that definition, so this PR does not register or use that marker.
 }
 
 

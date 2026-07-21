@@ -8,6 +8,11 @@ hooks (so a leaf inside a ``MixtureDistribution`` serializes too) by persisting 
 The module round-trips through ``torch.save``/``torch.load`` of a ``pickle`` byte buffer -- which requires the
 wrapped nn.Module class to be reachable at module level (that is why the ``build_*`` helpers were hoisted). The
 bytes are base64-encoded so the whole payload is plain JSON.
+
+That byte buffer is still a full-object pickle, so decoding it executes arbitrary code for a malicious
+input -- exactly like unpickling an untrusted file -- even though the surrounding artifact is nominally
+"JSON format". :func:`module_from_bytes` refuses to run unless the caller has opened
+``mixle.utils.serialization.trusted_deserialization()``; see that function for why.
 """
 
 from __future__ import annotations
@@ -30,12 +35,27 @@ def module_to_bytes(module: Any) -> bytes:
 
 
 def module_from_bytes(data: bytes) -> Any:
-    """Reconstruct a torch nn.Module previously encoded by :func:`module_to_bytes`."""
+    """Reconstruct a torch nn.Module previously encoded by :func:`module_to_bytes`.
+
+    This unpickles a full object graph (architecture + weights), which executes arbitrary code for a
+    malicious byte string -- exactly like ``pickle.load`` on an untrusted file, regardless of whether
+    the caller arrived here through a nominally "JSON" artifact (a NeuralLeaf's state embeds this blob
+    base64-encoded inside otherwise-safe JSON). Refuses by default; the caller must open
+    ``mixle.utils.serialization.trusted_deserialization()`` around a load it knows the source of.
+    """
+    from mixle.utils.serialization import SerializationError, deserialization_is_trusted
+
+    if not deserialization_is_trusted():
+        raise SerializationError(
+            "refusing to deserialize an embedded torch module: this executes arbitrary code from the "
+            "artifact, the same as pickle.load on an untrusted file. Only load a model from a source "
+            "you trust, and do so inside 'with mixle.utils.serialization.trusted_deserialization():'."
+        )
     import torch
 
     buf = io.BytesIO(bytes(data))
     try:
-        return torch.load(buf, weights_only=False)  # full module (arch + weights); trusted local artifact
+        return torch.load(buf, weights_only=False)  # full module (arch + weights); trust gate above
     except TypeError:  # torch < 2.0 has no weights_only kwarg
         buf.seek(0)
         return torch.load(buf)

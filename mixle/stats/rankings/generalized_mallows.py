@@ -410,7 +410,7 @@ class GeneralizedMallowsSampler(DistributionSampler):
             out.append(perm)
         return out
 
-    def sample(self, size: int | None = None) -> list[int] | list[list[int]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | list[list[int]]:
         """Draw one ordering or ``size`` iid orderings."""
         k = 1 if size is None else size
         if self.dist.metric == "kendall":

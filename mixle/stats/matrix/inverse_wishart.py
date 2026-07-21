@@ -104,7 +104,7 @@ class InverseWishartSampler(DistributionSampler):
             seed=self.rng.randint(0, 2**31 - 1)
         )
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw one or more inverse-Wishart SPD matrix samples."""
         w = self._wishart.sample(size=size)
         if size is None:

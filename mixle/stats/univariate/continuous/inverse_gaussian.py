@@ -320,7 +320,7 @@ class InverseGaussianSampler(DistributionSampler):
         self.dist = dist
         self.seed = seed
 
-    def sample(self, size: int | None = None) -> float | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw ``size`` iid observations (a float when ``size`` is None)."""
         return self.rng.wald(self.dist.mu, self.dist.lam, size=size)
 

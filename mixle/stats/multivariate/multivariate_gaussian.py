@@ -557,7 +557,7 @@ class MultivariateGaussianSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw iid samples from the multivariate Gaussian distribution.
 
         Args:

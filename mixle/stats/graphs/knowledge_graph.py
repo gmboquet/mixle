@@ -213,7 +213,7 @@ class KnowledgeGraphSampler(DistributionSampler):
         self.dist = dist
         self.rng = RandomState(seed)
 
-    def sample(self, size: int | None = None) -> Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one triple or ``size`` iid triples."""
         sz = 1 if size is None else size
         out = []

@@ -98,17 +98,18 @@ class LeafSerializationTest(unittest.TestCase):
     def test_streaming_transformer_to_dict_and_json_preserve_seq_log_density(self):
         from mixle.models.streaming_transformer_leaf import StreamingTransformer
         from mixle.models.transformer import build_causal_lm
-        from mixle.utils.serialization import from_json, to_json
+        from mixle.utils.serialization import from_json, to_json, trusted_deserialization
 
         torch.manual_seed(0)
         st = StreamingTransformer(build_causal_lm(10, d_model=32, n_layer=2, n_head=4, block=8))
         enc = (np.zeros((4, 8), dtype=float), np.array([1, 2, 3, 4]))
         d0 = st.seq_log_density(enc)
 
-        st_d = StreamingTransformer.from_dict(st.to_dict())
-        np.testing.assert_array_equal(st_d.seq_log_density(enc), d0)
+        with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+            st_d = StreamingTransformer.from_dict(st.to_dict())
+            np.testing.assert_array_equal(st_d.seq_log_density(enc), d0)
 
-        st_j = from_json(to_json(st))
+            st_j = from_json(to_json(st))
         self.assertIsInstance(st_j, StreamingTransformer)
         np.testing.assert_array_equal(st_j.seq_log_density(enc), d0)
 
@@ -127,7 +128,7 @@ class LeafSerializationTest(unittest.TestCase):
     def test_dpo_model_to_dict_and_json_preserve_seq_log_density(self):
         from mixle.models.dpo_leaf import DPOModel
         from mixle.models.transformer import build_causal_lm
-        from mixle.utils.serialization import from_json, to_json
+        from mixle.utils.serialization import from_json, to_json, trusted_deserialization
 
         torch.manual_seed(0)
         policy = build_causal_lm(10, d_model=32, n_layer=2, n_head=4, block=8)
@@ -135,11 +136,12 @@ class LeafSerializationTest(unittest.TestCase):
         enc = (np.zeros((3, 8), dtype=float), np.array([1, 2, 3]), np.array([4, 5, 6]))
         e0 = dm.seq_log_density(enc)
 
-        dm_d = DPOModel.from_dict(dm.to_dict())
-        self.assertEqual(dm_d.beta, 0.1)
-        np.testing.assert_array_equal(dm_d.seq_log_density(enc), e0)
+        with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+            dm_d = DPOModel.from_dict(dm.to_dict())
+            self.assertEqual(dm_d.beta, 0.1)
+            np.testing.assert_array_equal(dm_d.seq_log_density(enc), e0)
 
-        dm_j = from_json(to_json(dm))
+            dm_j = from_json(to_json(dm))
         self.assertIsInstance(dm_j, DPOModel)
         np.testing.assert_array_equal(dm_j.seq_log_density(enc), e0)
 

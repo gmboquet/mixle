@@ -274,7 +274,7 @@ class ProbabilisticCircuitSampler(DistributionSampler):
         descend(len(self.dist.nodes) - 1)
         return out
 
-    def sample(self, size: int | None = None) -> Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one observation or ``size`` iid observations from the circuit."""
         if size is None:
             return self._sample_one()

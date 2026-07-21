@@ -432,7 +432,7 @@ class JointMixtureSampler(DistributionSampler):
         self.comp_sampler1 = [d.sampler(seed=self.rng.randint(0, maxrandint)) for d in self.dist.components1]
         self.comp_sampler2 = [d.sampler(seed=self.rng.randint(0, maxrandint)) for d in self.dist.components2]
 
-    def sample(self, size: int | None = None) -> tuple[Any, Any] | Sequence[tuple[Any, Any]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> tuple[Any, Any] | Sequence[tuple[Any, Any]]:
         """Draw iid ``(X1, X2)`` samples from the joint mixture.
 
         The X1 component state is drawn from w1, X1 is sampled from that component, the X2

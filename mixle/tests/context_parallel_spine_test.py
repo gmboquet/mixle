@@ -38,13 +38,13 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from mixle.experimental.context_spine import SlidingWindowSpine, train_tbptt  # noqa: E402
-from mixle.utils.parallel.context_parallel_spine import (  # noqa: E402
+from mixle.experimental.context_parallel_spine import (  # noqa: E402
     _apply_rope,
     _rope_angles,
     cp_shard_kv,
     cp_window_attention_forward,
 )
+from mixle.experimental.context_spine import SlidingWindowSpine, train_tbptt  # noqa: E402
 
 # torch / experimental / parallel / slow markers come from mixle/tests/conftest.py's FILE_MARKERS table.
 

@@ -128,8 +128,17 @@ class LM:
 
         Returns a model ready for scoring/generation; this is not a training-resume checkpoint (see
         :meth:`save`), so optimizer/step/RNG/data-loader state is not restored.
+
+        Loaded with ``weights_only=True``: :meth:`to_dict`'s payload is plain config scalars plus a
+        tensor ``state_dict``, never an arbitrary object graph, so this does not execute code from the
+        file (unlike a full-module pickle -- see ``mixle.models._neural_serial`` for that case).
         """
-        return cls.from_dict(_torch().load(path, weights_only=False))
+        torch = _torch()
+        try:
+            payload = torch.load(path, weights_only=True)
+        except TypeError:  # torch < 1.13 has no weights_only kwarg
+            payload = torch.load(path)
+        return cls.from_dict(payload)
 
     def fit(
         self,
@@ -171,7 +180,7 @@ class LM:
         (DDP on CPU, FSDP2/ZeRO-3 on CUDA) this handle already runs. They default to 1 (off): the plan is
         validated against the model's real dimensions (``n_head % tp_size``, ``pp_size <= n_layer``,
         ``block % cp_size``) so a bad plan fails fast, using the sharding/reconstruction mechanism in
-        ``mixle.utils.parallel.tensor_pipeline_context_parallel`` (tested there at small scale against the
+        ``mixle.experimental.tensor_pipeline_context_parallel`` (tested there at small scale against the
         dense forward). Composing the validated plan into real per-axis multi-GPU process groups is the
         piece that needs actual hardware this environment does not have -- see that module's docstring.
         """

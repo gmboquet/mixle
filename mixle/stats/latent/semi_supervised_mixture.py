@@ -431,7 +431,7 @@ class SemiSupervisedMixtureSampler(DistributionSampler):
         self.dist = dist
         self.comp_samplers = [d.sampler(seed=rng_loc.randint(0, maxrandint)) for d in self.dist.components]
 
-    def sample(self, size: int | None = None) -> Sequence[Any] | Any:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Sequence[Any] | Any:
         """Draw 'size' component values from the mixture (no prior labels are generated).
 
         Args:

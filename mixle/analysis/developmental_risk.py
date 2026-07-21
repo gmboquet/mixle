@@ -137,7 +137,7 @@ def benchmark_dose(
             b_bg = float(_quantal_p(model, np.array([dose.min() if dose.min() > 0 else 1e-9]), free_coef)[0])
             try:
                 implied = _solve_bmd(model, free_coef, b_bg, bmr, risk, dose_hi)
-            except Exception:  # noqa: BLE001 - any root-finding failure means this coefficient is infeasible
+            except (FloatingPointError, OverflowError, RuntimeError, ValueError):
                 return 1e12
             penalty = 1e6 * (implied - d) ** 2
             return _neg_log_likelihood(free_coef, model, dose, n_affected, n_total) + penalty
@@ -152,8 +152,7 @@ def benchmark_dose(
         if f_lo * f_hi > 0:
             raise ValueError("no bracket")
         bmdl = float(optimize.brentq(lambda d: nll_at_bmd(d) - chi2_1 / 2.0, lo_search, hi_search, xtol=1e-6))
-    except Exception:  # noqa: BLE001 - profile-likelihood bracketing/root-finding can fail for many
-        # numerical reasons (no sign change, non-convergence); fall back to the Wald proxy CI below
+    except (FloatingPointError, OverflowError, RuntimeError, ValueError):
         eps = max(bmd * 1e-3, 1e-9)
         se_proxy = abs(_solve_bmd(model, coef, background, bmr + eps, risk, dose_hi) - bmd) / eps
         z = stats.norm.ppf(ci_level)
