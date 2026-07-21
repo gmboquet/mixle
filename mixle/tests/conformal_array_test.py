@@ -120,6 +120,21 @@ class WeightedTest(unittest.TestCase):
         # weighted conformal keeps coverage close to nominal under the shift
         self.assertGreater(cov, 0.85)
 
+    def test_negative_weight_raises(self):
+        # weights are likelihood ratios p_test/p_train, inherently non-negative; a negative entry
+        # corrupts the weighted CDF (a cumulative sum of weights should be non-decreasing) instead
+        # of being caught.
+        cal_pred = np.zeros(3)
+        cal_y = np.array([1.0, -1.0, 2.0])
+        with self.assertRaises(ValueError):
+            weighted_conformal(cal_pred, cal_y, np.zeros(1), np.array([1.0, 1.0, -5.0]), alpha=0.3)
+
+    def test_negative_test_weight_raises(self):
+        cal_pred = np.zeros(3)
+        cal_y = np.array([1.0, -1.0, 2.0])
+        with self.assertRaises(ValueError):
+            weighted_conformal(cal_pred, cal_y, np.zeros(1), np.ones(3), alpha=0.3, test_weight=-1.0)
+
 
 class ConformalQuantileBoundaryTest(unittest.TestCase):
     """Regression: _conformal_quantile's ``s[k - 1]`` used to wrap around via Python negative indexing
@@ -147,6 +162,13 @@ class ConformalQuantileBoundaryTest(unittest.TestCase):
         s = np.random.RandomState(3).rand(20)
         with self.assertRaises(ValueError):
             _conformal_quantile(s, -0.1)
+
+    def test_empty_scores_raises_instead_of_indexerror(self):
+        # k < 1 used to return s[0] unconditionally; with n == 0 (no calibration data at all) that
+        # indexed an empty array. alpha=1.0 hits the k < 1 branch (see the module docstring), so it
+        # reproduces the exact old crash rather than any other ValueError already raised earlier.
+        with self.assertRaises(ValueError):
+            _conformal_quantile(np.array([]), 1.0)
 
     def test_label_threshold_does_not_flip_from_escalate_to_confident_at_alpha_one(self):
         # A near-uniform-looking calibration set with a confident test point: as alpha climbs, the

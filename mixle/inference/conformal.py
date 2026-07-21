@@ -41,6 +41,8 @@ def _conformal_quantile(scores: np.ndarray, alpha: float) -> float:
         raise ValueError(f"alpha must be in [0.0, 1.0], got {alpha!r}.")
     s = np.sort(np.asarray(scores, dtype=float))
     n = s.shape[0]
+    if n == 0:
+        raise ValueError("conformal calibration requires at least one score, got 0.")
     k = int(np.ceil((n + 1) * (1.0 - alpha)))
     if k > n:
         return float("inf")
@@ -242,6 +244,8 @@ def weighted_conformal(
     cal_y = np.asarray(cal_y, dtype=float)
     test_pred = np.asarray(test_pred, dtype=float)
     w = np.asarray(weights, dtype=float)
+    if np.any(w < 0.0) or test_weight < 0.0:
+        raise ValueError("weights and test_weight must be non-negative likelihood ratios.")
     scores = np.abs(cal_y - cal_pred)
     order = np.argsort(scores)
     s_sorted = scores[order]

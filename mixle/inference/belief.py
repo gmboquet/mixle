@@ -95,6 +95,8 @@ class CategoricalBelief(BeliefState):
         total = float(p.sum())
         if total <= 0:
             raise ValueError("CategoricalBelief requires positive total mass")
+        if labels is not None and len(labels) != p.size:
+            raise ValueError(f"labels must have length {p.size} to match probs, got {len(labels)}")
         self.probs = p / total
         self.labels = list(labels) if labels is not None else list(range(p.size))
 
