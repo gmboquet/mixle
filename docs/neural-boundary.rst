@@ -2,10 +2,9 @@ The Neural Product Boundary
 ===========================
 
 What mixle owns in the neural space, and where it hands off to dedicated trainers (worklist N9.1). The
-short version: **mixle owns neural leaves, their composition into probabilistic models, small/medium fitting
-convenience, calibration, and distillation. It does not own frontier-scale foundation-model training** —
-that belongs to mature external trainers, and mixle's job there is to *wrap the result*, not to reproduce
-the trainer.
+short version: **mixle owns neural leaves, their composition into probabilistic models, fitting contracts,
+calibration, and distillation**. For frontier transformer training it integrates with a mature external
+engine rather than reimplementing its kernels: the Megatron adapter maps Mixle's typed plan into Bridge.
 
 What mixle owns
 ---------------
@@ -15,9 +14,10 @@ What mixle owns
 * **Composition.** A neural leaf composes with classical components in the same model — a mixture of a
   torch density and a Gaussian, a neural leaf inside a record — fit by the same ``optimize``
   (``byo_model_contract_test`` pins this).
-* **Small/medium fitting convenience.** ``optimize(module)`` and ``LM.fit`` train modest models on a laptop
-  or a single node, single- or (via the FSDP2/DDP path) small-multi-process. This is a convenience for
-  getting a working model, not a scaling platform.
+* **Native distributed fitting.** Packed ``LM.fit`` can execute DDP, FSDP2/HSDP, MLP TP, and CUDA CP through
+  an explicit PyTorch DeviceMesh. The backend validates unsupported combinations before fitting.
+* **Frontier-engine integration.** A Megatron Bridge provider can receive the same plan for full transformer
+  and MoE TP/PP/CP/EP/ETP training while Megatron retains ownership of schedules and optimized kernels.
 * **Calibration and distillation.** Conformal calibration, density/OOD gates, and teacher→student
   distillation over the task spine — the parts of the neural workflow that turn a model into a *decision*
   with bounded risk.
@@ -36,21 +36,17 @@ Given that, ``GradLeaf(module).estimator()`` makes it fittable and composable li
 Expected scale for ``optimize(module)`` / ``LM.fit``
 ----------------------------------------------------
 
-These are sized for **small-to-medium models on available local hardware** — thousands to low-millions of
-parameters, corpora that stream from a single host, on CPU, one GPU, or a small multi-GPU node via the FSDP2
-path. The mechanics of larger-scale training (tensor/pipeline/context parallelism, sharded checkpointing,
-fault tolerance, muP transfer, scaling-law planning) exist in the tree as **prototypes**, explicitly labeled
-as such (see the frontier-prototype warnings; worklist A1.4) — they are exact at small scale but are not a
-production frontier trainer.
+``optimize(module)`` remains a small/medium fitting convenience. ``LM.fit(dense=True, distributed=True)``
+is the compact native trainer surface. At larger scale, use the Megatron adapter rather than treating the
+compact LM wrapper as a replacement for Megatron's data loader, fused kernels, or topology tuning. See
+:doc:`frontier-integration-note` for the exact capability matrix and checkpoint contract.
 
 When to switch to an external trainer
 -------------------------------------
 
-Reach for a dedicated trainer (TorchTitan, Megatron, DeepSpeed, or a managed service) when the training run
-needs any of: a model too large for one node's memory, real multi-node NCCL collectives at scale, a mature
-data/checkpoint/elastic-restart stack, or throughput/MFU as a first-class goal. That is the frontier-scale
-foundation-model training mixle deliberately does **not** own. The post-0.8 design note (worklist N9.7)
-sketches how such a trainer would integrate.
+Reach for the Megatron backend or another dedicated trainer when the run needs pipeline/expert parallelism,
+fused transformer kernels, mature multi-node data ingestion, or throughput/MFU as a first-class goal.
+Mixle supplies the model/update plan, receipts, and complete-state handoff; the selected engine executes it.
 
 Wrapping externally trained checkpoints
 ---------------------------------------
