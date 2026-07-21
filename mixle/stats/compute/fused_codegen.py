@@ -1394,8 +1394,10 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
             "        s = 0.0",
             "        for k in range(kc):",
             "            s += np.exp(llbuf[k] - m)",
-            # data log-likelihood, free as the posterior normalizer
-            "        out_ll[0] += wi * (m + np.log(s)) if ok else wi * -np.inf",
+            # data log-likelihood, free as the posterior normalizer. A zero-weighted row must
+            # contribute exactly 0.0 regardless of ok -- 0.0 * -inf is NaN in IEEE arithmetic, which
+            # would poison out_ll[0] for the whole batch on a row that's both impossible AND excluded.
+            "        out_ll[0] += 0.0 if wi == 0.0 else (wi * (m + np.log(s)) if ok else wi * -np.inf)",
             "        for k in range(kc):",
             "            r = np.exp(llbuf[k] - m) / s * wi",
             "            comp_counts[k] += r",
@@ -1457,7 +1459,8 @@ def _compile_estep(plan: FusedPlan, parallel: bool = False) -> Callable:
             "            s = 0.0",
             "            for k in range(kc):",
             "                s += np.exp(llbuf_c[k] - m)",
-            "            out_ll[c] += wi * (m + np.log(s)) if ok else wi * -np.inf",
+            # same zero-weight guard as the sequential kernel: 0.0 * -inf is NaN, not 0.0.
+            "            out_ll[c] += 0.0 if wi == 0.0 else (wi * (m + np.log(s)) if ok else wi * -np.inf)",
             "            for k in range(kc):",
             "                r = np.exp(llbuf_c[k] - m) / s * wi",
             "                comp_counts[c, k] += r",

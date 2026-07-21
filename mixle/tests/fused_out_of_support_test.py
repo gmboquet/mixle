@@ -104,6 +104,27 @@ class EstepImpossibleRowTest(unittest.TestCase):
             new_host = est.estimate(len(data), legacy)
             np.testing.assert_allclose(new_fused.seq_log_density(enc), new_host.seq_log_density(enc), rtol=1e-12)
 
+    def test_zero_weighted_impossible_row_contributes_exactly_zero_not_nan(self):
+        # `out_ll[0] += wi * (m + log(s)) if ok else wi * -np.inf` computes 0.0 * -np.inf = NaN when a
+        # row is BOTH impossible (ok=False) AND zero-weighted -- poisoning the total log-likelihood for
+        # the whole batch, not just that one (rightly excluded) row. A zero-weighted row must
+        # contribute exactly 0.0 regardless of whether it's possible under the model.
+        model = self._model()
+        data = ["a", "b", "c", "a"]  # "c" (index 2) is impossible under BOTH components
+        enc = model.dist_to_encoder().seq_encode(data)
+        w = np.array([1.0, 1.0, 0.0, 1.0])
+        host_ll = model.seq_log_density(enc)
+        self.assertTrue(np.isneginf(host_ll[2]))
+        # the correct weighted total excludes the zero-weighted row's -inf entirely (0.0 * -inf is
+        # NOT a valid way to compute this -- it's NaN, not 0.0 -- so filter before summing).
+        expected_ll = float(np.dot(w[w != 0], host_ll[w != 0]))
+        self.assertTrue(np.isfinite(expected_ll))
+        for parallel in (False, True):
+            suff, ll = fc.fused_accumulate(model, enc, w, return_ll=True, parallel=parallel)
+            self.assertFalse(np.isnan(ll), f"parallel={parallel}: ll={ll}")
+            self.assertAlmostEqual(ll, expected_ll, places=10, msg=f"parallel={parallel}")
+            self.assertTrue(np.all(np.isfinite(suff[0])), f"parallel={parallel}: suff={suff[0]}")
+
 
 @unittest.skipUnless(HAS_NUMBA, "fused kernels require numba")
 class NestedImpossibleRowTest(unittest.TestCase):
@@ -155,6 +176,27 @@ class NestedImpossibleRowTest(unittest.TestCase):
             for leaf_fused, leaf_legacy in zip(suff[1][j][1], legacy[1][j][1]):
                 np.testing.assert_allclose(np.asarray(leaf_fused), np.asarray(leaf_legacy), rtol=1e-12)
         self.assertTrue(np.isneginf(ll))
+
+    def test_zero_weighted_impossible_row_contributes_exactly_zero_not_nan(self):
+        # Same NaN-vs-inf gap as the flat mixture's E-step, but here root_expr's -inf comes from the
+        # RECURSIVE per-node finite-max guard in _emit_score rather than a single top-level `ok`
+        # check -- out_ll[0] += wi * (root_expr) still computes 0.0 * -inf = NaN for a row that's both
+        # impossible at every level AND zero-weighted.
+        model = self._model()
+        data = [0.5, 1.0e200, 3.2]  # index 1 overflows every leaf to -inf
+        enc = model.dist_to_encoder().seq_encode(data)
+        w = np.array([1.0, 0.0, 1.0])
+        with np.errstate(over="ignore"):
+            host_ll = model.seq_log_density(enc)
+        self.assertTrue(np.isneginf(host_ll[1]))
+        expected_ll = float(np.dot(w[w != 0], host_ll[w != 0]))
+        self.assertTrue(np.isfinite(expected_ll))
+        with np.errstate(over="ignore"):
+            for parallel in (False, True):
+                suff, ll = fn.fused_nested_accumulate(model, enc, w, return_ll=True, parallel=parallel)
+                self.assertFalse(np.isnan(ll), f"parallel={parallel}: ll={ll}")
+                self.assertAlmostEqual(ll, expected_ll, places=10, msg=f"parallel={parallel}")
+                self.assertTrue(np.all(np.isfinite(np.asarray(suff[0]))), f"parallel={parallel}")
 
 
 @unittest.skipUnless(HAS_NUMBA, "fused kernels require numba")
