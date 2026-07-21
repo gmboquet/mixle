@@ -11,6 +11,8 @@ pydantic = pytest.importorskip("pydantic")
 from pydantic import ValidationError  # noqa: E402
 
 knowledge_contracts = pytest.importorskip("mixle_knowledge.contracts")
+if not hasattr(knowledge_contracts, "KnowledgeBundle"):
+    pytest.skip("installed mixle-knowledge lacks KnowledgeBundle", allow_module_level=True)
 KnowledgeBundle = knowledge_contracts.KnowledgeBundle
 
 from mixle.substrate.context import (  # noqa: E402

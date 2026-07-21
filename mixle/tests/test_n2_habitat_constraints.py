@@ -9,6 +9,10 @@ knowledge_contracts = pytest.importorskip(
     "mixle_knowledge.contracts",
     reason="cross-project habitat contracts require the optional mixle-knowledge package",
 )
+_N2_SYMBOLS = ("CriticalHabitatDesignation", "ListedSpecies", "SourceRef", "SpatialBounds")
+_n2_missing = [s for s in _N2_SYMBOLS if not hasattr(knowledge_contracts, s)]
+if _n2_missing:
+    pytest.skip(f"installed mixle-knowledge lacks {', '.join(_n2_missing)}", allow_module_level=True)
 CriticalHabitatDesignation = knowledge_contracts.CriticalHabitatDesignation
 ListedSpecies = knowledge_contracts.ListedSpecies
 SourceRef = knowledge_contracts.SourceRef
