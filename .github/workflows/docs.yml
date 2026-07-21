@@ -54,10 +54,10 @@ jobs:
     # faster single-revision revision-check job instead.
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # full history: sphinx-polyversion needs every matched tag/branch, not just HEAD
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install sphinx-polyversion
@@ -74,7 +74,7 @@ jobs:
         run: |
           sphinx-polyversion docs/poly.py
           touch docs/_build/html/.nojekyll   # serve _static/ etc. verbatim (no Jekyll processing)
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: docs/_build/html
 
@@ -88,7 +88,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
   revision-check:
     name: Revision check (single-revision, warnings as errors)
@@ -100,8 +100,8 @@ jobs:
       group: docs-revision-check-${{ github.ref }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
