@@ -13,6 +13,12 @@ import unittest
 from pathlib import Path
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "release_metadata.py"
+_WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+
+
+def _push_trigger(name: str) -> str:
+    text = (_WORKFLOWS / name).read_text(encoding="utf-8")
+    return text.split("pull_request:", 1)[0]
 
 
 def _load():
@@ -49,6 +55,22 @@ class ReleaseMetadataTest(unittest.TestCase):
             meta = mod.artifact_metadata(f)
         self.assertEqual(meta["size_bytes"], len(payload))
         self.assertEqual(meta["sha256"], hashlib.sha256(payload).hexdigest())
+
+
+class ReleaseTipWorkflowTest(unittest.TestCase):
+    def test_all_release_gates_run_on_the_exact_release_tip(self):
+        for workflow in ("tests.yml", "docs.yml", "security.yml"):
+            trigger = _push_trigger(workflow)
+            self.assertIn("branches: [main, release/0.8.0]", trigger, workflow)
+
+    def test_release_docs_check_does_not_deploy_pages(self):
+        text = (_WORKFLOWS / "docs.yml").read_text(encoding="utf-8")
+        self.assertIn("github.ref == 'refs/heads/release/0.8.0'", text)
+        self.assertEqual(text.count("github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'"), 2)
+
+    def test_release_push_gates_are_not_suppressed_by_path_filters(self):
+        for workflow in ("docs.yml", "security.yml"):
+            self.assertNotIn("paths:", _push_trigger(workflow), workflow)
 
 
 if __name__ == "__main__":
