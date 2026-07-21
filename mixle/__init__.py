@@ -62,7 +62,10 @@ def __getattr__(name: str):  # PEP 562 — resolve any mixle submodule (incl. th
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals().keys()) | set(_NAMESPACES) | {"Model", "propose"})
+    # "stats"/"utils" are declared in __all__ below but aren't in _NAMESPACES (they're resolved via
+    # __getattr__ like every other lazy submodule) -- without listing them here too, dir(mixle) omits
+    # them until something else has already triggered their lazy import as a side effect.
+    return sorted(set(globals().keys()) | set(_NAMESPACES) | {"Model", "propose", "stats", "utils"})
 
 
 __all__ = [

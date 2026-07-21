@@ -57,8 +57,35 @@ def test_contracts_gathers_every_contract_in_one_import():
 def test_pysp_dir_advertises_the_namespaces():
     import mixle
 
-    for ns in ("dist", "process", "models", "enumeration", "inference", "ops", "contracts"):
+    for ns in ("dist", "process", "models", "enumeration", "inference", "ops", "contracts", "stats", "utils"):
         assert ns in dir(mixle)
+
+
+def test_dir_advertises_stats_and_utils_before_any_attribute_access():
+    # __dir__ used to union globals() with only _NAMESPACES -- "stats"/"utils" are declared in
+    # __all__ but aren't in _NAMESPACES (resolved via __getattr__ like every other lazy submodule), so
+    # dir(mixle) omitted both until something ELSE had already triggered their lazy import as a side
+    # effect (which auto-binds them into globals()). A subprocess is needed to see the state truly
+    # before first access -- in-process, some earlier test has almost certainly already touched
+    # mixle.stats/mixle.utils, which would mask the bug.
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-c", "import mixle; print('stats' in dir(mixle)); print('utils' in dir(mixle))"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["True", "True"], result.stdout
 
 
 def test_lazy_import_only_translates_a_missing_requested_module():
