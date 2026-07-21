@@ -145,6 +145,7 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
         mu: float,
         sigma2: float,
         name: str | None = None,
+        keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """Create a log-Gaussian distribution.
@@ -153,6 +154,7 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
             mu (float): Mean of ``log(X)``.
             sigma2 (float): Variance of ``log(X)``.
             name (Optional[str]): Optional distribution name.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
             prior (Optional): Conjugate parameter prior over (mu, tau=1/sigma2) of log(X). A
                 :class:`~mixle.stats.bayes.normal_gamma.NormalGammaDistribution` enables the
                 Bayesian/variational machinery (``expected_log_density`` and the conjugate
@@ -162,6 +164,7 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
             mu (float): Location parameter for log-Gaussian distribution.
             sigma2 (float): Scale for log-Gaussian distribution.
             name (Optional[str]): Optional distribution name.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
             cont (float): Normalizing constant (depends on sigma2).
             log_const (float): Log of above.
 
@@ -175,6 +178,7 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
         self.log_const = -0.5 * log(2.0 * pi * self.sigma2)
         self.const = 1.0 / sqrt(2.0 * pi * self.sigma2)
         self.name = name
+        self.keys = keys
         self.set_prior(prior)
 
     def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
@@ -221,7 +225,12 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the log-Gaussian distribution."""
-        return "LogGaussianDistribution(%s, %s, name=%s)" % (repr(self.mu), repr(self.sigma2), repr(self.name))
+        return "LogGaussianDistribution(%s, %s, name=%s, keys=%s)" % (
+            repr(self.mu),
+            repr(self.sigma2),
+            repr(self.name),
+            repr(self.keys),
+        )
 
     def density(self, x: float) -> float:
         """Density of Log-Gaussian distribution at observation x.
@@ -394,10 +403,14 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
         if pseudo_count is not None:
             suff_stat = (self.mu, self.sigma2)
             return LogGaussianEstimator(
-                pseudo_count=(pseudo_count, pseudo_count), suff_stat=suff_stat, name=self.name, prior=self.prior
+                pseudo_count=(pseudo_count, pseudo_count),
+                suff_stat=suff_stat,
+                name=self.name,
+                keys=self.keys,
+                prior=self.prior,
             )
         else:
-            return LogGaussianEstimator(name=self.name, prior=self.prior)
+            return LogGaussianEstimator(name=self.name, keys=self.keys, prior=self.prior)
 
     def dist_to_encoder(self) -> "LogGaussianDataEncoder":
         """Return the encoder for log-Gaussian observations."""
@@ -683,7 +696,7 @@ class LogGaussianEstimator(ParameterEstimator):
         new_sigma2 = new_b / (new_a - 0.5)
         new_sigma2 = new_sigma2 if new_sigma2 > 0 else 1.0
         new_prior = NormalGammaDistribution(new_mu, new_n, new_a, new_b)
-        return LogGaussianDistribution(new_mu, new_sigma2, name=self.name, prior=new_prior)
+        return LogGaussianDistribution(new_mu, new_sigma2, name=self.name, keys=self.keys, prior=new_prior)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float]) -> "LogGaussianDistribution":
         """Estimate a log-Gaussian distribution from accumulated log moments.
@@ -716,7 +729,7 @@ class LogGaussianEstimator(ParameterEstimator):
             sigma2 = log_x2 / nobs_loc2 - mu * mu
 
         sigma2 = max(sigma2, self.min_covar, 1.0e-6 * sigma2)
-        return LogGaussianDistribution(mu, sigma2, name=self.name)
+        return LogGaussianDistribution(mu, sigma2, name=self.name, keys=self.keys)
 
 
 class LogGaussianDataEncoder(DataSequenceEncoder):

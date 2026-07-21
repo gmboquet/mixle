@@ -60,7 +60,15 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
             differentiable=False,
         )
 
-    def __init__(self, k: int, num_vals: int, p: float, min_val: int | None = 0, name: str | None = None) -> None:
+    def __init__(
+        self,
+        k: int,
+        num_vals: int,
+        p: float,
+        min_val: int | None = 0,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """Create a uniform integer distribution with a spike at ``k``.
 
         Args:
@@ -69,6 +77,7 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
             p (float): Probability of drawing k. (1-p)/(num_vals-1) to draw any other integer in range.
             min_val (Optional[int]): Defaults to 0. Set bottom of integer range.
             name (Optional[str]): Optional distribution name.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         Attributes:
             p (float): Probability of drawing from k.
@@ -79,6 +88,7 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
             log_1p (float): Log of 1-p
             num_vals (int): Total number of integers in range.
             name (Optional[str]): Optional distribution name.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
         if not 0.0 <= p <= 1.0:
@@ -105,6 +115,7 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
         else:
             self.log_1p = np.log1p(-self.p) - np.log(self.num_vals - 1)
         self.name = name
+        self.keys = keys
 
     def __str__(self) -> str:
         s1 = str(self.min_val)
@@ -112,8 +123,16 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
         s3 = repr(self.p)
         s4 = repr(self.k)
         s5 = repr(self.name)
+        s6 = repr(self.keys)
 
-        return "IntegerUniformSpikeDistribution(p=%s, min_val=%s, num_vals=%s,k=%s, name=%s)" % (s3, s1, s2, s4, s5)
+        return "IntegerUniformSpikeDistribution(p=%s, min_val=%s, num_vals=%s,k=%s, name=%s, keys=%s)" % (
+            s3,
+            s1,
+            s2,
+            s4,
+            s5,
+            s6,
+        )
 
     def density(self, x: int) -> float:
         """Density of the integer uniform spike distribution at observation x.
@@ -249,11 +268,17 @@ class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return IntegerUniformSpikeEstimator(min_val=self.min_val, max_val=self.max_val, name=self.name)
+            return IntegerUniformSpikeEstimator(
+                min_val=self.min_val, max_val=self.max_val, name=self.name, keys=self.keys
+            )
 
         else:
             return IntegerUniformSpikeEstimator(
-                min_val=self.min_val, max_val=self.max_val, pseudo_count=pseudo_count, name=self.name
+                min_val=self.min_val,
+                max_val=self.max_val,
+                pseudo_count=pseudo_count,
+                name=self.name,
+                keys=self.keys,
             )
 
     def dist_to_encoder(self) -> "IntegerUniformSpikeDataEncoder":
@@ -706,6 +731,7 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
                     num_vals=len(count_vec),
                     p=p,
                     name=self.name,
+                    keys=self.keys,
                 )
             if self.pseudo_count is not None:
                 # Copy so the pseudo_count adjustments below do not mutate the caller's array.
@@ -728,6 +754,7 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
                         num_vals=len(count_vec),
                         p=p,
                         name=self.name,
+                        keys=self.keys,
                     )
 
                 elif self.suff_stat[0] is not None and self.suff_stat[1] is not None:
@@ -748,6 +775,7 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
                         num_vals=len(count_vec),
                         p=p,
                         name=self.name,
+                        keys=self.keys,
                     )
                 else:
                     count_vec += self.pseudo_count
@@ -766,6 +794,7 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
                         num_vals=len(count_vec),
                         p=p,
                         name=self.name,
+                        keys=self.keys,
                     )
 
 

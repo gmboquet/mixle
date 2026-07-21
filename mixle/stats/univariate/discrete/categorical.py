@@ -176,6 +176,7 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         pmap: dict[Any, float] = MISSING,
         default_value: float = 0.0,
         name: str | None = None,
+        keys: str | None = None,
         prob_map: dict[Any, float] = MISSING,
         prior: Optional["SequenceEncodableProbabilityDistribution"] = None,
     ) -> None:
@@ -189,6 +190,7 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             pmap: Mapping from labels to probabilities.
             default_value: Probability assigned to labels outside ``pmap``.
             name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             prob_map: Alias for ``pmap``.
             prior (Optional): Conjugate parameter prior over the category-probability simplex. A
                 :class:`~mixle.stats.bayes.dict_dirichlet.DictDirichletDistribution` enables the Bayesian /
@@ -197,6 +199,7 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
         Attributes:
             name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             pmap: Mapping from labels to probabilities.
             default_value: Probability assigned to labels outside ``pmap``.
             no_default: ``True`` when outside-support labels have nonzero mass.
@@ -210,6 +213,7 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             # so reject it at the constructor like the scalar families do.
             raise ValueError("CategoricalDistribution requires non-negative probabilities.")
         self.name = name
+        self.keys = keys
         self.pmap = pmap
         self.no_default = default_value != 0.0
         self.default_value = max(0.0, min(default_value, 1.0))
@@ -222,8 +226,9 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         s1 = ", ".join(["%s: %s" % (repr(k), repr(v)) for k, v in sorted(self.pmap.items(), key=lambda u: u[0])])
         s2 = repr(self.default_value)
         s3 = repr(self.name)
+        s4 = repr(self.keys)
 
-        return "CategoricalDistribution({%s}, default_value=%s, name=%s)" % (s1, s2, s3)
+        return "CategoricalDistribution({%s}, default_value=%s, name=%s, keys=%s)" % (s1, s2, s3, s4)
 
     def get_prior(self) -> Optional["SequenceEncodableProbabilityDistribution"]:
         """Return the conjugate parameter prior over the category-probability simplex (or None)."""
@@ -453,11 +458,11 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             A ``CategoricalEstimator``.
         """
         if pseudo_count is None:
-            return CategoricalEstimator(name=self.name, prior=self.prior)
+            return CategoricalEstimator(name=self.name, keys=self.keys, prior=self.prior)
 
         else:
             return CategoricalEstimator(
-                pseudo_count=pseudo_count, suff_stat=self.pmap, name=self.name, prior=self.prior
+                pseudo_count=pseudo_count, suff_stat=self.pmap, name=self.name, keys=self.keys, prior=self.prior
             )
 
     def dist_to_encoder(self) -> "CategoricalDataEncoder":
@@ -834,7 +839,7 @@ class CategoricalEstimator(ParameterEstimator):
             p_map = {k: v / cpp_sum for k, v in cpp.items()}
 
         return CategoricalDistribution(
-            pmap=p_map, default_value=0.0, name=self.name, prior=DictDirichletDistribution(cpp)
+            pmap=p_map, default_value=0.0, name=self.name, keys=self.keys, prior=DictDirichletDistribution(cpp)
         )
 
     def estimate(self, nobs: float | None, suff_stat: dict[Any, float]) -> "CategoricalDistribution":
@@ -896,7 +901,7 @@ class CategoricalEstimator(ParameterEstimator):
                 k: (suff_stat.get(k, 0) + self.suff_stat.get(k, 0) * self.pseudo_count) / adjusted_nobs for k in levels
             }
 
-        return CategoricalDistribution(pmap=p_map, default_value=default_value, name=self.name)
+        return CategoricalDistribution(pmap=p_map, default_value=default_value, name=self.name, keys=self.keys)
 
 
 class CategoricalDataEncoder(DataSequenceEncoder):

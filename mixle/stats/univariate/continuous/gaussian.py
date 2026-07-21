@@ -138,6 +138,7 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         mu: float,
         sigma2: float,
         name: str | None = None,
+        keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """Create a univariate Gaussian distribution.
@@ -146,6 +147,7 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
             mu: Mean of the Gaussian.
             sigma2: Positive finite variance.
             name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate parameter prior over (mu, tau=1/sigma2). A
                 :class:`~mixle.stats.bayes.normal_gamma.NormalGammaDistribution` enables the
                 Bayesian/variational machinery (``expected_log_density`` and the
@@ -155,6 +157,7 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
             mu: Mean of the Gaussian.
             sigma2: Variance of the Gaussian.
             name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             const: Density normalizing constant.
             log_const: Log normalizing constant.
 
@@ -168,11 +171,17 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         self.log_const = -0.5 * log(2.0 * pi * self.sigma2)
         self.const = 1.0 / sqrt(2.0 * pi * self.sigma2)
         self.name = name
+        self.keys = keys
         self.set_prior(prior)
 
     def __str__(self) -> str:
         """Return a readable distribution summary."""
-        return "GaussianDistribution(%s, %s, name=%s)" % (repr(self.mu), repr(self.sigma2), repr(self.name))
+        return "GaussianDistribution(%s, %s, name=%s, keys=%s)" % (
+            repr(self.mu),
+            repr(self.sigma2),
+            repr(self.name),
+            repr(self.keys),
+        )
 
     def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
         """Attach a parameter prior and precompute conjugate-prior expectations.
@@ -383,10 +392,14 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         if pseudo_count is not None:
             suff_stat = (self.mu, self.sigma2)
             return GaussianEstimator(
-                pseudo_count=(pseudo_count, pseudo_count), suff_stat=suff_stat, name=self.name, prior=self.prior
+                pseudo_count=(pseudo_count, pseudo_count),
+                suff_stat=suff_stat,
+                name=self.name,
+                keys=self.keys,
+                prior=self.prior,
             )
         else:
-            return GaussianEstimator(name=self.name, prior=self.prior)
+            return GaussianEstimator(name=self.name, keys=self.keys, prior=self.prior)
 
     def dist_to_encoder(self) -> "GaussianDataEncoder":
         """Return an encoder for iid scalar Gaussian observations."""
@@ -772,7 +785,7 @@ class GaussianEstimator(ParameterEstimator):
         new_sigma2 = new_b / denom if denom > 0.0 else self.min_covar
         new_sigma2 = max(new_sigma2, self.min_covar)  # match the MLE-path variance floor
         new_prior = NormalGammaDistribution(new_mu, new_n, new_a, new_b)
-        return GaussianDistribution(new_mu, new_sigma2, name=self.name, prior=new_prior)
+        return GaussianDistribution(new_mu, new_sigma2, name=self.name, keys=self.keys, prior=new_prior)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float]) -> "GaussianDistribution":
         """Estimate a Gaussian distribution from aggregated sufficient statistics.
@@ -826,7 +839,7 @@ class GaussianEstimator(ParameterEstimator):
         else:
             sigma2 = max(sigma2, self.min_covar, 1.0e-6 * sigma2)
 
-        return GaussianDistribution(mu, sigma2, name=self.name)
+        return GaussianDistribution(mu, sigma2, name=self.name, keys=self.keys)
 
 
 class GaussianDataEncoder(DataSequenceEncoder):

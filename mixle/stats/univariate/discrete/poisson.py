@@ -112,6 +112,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         self,
         lam: float,
         name: str | None = None,
+        keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """Create a Poisson distribution.
@@ -119,6 +120,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         Args:
             lam: Positive finite rate and mean.
             name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate parameter prior over the rate ``lam``. A
                 :class:`~mixle.stats.univariate.continuous.gamma.GammaDistribution` enables the
                 Bayesian/variational machinery (``expected_log_density`` and the
@@ -127,6 +129,7 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         Attributes:
             lam: Rate and mean of the Poisson distribution.
             name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             log_lambda: Log rate used by scoring.
         """
         if lam <= 0.0 or not np.isfinite(lam):
@@ -134,11 +137,12 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         self.lam = float(lam)
         self.log_lambda = log(self.lam)
         self.name = name
+        self.keys = keys
         self.set_prior(prior)
 
     def __str__(self) -> str:
         """Return a readable distribution summary."""
-        return "PoissonDistribution(%s, name=%s)" % (repr(self.lam), repr(self.name))
+        return "PoissonDistribution(%s, name=%s, keys=%s)" % (repr(self.lam), repr(self.name), repr(self.keys))
 
     def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
         """Attach a parameter prior and cache the conjugate Gamma expectations.
@@ -356,9 +360,11 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return PoissonEstimator(name=self.name, prior=self.prior)
+            return PoissonEstimator(name=self.name, keys=self.keys, prior=self.prior)
         else:
-            return PoissonEstimator(pseudo_count=pseudo_count, suff_stat=self.lam, name=self.name, prior=self.prior)
+            return PoissonEstimator(
+                pseudo_count=pseudo_count, suff_stat=self.lam, name=self.name, keys=self.keys, prior=self.prior
+            )
 
     def dist_to_encoder(self) -> "PoissonDataEncoder":
         """Return an encoder for iid Poisson observations."""
@@ -715,7 +721,9 @@ class PoissonEstimator(ParameterEstimator):
 
         posterior_mode = max(posterior_mode, 1.0e-128)
 
-        return PoissonDistribution(posterior_mode, name=self.name, prior=GammaDistribution(new_k, new_theta))
+        return PoissonDistribution(
+            posterior_mode, name=self.name, keys=self.keys, prior=GammaDistribution(new_k, new_theta)
+        )
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> "PoissonDistribution":
         """Estimate a Poisson distribution from aggregated sufficient statistics.
@@ -737,11 +745,11 @@ class PoissonEstimator(ParameterEstimator):
 
         if self.pseudo_count is not None and self.suff_stat is not None:
             lam = (psum + self.suff_stat * self.pseudo_count) / (nobs + self.pseudo_count)
-            return PoissonDistribution(max(float(lam), 1.0e-12), name=self.name)
+            return PoissonDistribution(max(float(lam), 1.0e-12), name=self.name, keys=self.keys)
         elif nobs == 0.0:
-            return PoissonDistribution(1.0, name=self.name)
+            return PoissonDistribution(1.0, name=self.name, keys=self.keys)
         else:
-            return PoissonDistribution(max(float(psum / nobs), 1.0e-12), name=self.name)
+            return PoissonDistribution(max(float(psum / nobs), 1.0e-12), name=self.name, keys=self.keys)
 
 
 class PoissonDataEncoder(DataSequenceEncoder):

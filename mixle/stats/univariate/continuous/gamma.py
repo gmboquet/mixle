@@ -146,18 +146,20 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         vals = engine.asarray(x[0])
         return engine.where(vals > 0.0, vals * 0.0, engine.asarray(-np.inf))
 
-    def __init__(self, k: float, theta: float, name: str | None = None) -> None:
+    def __init__(self, k: float, theta: float, name: str | None = None, keys: str | None = None) -> None:
         """Create a Gamma distribution.
 
         Args:
             k: Positive finite shape parameter.
             theta: Positive finite scale parameter.
             name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
 
         Attributes:
             k: Shape parameter.
             theta: Scale parameter.
             name: Optional diagnostic name.
+            keys: Optional key for merging sufficient statistics.
             log_const: Log normalizing constant.
 
         """
@@ -169,10 +171,16 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
         self.theta = float(theta)
         self.log_const = -(gammaln(self.k) + self.k * log(self.theta))
         self.name = name
+        self.keys = keys
 
     def __str__(self) -> str:
         """Return a readable distribution summary."""
-        return "GammaDistribution(%s, %s, name=%s)" % (repr(self.k), repr(self.theta), repr(self.name))
+        return "GammaDistribution(%s, %s, name=%s, keys=%s)" % (
+            repr(self.k),
+            repr(self.theta),
+            repr(self.name),
+            repr(self.keys),
+        )
 
     def get_parameters(self) -> tuple[float, float]:
         """Return the (shape k, scale theta) pair.
@@ -373,10 +381,12 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return GammaEstimator(name=self.name)
+            return GammaEstimator(name=self.name, keys=self.keys)
         else:
             suff_stat = (self.k * self.theta, digamma(self.k) + log(self.theta))
-            return GammaEstimator(pseudo_count=(pseudo_count, pseudo_count), suff_stat=suff_stat, name=self.name)
+            return GammaEstimator(
+                pseudo_count=(pseudo_count, pseudo_count), suff_stat=suff_stat, name=self.name, keys=self.keys
+            )
 
     def dist_to_encoder(self) -> "GammaDataEncoder":
         """Return an encoder for iid Gamma observations."""
@@ -624,25 +634,25 @@ class GammaEstimator(ParameterEstimator):
         ss1, ss2 = self.suff_stat
 
         if suff_stat[0] <= 0:
-            return GammaDistribution(1.0, 1.0, name=self.name)
+            return GammaDistribution(1.0, 1.0, name=self.name, keys=self.keys)
 
         adj_sum = suff_stat[1] + ss1 * pc1
         adj_cnt = suff_stat[0] + pc1
         if adj_cnt <= 0.0 or adj_sum <= 0.0 or not np.isfinite(adj_sum):
-            return GammaDistribution(1.0, 1.0, name=self.name)
+            return GammaDistribution(1.0, 1.0, name=self.name, keys=self.keys)
         adj_mean = adj_sum / adj_cnt
 
         adj_lsum = suff_stat[2] + ss2 * pc2
         adj_lcnt = suff_stat[0] + pc2
         if adj_lcnt <= 0.0 or not np.isfinite(adj_lsum):
-            return GammaDistribution(1.0, adj_mean, name=self.name)
+            return GammaDistribution(1.0, adj_mean, name=self.name, keys=self.keys)
         adj_lmean = adj_lsum / adj_lcnt
 
         k = self.estimate_shape(adj_mean, adj_lmean, self.threshold)
 
         # theta = mean / k, where the mean uses the count adjusted by pc1 (adj_lcnt
         # uses pc2 and is only valid for the log-mean).
-        return GammaDistribution(k, max(_MIN_GAMMA_SCALE, adj_mean / k), name=self.name)
+        return GammaDistribution(k, max(_MIN_GAMMA_SCALE, adj_mean / k), name=self.name, keys=self.keys)
 
     @staticmethod
     def estimate_shape(avg_sum: float, avg_sum_of_logs: float, threshold: float) -> float:

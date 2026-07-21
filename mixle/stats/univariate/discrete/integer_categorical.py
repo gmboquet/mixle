@@ -145,6 +145,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         min_val: int,
         p_vec: list[float] | np.ndarray = MISSING,
         name: str | None = None,
+        keys: str | None = None,
         prob_vec: list[float] | np.ndarray = MISSING,
         prior: Optional["SequenceEncodableProbabilityDistribution"] = None,
     ) -> None:
@@ -155,6 +156,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             p_vec: Probability vector for values ``min_val`` through
                 ``min_val + len(p_vec) - 1``.
             name: Optional distribution name.
+            keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate parameter prior over the probability vector. A
                 :class:`~mixle.stats.bayes.dirichlet.DirichletDistribution` or
                 :class:`~mixle.stats.bayes.symmetric_dirichlet.SymmetricDirichletDistribution` enables the Bayesian /
@@ -167,6 +169,8 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             max_val: Maximum supported integer value.
             log_p_vec: Elementwise log probabilities.
             num_vals: Number of integer values in the support.
+            name: Optional distribution name.
+            keys: Optional key for merging sufficient statistics.
         """
         p_vec = coalesce_alias("p_vec", p_vec, "prob_vec", prob_vec, default=MISSING)
         if any(v < 0.0 for v in p_vec):
@@ -180,6 +184,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             self.log_p_vec = np.log(self.p_vec)
             self.num_vals = self.p_vec.shape[0]
             self.name = name
+            self.keys = keys
         self.set_prior(prior)
 
     def __str__(self) -> str:
@@ -187,8 +192,9 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         s1 = str(self.min_val)
         s2 = repr(list(self.p_vec))
         s3 = repr(self.name)
+        s4 = repr(self.keys)
 
-        return "IntegerCategoricalDistribution(%s, %s, name=%s)" % (s1, s2, s3)
+        return "IntegerCategoricalDistribution(%s, %s, name=%s, keys=%s)" % (s1, s2, s3, s4)
 
     def get_parameters(self) -> np.ndarray:
         """Return the probability vector p_vec (lets it be scored by a Dirichlet conjugate prior)."""
@@ -400,11 +406,15 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 probability vector during estimation.
         """
         if pseudo_count is None:
-            return IntegerCategoricalEstimator(name=self.name, prior=self.prior)
+            return IntegerCategoricalEstimator(name=self.name, keys=self.keys, prior=self.prior)
 
         else:
             return IntegerCategoricalEstimator(
-                pseudo_count=pseudo_count, suff_stat=(self.min_val, self.p_vec), name=self.name, prior=self.prior
+                pseudo_count=pseudo_count,
+                suff_stat=(self.min_val, self.p_vec),
+                name=self.name,
+                keys=self.keys,
+                prior=self.prior,
             )
 
     def dist_to_encoder(self) -> "IntegerCategoricalDataEncoder":
@@ -860,7 +870,7 @@ class IntegerCategoricalEstimator(ParameterEstimator):
 
         hyper_posterior = DirichletDistribution(posterior_params)
 
-        return IntegerCategoricalDistribution(min_val, prob_vec, name=self.name, prior=hyper_posterior)
+        return IntegerCategoricalDistribution(min_val, prob_vec, name=self.name, keys=self.keys, prior=hyper_posterior)
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[int, np.ndarray] | None
@@ -880,7 +890,7 @@ class IntegerCategoricalEstimator(ParameterEstimator):
             adjusted_nobs = suff_stat[1].sum() + self.pseudo_count
 
             return IntegerCategoricalDistribution(
-                suff_stat[0], (suff_stat[1] + pseudo_count_per_level) / adjusted_nobs, name=self.name
+                suff_stat[0], (suff_stat[1] + pseudo_count_per_level) / adjusted_nobs, name=self.name, keys=self.keys
             )
 
         elif self.pseudo_count is not None and self.min_val is not None and self.max_val is not None:
@@ -897,7 +907,7 @@ class IntegerCategoricalEstimator(ParameterEstimator):
             adjusted_nobs = suff_stat[1].sum() + self.pseudo_count
 
             return IntegerCategoricalDistribution(
-                min_val, (count_vec + pseudo_count_per_level) / adjusted_nobs, name=self.name
+                min_val, (count_vec + pseudo_count_per_level) / adjusted_nobs, name=self.name, keys=self.keys
             )
 
         elif self.pseudo_count is not None and self.suff_stat is not None:
@@ -917,10 +927,14 @@ class IntegerCategoricalEstimator(ParameterEstimator):
             i1 = (suff_stat[0] + len(suff_stat[1]) - 1) - min_val + 1
             count_vec[i0:i1] += suff_stat[1]
 
-            return IntegerCategoricalDistribution(min_val, count_vec / (count_vec.sum()), name=self.name)
+            return IntegerCategoricalDistribution(
+                min_val, count_vec / (count_vec.sum()), name=self.name, keys=self.keys
+            )
 
         else:
-            return IntegerCategoricalDistribution(suff_stat[0], suff_stat[1] / (suff_stat[1].sum()), name=self.name)
+            return IntegerCategoricalDistribution(
+                suff_stat[0], suff_stat[1] / (suff_stat[1].sum()), name=self.name, keys=self.keys
+            )
 
 
 class IntegerCategoricalDataEncoder(DataSequenceEncoder):
