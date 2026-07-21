@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from mixle.ppl import Bernoulli, Beta, Exponential, Field, Gamma, Group, Normal, Poisson, free
+from mixle.ppl import Bernoulli, Beta, Exponential, Field, Gamma, Group, Mix, Normal, Poisson, free
 from mixle.ppl.inference import ConjugatePosterior
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
@@ -148,6 +148,24 @@ class PPLExplainFitTestCase(unittest.TestCase):
 
         hierarchical = Normal(Normal(0, 5).each(), free).fit([[1.0, 1.2], [5.0, 4.8], [-1.0, -0.9]])
         self.assertEqual(hierarchical.explain_fit()["route"], "hierarchical")
+
+    def test_priors_nested_inside_a_composite_child_are_not_missed(self):
+        # _has_priors() used to stop at the first CompositeFamily and report "no priors" even when a
+        # component nested inside it (e.g. a mixture of priored Bernoullis) carried a real prior --
+        # explain_fit() then claimed route="em" for a model whose priors make plain EM the wrong tool.
+        # Fixing _has_priors surfaced a second, pre-existing bug on the route it now correctly takes:
+        # autograd.MixtureGradTarget.__init__ hardcoded `self.unpack = None` and never implemented it,
+        # so map_fit's `g.unpack(res.x)` call crashed with `TypeError: 'NoneType' object is not callable`
+        # once a model finally routed through MAP via this class -- no existing test called `.unpack()`
+        # on it (NUTS/VI/log_target checks never do), so this was unreachable dead weight until now.
+        nested = Mix([Bernoulli(Beta(1, 1)), Bernoulli(Beta(2, 2))])
+        self.assertNotEqual(nested.explain_fit()["route"], "em")
+        self.assertEqual(nested.explain_fit()["route"], "map")
+        fitted = nested.fit([0, 1, 1, 0, 1])  # must complete, not crash, with a real prior in a mixture slot
+        self.assertTrue(fitted.is_bound)
+        # a composite with no nested priors is unaffected by the recursive _has_priors walk
+        no_priors = Mix([Normal(-2, 1), Normal(2, 1)], [0.5, 0.5])
+        self.assertFalse(no_priors._has_priors())
 
     def test_bound_rv_without_cached_explanation_raises(self):
         # A model reloaded from a saved artifact (or otherwise bound without going through .fit())

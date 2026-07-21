@@ -378,12 +378,28 @@ class MixtureGradTarget(GradTarget):
         import torch
 
         from mixle.engines import TorchEngine
+        from mixle.ppl.inference import _to_value
 
         self._torch = torch
         self._rv = rv
         self.slots = slots
         self.build = build
-        self.unpack = None
+
+        def unpack(u):
+            # Post-optimization: map the raw unconstrained vector back to constrained values, exactly
+            # like `inference._target_parts`'s own `unpack` closures -- one `_to_value` per slot, keyed
+            # by `s.index`. `build` (via `_rebuild`) does its own simplex/Gamma-representation assembly
+            # for any weight slots, so this needs no mixture-specific normalization here. This was
+            # missing entirely (hardcoded `self.unpack = None`) until a model finally routed through MAP
+            # with this class -- every other fitter (NUTS/VI/log_target checks) never called `.unpack()`.
+            vals, logj = {}, 0.0
+            for k, s in enumerate(slots):
+                v, lj = _to_value(s.support, u[k])
+                vals[s.index] = v
+                logj += lj
+            return vals, logj
+
+        self.unpack = unpack
         self.dmean = dmean
         self.dstd = dstd
         self._jacobian = bool(jacobian)
