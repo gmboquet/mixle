@@ -85,6 +85,7 @@ from mixle.inference.freeze_rollup import (
     detect_frozen,
 )
 from mixle.inference.node_report import node_report
+from mixle.inference.transaction import MutableStateSnapshot
 from mixle.models.grad_leaf import GradLeaf
 from mixle.stats.latent.mixture import MixtureDistribution, MixtureEstimator, _component_enc
 from mixle.stats.multivariate.multivariate_gaussian import (
@@ -567,6 +568,14 @@ def run_em_with_hotswap(
             swapped_this_round.append(idx)
             new_swap_ids.append(idx)
 
+        # A GradLeaf's ordinary (non-swapped) M-step mutates its underlying nn.Module IN PLACE
+        # (opt.step()), and the pre- and post-step wrapper objects alias that same module -- unlike
+        # freeze_rollup.run_em_freeze_rollup (which snapshots exactly this way before its own
+        # _m_step call), this loop had no such snapshot, so a rejected round's gradient update
+        # silently survived: `model = pre_swap_model` below restores which WRAPPER objects are
+        # "current" (undoing the swap-in), but not the shared module's already-mutated parameter
+        # values for any component that went through an ordinary gradient M-step this round.
+        transaction = MutableStateSnapshot.capture(model, estimator)
         candidate, n_grad, n_closed = _m_step_hotswap(enc_payload, estimator, model, gamma, frozen_idx, swapped_idx)
         candidate_frozen = detect_frozen(cache, candidate)
         ll_mat_c, evals_c = _component_log_density_matrix(candidate, enc_payload, cache, candidate_frozen | swapped_idx)
@@ -587,6 +596,7 @@ def run_em_with_hotswap(
             # :func:`swap_back` would restore them, the streak resets so the plateau monitor can
             # retry cleanly next round, and any never-committed ``SwapRecord``/cache entry from this
             # round's rejected proposal is discarded rather than left to look like a real swap.
+            transaction.restore()  # undo any in-place gradient-leaf mutation from this round's M-step
             model = pre_swap_model
             for idx in new_swap_ids:
                 swapped_idx.discard(idx)
