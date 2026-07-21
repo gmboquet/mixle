@@ -272,8 +272,9 @@ Normal(free * Field("x") + free * Field("z") + free, free).fit(
   multivariate), copulas and vines for dependence, permutations and graphs (Mallows, matchings, spanning
   trees, grammars), and neural leaves: a Transformer LM, energy models, and constrained networks
   (physics-informed, monotonic, input-convex, conservation-preserving, permutation-invariant).
-- **Scale with a flag** — the same fit runs local (NumPy / Numba / GPU) or distributed
-  (Spark / Dask / Ray / MPI) via `backend=`; the Transformer LM trains sharded (FSDP2) under torchrun.
+- **Scale without lying about the backend** — sufficient-statistic fits run over Spark / Dask / Ray / MPI;
+  packed Transformer training has an explicit PyTorch DeviceMesh backend (DDP, HSDP/FSDP2, MLP TP, CUDA CP)
+  and a Megatron Bridge adapter for full TP / PP / CP / EP / ETP. Unsupported combinations fail before fitting.
 - **When you want the full picture** — exact enumeration and rank / quantile queries over discrete and
   structured models, MCMC and variational inference for posteriors (a `prior=` is the only switch from
   point estimate to posterior), design of experiments with Bayesian optimization, cross-modal

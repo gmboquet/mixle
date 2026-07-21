@@ -21,6 +21,7 @@ __all__ = [
     "build_routed_optimizer",
     "plan_neural_optimizer",
     "resolve_neural_optimizer",
+    "shard_safe_neural_optimizer_plan",
 ]
 
 
@@ -107,6 +108,32 @@ def plan_neural_optimizer(
             family, reason = _automatic_family(str(name), shape, numel, matrix_min_elements, sign_stable)
         routes.append(NeuralOptimizerRoute(str(name), family, reason, shape))
     return NeuralOptimizerPlan(tuple(routes), sign_stable)
+
+
+def shard_safe_neural_optimizer_plan(plan: NeuralOptimizerPlan) -> NeuralOptimizerPlan:
+    """Localize routes whose geometry is not invariant under parameter sharding.
+
+    Muon/Kronecker/natural-gradient directions require a global matrix. Applying
+    them independently to rectangular shards is a different algorithm. Until a
+    backend declares and executes the required gather/factor reductions, use
+    momentum for those blocks and record the reason in the plan.
+    """
+
+    global_geometry = {"muon", "kronecker", "natural_gradient"}
+    routes = tuple(
+        NeuralOptimizerRoute(
+            route.name,
+            "sgd_momentum" if route.family in global_geometry else route.family,
+            (
+                route.reason + "; localized to momentum because global geometry is sharded"
+                if route.family in global_geometry
+                else route.reason
+            ),
+            route.shape,
+        )
+        for route in plan.routes
+    )
+    return NeuralOptimizerPlan(routes, plan.sign_stable)
 
 
 def _route_name(route: Any) -> str:
@@ -206,9 +233,14 @@ def build_routed_optimizer(
     for route in plan.routes:
         name = _route_name(route)
         family = _route_family(route)
-        if name not in named:
+        resolved_name = name
+        for prefix in ("module.", "_orig_mod.", "_orig_mod.module.", "module._orig_mod."):
+            candidate = prefix + name
+            if resolved_name not in named and candidate in named:
+                resolved_name = candidate
+        if resolved_name not in named:
             raise KeyError("optimizer plan parameter is absent from module: %s" % name)
-        parameter = named[name]
+        parameter = named[resolved_name]
         if family in skipped:
             continue
         existing = parameter_families.get(id(parameter))

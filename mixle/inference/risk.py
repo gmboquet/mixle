@@ -22,8 +22,6 @@ from typing import Any
 
 import numpy as np
 
-from mixle.analysis.extreme import peaks_over_threshold
-
 
 def _as_samples(samples: Any) -> np.ndarray:
     x = np.asarray(samples, dtype=float).ravel()
@@ -81,6 +79,11 @@ def conditional_value_at_risk(samples: Any, alpha: float = 0.95, *, min_tail: in
         tail = np.array([x.min()])
     raw_cvar = float(-tail.mean())
     if tail.size < min_tail:
+        # Import lazily: importing a submodule executes ``mixle.analysis``'s
+        # package initializer, which itself reaches inference through valuation.
+        # Risk is re-exported while Dirichlet may still be initializing.
+        from mixle.analysis.extreme import peaks_over_threshold
+
         losses = -x
         try:
             fit = peaks_over_threshold(losses, threshold=var)
