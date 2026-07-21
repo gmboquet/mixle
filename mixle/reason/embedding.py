@@ -73,6 +73,8 @@ class ScaledEmbedding:
 
     # -- internals ----------------------------------------------------------------------------
     def _encode_std(self, x_std: Any) -> tuple[Any, Any]:
+        # No _fitted guard here: fit()'s own training loop calls this every step, before _fitted is
+        # set -- the guard belongs on the public inference entry points (encode/coordinate_kl) below.
         torch = _torch()
         out = self._enc(x_std)
         mu = out[..., : self.max_dim]
@@ -108,8 +110,16 @@ class ScaledEmbedding:
         return self
 
     # -- inference ----------------------------------------------------------------------------
+    def _require_fitted(self) -> None:
+        if not self._fitted:
+            raise RuntimeError(
+                "ScaledEmbedding.encode/coordinate_kl/active_dim/rate_nats called before .fit(X) -- the "
+                "network is still at its random initialization, so the returned code would be meaningless."
+            )
+
     def encode(self, X: Any) -> np.ndarray:
         """The embedding means ``(n, max_dim)`` -- the common code (use with a store's keys)."""
+        self._require_fitted()
         torch = _torch()
         Xs = (np.atleast_2d(np.asarray(X, dtype=float)) - self._x_mean) / self._x_scale
         with torch.no_grad():
@@ -118,6 +128,7 @@ class ScaledEmbedding:
 
     def coordinate_kl(self, X: Any) -> np.ndarray:
         """Per-coordinate KL from the prior, ``(n, max_dim)`` (nats) -- how much each coord encodes."""
+        self._require_fitted()
         torch = _torch()
         Xs = (np.atleast_2d(np.asarray(X, dtype=float)) - self._x_mean) / self._x_scale
         with torch.no_grad():

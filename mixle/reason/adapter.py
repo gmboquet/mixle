@@ -50,6 +50,7 @@ class StructuredAdapter:
         self.full = bool(full)
         self._params: list[Any] | None = None
         self._logit_scale: Any = None
+        self._built: tuple[list[Any], Any] | None = None
 
     def _build(self) -> tuple[list[Any], Any]:
         torch = _torch()
@@ -62,6 +63,8 @@ class StructuredAdapter:
         return [diag, u, v], lambda x: x + x * diag + (x @ v) @ u.T
 
     def _apply(self, x: Any) -> Any:
+        if self._built is None:
+            raise RuntimeError("StructuredAdapter.transform() called before fit(): the residual map is untrained.")
         _, fn = self._built
         return fn(x)
 
