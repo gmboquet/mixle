@@ -1,16 +1,16 @@
 """Fit a lookback HMM whose emissions depend on the previous integer state."""
 
-#import os
-
 import numpy as np
 
+from mixle.inference import optimize
 from mixle.stats import *
 from mixle.stats import IntegerMarkovChainDistribution, IntegerMarkovChainEstimator
-from mixle.stats.latent.lookback_hidden_markov_model import LookbackHiddenMarkovModelDistribution, LookbackHiddenMarkovModelEstimator
-from mixle.inference import optimize
+from mixle.stats.latent.lookback_hidden_markov_model import (
+    LookbackHiddenMarkovModelDistribution,
+    LookbackHiddenMarkovModelEstimator,
+)
 
-if __name__ == '__main__':
-
+if __name__ == "__main__":
     # P(set_1)
     d0 = IntegerCategoricalDistribution(0, [0.4, 0.3, 0.3])
     # P(set_2 | set_1, Z=0)
@@ -20,13 +20,15 @@ if __name__ == '__main__':
     # P(set_2 | set_1, Z=2)
     dist3 = IntegerMarkovChainDistribution(3, [[0.1, 0.1, 0.8], [0.8, 0.1, 0.1], [0.1, 0.8, 0.1]])
 
-    init_dists = [SequenceDistribution(d0, CategoricalDistribution({1:1.0}))]*3
-    states     = [dist1, dist2, dist3]
-    len_dist   = CategoricalDistribution({7:0.5, 8:0.25, 9:0.25})
+    init_dists = [SequenceDistribution(d0, CategoricalDistribution({1: 1.0}))] * 3
+    states = [dist1, dist2, dist3]
+    len_dist = CategoricalDistribution({7: 0.5, 8: 0.25, 9: 0.25})
     transition = [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]]
-    w          = [0.4, 0.3, 0.3]
+    w = [0.4, 0.3, 0.3]
 
-    dist = LookbackHiddenMarkovModelDistribution(states, w=w, transitions=transition, lag=1, init_dist=init_dists, len_dist=len_dist)
+    dist = LookbackHiddenMarkovModelDistribution(
+        states, w=w, transitions=transition, lag=1, init_dist=init_dists, len_dist=len_dist
+    )
 
     data = dist.sampler(seed=1).sample(200)
 
@@ -39,7 +41,9 @@ if __name__ == '__main__':
 
     est0 = SequenceEstimator(IntegerCategoricalEstimator(), len_estimator=CategoricalEstimator())
     est1 = IntegerMarkovChainEstimator(3)
-    est  = LookbackHiddenMarkovModelEstimator([est1]*3, lag=1, init_estimators=[est0]*3, len_estimator=CategoricalEstimator())
+    est = LookbackHiddenMarkovModelEstimator(
+        [est1] * 3, lag=1, init_estimators=[est0] * 3, len_estimator=CategoricalEstimator()
+    )
 
     model = optimize(data, est, max_its=1000, delta=None, rng=np.random.RandomState(1))
 
