@@ -1,7 +1,7 @@
 Module ownership and migration
 ==============================
 
-``module_ownership.json`` classifies every current top-level public module as
+``manifests/module_ownership.json`` classifies every current top-level public module as
 ``retain``, ``narrow``, ``migrate``, ``deprecate`` or ``experimental``. A test
 fails whenever a top-level module is added without a decision.
 

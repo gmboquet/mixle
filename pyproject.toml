@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # PyPI distribution name; the import package is `mixle` (cf. scikit-learn -> sklearn).
 name = "mixle"
-version = "0.8.0.dev0"
+version = "0.8.0"
 description = "A package for estimating heterogeneous probability density functions."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -116,15 +116,21 @@ kernels = ["Cython>=3.0", "setuptools>=68"]
 # ruff is pinned: a newer release could add rules and break the blocking lint check unexpectedly.
 # import-linter is floored, not pinned: its contracts are fully self-defined in [tool.importlinter],
 # so new releases cannot add surprise rules the way a linter's default rule set can.
-lint = ["ruff==0.15.17", "mypy>=1.0", "import-linter>=2"]
+lint = ["ruff==0.15.20", "mypy>=1.0", "import-linter>=2"]
 all = ["numba>=0.59", "tbb>=2021.6; platform_machine == 'x86_64'", "pyspark>=3.4", "dask>=2023.5.0", "distributed>=2023.5.0", "torch>=2.4", "safetensors>=0.4", "mpi4py>=3.1", "umap-learn>=0.5.4", "pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "networkx>=3.0", "ray>=2.9", "lightning>=2.1"]
 
 [project.urls]
 Homepage = "https://github.com/gmboquet/mixle"
 Repository = "https://github.com/gmboquet/mixle"
 
+[tool.setuptools]
+# Release artifacts do not ship the 400k-line test tree. Runtime data is declared explicitly below;
+# MANIFEST.in retains the changelog and generated compatibility manifests in the sdist.
+include-package-data = false
+
 [tool.setuptools.packages.find]
 include = ["mixle*"]
+exclude = ["mixle.tests*"]
 
 [tool.setuptools.package-data]
 # Ship the Cython kernel sources so an installed mixle can self-compile them (the `kernels` extra);

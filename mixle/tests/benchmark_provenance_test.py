@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -33,7 +34,9 @@ def _mod():
 def test_stamp_marks_the_current_version() -> None:
     prov = _mod()
     stamped = prov.stamp_result({"benchmark": "gmm_fit", "seconds": 0.1})
-    assert stamped["mixle_version"], "stamp must record the mixle version"
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        expected = tomllib.load(handle)["project"]["version"]
+    assert stamped["mixle_version"] == expected, "stamp must record this checkout's release version"
     assert stamped["mixle_minor"], "stamp must record the major.minor line"
     assert prov.is_current(stamped), "a freshly-stamped result must read as current"
 
@@ -59,21 +62,19 @@ def test_no_committed_benchmark_result_is_stale() -> None:
     prov = _mod()
     if not BENCH_DIR.is_dir():
         pytest.skip("no benchmarks/ directory in this checkout (harness lands separately)")
-    result_files = [p for p in BENCH_DIR.rglob("*.json") if "result" in p.name.lower()]
+    result_files = [p for p in BENCH_DIR.rglob("*.json") if "result" in p.name.lower() and "archive" not in p.parts]
     if not result_files:
-        pytest.skip("no benchmark results files present yet")
+        return
     offenders = []
     for path in result_files:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             continue
-        records = data if isinstance(data, list) else data.get("results", [data])
-        if not isinstance(records, list):
-            continue
+        records = data if isinstance(data, list) else [data]
         for rec in records:
-            if isinstance(rec, dict) and rec.get("seconds") is not None and not prov.is_current(rec):
-                offenders.append(f"{path.name}: {rec.get('benchmark', rec)}")
+            if isinstance(rec, dict) and not prov.is_current(rec):
+                offenders.append(str(path.relative_to(ROOT)))
     assert not offenders, (
         "benchmark results carry a stale or missing version stamp (B7.3 -- no headline "
         "number from old artifacts):\n" + "\n".join(offenders)

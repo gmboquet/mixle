@@ -16,8 +16,12 @@ import platform
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import _bench as B  # noqa: E402
+from benchmark_provenance import stamp_result  # noqa: E402
 
 LL_TOL = 1e-3  # absolute tolerance on mean log-likelihood agreement across packages
 
@@ -218,11 +222,11 @@ def main():
     if "hmm_states" in sel:
         panels["hmm_scale_states"] = panel_hmm_scale_states(args.reps, args.quick)
 
-    out = {"meta": meta, "panels": panels, "ll_tol": LL_TOL}
+    out = stamp_result({"meta": meta, "panels": panels, "ll_tol": LL_TOL})
     # --quick is a smoke run: keep it away from results.json, the tracked full-sweep reference
     # artifact that the write-up and B7.3's version-stamp gate consume.
     fname = "results_quick.json" if args.quick else "results.json"
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", fname)
+    path = os.path.join(HERE, "results", fname)
     with open(path, "w") as f:
         json.dump(out, f, indent=2)
     print(f"\nwrote {path}")

@@ -1,6 +1,6 @@
 """Public-API drift gate (worklist A1.1).
 
-``api_manifest.json`` at the repo root is the reviewed, committed record of everything ``mixle``
+``manifests/api_manifest.json`` is the reviewed, committed record of everything ``mixle``
 exports -- the ``__all__`` of every public package, each tagged with its maturity tier from the
 worklist A1.2 registry (:mod:`mixle.maturity`). This test regenerates that manifest from the current
 tree and asserts the ``stable``/``provisional`` surface is unchanged, so that adding, removing, or
@@ -27,11 +27,14 @@ falsely diff against a manifest generated in a fuller environment.
 
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_MANIFEST_PATH = _REPO_ROOT / "api_manifest.json"
+_MANIFEST_PATH = _REPO_ROOT / "manifests" / "api_manifest.json"
 _GEN_PATH = _REPO_ROOT / "scripts" / "gen_api_manifest.py"
 
 _VALID_MATURITIES = {"stable", "provisional", "experimental"}
@@ -86,8 +89,23 @@ def _partition_drift(committed_packages, current_packages):
 
 class PublicApiManifestTest(unittest.TestCase):
     def test_manifest_files_exist(self):
-        self.assertTrue(_MANIFEST_PATH.exists(), "api_manifest.json missing -- run scripts/gen_api_manifest.py")
+        self.assertTrue(
+            _MANIFEST_PATH.exists(),
+            "manifests/api_manifest.json missing -- run scripts/gen_api_manifest.py",
+        )
         self.assertTrue(_GEN_PATH.exists(), "scripts/gen_api_manifest.py missing")
+
+    def test_standalone_generator_checks_its_own_checkout(self):
+        env = dict(os.environ)
+        env.pop("PYTHONPATH", None)
+        proc = subprocess.run(
+            [sys.executable, str(_GEN_PATH), "--check"],
+            cwd="/tmp",
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_public_surface_matches_committed_manifest(self):
         committed = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))["packages"]
@@ -100,14 +118,14 @@ class PublicApiManifestTest(unittest.TestCase):
             # it expecting churn"; graduation "not yet enforced") -- surfaced for visibility, but it does
             # not fail the freeze gate.
             print(
-                "\nexperimental-surface drift from api_manifest.json (expected churn, not a freeze "
+                "\nexperimental-surface drift from manifests/api_manifest.json (expected churn, not a freeze "
                 "violation; regenerate with `python scripts/gen_api_manifest.py` when convenient):\n"
                 + "\n".join(experimental_only)
             )
 
         self.assertFalse(
             blocking,
-            "public API drifted from api_manifest.json on a stable/provisional package (regenerate with "
+            "public API drifted from manifests/api_manifest.json on a stable/provisional package (regenerate with "
             "`python scripts/gen_api_manifest.py` and commit; if this adds surface, the freeze rule "
             "requires a written exception in release-checklists/0.8.0-decisions.md):\n" + "\n".join(blocking),
         )

@@ -18,7 +18,7 @@ manifest saw every package's changes identically, including the ~170 names under
 recording each entry's maturity; this folds in the A1.2 registry, per the note in
 ``scripts/gen_maturity_manifest.py``.
 
-The committed ``api_manifest.json`` is the baseline the drift test compares against. When a PR
+The committed ``manifests/api_manifest.json`` is the baseline the drift test compares against. When a PR
 intentionally changes the public surface, regenerate it::
 
     python scripts/gen_api_manifest.py
@@ -38,7 +38,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MANIFEST_PATH = REPO_ROOT / "api_manifest.json"
+# Resolve runtime-built ``__all__`` values from this checkout, never from an unrelated editable install.
+sys.path.insert(0, str(REPO_ROOT))
+MANIFEST_PATH = REPO_ROOT / "manifests" / "api_manifest.json"
 ARTIFACT_ID = "mixle.api_manifest/v1"
 
 
@@ -158,9 +160,23 @@ def build_manifest(repo_root: Path = REPO_ROOT) -> dict[str, object]:
     return {"artifact": ARTIFACT_ID, "packages": packages}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
     manifest = build_manifest()
-    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    rendered = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    if "--check" in argv:
+        try:
+            current = MANIFEST_PATH.read_text(encoding="utf-8")
+        except OSError:
+            current = None
+        if current != rendered:
+            print(
+                "manifests/api_manifest.json is stale; run: python scripts/gen_api_manifest.py",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+    MANIFEST_PATH.write_text(rendered, encoding="utf-8")
     packages = manifest["packages"]
     total = sum(len(v["names"]) for v in packages.values() if "names" in v)
     experimental = sum(1 for v in packages.values() if v.get("maturity") == "experimental")

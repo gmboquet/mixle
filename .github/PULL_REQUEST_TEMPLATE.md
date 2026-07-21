@@ -17,7 +17,7 @@ under `mixle.experimental`. See release-checklists/0.8.0.md and CONTRIBUTING.md.
 ## Public API impact
 
 - [ ] This PR does **not** change any public `__all__`.
-- [ ] It changes the public surface, and I regenerated the manifest (`python scripts/gen_api_manifest.py`) and committed `api_manifest.json`.
+- [ ] It changes the public surface, and I regenerated the manifest (`python scripts/gen_api_manifest.py`) and committed `manifests/api_manifest.json`.
 - [ ] It adds public surface: a written exception is recorded in the release decision log (freeze rule — a change adding more public surface than it removes needs one).
 
 ## Claims impact

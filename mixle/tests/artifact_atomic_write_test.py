@@ -40,10 +40,12 @@ class AtomicJsonDumpTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             dst = os.path.join(d, "out.json")
             _atomic_json_dump(dst, {"good": True})
-            original = open(dst).read()
+            with open(dst, encoding="utf-8") as f:
+                original = f.read()
             with self.assertRaises(TypeError):
                 _atomic_json_dump(dst, {1, 2, 3})
-            self.assertEqual(open(dst).read(), original)  # untouched by the failed write
+            with open(dst, encoding="utf-8") as f:
+                self.assertEqual(f.read(), original)  # untouched by the failed write
             self.assertEqual(glob.glob(os.path.join(d, _TMP_GLOB)), [])
 
 
@@ -60,13 +62,15 @@ class SaveJsonAtomicityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "art")
             save_json(path, st.GaussianDistribution(1.5, 2.0))
-            before = open(os.path.join(path, JSON_MODEL_NAME)).read()
+            with open(os.path.join(path, JSON_MODEL_NAME), encoding="utf-8") as f:
+                before = f.read()
 
             # object() is not registered for serialization -> save must fail without touching the good artifact.
             with self.assertRaises(SerializationError):
                 save_json(path, object())
 
-            self.assertEqual(open(os.path.join(path, JSON_MODEL_NAME)).read(), before)
+            with open(os.path.join(path, JSON_MODEL_NAME), encoding="utf-8") as f:
+                self.assertEqual(f.read(), before)
             self.assertEqual(glob.glob(os.path.join(path, _TMP_GLOB)), [])
             loaded, _ = load_json(path)  # still loadable
             self.assertAlmostEqual(
