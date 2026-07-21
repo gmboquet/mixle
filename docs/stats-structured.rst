@@ -133,6 +133,10 @@ Multivariate and Matrix Families
      - correlation matrix
      - correlation priors or fitted correlation structure.
 
+``AitchisonNormalDistribution``/``AitchisonNormalEstimator`` is available from
+:mod:`mixle.stats.multivariate.composition` rather than the top-level
+``mixle.stats`` namespace used by the other families in this table.
+
 For full-covariance multivariate Gaussian fits, the default numeric path uses
 two safeguards. Weighted second moments are accumulated through a BLAS-backed
 matrix multiply instead of a naive tensor contraction, which keeps large mixture
@@ -192,7 +196,9 @@ The sequence package covers explicit Markov structure over observed states:
 
 * ``MarkovChainDistribution`` and ``MarkovChainEstimator``;
 * ``IntegerMarkovChainDistribution`` and ``IntegerMarkovChainEstimator``;
-* ``MarkovTransformDistribution`` and ``MarkovTransformEstimator``;
+* ``MarkovTransformDistribution`` and ``MarkovTransformEstimator``
+  (:mod:`mixle.stats.sequences.markov_transform`, not re-exported from the
+  top-level ``mixle.stats`` namespace like the others here);
 * ``SparseMarkovAssociationDistribution`` and
   ``SparseMarkovAssociationEstimator``.
 

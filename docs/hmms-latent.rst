@@ -366,8 +366,9 @@ zero-probability region -- scores a clean ``-inf`` in **both** routes, never ``N
 Unsupported combinations and common errors
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-* A discrete HMM estimator's ``pseudo_count`` is a ``(transition, initial)`` tuple, not a
-  scalar; passing a single float raises ``TypeError``. Use ``pseudo_count=(1.0, 1.0)``.
+* A discrete HMM estimator's ``pseudo_count`` is a ``(transition, initial)`` tuple. A scalar
+  is broadcast to both positions (``pseudo_count=1.0`` behaves like ``pseudo_count=(1.0, 1.0)``);
+  pass a 2-tuple directly to use different transition and initial pseudo-counts.
 * A held-out categorical symbol never seen during training has zero emission mass under every
   state, so a sequence containing it scores ``-inf`` (see above). Cover the symbol set in the
   training/seed data, or smooth the emission support, before scoring held-out data.

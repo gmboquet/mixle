@@ -310,6 +310,7 @@ API Map
    * - ``Monitor``
      - drift-triggered retrain/swap loop
    * - ``record_fit``, ``verify_reproducible``, ``ReproReceipt``
+       (:mod:`mixle.inference`, not ``mixle.inference.production``)
      - replay and verify fitted parameter recovery
-   * - ``Telemetry``, ``record``
+   * - ``Telemetry``, ``record`` (:mod:`mixle.telemetry`)
      - local decision events for reasoning, routing, placement, and pool jobs

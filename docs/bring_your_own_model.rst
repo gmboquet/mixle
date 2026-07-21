@@ -272,7 +272,7 @@ reader should run these directly rather than trust the prose above:
      - ``mixle/tests/task_router_test.py``
    * - GradLeaf contrast
      - a real peft-wrapped HF checkpoint fine-tunes unchanged inside
-       ``GradLeaf`` (PR #129, open)
+       ``GradLeaf``
      - ``mixle/tests/grad_control_test.py``
        (``AdapterThroughTheBridgeTest``), ``examples/peft_lora_grad_leaf.py``
 
