@@ -25,6 +25,7 @@ from mixle.engines.arithmetic import maxrandint
 from mixle.inference.mcmc.parameter_bridge import sample_parameter_posterior
 from mixle.stats.bayes.conjugate import ConjugatePosterior, conjugate_posterior, is_conjugate_family
 from mixle.stats.compute.posterior import Posterior
+from mixle.utils.optional_deps import HAS_PANDAS, pandas, require
 
 __all__ = ["ParameterPosterior", "PredictivePosterior", "posterior"]
 
@@ -35,6 +36,38 @@ def _as_rng(rng: Any) -> RandomState:
 
 def _seed_from(rng: Any) -> int:
     return int(_as_rng(rng).randint(maxrandint))
+
+
+def _params_to_dataframe(draws: Any) -> Any:
+    """Tabulate a batch of parameter draws (whatever :meth:`ParameterPosterior.samples` returned).
+
+    Handles the shapes the two backing paths actually produce: a dict of length-``n`` arrays
+    (conjugate; also MCMC over a family with named parameters, e.g. ``CategoricalDistribution``), or a
+    plain list of per-draw values (MCMC over the other bridged families, see
+    ``mixle.inference.mcmc.parameter_bridge.build_parameter_bridge``) -- a tuple/array per draw becomes
+    columns ``param_0..param_{d-1}``, a bare scalar per draw becomes a single ``param_0`` column.
+    Raises ``TypeError`` for draws that are not numeric/dict (e.g. ``return_distributions=True``
+    rebuilt distribution objects) rather than forcing a column shape onto them.
+    """
+    if isinstance(draws, dict):
+        return pandas.DataFrame(draws)
+    draws = list(draws)
+    if draws and isinstance(draws[0], dict):
+        return pandas.DataFrame(draws)
+    try:
+        arr = np.asarray(draws, dtype=float)
+    except (TypeError, ValueError) as e:
+        raise TypeError(
+            "to_dataframe() needs numeric or dict-valued parameter draws; got a sequence of "
+            f"{type(draws[0]).__name__ if draws else type(draws).__name__} (e.g. "
+            "sample_parameter_posterior(..., return_distributions=True) rebuilds distribution objects, "
+            "which have no natural tabular form)."
+        ) from e
+    if arr.ndim == 1:
+        return pandas.DataFrame({"param_0": arr})
+    if arr.ndim == 2:
+        return pandas.DataFrame(arr, columns=[f"param_{i}" for i in range(arr.shape[1])])
+    raise TypeError(f"to_dataframe() cannot tabulate parameter draws of shape {arr.shape}.")
 
 
 class ParameterPosterior(Posterior):
@@ -115,6 +148,29 @@ class ParameterPosterior(Posterior):
             return np.quantile(self._chain, [lo, hi], axis=0)
         draws = self._draw_many(2000, 0)
         return {k: np.quantile(np.asarray(v, dtype=float), [lo, hi], axis=0) for k, v in draws.items()}
+
+    def to_dataframe(self, n: int, rng: Any = None) -> Any:
+        """Return ``n`` posterior parameter draws as a ``pandas.DataFrame``, one row per draw.
+
+        Draws through :meth:`samples`, so an MCMC-backed posterior resamples (with replacement) from
+        its retained chain and a conjugate posterior draws exact iid samples. Columns are the
+        parameter names when the sampler kept them (conjugate; MCMC over
+        ``CategoricalDistribution``); otherwise generic ``param_0..param_{d-1}`` (a single ``param_0``
+        for a scalar family) since the other bridged MCMC families map to unnamed positional theta --
+        see ``mixle.inference.mcmc.parameter_bridge``. Requires the ``pandas`` extra
+        (``pip install mixle[pandas]``).
+        """
+        if not HAS_PANDAS:
+            require("pandas", "pandas")
+        return _params_to_dataframe(self.samples(int(n), rng))
+
+    def to_parquet(self, path: Any, n: int, rng: Any = None, **kwargs: Any) -> None:
+        """Write ``n`` posterior parameter draws to a Parquet file; see :meth:`to_dataframe`.
+
+        ``kwargs`` forward to ``DataFrame.to_parquet`` (e.g. ``engine=``, ``compression=``). Needs a
+        Parquet engine in addition to pandas -- ``pip install mixle[arrow]`` (pyarrow) or fastparquet.
+        """
+        self.to_dataframe(n, rng).to_parquet(path, **kwargs)
 
 
 class PredictivePosterior(Posterior):

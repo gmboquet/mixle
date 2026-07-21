@@ -15,13 +15,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Frontier-training prototype modules that live in stable namespaces (not under mixle.experimental).
+# F1 (tensor_pipeline_context_parallel.py) and E8 (context_parallel_spine.py) used to be listed here,
+# but both now live under mixle/experimental/ (see mixle/experimental/__init__.py): a module under
+# mixle.experimental is already unambiguously non-production by its namespace, so this docstring-signal
+# check -- which exists specifically for frontier-flavored modules that remain in STABLE namespaces --
+# no longer applies to them.
 _FRONTIER_MODULES = [
     "mixle/models/mup.py",
     "mixle/models/sparsity_2_4.py",
     "mixle/ppl/scaling_laws.py",
-    "mixle/utils/parallel/context_parallel_spine.py",
     "mixle/utils/parallel/fault_tolerant_training.py",
-    "mixle/utils/parallel/tensor_pipeline_context_parallel.py",
     "mixle/utils/parallel/dcp_checkpoint.py",
 ]
 

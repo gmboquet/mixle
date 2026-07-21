@@ -14,6 +14,7 @@ knowledge_contracts = pytest.importorskip("mixle_knowledge.contracts")
 KnowledgeBundle = knowledge_contracts.KnowledgeBundle
 
 from mixle.substrate.context import (  # noqa: E402
+    MESH_SCHEMA,
     PROPERTY_GRAPH_SCHEMA,
     SPATIAL_MEDIA_SCHEMA,
     TYPED_TABLE_SCHEMA,
@@ -77,6 +78,23 @@ def _image_item():
     )
 
 
+def _mesh_item():
+    return SubstrateItem(
+        id="mesh-1",
+        kind="mesh",
+        text="faulted domain mesh",
+        payload={
+            "ref": "blob/sha256/" + "4" * 64,
+            "topology_dimension": 2,
+            "geometry_dimension": 3,
+            "node_count": 8,
+            "cell_count": 6,
+            "cell_type": "triangle",
+            "regions": [{"id": "fault", "dimension": 1}],
+        },
+    )
+
+
 def test_graph_item_round_trips_through_knowledge_item_validation():
     d = substrate_item_to_knowledge_dict(_graph_item())
     assert d["schema_uri"] == PROPERTY_GRAPH_SCHEMA
@@ -111,6 +129,15 @@ def test_explicit_schema_uri_override_wins():
     assert d["schema_uri"] == "mixle://schema/substrate-item/1"
 
 
+def test_mesh_item_preserves_region_identity_and_artifact_reference():
+    d = substrate_item_to_knowledge_dict(_mesh_item())
+    assert d["schema_uri"] == MESH_SCHEMA
+    assert d["kind"] == "mesh" and d["modality"] == "mesh"
+    item = knowledge_contracts.KnowledgeItem.model_validate(d)
+    assert item.payload["regions"][0]["id"] == "fault"
+    assert item.artifact_ref.endswith("4" * 64)
+
+
 def test_bundle_round_trips_graph_table_image_without_flattening():
     packet = ContextPacket(
         task="rank targets",
@@ -130,6 +157,9 @@ def test_bundle_round_trips_graph_table_image_without_flattening():
         target_id="model-a",
         expected_output_schema={"type": "object"},
         gaps=[gap],
+        required_capability_ids=["mesh.solve"],
+        handoff_policy={"required_item_ids": ["graph-1"], "max_item_loss_fraction": 0.25},
+        continuation={"step": 2, "pending_actions": [{"id": "run-solver"}], "idempotency_key": "step-2"},
     )
 
     bundle = KnowledgeBundle.model_validate(bundle_dict)
@@ -146,6 +176,9 @@ def test_bundle_round_trips_graph_table_image_without_flattening():
 
     assert bundle.gaps[0].id == "gap-assay"
     assert bundle.gaps[0].status.value == "open"
+    assert bundle.required_capability_ids == ["mesh.solve"]
+    assert bundle.handoff_policy.required_item_ids == ["graph-1"]
+    assert bundle.continuation.step == 2
 
     # renderings carry the legacy text view only -- it may differ freely without moving item hashes
     hashes_before = {item.id: item.content_hash for item in bundle.items}

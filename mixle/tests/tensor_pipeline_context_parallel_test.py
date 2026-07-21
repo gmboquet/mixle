@@ -39,8 +39,8 @@ except ImportError:
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class TensorParallelTest(unittest.TestCase):
     def test_tp_attention_matches_dense_attention(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import tp_attention_forward, tp_shard_attention
         from mixle.models.transformer import CausalAttention
-        from mixle.utils.parallel.tensor_pipeline_context_parallel import tp_attention_forward, tp_shard_attention
 
         torch.manual_seed(0)
         d_model, n_head, b, t = 64, 8, 3, 16
@@ -58,8 +58,8 @@ class TensorParallelTest(unittest.TestCase):
                 )
 
     def test_tp_shard_causal_lm_matches_dense_forward(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import tp_forward_causal_lm, tp_shard_causal_lm
         from mixle.models.transformer import build_causal_lm
-        from mixle.utils.parallel.tensor_pipeline_context_parallel import tp_forward_causal_lm, tp_shard_causal_lm
 
         torch.manual_seed(1)
         vocab, d_model, n_layer, n_head, block = 37, 48, 3, 6, 12
@@ -76,8 +76,8 @@ class TensorParallelTest(unittest.TestCase):
                 )
 
     def test_tp_requires_head_divisible_shard_count(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import tp_shard_attention
         from mixle.models.transformer import CausalAttention
-        from mixle.utils.parallel.tensor_pipeline_context_parallel import tp_shard_attention
 
         attn = CausalAttention(32, 4)
         with self.assertRaises(AssertionError):
@@ -87,8 +87,8 @@ class TensorParallelTest(unittest.TestCase):
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class PipelineParallelTest(unittest.TestCase):
     def test_pp_partition_and_pipeline_forward_match_dense(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import pipeline_forward, pp_partition_causal_lm
         from mixle.models.transformer import build_causal_lm
-        from mixle.utils.parallel.tensor_pipeline_context_parallel import pipeline_forward, pp_partition_causal_lm
 
         torch.manual_seed(2)
         vocab, d_model, n_layer, n_head, block = 29, 32, 6, 4, 10
@@ -108,8 +108,8 @@ class PipelineParallelTest(unittest.TestCase):
                     )
 
     def test_pp_stages_own_disjoint_contiguous_blocks(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import pp_partition_causal_lm
         from mixle.models.transformer import build_causal_lm
-        from mixle.utils.parallel.tensor_pipeline_context_parallel import pp_partition_causal_lm
 
         model = build_causal_lm(11, d_model=16, n_layer=7, n_head=2, block=8)
         stages = pp_partition_causal_lm(model, 3)
@@ -125,8 +125,8 @@ class PipelineParallelTest(unittest.TestCase):
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class ContextParallelTest(unittest.TestCase):
     def test_cp_attention_matches_dense_attention(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import cp_attention_forward, cp_shard_sequence
         from mixle.models.transformer import CausalAttention
-        from mixle.utils.parallel.tensor_pipeline_context_parallel import cp_attention_forward, cp_shard_sequence
 
         torch.manual_seed(3)
         d_model, n_head, b, t = 40, 4, 2, 24
@@ -146,9 +146,9 @@ class ContextParallelTest(unittest.TestCase):
                 )
 
     def test_cp_forward_causal_lm_matches_dense_all_positions(self):
+        from mixle.experimental.tensor_pipeline_context_parallel import cp_forward_causal_lm
         from mixle.models.language_model import _forward_all_positions
         from mixle.models.transformer import build_causal_lm
-        from mixle.utils.parallel.tensor_pipeline_context_parallel import cp_forward_causal_lm
 
         torch.manual_seed(4)
         vocab, d_model, n_layer, n_head, block = 23, 32, 3, 4, 24
@@ -225,12 +225,12 @@ def _tp_real_worker(rank, world_size, model_state, x_cpu, cfg, result_queue):
     import torch.distributed as dist
     import torch.nn.functional as F
 
-    from mixle.models.transformer import build_causal_lm
-    from mixle.utils.parallel.tensor_pipeline_context_parallel import (
+    from mixle.experimental.tensor_pipeline_context_parallel import (
         ColumnParallelLinear,
         RowParallelLinear,
         tp_shard_attention,
     )
+    from mixle.models.transformer import build_causal_lm
 
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", "29511")

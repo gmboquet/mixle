@@ -79,7 +79,7 @@ class MaturityPolicyConsistencyTest(unittest.TestCase):
 
     def test_stable_surfaces_are_the_documented_core(self):
         stable = {k for k, (tier, _) in MATURITY_REGISTRY.items() if tier is Maturity.STABLE}
-        self.assertEqual(stable, {"mixle.stats", "mixle.inference"})
+        self.assertEqual(stable, {"mixle.stats", "mixle.inference", "mixle.semantics"})
 
 
 if __name__ == "__main__":

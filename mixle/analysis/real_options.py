@@ -49,7 +49,7 @@ from mixle.reason.posterior_protocol import Posterior
 if TYPE_CHECKING:
     from mixle.analysis.valuation import NPVDistribution
 
-__all__ = ["OptionValue", "real_option_value", "voi_dollars"]
+__all__ = ["OptionValue", "real_option_value", "voi_dollars", "VoiStoppingDecision", "voi_stopping_decision"]
 
 _KINDS = ("defer", "expand", "abandon")
 
@@ -113,11 +113,15 @@ def real_option_value(
             mean is used; ``real_option_value`` prices the *option on top of* the point estimate, not a
             re-derivation of the distribution itself.
         volatility: fractional (per-sqrt-period) dispersion of NPV around its mean. Must be ``>= 0``;
-            ``0`` means no dispersion and the option collapses to the naive ``max(npv_dist.mean, 0)``.
+            ``0`` means no dispersion and the option collapses to immediate exercise of ``kind``'s own
+            payoff on ``npv_dist.mean`` (:func:`_intrinsic`) -- ``max(npv_dist.mean, 0)`` for
+            ``"defer"``/``"abandon"``, ``npv_dist.mean + expand_fraction * max(npv_dist.mean, 0)`` for
+            ``"expand"``.
         horizon: number of periods over which the option may be exercised. ``0`` means "decide now".
         kind: one of ``"defer"``, ``"expand"``, ``"abandon"``.
         rate: per-period discount rate applied to the continuation value.
-        n_steps: lattice steps (defaults to ``max(horizon, 1)``, i.e. one step per period).
+        n_steps: lattice steps (defaults to ``max(horizon, 1)``, i.e. one step per period). Must be a
+            positive integer when given explicitly.
         expand_fraction: for ``kind="expand"``, the fractional capacity bonus applied to a positive
             underlying value when the expansion is exercised.
 
@@ -130,6 +134,11 @@ def real_option_value(
         raise ValueError("real_option_value: volatility must be non-negative")
     if horizon < 0:
         raise ValueError("real_option_value: horizon must be non-negative")
+    if n_steps is not None and n_steps <= 0:
+        # n_steps=0 with horizon>0 divides by zero below; n_steps<0 builds an EMPTY lattice and then
+        # indexes boundary[n] == boundary[-1] on it, raising a confusing IndexError three lines later.
+        # One clear error at the boundary instead of two different internal crashes downstream.
+        raise ValueError(f"real_option_value: n_steps must be a positive integer, got {n_steps}")
 
     npv_mean = float(npv_dist.mean)
     n = int(n_steps) if n_steps is not None else max(int(horizon), 1)
@@ -138,9 +147,11 @@ def real_option_value(
     h = volatility * scale * float(np.sqrt(dt))
 
     if h == 0.0:
-        # No dispersion (or no time to disperse in): waiting has no upside, and discounting only makes it
-        # worse, so the optimal policy is "exercise now if positive, else never" -- the naive NPV floor.
-        value = max(npv_mean, 0.0)
+        # No dispersion (or no time to disperse in): waiting has no upside, and discounting only makes
+        # it worse, so the optimal policy is immediate exercise -- the SAME payoff _intrinsic gives
+        # every node of the lattice below, not a hardcoded max(npv_mean, 0.0) (which happens to match
+        # _intrinsic for "defer"/"abandon" but silently ignores "expand"'s expand_fraction bonus).
+        value = float(_intrinsic(np.array([npv_mean]), kind, expand_fraction)[0])
         boundary = np.full(n + 1, np.nan)
         return OptionValue(value=value, exercise_boundary=boundary, premium_over_npv=value - npv_mean)
 
@@ -260,3 +271,53 @@ def voi_dollars(
     value_with_info = float(np.mean(values_with_info))
 
     return max(value_with_info - value_no_info, 0.0)
+
+
+class VoiStoppingDecision(NamedTuple):
+    """A real decision-theoretic answer to "should we sample again?": compare the value of one more
+    sample against its cost, rather than an arbitrary uncertainty threshold picked by hand."""
+
+    voi_dollars: float
+    sample_cost: float
+    net_value: float
+    keep_sampling: bool
+
+
+def voi_stopping_decision(
+    posterior: Posterior,
+    decision_fn: Callable[[np.ndarray], float],
+    drill_info: dict[str, Any],
+    *,
+    sample_cost: float,
+    rng: np.random.Generator,
+    n_outer: int = 64,
+    n_inner: int = 256,
+) -> VoiStoppingDecision:
+    """Should the next sample (drillhole, monitoring well, survey station, ...) actually be taken?
+
+    A real, principled alternative to picking an uncertainty threshold by hand and telling an LLM
+    loop-controller to stop when it's cleared (the pattern used, and flagged as a real gap, in
+    ``experiments/adaptive-groundwater-monitoring`` and ``experiments/adaptive-gravity-survey-design``):
+    sample again iff :func:`voi_dollars` -- the actual expected dollar value the next sample would add
+    to the decision -- exceeds what that sample costs. As uncertainty tightens, ``voi_dollars`` shrinks
+    toward zero (there's less left to learn that would change the decision), so this converges to a
+    stopping rule on its own without any separately-chosen threshold; the only free parameter is
+    ``sample_cost``, which is an actual real-world number (drilling/survey cost) rather than an
+    arbitrary uncertainty width.
+
+    Args:
+        posterior, decision_fn, drill_info, rng, n_outer, n_inner: forwarded to :func:`voi_dollars`
+            unchanged -- see its docstring for what each means.
+        sample_cost: the real dollar cost of taking the next sample.
+
+    Returns:
+        A :class:`VoiStoppingDecision`: the computed VOI, the cost it was compared against, their
+        difference, and whether sampling should continue (``voi_dollars > sample_cost``).
+    """
+    voi = voi_dollars(posterior, decision_fn, drill_info, rng=rng, n_outer=n_outer, n_inner=n_inner)
+    return VoiStoppingDecision(
+        voi_dollars=voi,
+        sample_cost=float(sample_cost),
+        net_value=voi - float(sample_cost),
+        keep_sampling=voi > float(sample_cost),
+    )

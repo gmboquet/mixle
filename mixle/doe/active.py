@@ -117,14 +117,28 @@ def expected_information_gain_linear(
     """Exact expected information gain of a linear-Gaussian design ``y = F.theta + eps`` (= Bayesian D-opt).
 
     For a Gaussian prior ``theta ~ N(0, Sigma0)`` and observation noise ``eps ~ N(0, noise^2 I)``, the
-    mutual information between the data and ``theta`` is ``0.5 * log det(I + noise^-2 Sigma0 F^T F)``.
+    mutual information between the data and ``theta`` is ``0.5 * log det(I_p + noise^-2 Sigma0 F^T F)``.
     ``model_matrix`` is the ``(n, p)`` design matrix ``F`` (e.g. from
     :func:`mixle.doe.optimal.polynomial_features`). Higher EIG = a more informative design.
+
+    By Sylvester's determinant identity, ``det(I_p + Sigma0 F^T F / noise^2) == det(I_n + F Sigma0 F^T
+    / noise^2)`` exactly -- the two sides differ only in which of the ``(p, p)`` or ``(n, n)`` matrix
+    gets formed and factorized. This function forms whichever is smaller. That matters beyond
+    speed: scoring a handful of candidate observations (``n`` small, e.g. a few new monitoring
+    sites) against a model with many parameters (``p`` large, e.g. hundreds of grid cells) is exactly
+    this function's typical caller (:mod:`mixle_pde.monitoring_design`,
+    :mod:`mixle_pde.geophysics`), and forming the full dense ``(p, p)`` matrix in that regime is
+    reliably ill-conditioned for ``slogdet`` -- verified to throw spurious divide-by-zero/overflow
+    ``RuntimeWarning``s on a real ``p=720`` case that the ``(n, n)`` formulation computes cleanly
+    (identical value, to float64 precision, with zero warnings).
     """
     f = np.asarray(model_matrix, dtype=np.float64)
-    p = f.shape[1]
+    n, p = f.shape
     sigma0 = np.eye(p) if prior_cov is None else np.asarray(prior_cov, dtype=np.float64)
-    m = np.eye(p) + (sigma0 @ (f.T @ f)) / (float(noise) ** 2)
+    if n <= p:
+        m = np.eye(n) + (f @ sigma0 @ f.T) / (float(noise) ** 2)
+    else:
+        m = np.eye(p) + (sigma0 @ (f.T @ f)) / (float(noise) ** 2)
     sign, logdet = np.linalg.slogdet(m)
     return float(0.5 * logdet) if sign > 0 else -np.inf
 

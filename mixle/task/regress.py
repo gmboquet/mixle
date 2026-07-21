@@ -121,9 +121,17 @@ def _fit_reg_mlp(x: np.ndarray, y: np.ndarray, hidden: Sequence[int], epochs: in
 
     torch.manual_seed(seed)
     dims = [x.shape[1], *hidden, 1]
+    # Build every layer at an explicit float32, independent of torch's process-global default
+    # dtype. Leaving `dtype` unset makes `Linear` follow `torch.get_default_dtype()`, and callers
+    # (mixle_pde in particular sets `torch.set_default_dtype(torch.float64)` throughout its own PDE
+    # code, both in production paths and dozens of test files) routinely leave that global at
+    # float64 -- `xt`/`yt` below are already explicitly float32, so an ambient float64 default only
+    # poisons the net's own weights, and `net(xt)` then dies with "mat1 and mat2 must have the same
+    # dtype, but got Float and Double". Pinning the layer dtype here makes this function's contract
+    # (always trains and returns a float32 module) hold regardless of any caller's ambient state.
     layers: list[Any] = []
     for i in range(len(dims) - 1):
-        layers.append(torch.nn.Linear(dims[i], dims[i + 1]))
+        layers.append(torch.nn.Linear(dims[i], dims[i + 1], dtype=torch.float32))
         if i < len(dims) - 2:
             layers.append(torch.nn.ReLU())
     net = torch.nn.Sequential(*layers)

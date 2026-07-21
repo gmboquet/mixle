@@ -271,7 +271,9 @@ class ErdosRenyiGraphSampler(DistributionSampler):
             np.fill_diagonal(mat, diag)
         return mat
 
-    def sample(self, size: int | None = None, num_nodes: int | None = None) -> np.ndarray | list[np.ndarray]:
+    def sample(
+        self, size: int | None = None, num_nodes: int | None = None, *, batched: bool = True
+    ) -> np.ndarray | list[np.ndarray]:
         """Draw one graph or a list of graphs."""
         if size is None:
             return self.sample_graph(num_nodes=num_nodes)

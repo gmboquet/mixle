@@ -159,7 +159,7 @@ class PowerLawHawkesSampler(DistributionSampler):
         order = np.argsort(times)
         return np.asarray(times)[order], np.asarray(marks)[order]
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw one catalogue or a list of catalogues by the branching construction."""
         if size is None:
             return self._sample_one()

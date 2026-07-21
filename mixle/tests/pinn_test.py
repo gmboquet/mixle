@@ -168,7 +168,10 @@ class PINNRegressionSerializationTest(unittest.TestCase):
             name="ode-model",
         )
         payload = model.to_dict()
-        restored = PINNRegression.from_dict(payload)
+        from mixle.utils.serialization import trusted_deserialization
+
+        with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+            restored = PINNRegression.from_dict(payload)
 
         grid = np.linspace(-2.0, 2.0, 5)[:, None]
         np.testing.assert_allclose(model._forward(grid), restored._forward(grid), atol=1e-6)

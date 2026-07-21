@@ -523,7 +523,7 @@ class CategoricalSampler(DistributionSampler):
         self.probs = [u[1] for u in temp]
         self.num_levels = len(self.levels)
 
-    def sample(self, size: int | None = None) -> Any | list[Any]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> Any | list[Any]:
         """Draw iid samples from the categorical distribution.
 
         Args:

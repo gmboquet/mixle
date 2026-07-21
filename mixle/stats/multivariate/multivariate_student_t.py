@@ -293,7 +293,7 @@ class MultivariateStudentTSampler(DistributionSampler):
         self.dist = dist
         self.chol = np.linalg.cholesky(dist.shape)
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         """Draw ``size`` iid vectors (shape (p,) when size is None, else (size, p))."""
         sz = 1 if size is None else size
         p = self.dist.dim

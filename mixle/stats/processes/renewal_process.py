@@ -134,7 +134,7 @@ class RenewalProcessSampler(DistributionSampler):
             events.append(t)
         return np.asarray(events, dtype=np.float64)
 
-    def sample(self, size: int | None = None) -> np.ndarray | list[np.ndarray]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray | list[np.ndarray]:
         """Draw one realization, or ``size`` iid realizations, on the fixed window."""
         if size is None:
             return self._sample_one()

@@ -9,12 +9,14 @@ mixle's own distribution modules.
 from __future__ import annotations
 
 import base64
+import contextlib
+import contextvars
 import importlib
 import inspect
 import json
 import math
 import pkgutil
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 import numpy as np
@@ -34,9 +36,48 @@ _CALLABLE_IDS: dict[Callable[..., Any], str] = {}
 _REGISTRY_READY = False
 _OPTIONAL_IMPORT_NAMES = {"torch", "umap", "pyspark"}
 
+# Trust gate for code-executing deserialization (currently: an embedded torch module, persisted as a
+# full-object pickle -- see mixle.models._neural_serial). The type-tagged registry walk above this gate
+# is closed (only registered mixle classes are reconstructed, never an arbitrary imported class), but a
+# NeuralLeaf-family object's state embeds a pickle blob that DOES execute arbitrary code on load, which
+# defeats that guarantee wherever such a leaf is nested. Default-closed: any decode that reaches an
+# embedded module blob without this gate open raises SerializationError instead of silently unpickling
+# it, so "this artifact is JSON-format" is no longer a false safety claim. Callers that DO trust the
+# artifact's source open the gate explicitly with :func:`trusted_deserialization`.
+_TRUST_CODE_EXECUTION: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "mixle_trust_code_execution", default=False
+)
+
 
 class SerializationError(ValueError):
     """Raised when an object cannot be serialized or decoded safely."""
+
+
+def deserialization_is_trusted() -> bool:
+    """Whether the current context has opted into code-executing deserialization.
+
+    Checked by :mod:`mixle.models._neural_serial` before unpickling an embedded torch module. Not
+    needed for the ordinary registry-based path (:func:`from_serializable` on a payload with no
+    embedded module blob), which never executes code regardless of this flag.
+    """
+    return _TRUST_CODE_EXECUTION.get()
+
+
+@contextlib.contextmanager
+def trusted_deserialization() -> Iterator[None]:
+    """Permit code-executing deserialization (an embedded torch module) for this ``with`` block.
+
+    Only enter this around an artifact whose SOURCE you trust: within the block, decoding a
+    NeuralLeaf-family object (or anything else that persists live code/objects via pickle) executes
+    that pickle's ``__reduce__``/``__setstate__`` arbitrarily, exactly like ``pickle.load`` on an
+    untrusted file. Nested/re-entrant use is safe (the gate stays open until the outermost block
+    exits); safe to use across threads/async tasks via ``contextvars`` propagation.
+    """
+    token = _TRUST_CODE_EXECUTION.set(True)
+    try:
+        yield
+    finally:
+        _TRUST_CODE_EXECUTION.reset(token)
 
 
 def _type_id(cls: type[Any]) -> str:
@@ -143,6 +184,19 @@ def ensure_pysp_serialization_registry() -> None:
         structure = importlib.import_module("mixle.inference.structure")
         for _, cls in inspect.getmembers(structure, inspect.isclass):
             if cls.__module__ == structure.__name__ and getattr(cls, "__pysp_serializable__", False):
+                register_serializable_class(cls)
+    except Exception:  # noqa: BLE001
+        # Optional: the core stats registry above is enough for pure-stats models.
+        pass
+
+    # Heterogeneous Bayesian networks (HeterogeneousBayesianNetwork + its per-child factor classes) live
+    # in mixle.inference.bayesian_network -- same opt-in mechanism, same reason: optimize(data)'s automatic
+    # structure-discovery path (F10.1) returns one of these, and it must survive a save/reload round trip
+    # through the same safe json artifact path as everything else, not fall back to raw pickle.
+    try:
+        bn = importlib.import_module("mixle.inference.bayesian_network")
+        for _, cls in inspect.getmembers(bn, inspect.isclass):
+            if cls.__module__ == bn.__name__ and getattr(cls, "__pysp_serializable__", False):
                 register_serializable_class(cls)
     except Exception:  # noqa: BLE001
         # Optional: the core stats registry above is enough for pure-stats models.

@@ -499,7 +499,9 @@ class IntegerHiddenAssociationSampler(DistributionSampler):
 
         return list(count_by_value(v2).items())
 
-    def sample(self, size: int | None = None) -> Sequence[list[tuple[int, float]]] | list[tuple[int, float]]:
+    def sample(
+        self, size: int | None = None, *, batched: bool = True
+    ) -> Sequence[list[tuple[int, float]]] | list[tuple[int, float]]:
         """Draw iid grouped-count observations from the integer hidden association model.
 
         Args:
