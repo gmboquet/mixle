@@ -99,6 +99,20 @@ def test_min_cost_flow_infeasible_raises():
         pass
 
 
+def test_min_cost_flow_unbalanced_supply_raises_value_error():
+    # supply must sum to ~zero; this used to be a bare `assert` (an AssertionError, stripped
+    # entirely under `python -O`) instead of the ValueError every other input-validation path here
+    # raises.
+    cap = np.array([[0.0, 1.0], [0.0, 0.0]])
+    cost = np.array([[0.0, 1.0], [0.0, 0.0]])
+    supply = np.array([5.0, -3.0])  # does not sum to zero
+    try:
+        min_cost_flow(cap, cost, supply)
+        raise AssertionError("expected ValueError for unbalanced supply")
+    except ValueError:
+        pass
+
+
 def test_multicommodity_flow_respects_shared_capacity_and_cost():
     # nodes: 0 srcA, 1 srcB, 2 trunk-in, 3 trunk-out, 4 sinkA, 5 sinkB
     n = 6

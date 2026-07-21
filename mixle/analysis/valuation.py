@@ -35,6 +35,7 @@ those tasks land, since both already produce array-likes of that shape.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
@@ -257,17 +258,29 @@ def _align_price_paths(price_paths: Any, n: int, n_periods: int, rng: np.random.
     return prices[idx]
 
 
-def _call_cost_model(cost_model: Callable, t: int, tonnage_t: float) -> float:
-    """Call ``cost_model`` as ``cost_model(t, tonnage_t)``, falling back to ``cost_model(t)``.
+def _cost_model_accepts_tonnage(cost_model: Callable) -> bool:
+    try:
+        return len(inspect.signature(cost_model).parameters) >= 2
+    except (TypeError, ValueError):
+        # a builtin/C callable or anything else signature() can't introspect: assume the
+        # single-argument form rather than risk invoking `cost_model` twice on unrelated errors.
+        return False
+
+
+def _call_cost_model(cost_model: Callable, t: int, tonnage_t: float, *, accepts_tonnage: bool) -> float:
+    """Call ``cost_model`` as ``cost_model(t, tonnage_t)`` if it takes two args, else ``cost_model(t)``.
 
     ``cost_model`` is opaque to this module (DR-ALG J2 writes it simply as ``opex_t(cost_model)``); a
-    caller closing over :func:`cost_curve` (J4) typically needs the period's tonnage too, so the two-arg
-    form is tried first and a plain ``TypeError`` (arity mismatch) falls back to the one-arg form.
+    caller closing over :func:`cost_curve` (J4) typically needs the period's tonnage too. Arity is
+    determined once up front via ``accepts_tonnage`` (see :func:`_cost_model_accepts_tonnage`) rather
+    than by catching ``TypeError`` from the call itself -- a ``TypeError`` raised *inside*
+    ``cost_model(t, tonnage_t)`` for an unrelated reason used to be misread as an arity mismatch and
+    silently retried as ``cost_model(t)``, invoking ``cost_model`` a second time and masking the real
+    error.
     """
-    try:
+    if accepts_tonnage:
         return float(cost_model(t, tonnage_t))
-    except TypeError:
-        return float(cost_model(t))
+    return float(cost_model(t))
 
 
 def _npv_samples(
@@ -336,7 +349,10 @@ def monte_carlo_npv(
 
     price_per_period = _align_price_paths(price_paths, n, n_periods, rng)
 
-    opex = np.array([_call_cost_model(cost_model, t, float(tonnage[t])) for t in range(n_periods)])
+    accepts_tonnage = _cost_model_accepts_tonnage(cost_model)
+    opex = np.array(
+        [_call_cost_model(cost_model, t, float(tonnage[t]), accepts_tonnage=accepts_tonnage) for t in range(n_periods)]
+    )
     discount = 1.0 / (1.0 + float(discount_rate)) ** np.arange(n_periods, dtype=np.float64)
 
     npv = _npv_samples(grade_per_period, price_per_period, tonnage, opex, capex, discount)

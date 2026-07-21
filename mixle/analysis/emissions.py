@@ -23,18 +23,20 @@ GHG-Protocol-style :class:`EmissionFactors`.
 Emission factors are always supplied by the caller (or an upstream knowledge store) -- this module
 vendors no lifecycle-inventory database; see the work-plan Non-goals for L1.
 
-Repo-boundary note (L6): L2's `WaterBudget` (a dataclass in the separate `mixle-pde` repo) had not
-landed on this branch as of L6's PR and is never imported here; ``water`` is typed as the forward-
-reference string ``"WaterBudget | None"`` exactly as the frozen signature specifies, and any object
-exposing a ``.shortfall_m3`` float and (optionally) a ``.storage`` array and/or ``.provenance`` dict
-duck-types against it, so this module has no runtime dependency on `mixle-pde` landing first.
+Repo-boundary note (L6): L2's `WaterBudget` (a dataclass in the separate `mixle-pde` repo) is not a
+dependency of mixle core and is never imported here; ``water`` duck-types against the local
+:class:`WaterBudget` structural stand-in below (any object exposing a ``.shortfall_m3`` float and,
+optionally, ``.storage``/``.provenance``/``.demand_m3`` satisfies it), so this module has no runtime
+dependency on `mixle-pde`. The stand-in is a real name in THIS module's namespace -- unlike the bare
+forward-reference string ``"WaterBudget | None"`` this replaced, which named an import that never
+happens and left ``climate_terms``'s annotation unresolvable to ``typing.get_type_hints()``.
 """
 
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -47,8 +49,27 @@ __all__ = [
     "emissions_footprint",
     "TransitionRiskResult",
     "transition_risk",
+    "WaterBudget",
     "climate_terms",
 ]
+
+
+@runtime_checkable
+class WaterBudget(Protocol):
+    """Structural stand-in for L2's `WaterBudget` (mixle-pde) -- see the module's repo-boundary note.
+
+    Never constructed here; a real ``WaterBudget`` (or anything shaped like one) is passed in and
+    duck-typed via ``getattr(water, ..., default)`` throughout this module, so a caller-supplied
+    object satisfying only ``shortfall_m3`` (the one required field) still works -- the optional
+    fields default to absent, matching the "or None if absent" fallbacks already documented on
+    :func:`_water_demand_m3` and :func:`_shortfall_probability`.
+    """
+
+    shortfall_m3: float
+    storage: Any = None
+    provenance: dict | None = None
+    demand_m3: float | None = None
+
 
 _VALID_SCOPES = (1, 2, 3)
 
@@ -327,7 +348,7 @@ def _shortfall_probability(water: Any, shortfall_m3: float) -> float:
 
 def climate_terms(
     footprint: Footprint,
-    water: "WaterBudget | None",  # noqa: F821, UP037  -- L2's WaterBudget (mixle-pde); duck-typed, not imported
+    water: WaterBudget | None,  # duck-typed against the local structural stand-in; see module docstring
     *,
     carbon_price: float,
     water_limit_m3: float | None = None,

@@ -64,6 +64,42 @@ class ExtractorTest(unittest.TestCase):
         self.assertEqual(out, [{"id": "1234", "vendor": "Acme"}])  # off-schema 'missing' dropped, absent omitted
 
 
+class CallableLLMTest(unittest.TestCase):
+    def test_single_arg_fn_is_called_once(self):
+        calls = []
+
+        def fn(prompt):
+            calls.append(prompt)
+            return "reply"
+
+        self.assertEqual(CallableLLM(fn).complete("hi", system="be terse"), "reply")
+        self.assertEqual(calls, ["hi"])
+
+    def test_two_arg_fn_is_called_once(self):
+        calls = []
+
+        def fn(prompt, system):
+            calls.append((prompt, system))
+            return "reply"
+
+        self.assertEqual(CallableLLM(fn).complete("hi", system="be terse"), "reply")
+        self.assertEqual(calls, [("hi", "be terse")])
+
+    def test_unrelated_type_error_inside_two_arg_fn_is_not_swallowed_by_a_retry(self):
+        # A TypeError raised *inside* fn(prompt, system) for a reason unrelated to arity used to be
+        # misread as "fn only takes one argument" and silently retried as fn(prompt) -- invoking fn
+        # a second time and masking the real error.
+        calls = []
+
+        def fn(prompt, system):
+            calls.append(prompt)
+            raise TypeError("boom: unrelated bug inside fn")
+
+        with self.assertRaises(TypeError):
+            CallableLLM(fn).complete("hi", system="be terse")
+        self.assertEqual(calls, ["hi"])  # called exactly once, not retried
+
+
 class OpenAICompatTest(unittest.TestCase):
     def test_request_shape_and_parse(self):
         captured = {}
