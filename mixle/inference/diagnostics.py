@@ -51,8 +51,13 @@ def rhat(chains: Any) -> np.ndarray:
     b = n * chain_means.var(axis=0, ddof=1)  # between-chain variance (d,)
     var_hat = (n - 1) / n * w + b / n
     with np.errstate(divide="ignore", invalid="ignore"):
-        out = np.sqrt(np.where(w > 0.0, np.maximum(var_hat / np.where(w > 0.0, w, 1.0), 0.0), 1.0))
-    return np.where(w > 0.0, out, 1.0)
+        finite = np.sqrt(np.maximum(var_hat / np.where(w > 0.0, w, 1.0), 0.0))
+    # w == 0 (every chain individually constant) used to hardcode R-hat to exactly 1.0 regardless
+    # of b -- masking the "chains stuck at different constant values" non-convergence signature
+    # (b > 0 with w == 0 is R-hat's actual w -> 0 limit: it diverges, it does not vanish to 1.0).
+    # Only w == 0 together with b == 0 (chains constant at the SAME value) is genuine convergence.
+    degenerate = np.where(b > 0.0, np.inf, 1.0)
+    return np.where(w > 0.0, finite, degenerate)
 
 
 def _geyer_tau(centered: np.ndarray, var: np.ndarray, lag_limit: int) -> np.ndarray:
@@ -278,5 +283,15 @@ def geweke_z(chain: Any, first: float = 0.1, last: float = 0.5) -> np.ndarray:
         var_a = a[:, k].var(ddof=1) / max(float(ess(a[:, k][None, :, None])[0]), 1.0)
         var_b = b[:, k].var(ddof=1) / max(float(ess(b[:, k][None, :, None])[0]), 1.0)
         denom = np.sqrt(var_a + var_b)
-        z[k] = (a[:, k].mean() - b[:, k].mean()) / denom if denom > 0 else 0.0
+        diff = float(a[:, k].mean() - b[:, k].mean())
+        if denom > 0:
+            z[k] = diff / denom
+        elif diff != 0.0:
+            # both segments are individually constant (denom == 0) but at DIFFERENT values -- this
+            # used to hardcode z=0.0 ("converged"), exactly masking the "chain jumped to a different
+            # constant" non-stationarity Geweke's test exists to catch. Signed infinity reflects the
+            # z -> +-inf limit as denom -> 0 with a genuine nonzero mean shift.
+            z[k] = np.inf if diff > 0 else -np.inf
+        else:
+            z[k] = 0.0
     return z

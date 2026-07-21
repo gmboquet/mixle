@@ -65,6 +65,38 @@ class VuongClarkeTest(unittest.TestCase):
         self.assertIn(res["favored"], ("B", "tie"))
 
 
+class PairedValidationTest(unittest.TestCase):
+    """Regression: none of the four comparison functions validated their paired inputs, so a
+    length mismatch silently broadcast (numpy) into a confidently-wrong verdict instead of an
+    error, and n=1 starved the ddof=1 standard deviation into NaN, which then silently resolved
+    to a specific favored side (NaN comparisons are always False) instead of raising or tying."""
+
+    def test_paired_score_difference_rejects_mismatched_lengths(self):
+        with self.assertRaises(ValueError):
+            paired_score_difference(np.zeros(5), np.zeros(1))
+
+    def test_vuong_rejects_mismatched_lengths(self):
+        with self.assertRaises(ValueError):
+            vuong_test(np.zeros(5), np.zeros(1))
+
+    def test_clarke_rejects_mismatched_lengths(self):
+        with self.assertRaises(ValueError):
+            clarke_test(np.zeros(5), np.zeros(1))
+
+    def test_compare_elpd_rejects_mismatched_lengths(self):
+        with self.assertRaises(ValueError):
+            compare_elpd(np.zeros(5), np.zeros(1))
+
+    def test_vuong_rejects_single_observation_instead_of_a_confident_verdict(self):
+        with self.assertRaises(ValueError):
+            vuong_test(np.array([1.0]), np.array([2.0]))
+
+    def test_all_four_reject_nonfinite_input(self):
+        for fn in (paired_score_difference, vuong_test, clarke_test, compare_elpd):
+            with self.assertRaises(ValueError):
+                fn(np.array([1.0, np.nan, 2.0]), np.array([1.0, 2.0, 3.0]))
+
+
 class CompareElpdTest(unittest.TestCase):
     def test_favors_higher_elpd(self):
         rng = np.random.RandomState(2)
