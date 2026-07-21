@@ -114,6 +114,12 @@ class CoxResult:
         baseline_time / baseline_cumhaz: Breslow baseline cumulative hazard.
         concordance: Harrell's C-index.
         n_iter: Newton iterations.
+        converged: whether Newton's method reached ``tol`` with a finite, well-identified fit.
+            ``False`` means either it hit ``max_iter`` without reaching ``tol``, a step produced a
+            non-finite iterate (kept the last finite one instead), or the final standard errors are
+            enormous -- the classic symptom of (quasi-)complete separation, where the partial
+            likelihood has no finite maximizer and Newton's steps can shrink below ``tol`` while the
+            coefficients themselves keep drifting toward infinity.
     """
 
     coef: np.ndarray
@@ -124,6 +130,7 @@ class CoxResult:
     baseline_cumhaz: np.ndarray
     concordance: float
     n_iter: int
+    converged: bool
 
     def hazard_ratios(self) -> np.ndarray:
         """Return exponentiated Cox coefficients."""
@@ -197,52 +204,75 @@ def cox_ph(
 
     beta = np.zeros(p)
     n_iter = 0
+    converged = False
     for n_iter in range(1, max_iter + 1):
         grad = np.zeros(p)
         hess = np.zeros((p, p))
-        for s in np.unique(strata):
-            sm = strata == s
-            Xs, ts, es, sts = X[sm], time[sm], event[sm], start[sm]
-            for et in np.unique(ts[es == 1]):
-                risk = (sts < et) & (ts >= et)
-                tied = (ts == et) & (es == 1)
-                if not np.any(risk):
-                    continue
-                Xr = Xs[risk]
-                theta = np.exp(Xr @ beta)
-                Xd = Xs[tied]
-                d = Xd.shape[0]
-                if ties == "breslow" or d == 1:
-                    s0 = theta.sum()
-                    s1 = theta @ Xr
-                    s2 = (Xr * theta[:, None]).T @ Xr
-                    grad += Xd.sum(axis=0) - d * s1 / s0
-                    hess -= d * (s2 / s0 - np.outer(s1, s1) / s0**2)
-                else:  # Efron
-                    theta_d = np.exp(Xd @ beta)
-                    s0_full = theta.sum()
-                    s1_full = theta @ Xr
-                    s2_full = (Xr * theta[:, None]).T @ Xr
-                    sd0 = theta_d.sum()
-                    sd1 = theta_d @ Xd
-                    sd2 = (Xd * theta_d[:, None]).T @ Xd
-                    grad += Xd.sum(axis=0)
-                    for ell in range(d):
-                        f = ell / d
-                        a0 = s0_full - f * sd0
-                        a1 = s1_full - f * sd1
-                        a2 = s2_full - f * sd2
-                        grad -= a1 / a0
-                        hess -= a2 / a0 - np.outer(a1, a1) / a0**2
-        step = np.linalg.solve(hess, grad)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            for s in np.unique(strata):
+                sm = strata == s
+                Xs, ts, es, sts = X[sm], time[sm], event[sm], start[sm]
+                for et in np.unique(ts[es == 1]):
+                    risk = (sts < et) & (ts >= et)
+                    tied = (ts == et) & (es == 1)
+                    if not np.any(risk):
+                        continue
+                    Xr = Xs[risk]
+                    theta = np.exp(Xr @ beta)
+                    Xd = Xs[tied]
+                    d = Xd.shape[0]
+                    if ties == "breslow" or d == 1:
+                        s0 = theta.sum()
+                        s1 = theta @ Xr
+                        s2 = (Xr * theta[:, None]).T @ Xr
+                        grad += Xd.sum(axis=0) - d * s1 / s0
+                        hess -= d * (s2 / s0 - np.outer(s1, s1) / s0**2)
+                    else:  # Efron
+                        theta_d = np.exp(Xd @ beta)
+                        s0_full = theta.sum()
+                        s1_full = theta @ Xr
+                        s2_full = (Xr * theta[:, None]).T @ Xr
+                        sd0 = theta_d.sum()
+                        sd1 = theta_d @ Xd
+                        sd2 = (Xd * theta_d[:, None]).T @ Xd
+                        grad += Xd.sum(axis=0)
+                        for ell in range(d):
+                            f = ell / d
+                            a0 = s0_full - f * sd0
+                            a1 = s1_full - f * sd1
+                            a2 = s2_full - f * sd2
+                            grad -= a1 / a0
+                            hess -= a2 / a0 - np.outer(a1, a1) / a0**2
+        if not (np.all(np.isfinite(grad)) and np.all(np.isfinite(hess))):
+            break  # divergence overflowed the risk-set accumulators (e.g. exp(x @ beta)): stop here
+        try:
+            step = np.linalg.solve(hess, grad)
+        except np.linalg.LinAlgError:
+            break  # singular Hessian (e.g. complete separation): keep the last finite iterate
         beta_new = beta - step
-        if np.max(np.abs(beta_new - beta)) < tol:
-            beta = beta_new
-            break
+        if not np.all(np.isfinite(beta_new)):
+            break  # divergence: keep the last finite iterate rather than poisoning beta with NaN/inf
+        delta = np.max(np.abs(beta_new - beta))
         beta = beta_new
+        if delta < tol:
+            converged = True
+            break
 
-    cov = np.linalg.inv(-hess)
-    se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    if np.all(np.isfinite(hess)):
+        # pinv, not inv: a (quasi-)singular Hessian under separation must not crash here
+        cov = np.linalg.pinv(-hess)
+        se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    else:
+        cov = np.full((p, p), np.nan)
+        se = np.full(p, np.inf)
+        converged = False
+    if not np.all(np.isfinite(se)) or np.any(se > 1.0e6):
+        # An enormous standard error is the classic symptom of (quasi-)complete separation: the
+        # partial likelihood has no finite maximizer, so Newton's steps can shrink below `tol`
+        # while beta itself keeps drifting -- a step-size "converged" verdict alone would be
+        # indistinguishable from a genuine, well-identified fit (observed repro: coef=27.17,
+        # se=67e6, every step still satisfying `tol`).
+        converged = False
 
     # partial log-likelihood (under the requested ties handling) and Breslow baseline cumulative hazard
     loglik = 0.0
@@ -271,7 +301,17 @@ def cox_ph(
     base_h = np.asarray(base_h)[order]
     risk_score = X @ beta
     conc = _concordance(risk_score, time, event)
-    return CoxResult(beta, se, cov, float(loglik), base_t, base_h, conc, n_iter)
+    return CoxResult(
+        coef=beta,
+        se=se,
+        cov=cov,
+        loglik=float(loglik),
+        baseline_time=base_t,
+        baseline_cumhaz=base_h,
+        concordance=conc,
+        n_iter=n_iter,
+        converged=converged,
+    )
 
 
 # --------------------------------------------------------------------------- discrete-time hazard
@@ -463,7 +503,7 @@ def frailty_cox(
     for n_iter in range(1, max_iter + 1):
         res = _cox_offset(X, time, event, log_w, ties=ties)
         risk_score = np.exp(X @ res)
-        base = _breslow_cumhaz(X, time, event, res)
+        base = _breslow_cumhaz(X, time, event, res, log_w)
         H = _cumhaz_at(np.unique(time[event == 1]), base, time)
         w_post = np.empty(len(uniq))
         theta_terms = []
@@ -526,13 +566,19 @@ def _cox_cov(X, time, event, offset, beta, *, ties="breslow"):
     return np.linalg.inv(-hess)
 
 
-def _breslow_cumhaz(X, time, event, beta):
+def _breslow_cumhaz(X, time, event, beta, offset):
+    """Breslow baseline cumulative hazard under a fixed per-observation ``offset`` (frailty log w_g).
+
+    ``_cox_offset``/``_cox_cov`` both include ``offset`` in the risk-set sum ``s0`` -- this must
+    match, or the baseline hazard (and the E-step expected-event-count it feeds in :func:`frailty_cox`)
+    is computed as if every group's frailty were exactly 1, silently wrong whenever the fitted
+    frailties actually differ from 1 (the entire point of fitting a frailty model)."""
     cum = 0.0
     out = []
     for et in np.unique(time[event == 1]):
         risk = time >= et
         tied = (time == et) & (event == 1)
-        s0 = np.exp(X[risk] @ beta).sum()
+        s0 = np.exp(X[risk] @ beta + offset[risk]).sum()
         cum += tied.sum() / s0
         out.append(cum)
     return np.asarray(out)

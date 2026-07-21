@@ -14,6 +14,7 @@ from mixle.inference import (
     nelson_aalen,
     to_person_period,
 )
+from mixle.inference.survival import _breslow_cumhaz
 
 
 class NonparametricTest(unittest.TestCase):
@@ -55,6 +56,32 @@ class CoxTest(unittest.TestCase):
         np.testing.assert_allclose(r.coef, beta, atol=0.12)
         self.assertTrue(np.all(r.se > 0))
         self.assertGreater(r.concordance, 0.65)
+        self.assertTrue(r.converged)  # well-identified data must not be spuriously flagged
+
+    def test_flags_nonconvergence_under_complete_separation(self):
+        # x=1 always fails strictly before every x=0 subject: the partial likelihood has no finite
+        # maximizer (beta -> +inf), so Newton's Hessian becomes exactly singular. Before the fix
+        # this crashed with a raw, unhandled LinAlgError instead of reporting a clear verdict.
+        n = 40
+        x = np.array([1.0] * (n // 2) + [0.0] * (n // 2)).reshape(-1, 1)
+        time = np.concatenate([np.arange(1, n // 2 + 1), np.arange(n // 2 + 1, n + 1)]).astype(float)
+        event = np.ones(n)
+        r = cox_ph(x, time, event, max_iter=50)
+        self.assertFalse(r.converged)
+
+    def test_flags_nonconvergence_under_quasi_separation(self):
+        # A continuous covariate whose rank almost perfectly determines the event order: no exactly
+        # singular Hessian, but beta drifts to a huge value while the step size still satisfies
+        # `tol` -- the "coef=27.17, se=67e6, indistinguishable from converged" repro this guards.
+        rng = np.random.RandomState(0)
+        n = 60
+        x = rng.normal(0, 1, n).reshape(-1, 1)
+        rank_time = np.argsort(np.argsort(-x[:, 0])).astype(float) + 1.0
+        time = rank_time + rng.normal(0, 0.01, n)
+        event = np.ones(n)
+        r = cox_ph(x, time, event, max_iter=50)
+        self.assertFalse(r.converged)
+        self.assertGreater(abs(r.coef[0]), 20.0)
 
     def test_efron_and_breslow_close(self):
         # With continuous event times there are effectively no exact ties, so Efron and Breslow
@@ -175,6 +202,28 @@ class FrailtyTest(unittest.TestCase):
         np.testing.assert_allclose(r.coef, beta, atol=0.2)
         self.assertGreater(r.theta, 0.1)  # detects the clustering
         self.assertEqual(len(r.frailties), n_groups)
+
+    def test_breslow_cumhaz_includes_the_frailty_offset(self):
+        # _cox_offset/_cox_cov both include `offset` in the risk-set sum s0; _breslow_cumhaz must
+        # match, or frailty_cox's E-step (which uses this baseline hazard to compute each group's
+        # expected event count) silently treats every group's frailty as exactly 1.
+        rng = np.random.RandomState(0)
+        n = 200
+        X = rng.normal(0, 1, (n, 1))
+        time = rng.exponential(1.0, n)
+        event = np.ones(n)
+        beta = np.array([0.5])
+        offset = rng.normal(0, 1, n)
+
+        base_with_offset = _breslow_cumhaz(X, time, event, beta, offset)
+        base_zero_offset = _breslow_cumhaz(X, time, event, beta, np.zeros(n))
+        self.assertFalse(np.allclose(base_with_offset, base_zero_offset))
+
+        et0 = np.unique(time[event == 1])[0]
+        risk0 = time >= et0
+        tied0 = (time == et0) & (event == 1)
+        s0_expected = np.exp(X[risk0] @ beta + offset[risk0]).sum()
+        self.assertAlmostEqual(base_with_offset[0], tied0.sum() / s0_expected)
 
 
 if __name__ == "__main__":

@@ -47,12 +47,25 @@ def deming_regression(x, y, variance_ratio: float = 1.0) -> DemingFit:
         A :class:`DemingFit` with the unbiased ``slope`` / ``intercept`` and the recovered latent ``x*``.
     """
     x, y = np.asarray(x, dtype=float).ravel(), np.asarray(y, dtype=float).ravel()
+    if x.shape[0] < 2:
+        raise ValueError("deming_regression requires at least 2 observations")
     lam = float(variance_ratio)
     xb, yb = x.mean(), y.mean()
     sxx = np.mean((x - xb) ** 2)
     syy = np.mean((y - yb) ** 2)
     sxy = np.mean((x - xb) * (y - yb))
-    slope = (syy - lam * sxx + np.sqrt((syy - lam * sxx) ** 2 + 4.0 * lam * sxy**2)) / (2.0 * sxy)
+    if sxx == 0.0:
+        raise ValueError(
+            "deming_regression requires x to have nonzero variance (a constant x carries no information about the slope)"
+        )
+    if sxy == 0.0:
+        # x and y are exactly uncorrelated: the Deming quadratic lam*sxy*b^2 + (lam*sxx-syy)*b - sxy = 0
+        # degenerates to (lam*sxx - syy)*b = 0, whose solution is slope=0 (the coefficient is nonzero
+        # here, since sxx > 0 is already guaranteed above and generically lam*sxx != syy) -- not the
+        # division by `2*sxy` below, which would otherwise produce +-inf/nan.
+        slope = 0.0
+    else:
+        slope = (syy - lam * sxx + np.sqrt((syy - lam * sxx) ** 2 + 4.0 * lam * sxy**2)) / (2.0 * sxy)
     intercept = yb - slope * xb
     return DemingFit(slope, intercept, lam, x, y)
 
@@ -134,9 +147,21 @@ def propagate_uncertainty(
         ``{'mean', 'std', 'quantiles', 'levels', 'samples'}`` over the propagated outputs.
     """
     s = np.asarray(samples, dtype=float)
+    # Matching the outer shape is NECESSARY but not SUFFICIENT to prove `func` is genuinely
+    # vectorised (row-independent): a per-draw function written with a numpy reduction that forgot
+    # `axis=` (e.g. `lambda row: row / row.sum()`, intended per-row but summing over everything when
+    # handed the whole (n, ...) array at once) preserves the outer shape by coincidence while
+    # silently computing the wrong thing for every row but the one whose own sum matches the global
+    # sum. Cross-check the vectorised call's own first row against `func` applied to that single
+    # draw -- the same call shape the fallback loop below already relies on -- before trusting it.
+    try:
+        row0_ref = np.asarray(func(s[0]), dtype=float)
+    except Exception:  # noqa: BLE001
+        row0_ref = None  # func doesn't support a single-draw call; fall back to the shape-only check
     try:
         out = np.asarray(func(s), dtype=float)
-        if out.shape[0] != s.shape[0]:
+        matches_single_draw = row0_ref is None or np.allclose(out[0], row0_ref, equal_nan=True)
+        if out.shape[0] != s.shape[0] or not matches_single_draw:
             raise ValueError
     except Exception:  # noqa: BLE001
         out = np.array([np.asarray(func(row), dtype=float) for row in s])
