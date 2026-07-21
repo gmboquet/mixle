@@ -39,7 +39,10 @@ The core package currently ships 57 Python example scripts:
 Release Execution Status
 ------------------------
 
-The 23 base-install ("Execute.") examples were re-run on 2026-07-17 against the
+The 23 base-install examples (21 inventoried "Execute.", plus
+``skeptic_challenge_example.py`` and ``win_demo_example.py`` -- inventoried
+"Blocked", but attempted anyway to confirm the failure mode) were re-run on
+2026-07-17 against the
 built ``mixle-0.8.0.dev0`` wheel, installed into a bare venv (``pip install
 dist/mixle-0.8.0.dev0-py3-none-any.whl``, no extras, no editable install, no
 ``PYTHONPATH``, Python 3.12), each with a 90s budget:
@@ -151,6 +154,50 @@ before #435 (``2ed006ca``), and current ``release/0.8.0``.
   (``delta=1.0e-9``) is unchanged for real callers; only this example's
   requested ``max_its`` moved.
 
+**2026-07-21 re-verification.** All 19 previously-passed examples plus both
+previously-resolved timed-out cases (``hierarchical_mixture_example.py``,
+``lookback_hmm_example.py``) were re-run against current ``release-prep/0.8.0``
+source (roughly 40 additional bug-fix commits landed since the 2026-07-17 pass,
+none in these examples' own code paths) and still pass; ``flagship_temporal_sunspots.py``
+reproduces the identical held-out mean log-likelihood (-2.0762). This pass also:
+
+* Confirmed ``auto_example.py`` and ``enumeration_showcase_example.py`` --
+  both inventoried "Execute." but absent from the 2026-07-17 evidence above --
+  pass cleanly and quickly (0.55s and 0.68s respectively). Recorded here as
+  the evidence that was previously missing; not a live concern.
+* Corrected the ``lookback_hmm_example.py`` mechanism claim above: an
+  instrumented per-iteration trace shows only about 480 of the requested 1000
+  iterations actually execute, not the full 1000 as previously stated.
+  ``delta=None`` does disable the ``delta``-gated convergence check, but a
+  separate, ``delta``-independent monotonicity guard in ``_fused_em_loop``
+  (``mixle/inference/estimation.py:598-601``, added by a commit predating even
+  the 2026-07-17 baseline) breaks the loop when a per-iteration log-likelihood
+  delta goes slightly negative -- which happens near convergence here. The
+  bottom-line ``passed`` status and the ~86s runtime are unaffected; only the
+  stated reason was wrong.
+* Documented, in the Inventory table below, a previously-unrecorded ``torch``
+  hard dependency (no classical fallback) for ``doe_example.py`` (via
+  ``GaussianProcessRegressor``) and for ``task_cascade_economics_example.py``,
+  ``task_distill_example.py``, ``task_extraction_example.py``, and
+  ``task_llm_active_example.py`` (all via ``mixle.task.distill._fit_mlp`` or
+  ``mixle.task.extract``'s distillation path) -- the same shape of blocker
+  already documented for ``win_demo_example.py``. This is why these five,
+  despite being policy-required by the Minimum Release Run below, had no
+  recorded execution evidence: a base install cannot run them at all, and the
+  Inventory entries did not say so.
+* Corrected ``real_receipt_banking77.py``'s documented blocker from "dataset
+  download permission" to ``torch`` (same chokepoint as the four examples
+  above) -- the dataset load itself is not the blocker in a base install.
+* Confirmed ``geoscience_inversion_report.py`` -- also absent from the
+  2026-07-17 evidence despite exercising ``mixle.task.inverse`` -- passes
+  (3.4s, deterministic across repeated runs). Separately worth a follow-up
+  look: the M3 inversion posterior this run produced was badly miscalibrated
+  (SBC p-value 1.4e-07; 50%/90% nominal coverage measured at 32%/95%; posterior
+  standard deviation about 39x tighter than the actual error), which the
+  script's own calibration layer correctly detected, abstaining rather than
+  serving an overconfident claim -- the script passes, but the underlying fit
+  quality is a separate, open question from execution status.
+
 Execution status should be recorded as evidence, not inferred from import
 success or from an earlier notebook run. If an example writes an artifact, the
 artifact path and any cleanup policy should be captured with the status.
@@ -224,7 +271,10 @@ Inventory
    * - ``examples/cross_modal_fit_receipt.py``
      - Execute with optional-dependency status recorded.
    * - ``examples/doe_example.py``
-     - Execute for DOE coverage.
+     - Blocked on ``torch`` in a base install (``minimize()``'s Bayesian
+       optimization routes unconditionally through
+       ``mixle.models.gaussian_process.GaussianProcessRegressor``, which has no
+       classical fallback); execute with ``torch`` installed for DOE coverage.
    * - ``examples/engine_benchmark_example.py``
      - Manual/benchmark or bounded smoke run.
    * - ``examples/enumeration_example.py``
@@ -303,7 +353,13 @@ Inventory
    * - ``examples/project_neural_to_structured.py``
      - Execute with optional-dependency status recorded.
    * - ``examples/real_receipt_banking77.py``
-     - Manual or blocked unless dataset download is permitted.
+     - Blocked on ``torch`` in a base install (``mixle.task.distill._fit_mlp``,
+       same chokepoint as ``win_demo_example.py``); with ``torch`` installed,
+       also needs the Banking77 dataset -- confirmed reachable only via a
+       stale local Hugging Face cache in one run (a live
+       ``load_dataset("banking77")`` Hub lookup failed with "banking77
+       couldn't be found on the Hugging Face Hub"), a separate portability
+       risk worth re-checking on a host without that cache.
    * - ``examples/reasoner_investigation_demo.py``
      - Manual/integration.
    * - ``examples/scaling_example.py``
@@ -323,13 +379,20 @@ Inventory
    * - ``examples/structured_leaves_example.py``
      - Execute.
    * - ``examples/task_cascade_economics_example.py``
-     - Execute for task coverage.
+     - Blocked on ``torch`` in a base install (``mixle.task.distill._fit_mlp``,
+       same chokepoint as ``win_demo_example.py``); execute with ``torch``
+       installed for task coverage.
    * - ``examples/task_distill_example.py``
-     - Execute for task coverage.
+     - Blocked on ``torch`` in a base install (``mixle.task.distill._fit_mlp``);
+       execute with ``torch`` installed for task coverage.
    * - ``examples/task_extraction_example.py``
-     - Execute for task coverage.
+     - Blocked on ``torch`` in a base install (``mixle.task.extract``'s
+       distillation path); execute with ``torch`` installed for task coverage.
    * - ``examples/task_llm_active_example.py``
-     - Execute or mark blocked on teacher/provider requirements.
+     - Blocked on ``torch`` in a base install (the local teacher call itself
+       does not need it, but the local-student distillation step routes
+       through ``mixle.task.distill._fit_mlp``); execute with ``torch``
+       installed, not just teacher/provider requirements.
    * - ``examples/vision_edge_distillation/distill_clip_features.py``
      - Manual or blocked unless cached features/model weights are present.
    * - ``examples/vision_edge_distillation/verify_on_laptop.py``
