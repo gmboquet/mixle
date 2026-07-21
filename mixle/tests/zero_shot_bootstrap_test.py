@@ -251,5 +251,38 @@ class FitResonanceLeavesTest(unittest.TestCase):
         self.assertEqual(new_joint.names, ("image", "text", "proxy_sensor"))
 
 
+class GenericScalarReductionTest(unittest.TestCase):
+    def test_non_numeric_sample_reduction_is_stable_across_interpreter_hash_seeds(self):
+        # _generic_scalar_reduction's no-numeric-payload branch used to fall back to the builtin
+        # hash(), which is salted per-process by PYTHONHASHSEED for str content -- so its docstring's
+        # claim of being "still deterministic" was false across process restarts / xdist workers.
+        import os
+        import subprocess
+        import sys
+
+        from mixle.reason.zero_shot_bootstrap import _generic_scalar_reduction
+
+        sample = {"kind": "unseen_modality", "payload": "opaque-blob-xyz"}
+        here = _generic_scalar_reduction(sample)
+        self.assertGreaterEqual(here, 0.0)
+        self.assertLess(here, 1.0)
+
+        script = (
+            "from mixle.reason.zero_shot_bootstrap import _generic_scalar_reduction\n"
+            f"sample = {sample!r}\n"
+            "print(_generic_scalar_reduction(sample))\n"
+        )
+        for hash_seed in ("1", "2"):
+            env = dict(os.environ, PYTHONHASHSEED=hash_seed)
+            out = subprocess.run(
+                [sys.executable, "-c", script],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(float(out.stdout.strip()), here)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -95,6 +95,26 @@ class OptimizerSanityTest(unittest.TestCase):
         self.assertAlmostEqual(float(weights.sum()), 1.0, places=6)
         self.assertEqual(int(np.argmax(weights)), 0)
 
+    def test_return_detail_in_proxy_kwargs_is_rejected_up_front(self):
+        # proxy_run_score(..., return_detail=True) returns a (loss, per_domain_dict) tuple instead of
+        # a bare scalar; the bandit/doe search loops need a scalar (bandit.update(reward=-loss),
+        # opt.tell(x, loss)), so passing return_detail=True through proxy_kwargs used to crash deep
+        # inside the search loop with an opaque, hard-to-diagnose TypeError. It should be rejected
+        # immediately instead.
+        domains = [
+            SyntheticDomain(name="informative", vocab=VOCAB, period=2, noise_p=0.0, pattern_seed=0),
+            SyntheticDomain(name="noise_a", vocab=VOCAB, period=None),
+        ]
+        with self.assertRaises(ValueError):
+            optimize_mixture(
+                domains,
+                proxy_steps=5,
+                budget=3,
+                method="bandit",
+                proxy_kwargs={"return_detail": True},
+                seed=0,
+            )
+
 
 class LearnedMixtureBeatsUniformTest(unittest.TestCase):
     """The F8 acceptance criterion: a mixture LEARNED via proxy runs beats UNIFORM weights at matched
@@ -161,6 +181,38 @@ class NearDuplicateReceiptTest(unittest.TestCase):
     def test_single_document_corpus_has_zero_rate(self):
         self.assertEqual(estimate_near_duplicate_rate(["only one document here"]), 0.0)
         self.assertEqual(estimate_near_duplicate_rate([]), 0.0)
+
+    def test_shingles_are_stable_across_interpreter_hash_seeds(self):
+        # _shingles used to fold each shingle through the builtin hash(), which is salted per-process
+        # by PYTHONHASHSEED for str/tuple-of-str content -- so two processes (or two xdist workers)
+        # would silently disagree on a document's MinHash signature. Spawn a fresh subprocess with a
+        # different hash seed and confirm the near-duplicate rate it computes matches this process's.
+        import os
+        import subprocess
+        import sys
+
+        corpus = [
+            "the quick brown fox jumps over the lazy dog near the river bank at dawn",
+            "the quick brown fox jumps over the sleepy dog near the river bank at dawn",
+            "completely unrelated sentence about quarterly revenue and inventory forecasts",
+        ]
+        here = estimate_near_duplicate_rate(corpus, shingle_size=3, num_hashes=64, threshold=0.5, seed=0)
+
+        script = (
+            "from mixle.task.data_mixture import estimate_near_duplicate_rate\n"
+            f"corpus = {corpus!r}\n"
+            "print(estimate_near_duplicate_rate(corpus, shingle_size=3, num_hashes=64, threshold=0.5, seed=0))\n"
+        )
+        for hash_seed in ("1", "2"):
+            env = dict(os.environ, PYTHONHASHSEED=hash_seed)
+            out = subprocess.run(
+                [sys.executable, "-c", script],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertAlmostEqual(float(out.stdout.strip()), here, delta=1.0e-9)
 
     def test_invalid_minhash_parameters_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "shingle_size"):

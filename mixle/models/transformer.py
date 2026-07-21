@@ -32,6 +32,9 @@ if _HAS_TORCH:
         def __init__(self, d_model: int, n_head: int) -> None:
             super().__init__()
             self.h = n_head
+            # ``parallelize_module`` shards qkv by output features.  The public
+            # forward therefore has to distinguish global from rank-local heads.
+            self.tp_size = 1
             self.qkv = nn.Linear(d_model, 3 * d_model)
             self.proj = nn.Linear(d_model, d_model)
             # muP attention scaling (see mixle.models.mup): standard attention scales QK^T by
@@ -44,7 +47,12 @@ if _HAS_TORCH:
         def forward(self, x: Any) -> Any:
             b, t, d = x.shape
             head_dim = d // self.h
-            qkv = self.qkv(x).reshape(b, t, 3, self.h, head_dim).permute(2, 0, 3, 1, 4)
+            qkv_projection = self.qkv(x)
+            local_width = qkv_projection.shape[-1]
+            local_heads = local_width // (3 * head_dim)
+            if local_heads * 3 * head_dim != local_width:
+                raise ValueError("the local qkv width must contain complete attention heads.")
+            qkv = qkv_projection.reshape(b, t, 3, local_heads, head_dim).permute(2, 0, 3, 1, 4)
             scale = 1.0 / head_dim if self.mup_attention else None
             o = F.scaled_dot_product_attention(
                 qkv[0], qkv[1], qkv[2], is_causal=True, scale=scale
@@ -95,17 +103,39 @@ if _HAS_TORCH:
                 return gc
             return bool(gc[i])  # per-block list/tuple, one entry per self.blocks
 
-        def forward(self, x: Any) -> Any:
+        def forward(
+            self,
+            x: Any,
+            *,
+            position_ids: Any = None,
+            return_all_logits: bool = False,
+        ) -> Any:
+            """Score a token block with optional global positions.
+
+            ``position_ids`` is the hook context parallelism needs after the
+            sequence is sharded: local token chunks retain their positions in
+            the global sequence.  The default return remains last-token logits
+            for compatibility; training asks for all positions explicitly.
+            """
             x = x.long()
             t = x.shape[1]
-            pos = torch.arange(t, device=x.device)
-            h = self.tok(x) + self.pos(pos)[None, :, :]
+            if position_ids is None:
+                position_ids = torch.arange(t, device=x.device)
+            position_ids = position_ids.long()
+            if position_ids.ndim == 1:
+                position_embeddings = self.pos(position_ids)[None, :, :]
+            elif position_ids.ndim == 2:
+                position_embeddings = self.pos(position_ids)
+            else:
+                raise ValueError("position_ids must have shape (sequence,) or (batch, sequence).")
+            h = self.tok(x) + position_embeddings
             for i, blk in enumerate(self.blocks):
                 if self._checkpoint_block(i) and self.training and torch.is_grad_enabled():
                     h = torch.utils.checkpoint.checkpoint(blk, h, use_reentrant=False)
                 else:
                     h = blk(h)
-            return self.head(self.ln(h))[:, -1]  # next-token logits from the last position -> (batch, vocab)
+            logits = self.head(self.ln(h))
+            return logits if return_all_logits else logits[:, -1]
 
 
 def build_causal_lm(

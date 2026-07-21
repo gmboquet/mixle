@@ -1786,20 +1786,33 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
         return "TreeHiddenMarkovDataEncoder(emission_encoder=%s, len_encoder=%s, use_numba=%s)" % (s1, s2, s3)
 
     def __eq__(self, other: object) -> bool:
-        """Return true when ``other`` is a tree-HMM encoder with a matching length encoder.
+        """Return whether another encoder is equivalent to this encoder.
+
+        The emission encoder and ``use_numba`` participate in the comparison, matching the sibling
+        ``HiddenMarkovDataEncoder``: the heterogeneous grouping machinery (e.g. a mixture over tree
+        HMMs with unlike emission families, or numba vs. pure-numpy encoders) keys off encoder
+        equality, so two tree-HMM encoders are interchangeable only when their emission encodings and
+        encoding path are too -- comparing ``len_encoder`` alone silently treated any two encoders
+        with the same length model as equal regardless of what they emit. Also returns a definite
+        ``False`` (not ``None``) for a same-type encoder whose ``len_encoder`` differs -- the previous
+        shape fell through to an implicit ``None`` for exactly that case, an equality check should
+        never do.
 
         Args:
             other (object): Object to compare against.
 
         Returns:
-            True if other is a TreeHiddenMarkovDataEncoder with an equal len_encoder, else False/None.
+            True if other is a TreeHiddenMarkovDataEncoder with equivalent 'emission_encoder',
+            'len_encoder', and 'use_numba', else False.
 
         """
-        if isinstance(other, TreeHiddenMarkovDataEncoder):
-            if self.len_encoder == other.len_encoder:
-                return True
-        else:
+        if not isinstance(other, TreeHiddenMarkovDataEncoder):
             return False
+        return (
+            self.use_numba == other.use_numba
+            and self.len_encoder == other.len_encoder
+            and self.emission_encoder == other.emission_encoder
+        )
 
     def _seq_encode(self, x: Sequence[Sequence[tuple[D, T]]]) -> tuple[int, np.ndarray, E5, E6, Any, Any | None]:
         """Encode trees for the pure-numpy implementation (nodes batched across trees by level).
