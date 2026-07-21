@@ -27,6 +27,21 @@ class GaussianBeliefBasicsTest(unittest.TestCase):
         np.testing.assert_allclose(s.mean(axis=0), b.mean(), atol=0.02)
         np.testing.assert_allclose(np.cov(s.T), b.cov(), atol=0.03)
 
+    def test_rejects_indefinite_covariance(self):
+        # eigenvalues [-1, 3]: not a valid covariance matrix.
+        bad = np.array([[1.0, 2.0], [2.0, 1.0]])
+        self.assertLess(np.linalg.eigvalsh(bad).min(), 0.0)
+        with self.assertRaises(ValueError):
+            GaussianBelief([0.0, 0.0], bad)
+
+    def test_allows_exactly_singular_covariance(self):
+        # a valid degenerate (rank-deficient) covariance -- a deterministic relationship between
+        # coordinates -- must still construct; only genuinely negative eigenvalues are rejected.
+        singular = np.array([[1.0, 1.0], [1.0, 1.0]])  # eigenvalues [0, 2]
+        self.assertAlmostEqual(np.linalg.eigvalsh(singular).min(), 0.0, places=10)
+        b = GaussianBelief([0.0, 0.0], singular)
+        np.testing.assert_allclose(b.cov(), singular)
+
 
 class KalmanUpdateTest(unittest.TestCase):
     def test_scalar_update_matches_closed_form(self):
