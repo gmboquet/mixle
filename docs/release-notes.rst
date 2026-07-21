@@ -1,106 +1,91 @@
 Release Notes
 =============
 
-The 0.7.0 release is a capability and hardening release. It expands Mixle's
-task, DOE, neural, latent-model, and reasoning surfaces while tightening
-numerical behavior in mixture, automatic-inference, and registry paths.
+Mixle 0.8.0 is the credibility, correctness, and evidence release. It retains
+the library's broad probabilistic-modeling surface while making maturity,
+compatibility, numerical behavior, release claims, and operational limits
+explicit and machine-checkable.
+
+This page describes the unreleased 0.8.0 branch. It is not a publication
+claim. Final artifact hashes, exact-tip CI results, independent review, and
+post-publication verification remain release gates.
 
 Highlights
 ----------
 
-This release focuses on three themes:
+Evidence-backed product boundary
+    Public APIs and maturity tiers have machine-readable manifests and drift
+    tests. Stable, provisional, and experimental surfaces now carry different
+    compatibility expectations. Architecture, ownership, security,
+    scientific-validity, migration, and release documents define the supported
+    boundary without presenting research prototypes as production evidence.
 
-* stronger numerical behavior for mixture, EM, HMM, automatic-inference, and
-  missing-data paths;
-* broader task, distillation, DOE, neural, and reasoning APIs; and
-* clearer documentation for maturity, validation, production use, and family
-  release expectations.
+Numerical and statistical hardening
+    The release includes a broad correctness pass over fused EM, HMM decoding
+    and smoothing, probabilistic-programming transforms, posterior summaries,
+    uncertainty methods, automatic structure learning, categorical support,
+    entropy implementations, and impossible-observation handling. Regression
+    tests preserve each repaired behavior.
 
-Added
------
+Reproducible artifacts and execution
+    Safe serialization, schema manifests, provenance receipts, deterministic
+    hashing, checkpoint metadata, base-install import sweeps, minimum-version
+    jobs, platform lanes, and artifact fingerprinting make it possible to tie a
+    claim to the code and artifact that produced it.
 
-Task and distillation capabilities
-    The task layer now includes richer teacher/student workflows: soft-label
-    distillation, structured task distillation, active labeling, cascade
-    economics, local harvest/retrain loops, and agentic task distillation for
-    tool calls and plans.
+Distributed training and estimation
+    Existing Spark, Dask, Ray, MPI, and multiprocessing estimation paths have
+    explicit support levels. Packed language-model training gains typed
+    parallel plans, native PyTorch execution where supported, checkpointable
+    training state, and adapters for external distributed-training systems.
+    Multi-GPU performance remains unverified until retained hardware receipts
+    exist; unsupported topology combinations fail before launch.
 
-DOE for distillation and cross-modal training
-    ``mixle.doe.distillation`` adds pool-based experiment design for task
-    distillation and cross-modal training. It helps choose informative teacher
-    calls, balance task coverage, and treat label acquisition as an expensive
-    experimental design problem. See :doc:`doe` for the Sphinx examples and
-    selector contract.
+Scientific workflow building blocks
+    The provisional task, reasoning, DOE, causal, calibration, posterior, and
+    lifecycle layers now expose clearer typed contracts and receipts. They can
+    support model selection, distillation, sequential design, evidence-aware
+    decisions, and heterogeneous-data workflows, but do not turn Mixle into a
+    frontier-model trainer or a safety guarantee.
 
-Neural and energy models
-    The branch adds reusable neural-model builders including Deep Sets,
-    monotonic MLPs, input-convex networks, Hamiltonian networks, and
-    energy-based product-of-experts helpers.
+Compatibility and dependency changes
+------------------------------------
 
-Latent and dependence models
-    New or expanded latent surfaces include gated mixtures, copulas, structured
-    mixture/reduction utilities, and additional mixture-of-experts style
-    building blocks.
+* Python 3.11 is now the minimum supported runtime. Hosted fast lanes cover
+  Python 3.11 and 3.12 on Linux x86_64 and macOS arm64; the full lane uses
+  Python 3.12.
+* ``mpmath`` is no longer installed by the base package. Install
+  ``mixle[highprec]`` for the mpmath arbitrary-precision fallback, or the
+  separate ``gmpy2`` extra for its supported high-precision paths.
+* Stable deprecations warn through the shared deprecation helper and remain
+  available for at least two minor releases. Removed or renamed surfaces must
+  have migration documentation and compatibility tests.
+* Public API additions and removals require a reviewed manifest diff. Names
+  under ``mixle.experimental`` remain explicitly outside the compatibility
+  guarantee.
 
-Reasoning and evidence surfaces
-    The reasoning package adds cross-modal transport checks, task-sufficient
-    projections, cycle-consistency signals, anchor harnesses, answer receipts,
-    and provenance-aware explanation helpers.
+Correctness fixes in the final integration
+------------------------------------------
 
-Changed
--------
+The final stabilization includes fixes for array-backed TreeHMM encoder
+equality, runtime-resolvable annotations, callable arity probing that could
+invoke user code twice or mask its exception, deterministic reductions and
+corpus shingles, explicit optimization failures in place of removable
+assertions, and early rejection of detailed mixture scores where a scalar
+objective is required.
 
-Automatic modeling is more defensive
-    Empty data, all-empty nested sequences, detector failure paths, marginal
-    field validation, and model-recommendation fallbacks now fail more
-    explicitly.
+Validation and remaining gates
+------------------------------
 
-Mixture and EM paths are harder to destabilize
-    Mixture code has additional stress coverage for high-dimensional Gaussian
-    mixtures, singular or near-singular covariance paths, weighted
-    responsibilities, and impossible-observation updates. See
-    :doc:`stability-and-missing-data` for the branch-level contract around
-    ``NaN`` inputs, ``-inf`` impossible observations, robust mixture
-    initialization, and DOE score validation.
+Every pull request runs lint, minimum-version, Linux, macOS, clean-wheel, full,
+documentation, and applicable security checks. The active release branch also
+runs tests, strict documentation validation, and security auditing on its exact
+tip after integration.
 
-PPL route behavior is more explicit
-    The PPL guide now documents ``explain_fit``, explicit missing-data
-    marginalization, composite custom potentials, state-space fitted
-    distributions, and indexed latent sampler routes. Unsupported
-    route/feature combinations are expected to raise clear errors instead of
-    returning partially applied models.
-
-Task documentation is broader
-    The task guides now cover one-call replacement patterns, calibrated
-    structured outputs, density gates, serving cascades, economics, extraction,
-    and agentic/task-planning variants.
-
-Fixed
------
-
-The branch includes hardening commits for foundational EM, precision,
-registry, automatic-inference, oracle timeout, stochastic test, safetensors,
-and mixture-stability issues. See the repository history for the exact patch
-commits used for the final tag.
-
-Compatibility And Migration
----------------------------
-
-No broad removal is documented for this release. Users upgrading from the
-previous release should pay closest attention to expanded task APIs, DOE
-distillation helpers, reasoning receipts, and the clarified missing-data and
-impossible-observation contracts.
-
-Validation Focus
-----------------
-
-The release should be validated through the gates in :doc:`release-readiness`.
-At minimum, release evidence should cover:
-
-* ``python -m build`` and ``twine check dist/*``;
-* install from the built wheel in a fresh virtual environment;
-* import sweep over public ``mixle`` modules with optional-dependency guards;
-* full test suite, not only the fast marker subset;
-* examples and notebooks that are shipped or linked by the docs;
-* strict Sphinx build with warnings as errors; and
-* the coordinated family resolver/integration check across sibling packages.
+Before publication, the release checklist still requires an immutable candidate
+artifact, clean-wheel and resolver evidence tied to that candidate, realistic
+backend and performance receipts for retained claims, independent statistical
+and systems review, external clean-install reproduction, final sign-off, and
+post-publication verification. See :doc:`release-readiness`,
+:doc:`claim-evidence-ledger`, and the tracked 0.8.0 checklist for the current
+state.

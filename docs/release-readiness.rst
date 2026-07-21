@@ -8,7 +8,7 @@ evidence must exist before the branch can be treated as a releasable artifact.
 Supported Environment
 ---------------------
 
-The package metadata declares Python 3.10 and newer. The effective release
+The package metadata declares Python 3.11 and newer. The effective release
 matrix is the intersection of that declaration and the optional dependencies
 used by a given surface:
 
