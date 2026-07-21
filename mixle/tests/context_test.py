@@ -132,6 +132,19 @@ class CompressionTest(unittest.TestCase):
     def test_short_text_is_returned_unchanged(self):
         self.assertEqual(compress_text("brief note", "anything", 100), "brief note")
 
+    def test_output_never_exceeds_max_chars_even_when_the_top_sentence_alone_does(self):
+        # The "always keep >= 1 sentence" fallback (so compression never returns empty) previously
+        # never capped that first sentence to max_chars -- when the single most query-relevant
+        # sentence alone was longer than the budget, the summary could be many times over it.
+        text = (
+            "The quarterly refund policy changes affect all customers who purchased items in the last "
+            "thirty days and want a full refund immediately without any questions asked by support staff. "
+            "Cats are cute. The sky is blue today."
+        )
+        out = compress_text(text, "refund policy", max_chars=20)
+        self.assertLessEqual(len(out), 20)
+        self.assertGreater(len(out), 0)
+
 
 @unittest.skipUnless(_HAS_TORCH, "semantic retrieval needs the represent embedder")
 class SemanticAssemblyTest(unittest.TestCase):

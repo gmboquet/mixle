@@ -468,7 +468,14 @@ def _compress(text: str, task: str, max_chars: int) -> str:
         keep.add(i)
         used += add
     summary = " ".join(sents[i] for i in sorted(keep))
-    return summary if summary else text[: max(max_chars - 1, 1)] + "…"
+    if not summary:
+        return text[: max(max_chars - 1, 1)] + "…"
+    if len(summary) > max_chars:
+        # the "always keep >= 1 sentence" fallback above never caps that first sentence to
+        # max_chars -- when it alone exceeds the budget, truncate rather than returning a summary
+        # far larger than requested.
+        return summary[: max(max_chars - 1, 1)] + "…"
+    return summary
 
 
 def assemble_context(
