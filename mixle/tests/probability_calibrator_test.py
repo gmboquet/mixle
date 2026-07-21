@@ -8,10 +8,19 @@ from mixle.inference import (
     ProbabilityCalibrator,
     calibrate_probabilities,
     expected_calibration_error,
+    pit_ensemble,
 )
 
 
 class IsotonicTest(unittest.TestCase):
+    def test_ties_pool_to_the_group_mean_not_the_first_occurrence(self):
+        # scores [1,1,1,5], outcomes [0,1,0,1]: running raw PAVA on the tied sequence and then
+        # keeping only each tied group's FIRST occurrence's fitted value returned 0.0 (the first
+        # point's own raw outcome) instead of the group's true rate 1/3 (1 success of 3).
+        cal = calibrate_probabilities([1.0, 1.0, 1.0, 5.0], [0, 1, 0, 1], method="isotonic")
+        self.assertAlmostEqual(float(cal.predict([1.0])[0]), 1.0 / 3.0, places=10)
+        self.assertAlmostEqual(float(cal.predict([5.0])[0]), 1.0, places=10)
+
     def test_monotone_and_recovers_true_probability(self):
         # scores are a monotone-but-distorted transform of the true P(correct); isotonic should undo it.
         rng = np.random.RandomState(0)
@@ -77,6 +86,18 @@ class UninformativeScoreTest(unittest.TestCase):
         pred = cal.predict(score[te])
         self.assertLess(abs(_auc(pred, y[te]) - 0.5), 0.05)  # no discrimination on held-out
         self.assertLess(expected_calibration_error(pred, y[te]), 0.05)  # still calibrated to base rate
+
+
+class PitEnsembleEmptyGuardTest(unittest.TestCase):
+    def test_empty_ensemble_raises_instead_of_fabricating_uniform_noise(self):
+        # with randomize=True, an empty ensemble used to return `u = v` (the raw jitter, nothing
+        # else) -- indistinguishable from a genuinely well-calibrated PIT.
+        with self.assertRaises(ValueError):
+            pit_ensemble(np.array([1.0, 2.0]), np.zeros((2, 0)), randomize=True)
+
+    def test_empty_ensemble_raises_instead_of_silent_nan(self):
+        with self.assertRaises(ValueError):
+            pit_ensemble(np.array([1.0, 2.0]), np.zeros((2, 0)), randomize=False)
 
     def test_informative_score_keeps_its_discrimination(self):
         # a score that DOES track correctness keeps its AUC after calibration (calibration fixes the

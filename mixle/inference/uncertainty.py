@@ -148,6 +148,8 @@ def decompose_variance(member_means: Any, member_vars: Any = None) -> Uncertaint
         v = np.asarray(member_vars, dtype=float)
         if v.shape != mu.shape:
             raise ValueError(f"member_vars shape {v.shape} must match member_means shape {mu.shape}")
+        if np.any(v < 0.0):
+            raise ValueError("member_vars must be non-negative variances")
         aleatoric = v.mean(axis=0)  # mean_m Var[y|m]
     total = aleatoric + epistemic
     return UncertaintyDecomposition(total, aleatoric, epistemic, "variance")
@@ -259,6 +261,8 @@ def marginalize_meaning(
         w = np.asarray(weights, dtype=float).reshape(-1)
         if w.shape[0] != labels.shape[0]:
             raise ValueError("weights must have one entry per item")
+        if np.any(w < 0.0):
+            raise ValueError("weights must be non-negative")
         mass = np.zeros(k)
         for i, lab in enumerate(labels):
             mass[lab] += w[i]

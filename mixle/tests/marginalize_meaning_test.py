@@ -57,6 +57,13 @@ class MarginalizeMeaningTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             marginalize_meaning(["a", "b", "c"], log_probs=[0.0, 0.0])
 
+    def test_negative_weight_raises_instead_of_an_impossible_probability(self):
+        # only the SUM of weights was checked (>0); unguarded, weights=[10,-3,-2] (summing to a
+        # positive 5) gave probs=[2.0,-0.6,-0.4] -- not a distribution -- and a negative Shannon
+        # entropy downstream, both mathematically impossible.
+        with self.assertRaises(ValueError):
+            marginalize_meaning(["x", "y", "z"], weights=[10.0, -3.0, -2.0])
+
 
 class ProbabilityCalibratorTest(unittest.TestCase):
     def test_isotonic_lowers_ece_on_miscalibrated_scores(self):

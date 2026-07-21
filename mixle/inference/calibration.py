@@ -267,6 +267,11 @@ def pit_ensemble(
     y = np.asarray(y, dtype=float)
     f = np.asarray(forecasts, dtype=float)
     m = f.shape[1]
+    if m == 0:
+        # unguarded, this returned fabricated-looking Uniform(0,1) noise when randomize=True (u
+        # reduces to just the raw jitter v) and a silent 0/0 NaN when randomize=False -- neither
+        # signals "no ensemble members were provided" the way this ValueError does.
+        raise ValueError("pit_ensemble requires at least one ensemble member per observation, got 0.")
     below = np.sum(f < y[:, None], axis=1)
     equal = np.sum(f == y[:, None], axis=1)
     if randomize:
@@ -408,11 +413,24 @@ class ProbabilityCalibrator:
         if self.method == "isotonic":
             order = np.argsort(s, kind="mergesort")
             xs = s[order]
-            fit = np.clip(_pava(y[order]), 0.0, 1.0)
-            # collapse ties to a strictly increasing support for interpolation
-            uniq, idx = np.unique(xs, return_index=True)
+            ys = y[order]
+            # Pool tied scores to their mean outcome BEFORE running PAVA, not after: running PAVA on
+            # the raw (possibly tied-x) sequence and then keeping only each tied group's FIRST
+            # occurrence's fitted value does not recover the group's pooled mean -- PAVA only
+            # guarantees pooling actual monotonicity *violations*, so a tied-x group with a mixed,
+            # non-monotone y sub-sequence (e.g. scores [1,1,1,5], outcomes [0,1,0,1]) can leave
+            # different members of the SAME tied group in different PAVA blocks, and which one
+            # happens to be "first" is an accident of stable-sort tie order, not the group's true
+            # rate. Aggregating first (this is the standard isotonic-regression treatment of ties,
+            # e.g. sklearn's IsotonicRegression) makes each unique score contribute its own mean
+            # exactly once, so PAVA pools on the real per-score rate.
+            uniq, inverse, counts = np.unique(xs, return_inverse=True, return_counts=True)
+            group_sum = np.zeros(uniq.shape[0])
+            np.add.at(group_sum, inverse, ys)
+            group_mean = group_sum / counts
+            fit = np.clip(_pava(group_mean), 0.0, 1.0)
             self._x = uniq
-            self._y = np.maximum.accumulate(fit[idx])
+            self._y = np.maximum.accumulate(fit)
         else:  # platt
             from scipy.optimize import minimize
 
