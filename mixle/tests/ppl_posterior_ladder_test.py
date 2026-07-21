@@ -30,6 +30,27 @@ class PosteriorLadderTestCase(unittest.TestCase):
         self.assertTrue(hasattr(m.result, "samples"))  # a posterior object, not a bare point estimate
         self.assertAlmostEqual(float(m.dist.mu), 0.4, delta=0.2)
 
+    def test_grouped_prior_escalates_to_hierarchical_not_a_silent_flat_pool(self):
+        # how='auto' checks `grouped` before anything else; the posterior ladder used not to check it
+        # at all, so a .each() group prior fell through to the flat conjugate/Laplace/MCMC checks and
+        # was silently fit as if it had no group structure -- pooling every group into one flat estimate.
+        model = Normal(Normal(0, 100).each(by="school"), free)
+        self.assertEqual(model.explain_fit(how="posterior")["route"], "hierarchical")
+
+        rng = np.random.RandomState(2)
+        G = 5
+        theta_true = rng.normal(5.0, 4.0, G)
+        labels, y = [], []
+        for g in range(G):
+            n = rng.randint(20, 40)
+            labels += [g] * n
+            y += list(rng.normal(theta_true[g], 1.0, n))
+        labels, y = np.array(labels), np.array(y)
+        fit = model.fit(y, given={"school": labels}, how="posterior")
+        group_means = np.asarray(fit.result.summary()["group_means"])
+        self.assertEqual(group_means.shape, (G,))  # per-group latents, not one pooled estimate
+        self.assertLess(float(np.max(np.abs(group_means - theta_true))), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

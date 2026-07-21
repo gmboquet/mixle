@@ -1716,12 +1716,28 @@ class RandomVariable:
 
     # -- resolve ------------------------------------------------------------
     def _has_priors(self) -> bool:
-        # A prior is an RV in a *flat* family slot; composite children are sub-models.
-        return (
-            self._kind == "sample"
-            and not isinstance(self._family, CompositeFamily)
-            and any(isinstance(a, RandomVariable) for a in self._args)
-        )
+        """Whether any slot in this expression's tree carries a prior -- an RV in a *flat* family slot.
+
+        Recurses into composite children (``Mix(...)`` components, etc.): a composite's own immediate
+        children are sub-models, not priors themselves, but a child that is itself a flat family with a
+        prior nested in *its* slot (e.g. ``Mix([Bernoulli(Beta(1,1)), ...])``) carries a real prior the
+        auto-router and ``explain_fit()`` must see. This used to stop at the first ``CompositeFamily``
+        and report "no priors" even when a nested child slot held one, so ``explain_fit()`` could claim
+        route="em" for an expression whose actual ``.fit()`` raises ``NotImplementedError``.
+        """
+        if self._kind != "sample":
+            return False
+        if not isinstance(self._family, CompositeFamily):
+            return any(isinstance(a, RandomVariable) for a in self._args)
+        stack = list(self._args)
+        while stack:
+            a = stack.pop()
+            if isinstance(a, RandomVariable):
+                if a._has_priors():
+                    return True
+            elif isinstance(a, (list, tuple)):
+                stack.extend(a)
+        return False
 
     def _has_struct_param(self) -> bool:
         # A structural vector/matrix parameter (a spec or a param(...) handle) anywhere in the tree
@@ -1767,15 +1783,22 @@ class RandomVariable:
             return "map", "a structural vector/matrix parameter or a fixed+free mix -> MAP"
         return "em", "all-free parameters, no priors -> maximum-likelihood EM"
 
-    def _resolve_posterior_ladder(self):
+    def _resolve_posterior_ladder(self, *, grouped):
         """Lowest-cost route that returns a *posterior* (uncertainty), not a point estimate -- the
         ``how='posterior'`` escalation ladder: conjugate (exact) -> Laplace (Gaussian at the MAP) -> MCMC.
 
         Unlike ``how='auto'`` (which stops at MAP for a non-conjugate prior and returns a point estimate),
         this always climbs to the lowest-cost route that yields posterior uncertainty, and reports which route.
+
+        ``grouped`` mirrors ``_resolve_auto``'s own first check: a ``.each()`` group prior needs the
+        random-effects (hierarchical) fit for its group-level posterior, the same as the auto ladder --
+        without this check here, a grouped model fell through to the flat conjugate/Laplace/MCMC checks
+        below and was silently fit as if it had no group structure at all.
         """
         from mixle.ppl import inference as _inf
 
+        if grouped:
+            return "hierarchical", "a .each() group prior -> random-effects (hierarchical) fit"
         closed_form = (
             _inf.conjugate_spec(self) is not None
             or _inf.conjugate_mixture_spec(self) is not None
@@ -1819,7 +1842,10 @@ class RandomVariable:
                 "explain_fit() on the pre-fit expression instead, or re-fit for a fresh explanation."
             )
         if how == "posterior":
-            route, reason = self._resolve_posterior_ladder()
+            _grouped_for_posterior = self._kind == "sample" and any(
+                isinstance(a, RandomVariable) and a._scope == "grouped" for a in self._args
+            )
+            route, reason = self._resolve_posterior_ladder(grouped=_grouped_for_posterior)
         elif how != "auto":
             route, reason = how, f"explicit how={how!r}"
         elif self._kind == "sample" and any(_expr_has_gather(a) for a in self._args):
@@ -2001,7 +2027,7 @@ class RandomVariable:
         if how == "posterior":
             # the escalation ladder: lowest-cost route that yields posterior uncertainty (conjugate ->
             # Laplace -> MCMC). Unlike 'auto', never returns a bare point estimate.
-            how, _ = self._resolve_posterior_ladder()
+            how, _ = self._resolve_posterior_ladder(grouped=grouped)
         if how == "auto":
             how, _auto_reason = self._resolve_auto(
                 has_constraints=has_constraints,

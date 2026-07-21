@@ -131,6 +131,37 @@ class MixtureAutogradTestCase(unittest.TestCase):
         for u in (u0, u0 + 0.3, u0 - 0.2):
             self.assertAlmostEqual(g.log_target(u), lt_np(u), places=3)
 
+    def test_unpack_matches_the_numeric_target_and_map_fit_completes(self):
+        # MixtureGradTarget.unpack was hardcoded to None and never implemented -- unreachable until a
+        # model actually finished MAP fitting through this class (NUTS/VI/log_target checks above never
+        # call .unpack() at all), at which point map_fit's `g.unpack(res.x)` crashed with
+        # `TypeError: 'NoneType' object is not callable`. Check unpack's actual per-slot values against
+        # the independent numeric target's own unpack (not just that it runs), and that a real MAP fit
+        # through this exact path completes and recovers sensible component means.
+        from mixle.ppl import autograd as ag
+        from mixle.ppl.inference import _init_u, _target_parts
+
+        m0, m1 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1")
+        mix = Mix([Normal(m0, 1.0), Normal(m1, 1.0)], free)
+        g = ag.grad_target(mix, self.data)
+        _, slots, _, numeric_unpack, (dmean, dstd) = _target_parts(mix, self.data)
+        u0 = _init_u(slots, dmean, dstd)
+        for u in (u0, u0 + 0.3, u0 - 0.2):
+            g_vals, g_logj = g.unpack(u)
+            n_vals, n_logj = numeric_unpack(u)
+            self.assertEqual(g_vals.keys(), n_vals.keys())
+            for k in g_vals:
+                self.assertAlmostEqual(g_vals[k], n_vals[k], places=10)
+            self.assertAlmostEqual(g_logj, n_logj, places=10)
+
+        fit = Mix([Normal(m0, 1.0), Normal(m1, 1.0)], free).fit(
+            self.data, how="map", constraints=m0 < m1, rng=np.random.RandomState(2)
+        )
+        self.assertTrue(fit.is_bound)
+        means = sorted([fit.dist.components[0].mu, fit.dist.components[1].mu])
+        self.assertAlmostEqual(means[0], -3.0, delta=0.4)
+        self.assertAlmostEqual(means[1], 3.0, delta=0.4)
+
     def test_nuts_on_mixture(self):
         m0, m1 = Normal(0, 10, name="m0"), Normal(0, 10, name="m1")
         fit = Mix([Normal(m0, 1.0), Normal(m1, 1.0)], free).fit(
