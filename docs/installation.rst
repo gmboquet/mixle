@@ -45,9 +45,10 @@ Install only the optional integrations you need:
    * - ``numba``
      - JIT hot paths and TBB support
      - large local fits need faster kernels
-   * - ``spark`` / ``dask`` / ``mpi``
+   * - ``spark`` / ``dask`` / ``mpi`` / ``ray`` / ``lightning``
      - distributed encoded-data backends
-     - fitting on clusters or multi-process data
+     - fitting on clusters or multi-process data; ``ray`` and ``lightning``
+       add their respective :doc:`compute-layer` backends
    * - ``jax``
      - JAX and NumPyro-backed routes
      - differentiable or probabilistic-programming experiments

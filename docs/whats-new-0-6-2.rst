@@ -1,6 +1,11 @@
 What Is New In 0.6.2
 ====================
 
+.. note::
+
+   This page describes the 0.6.2 release. See :doc:`release-notes` for the
+   current release's narrative.
+
 Version 0.6.2 broadens Mixle from a composable statistical modeling library
 into a more complete runtime for heterogeneous modeling, local reasoning, and
 auditable deployment. The stable center is still the distribution/estimator

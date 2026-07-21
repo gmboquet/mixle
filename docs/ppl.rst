@@ -276,7 +276,9 @@ The PPL can use neural modules as predictors in distribution parameters.
        logits=Transformer(out=vocab, d_model=64, n_layer=2, n_head=4)
    ).fit(next_ids, given={"x": contexts}, epochs=40)
 
-Use :doc:`neural-llm` for the estimator-level neural leaf workflow.
+``labels``/``next_ids`` must be integer-coded (the class index, not a string
+label) when fitting a neural-logit ``Categorical``. Use :doc:`neural-llm` for
+the estimator-level neural leaf workflow.
 
 Posterior and Predictive Checks
 -------------------------------
@@ -329,8 +331,8 @@ The namespace also includes:
   distribution after ``.fit()`` for log-probability and simulation;
 * indexed latent vectors such as ``theta[Field("g")]`` with MAP, MCMC, HMC, and
   NUTS routes for grouped observations;
-* custom ``potential`` terms on flat and composite models when the route is
-  numerical enough to include the extra log-joint term.
+* custom ``potential`` terms on flat models when the route is numerical enough
+  to include the extra log-joint term.
 
 Custom Potentials
 -----------------
@@ -340,11 +342,11 @@ expressible as an ordinary distribution slot.
 
 .. code-block:: python
 
-   from mixle.ppl import Mix, Normal, free, potential
+   from mixle.ppl import Normal, free, potential
 
    mu0 = Normal(0.0, 10.0, name="mu0")
    anchor = Normal(3.0, 0.05, name="anchor")
-   model = Mix([Normal(mu0, free), Normal(free, free)])
+   model = Normal(mu0, free)
 
    coupled = model.fit(
        data,
@@ -359,7 +361,10 @@ expressible as an ordinary distribution slot.
 Potentials require routes that score the numerical joint objective: ``map``,
 ``mcmc``, ``hmc``, ``nuts``, ``ensemble``, or ``auto`` when it resolves to one
 of those. EM, conjugate, VMP, and closed-form variational routes reject
-potentials because they would otherwise ignore the extra term.
+potentials because they would otherwise ignore the extra term. Potentials are
+supported on flat models only, not composites (``Mix`` and similar) --
+``anchor`` here is an auxiliary latent that appears only inside the potential,
+not in ``model`` itself.
 
 When to Use PPL
 ---------------

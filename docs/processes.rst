@@ -14,8 +14,11 @@ The public namespace re-exports:
 * ``InhomogeneousPoissonProcessDistribution``;
 * ``RenewalProcessDistribution``;
 * ``BirthDeathSamplingDistribution``;
-* ``ContinuousTimeMarkovChainDistribution``;
 * ``ChineseRestaurantProcessDistribution``.
+
+``ContinuousTimeMarkovChainDistribution`` is a related family but is reached
+through :mod:`mixle.stats` or :mod:`mixle.stats.processes.ctmc`, not through
+this namespace.
 
 When to Use a Process Model
 ---------------------------

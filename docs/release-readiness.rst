@@ -138,3 +138,14 @@ Use explicit readiness labels in release evidence:
 
 Avoid ambiguous status like "looks good" or "probably fine"; it is not useful
 when a release has to be audited later.
+
+A specific release's checklist (for example ``release-checklists/0.8.0.md`` in
+the repository root, not under ``docs/``) is the concrete, per-release
+instantiation of this page's methodology and may define its own status
+vocabulary tailored to that release's gates -- e.g. distinguishing a gate that
+already passes locally (``COMPLETE``) from one that only a hosted CI job,
+external reviewer, or post-publication step can close (``HOSTED`` /
+``EXTERNAL`` / ``POST-RELEASE``). Where the two differ, the release's own
+checklist is authoritative for that release's evidence; the five labels above
+are the general-purpose vocabulary for pages and processes that do not define
+a more specific one.

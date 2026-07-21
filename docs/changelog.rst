@@ -41,8 +41,6 @@ Added
 Changed
 ~~~~~~~
 
-* The docs tree is Sphinx/reStructuredText only; Markdown sources and Markdown
-  parser configuration are no longer part of the package docs.
 * Generated API pages are supported by narrative guides for core models,
   inference, PPL, DOE, data, reasoning, and production surfaces.
 * The generated API reference is treated as a broad public module map rather

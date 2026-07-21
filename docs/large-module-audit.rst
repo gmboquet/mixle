@@ -1,7 +1,7 @@
 Large-Module Audit
 ==================
 
-Fifteen modules in ``mixle`` exceed 1,500 lines. Size alone is not a defect, and this audit is **not** a
+Seventeen modules in ``mixle`` exceed 1,500 lines. Size alone is not a defect, and this audit is **not** a
 mandate to split them. Its purpose (worklist A1.7) is to record, for each large module, what it owns, the
 state it carries, the optional dependencies it touches, its hot paths, its serialization hooks, and where a
 *safe* extraction boundary lies — so that a future change can be scoped without a blind refactor.

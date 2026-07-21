@@ -65,8 +65,8 @@ embedding evidence or fine raw-payload evidence.
    belief, steps = store.assimilate(prior_belief, query_key, k=8, epsilon=0.05)
 
 Each ``RetrievalStep`` records the item index, fidelity, and information gain.
-Use ``next_evidence`` for active retrieval: the next item whose evidence most
-reduces query entropy.
+Use ``store.next_evidence(...)`` for active retrieval: the next item whose
+evidence most reduces query entropy.
 
 Retrieval evidence should remain auditable. Store candidate identifiers,
 fidelity choices, and skipped high-cost evidence when the reasoning result is

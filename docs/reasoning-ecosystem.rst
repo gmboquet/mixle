@@ -130,8 +130,11 @@ The substrate includes operational controls around the knowledge store:
 * ``Space`` and ``publish`` provide team-scoped visibility with an explicit
   sharing action.
 * ``Governance`` adds propose/review/approve/reject gates for curated scopes.
-* ``Ontology`` and ``OntologyConstrainedKG`` add typed constraints to graph
-  facts and knowledge-graph completion.
+
+:mod:`mixle.reason.ontology`'s ``Ontology`` and ``OntologyConstrainedKG`` add
+typed constraints to graph facts and knowledge-graph completion; they live
+alongside the reasoning surface above rather than in ``mixle.substrate``
+itself.
 
 These tools do not turn a local store into an enterprise governance platform.
 They make the application-level contract inspectable: what was stored, who can

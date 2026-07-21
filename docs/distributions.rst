@@ -163,8 +163,13 @@ Multivariate, Matrix, and Directional Families
 ----------------------------------------------
 
 Vector families include MultivariateGaussian, DiagonalGaussian,
-MultivariateStudentT, GaussianCopula, Composition, CategoricalMultinomial,
-IntegerMultinomial, and DirichletMultinomial.
+MultivariateStudentT, GaussianCopula, Multinomial, IntegerMultinomial, and
+DirichletMultinomial.
+
+Compositional data (simplex-valued vectors) is supported through
+``AitchisonNormalDistribution``/``AitchisonNormalEstimator``
+(:mod:`mixle.stats.multivariate.composition`), available via that submodule
+rather than the top-level ``mixle.stats`` namespace.
 
 Matrix-valued families include Wishart, InverseWishart, MatrixNormal, and LKJ.
 
