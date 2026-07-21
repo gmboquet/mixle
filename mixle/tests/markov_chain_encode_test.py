@@ -105,6 +105,20 @@ class ChainEncodeParityTest(unittest.TestCase):
         per_row = [d.log_density(seq) for seq in data]
         np.testing.assert_allclose(d.seq_log_density(enc), per_row, rtol=1e-12)
 
+    def test_scoring_an_all_length_one_corpus_does_not_crash_or_misscore(self):
+        """A corpus where EVERY sequence has length 1 (idx1/prev/next all empty -- e.g. a
+        single-domain task decomposition fit) used to crash `seq_log_density` with a numpy
+        same-kind casting error: `np.bincount([], weights=[], minlength=n)` silently returns
+        int64 zeros (not float64) when both its inputs are empty, and the subsequent
+        `rv[idx0] += <float log-density>` then fails to cast. `test_scoring_parity_end_to_end`
+        above doesn't catch this because it mixes lengths 1-6, so `idx1` is never globally empty."""
+        states = ["a", "b", "c"]
+        d = _chain(states)
+        data = [["a"], ["b"], ["a"], ["c"]]
+        enc = d.dist_to_encoder().seq_encode(data)
+        per_row = [d.log_density(seq) for seq in data]
+        np.testing.assert_allclose(d.seq_log_density(enc), per_row, rtol=1e-12)
+
 
 class CompositeValidationFastPathTest(unittest.TestCase):
     def setUp(self):

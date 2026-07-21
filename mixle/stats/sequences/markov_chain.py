@@ -462,8 +462,15 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
         loc_key_map = np.asarray([self.key_map.get(u, 0) for u in inv_key_map])
 
-        temp = self.trans_log_pvec[loc_key_map[prev_x], loc_key_map[next_x]].toarray().flatten() - self.log1p_dv
-        rv = np.bincount(idx1, weights=temp, minlength=sz)
+        # np.bincount(weights=...) silently returns an int64 (not float64) array when both `idx1` and
+        # `weights` are empty -- the case for length-1 sequences (no transitions, only an initial
+        # state) -- which then breaks the float `+=` below with a same-kind casting error. Mirrors the
+        # `rv = np.zeros(sz, dtype=float)` + `if len(idx1) > 0` guard already used above in
+        # `model_log_density` for the identical reason.
+        rv = np.zeros(sz, dtype=float)
+        if len(idx1) > 0:
+            temp = self.trans_log_pvec[loc_key_map[prev_x], loc_key_map[next_x]].toarray().flatten() - self.log1p_dv
+            rv = np.bincount(idx1, weights=temp, minlength=sz)
         rv[idx0] += self.init_log_pvec[loc_key_map[init_x]] - self.log1p_dv
 
         if len_enc is not None:

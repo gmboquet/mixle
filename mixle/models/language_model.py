@@ -137,8 +137,17 @@ class LM:
 
         Returns a model ready for scoring/generation; this is not a training-resume checkpoint (see
         :meth:`save`), so optimizer/step/RNG/data-loader state is not restored.
+
+        Loaded with ``weights_only=True``: :meth:`to_dict`'s payload is plain config scalars plus a
+        tensor ``state_dict``, never an arbitrary object graph, so this does not execute code from the
+        file (unlike a full-module pickle -- see ``mixle.models._neural_serial`` for that case).
         """
-        return cls.from_dict(_torch().load(path, weights_only=False))
+        torch = _torch()
+        try:
+            payload = torch.load(path, weights_only=True)
+        except TypeError:  # torch < 1.13 has no weights_only kwarg
+            payload = torch.load(path)
+        return cls.from_dict(payload)
 
     def fit(
         self,

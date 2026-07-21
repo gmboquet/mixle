@@ -185,6 +185,46 @@ def _attempt(*, tool_or_model: str | None, query: str, status: str, produced_ite
     }
 
 
+def _accepts_known_items(invoke: Any) -> bool:
+    """Whether ``invoke`` declares a parameter literally named ``known_items`` it wants the
+    accumulated real knowledge items passed into (called by that keyword, so the name must match
+    exactly -- a second positional parameter with some other name is a different, unrelated
+    interface, not an opt-in, and must not be called with a mismatched keyword).
+
+    A one-arg ``invoke(gap)`` (every existing catalog entry written before this) is unaffected --
+    this only widens what a *new* tool may opt into, via ``inspect.signature`` rather than a required
+    interface change. ``TypeError``/``ValueError`` (an unintrospectable builtin/C callable) means
+    "assume the old one-arg shape," the safe default.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(invoke).parameters
+    except (TypeError, ValueError):
+        return False
+    known = params.get("known_items")
+    return known is not None and known.kind in (
+        known.POSITIONAL_OR_KEYWORD,
+        known.KEYWORD_ONLY,
+    )
+
+
+def _invoke_tool(invoke: Any, gap: dict[str, Any], known_items: list[dict[str, Any]]) -> Any:
+    """Call a catalog entry's ``invoke``, passing ``known_items`` (every real item resolved so far
+    in this ``route_task`` call, plus whatever the input ``bundle`` carried) only if it opted in.
+
+    This is the fix for a real, documented limitation (found and worked around by hand across
+    several ``experiments/`` demos): previously ``invoke(gap)`` had no way to see another gap's
+    already-resolved result within the same ``route_task`` call at all, forcing every genuinely
+    multi-stage pipeline to bridge through separate sequential calls via the knowledge store. A tool
+    that wants that now declares a second parameter and gets it directly; one that doesn't is called
+    exactly as before.
+    """
+    if _accepts_known_items(invoke):
+        return invoke(gap, known_items=known_items)
+    return invoke(gap)
+
+
 def _resolve_gap(gap: dict[str, Any], known_items: list[dict[str, Any]], catalog: list[CatalogEntry]) -> dict[str, Any]:
     """Resolve one gap: prefer evidence already in the bundle, else route to the cheapest matching,
     reliable, verifiable catalog entry and verify its result before ever treating it as canonical."""
@@ -215,7 +255,7 @@ def _resolve_gap(gap: dict[str, Any], known_items: list[dict[str, Any]], catalog
             ),
         }
 
-    raw = invoke(gap)
+    raw = _invoke_tool(invoke, gap, known_items)
     item = _to_knowledge_item(gap, entry, raw)
     verdict = entry.verifier.verify(claim={"payload": item["payload"]}, context={"gap": gap, "entry": entry.id})
     if _verdict_passed(verdict):

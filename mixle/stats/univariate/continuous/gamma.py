@@ -404,7 +404,7 @@ class GammaSampler(DistributionSampler):
         self.dist = dist
         self.seed = seed
 
-    def sample(self, size: int | None = None) -> float | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> float | np.ndarray:
         """Draw iid observations from the Gamma distribution.
 
         Args:

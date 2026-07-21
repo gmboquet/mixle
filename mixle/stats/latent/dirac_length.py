@@ -511,7 +511,7 @@ class DiracLengthMixtureSampler(DistributionSampler):
         self.len_dist_sampler = dist.len_dist.sampler(seed=self.rng.randint(maxrandint))
         self.v = dist.v
 
-    def sample(self, size: int | None = None) -> list[int] | int:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | int:
         """Draw iid samples from a DiracLengthMixture distribution.
 
         Args:
