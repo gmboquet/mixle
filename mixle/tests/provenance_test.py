@@ -45,6 +45,21 @@ class ProvenanceHeaderTest(unittest.TestCase):
         self.assertIn("duration_s", header.timing)
         self.assertIsNotNone(header.environment["python"])
 
+    def test_default_max_its_and_delta_are_recorded_not_none(self):
+        # training["max_its"]/["delta"] used to read straight from the caller-supplied kwargs dict,
+        # so a caller relying on optimize()'s own defaults (not passing max_its=/delta= explicitly,
+        # exactly like this call) got them recorded as bare None -- and training["converged"] was
+        # never even set, since that check was gated on delta not being None -- silently breaking
+        # the audit trail this function exists to build.
+        # note: no out= kwarg here (unlike the other tests in this file) -- passing out= at all,
+        # even out=None, disables convergence capture entirely per this function's own docstring,
+        # which would trivially make "converged" absent for an unrelated, documented reason.
+        data = np.random.RandomState(2).normal(1.0, 1.0, 300).tolist()
+        _, header = fit_with_provenance(data, GaussianDistribution(0.0, 1.0).estimator())
+        self.assertEqual(header.training["max_its"], 10)  # optimize()'s own default
+        self.assertEqual(header.training["delta"], 1.0e-9)  # optimize()'s own default
+        self.assertIn("converged", header.training)
+
     def test_header_round_trips_through_dict(self):
         data = [1.0, 2.0, 3.0, 4.0]
         _, header = fit_with_provenance(data, GaussianDistribution(0.0, 1.0).estimator(), max_its=5, out=None)

@@ -64,28 +64,42 @@ class RecordAndVerifyTest(unittest.TestCase):
         self.assertFalse(res["data_matches"])
 
     def test_em_fit_reproduces_with_same_seed(self):
+        # record_fit is given the SAME max_its the original optimize() call used; verify_reproducible
+        # no longer needs max_its threaded through separately -- it replays the receipt's own value.
         d = _mixture_data()
         est = st.MixtureEstimator([st.GaussianEstimator(), st.GaussianEstimator()])
         m = optimize(d, est, out=None, max_its=30, rng=np.random.RandomState(11))
-        rec = record_fit(m, d, seed=11, estimator=est)
-        res = verify_reproducible(
-            st.MixtureEstimator([st.GaussianEstimator(), st.GaussianEstimator()]), d, rec, max_its=30
-        )
+        rec = record_fit(m, d, seed=11, estimator=est, max_its=30)
+        res = verify_reproducible(st.MixtureEstimator([st.GaussianEstimator(), st.GaussianEstimator()]), d, rec)
         self.assertTrue(res["reproducible"])  # same seed -> bit-identical EM path
 
     def test_em_fit_diverges_with_different_seed(self):
         d = _mixture_data()
         est = st.MixtureEstimator([st.GaussianEstimator(), st.GaussianEstimator()])
         m = optimize(d, est, out=None, max_its=30, rng=np.random.RandomState(11))
-        rec = record_fit(m, d, seed=11, estimator=est)
+        rec = record_fit(m, d, seed=11, estimator=est, max_its=30)
         res = verify_reproducible(
             st.MixtureEstimator([st.GaussianEstimator(), st.GaussianEstimator()]),
             d,
             rec,
             seed=99,
-            max_its=30,
         )
         self.assertFalse(res["params_match"])  # a different init can land in a different optimum
+
+    def test_receipt_carries_max_its_so_a_caller_need_not_thread_it_separately(self):
+        # Regression: ReproReceipt used to carry no max_its/delta at all, and verify_reproducible
+        # hardcoded max_its=25 -- unrelated to whatever the ORIGINAL fit actually used. A caller who
+        # (reasonably) called record_fit/verify_reproducible without separately re-stating max_its
+        # got a refit computed with a different iteration budget than the original fit, which can
+        # land at a visibly different (if nearby) point for an iterative estimator -- a false
+        # "not reproducible" verdict for a fit that WOULD have reproduced under its own settings.
+        d = _mixture_data()
+        est = st.MixtureEstimator([st.GaussianEstimator(), st.GaussianEstimator()])
+        m = optimize(d, est, out=None, max_its=3, rng=np.random.RandomState(11))  # deliberately under-converged
+        rec = record_fit(m, d, seed=11, estimator=est, max_its=3)
+        self.assertEqual(rec.max_its, 3)
+        res = verify_reproducible(st.MixtureEstimator([st.GaussianEstimator(), st.GaussianEstimator()]), d, rec)
+        self.assertTrue(res["reproducible"])  # replays max_its=3 from the receipt, not a hardcoded 25
 
     def test_receipt_helpers(self):
         d = _gauss_data()

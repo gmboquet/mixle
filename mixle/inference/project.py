@@ -251,7 +251,13 @@ def fisher_merge(estimates: Any, fishers: Any = None) -> np.ndarray:
 
     if fishers is None:
         fs: list[Any] = [np.ones(p) for _ in thetas]
-    elif isinstance(fishers, (list, tuple)) and len(fishers) == m:
+    elif hasattr(fishers, "__len__") and len(fishers) == m:
+        # One Fisher per estimate: a list/tuple of arrays, or an equivalent stacked ndarray (e.g. an
+        # (m, p) row of diagonal Fishers per estimate, or (m, p, p) full matrices). len(fishers) == m
+        # decides this the same way regardless of container type -- previously only a list/tuple got
+        # this treatment, so a stacked (m, p) ndarray with m == p was silently misread as a single
+        # (p, p) full Fisher matrix to broadcast to every estimate instead of one diagonal row per
+        # estimate, producing a numerically wrong (Fisher-blind, effectively unweighted) merge.
         fs = [np.asarray(f, dtype=float) for f in fishers]
     else:  # a single Fisher broadcast to every estimate
         fs = [np.asarray(fishers, dtype=float) for _ in thetas]
