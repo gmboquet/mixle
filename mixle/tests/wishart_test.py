@@ -25,6 +25,24 @@ class WishartTest(unittest.TestCase):
     def test_non_pd_is_minus_inf(self):
         self.assertEqual(self.d.log_density(np.array([[1.0, 2.0], [2.0, 1.0]])), -np.inf)  # indefinite
 
+    def test_negative_definite_with_positive_determinant_is_minus_inf(self):
+        # -I in an even dimension has determinant (-1)^2 = +1 while every eigenvalue is negative;
+        # a determinant-sign check alone would wrongly accept this as positive definite.
+        neg_i = -np.eye(2)
+        self.assertGreater(np.linalg.det(neg_i), 0.0)
+        self.assertEqual(self.d.log_density(neg_i), -np.inf)
+        seq = self.d.seq_log_density(np.array([neg_i, self.V]))
+        self.assertEqual(seq[0], -np.inf)
+        self.assertAlmostEqual(seq[1], self.d.log_density(self.V), places=9)
+
+    def test_negative_definite_scale_with_positive_determinant_raises(self):
+        # the constructor's own explicit check must reject this, with its own message -- not rely
+        # on np.linalg.cholesky() happening to raise (a LinAlgError, which subclasses ValueError,
+        # with numpy/LAPACK's own message) a few lines later as an accidental safety net.
+        with self.assertRaises(ValueError) as cm:
+            WishartDistribution(self.df, -np.eye(2))
+        self.assertEqual(str(cm.exception), "scale must be positive definite")
+
     def test_sampler_is_spd_with_correct_mean(self):
         s = self.d.sampler(seed=0).sample(40000)
         self.assertTrue(np.all(np.linalg.eigvalsh(s[:300]) > 0))  # all SPD
@@ -70,3 +88,26 @@ class WishartEstimatedDFTest(unittest.TestCase):
         data = WishartDistribution(df=8.0, scale=self._V()).sampler(seed=2).sample(500)
         m = self._fit_direct(WishartEstimator(dim=3, df=8.0), data)
         self.assertEqual(m.df, 8.0)  # fixed df is honored exactly
+
+
+class WishartAccumulatorLogdetTest(unittest.TestCase):
+    """The sum_logdet sufficient statistic (used for df MLE) must reject a positive-determinant,
+    negative-definite matrix the same way log_density does, not silently include a wrong value."""
+
+    def test_negative_definite_with_positive_determinant_contributes_minus_inf(self):
+        from mixle.stats.matrix.wishart import WishartAccumulator
+
+        acc = WishartAccumulator(dim=2)
+        acc.update(-np.eye(2), 1.0, None)  # det = +1, but negative definite
+        _, count, sum_logdet = acc.value()
+        self.assertEqual(count, 1.0)
+        self.assertEqual(sum_logdet, -np.inf)
+
+    def test_seq_update_matches_update_for_negative_definite(self):
+        from mixle.stats.matrix.wishart import WishartAccumulator
+
+        acc = WishartAccumulator(dim=2)
+        acc.seq_update(np.array([-np.eye(2), np.eye(2)]), np.array([1.0, 1.0]), None)
+        _, count, sum_logdet = acc.value()
+        self.assertEqual(count, 2.0)
+        self.assertEqual(sum_logdet, -np.inf)  # one -inf term poisons the weighted sum, as intended

@@ -264,6 +264,59 @@ def cho_solve(a_mat: tuple[np.ndarray, bool], b: np.ndarray) -> np.ndarray:
     return scipy.linalg.cho_solve(a_mat, b)
 
 
+def cholesky_logdet(mat: np.ndarray) -> float | None:
+    """Attempt a Cholesky factorization of mat, returning its log-determinant, or None if mat
+    is not positive definite.
+
+    This is the correct way to test positive-definiteness of a symmetric matrix. Determinant
+    sign (e.g. from np.linalg.slogdet) is not sufficient: a matrix can have positive determinant
+    while being negative definite or indefinite (e.g. -I in an even dimension has determinant
+    (-1)^d = +1 while every eigenvalue is negative). Cholesky fails on exactly the matrices that
+    are not positive definite, and its diagonal gives the log-determinant as a free byproduct.
+    Callers that also require symmetry (e.g. correlation/covariance matrices) must check that
+    separately -- cho_factor only reads one triangle and does not itself verify the other.
+
+    Args:
+        mat (np.ndarray): Square matrix to factor.
+
+    Returns:
+        The log-determinant of mat if it is positive definite, else None.
+
+    """
+    try:
+        c_factor, _ = scipy.linalg.cho_factor(mat)
+    except np.linalg.LinAlgError:
+        return None
+
+    return float(2.0 * np.sum(np.log(np.diag(c_factor))))
+
+
+def batched_pd_logdet(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized positive-definite check and log-determinant for a stack of symmetric matrices,
+    shape (..., p, p).
+
+    Analogous to np.linalg.slogdet's (sign, logdet) return, but with a correct positive-definite
+    test in place of a sign check (see cholesky_logdet for why sign is not sufficient). Cholesky
+    does not vectorize usefully here: np.linalg.cholesky on a stacked batch raises LinAlgError for
+    the whole batch if even one matrix fails, instead of flagging just that one. eigvalsh has no
+    such issue -- it never raises for a symmetric input, definite or not.
+
+    Args:
+        x (np.ndarray): Stack of symmetric matrices, shape (..., p, p).
+
+    Returns:
+        Tuple (is_pd, logdet), each shape x.shape[:-2]. is_pd[i] is True iff x[i] is positive
+        definite (every eigenvalue > 0). logdet[i] is log(|det(x[i])|) regardless of definiteness
+        (finite whenever x[i] is nonsingular) -- combine with is_pd via np.where the same way
+        slogdet's sign output is used, discarding logdet where is_pd is False.
+
+    """
+    eigvals = np.linalg.eigvalsh(x)
+    is_pd = np.all(eigvals > 0, axis=-1)
+    logdet = np.sum(np.log(np.abs(eigvals)), axis=-1)
+    return is_pd, logdet
+
+
 def maximum(
     x: float | int | Iterable | np.ndarray,
     y: float | int | Iterable | np.ndarray,

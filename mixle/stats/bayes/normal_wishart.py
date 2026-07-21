@@ -22,6 +22,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableProbabilityDistribution,
 )
 from mixle.utils.special import digamma, gammaln
+from mixle.utils.vector import cholesky_logdet
 
 
 def _multigammaln(a: float, d: int) -> float:
@@ -98,9 +99,10 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
         if not self.nu > d - 1:
             raise ValueError("NormalWishartDistribution requires nu > dim - 1 (got nu=%s, dim=%d)." % (self.nu, d))
 
-        sgn, self.log_det_w = np.linalg.slogdet(self.w_mat)
-        if not sgn > 0:
+        log_det_w = cholesky_logdet(self.w_mat)
+        if log_det_w is None:
             raise ValueError("NormalWishartDistribution requires a positive-definite scale matrix w_mat.")
+        self.log_det_w = log_det_w
         self.w_inv = np.linalg.inv(self.w_mat)
 
         # log normalizer of the Wishart factor
@@ -130,8 +132,8 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
         lam = np.asarray(lam, dtype=float)
         d = self.dim
 
-        sgn, log_det_lam = np.linalg.slogdet(lam)
-        if sgn <= 0:
+        log_det_lam = cholesky_logdet(lam)
+        if log_det_lam is None:
             return -np.inf
 
         diff = mu - self.mu

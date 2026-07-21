@@ -29,6 +29,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.matrix.wishart import WishartDistribution, _MeanScatterAccumulator
+from mixle.utils.vector import batched_pd_logdet, cholesky_logdet
 
 
 class InverseWishartDistribution(SequenceEncodableProbabilityDistribution):
@@ -41,8 +42,8 @@ class InverseWishartDistribution(SequenceEncodableProbabilityDistribution):
         self.dim = v.shape[0]
         if df <= self.dim - 1:
             raise ValueError("df must be > p - 1")
-        sign, logdet = np.linalg.slogdet(v)
-        if sign <= 0:
+        logdet = cholesky_logdet(v)
+        if logdet is None:
             raise ValueError("scale must be positive definite")
         self.df = float(df)
         self.scale = v
@@ -66,8 +67,8 @@ class InverseWishartDistribution(SequenceEncodableProbabilityDistribution):
     def log_density(self, x: np.ndarray) -> float:
         """Return the log-density at a single ``(p, p)`` SPD matrix (``-inf`` if not positive definite)."""
         xx = np.asarray(x, dtype=np.float64)
-        sign, logdet = np.linalg.slogdet(xx)
-        if sign <= 0:
+        logdet = cholesky_logdet(xx)
+        if logdet is None:
             return -np.inf
         tr = np.trace(self.scale @ np.linalg.inv(xx))
         return float(self._log_norm - (self.df + self.dim + 1.0) / 2.0 * logdet - 0.5 * tr)
@@ -75,11 +76,11 @@ class InverseWishartDistribution(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized log-density for a stack of SPD matrices, shape ``(N, p, p)``."""
         xx = np.asarray(x, dtype=np.float64)
-        sign, logdet = np.linalg.slogdet(xx)
+        is_pd, logdet = batched_pd_logdet(xx)
         x_inv = np.linalg.inv(xx)
         tr = np.einsum("ab,nba->n", self.scale, x_inv, optimize=True)
         rv = self._log_norm - (self.df + self.dim + 1.0) / 2.0 * logdet - 0.5 * tr
-        return np.where(sign <= 0, -np.inf, rv)
+        return np.where(is_pd, rv, -np.inf)
 
     def sampler(self, seed: int | None = None) -> "InverseWishartSampler":
         """Return a sampler for drawing SPD matrices from this distribution."""

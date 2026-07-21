@@ -31,6 +31,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.vector import cholesky_logdet
 
 
 class MatrixNormalDistribution(SequenceEncodableProbabilityDistribution):
@@ -57,9 +58,9 @@ class MatrixNormalDistribution(SequenceEncodableProbabilityDistribution):
         self.col_covar = v
         self.name = name
         self.keys = keys
-        su, logdet_u = np.linalg.slogdet(u)
-        sv, logdet_v = np.linalg.slogdet(v)
-        if su <= 0 or sv <= 0:
+        logdet_u = cholesky_logdet(u)
+        logdet_v = cholesky_logdet(v)
+        if logdet_u is None or logdet_v is None:
             raise ValueError("row_covar and col_covar must be positive definite")
         self._u_inv = np.linalg.inv(u)
         self._v_inv = np.linalg.inv(v)

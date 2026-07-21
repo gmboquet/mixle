@@ -44,6 +44,21 @@ class MatrixNormalTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             MatrixNormalDistribution(np.zeros((3, 2)), np.eye(2), np.eye(2))  # U must be (3,3)
 
+    def test_negative_definite_covariance_with_positive_determinant_raises(self):
+        # -I in an even dimension has determinant (-1)^2 = +1 while every eigenvalue is negative;
+        # a determinant-sign check alone would wrongly accept this as positive definite. Check the
+        # constructor's own message, not just any ValueError -- np.linalg.cholesky() happening to
+        # raise a LinAlgError (a ValueError subclass) a few lines later would otherwise mask a
+        # regression of the actual validation check.
+        neg_i2 = -np.eye(2)
+        self.assertGreater(np.linalg.det(neg_i2), 0.0)
+        with self.assertRaises(ValueError) as cm:
+            MatrixNormalDistribution(np.zeros((2, 2)), neg_i2, np.eye(2))
+        self.assertEqual(str(cm.exception), "row_covar and col_covar must be positive definite")
+        with self.assertRaises(ValueError) as cm:
+            MatrixNormalDistribution(np.zeros((2, 2)), np.eye(2), neg_i2)
+        self.assertEqual(str(cm.exception), "row_covar and col_covar must be positive definite")
+
 
 if __name__ == "__main__":
     unittest.main()
