@@ -1,8 +1,6 @@
 """Tests for runtime EM observability: straggler detection, imbalance receipts, fit_report."""
 
-import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
 
 from mixle.telemetry.core import Telemetry
 from mixle.utils.parallel.em_observability import (
@@ -16,48 +14,28 @@ from mixle.utils.parallel.em_observability import (
 )
 
 
-def _simulate_rank(telemetry, *, rank, round, sleep_seconds, n_obs, run_id):
-    """Simulate one rank's E-step: a real time.sleep so the slow rank is genuinely slower wall-clock."""
-    start = time.perf_counter()
-    time.sleep(sleep_seconds)
-    elapsed = time.perf_counter() - start
-    record_rank_round(
-        telemetry,
-        rank=rank,
-        round=round,
-        e_step_seconds=elapsed,
-        bytes_processed=n_obs * 64,
-        accumulator_bytes=256,
-        n_obs=n_obs,
-        run_id=run_id,
-    )
-
-
 class StragglerDetectionTest(unittest.TestCase):
     def test_induced_slow_rank_identified_within_one_round(self):
-        # 4 ranks running "in parallel" (real threads, real time.sleep) for ONE EM round; rank 2 is
-        # deliberately made slow. The straggler test must flag exactly rank 2 from this single round.
+        # Feed measured rank durations through the telemetry boundary. Sleeping threads here made
+        # the test depend on runner scheduling: under load, a nominally fast thread could be delayed
+        # enough to inflate the MAD and hide the planted straggler.
         telemetry = Telemetry()
         fast = 0.02
         slow = 0.25
         num_ranks = 4
         slow_rank = 2
 
-        with ThreadPoolExecutor(max_workers=num_ranks) as pool:
-            futures = [
-                pool.submit(
-                    _simulate_rank,
-                    telemetry,
-                    rank=rank,
-                    round=0,
-                    sleep_seconds=slow if rank == slow_rank else fast,
-                    n_obs=100,
-                    run_id="induced-slow",
-                )
-                for rank in range(num_ranks)
-            ]
-            for f in futures:
-                f.result()
+        for rank in range(num_ranks):
+            record_rank_round(
+                telemetry,
+                rank=rank,
+                round=0,
+                e_step_seconds=slow if rank == slow_rank else fast,
+                bytes_processed=100 * 64,
+                accumulator_bytes=256,
+                n_obs=100,
+                run_id="induced-slow",
+            )
 
         records = records_from_events(list(telemetry.events(kind="em_round")))
         self.assertEqual(len(records), num_ranks)
