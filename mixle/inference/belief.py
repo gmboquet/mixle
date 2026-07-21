@@ -148,8 +148,14 @@ class GaussianBelief(BeliefState):
         P = np.atleast_2d(np.asarray(cov, dtype=float))
         if P.shape != (m.size, m.size):
             raise ValueError(f"cov shape {P.shape} must be ({m.size}, {m.size}) to match mean of size {m.size}")
+        P = 0.5 * (P + P.T)  # symmetrize defensively
+        # positive *semi*-definite, not strictly definite: a noiseless update or condition() can
+        # legitimately collapse a coordinate to exactly zero variance. -1e-9 matches the tolerance
+        # already used elsewhere in this codebase (e.g. lkj_test.py) for "PSD up to float noise".
+        if np.linalg.eigvalsh(P).min() < -1e-9:
+            raise ValueError("cov must be positive semi-definite")
         self._mean = m
-        self._cov = 0.5 * (P + P.T)  # symmetrize defensively
+        self._cov = P
         self._dim = m.size
 
     @property
