@@ -40,6 +40,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
+    child_enumerator,
 )
 from mixle.stats.multivariate.categorical_multinomial import MultisetProductEnumerator
 from mixle.utils.aliasing import coalesce_alias
@@ -228,11 +229,13 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         Un-normalized log-density given by
 
-        log(p_mat(x)) = sum_k x_k*log(p_k), for x having k integer categories.
+        log(p_mat(x)) = sum_k x_k*log(p_k) + log(p_mat(n)), for x having k integer categories and n the
+        total trial count (sum of the k category counts), scored under len_dist.
 
         Note: x has k integer values and p_k denotes the probability of success for integer-category x_k. The
         multinomial coefficient is intentionally omitted (see the module docstring), so this is a per-category
-        scoring form, not a normalized mass over count vectors.
+        scoring form, not a normalized mass over count vectors. len_dist defaults to NullDistribution, whose
+        log_density is 0.0 for any input, so the trial-count term is a no-op unless len_dist is set.
 
         Args:
             x (Sequence[Tuple[int, float]]): Sequence of Tuple(s) containing the integer category value and number of
@@ -243,12 +246,18 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         rv = 0.0
+        # Start the trial count at integer zero so integer counts stay integers and the
+        # total is a valid argument for integer-supported length distributions (matches the
+        # sibling MultinomialDistribution.log_density's convention).
+        cc = 0
         for xx, cnt in x:
+            cc += cnt
             if cnt == 0:
                 # A zero-count term contributes nothing, even for an out-of-support value
                 # (avoids (-inf) * 0 = NaN). Matches the seq path's base-measure masking.
                 continue
             rv += (-inf if (xx < self.min_val or xx > self.max_val) else self.log_p_vec[xx - self.min_val]) * cnt
+        rv += self.len_dist.log_density(cc)
         return rv
 
     def seq_log_density(self, x: E) -> np.ndarray:
@@ -471,21 +480,31 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class IntegerMultinomialEnumerator(DistributionEnumerator):
-    """Enumerates integer count vectors (lists of (category, count) pairs) in descending log-density order."""
+    """Enumerates integer count vectors (lists of (category, count) pairs) in descending log_density order:
+    the per-category term sum_k n_k * log(p_k) plus len_dist's log-density of the total trial count (0.0
+    when len_dist is the default NullDistribution)."""
 
     def __init__(self, dist: IntegerMultinomialDistribution) -> None:
         """Create an enumerator for integer multinomial observations.
 
-        IntegerMultinomialDistribution.log_density scores an observation by sum_k n_k * log(p_k)
-        alone -- it includes neither the multinomial coefficient nor the trial-count (len_dist)
-        contribution -- so every finite count vector over the positive-probability categories
-        has positive density and the support is countably infinite. Trial counts are introduced
-        lazily through a synthetic frontier: every size-n count vector scores at most
-        n * log(p_max), which strictly decreases in n, so size n is instantiated only once it
-        can still beat the best pending value. Within a size, count vectors are produced by a
-        best-first multiset search over the probability-sorted categories. Values are emitted
-        as lists of (category, count) pairs sorted by category, matching the sampler's format;
-        log_prob equals log_density exactly.
+        The category term alone gives every finite count vector over the positive-probability
+        categories positive density, so the support is countably infinite. Trial counts are
+        introduced lazily through a length-indexed frontier (:class:`LengthFrontierMerge`), one of
+        two ways depending on whether a real trial-count distribution is modeled:
+
+        - len_dist Null (the default): a synthetic frontier over n = 0, 1, 2, ... -- every size-n
+          count vector scores at most n * log(p_max) on the category term alone (which strictly
+          decreases in n), so size n is instantiated only once it can still beat the best pending
+          value. The category term IS the full log_density here, so multisets carry no extra offset.
+        - len_dist real: trial counts are instead pulled from len_dist's OWN enumerator (already
+          descending in its own log-density, exactly as MultinomialEnumerator, the generic sibling,
+          does), and each count's multisets are offset by that count's real len_dist log-density --
+          a valid frontier bound because the category term is always <= 0, so no multiset of that
+          count can score above len_dist's own value for it.
+
+        Within a size, count vectors are produced by a best-first multiset search over the
+        probability-sorted categories. Values are emitted as lists of (category, count) pairs sorted
+        by category, matching the sampler's format; log_prob equals log_density exactly.
 
         Raises EnumerationError when some category has probability one: arbitrarily large
         counts of that category then all have density one and no non-increasing complete
@@ -509,14 +528,22 @@ class IntegerMultinomialEnumerator(DistributionEnumerator):
             return sorted(pairs)
 
         if len(entries) == 0:
-            # No positive-probability category: only the empty observation has positive density.
-            self._merge = iter([([], 0.0)])
-        else:
+            # No positive-probability category: only the all-zero (empty) observation has positive
+            # category-term density; its score still needs len_dist's term for a trial count of 0
+            # (0.0 when len_dist is Null, matching the prior hardcoded behavior exactly).
+            self._merge = iter([([], dist.len_dist.log_density(0))])
+        elif supports(dist.len_dist, Neutral):
             elem_buf = BufferedStream(iter(entries))
             lp_max = entries[0][1]
             len_stream = BufferedStream((n, n * lp_max) for n in itertools.count())
             self._merge = LengthFrontierMerge(
                 len_stream, lambda n, lp_len: MultisetProductEnumerator(elem_buf, n, combine=combine, offset=0.0)
+            )
+        else:
+            elem_buf = BufferedStream(iter(entries))
+            len_stream = BufferedStream(child_enumerator(dist.len_dist, "IntegerMultinomialDistribution.len_dist"))
+            self._merge = LengthFrontierMerge(
+                len_stream, lambda n, lp_len: MultisetProductEnumerator(elem_buf, n, combine=combine, offset=lp_len)
             )
 
     def __next__(self) -> tuple[list[tuple[int, int]], float]:
