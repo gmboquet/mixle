@@ -540,8 +540,10 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
                 pr_obs[:, i] = self.topics[i].seq_log_density(enc_x)
 
             pr_max0 = pr_obs.max(axis=1)
-            pr_obs -= pr_max0[:, None]
-            np.exp(pr_obs, out=pr_obs)
+            with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
+                pr_obs -= pr_max0[:, None]
+                np.exp(pr_obs, out=pr_obs)
+            pr_obs[np.isnan(pr_obs).any(axis=1), :] = 0.0  # impossible observation -> zero emission row
 
             betas = np.zeros_like(pr_obs, dtype=np.float64)
             etas = np.zeros((len(xbi), num_states), dtype=np.float64)
@@ -556,7 +558,9 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             if single.size > 0:
                 r = tz[single]
                 gam = pr_obs[r, :] * w[None, :]
-                betas[r, :] = gam / gam.sum(axis=1, keepdims=True)
+                gam_sum = gam.sum(axis=1, keepdims=True)
+                # impossible root -> gam_sum 0; leave betas at their already-0 initial value (avoid 0/0).
+                betas[r, :] = np.divide(gam, gam_sum, out=np.zeros_like(gam), where=gam_sum > 0.0)
 
             return [betas[tz[i] : tz[i + 1], :] for i in range(len(tz) - 1)]
 
@@ -585,13 +589,16 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
                 pr_obs[:, i] = self.topics[i].seq_log_density(enc_x)
 
             pr_max0 = pr_obs.max(axis=1)
-            pr_obs -= pr_max0[:, None]
-            np.exp(pr_obs, out=pr_obs)
+            with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
+                pr_obs -= pr_max0[:, None]
+                np.exp(pr_obs, out=pr_obs)
+            pr_obs[np.isnan(pr_obs).any(axis=1), :] = 0.0  # impossible observation -> zero emission row
 
             #  set the leaf nodes
             betas[xln, :] *= pr_obs[xln, :] * p_level[xlnl, :]
             betas_sum = np.sum(betas[xln, :], axis=1, keepdims=True)
-            betas[xln, :] /= betas_sum
+            # clamp the divisor (impossible leaf -> betas_sum 0 -> keep beta 0, avoid 0/0).
+            betas[xln, :] /= np.where(betas_sum > 0.0, betas_sum, 1.0)
 
             #  upward pass on betas
             for level in range(len(level_idx) - 1, -1, -1):
@@ -605,13 +612,15 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
                 etas[xbis, :] += temp
 
                 # within-segment sums (batch-independent, unlike a cumsum-difference)
-                log_etas = np.add.reduceat(np.log(etas[xbis, :]), eta_p[level][:-1], axis=0)
+                with np.errstate(divide="ignore"):  # an impossible subtree gives etas 0 -> log -inf -> beta 0
+                    log_etas = np.add.reduceat(np.log(etas[xbis, :]), eta_p[level][:-1], axis=0)
 
                 betas[p_nxt[level], :] *= np.exp(log_etas) * pr_obs[p_nxt[level], :]
                 betas[p_nxt[level], :] *= p_level[level, :]
                 betas_sum = np.sum(betas[p_nxt[level], :], axis=1, keepdims=True)
 
-                betas[p_nxt[level], :] /= betas_sum
+                # clamp the divisor (impossible node -> betas_sum 0 -> keep beta 0, avoid 0/0).
+                betas[p_nxt[level], :] /= np.where(betas_sum > 0.0, betas_sum, 1.0)
 
             #  Return betas by observed sequence need tz
             return [betas[tz[i] : tz[i + 1], :] for i in range(len(tz) - 1)]
@@ -1136,8 +1145,10 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_x)
 
             pr_max0 = pr_obs.max(axis=1)
-            pr_obs -= pr_max0[:, None]
-            np.exp(pr_obs, out=pr_obs)
+            with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
+                pr_obs -= pr_max0[:, None]
+                np.exp(pr_obs, out=pr_obs)
+            pr_obs[np.isnan(pr_obs).any(axis=1), :] = 0.0  # impossible observation -> zero emission row
 
             # When the fused-EM fast path requests it, compute the per-tree data log-likelihood
             # from the already-scored emissions via the (read-only) forward kernel, reusing pr_obs
@@ -1211,7 +1222,10 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             if single.size > 0:
                 r = tz[single]
                 gam = pr_obs[r, :] * w[None, :]
-                gam /= gam.sum(axis=1, keepdims=True)
+                gam_sum = gam.sum(axis=1, keepdims=True)
+                # impossible root -> gam_sum 0; leave gam at its already-0 value (avoid 0/0) so this
+                # tree contributes nothing rather than nan to the accumulator.
+                gam = np.divide(gam, gam_sum, out=np.zeros_like(gam), where=gam_sum > 0.0)
                 gam *= weights[single][:, None]
                 alphas[r, :] = gam
                 pi_acc[single, :] = gam
@@ -1256,8 +1270,10 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 pr_obs[:, i] = estimate.topics[i].seq_log_density(enc_x)
 
             pr_max0 = pr_obs.max(axis=1)
-            pr_obs -= pr_max0[:, None]
-            np.exp(pr_obs, out=pr_obs)
+            with np.errstate(invalid="ignore"):  # impossible rows have max -inf -> NaN; zeroed below
+                pr_obs -= pr_max0[:, None]
+                np.exp(pr_obs, out=pr_obs)
+            pr_obs[np.isnan(pr_obs).any(axis=1), :] = 0.0  # impossible observation -> zero emission row
 
             # When the fused-EM fast path requests it, accumulate the per-tree data log-likelihood
             # inline during the (existing) upward beta pass from the betas_sum normalizers + emission
@@ -1268,7 +1284,9 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             #  set the leaf nodes
             betas[xln, :] *= pr_obs[xln, :] * p_level[xlnl, :]
             betas_sum = np.sum(betas[xln, :], axis=1, keepdims=True)
-            betas[xln, :] /= betas_sum
+            # divide by a clamped sum (impossible leaf -> betas_sum 0 -> keep beta 0, avoid 0/0), but keep
+            # the true betas_sum for the log below so an impossible leaf correctly drives ll to -inf.
+            betas[xln, :] /= np.where(betas_sum > 0.0, betas_sum, 1.0)
 
             if track_ll:
                 ll_ret += np.bincount(xlni, weights=np.log(betas_sum.flatten()) + pr_max0[xln], minlength=num_trees)
@@ -1285,13 +1303,16 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 etas[xbis, :] += temp
 
                 # within-segment sums (batch-independent, unlike a cumsum-difference)
-                log_etas = np.add.reduceat(np.log(etas[xbis, :]), eta_p[level][:-1], axis=0)
+                with np.errstate(divide="ignore"):  # an impossible subtree gives etas 0 -> log -inf -> beta 0
+                    log_etas = np.add.reduceat(np.log(etas[xbis, :]), eta_p[level][:-1], axis=0)
 
                 betas[p_nxt[level], :] *= np.exp(log_etas) * pr_obs[p_nxt[level], :]
                 betas[p_nxt[level], :] *= p_level[level, :]
                 betas_sum = np.sum(betas[p_nxt[level], :], axis=1, keepdims=True)
 
-                betas[p_nxt[level], :] /= betas_sum
+                # clamp the divisor (impossible node -> betas_sum 0 -> keep beta 0, avoid 0/0), keeping the
+                # true betas_sum for the log so an impossible subtree correctly drives ll to -inf.
+                betas[p_nxt[level], :] /= np.where(betas_sum > 0.0, betas_sum, 1.0)
 
                 if track_ll:
                     ll_ret += np.bincount(
@@ -1312,7 +1333,13 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 idxs, xbis, xps, xcs = idx[lidx], xbi[lidx], xp[lidx], xc[lidx]
                 weights_loc = np.reshape(weights[idxs], (-1, 1, 1))
 
-                xi0 = np.reshape(alphas[xps, :] / etas[xbis, :], (-1, num_states, 1)) * a_mat
+                # an impossible child c makes etas[xbis, :] 0 (no valid state assignment reaches c) --
+                # there is no signal to propagate through it, so this term contributes 0 rather than a
+                # bare x/0 -> inf/nan (matching the identical guard in the numba kernel above).
+                alpha_over_eta = np.divide(
+                    alphas[xps, :], etas[xbis, :], out=np.zeros_like(alphas[xps, :]), where=etas[xbis, :] > 0.0
+                )
+                xi0 = np.reshape(alpha_over_eta, (-1, num_states, 1)) * a_mat
                 xi1 = np.reshape(betas[xcs, :] / p_level[level + 1, :], (-1, 1, num_states))
                 xi_loc = xi0 * xi1
 
@@ -2219,8 +2246,12 @@ def numba_baum_welch(
                 alphas[s0, i] = temp * weight_loc
                 alpha_sum += temp
 
+            # impossible single-node tree -> alpha_sum 0; keep alphas at their already-0 value (avoid 0/0)
+            # instead of writing nan into the accumulator.
+            if alpha_sum > 0.0:
+                for i in range(num_states):
+                    alphas[s0, i] /= alpha_sum
             for i in range(num_states):
-                alphas[s0, i] /= alpha_sum
                 pi_acc[n, i] += alphas[s0, i]
 
             continue
@@ -2243,8 +2274,11 @@ def numba_baum_welch(
                 beta_mat[leaf_node, i] = temp
                 beta_sum += temp
 
-            for i in range(num_states):
-                beta_mat[leaf_node, i] /= beta_sum
+            # impossible leaf -> beta_sum 0; keep beta_mat at its already-0 value (avoid 0/0) instead of
+            # writing nan into the accumulator.
+            if beta_sum > 0.0:
+                for i in range(num_states):
+                    beta_mat[leaf_node, i] /= beta_sum
 
         #  Slice the upward pass
         xps = xp[i0:i1]
@@ -2277,8 +2311,11 @@ def numba_baum_welch(
 
                 beta_sum += beta_mat[p, i]
 
-            for i in range(num_states):
-                beta_mat[p, i] /= beta_sum
+            # impossible subtree -> beta_sum 0; keep beta_mat at its already-0 value (avoid 0/0) instead
+            # of writing nan into the accumulator.
+            if beta_sum > 0.0:
+                for i in range(num_states):
+                    beta_mat[p, i] /= beta_sum
 
         ### do the alpha pass
         alpha_mat = alphas[s0:s1, :]
@@ -2300,7 +2337,13 @@ def numba_baum_welch(
                 for i in range(num_states):
                     alpha_sum = 0
                     for j in range(num_states):
-                        temp = tr_mat[j, i] * alpha_mat[p, j] / eta_mat[eta_idx, j]
+                        # an impossible child c makes eta_mat[eta_idx, j] 0 for every j (no valid state
+                        # assignment reaches c) -- there is no signal to propagate through it, so this
+                        # term contributes 0 rather than a bare x/0 -> inf/nan.
+                        if eta_mat[eta_idx, j] > 0.0:
+                            temp = tr_mat[j, i] * alpha_mat[p, j] / eta_mat[eta_idx, j]
+                        else:
+                            temp = 0.0
                         alpha_sum += temp
 
                         temp *= beta_mat[c, i]
@@ -2358,8 +2401,10 @@ def numba_posteriors(
                 betas[s0, i] += temp
                 beta_sum += temp
 
-            for i in range(num_states):
-                betas[s0, i] /= beta_sum
+            # impossible single-node tree -> beta_sum 0; skip the divide rather than writing nan.
+            if beta_sum > 0.0:
+                for i in range(num_states):
+                    betas[s0, i] /= beta_sum
 
         beta_mat = betas[s0:s1, :]
         eta_mat = etas[i0:i1, :]
@@ -2379,8 +2424,11 @@ def numba_posteriors(
                 beta_mat[leaf_node, i] = temp
                 beta_sum += temp
 
-            for i in range(num_states):
-                beta_mat[leaf_node, i] /= beta_sum
+            # impossible leaf -> beta_sum 0; keep beta_mat at its already-0 value (avoid 0/0) instead of
+            # writing nan into the accumulator.
+            if beta_sum > 0.0:
+                for i in range(num_states):
+                    beta_mat[leaf_node, i] /= beta_sum
 
         #  Slice the upward pass
         xps = xp[i0:i1]
@@ -2413,8 +2461,11 @@ def numba_posteriors(
 
                 beta_sum += beta_mat[p, i]
 
-            for i in range(num_states):
-                beta_mat[p, i] /= beta_sum
+            # impossible subtree -> beta_sum 0; keep beta_mat at its already-0 value (avoid 0/0) instead
+            # of writing nan into the accumulator.
+            if beta_sum > 0.0:
+                for i in range(num_states):
+                    beta_mat[p, i] /= beta_sum
 
 
 @numba.jit(
