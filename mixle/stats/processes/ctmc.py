@@ -118,7 +118,12 @@ class ContinuousTimeMarkovChainDistribution(SequenceEncodableProbabilityDistribu
     def estimator(self, pseudo_count: float | None = None) -> ContinuousTimeMarkovChainEstimator:
         """Return the closed-form rate estimator for this state space."""
         return ContinuousTimeMarkovChainEstimator(
-            self.num_states, pseudo_count=pseudo_count, name=self.name, keys=self.keys
+            self.num_states,
+            pseudo_count=pseudo_count,
+            initial_state=self.initial_state,
+            horizon=self.horizon,
+            name=self.name,
+            keys=self.keys,
         )
 
     def dist_to_encoder(self) -> ContinuousTimeMarkovChainDataEncoder:
@@ -240,11 +245,15 @@ class ContinuousTimeMarkovChainEstimator(ParameterEstimator):
         self,
         num_states: int,
         pseudo_count: float | None = None,
+        initial_state: int = 0,
+        horizon: float = 10.0,
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
         self.num_states = int(num_states)
         self.pseudo_count = pseudo_count
+        self.initial_state = int(initial_state)
+        self.horizon = float(horizon)
         self.name = name
         self.keys = keys
 
@@ -262,7 +271,9 @@ class ContinuousTimeMarkovChainEstimator(ParameterEstimator):
         denom = np.maximum(dwell + pc * self.num_states, _MIN_TIME)[:, None]
         rates = num / denom
         np.fill_diagonal(rates, 0.0)
-        return ContinuousTimeMarkovChainDistribution(rates, name=self.name, keys=self.keys)
+        return ContinuousTimeMarkovChainDistribution(
+            rates, initial_state=self.initial_state, horizon=self.horizon, name=self.name, keys=self.keys
+        )
 
 
 class ContinuousTimeMarkovChainDataEncoder(DataSequenceEncoder):

@@ -53,6 +53,17 @@ class CTMCTest(unittest.TestCase):
         expected = np.log(3.0) - 3.0 * 2.0  # log q01 - q0 * T0
         self.assertAlmostEqual(d.log_density(traj), expected, places=10)
 
+    def test_estimator_round_trip_preserves_initial_state_and_horizon(self):
+        # .estimator() previously dropped initial_state/horizon entirely (ContinuousTimeMarkovChainEstimator
+        # had no such params to receive them), so a fitted result silently reset to the class defaults
+        # (initial_state=0, horizon=10.0) regardless of what the original distribution had -- a real
+        # difference for anyone then sampling new trajectories from the fitted result.
+        d = st.ContinuousTimeMarkovChainDistribution(_true(), initial_state=2, horizon=77.0)
+        traj = d.sampler(seed=0).sample(50)
+        fit = optimize(traj, d.estimator(), out=None, max_its=1)
+        self.assertEqual(fit.initial_state, 2)
+        self.assertEqual(fit.horizon, 77.0)
+
     def test_bad_rate_matrix_rejected(self):
         with self.assertRaises(ValueError):
             st.ContinuousTimeMarkovChainDistribution(np.array([[0.0, -1.0], [1.0, 0.0]]))  # negative rate
