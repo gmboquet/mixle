@@ -314,7 +314,10 @@ def _compile_estep(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> 
             "        wi = weights[i]",
         ]
         lines += ["    " + ln for ln in fwd]
-        lines.append(f"        out_ll[0] += wi * ({root_expr})")
+        # root_expr can legitimately be -inf (an impossible row, propagated up through the per-node
+        # finite-max guards in _emit_score); a zero-weighted such row must contribute exactly 0.0, not
+        # 0.0 * -inf (NaN in IEEE arithmetic), which would poison out_ll[0] for the whole batch.
+        lines.append(f"        out_ll[0] += 0.0 if wi == 0.0 else wi * ({root_expr})")
         lines += ["    " + ln for ln in bwd]
         fn = _njit("\n".join(lines), "_es")
     else:
@@ -338,7 +341,8 @@ def _compile_estep(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> 
             "            wi = weights[i]",
         ]
         lines += ["        " + ln for ln in fwd]
-        lines.append(f"            out_ll[c] += wi * ({root_expr})")
+        # same zero-weight guard as the sequential kernel: 0.0 * -inf is NaN, not 0.0.
+        lines.append(f"            out_ll[c] += 0.0 if wi == 0.0 else wi * ({root_expr})")
         bwd_sub = bwd
         for nm in acc_all:
             bwd_sub = [ln.replace(f"{nm}[", f"{nm}_c[") for ln in bwd_sub]
