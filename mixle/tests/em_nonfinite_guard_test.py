@@ -13,6 +13,7 @@ import unittest
 
 import numpy as np
 
+from mixle.inference.em import MonteCarloEM, OnlineEM
 from mixle.inference.estimation import _em_loop, _resolve_monotone, _resolve_track_best, optimize
 from mixle.stats import DiagonalGaussianEstimator, MixtureEstimator
 
@@ -56,6 +57,22 @@ class EmNonFiniteGuardTest(unittest.TestCase):
         self.assertFalse(_resolve_monotone(None, surrogate, exact))
         self.assertFalse(_resolve_track_best(None, surrogate))
         self.assertTrue(_resolve_track_best(True, surrogate))
+
+    def test_stochastic_strategies_default_to_best_seen_over_an_otherwise_exact_model(self):
+        # _resolve_monotone previously only looked at has_mutable_state/seq_local_elbo/
+        # outer_objective_compatible -- none of which flag a genuinely stochastic EM *strategy*
+        # (MonteCarloEM/OnlineEM) layered on top of an ordinary, otherwise-"exact" model/estimator.
+        # The strict gate then defaulted to True and broke the very first noisy step, silently
+        # terminating the whole optimize() run after one iteration regardless of max_its.
+        exact = _Model("exact", 0.0)
+        self.assertTrue(_resolve_monotone(None, None, exact))  # no strategy: unaffected, still strict
+
+        mc = MonteCarloEM(lambda *args: (1, None), num_samples=1, seed=0)
+        self.assertFalse(_resolve_monotone(None, None, exact, mc))
+        self.assertTrue(_resolve_monotone(True, None, exact, mc))  # explicit bool still wins
+
+        online = OnlineEM()
+        self.assertFalse(_resolve_monotone(None, None, exact, online))
 
     def test_best_seen_policy_can_cross_a_temporary_objective_valley(self):
         init = _Model("init", 1.0)

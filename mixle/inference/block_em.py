@@ -400,8 +400,12 @@ def _incremental_candidate_log_density(
         candidate[cancellation_rows] = np.logaddexp(new_inactive_log, new_active_log)
         impossible[cancellation_rows] = ~np.isfinite(candidate[cancellation_rows])
     if np.any(impossible):
+        # -inf, not 0.0: an impossible row (zero density under the candidate) must make the
+        # candidate's objective_value() sum -inf so the accept/reject gate correctly rejects it.
+        # 0.0 (log(1.0), the OPPOSITE extreme -- perfectly likely) let a candidate that collapses
+        # even one observation to zero density be silently accepted on a non-audited round.
         candidate = candidate.copy()
-        candidate[impossible] = 0.0
+        candidate[impossible] = -np.inf
     return candidate, impossible, int(np.count_nonzero(cancellation_rows))
 
 
