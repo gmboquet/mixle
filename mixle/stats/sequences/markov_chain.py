@@ -1895,7 +1895,7 @@ class MarkovChainEstimator(ParameterEstimator):
         len_dist = self.len_estimator.estimate(nobs, suff_stat[2])
 
         if a_sum > 0:
-            def_val = self.pseudo_count / a_sum
+            def_val = p_cnt0 / a_sum  # p_cnt0 already coalesces self.pseudo_count None -> 0.0 above
 
         return MarkovChainDistribution(
             init_prob_map, trans_map, len_dist=len_dist, default_value=def_val, name=self.name
