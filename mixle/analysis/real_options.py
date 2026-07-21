@@ -25,29 +25,26 @@ more is known?" Two tools close that gap:
     much uncertainty remains once it lands there." A rational decision-maker never loses from more
     information, so the estimate is floored at zero.
 
-Repo-boundary note (see this task's PR description): as of this PR neither J2's
-``mixle.analysis.valuation`` module (``NPVDistribution`` / ``monte_carlo_npv``) nor C8's ``mixle_pde``
-VOI hooks had landed on ``release/0.8.0`` -- J2 and C8 are this task's stated dependencies but are
-themselves still in flight. Consistent with how J4's ``valuation.py`` already handled the same kind of
-repo-boundary gap (see that module's docstring), this module treats both as soft dependencies: the
-``npv_dist`` parameter is duck-typed against anything exposing a ``.mean`` (the ``"NPVDistribution"``
-annotation is a forward reference, exactly as written in the frozen work order, never imported at
-runtime), and ``voi_dollars`` best-effort imports the C8 hook and falls back to a self-contained
+Repo-boundary note: J2's ``mixle.analysis.valuation`` module (``NPVDistribution`` / ``monte_carlo_npv``)
+has since landed and is imported normally below; C8's ``mixle_pde`` VOI hooks have not, so
+``voi_dollars`` still best-effort imports that hook and falls back to a self-contained
 posterior-refinement simulation over the frozen IC-1 :class:`~mixle.reason.posterior_protocol.Posterior`
-when it is unavailable. Nothing here blocks on either dependency merging first.
+when it is unavailable. ``real_option_value``'s ``npv_dist`` parameter stays duck-typed against
+anything exposing a ``.mean`` -- the hard import below is for the type annotation and documentation
+value only (previously a ``TYPE_CHECKING``-only forward reference, which left the name unresolvable to
+``typing.get_type_hints()`` -- a real, if rarely exercised, runtime introspection break); no
+``isinstance`` check was added, so any duck-typed object still works exactly as before.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 
+from mixle.analysis.valuation import NPVDistribution
 from mixle.reason.posterior_protocol import Posterior
-
-if TYPE_CHECKING:
-    from mixle.analysis.valuation import NPVDistribution
 
 __all__ = ["OptionValue", "real_option_value", "voi_dollars", "VoiStoppingDecision", "voi_stopping_decision"]
 

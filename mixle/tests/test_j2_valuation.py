@@ -147,6 +147,51 @@ def test_monte_carlo_npv_resamples_mismatched_price_path_count():
     assert np.isfinite(result.mean)
 
 
+def test_monte_carlo_npv_accepts_a_one_arg_cost_model():
+    posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
+    price_paths = np.random.default_rng(0).normal(PRICE_MEAN, PRICE_STD, size=(N, 1))
+
+    def one_arg_cost_model(t: int) -> float:
+        assert t == 0
+        return OPEX_PER_TONNE * TONNAGE
+
+    result = monte_carlo_npv(
+        posterior,
+        price_paths,
+        one_arg_cost_model,
+        _schedule(),
+        discount_rate=DISCOUNT_RATE,
+        n=N,
+        rng=np.random.default_rng(0),
+    )
+    assert np.isfinite(result.mean)
+
+
+def test_monte_carlo_npv_does_not_swallow_an_unrelated_type_error_from_a_two_arg_cost_model():
+    # A TypeError raised *inside* cost_model(t, tonnage_t) for a reason unrelated to arity used to be
+    # misread as "cost_model only takes one argument" and silently retried as cost_model(t) --
+    # invoking cost_model a second time (with different side effects) and masking the real error.
+    posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
+    price_paths = np.random.default_rng(0).normal(PRICE_MEAN, PRICE_STD, size=(N, 1))
+    calls = []
+
+    def buggy_cost_model(t: int, tonnage_t: float) -> float:
+        calls.append(t)
+        raise TypeError("boom: unrelated bug inside cost_model")
+
+    with pytest.raises(TypeError):
+        monte_carlo_npv(
+            posterior,
+            price_paths,
+            buggy_cost_model,
+            _schedule(),
+            discount_rate=DISCOUNT_RATE,
+            n=N,
+            rng=np.random.default_rng(0),
+        )
+    assert calls == [0]  # called exactly once, not retried as a one-arg call
+
+
 def test_monte_carlo_npv_rejects_period_dimension_mismatch():
     posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
     price_paths = np.random.default_rng(0).normal(PRICE_MEAN, PRICE_STD, size=(N, 3))  # 3 periods

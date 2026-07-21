@@ -260,6 +260,11 @@ def optimize_mixture(
     if budget < 2:
         raise ValueError("budget must allow at least two proxy runs.")
     kwargs = dict(proxy_kwargs or {})
+    if kwargs.get("return_detail"):
+        # the search loop needs a bare scalar loss (bandit.update(reward=-loss), opt.tell(x, loss));
+        # return_detail=True makes proxy_run_score return a (loss, per_domain_dict) tuple instead,
+        # which crashes the loop far from this call site with an opaque TypeError.
+        raise ValueError("proxy_kwargs['return_detail']=True is incompatible with optimize_mixture's search loop.")
     if method == "bandit":
         return _bandit_search(domains, proxy_steps, budget, kwargs, seed)
     if method == "doe":
