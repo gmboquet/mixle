@@ -76,5 +76,44 @@ class SpearmanRankingEstimatorRhoTestCase(unittest.TestCase):
         self.assertEqual(dist.rho, 0.0)
 
 
+class SpearmanRankingDimGuardTestCase(unittest.TestCase):
+    # No size guard previously existed on the dim! permutation normalizer (every sibling ranking
+    # distribution has one for its own exponential-cost construct) -- dim=13 alone would materialize
+    # 6.2 billion rows, and dim=12 already costs ~46GB/~168s; unusable, not just slow.
+    #
+    # These tests use a tiny artificial max_dim (2 or 3) to exercise the guard mechanism itself --
+    # raising above the configured limit is fast (it raises before ever materializing anything), but
+    # SUCCEEDING requires an actual dim! materialization, so only test_default_max_dim_value_is_ten
+    # below touches the real default (and only via the "exceeds it, raises immediately" direction,
+    # which likewise never materializes).
+
+    def test_default_max_dim_value_is_ten(self):
+        with self.assertRaises(ValueError):
+            SpearmanRankingDistribution(sigma=list(range(11)), rho=1.0)  # 11 > default max_dim=10
+
+    def test_distribution_over_custom_max_dim_raises(self):
+        with self.assertRaises(ValueError):
+            SpearmanRankingDistribution(sigma=[0, 1, 2], rho=1.0, max_dim=2)  # 3 > custom max_dim=2
+
+    def test_distribution_at_custom_max_dim_is_allowed(self):
+        dist = SpearmanRankingDistribution(sigma=[0, 1, 2], rho=1.0, max_dim=3)  # 3 == custom max_dim
+        self.assertTrue(np.isfinite(dist.log_const))
+
+    def test_estimator_over_custom_max_dim_raises(self):
+        with self.assertRaises(ValueError):
+            SpearmanRankingEstimator(3, max_dim=2)  # 3 > custom max_dim=2 -- must raise at construction
+
+    def test_estimator_round_trip_preserves_max_dim(self):
+        # estimator()/estimate() must carry the SAME max_dim forward, not silently reset to the
+        # default (the same "estimator round-trip drops metadata" bug class fixed elsewhere this
+        # session) -- a distribution built with a non-default max_dim, refit through its own
+        # estimator, must produce a result with that SAME max_dim, not the module default.
+        dist = SpearmanRankingDistribution(sigma=[0, 1, 2], rho=1.0, max_dim=3)
+        est = dist.estimator()
+        self.assertEqual(est.max_dim, 3)
+        refit = _estimate(est, [[0, 1, 2]])
+        self.assertEqual(refit.max_dim, 3)
+
+
 if __name__ == "__main__":
     unittest.main()
