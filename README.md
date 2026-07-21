@@ -59,7 +59,8 @@ Python 3.11+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64 and 
 Silicon) on every PR; Windows is untested.
 
 ```sh
-pip install mixle          # base (numpy, scipy, mpmath): every distribution, fit locally
+pip install mixle          # base (numpy, scipy): ordinary distributions and local fitting
+pip install "mixle[highprec]"  # + mpmath arbitrary-precision fallback
 pip install "mixle[all]"   # + numba, torch, the distributed backends, and core data connectors
 ```
 
@@ -68,7 +69,7 @@ Everything past the base is opt-in — install any subset, e.g. `pip install "mi
 - **Acceleration** — `numba` (JIT hot paths, falls back to NumPy), `torch` (GPU / autograd), `jax` (JAX engine + NUTS)
 - **Scale-out** — `spark` · `dask` · `ray` · `lightning` · `mpi`
 - **Data sources** — `pandas` · `arrow` · `sql` · `mongo` · `hadoop` · `arrays`
-- **Other** — `gmpy2` (fast exact ranking) · `umap` (embeddings) · `sympy` · `sage` (symbolic export) · `grammar` (graph grammars)
+- **Other** — `highprec` (mpmath fallback) · `gmpy2` (fast exact ranking) · `umap` (embeddings) · `sympy` · `sage` (symbolic export) · `grammar` (graph grammars)
 
 `[all]` covers `numba`, `torch`, the scale-out backends, and `pandas`/`arrow`/`sql`; `jax`, `gmpy2`,
 `sympy`/`sage`, and `mongo`/`hadoop`/`arrays` install separately.
@@ -323,11 +324,12 @@ export PYSPARK_PYTHON=/path/to/venv/bin/python PYSPARK_DRIVER_PYTHON=$PYSPARK_PY
 ## Tests
 
 ```sh
-python -m pytest                                       # fast gate (parallel), ~25 s
-python -m pytest -m "not optional and not benchmark"   # full suite incl. slow tests
+python -m pytest path/to/focused_test.py               # select the smallest relevant local test
+python -m pytest -m "not optional and not benchmark"   # hosted full gate, not a routine local command
 ```
 
-`base_dist_test.py` exercises 40 of its 41 base-distribution families end to end: sampler repeatability,
+Local validation should be scoped to commands that finish within 30 seconds; the hosted pull-request and
+release-tip workflows own the broad matrix. `base_dist_test.py` exercises 40 of its 41 base-distribution families end to end: sampler repeatability,
 `str`/`eval` round-trips, vectorized-vs-scalar density agreement, EM convergence. (The one exception,
 `HierarchicalMixtureDistribution`, is excluded with the reason documented at its `_build_dists()` entry.)
 See [`mixle/tests/README.md`](https://github.com/gmboquet/mixle/blob/main/mixle/tests/README.md).

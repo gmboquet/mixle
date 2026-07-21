@@ -32,7 +32,7 @@ the 0.8.0 re-run, marked below).
        clean wheel by the ``clean-wheel`` CI job.
    * - "5000+ tests"
      - E1
-     - The full suite runs in CI (``fast`` on 3.10–3.12, ``full`` on 3.12). Not yet run from the wheel
+     - The full suite runs in CI (``fast`` on 3.11–3.12, ``full`` on 3.12). Not yet run from the wheel
        for the whole suite (only the import sweep is) — that is a 0.8.0 exit criterion.
    * - One ``optimize(...)`` call fits a composed model (distribution + neural + latent) together
      - E2

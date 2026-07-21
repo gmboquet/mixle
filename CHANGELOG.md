@@ -51,6 +51,11 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   had nine read-side data connectors and no supported way to move a result back into
   pandas/Parquet; `pandas` is an optional extra (`pip install mixle[pandas]`), guarded the same way
   as the other optional dependencies and never imported by the base install.
+- Executable distributed language-model training contracts: typed DP/HSDP/FSDP2, tensor, pipeline,
+  context, expert, and expert-tensor axes; deterministic accumulation and data sharding; complete
+  distributed-checkpoint state; native PyTorch execution for supported plans; and explicit adapters
+  for Megatron, Ray Train, and Lightning Fabric. Hardware-dependent performance and multi-GPU claims
+  remain unverified until retained receipts exist.
 
 ### Fixed
 
@@ -74,6 +79,10 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   non-finite, asymmetric, or non-positive-semidefinite inputs instead of passing or clipping them.
 - Reproducibility-sensitive modality reductions and corpus shingles now use portable digest-based
   hashes rather than process-randomized values.
+- TreeHMM encoder equality handles array-backed state; real-option annotations resolve under runtime
+  introspection; callable-arity probing no longer invokes user code twice or masks its exception;
+  optimization failure uses explicit exceptions rather than removable assertions; and mixture search
+  rejects detailed tuple scores before entering scalar optimizer loops.
 - Empirical law discovery selects candidates on validation data and confirms the winner on a separate
   untouched holdout; invalid ranges, budgets, forms, and simulator outputs are rejected.
 - Sequential-design acquisition budgets reject invalid values and explicitly count the initial fit;
@@ -100,8 +109,6 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   twins (both are registered Sphinx source suffixes). Sphinx was silently building the `.md` file for
   each docname; for `operations` this meant the published site was missing the `mixle.ops` API
   reference entirely, since `docs/operations.rst` never won the build.
-
-### Fixed
 
 Findings from the 2026-07-13 full-tree code review (IDs reference its audit ledger; every fix ships
 with a regression test that fails on the unfixed code):

@@ -25,12 +25,12 @@ The package family currently declares these runtime floors:
      - Runtime floor
      - Release evidence required
    * - Core ``mixle``
-     - Python 3.10 and newer
+     - Python 3.11 and newer
      - Wheel install, import sweep, tests, examples, and docs builds on the
        effective Python/OS matrix.
    * - Python sister packages
-     - Usually Python 3.10 and newer; ``mixle-demos`` currently declares
-       Python 3.11 and newer
+     - The floor declared by each package; the coordinated release manifest
+       records any differences from the Core Python 3.11 floor
      - Package-specific build, clean install, tests, docs, and family
        co-install evidence.
    * - ``mixle-agent``
