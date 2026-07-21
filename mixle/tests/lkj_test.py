@@ -63,6 +63,75 @@ class LKJTest(unittest.TestCase):
         bad = np.array([[1.0, 2.0, 0.0], [2.0, 1.0, 0.0], [0.0, 0.0, 1.0]])  # not positive definite
         self.assertEqual(LKJ(3, 2.0).log_density(bad), -np.inf)
 
+    def test_not_pd_with_positive_determinant_is_neg_inf(self):
+        # symmetric, unit diagonal, determinant > 0 (a determinant-sign check would accept this),
+        # but eigenvalues [-0.6, -0.2, 3.8] -- not positive definite.
+        bad = np.array([[1.0, -1.5, -1.5], [-1.5, 1.0, 1.2], [-1.5, 1.2, 1.0]])
+        self.assertGreater(np.linalg.det(bad), 0.0)
+        self.assertEqual(LKJ(3, 2.0).log_density(bad), -np.inf)
+        # and for eta < 1, where (eta - 1) is negative -- a naive sign-propagation through the
+        # arithmetic would flip -inf to +inf instead of keeping it -inf.
+        self.assertEqual(LKJ(3, 0.5).log_density(bad), -np.inf)
+
+    def test_wrong_size_is_neg_inf(self):
+        wrong_size = np.eye(2)  # a valid 2x2 correlation matrix, but this LKJ is dim=3
+        self.assertEqual(LKJ(3, 2.0).log_density(wrong_size), -np.inf)
+
+    def test_non_symmetric_is_neg_inf(self):
+        non_symmetric = np.array([[1.0, 0.5, 0.0], [0.9, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        self.assertEqual(LKJ(3, 2.0).log_density(non_symmetric), -np.inf)
+
+    def test_non_unit_diagonal_is_neg_inf(self):
+        non_unit_diag = np.array([[2.0, 0.5, 0.0], [0.5, 2.0, 0.0], [0.0, 0.0, 2.0]])  # scaled covariance, not corr
+        self.assertEqual(LKJ(3, 2.0).log_density(non_unit_diag), -np.inf)
+
+    def test_seq_encode_flags_invalid_rows_without_corrupting_valid_ones(self):
+        from mixle.stats.matrix.lkj import LKJDataEncoder
+
+        d = LKJ(3, 2.0)
+        good = d.sampler(seed=3).sample(2)
+        bad = np.array([[1.0, -1.5, -1.5], [-1.5, 1.0, 1.2], [-1.5, 1.2, 1.0]])
+        batch = np.array([good[0], bad, good[1]])
+        encoded = LKJDataEncoder().seq_encode(batch)
+        self.assertEqual(encoded[1], -np.inf)
+        np.testing.assert_allclose(encoded[[0, 2]], [np.linalg.slogdet(good[0])[1], np.linalg.slogdet(good[1])[1]])
+        seq_ll = d.seq_log_density(encoded)
+        self.assertEqual(seq_ll[1], -np.inf)
+        np.testing.assert_allclose(seq_ll[[0, 2]], [d.log_density(good[0]), d.log_density(good[1])])
+
+    def test_accumulator_poisons_sum_log_det_for_invalid_matrix(self):
+        from mixle.stats.matrix.lkj import LKJAccumulator
+
+        bad = np.array([[1.0, -1.5, -1.5], [-1.5, 1.0, 1.2], [-1.5, 1.2, 1.0]])
+        acc = LKJAccumulator()
+        acc.update(np.eye(3), 1.0, None)
+        acc.update(bad, 1.0, None)
+        count, sum_log_det = acc.value()
+        self.assertEqual(count, 2.0)
+        self.assertEqual(sum_log_det, -np.inf)
+
+    def test_accumulator_zero_weight_on_invalid_matrix_does_not_poison(self):
+        from mixle.stats.matrix.lkj import LKJAccumulator
+
+        bad = np.array([[1.0, -1.5, -1.5], [-1.5, 1.0, 1.2], [-1.5, 1.2, 1.0]])
+        acc = LKJAccumulator()
+        acc.update(np.eye(3), 1.0, None)  # log det = 0
+        acc.update(bad, 0.0, None)  # zero weight: must contribute exactly 0, not nan (0 * -inf)
+        count, sum_log_det = acc.value()
+        self.assertEqual(count, 1.0)
+        self.assertEqual(sum_log_det, 0.0)
+
+    def test_seq_update_zero_weight_on_invalid_row_does_not_poison(self):
+        from mixle.stats.matrix.lkj import LKJAccumulator, LKJDataEncoder
+
+        bad = np.array([[1.0, -1.5, -1.5], [-1.5, 1.0, 1.2], [-1.5, 1.2, 1.0]])
+        encoded = LKJDataEncoder().seq_encode(np.array([np.eye(3), bad]))
+        acc = LKJAccumulator()
+        acc.seq_update(encoded, np.array([1.0, 0.0]), None)
+        count, sum_log_det = acc.value()
+        self.assertEqual(count, 1.0)
+        self.assertEqual(sum_log_det, 0.0)
+
     def test_mle_recovers_eta(self):
         for d, eta in [(3, 2.0), (4, 4.0)]:
             true = LKJ(d, eta)

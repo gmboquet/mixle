@@ -100,6 +100,28 @@ class StudentTCopulaTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             StudentTCopulaDistribution(np.array([[1.0, 1.5], [1.5, 1.0]]), 4.0)  # not PD
 
+    def test_rejects_not_pd_with_positive_determinant(self):
+        # symmetric, unit diagonal, determinant > 0 (a determinant-sign check would accept this),
+        # but eigenvalues [-0.6, -0.2, 3.8] -- not positive definite.
+        bad = np.array([[1.0, -1.5, -1.5], [-1.5, 1.0, 1.2], [-1.5, 1.2, 1.0]])
+        self.assertGreater(np.linalg.det(bad), 0.0)
+        with self.assertRaises(ValueError):
+            StudentTCopulaDistribution(bad, 4.0)
+
+    def test_rejects_non_symmetric_corr(self):
+        with self.assertRaises(ValueError):
+            StudentTCopulaDistribution(np.array([[1.0, 0.5, 0.0], [0.9, 1.0, 0.0], [0.0, 0.0, 1.0]]), 4.0)
+
+    def test_rejects_non_unit_diagonal(self):
+        with self.assertRaises(ValueError):
+            StudentTCopulaDistribution(np.array([[2.0, 0.5], [0.5, 2.0]]), 4.0)  # a covariance, not a correlation
+
+    def test_rejects_nonpositive_df(self):
+        corr = np.array([[1.0, 0.6], [0.6, 1.0]])
+        for bad_df in (0.0, -3.0):
+            with self.subTest(df=bad_df), self.assertRaises(ValueError):
+                StudentTCopulaDistribution(corr, bad_df)
+
 
 class CopulaCoreIntegrationTest(unittest.TestCase):
     def test_each_core_plugs_into_copula_distribution_and_the_matching_core_wins(self):

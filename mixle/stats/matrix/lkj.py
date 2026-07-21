@@ -38,8 +38,30 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.vector import batched_pd_logdet, cholesky_logdet
 
 _LOG_SQRT_PI = 0.5 * math.log(math.pi)
+
+
+def _is_corr_like(r: np.ndarray, dim: int | None = None) -> bool:
+    """True iff r is a square, symmetric, unit-diagonal matrix (a correlation matrix modulo
+    positive-definiteness, which is checked separately via cholesky_logdet since that call also
+    yields the log-determinant callers need). If dim is given, r must also be exactly that size --
+    callers that don't track a dimension (the accumulator and encoder, which only ever store
+    (count, sum_log_det) / a reduced log-determinant) pass dim=None and skip that check.
+    """
+    if r.ndim != 2 or r.shape[0] != r.shape[1]:
+        return False
+    if dim is not None and r.shape[0] != dim:
+        return False
+    return bool(np.allclose(r, r.T) and np.allclose(np.diag(r), 1.0))
+
+
+def _batched_is_corr_like(x: np.ndarray) -> np.ndarray:
+    """Vectorized symmetric + unit-diagonal check for a stack of matrices, shape (n, d, d)."""
+    sym = np.all(np.isclose(x, np.swapaxes(x, -1, -2)), axis=(-1, -2))
+    unit_diag = np.all(np.isclose(np.diagonal(x, axis1=-2, axis2=-1), 1.0), axis=-1)
+    return sym & unit_diag
 
 
 def _log_beta_half(a: float) -> float:
@@ -79,17 +101,26 @@ class LKJDistribution(SequenceEncodableProbabilityDistribution):
         return math.exp(self.log_density(x))
 
     def log_density(self, x: Any) -> float:
-        """Return the log-density at a ``dim x dim`` correlation matrix (``-inf`` if not positive definite)."""
+        """Return the log-density at a ``dim x dim`` correlation matrix (``-inf`` if ``x`` is the
+        wrong size, not symmetric, does not have a unit diagonal, or is not positive definite)."""
         r = np.asarray(x, dtype=np.float64)
-        sign, logdet = np.linalg.slogdet(r)
-        if sign <= 0.0:
+        if not _is_corr_like(r, self.dim):
             return -math.inf
-        return self._log_c + (self.eta - 1.0) * float(logdet)
+        logdet = cholesky_logdet(r)
+        if logdet is None:
+            return -math.inf
+        return self._log_c + (self.eta - 1.0) * logdet
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
-        """Return vectorized log-density for a sequence-encoded array of ``log det(R)`` values."""
+        """Return vectorized log-density for a sequence-encoded array of ``log det(R)`` values.
+
+        The encoder marks an invalid (wrong-shape/non-symmetric/non-unit-diagonal/non-PD) input
+        as -inf; that must stay -inf here regardless of sign, since (eta - 1) is negative for
+        eta < 1 and would otherwise flip a -inf log-determinant to +inf density.
+        """
         log_det = np.asarray(x, dtype=np.float64)
-        return self._log_c + (self.eta - 1.0) * log_det
+        rv = self._log_c + (self.eta - 1.0) * log_det
+        return np.where(np.isneginf(log_det), -np.inf, rv)
 
     def sampler(self, seed: int | None = None) -> "LKJSampler":
         """Return an onion-method sampler for correlation matrices."""
@@ -152,21 +183,34 @@ class LKJAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
 
     def update(self, x: Any, weight: float, estimate: LKJDistribution | None) -> None:
-        """Accumulate the weighted log determinant for one correlation matrix."""
-        sign, logdet = np.linalg.slogdet(np.asarray(x, dtype=np.float64))
+        """Accumulate the weighted log determinant for one correlation matrix.
+
+        An invalid matrix (not symmetric, not unit diagonal, or not positive definite --
+        the accumulator has no dimension of its own to check shape against) contributes -inf,
+        poisoning sum_log_det, unless its weight is exactly 0 (0 * -inf would otherwise be nan).
+        """
+        r = np.asarray(x, dtype=np.float64)
+        logdet = cholesky_logdet(r) if _is_corr_like(r) else None
+        contribution = logdet if logdet is not None else -np.inf
         self.count += weight
-        self.sum_log_det += weight * float(logdet)
+        self.sum_log_det += 0.0 if weight == 0.0 else weight * contribution
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
         """Initialize the sufficient statistics with one weighted matrix."""
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
-        """Accumulate weighted log determinants from encoded matrices."""
+        """Accumulate weighted log determinants from encoded matrices.
+
+        log_det entries are -inf for matrices the encoder flagged invalid; guard the zero-weight
+        case the same way update() does, since np.dot would otherwise turn a single 0 * -inf term
+        into a nan that poisons the entire weighted sum.
+        """
         log_det = np.asarray(x, dtype=np.float64)
         w = np.asarray(weights, dtype=np.float64)
         self.count += float(w.sum())
-        self.sum_log_det += float(np.dot(w, log_det))
+        with np.errstate(invalid="ignore"):  # the w == 0 branch of np.where still computes 0 * -inf
+            self.sum_log_det += float(np.sum(np.where(w == 0.0, 0.0, w * log_det)))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize the sufficient statistics from encoded log determinants."""
@@ -261,6 +305,10 @@ class LKJDataEncoder(DataSequenceEncoder):
         return isinstance(other, LKJDataEncoder)
 
     def seq_encode(self, x: Sequence[Any]) -> np.ndarray:
-        """Encode correlation matrices as their log determinants."""
-        # batched slogdet over a stacked (n, d, d) array -- ~7x faster than a per-matrix Python loop
-        return np.asarray(np.linalg.slogdet(np.asarray(x, dtype=np.float64))[1], dtype=np.float64)
+        """Encode correlation matrices as their log determinants (-inf for a matrix that is not
+        symmetric, not unit diagonal, or not positive definite -- this encoder has no dimension of
+        its own to check shape against; that check happens in LKJDistribution.log_density)."""
+        xx = np.asarray(x, dtype=np.float64)
+        is_valid = _batched_is_corr_like(xx)
+        is_pd, logdet = batched_pd_logdet(xx)
+        return np.where(is_valid & is_pd, logdet, -np.inf)

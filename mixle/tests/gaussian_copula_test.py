@@ -37,6 +37,26 @@ class GaussianCopulaTest(unittest.TestCase):
         np.testing.assert_allclose(est.corr, self.R, atol=0.03)
         np.testing.assert_allclose(np.diag(est.corr), 1.0)  # valid correlation matrix
 
+    def test_rejects_non_pd_corr(self):
+        with self.assertRaises(ValueError):
+            GaussianCopulaDistribution(np.array([[1.0, 1.5], [1.5, 1.0]]))  # det < 0, indefinite
+
+    def test_rejects_not_pd_with_positive_determinant(self):
+        # symmetric, unit diagonal, determinant > 0 (a determinant-sign check would accept this),
+        # but eigenvalues [-0.6, -0.2, 3.8] -- not positive definite.
+        bad = np.array([[1.0, -1.5, -1.5], [-1.5, 1.0, 1.2], [-1.5, 1.2, 1.0]])
+        self.assertGreater(np.linalg.det(bad), 0.0)
+        with self.assertRaises(ValueError):
+            GaussianCopulaDistribution(bad)
+
+    def test_rejects_non_symmetric_corr(self):
+        with self.assertRaises(ValueError):
+            GaussianCopulaDistribution(np.array([[1.0, 0.5, 0.0], [0.9, 1.0, 0.0], [0.0, 0.0, 1.0]]))
+
+    def test_rejects_non_unit_diagonal(self):
+        with self.assertRaises(ValueError):
+            GaussianCopulaDistribution(np.array([[2.0, 0.5], [0.5, 2.0]]))  # a covariance, not a correlation
+
 
 if __name__ == "__main__":
     unittest.main()
