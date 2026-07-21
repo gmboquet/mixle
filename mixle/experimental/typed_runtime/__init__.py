@@ -96,6 +96,7 @@ from mixle.experimental.typed_runtime.contracts import (
     UpdateContract,
     UpdateKind,
 )
+from mixle.experimental.typed_runtime.distributed import plan_distributed_updates
 from mixle.experimental.typed_runtime.faults import (
     BoundaryFaultInjector,
     FaultEvent,
@@ -379,6 +380,7 @@ __all__ = [
     "compile_update_graph",
     "ExecutionPlan",
     "plan_execution",
+    "plan_distributed_updates",
     "calibrate_links",
     "build_routed_torch_optimizer",
     "bounded_context_attention",

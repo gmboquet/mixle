@@ -88,3 +88,29 @@ def test_scopes_subset_excludes_unrequested_scope():
 def test_invalid_scope_raises():
     with pytest.raises(ValueError):
         emissions_footprint(ACTIVITY, FACTORS, scopes=(1, 4))
+
+
+def test_climate_terms_type_hints_are_resolvable():
+    # climate_terms's `water` parameter used to be a bare forward-reference string naming an import
+    # that never happened, so any runtime introspection (typing.get_type_hints, some doc generators,
+    # dataclass-style tooling) raised NameError. It must resolve now that WaterBudget is a real name
+    # in this module's namespace.
+    import typing
+
+    from mixle.analysis.emissions import WaterBudget, climate_terms
+
+    hints = typing.get_type_hints(climate_terms)
+    assert hints["water"] == (WaterBudget | None)
+
+
+def test_climate_terms_still_duck_types_an_unrelated_water_object():
+    from mixle.analysis.emissions import climate_terms
+
+    class ThirdPartyWaterBudget:
+        shortfall_m3 = 0.0
+        storage = [1.0, 2.0, 0.0]
+
+    fp = emissions_footprint(ACTIVITY, FACTORS)
+    result = climate_terms(fp, ThirdPartyWaterBudget(), carbon_price=10.0)
+    assert result["water_feasible"] is True
+    assert result["shortfall_prob"] == pytest.approx(1.0 / 3.0)

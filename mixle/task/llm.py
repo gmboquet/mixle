@@ -14,6 +14,7 @@ propose a model specification (:mod:`mixle.task.design`).
 
 from __future__ import annotations
 
+import inspect
 import json
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -34,13 +35,23 @@ class CallableLLM:
 
     def __init__(self, fn: Callable[..., str]) -> None:
         self.fn = fn
+        try:
+            n_params = len(inspect.signature(fn).parameters)
+        except (TypeError, ValueError):
+            # a builtin/C callable or anything else signature() can't introspect: assume the
+            # single-argument form rather than risk invoking `fn` twice on unrelated errors.
+            n_params = 1
+        self._accepts_system = n_params >= 2
 
     def complete(self, prompt: str, *, system: str | None = None, **kwargs: Any) -> str:
         """Call the wrapped Python function and return its text output."""
-        try:
-            return self.fn(prompt, system)  # type: ignore[call-arg]
-        except TypeError:
-            return self.fn(prompt)
+        # Dispatch on `fn`'s arity up front (checked once, at wrap time) rather than by catching
+        # TypeError from the call itself -- a TypeError raised *inside* fn(prompt, system) for an
+        # unrelated reason used to be misread as "wrong arity" and silently retried as fn(prompt),
+        # invoking `fn` a second time and masking the real error.
+        if self._accepts_system:
+            return self.fn(prompt, system)
+        return self.fn(prompt)
 
 
 def _http_post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:

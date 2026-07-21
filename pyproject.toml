@@ -91,10 +91,10 @@ ray = ["ray>=2.9"]
 lightning = ["lightning>=2.1"]
 # safetensors is the companion of torch here: torch TaskModel artifacts persist their weights through
 # safetensors.torch.save_model (see mixle/task/artifact.py), so a torch install needs it to save/load.
-torch = ["torch>=2.0", "safetensors>=0.4"]
+torch = ["torch>=2.4", "safetensors>=0.4"]
 # the assembled laptop scientist (mixle.scientist): real open-weight encoders + a local LLM as typed
 # leaves. Weights load from the local HF cache; nothing is downloaded at import.
-scientist = ["torch>=2.0", "safetensors>=0.4", "transformers>=4.40", "sentence-transformers>=3.0", "datasets>=2.14"]
+scientist = ["torch>=2.4", "safetensors>=0.4", "transformers>=4.40", "sentence-transformers>=3.0", "datasets>=2.14"]
 # Documentation build (Sphinx site): the Furo theme + MyST markdown; autodoc mocks the heavy back-ends.
 # sphinx-polyversion drives the multi-version build (docs/poly.py) -- a plain `sphinx-build` doesn't
 # need it, only `sphinx-polyversion docs/poly.py` (what the Docs CI workflow runs) does.
@@ -117,7 +117,7 @@ kernels = ["Cython>=3.0", "setuptools>=68"]
 # import-linter is floored, not pinned: its contracts are fully self-defined in [tool.importlinter],
 # so new releases cannot add surprise rules the way a linter's default rule set can.
 lint = ["ruff==0.15.17", "mypy>=1.0", "import-linter>=2"]
-all = ["numba>=0.59", "tbb>=2021.6; platform_machine == 'x86_64'", "pyspark>=3.4", "dask>=2023.5.0", "distributed>=2023.5.0", "torch>=2.0", "safetensors>=0.4", "mpi4py>=3.1", "umap-learn>=0.5.4", "pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "networkx>=3.0", "ray>=2.9", "lightning>=2.1"]
+all = ["numba>=0.59", "tbb>=2021.6; platform_machine == 'x86_64'", "pyspark>=3.4", "dask>=2023.5.0", "distributed>=2023.5.0", "torch>=2.4", "safetensors>=0.4", "mpi4py>=3.1", "umap-learn>=0.5.4", "pandas>=2.0", "pyarrow>=14", "sqlalchemy>=2.0", "networkx>=3.0", "ray>=2.9", "lightning>=2.1"]
 
 [project.urls]
 Homepage = "https://github.com/gmboquet/mixle"

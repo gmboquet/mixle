@@ -48,9 +48,10 @@ and tested:
   ``mixle.enumeration`` / ``mixle.ops`` beyond the capability-gated core, ``mixle.doe`` / ``mixle.evolve``,
   the runtime layers (``mixle.substrate`` / ``mixle.pool`` / ``mixle.telemetry`` / ``mixle.scientist``), and
   ``mixle.inference.production`` (see :doc:`maturity`);
-* **experimental** (no compatibility guarantee) -- everything under ``mixle.experimental``, and the
-  frontier-training prototypes (muP, 2:4 sparsity, scaling laws, TP/PP/CP, fault-tolerant training, sharded
-  checkpointing), which are labeled as prototypes in their own docstrings.
+* **experimental** (no compatibility guarantee) -- everything under ``mixle.experimental`` and the
+  standalone frontier-training mechanism prototypes (muP, 2:4 sparsity, scaling laws, simulated TP/PP/CP,
+  and fault injection). The executable distributed backend and complete-state checkpoint APIs are
+  provisional ``mixle.utils.parallel`` surfaces, not stable compatibility promises.
 
 To check a surface's tier programmatically::
 

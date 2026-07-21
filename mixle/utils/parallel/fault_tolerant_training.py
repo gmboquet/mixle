@@ -51,7 +51,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -170,9 +170,14 @@ class AsyncCheckpointHandle:
     thread: threading.Thread
     path: str
     prepare_time_s: float  # wall-clock time the CALLER was actually blocked (the D2H clone only)
+    errors: list[BaseException] = field(default_factory=list)
 
     def wait(self, timeout: float | None = None) -> None:
         self.thread.join(timeout=timeout)
+        if self.thread.is_alive():
+            raise TimeoutError("checkpoint write did not finish within the requested timeout.")
+        if self.errors:
+            raise RuntimeError("asynchronous checkpoint write failed.") from self.errors[0]
 
     @property
     def done(self) -> bool:
@@ -226,16 +231,21 @@ def save_checkpoint_async(
 
     payload = {"loader_state": loader_state.to_dict(), "extra": extra or {}}
 
-    def _write() -> None:
-        import torch.distributed.checkpoint as dcp
+    errors: list[BaseException] = []
 
-        Path(path).mkdir(parents=True, exist_ok=True)
-        dcp.save({"model": model_sd, "optimizer": optim_sd}, checkpoint_id=str(path))
-        Path(path, "loader_state.json").write_text(json.dumps(payload))
+    def _write() -> None:
+        try:
+            import torch.distributed.checkpoint as dcp
+
+            Path(path).mkdir(parents=True, exist_ok=True)
+            dcp.save({"model": model_sd, "optimizer": optim_sd}, checkpoint_id=str(path))
+            Path(path, "loader_state.json").write_text(json.dumps(payload))
+        except BaseException as error:  # noqa: BLE001 - surfaced by AsyncCheckpointHandle.wait
+            errors.append(error)
 
     thread = threading.Thread(target=_write, daemon=True)
     thread.start()
-    return AsyncCheckpointHandle(thread=thread, path=str(path), prepare_time_s=prepare_time_s)
+    return AsyncCheckpointHandle(thread=thread, path=str(path), prepare_time_s=prepare_time_s, errors=errors)
 
 
 def load_checkpoint(module: Any, optimizer: Any, path: str) -> LoaderState:

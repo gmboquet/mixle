@@ -86,8 +86,17 @@ class DenseFitTest(unittest.TestCase):
         lm = self._lm()
         with self.assertRaises(ValueError):
             lm.fit(np.arange(4, 10, dtype=np.int64)[:_BLOCK], dense=True)  # < block+1 tokens
-        with self.assertRaises(NotImplementedError):
-            lm.fit(_cycle_corpus(10), dense=True, distributed=True)
+        losses = []
+        lm.fit(
+            _cycle_corpus(10),
+            dense=True,
+            distributed=True,
+            optimizer="sgd",
+            log=lambda epoch, loss: losses.append((epoch, loss)),
+        )
+        self.assertEqual(len(losses), 1)
+        with self.assertRaisesRegex(ValueError, "explicit parallel plan"):
+            lm.fit(_cycle_corpus(10), distributed=True, dp_replicate=2)
         with self.assertRaises(ValueError):
             lm.fit([0, 1, _VOCAB], dense=True)  # id outside vocabulary
 
