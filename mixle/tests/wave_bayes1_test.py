@@ -140,7 +140,10 @@ class NullTestCase(unittest.TestCase):
         s = NullDistribution().sampler(seed=1)
         self.assertIsInstance(s, NullSampler)
         self.assertIsNone(s.sample())
-        self.assertIsNone(s.sample(size=3))
+        # sample(size=n) must return a length-n collection per the DistributionSampler contract
+        # (previously returned bare None regardless of size, breaking composite samplers that zip
+        # child samples expecting len() == size).
+        self.assertEqual(s.sample(size=3), [None, None, None])
 
     def test_sequence_with_null_length_sampler(self):
         # regression: the null default len_dist threads cleanly through the

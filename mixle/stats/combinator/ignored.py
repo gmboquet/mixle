@@ -266,7 +266,7 @@ class IgnoredEstimator(ParameterEstimator):
             name (Optional[str]): Optional name assigned to the estimated distribution.
 
         """
-        self.dist = dist if dist is not None else NullDistribution
+        self.dist = dist if dist is not None else NullDistribution()
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
         self.keys = keys
