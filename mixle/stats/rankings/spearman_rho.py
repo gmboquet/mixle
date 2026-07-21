@@ -30,6 +30,9 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 
+_DEFAULT_MAX_DIM = 10  # dim! permutations materialized densely: dim=10 is ~290MB/~1s (cached after first
+# use); dim=11 is already ~3.5GB/~14s, dim=12 ~46GB -- well past what a default should silently allow.
+
 
 @cache
 def _permutation_array(dim: int) -> np.ndarray:
@@ -143,6 +146,7 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         rho: float = 1.0,
         name: str | None = None,
         keys: str | None = None,
+        max_dim: int = _DEFAULT_MAX_DIM,
     ) -> None:
         """Create a Spearman ranking distribution.
 
@@ -151,6 +155,7 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
             rho (float): Decay rate on variance of ranks.
             name (Optional[str]): Optional distribution name.
             keys (Optional[str]): Optional key for merging sufficient statistics.
+            max_dim (int): Guard on dim for the factorial-size normalizer (raises above this).
 
         Attributes:
             sigma (np.ndarray]): Numpy array of means for the rank variables.
@@ -158,6 +163,7 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
             name (Optional[str]): Optional distribution name.
             dim (int): Dimension of the rank variable.
             keys (Optional[str]): Optional key for merging sufficient statistics.
+            max_dim (int): Guard on dim for the factorial-size normalizer.
 
         """
         self.sigma = np.asarray(sigma, dtype=np.float64)
@@ -165,16 +171,23 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.dim = len(sigma)
         self.keys = keys
+        self.max_dim = max_dim
+        if self.dim > max_dim:
+            raise ValueError(
+                "SpearmanRankingDistribution dim=%d exceeds max_dim=%d (normalizer materializes dim! "
+                "permutations)." % (self.dim, max_dim)
+            )
 
         self.log_const = _log_partition(self.sigma, self.rho)
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the Spearman ranking distribution."""
-        return "SpearmanRankingDistribution(sigma=%s, rho=%s, name=%s, keys=%s)" % (
+        return "SpearmanRankingDistribution(sigma=%s, rho=%s, name=%s, keys=%s, max_dim=%s)" % (
             repr(self.sigma),
             repr(self.rho),
             repr(self.name),
             repr(self.keys),
+            repr(self.max_dim),
         )
 
     def density(self, x: list[int]) -> float:
@@ -286,7 +299,14 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
             SpearmanRankingEstimator object.
 
         """
-        return SpearmanRankingEstimator(self.dim, rho=None, pseudo_count=pseudo_count, name=self.name, keys=self.keys)
+        return SpearmanRankingEstimator(
+            self.dim,
+            rho=None,
+            pseudo_count=pseudo_count,
+            name=self.name,
+            keys=self.keys,
+            max_dim=self.max_dim,
+        )
 
     def dist_to_encoder(self) -> "SpearmanRankingDataEncoder":
         """Return the encoder for Spearman ranking observations."""
@@ -510,6 +530,7 @@ class SpearmanRankingEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
         max_rho: float = 1.0e6,
+        max_dim: int = _DEFAULT_MAX_DIM,
     ) -> None:
         """Create an estimator for Spearman ranking parameters.
 
@@ -521,12 +542,18 @@ class SpearmanRankingEstimator(ParameterEstimator):
             name (Optional[str]): Optional name assigned to the estimated distribution.
             keys (Optional[str]): Optional key for merging sufficient statistics.
             max_rho (float): Finite cap used when the MLE is at rho = infinity.
+            max_dim (int): Guard on dim for the factorial-size normalizer (raises above this).
 
         """
         if rho is not None and rho < 0:
             raise ValueError("SpearmanRankingEstimator requires rho >= 0 or None (got %s)." % repr(rho))
         if max_rho <= 0:
             raise ValueError("SpearmanRankingEstimator requires max_rho > 0 (got %s)." % repr(max_rho))
+        if dim > max_dim:
+            raise ValueError(
+                "SpearmanRankingEstimator dim=%d exceeds max_dim=%d (normalizer materializes dim! "
+                "permutations)." % (dim, max_dim)
+            )
 
         self.rho = None if rho is None else float(rho)
         self.pseudo_count = pseudo_count
@@ -535,6 +562,7 @@ class SpearmanRankingEstimator(ParameterEstimator):
         self.name = name
         self.dim = dim
         self.max_rho = float(max_rho)
+        self.max_dim = max_dim
 
     def accumulator_factory(self) -> "SpearmanRankingAccumulatorFactory":
         """Return a factory for Spearman ranking accumulators."""
@@ -582,7 +610,7 @@ class SpearmanRankingEstimator(ParameterEstimator):
             sigma = np.arange(self.dim)  # no data: the identity permutation (rho=0 is uniform regardless)
             rho = 0.0
 
-        return SpearmanRankingDistribution(sigma, rho, name=self.name, keys=self.keys)
+        return SpearmanRankingDistribution(sigma, rho, name=self.name, keys=self.keys, max_dim=self.max_dim)
 
 
 class SpearmanRankingDataEncoder(DataSequenceEncoder):
