@@ -408,6 +408,53 @@ class MonotoneObjectiveGateCatchesBadSwapTestCase(unittest.TestCase):
         )
 
 
+class TransactionalRollbackTestCase(unittest.TestCase):
+    """A GradLeaf's ordinary (non-swapped) M-step runs ``GradEstimator.estimate()``, which does
+    ``m_steps`` of SGD directly on the leaf's underlying ``nn.Module`` IN PLACE -- the pre- and
+    post-step wrapper objects alias that same module. Before the fix under test, a rejected
+    round's gradient update silently survived: ``model = pre_swap_model`` only rebinds which
+    WRAPPER object is "current", it does not touch the shared module's already-mutated parameter
+    values. ``run_em_with_hotswap`` must snapshot every mutable module before the M-step and
+    restore it when a round is rejected, exactly like ``freeze_rollup.run_em_freeze_rollup``
+    already does for its own M-step.
+    """
+
+    def test_rejected_round_reverts_gradient_leaf_module_mutation(self):
+        rng = np.random.RandomState(30)
+        data = [float(v) for v in np.concatenate([rng.normal(-4.0, 1.0, 300), rng.normal(4.0, 1.0, 300)])]
+
+        torch.manual_seed(30)
+        module = DiagGauss(1, mu0=-2.0)  # offset from the -4.0 cluster so a real M-step clearly moves it
+        comp0 = GradLeaf(module, m_steps=50, lr=5e-2)
+        comp1 = GaussianDistribution(4.0, 1.0)
+        start = MixtureDistribution([comp0, comp1], [0.5, 0.5])
+        estimator = MixtureEstimator([GradEstimator(module, m_steps=50, lr=5e-2), GaussianEstimator()])
+        enc = seq_encode(data, model=start)
+
+        mu_before = float(module.mu.detach().clone())
+
+        model, history, swap_records = run_em_with_hotswap(
+            enc,
+            estimator,
+            start,
+            max_its=5,
+            delta=None,
+            plateau_patience=10_000,  # never plateau/swap within this test -- isolates the mechanism
+            accept_tolerance=-1.0e6,
+            rel_accept_tolerance=-1.0e6,  # forces every round's candidate to be rejected
+        )
+
+        self.assertTrue(history)
+        self.assertTrue(all(not h.accepted for h in history), "every round should have been rejected by construction")
+        self.assertFalse(swap_records, "no swap should have been committed")
+
+        mu_after = float(module.mu.detach().clone())
+        print(f"[D4 rollback] mu before={mu_before:.6f}, after {len(history)} rejected round(s)={mu_after:.6f}")
+        self.assertEqual(
+            mu_after, mu_before, "a rejected round must not leave the gradient leaf's module mutated in place"
+        )
+
+
 class PlateauMonitorTestCase(unittest.TestCase):
     def test_plateau_requires_sustained_near_zero_q_gain(self):
         monitor = PlateauMonitor(q_gain_tol=1.0e-6, patience=3)
