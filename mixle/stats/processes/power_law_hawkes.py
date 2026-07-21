@@ -122,7 +122,12 @@ class PowerLawHawkesDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> PowerLawHawkesEstimator:
         """Return the maximum-likelihood estimator for realizations on this window."""
-        return PowerLawHawkesEstimator(self.window, alpha_fixed=self.alpha if self.alpha == 0.0 else None)
+        return PowerLawHawkesEstimator(
+            self.window,
+            alpha_fixed=self.alpha if self.alpha == 0.0 else None,
+            name=self.name,
+            keys=self.keys,
+        )
 
     def dist_to_encoder(self) -> PowerLawHawkesDataEncoder:
         """Return the pass-through realization encoder used by vectorized methods."""
@@ -261,7 +266,10 @@ class PowerLawHawkesAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self):
         """Return stored realizations with the shared window and alpha constraint."""
-        return (self.realizations, self.window, self.alpha_fixed)
+        # copy on extract: returning self.realizations directly would alias the live list, so a later
+        # in-place update()/seq_update()/combine() on this accumulator would silently mutate an already-
+        # returned value() too (same hazard from_value's own copy-on-restore comment guards against).
+        return (list(self.realizations), self.window, self.alpha_fixed)
 
     def from_value(self, x):
         """Restore stored realizations, window, and alpha constraint."""
