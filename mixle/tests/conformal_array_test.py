@@ -135,6 +135,26 @@ class WeightedTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             weighted_conformal(cal_pred, cal_y, np.zeros(1), np.ones(3), alpha=0.3, test_weight=-1.0)
 
+    def test_empty_calibration_raises_value_error_not_indexerror(self):
+        # weighted_conformal has its own inline quantile logic rather than routing through
+        # _conformal_quantile, so it needs -- and previously lacked -- its own n==0 guard: it
+        # crashed with a raw IndexError from cdf[-1] instead of a clear ValueError.
+        with self.assertRaises(ValueError):
+            weighted_conformal(np.array([]), np.array([]), np.zeros(1), np.array([]), alpha=0.1)
+
+    def test_nan_weight_raises_instead_of_silently_returning_the_trivial_interval(self):
+        # `np.any(w < 0.0)` does not catch NaN (a NaN comparison is always False), so a NaN weight
+        # used to silently corrupt the cumulative weighted CDF and fall through to the "insufficient
+        # mass" branch, indistinguishable from a legitimate empty-mass case.
+        cal_pred = np.zeros(3)
+        cal_y = np.array([1.0, -1.0, 2.0])
+        with self.assertRaises(ValueError):
+            weighted_conformal(cal_pred, cal_y, np.zeros(1), np.array([1.0, np.nan, 1.0]), alpha=0.3)
+
+    def test_mismatched_shapes_raise(self):
+        with self.assertRaises(ValueError):
+            weighted_conformal(np.zeros(3), np.zeros(3), np.zeros(1), np.ones(5), alpha=0.1)
+
 
 class ConformalQuantileBoundaryTest(unittest.TestCase):
     """Regression: _conformal_quantile's ``s[k - 1]`` used to wrap around via Python negative indexing
@@ -169,6 +189,12 @@ class ConformalQuantileBoundaryTest(unittest.TestCase):
         # reproduces the exact old crash rather than any other ValueError already raised earlier.
         with self.assertRaises(ValueError):
             _conformal_quantile(np.array([]), 1.0)
+
+    def test_nan_score_raises_instead_of_silently_becoming_the_quantile(self):
+        # a NaN calibration score sorts to the array's end; depending on alpha the returned quantile
+        # could land exactly on it and silently poison every downstream interval with NaN.
+        with self.assertRaises(ValueError):
+            _conformal_quantile(np.array([0.1, 0.2, 0.3, np.nan]), 0.3)
 
     def test_label_threshold_does_not_flip_from_escalate_to_confident_at_alpha_one(self):
         # A near-uniform-looking calibration set with a confident test point: as alpha climbs, the

@@ -66,7 +66,10 @@ class BeliefState(ABC):
 
     def var(self) -> np.ndarray:
         """Per-coordinate posterior variance."""
-        return np.diag(np.atleast_2d(self.cov()))
+        # clip at 0: a coordinate the PSD tolerance in a constructor let through can carry a tiny
+        # negative diagonal entry from float noise (never a real negative variance), which would
+        # otherwise propagate as NaN through sd()/interval()'s sqrt.
+        return np.clip(np.diag(np.atleast_2d(self.cov())), 0.0, None)
 
     def sd(self) -> np.ndarray:
         """Per-coordinate posterior standard deviation."""
@@ -106,6 +109,8 @@ class CategoricalBelief(BeliefState):
     def uniform(cls, k_or_labels: Any) -> CategoricalBelief:
         """Create a uniform categorical belief over count or explicit labels."""
         labels = list(range(k_or_labels)) if isinstance(k_or_labels, int) else list(k_or_labels)
+        if not labels:
+            raise ValueError("uniform() requires at least one label")
         return cls(np.full(len(labels), 1.0 / len(labels)), labels)
 
     def mean(self) -> np.ndarray:
@@ -119,8 +124,7 @@ class CategoricalBelief(BeliefState):
 
     def sample(self, n: int = 1, rng: Any = None) -> np.ndarray:
         """Draw hypothesis indices according to the belief probabilities."""
-        rng = rng if rng is not None else np.random.RandomState()
-        return rng.choice(len(self.probs), size=n, p=self.probs)
+        return _as_rng(rng).choice(len(self.probs), size=n, p=self.probs)
 
     def update(self, log_lik: Any) -> CategoricalBelief:
         """Exact Bayes: condition on a length-``K`` log-likelihood vector for one observation."""
@@ -154,9 +158,14 @@ class GaussianBelief(BeliefState):
             raise ValueError(f"cov shape {P.shape} must be ({m.size}, {m.size}) to match mean of size {m.size}")
         P = 0.5 * (P + P.T)  # symmetrize defensively
         # positive *semi*-definite, not strictly definite: a noiseless update or condition() can
-        # legitimately collapse a coordinate to exactly zero variance. -1e-9 matches the tolerance
-        # already used elsewhere in this codebase (e.g. lkj_test.py) for "PSD up to float noise".
-        if np.linalg.eigvalsh(P).min() < -1e-9:
+        # legitimately collapse a coordinate to exactly zero variance. The tolerance is relative to
+        # the matrix's own eigenvalue scale (not a fixed absolute constant): eigvalsh's own floating
+        # -point noise on a near-singular matrix scales with the matrix's magnitude, so a fixed
+        # absolute threshold both false-rejects a valid large-scale covariance (noise well above a
+        # small constant) and false-accepts a small-scale but proportionally-severe indefinite one
+        # (a genuine negative eigenvalue that happens to be tiny in absolute terms).
+        evals = np.linalg.eigvalsh(P)
+        if evals.min() < -1e-9 * np.abs(evals).max():
             raise ValueError("cov must be positive semi-definite")
         self._mean = m
         self._cov = P

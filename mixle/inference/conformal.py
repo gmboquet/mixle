@@ -43,6 +43,8 @@ def _conformal_quantile(scores: np.ndarray, alpha: float) -> float:
     n = s.shape[0]
     if n == 0:
         raise ValueError("conformal calibration requires at least one score, got 0.")
+    if not np.isfinite(s).all():
+        raise ValueError("conformal calibration scores must be finite (no NaN/Inf).")
     k = int(np.ceil((n + 1) * (1.0 - alpha)))
     if k > n:
         return float("inf")
@@ -244,8 +246,23 @@ def weighted_conformal(
     cal_y = np.asarray(cal_y, dtype=float)
     test_pred = np.asarray(test_pred, dtype=float)
     w = np.asarray(weights, dtype=float)
+    # This function computes its own weighted quantile rather than routing through
+    # _conformal_quantile (the weighting has no unweighted equivalent there), so it needs its own
+    # complete set of guards rather than inheriting _conformal_quantile's.
+    if w.shape[0] == 0:
+        raise ValueError("weighted_conformal requires at least one calibration point, got 0.")
+    if w.shape != cal_pred.shape or w.shape != cal_y.shape:
+        raise ValueError(
+            f"weights, cal_pred, and cal_y must have matching shape, got {w.shape}, {cal_pred.shape}, {cal_y.shape}."
+        )
+    if not np.isfinite(w).all() or not np.isfinite(test_weight):
+        # checked before the sign check below: a NaN comparison is always False, so `NaN < 0.0` would
+        # otherwise silently pass as "non-negative" and corrupt every downstream sum/cdf entry.
+        raise ValueError("weights and test_weight must be finite.")
     if np.any(w < 0.0) or test_weight < 0.0:
         raise ValueError("weights and test_weight must be non-negative likelihood ratios.")
+    if not np.isfinite(cal_pred).all() or not np.isfinite(cal_y).all():
+        raise ValueError("cal_pred and cal_y must be finite.")
     scores = np.abs(cal_y - cal_pred)
     order = np.argsort(scores)
     s_sorted = scores[order]
