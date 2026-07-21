@@ -2,16 +2,17 @@
 
 .. note::
 
-   This is a provisional API. Complete-state and failure semantics are covered
-   on CPU; resharding and throughput at multi-node GPU scale still require
-   retained hardware receipts.
+   This is a provisional API with experimental multi-node behavior.
+   Complete-state and failure semantics are covered on CPU; resharding and
+   throughput at multi-node GPU scale still require retained hardware receipts.
 
 The gather-to-root + ``pickle``-broadcast that :class:`TorchRunEncodedData` uses to move a model cannot save a
 model that does not fit (and is not folded on) one rank. DCP saves each rank's shard of the (FSDP2-sharded) model
 + optimizer state in parallel to a checkpoint directory, and loads it back sharded -- the standard frontier
 checkpoint, and the resume hook for :class:`~mixle.utils.parallel.torch_neural.StreamingTokenEncodedData`.
 
-CUDA / multi-GPU path: correct per the torch 2.4+ DCP + distributed-state-dict APIs, exercised on the cluster.
+CUDA / multi-GPU path: implemented against the torch 2.4+ DCP and
+distributed-state-dict APIs, but not verified without retained hardware receipts.
 """
 
 from __future__ import annotations
