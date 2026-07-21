@@ -2423,28 +2423,43 @@ def _regime_signatures(proto: Any, obs: Any) -> np.ndarray:
     """Per-transition signature (T, F): the OBSERVED edit derivation summary that identifies a regime.
 
     Because the motif partition is mutually exclusive the derivation is observed, so each transition exposes
-    its own sufficient statistics -- per-motif add/remove counts, node growth, and (if attributed) attribute
-    means. Regimes are, by the identifiability argument, separated in this signature space, so clustering the
-    signatures seeds EM near the true solution instead of at random."""
+    its own sufficient statistics -- per-motif add/remove counts, node growth, node-removal count (if
+    churning), and (if attributed) attribute means. Regimes are, by the identifiability argument, separated
+    in this signature space, so clustering the signatures seeds EM near the true solution instead of at
+    random."""
     regimes = getattr(proto, "states", None) or proto.structures
     attributed = hasattr(proto, "node_dists") and proto.node_dists is not None
     edge_attr = hasattr(proto, "edge_dists") and proto.edge_dists is not None
+    churning = hasattr(proto, "node_remove_rates")
     snaps = obs[0] if (attributed or edge_attr) else obs
     m = regimes[0].motif.num_motifs
     nf = obs[1] if attributed else None
     ef = obs[2] if edge_attr else None
     out = []
     for t in range(len(snaps) - 1):
-        nn, add_bins, _ac, rem_bins, _rc, valid = regimes[0].transition_components(snaps[t], snaps[t + 1])
+        if churning:
+            # Churning snapshots are (adjacency, node_ids) tuples -- transition_components (like
+            # LatentChurningTemporalGraphGrammarDistribution._emission_logb) needs the identity-aligned
+            # surviving subgraphs, not the raw tuples. num_removed is itself a regime-discriminating
+            # signal here (the whole point of this variant), so it's folded into the signature too.
+            prev_surv, cur_reord, num_removed = _align_by_ids(
+                snaps[t][0], snaps[t][1], snaps[t + 1][0], snaps[t + 1][1]
+            )
+        else:
+            prev_surv, cur_reord = snaps[t], snaps[t + 1]
+        nn, add_bins, _ac, rem_bins, _rc, valid = regimes[0].transition_components(prev_surv, cur_reord)
         a = np.bincount(add_bins, minlength=m).astype(float) if valid and len(add_bins) else np.zeros(m)
         r = np.bincount(rem_bins, minlength=m).astype(float) if valid and len(rem_bins) else np.zeros(m)
         feat = [*a.tolist(), *r.tolist(), float(nn if valid else 0)]
+        if churning:
+            feat.append(float(num_removed))
         if attributed:
             feat.append(_records_mean(nf[t]) if nf and t < len(nf) else 0.0)
         if edge_attr:
             feat.append(_records_mean(ef[t]) if ef and t < len(ef) else 0.0)
         out.append(feat)
-    return np.asarray(out, dtype=np.float64) if out else np.zeros((0, 2 * m + 1))
+    dim = 2 * m + 1 + int(churning) + int(attributed) + int(edge_attr)
+    return np.asarray(out, dtype=np.float64) if out else np.zeros((0, dim))
 
 
 def _records_mean(records: Sequence[Any]) -> float:
@@ -2486,6 +2501,7 @@ def regime_moment_init(estimator: Any, proto: Any, data: Sequence[Any], k: int, 
     the regimes, so this avoids the local optima of random-restart EM. ``proto`` is any distribution of the
     target class (used only for its motif/attribute structure); ``estimator`` produces the fitted result."""
     rng = RandomState(seed)
+    churning = hasattr(proto, "node_remove_rates")
     sigs, spans = [], []
     for obs in data:
         s = _regime_signatures(proto, obs)
@@ -2505,5 +2521,8 @@ def regime_moment_init(estimator: Any, proto: Any, data: Sequence[Any], k: int, 
         xi = np.zeros((max(span - 1, 0), k, k))
         for t in range(span - 1):
             xi[t] = np.outer(gamma[t], gamma[t + 1])
-        acc._accumulate(obs, 1.0, gamma, xi, None)  # Latent/Attributed _accumulate take the observation directly
+        # Latent/Attributed _accumulate take the observation directly; Churning's takes the
+        # already-identity-aligned (prev_surv, cur_reord, num_removed, n_prev) tuples instead
+        # (see LatentChurningTemporalGraphGrammarAccumulator._accumulate).
+        acc._accumulate(proto._aligned(obs) if churning else obs, 1.0, gamma, xi, None)
     return estimator.estimate(len(data), acc.value())
