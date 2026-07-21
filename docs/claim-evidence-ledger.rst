@@ -53,11 +53,11 @@ the 0.8.0 re-run, marked below).
      - Per-backend encoded-data tests exist but are not installed in the default CI lanes, so they skip;
        exercising each in CI or a scheduled job is a 0.8.0 gate (worklist D8.3). Wording qualified in the
        README accordingly.
-   * - Multi-GPU tensor/pipeline/context sharding
-     - E3 (single run), plan-validated
-     - The sharding math has exact-match small-scale tests; one real 2-GPU run is retained. Integrated
-       multi-GPU training is **not** claimed — the knobs validate a plan and refuse to silently run
-       data-parallel instead (worklist N9.5). Frontier-scale training is explicitly post-0.8.
+   * - Distributed transformer and MoE training
+     - E3 (CPU objective/checkpoint tests and provider delegation)
+     - The native backend executes DDP/FSDP2/HSDP and selected TP/CP paths; Megatron Bridge owns full
+       TP/PP/CP/EP/ETP. GPU throughput, MFU, and multi-node recovery remain unverified until retained
+       hardware receipts exist. Unsupported axes fail capability validation.
    * - Serialization round-trips and provenance / replay
      - E1
      - Fresh-process serialization tests; lineage/receipt tamper-and-replay tests. Cross-version

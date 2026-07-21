@@ -196,6 +196,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "chow_liu_tree_test.py": ("distribution", "latent"),
     "distribution_additions_test.py": ("distribution",),
     "dask_encoded_data_test.py": ("dask", "optional", "parallel", "slow"),
+    "distributed_training_torchrun_test.py": ("torch", "torchrun", "parallel", "slow"),
     "density_rank_test.py": ("enumeration",),
     "em_strategies_test.py": ("em",),
     "enumeration_test.py": ("enumeration", "distribution"),

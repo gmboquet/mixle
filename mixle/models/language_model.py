@@ -4,15 +4,15 @@ A causal Transformer trained on a token stream::
 
     lm = LM(vocab=V, d_model=256, n_layer=6, n_head=8, block=128)
     lm.fit(token_ids, epochs=3, batch_size=64, device="mps")          # pretrain (single process)
-    lm.fit(token_ids, distributed=True, precision="bf16")             # or distributed under torchrun (FSDP2 on CUDA)
+    lm.fit(token_ids, dense=True, distributed=True, precision="bf16") # packed DDP/FSDP2 training
     text = lm.generate(prompt_ids, n=200, temperature=0.8)            # autoregressive sampling
     nll  = lm.nll(held_out_ids)                                       # bits/token on held-out data
 
-``fit`` runs the non-buffering streaming estimator (``mixle.models.streaming_transformer_leaf``); with
-``distributed=True`` it dispatches through ``StreamingTokenEncodedData`` (per-rank shard, in-backward all-reduce,
-FSDP2/ZeRO-3 + bf16 + DCP on CUDA). ``fit_pairs`` is the SFT stage: dense all-position teacher forcing on
-``(prompt, completion)`` pairs with the loss masked to completions -- the shape needed to distill verified
-trajectories into a compact model.
+``fit`` retains the non-buffering streaming estimator for compatibility. Packed
+``dense=True`` training uses the distributed-gradient backend when requested,
+with deterministic data sharding, microbatches, accumulation, and complete DCP
+training state. ``fit_pairs`` is the SFT stage: dense all-position teacher
+forcing on ``(prompt, completion)`` pairs with the loss masked to completions.
 The rest of the multi-stage pipeline (CPT-with-EWC, DPO) is ``mixle.models.continual`` / ``mixle.models.dpo_leaf``.
 """
 
@@ -29,19 +29,28 @@ def _torch() -> Any:
     return torch
 
 
-def _forward_all_positions(module: Any, x: Any) -> Any:
+def _forward_all_positions(module: Any, x: Any, *, position_ids: Any = None) -> Any:
     """Next-token logits at EVERY position, ``(batch, block, vocab)``.
 
     ``build_causal_lm``'s forward returns only the last position (the shape the leaf estimators score);
     dense teacher forcing needs them all, so this re-runs the same layers off the module's own parts.
     """
-    torch = _torch()
-    t = x.shape[1]
-    pos = torch.arange(t, device=x.device)
-    h = module.tok(x.long()) + module.pos(pos)[None, :, :]
-    for blk in module.blocks:
-        h = blk(h)
-    return module.head(module.ln(h))
+    try:
+        return module(x, position_ids=position_ids, return_all_logits=True)
+    except TypeError as error:
+        if "return_all_logits" not in str(error) and "unexpected keyword" not in str(error):
+            raise
+        # Keep externally supplied CausalLM-compatible modules working.
+        torch = _torch()
+        t = x.shape[1]
+        pos = torch.arange(t, device=x.device) if position_ids is None else position_ids
+        position_embeddings = module.pos(pos)
+        if position_embeddings.ndim == 2:
+            position_embeddings = position_embeddings[None, :, :]
+        h = module.tok(x.long()) + position_embeddings
+        for blk in module.blocks:
+            h = blk(h)
+        return module.head(module.ln(h))
 
 
 class LM:
@@ -156,6 +165,18 @@ class LM:
         tp_size: int = 1,
         pp_size: int = 1,
         cp_size: int = 1,
+        dp_replicate: int = 1,
+        dp_shard: int = 1,
+        ep_size: int = 1,
+        etp_size: int = 1,
+        microbatches: int = 1,
+        gradient_accumulation_steps: int = 1,
+        distributed_backend: str = "torch_native",
+        optimizer: Any = None,
+        max_grad_norm: float | None = None,
+        compile: bool = False,
+        checkpoint_path: str | None = None,
+        resume: bool = False,
     ) -> LM:
         """Small-scale reference pretraining (or continuation) on a token-id array.
 
@@ -173,29 +194,61 @@ class LM:
           single forward, recovering the ~``block``x supervision the streaming path leaves unused.
           Token ids stay integer end to end (no float conversion). ``seed`` drives row shuffling and
           ``log(epoch, mean_loss)`` reports per-epoch training loss, both as in :meth:`fit_pairs`.
-          Not yet wired to ``distributed=True`` (raises); use the streaming path for that.
+          With ``distributed=True`` this objective is executed by the selected
+          distributed-gradient backend.
 
-        ``tp_size``/``pp_size``/``cp_size`` (only meaningful with ``distributed=True``) are the F1 N-D
-        parallelism dimensions -- tensor/pipeline/context parallel, ORTHOGONAL to the data-parallel axis
-        (DDP on CPU, FSDP2/ZeRO-3 on CUDA) this handle already runs. They default to 1 (off): the plan is
-        validated against the model's real dimensions (``n_head % tp_size``, ``pp_size <= n_layer``,
-        ``block % cp_size``) so a bad plan fails fast, using the sharding/reconstruction mechanism in
-        ``mixle.experimental.tensor_pipeline_context_parallel`` (tested there at small scale against the
-        dense forward). Composing the validated plan into real per-axis multi-GPU process groups is the
-        piece that needs actual hardware this environment does not have -- see that module's docstring.
+        Parallel sizes are executable contracts. ``torch_native`` supports
+        DDP/HSDP, FSDP2, MLP tensor parallelism, and CUDA context parallelism;
+        unsupported combinations fail capability validation. Full TP/PP/CP/EP
+        transformer and MoE training is exposed by the ``megatron`` backend.
         """
         ids = self._check_ids(token_ids, "fit")
         if dense:
             if distributed:
-                raise NotImplementedError(
-                    "fit(dense=True) is single-process in this release; the distributed handle "
-                    "(StreamingTokenEncodedData) only implements the streaming one-target-per-window "
-                    "objective. Use dense=False with distributed=True, or run the dense path locally."
+                return self._fit_dense_distributed(
+                    ids,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    lr=lr,
+                    precision=precision,
+                    shuffle=shuffle,
+                    seed=seed,
+                    log=log,
+                    tp_size=tp_size,
+                    pp_size=pp_size,
+                    cp_size=cp_size,
+                    dp_replicate=dp_replicate,
+                    dp_shard=dp_shard,
+                    ep_size=ep_size,
+                    etp_size=etp_size,
+                    microbatches=microbatches,
+                    gradient_accumulation_steps=gradient_accumulation_steps,
+                    distributed_backend=distributed_backend,
+                    optimizer=optimizer,
+                    max_grad_norm=max_grad_norm,
+                    compile=compile,
+                    checkpoint_path=checkpoint_path,
+                    resume=resume,
                 )
             return self._fit_dense(
                 ids, epochs=epochs, batch_size=batch_size, lr=lr, shuffle=shuffle, seed=seed, log=log
             )
         if distributed:
+            requested_model_axes = {
+                "dp_replicate": dp_replicate,
+                "dp_shard": dp_shard,
+                "tp_size": tp_size,
+                "pp_size": pp_size,
+                "cp_size": cp_size,
+                "ep_size": ep_size,
+                "etp_size": etp_size,
+            }
+            active = [name for name, size in requested_model_axes.items() if int(size) > 1]
+            if active:
+                raise ValueError(
+                    "the streaming one-target objective does not execute an explicit parallel plan (%s); "
+                    "use dense=True with torch_native where supported, or a Megatron provider." % ", ".join(active)
+                )
             from mixle.models.streaming_transformer_leaf import StreamingTransformerLeafEstimator
             from mixle.stats.compute.sequence import seq_estimate
             from mixle.utils.parallel.torch_neural import StreamingTokenEncodedData
@@ -221,6 +274,111 @@ class LM:
                 token_ids, block=self.block, batch_size=batch_size, epochs=epochs, shuffle=shuffle
             )
             self.module = stream_fit(self.module, src, lr=lr, device=self.device)[0].module
+        return self
+
+    def _fit_dense_distributed(
+        self,
+        ids: np.ndarray,
+        *,
+        epochs: int,
+        batch_size: int,
+        lr: float,
+        precision: str,
+        shuffle: bool,
+        seed: int,
+        log: Any,
+        tp_size: int,
+        pp_size: int,
+        cp_size: int,
+        dp_replicate: int,
+        dp_shard: int,
+        ep_size: int,
+        etp_size: int,
+        microbatches: int,
+        gradient_accumulation_steps: int,
+        distributed_backend: str,
+        optimizer: Any,
+        max_grad_norm: float | None,
+        compile: bool,
+        checkpoint_path: str | None,
+        resume: bool,
+    ) -> LM:
+        """Packed all-position training over an explicit distributed mesh."""
+
+        torch = _torch()
+        from mixle.utils.parallel import ParallelPlan, get_training_backend
+
+        stride = self.block + 1
+        n_rows = len(ids) // stride
+        if n_rows < 1:
+            raise ValueError(
+                "fit(dense=True) needs at least block+1=%d tokens to form one packed row; got %d" % (stride, len(ids))
+            )
+        plan = ParallelPlan(
+            dp_replicate=dp_replicate,
+            dp_shard=dp_shard,
+            tp=tp_size,
+            pp=pp_size,
+            cp=cp_size,
+            ep=ep_size,
+            etp=etp_size,
+            microbatches=microbatches,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+        )
+        backend = get_training_backend(distributed_backend)
+        session = backend.prepare(
+            self.module,
+            plan=plan,
+            device=self.device,
+            precision=precision,
+            optimizer=optimizer,
+            lr=lr,
+            max_grad_norm=max_grad_norm,
+            compile=compile,
+        )
+        flat = torch.as_tensor(ids[: n_rows * stride], dtype=torch.int64).view(n_rows, stride)
+        try:
+            start_epoch = 0
+            if resume:
+                if checkpoint_path is None:
+                    raise ValueError("resume=True requires checkpoint_path.")
+                payload = session.load_checkpoint(checkpoint_path)
+                loader_state = payload.get("loader_state") or {}
+                start_epoch = int(loader_state.get("epoch", 0))
+            for epoch in range(start_epoch, int(epochs)):
+                epoch_seed = int(np.random.SeedSequence([seed, epoch]).generate_state(1)[0])
+                rng = np.random.RandomState(epoch_seed)
+                global_order = rng.permutation(n_rows) if shuffle else np.arange(n_rows)
+                local_order = global_order[session.data_parallel_rank :: session.data_parallel_size]
+                total_loss = 0.0
+                total_tokens = 0.0
+                for start in range(0, len(local_order), int(batch_size)):
+                    index = torch.as_tensor(local_order[start : start + int(batch_size)], dtype=torch.int64)
+                    rows = flat[index]
+                    receipt = session.train_batch(rows[:, :-1], rows[:, 1:])
+                    if not receipt.skipped:
+                        total_loss += receipt.loss * receipt.local_tokens
+                        total_tokens += receipt.local_tokens
+                receipt = session.finish_accumulation()
+                if receipt is not None:
+                    total_loss += receipt.loss * receipt.local_tokens
+                    total_tokens += receipt.local_tokens
+                if hasattr(session, "reduce_sums"):
+                    total_loss, total_tokens = session.reduce_sums(total_loss, total_tokens)
+                if log is not None and session.is_logging_rank:
+                    log(epoch, total_loss / max(total_tokens, 1.0))
+                if checkpoint_path is not None:
+                    session.save_checkpoint(
+                        checkpoint_path,
+                        loader_state={"seed": seed, "epoch": epoch + 1, "batch": 0},
+                        extra={"objective": "packed_causal_lm"},
+                    )
+        finally:
+            session.close()
+        wrapped = session.module
+        while hasattr(wrapped, "module"):
+            wrapped = wrapped.module
+        self.module = getattr(wrapped, "_orig_mod", wrapped)
         return self
 
     def _fit_dense(

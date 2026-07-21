@@ -25,15 +25,14 @@ that lean on extensive MCMC diagnostics and a mature sampler ecosystem, a specia
 NumPyro) is the deeper tool. Reach for ``mixle.ppl`` when the model composes naturally with the
 stats/inference layer; check the generated model and route before depending on it.
 
-Not a frontier pretraining or distributed-training platform
------------------------------------------------------------
+Not a replacement for a frontier training engine
+------------------------------------------------
 
-Mixle sits *above* the trainer. Its neural and language-model helpers, and the tensor/pipeline/context
-parallelism plan, are the composition and orchestration layer that a real training run would sit on —
-not a replacement for a dedicated large-scale trainer (Megatron, DeepSpeed, TorchTitan). Multi-node,
-multi-GPU frontier pretraining is explicitly out of scope for this release; the parallelism knobs
-validate a plan and, without an explicit opt-in, refuse to silently run a different one. Use mixle to
-wrap, fine-tune, distill, and calibrate models; use a dedicated trainer to pretrain at frontier scale.
+Mixle now has an executable native DeviceMesh backend and a Megatron Bridge adapter, but it does not claim
+to replace Megatron's fused kernels, schedules, topology tuning, or data stack. Use ``torch_native`` for
+DDP/FSDP2/HSDP and the supported native model axes; use ``megatron`` for full transformer/MoE
+TP/PP/CP/EP/ETP. Mixle owns the typed plan, structured-model integration, checkpoint semantics, and receipts.
+Unsupported combinations fail rather than degrading to data parallelism.
 
 Not an MLOps, serving, or deployment platform
 ---------------------------------------------
