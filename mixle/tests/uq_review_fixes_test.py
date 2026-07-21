@@ -143,6 +143,44 @@ def test_nuts_numba_thin_keeps_num_samples() -> None:
     assert np.asarray(result.samples).shape[0] == 50
 
 
+@pytest.mark.numba
+@pytest.mark.optional
+def test_nuts_numba_log_probs_are_real_not_fabricated_zeros() -> None:
+    # MCMCResult.log_probs used to be hardcoded np.zeros(...) regardless of the actual draws --
+    # the njit kernel never tracked the log-density of a kept sample at all.
+    numba = pytest.importorskip("numba")
+    from mixle.inference.mcmc.nuts_numba import nuts_numba
+
+    @numba.njit(cache=False)
+    def value_and_grad(x: np.ndarray) -> tuple[float, np.ndarray]:
+        return -0.5 * np.sum(x * x), -x
+
+    result = nuts_numba(value_and_grad, np.full(2, 3.0), num_samples=20, warmup=100, seed=0)
+    lp = np.asarray(result.log_probs)
+    assert not np.all(lp == 0.0)
+    expected = -0.5 * np.sum(np.asarray(result.samples) ** 2, axis=1)
+    np.testing.assert_allclose(lp, expected, atol=1e-8)
+
+
+@pytest.mark.numba
+@pytest.mark.optional
+def test_nuts_numba_warmup_zero_keeps_the_pretuned_step_size() -> None:
+    # `it == warmup` fires at it=0 when warmup=0, but `it < warmup` never ran even once, so
+    # log_eps_bar was still its zero-initial value -- exp(0.0) == 1.0 silently overwrote the
+    # properly-tuned step size from _find_reasonable_eps with a fixed constant unrelated to the
+    # target's actual scale (badly-scaled targets: a frozen/wildly-mistuned chain, no warning).
+    numba = pytest.importorskip("numba")
+    from mixle.inference.mcmc.nuts_numba import nuts_numba
+
+    @numba.njit(cache=False)
+    def value_and_grad(x: np.ndarray) -> tuple[float, np.ndarray]:
+        sigma2 = 1.0e-6
+        return -0.5 * np.sum(x * x) / sigma2, -x / sigma2
+
+    result = nuts_numba(value_and_grad, np.zeros(1), num_samples=20, warmup=0, seed=0)
+    assert result.step_size < 0.1  # a properly-tuned step size for this tight a target; 1.0 would be absurd
+
+
 # --------------------------------------------------------------------- U-7: cumulative-hazard lookup
 def test_cumhaz_step_function_is_right_continuous_from_zero() -> None:
     event_times = np.asarray([1.0, 2.0, 3.0])

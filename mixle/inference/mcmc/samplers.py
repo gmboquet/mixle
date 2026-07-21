@@ -815,7 +815,12 @@ def nuts(
             eta = m1 ** (-kappa)
             log_eps_bar = eta * log_eps + (1.0 - eta) * log_eps_bar
             eps = math.exp(log_eps)
-        elif it == warmup:
+        elif it == warmup and warmup > 0:
+            # warmup == 0 hits this same `it == warmup` branch on the very first iteration (it=0),
+            # but `it < warmup` above never ran even once, so log_eps_bar is still its zero-initial
+            # value -- exp(0.0) == 1.0 silently overwrote the properly-tuned eps _find_reasonable_eps
+            # already found, with a fixed constant unrelated to the target's actual scale. With no
+            # adaptation phase at all, the pre-tuned eps from before this loop should simply stand.
             eps = math.exp(log_eps_bar)
 
         if it >= warmup and ((it - warmup) % thin == 0):

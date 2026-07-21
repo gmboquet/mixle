@@ -202,6 +202,31 @@ class MCMCTestCase(unittest.TestCase):
         self.assertEqual(s.shape, (2000, 2))
         self.assertTrue(np.allclose(s.mean(0), mean, atol=0.15))
         self.assertLess(abs(np.cov(s.T)[0, 1] - 0.8), 0.2)  # recovers the correlation
+
+    def test_nuts_warmup_zero_keeps_the_pretuned_step_size(self):
+        # `it == warmup` fires at it=0 when warmup=0, but `it < warmup` (dual-averaging) never ran
+        # even once, so log_eps_bar was still its zero-initial value -- exp(0.0) == 1.0 silently
+        # overwrote the properly-tuned step size _find_reasonable_eps already found, with a fixed
+        # constant unrelated to the target's actual scale. Repro target: a very tight Gaussian
+        # (sigma=1e-3) where a correctly-tuned step size must be small; 1.0 would be absurdly large
+        # and freeze the chain (every proposal diverges).
+        sigma = 1.0e-3
+
+        def log_target(x):
+            return float(-0.5 * (float(x[0]) / sigma) ** 2)
+
+        def grad_log_target(x):
+            return np.array([-float(x[0]) / sigma**2])
+
+        result = nuts(
+            log_target,
+            grad_log_target,
+            np.zeros(1),
+            num_samples=20,
+            warmup=0,
+            rng=np.random.RandomState(0),
+        )
+        self.assertLess(result.step_size, 0.1)
         self.assertGreater(result.step_size, 0.0)  # adapted
 
     def test_posterior_predictive_uses_retained_states(self):
