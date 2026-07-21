@@ -23,6 +23,18 @@ class CategoricalBeliefBasicsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             CategoricalBelief([0.5, 0.5], labels=["a", "b", "c"])  # 2 probs, 3 labels
 
+    def test_sample_accepts_an_integer_seed(self):
+        # GaussianBelief.sample(rng=<int>) has always worked via _as_rng; CategoricalBelief.sample
+        # used `rng if rng is not None else np.random.RandomState()`, which does not convert an int
+        # seed and crashed with AttributeError.
+        b = CategoricalBelief([0.5, 0.5], labels=["a", "b"])
+        draws = b.sample(5, rng=42)
+        self.assertEqual(len(draws), 5)
+
+    def test_uniform_rejects_zero_labels(self):
+        with self.assertRaises(ValueError):
+            CategoricalBelief.uniform(0)
+
 
 class GaussianBeliefBasicsTest(unittest.TestCase):
     def test_moments_entropy_interval(self):
@@ -58,6 +70,35 @@ class GaussianBeliefBasicsTest(unittest.TestCase):
         self.assertAlmostEqual(np.linalg.eigvalsh(singular).min(), 0.0, places=10)
         b = GaussianBelief([0.0, 0.0], singular)
         np.testing.assert_allclose(b.cov(), singular)
+
+    def test_accepts_large_scale_near_singular_covariance(self):
+        # eigenvalues [1e9, -1e-3]: the negative eigenvalue is a tiny fraction (1e-12) of the
+        # matrix's own scale -- exactly the shape of float noise a large-scale PSD matrix produces
+        # under eigvalsh. A fixed absolute tolerance (the old -1e-9 constant) incorrectly rejects
+        # this; the tolerance must scale with the matrix's own eigenvalue magnitude.
+        P = np.diag([1e9, -1e-3])
+        b = GaussianBelief([0.0, 0.0], P)
+        self.assertAlmostEqual(float(b.var()[0]), 1e9, places=0)
+
+    def test_rejects_small_scale_proportionally_indefinite_covariance(self):
+        # eigenvalues [1e-9, -1e-9]: the negative eigenvalue is 100% as large as the positive one
+        # -- genuinely, proportionally indefinite, not float noise -- even though both are tiny in
+        # absolute terms. The old fixed absolute tolerance (-1e-9) incorrectly accepted this exact
+        # case (-1e-9 is not strictly less than -1e-9); a relative tolerance correctly rejects it.
+        P = np.diag([1e-9, -1e-9])
+        with self.assertRaises(ValueError):
+            GaussianBelief([0.0, 0.0], P)
+
+    def test_var_sd_interval_clip_a_boundary_negative_diagonal_instead_of_nan(self):
+        # a covariance accepted by the PSD tolerance can still carry a tiny negative diagonal entry
+        # from float noise (never a real negative variance); var()/sd()/interval() must clip it to
+        # 0 rather than silently propagate NaN through sqrt.
+        P = np.diag([1.0, -1e-15])
+        b = GaussianBelief([0.0, 0.0], P)
+        self.assertTrue(np.isfinite(b.var()).all())
+        self.assertTrue(np.isfinite(b.sd()).all())
+        self.assertTrue(np.isfinite(b.interval()).all())
+        self.assertEqual(float(b.var()[1]), 0.0)
 
 
 class KalmanUpdateTest(unittest.TestCase):
