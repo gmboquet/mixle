@@ -714,14 +714,15 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
         """
         min_val, count_vec = suff_stat
 
-        with np.errstate(divide="ignore"):
+        with np.errstate(divide="ignore", invalid="ignore"):
             if self.pseudo_count is None:
                 count = np.sum(count_vec)
                 p_vec = count_vec / count
-                ll = np.log1p(-p_vec)
-                ll -= np.log(len(count_vec) - 1)
-                ll *= count - count_vec
-                ll += count_vec * np.log(p_vec)
+                non_spike = count - count_vec
+                log1m_p = np.log1p(-p_vec) - np.log(len(count_vec) - 1)
+                log_p = np.log(p_vec)
+                ll = np.where(non_spike == 0.0, 0.0, non_spike * log1m_p)
+                ll += np.where(count_vec == 0.0, 0.0, count_vec * log_p)
                 k = np.argmax(ll)
                 p = p_vec[k]
 
@@ -741,10 +742,11 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
                     count_vec[k_pseudo] += self.pseudo_count
                     count = np.sum(count_vec)
                     p_vec = count_vec / count
-                    ll = np.log1p(-p_vec)
-                    ll -= np.log(len(count_vec) - 1)
-                    ll *= count - count_vec
-                    ll += count_vec * np.log(p_vec)
+                    non_spike = count - count_vec
+                    log1m_p = np.log1p(-p_vec) - np.log(len(count_vec) - 1)
+                    log_p = np.log(p_vec)
+                    ll = np.where(non_spike == 0.0, 0.0, non_spike * log1m_p)
+                    ll += np.where(count_vec == 0.0, 0.0, count_vec * log_p)
                     k = np.argmax(ll)
                     p = p_vec[k]
 
@@ -762,10 +764,11 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
                     count_vec[k_pseudo] += self.pseudo_count * self.suff_stat[1]
                     count = np.sum(count_vec)
                     p_vec = count_vec / count
-                    ll = np.log1p(-p_vec)
-                    ll -= np.log(len(count_vec) - 1)
-                    ll *= count - count_vec
-                    ll += count_vec * np.log(p_vec)
+                    non_spike = count - count_vec
+                    log1m_p = np.log1p(-p_vec) - np.log(len(count_vec) - 1)
+                    log_p = np.log(p_vec)
+                    ll = np.where(non_spike == 0.0, 0.0, non_spike * log1m_p)
+                    ll += np.where(count_vec == 0.0, 0.0, count_vec * log_p)
                     k = np.argmax(ll)
                     p = p_vec[k]
 
@@ -781,10 +784,11 @@ class IntegerUniformSpikeEstimator(ParameterEstimator):
                     count_vec += self.pseudo_count
                     count = np.sum(count_vec)
                     p_vec = count_vec / count
-                    ll = np.log1p(-p_vec)
-                    ll -= np.log(len(count_vec) - 1)
-                    ll *= count - count_vec
-                    ll += count_vec * np.log(p_vec)
+                    non_spike = count - count_vec
+                    log1m_p = np.log1p(-p_vec) - np.log(len(count_vec) - 1)
+                    log_p = np.log(p_vec)
+                    ll = np.where(non_spike == 0.0, 0.0, non_spike * log1m_p)
+                    ll += np.where(count_vec == 0.0, 0.0, count_vec * log_p)
                     k = np.argmax(ll)
                     p = p_vec[k]
 
