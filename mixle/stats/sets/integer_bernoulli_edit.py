@@ -462,7 +462,9 @@ class IntegerBernoulliEditSampler(DistributionSampler):
         self.init_rng = dist.init_dist.sampler(self.rng.randint(0, maxrandint))
         self.next_rng = np.random.RandomState(self.rng.randint(0, maxrandint))
 
-    def sample(self, size: int | None = None) -> list[tuple[list[int], list[int]]] | tuple[list[int], list[int]]:
+    def sample(
+        self, size: int | None = None, *, batched: bool = True
+    ) -> list[tuple[list[int], list[int]]] | tuple[list[int], list[int]]:
         """Draw iid (prev set, next set) observations from the distribution.
 
         Args:

@@ -72,7 +72,10 @@ def dependency_gain(
     rng = np.random.RandomState(0) if rng is None else rng
     child = list(child)
     n = len(child)
-    levels = sorted(set(parent))
+    # key=repr (not bare comparison): a discrete parent may carry a missing sentinel (``None``) beside
+    # str/int/bool levels, and ``None`` has no ``<`` against those types (TypeError). repr gives a total,
+    # deterministic order regardless of level type mix -- same guard `_GLMFactor.fit` applies in bayesian_network.py.
+    levels = sorted(set(parent), key=repr)
     marginal = fit(child, _clone(child_estimator), max_its=max_its, out=None, rng=rng)
     ll_marginal = float(np.sum(marginal.seq_log_density(marginal.dist_to_encoder().seq_encode(child))))
 
@@ -815,8 +818,9 @@ def learn_structure(
         else:
             p = parents[i]
             keys = keyed[p]
+            # key=repr: see the dependency_gain guard above -- keys may carry a ``None`` sentinel.
             est = ConditionalDistributionEstimator(
-                estimator_map={lv: _clone(templates[i]) for lv in sorted(set(keys))}, given_estimator=None
+                estimator_map={lv: _clone(templates[i]) for lv in sorted(set(keys), key=repr)}, given_estimator=None
             )
             factors[i] = fit(list(zip(keys, cols[i])), est, max_its=max_its, out=None, rng=rng)
             edge_binners[i] = binners[p]
@@ -834,7 +838,9 @@ def _init_matrix(data: list[tuple], *, numeric_only: bool) -> np.ndarray:
     numerics, onehots = [], []
     for c in cols:
         if _is_discrete(c):
-            levels = sorted(set(c))
+            # key=repr: see the dependency_gain guard above -- c may carry a ``None`` sentinel; the one-hot
+            # encoding below only needs a total, deterministic order, not a semantically meaningful one.
+            levels = sorted(set(c), key=repr)
             onehots.append(np.array([[1.0 if v == lv else 0.0 for lv in levels] for v in c]))
         else:
             arr = np.asarray(c, dtype=np.float64)

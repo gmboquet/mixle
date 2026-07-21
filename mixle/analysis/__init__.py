@@ -9,7 +9,14 @@ collected here so the distributions package stays focused on distribution famili
 
 from __future__ import annotations
 
-from mixle.analysis.biodiversity import habitat_offset_liability, no_net_loss_constraint
+from mixle.analysis.biodiversity import (
+    fragmentation_impact,
+    habitat_connectivity,
+    habitat_offset_liability,
+    least_cost_corridor,
+    no_net_loss_constraint,
+    resistance_raster,
+)
 from mixle.analysis.carcinogenic_risk import (
     RiskQuantity,
     SlopeFactor,
@@ -27,6 +34,7 @@ from mixle.analysis.coverage import (
     rarefaction_curve,
     turing_coverage,
 )
+from mixle.analysis.developmental_risk import BMDResult, benchmark_dose, rfd_exceedance
 from mixle.analysis.emissions import (
     EmissionFactors,
     Footprint,
@@ -86,7 +94,13 @@ from mixle.analysis.rank_aggregation import (
     mallows_fit,
     spearman_footrule,
 )
-from mixle.analysis.real_options import OptionValue, real_option_value, voi_dollars
+from mixle.analysis.real_options import (
+    OptionValue,
+    VoiStoppingDecision,
+    real_option_value,
+    voi_dollars,
+    voi_stopping_decision,
+)
 from mixle.analysis.sdm import HabitatModel, SpeciesObservation, fit_sdm
 from mixle.analysis.spatial_mixture import SpatialMixture
 from mixle.analysis.valuation import NPVDistribution, capex_opex, cost_curve, monte_carlo_npv
@@ -103,6 +117,10 @@ __all__ = [
     "endpoint_estimator",
     "n_records",
     "record_times",
+    # teratogenic / reproductive / developmental risk: benchmark dose (K8)
+    "BMDResult",
+    "benchmark_dose",
+    "rfd_exceedance",
     # dose-response / health-risk models (K3)
     "DOSE_RESPONSE_MODELS",
     "DoseResponse",
@@ -163,6 +181,11 @@ __all__ = [
     "transition_risk",
     # climate objective + risk: emissions footprint and carbon/water terms into J6/H4 (L6)
     "climate_terms",
+    # habitat connectivity (graph resistance on a habitat-cost raster; N4)
+    "resistance_raster",
+    "least_cost_corridor",
+    "habitat_connectivity",
+    "fragmentation_impact",
     # reclamation ecology / biodiversity offsets (priced habitat-offset liability + no-net-loss constraint)
     "habitat_offset_liability",
     "no_net_loss_constraint",
@@ -178,6 +201,8 @@ __all__ = [
     "OptionValue",
     "real_option_value",
     "voi_dollars",
+    "VoiStoppingDecision",
+    "voi_stopping_decision",
     # safety-risk / geotechnical hazard modeling
     "safety_risk_surface",
     "incident_probability",

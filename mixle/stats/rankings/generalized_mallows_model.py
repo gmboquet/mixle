@@ -172,7 +172,7 @@ class GeneralizedMallowsModelSampler(DistributionSampler):
             perm.insert(i - j, int(self.dist.sigma0[i]))
         return perm
 
-    def sample(self, size: int | None = None) -> list[int] | list[list[int]]:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | list[list[int]]:
         """Draw one ordering or ``size`` iid orderings."""
         if size is None:
             return self._sample_one()

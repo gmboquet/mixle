@@ -107,7 +107,7 @@ class HierarchicalNormalSampler(DistributionSampler):
         self.dist = dist
         self.rng = np.random.RandomState(seed)
 
-    def sample(self, sizes):
+    def sample(self, sizes, *, batched: bool = True):
         """Draw group(s) of given size(s): an int draws one group; a sequence draws one group per entry."""
         d = self.dist
         if np.ndim(sizes) == 0:

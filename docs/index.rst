@@ -169,8 +169,11 @@ reference under :doc:`api/modules` covers the broad public module surface;
    whats-new-0-6-2
    quickstart
    concepts
+   quantitative-semantics
+   module-ownership
    package-map
    lifecycle
+   capability-lifecycle
    tutorials/index
 
 .. toctree::
@@ -219,6 +222,23 @@ reference under :doc:`api/modules` covers the broad public module surface;
    release-notes
    example-execution-manifest
    changelog
+
+.. toctree::
+   :caption: Project Governance
+   :hidden:
+   :maxdepth: 2
+
+   charter
+   requirements
+   architecture
+   contracts
+   development
+   testing
+   security
+   scientific-validity
+   operations
+   releases
+   migrations/0.8.0
 
 .. toctree::
    :caption: Reference Guides

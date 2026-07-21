@@ -443,7 +443,7 @@ class OptionalSampler(DistributionSampler):
         self.dist = dist
         self.sampler = self.dist.dist.sampler(self.new_seed())
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw one observation or a list of observations from the optional mixture."""
 
         sampler = self.sampler

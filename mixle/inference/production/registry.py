@@ -88,7 +88,11 @@ class Registry:
         ``header`` defaults to ``model.header`` if present. The model is serialized with the safe mixle
         registry; the header (a :class:`Header` or dict) and ``metadata`` are stored alongside."""
         d = self._dir(name)
-        ver = f"v{len(self.versions(name)) + 1}"
+        # the NEXT version number, not the current COUNT: a deleted version (v2 removed from v1,v2,v3)
+        # must not free up its number for reuse, or the next register() overwrites the surviving v3.
+        existing = self.versions(name)
+        next_n = max((int(v[1:]) for v in existing if v[1:].isdigit()), default=0) + 1
+        ver = f"v{next_n}"
         attached = getattr(model, "header", None)
         if header is None:
             header = attached
@@ -163,11 +167,22 @@ class Registry:
             raise KeyError(f"{name!r} has no version {version!r}")
         return version
 
-    def get(self, name: str, version: str = "latest") -> tuple[Any, dict | None]:
-        """Load ``(model, header)`` for a version (``"latest"`` = highest-numbered)."""
+    def get(self, name: str, version: str = "latest", *, trust_code: bool = False) -> tuple[Any, dict | None]:
+        """Load ``(model, header)`` for a version (``"latest"`` = highest-numbered).
+
+        A registered model containing a NeuralLeaf-family component embeds its weights as a pickle
+        blob (see :mod:`mixle.models._neural_serial`); deserializing that executes code, so ``get``
+        requires ``trust_code=True`` for such an entry -- trust the registry root, not just the JSON
+        extension. A pure-statistical entry loads either way.
+        """
         version = self._resolve_version(name, version)
         with open(os.path.join(self._model_dir(name, create=False), version + ".json")) as f:
             payload = json.load(f)
+        if trust_code:
+            from mixle.utils.serialization import trusted_deserialization
+
+            with trusted_deserialization():
+                return from_serializable(payload["model"]), payload.get("header")
         return from_serializable(payload["model"]), payload.get("header")
 
     def header(self, name: str, version: str = "latest") -> dict | None:
@@ -183,19 +198,32 @@ class Registry:
             return json.load(f).get("metadata") or {}
 
     def promote(self, name: str, version: str, alias: str = "production") -> None:
-        """Point ``alias`` (e.g. ``"production"``) at ``version`` -- the atomic model swap."""
+        """Point ``alias`` (e.g. ``"production"``) at ``version`` -- the atomic model swap.
+
+        Written via a temp file + ``os.replace`` in the same directory (same filesystem, so the
+        rename is atomic): a concurrent reader of :meth:`current` either sees the old alias target or
+        the new one, never a truncated/partial write, and a crash mid-write leaves the old alias
+        file untouched rather than corrupted.
+        """
         if version not in self.versions(name):
             raise KeyError(f"{name!r} has no version {version!r}")
-        with open(os.path.join(self._dir(name), _safe_segment(alias, "alias") + ".alias"), "w") as f:
+        d = self._dir(name)
+        target = os.path.join(d, _safe_segment(alias, "alias") + ".alias")
+        tmp = os.path.join(d, f".{_safe_segment(alias, 'alias')}.{os.getpid()}.tmp")
+        with open(tmp, "w") as f:
             f.write(version)
+        os.replace(tmp, target)
 
-    def current(self, name: str, alias: str = "production") -> tuple[Any, dict | None]:
-        """Load the model an ``alias`` points at (falls back to ``latest`` if the alias is unset)."""
+    def current(self, name: str, alias: str = "production", *, trust_code: bool = False) -> tuple[Any, dict | None]:
+        """Load the model an ``alias`` points at (falls back to ``latest`` if the alias is unset).
+
+        See :meth:`get` -- ``trust_code`` is required in the same way and for the same reason.
+        """
         p = os.path.join(self._model_dir(name, create=False), _safe_segment(alias, "alias") + ".alias")
         # the version READ FROM the alias file is still resolved against the known version list by get(),
         # so a tampered alias file cannot traverse either.
         version = open(p).read().strip() if os.path.exists(p) else "latest"
-        return self.get(name, version)
+        return self.get(name, version, trust_code=trust_code)
 
     def verify_chain(self, name: str) -> bool:
         """Verify the persisted checkpoint lineage for ``name`` (see :meth:`checkpointer`).

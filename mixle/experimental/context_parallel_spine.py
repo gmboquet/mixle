@@ -65,9 +65,9 @@ if _HAS_TORCH:
 
     def _rope_angles(positions: Any, head_dim: int, base: float = 10000.0) -> tuple[Any, Any]:
         """``(sin, cos)`` of shape ``(len(positions), head_dim)`` -- mirrors ``context_spine._rope_angles``
-        exactly (duplicated rather than imported: this module is infrastructure over an experimental
-        mechanism, matching where F1's CP lives relative to ``CausalLM``, and should not create a
-        reverse dependency from ``mixle/utils/parallel`` onto ``mixle/experimental``)."""
+        exactly (duplicated rather than imported: this module is infrastructure over
+        ``SlidingWindowSpine``, not a piece of its public surface, and should not create an import
+        dependency between the two sibling ``mixle.experimental`` modules)."""
         inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
         freqs = positions.to(torch.float32)[:, None] * inv_freq[None, :]  # (len, head_dim/2)
         freqs = torch.cat([freqs, freqs], dim=-1)  # (len, head_dim)

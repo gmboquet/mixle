@@ -507,7 +507,7 @@ class TemporalGraphGrammarSampler(DistributionSampler):
         cols = np.concatenate([ij[:, 1], ij[:, 0]])
         return sp.csr_array((np.ones(rows.size), (rows, cols)), shape=(n, n))
 
-    def sample(self, size: int | None = None, *, num_steps: int = 10, n_init: int = 5) -> Any:
+    def sample(self, size: int | None = None, *, num_steps: int = 10, n_init: int = 5, batched: bool = True) -> Any:
         """Draw one sequence or a list of sequences from the grammar."""
         if size is None:
             return self.sample_one(num_steps=num_steps, n_init=n_init)

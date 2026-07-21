@@ -33,6 +33,10 @@ sync, so this table and the registry cannot drift apart.
      - Stable core
      - MLE/EM/conjugate fitting for ordinary distribution and latent-model
        workflows.
+   * - ``mixle.semantics``
+     - Stable core shared contract
+     - Domain-neutral value roles, units, transforms, priors, observations,
+       posterior/predictive identity, uncertainty, calibration, and decisions.
    * - ``mixle.enumeration`` and core ``mixle.ops``
      - Usable, evolving
      - Ranking, top-k, support traversal, quantization, conditioning,
@@ -70,6 +74,11 @@ sync, so this table and the registry cannot drift apart.
      - Active application/research workflows
      - Scientific design, Bayesian optimization, model-improvement loops, and
        anti-regression experiments.
+   * - ``mixle.blending``, ``mixle.mine_planning``, and ``mixle.pipeline_twin``
+     - Active mine-planning workflows (worklist H2, H3, H8)
+     - Blend-to-spec LP/MILP with IIS feasibility diagnostics; ultimate-pit
+       and time-phased extraction scheduling; and digital-twin, period-stepped
+       re-solve simulation of the mine-to-plant-to-customer pipeline.
    * - ``mixle.inference.production``
      - Practical helpers, not a platform
      - Provenance headers, filesystem registries, scoring wrappers, activity
@@ -83,6 +92,7 @@ For ordinary work, start with:
 
 * ``mixle.stats`` for model families and estimators;
 * ``mixle.inference.optimize`` for fitting;
+* ``mixle.semantics`` for cross-package values, priors, observations, and results;
 * ``mixle.describe`` to inspect what the fitted object supports;
 * ``mixle.enumeration`` and ``mixle.ops`` only after checking capabilities.
 

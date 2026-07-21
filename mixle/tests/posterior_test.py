@@ -1,15 +1,23 @@
 """The Posterior algebra: the posterior() factory over latent / parameter / predictive variables."""
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 
 from mixle.inference import ParameterPosterior, PredictivePosterior, posterior
+from mixle.inference.mcmc.parameter_bridge import sample_parameter_posterior
 from mixle.stats import sample
 from mixle.stats.compute.posterior import LatentPosterior, Posterior
 from mixle.stats.latent.mixture import MixtureDistribution
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 from mixle.stats.univariate.discrete.bernoulli import BernoulliDistribution
+from mixle.stats.univariate.discrete.poisson import PoissonDistribution
+from mixle.utils.optional_deps import HAS_PANDAS
+from mixle.utils.optional_deps import pandas as pd
+
+_SKIP_NO_PANDAS = unittest.skipUnless(HAS_PANDAS, "pandas not installed; pip install mixle[pandas]")
 
 
 class PredictivePosteriorTest(unittest.TestCase):
@@ -50,6 +58,30 @@ class ParameterPosteriorConjugateTest(unittest.TestCase):
     def test_auto_picks_conjugate(self):
         self.assertEqual(posterior(BernoulliDistribution(0.5), self.data, over="params").kind, "conjugate")
 
+    @_SKIP_NO_PANDAS
+    def test_to_dataframe_matches_analytic_beta_posterior(self):
+        # Beta(1, 1) prior + 400 Bernoulli(0.7) draws (289 successes, seed 0) -> Beta(290, 112) exactly;
+        # to_dataframe(n, rng) must equal an independent rng.beta(290, 112, size=n) draw column-for-column.
+        s = int(sum(self.data))
+        a, b = 1.0 + s, 1.0 + len(self.data) - s
+        self.assertEqual((a, b), (290.0, 112.0))  # pins the fixture so a future data change is caught here
+        df = self.post.to_dataframe(25, rng=np.random.RandomState(2))
+        self.assertIsInstance(df, pd.DataFrame)
+        self.assertEqual(list(df.columns), ["p"])
+        self.assertEqual(df.shape, (25, 1))
+        expected = np.random.RandomState(2).beta(a, b, size=25)
+        np.testing.assert_array_equal(df["p"].to_numpy(), expected)
+        self.assertTrue(bool((df["p"] > 0.0).all() and (df["p"] < 1.0).all()))  # Beta(290, 112) support
+
+    @_SKIP_NO_PANDAS
+    def test_to_parquet_roundtrips(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "beta_posterior.parquet"
+            self.post.to_parquet(path, 15, rng=np.random.RandomState(3))
+            roundtrip = pd.read_parquet(path)
+            expected = self.post.to_dataframe(15, rng=np.random.RandomState(3))
+            pd.testing.assert_frame_equal(roundtrip, expected)
+
 
 class ParameterPosteriorMCMCTest(unittest.TestCase):
     def test_mcmc_path_when_forced(self):
@@ -64,6 +96,49 @@ class ParameterPosteriorMCMCTest(unittest.TestCase):
         self.assertEqual(len(draws), 10)
         mean = np.asarray(post.mean(), dtype=float)
         self.assertAlmostEqual(float(mean[0]), 3.0, delta=0.5)  # posterior mean of mu near 3
+
+    @_SKIP_NO_PANDAS
+    def test_to_dataframe_two_param_family_gets_positional_columns(self):
+        # GaussianDistribution's parameter_bridge maps theta -> the tuple (mu, sigma2) -- no names
+        # travel through MCMCResult, so to_dataframe() must fall back to generic param_0/param_1,
+        # column-for-column identical to a direct call to .samples() with the same rng.
+        rng = np.random.RandomState(0)
+        data = (rng.normal(3.0, 1.0, size=200)).tolist()
+        post = posterior(
+            GaussianDistribution(0.0, 1.0), data, over="params", method="mcmc", steps=300, burn_in=100, seed=0
+        )
+        df = post.to_dataframe(20, rng=np.random.RandomState(3))
+        self.assertEqual(list(df.columns), ["param_0", "param_1"])
+        self.assertEqual(df.shape, (20, 2))
+        expected = np.asarray(post.samples(20, rng=np.random.RandomState(3)), dtype=float)
+        np.testing.assert_array_equal(df.to_numpy(), expected)
+
+    @_SKIP_NO_PANDAS
+    def test_to_dataframe_scalar_family_gets_single_column(self):
+        # PoissonDistribution's bridge maps theta -> a bare float (not even a 1-tuple); to_dataframe()
+        # must still produce exactly one column, matching the raw samples exactly.
+        rng = np.random.RandomState(0)
+        data = rng.poisson(4.0, size=200).tolist()
+        post = posterior(PoissonDistribution(1.0), data, over="params", method="mcmc", steps=300, burn_in=100, seed=0)
+        df = post.to_dataframe(12, rng=np.random.RandomState(4))
+        self.assertEqual(list(df.columns), ["param_0"])
+        self.assertEqual(df.shape, (12, 1))
+        expected = np.asarray(post.samples(12, rng=np.random.RandomState(4)), dtype=float)
+        np.testing.assert_array_equal(df["param_0"].to_numpy(), expected)
+        self.assertTrue(bool((df["param_0"] > 0.0).all()))  # Poisson rate posterior support
+
+    @_SKIP_NO_PANDAS
+    def test_to_dataframe_rejects_rebuilt_distribution_samples(self):
+        # return_distributions=True maps each MCMC draw to a rebuilt distribution object -- there is no
+        # natural tabular form for that, so to_dataframe() must refuse rather than fabricate columns.
+        rng = np.random.RandomState(0)
+        data = (rng.normal(3.0, 1.0, size=50)).tolist()
+        result = sample_parameter_posterior(
+            GaussianDistribution(0.0, 1.0), data, steps=50, burn_in=10, seed=0, return_distributions=True
+        )
+        post = ParameterPosterior.from_mcmc(result)
+        with self.assertRaises(TypeError):
+            post.to_dataframe(5, rng=np.random.RandomState(0))
 
 
 class LatentPosteriorFactoryTest(unittest.TestCase):

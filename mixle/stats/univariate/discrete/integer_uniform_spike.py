@@ -342,7 +342,7 @@ class IntegerUniformSpikeSampler(DistributionSampler):
         self.dist = dist
         self.non_k = np.delete(np.arange(self.dist.min_val, self.dist.max_val + 1), self.dist.k - self.dist.min_val)
 
-    def sample(self, size: int | None = None) -> int | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> int | np.ndarray:
         """Draw iid samples from the integer uniform spike distribution.
 
         Args:

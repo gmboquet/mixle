@@ -543,7 +543,9 @@ class IntegerMultinomialSampler(DistributionSampler):
         self.rng = np.random.RandomState(seed)
         self.len_sampler = self.dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
 
-    def sample(self, size: int | None = None) -> list[tuple[int, float]] | list[list[tuple[int, float]]]:
+    def sample(
+        self, size: int | None = None, *, batched: bool = True
+    ) -> list[tuple[int, float]] | list[list[tuple[int, float]]]:
         """Draw independent samples from an integer multinomial distribution.
 
         Args:

@@ -88,7 +88,7 @@ if _HAS_TORCH:
         default) is the original single-device path above, completely unchanged -- byte-identical, not just
         numerically close, so E1's existing behavior and tests are untouched. ``cp_size > 1`` shards the
         current step's KV axis (``cache ++ chunk``) across ``cp_size`` simulated ranks via
-        ``mixle.utils.parallel.context_parallel_spine`` for the attention sub-step of every layer; nothing
+        ``mixle.experimental.context_parallel_spine`` for the attention sub-step of every layer; nothing
         else (embeddings, LayerNorm, MLP, head, cache bookkeeping) changes, since those are all per-position
         and need no communication.
         """
@@ -116,7 +116,7 @@ if _HAS_TORCH:
             if self.cp_size < 1:
                 raise ValueError("cp_size must be >= 1, got %r" % (cp_size,))
             if self.cp_size > 1:
-                from mixle.utils.parallel.context_parallel_spine import validate_cp_window_plan
+                from mixle.experimental.context_parallel_spine import validate_cp_window_plan
 
                 validate_cp_window_plan(self.cp_size, self.window)
 
@@ -194,7 +194,7 @@ if _HAS_TORCH:
                     # E8: shard the KV axis (cache ++ chunk) across cp_size simulated ranks and reconstruct
                     # the dense attention output. k_full/v_full here are still raw (pre-RoPE) -- RoPE is
                     # applied per-shard inside cp_window_attention_forward, see notes/designs/E8.md.
-                    from mixle.utils.parallel.context_parallel_spine import cp_shard_kv, cp_window_attention_forward
+                    from mixle.experimental.context_parallel_spine import cp_shard_kv, cp_window_attention_forward
 
                     shards = cp_shard_kv(k_full, v_full, key_positions, self.cp_size)
                     out = cp_window_attention_forward(

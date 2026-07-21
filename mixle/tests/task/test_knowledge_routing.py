@@ -194,3 +194,72 @@ def test_research_proposal_to_gap_maps_into_the_frozen_gap_shape():
     assert gap["acceptance_criteria"] == ["run a falling-head permeability test"]
     assert gap["status"] == "open"
     assert gap["resolved_by_item_ids"] == []
+
+
+def test_a_gap_can_opt_into_seeing_another_gaps_real_resolved_result():
+    """Fix for a real, documented limitation (found and worked around across several
+    experiments/ demos by bridging through separate route_task calls): `invoke(gap)` had no way to
+    see another gap's already-resolved result within the SAME route_task call. A tool that declares
+    a `known_items` parameter now gets the real accumulated items -- not a value this test
+    precomputes and hands over regardless of whether the system actually resolved the upstream gap."""
+    physics_ref = {}
+
+    def _physics_tool_recorded(gap):
+        result = {"tonnage_mt": 12.5, "units": "Mt"}
+        physics_ref.update(result)
+        return result
+
+    def _dependent_economic_tool(gap, known_items):
+        physics_items = [i for i in known_items if i.get("metadata", {}).get("domain") == "physics"]
+        assert physics_items, "known_items must contain the already-resolved physics item"
+        tonnage = physics_items[0]["payload"]["tonnage_mt"]
+        assert tonnage == physics_ref["tonnage_mt"]  # the REAL value the physics tool actually returned
+        return {"npv_usd": tonnage * 1_000_000.0}
+
+    catalog = [
+        CatalogEntry(
+            id="physics_survey",
+            schema={"invoke": _physics_tool_recorded, "output": {}},
+            owner="physics",
+            cost=0.1,
+            reliability=0.9,
+            verifier=_PassVerifier(),
+        ),
+        CatalogEntry(
+            id="dependent_economic_model",
+            schema={"invoke": _dependent_economic_tool, "output": {}},
+            owner="economic",
+            cost=0.1,
+            reliability=0.9,
+            verifier=_PassVerifier(),
+        ),
+    ]
+    seed = [["physics", "economic"]] * 20
+    proposer = init_decomposition_proposer(seed)
+    result = route_task("dependent question", catalog, proposer=proposer, budget=5)
+
+    assert result.answer["resolved_gap_ids"] == ["gap-0-physics", "gap-1-economic"]
+    economic_item = next(i for i in result.delta["add_items"] if i["metadata"]["domain"] == "economic")
+    assert economic_item["payload"]["npv_usd"] == 12.5 * 1_000_000.0
+
+
+def test_a_one_arg_invoke_is_completely_unaffected():
+    """Every catalog entry written before this fix uses `invoke(gap)` -- must keep working exactly
+    as before, with no known_items argument forced on it."""
+
+    def _plain_tool(gap):
+        return {"tonnage_mt": 7.0}
+
+    catalog = [
+        CatalogEntry(
+            id="physics_survey",
+            schema={"invoke": _plain_tool, "output": {}},
+            owner="physics",
+            cost=0.1,
+            reliability=0.9,
+            verifier=_PassVerifier(),
+        )
+    ]
+    proposer = init_decomposition_proposer([["physics"]] * 20)
+    result = route_task("plain question", catalog, proposer=proposer, budget=3)
+    assert result.answer["resolved_gap_ids"] == ["gap-0-physics"]

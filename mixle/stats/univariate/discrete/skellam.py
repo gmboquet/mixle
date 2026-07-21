@@ -114,6 +114,29 @@ class SkellamDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X] = mu1 + mu2."""
         return float(self.mu1 + self.mu2)
 
+    def entropy(self) -> float:
+        """Shannon entropy in nats, by exact two-sided summation of the standard series.
+
+        The Skellam entropy ``-sum_k p_k log p_k`` has no closed form. The sum runs over the
+        support between this distribution's own quantiles at ``1e-16`` and ``1 - 1e-16`` (plus a
+        safety margin on each side), beyond which the remaining tail mass on both sides is far
+        below double rounding. Terms where the scaled Bessel term underflows to exactly zero
+        (mass indistinguishable from 0 at double precision) are dropped, matching the ``p log p
+        -> 0`` limit.
+        """
+        from scipy.special import ive
+
+        tol = 1.0e-16
+        lo = int(self.quantile(tol)) - 20
+        hi = int(self.quantile(1.0 - tol)) + 20
+        k = np.arange(lo, hi + 1, dtype=np.float64)
+        bessel = ive(np.abs(k), self.two_sqrt_prod)
+        with np.errstate(divide="ignore"):
+            log_bessel = np.log(bessel)
+        lp = -self.sqrt_diff_sq + k * self.log_ratio_half + log_bessel
+        finite = np.isfinite(lp)
+        return float(-np.sum(np.exp(lp[finite]) * lp[finite]))
+
     # --- compute-engine backend (numpy + torch/GPU), SCORING only: the moment accumulator stays
     # host-side (it is plain count/sum/sum2 already). torch has no ``iv(k, .)``, so ``log I_k(z)``
     # is evaluated engine-side as the ascending series (A&S 9.6.10) under logsumexp — every term is
@@ -242,7 +265,7 @@ class SkellamSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None) -> int | np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> int | np.ndarray:
         """Draw ``size`` iid Skellam samples (a single int if ``size`` is None)."""
         n1 = self.rng.poisson(lam=self.dist.mu1, size=size)
         n2 = self.rng.poisson(lam=self.dist.mu2, size=size)

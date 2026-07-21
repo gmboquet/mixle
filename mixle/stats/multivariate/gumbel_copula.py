@@ -100,7 +100,7 @@ class GumbelCopulaSampler(DistributionSampler):
         b = (np.sin((1.0 - alpha) * theta_u) / w) ** ((1.0 - alpha) / alpha)
         return a * b
 
-    def sample(self, size: int | None = None) -> np.ndarray:
+    def sample(self, size: int | None = None, *, batched: bool = True) -> np.ndarray:
         n = 1 if size is None else int(size)
         th = self.dist.theta
         m = self._positive_stable(1.0 / th, n).reshape(n, 1)

@@ -110,7 +110,7 @@ class ChineseRestaurantProcessSampler(DistributionSampler):
             labels[i] = t
         return labels
 
-    def sample(self, size: int | None = None):
+    def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw one partition or a list of independent partitions."""
         if size is None:
             return self._one()

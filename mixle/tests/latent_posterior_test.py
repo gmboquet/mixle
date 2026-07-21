@@ -1,7 +1,9 @@
 """LatentPosterior: q(z|x) as a first-class object -- the mixture (exact categorical) realization."""
 
 import itertools
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 from scipy.stats import dirichlet
@@ -17,6 +19,10 @@ from mixle.stats import (
     MeanFieldLDAPosterior,
     MixtureDistribution,
 )
+from mixle.utils.optional_deps import HAS_PANDAS
+from mixle.utils.optional_deps import pandas as pd
+
+_SKIP_NO_PANDAS = unittest.skipUnless(HAS_PANDAS, "pandas not installed; pip install mixle[pandas]")
 
 
 class MixtureLatentPosteriorTest(unittest.TestCase):
@@ -124,6 +130,63 @@ class HmmChainLatentPosteriorTest(unittest.TestCase):
         emp = np.array([[np.mean(s[:, t] == k) for k in range(3)] for t in range(len(self.x))])
         np.testing.assert_allclose(emp, self.q.marginals(), atol=0.03)
         self.assertTrue(np.array_equal(self.q.sample(rng=3), self.q.sample(rng=3)))  # repeatable
+
+    @_SKIP_NO_PANDAS
+    def test_to_dataframe_matches_brute_force_marginals_and_mode(self):
+        gamma, mode, _entropy = self._brute_force()
+        df = self.q.to_dataframe()
+        self.assertIsInstance(df, pd.DataFrame)
+        self.assertEqual(list(df.columns), ["t", "state", "state_0_prob", "state_1_prob", "state_2_prob"])
+        self.assertEqual(df.shape, (len(self.x), 5))
+        np.testing.assert_array_equal(df["t"].to_numpy(), np.arange(len(self.x)))
+        np.testing.assert_array_equal(df["state"].to_numpy(), np.array(mode))
+        np.testing.assert_array_equal(df["state"].to_numpy(), self.q.mode())  # matches the class's own mode()
+        prob_cols = df[["state_0_prob", "state_1_prob", "state_2_prob"]].to_numpy()
+        np.testing.assert_allclose(prob_cols, gamma, atol=1e-9)
+        np.testing.assert_allclose(prob_cols.sum(axis=1), 1.0)  # each row is a proper distribution
+
+    @_SKIP_NO_PANDAS
+    def test_to_parquet_roundtrips(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "hmm_latent_posterior.parquet"
+            self.q.to_parquet(path)
+            roundtrip = pd.read_parquet(path)
+            pd.testing.assert_frame_equal(roundtrip, self.q.to_dataframe())
+
+
+@_SKIP_NO_PANDAS
+class MarkovChainLatentPosteriorToDataFrameHandComputedTest(unittest.TestCase):
+    """A from-scratch, hand-derived check independent of ``HiddenMarkovModelDistribution``/brute force.
+
+    2 states, 2 steps, uniform prior and uniform-row transitions (``A[j, k] = 0.5`` for every ``j, k``):
+    the chain carries no information across time (the prior over ``(z_0, z_1)`` is exactly uniform and
+    independent), so the joint posterior factorizes into independent per-step terms and both the
+    smoothing marginals and the Viterbi path collapse to each step's own row-normalized emission
+    likelihood -- ``b[t] / sum(b[t])`` -- worked out below by hand, not read off the implementation.
+    """
+
+    def setUp(self):
+        self.log_pi = np.log([0.5, 0.5])
+        self.log_A = np.log([[0.5, 0.5], [0.5, 0.5]])
+        self.b = np.array([[0.8, 0.2], [0.3, 0.7]])  # t=0 favors state 0, t=1 favors state 1
+        self.q = MarkovChainLatentPosterior(self.log_pi, self.log_A, np.log(self.b))
+
+    def test_to_dataframe_matches_hand_derivation(self):
+        df = self.q.to_dataframe()
+        self.assertEqual(list(df.columns), ["t", "state", "state_0_prob", "state_1_prob"])
+        self.assertEqual(df.shape, (2, 4))
+        np.testing.assert_array_equal(df["t"].to_numpy(), [0, 1])
+        # forward alpha_0 = pi*b[0] = [0.4, 0.1]; alpha_1,k = b[1,k]*0.25 = [0.075, 0.175];
+        # backward beta_0 = [0.5, 0.5]; p(x) = sum(alpha_1) = 0.25 -- worked out in the PR description.
+        # gamma_0 = alpha_0*beta_0/p(x) = [0.8, 0.2] == b[0] itself (already row-normalized);
+        # gamma_1 = alpha_1*beta_1/p(x) = [0.3, 0.7] == b[1] itself.
+        np.testing.assert_allclose(df["state_0_prob"].to_numpy(), [0.8, 0.3], atol=1e-12)
+        np.testing.assert_allclose(df["state_1_prob"].to_numpy(), [0.2, 0.7], atol=1e-12)
+        # MAP path = per-step argmax of the (independent) posterior = argmax of each row of b
+        np.testing.assert_array_equal(df["state"].to_numpy(), [0, 1])
+        # cross-check the hand derivation against the class's own (independently implemented) methods
+        np.testing.assert_allclose(self.q.marginals(), self.b, atol=1e-12)
+        self.assertEqual(list(self.q.mode()), [0, 1])
 
 
 class LDAMeanFieldPosteriorTest(unittest.TestCase):
