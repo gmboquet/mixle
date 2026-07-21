@@ -95,10 +95,12 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
         self.dim = len(self.mu)
 
         d = self.dim
-        assert self.nu > d - 1, "NormalWishart requires nu > dim - 1."
+        if not self.nu > d - 1:
+            raise ValueError("NormalWishartDistribution requires nu > dim - 1 (got nu=%s, dim=%d)." % (self.nu, d))
 
         sgn, self.log_det_w = np.linalg.slogdet(self.w_mat)
-        assert sgn > 0, "NormalWishart scale matrix must be positive definite."
+        if not sgn > 0:
+            raise ValueError("NormalWishartDistribution requires a positive-definite scale matrix w_mat.")
         self.w_inv = np.linalg.inv(self.w_mat)
 
         # log normalizer of the Wishart factor

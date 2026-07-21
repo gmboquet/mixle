@@ -602,6 +602,16 @@ class NormalWishartTestCase(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(mu)))
             self.assertTrue(np.all(np.linalg.eigvalsh(lam) > 0))
 
+    def test_nu_below_dim_minus_one_raises(self):
+        # these were bare `assert`s -- silently stripped under `python -O`, letting an invalid
+        # distribution (log_z built from a degenerate/undefined multivariate gamma) construct.
+        with self.assertRaises(ValueError):
+            NormalWishartDistribution(np.zeros(3), 1.0, np.eye(3), 1.5)  # nu=1.5 <= dim-1=2
+
+    def test_non_positive_definite_scale_matrix_raises(self):
+        with self.assertRaises(ValueError):
+            NormalWishartDistribution(np.zeros(2), 1.0, np.array([[1.0, 2.0], [2.0, 1.0]]), 4.0)  # indefinite
+
 
 class MultivariateGaussianTestCase(unittest.TestCase):
     def make_dist(self):
