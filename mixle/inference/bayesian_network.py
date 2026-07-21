@@ -757,12 +757,17 @@ def learn_mixture_bayesian_network(
     """
     if em not in ("hard", "soft"):
         raise ValueError(f"em must be 'hard' or 'soft', got {em!r}")
+    if n_components < 1:
+        raise ValueError(f"n_components must be >= 1, got {n_components}")
     from mixle.inference.structure import _kmeans_init
 
     data = list(data)
     n = len(data)
     rng = np.random.RandomState(seed)
-    min_size = max(10, n // (4 * n_components))
+    # capped at n: a starved cluster's rescue (below) draws `min_size` DISTINCT points from the
+    # whole dataset (replace=False) -- uncapped, a small dataset with few components could compute
+    # a min_size > n and crash there instead of just falling back to "use every point available".
+    min_size = min(n, max(10, n // (4 * n_components)))
 
     def learn(subset: list[tuple], w: np.ndarray | None = None) -> HeterogeneousBayesianNetwork:
         return learn_bayesian_network(subset, max_parents=max_parents, min_gain=min_gain, max_its=max_its, weights=w)
@@ -851,6 +856,13 @@ def bayesian_network_bic(model: Any, data: Sequence[tuple]) -> float:
     return -2.0 * ll + k * float(np.log(max(len(data), 2)))
 
 
+# accepted by learn_mixture_bayesian_network but not by learn_bayesian_network (which has no
+# **kwargs catch-all): select_mixture_components's k<=1 branch must strip these before delegating,
+# or passing either one crashes with a bare TypeError the instant k_values includes 1 (its default
+# does) -- em/seed never reach **kwargs at all, since select_mixture_components names them itself.
+_MIXTURE_ONLY_KWARGS = frozenset({"restarts", "max_iter"})
+
+
 def select_mixture_components(
     data: Sequence[tuple],
     k_values: Sequence[int] = (1, 2, 3, 4),
@@ -871,7 +883,9 @@ def select_mixture_components(
     models: dict[int, Any] = {}
     for k in k_values:
         if int(k) <= 1:
-            models[1] = learn_bayesian_network(data, **{a: v for a, v in kwargs.items() if a != "restarts"})
+            models[1] = learn_bayesian_network(
+                data, **{a: v for a, v in kwargs.items() if a not in _MIXTURE_ONLY_KWARGS}
+            )
             scores[1] = bayesian_network_bic(models[1], data)
         else:
             models[int(k)] = learn_mixture_bayesian_network(data, int(k), em=em, seed=seed, **kwargs)
@@ -1014,13 +1028,24 @@ def _would_cycle(parents: list[list[int]], new_parent: int, child: int) -> bool:
 
 
 def _topo_order(parents_of: Sequence[Sequence[int]]) -> list[int]:
-    order, seen = [], set()
+    """Topological order over a parent graph. ``learn_bayesian_network``'s search guards against
+    cycles as it builds (:func:`_would_cycle`), but a :class:`HeterogeneousBayesianNetwork`
+    constructed directly from a hand-built ``factors`` list bypasses that guard entirely -- without
+    tracking which nodes are on the CURRENT recursion path (as opposed to fully visited), a cycle
+    sends ``visit`` back and forth between its members forever, since neither is ever marked
+    ``seen`` before the mutual recursion, raising an unhelpful ``RecursionError`` instead of a
+    clean, immediate diagnosis of the actual problem."""
+    order, seen, on_stack = [], set(), set()
 
     def visit(i: int) -> None:
         if i in seen:
             return
+        if i in on_stack:
+            raise ValueError(f"cycle detected in the Bayesian network's parent graph at field {i}")
+        on_stack.add(i)
         for p in parents_of[i]:
             visit(p)
+        on_stack.discard(i)
         seen.add(i)
         order.append(i)
 

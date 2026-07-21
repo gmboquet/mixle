@@ -16,6 +16,7 @@ from mixle.inference import fit
 from mixle.inference.bayesian_network import (
     HeterogeneousBayesianNetwork,
     MixtureOfBayesianNetworks,
+    _LinearGaussianFactor,
     learn_bayesian_network,
     learn_mixture_bayesian_network,
 )
@@ -203,6 +204,43 @@ class SoftEMTest(unittest.TestCase):
     def test_invalid_em_raises(self):
         with self.assertRaises(ValueError):
             learn_mixture_bayesian_network(_slope_regimes(1, n=100), 2, em="fuzzy")
+
+    def test_select_mixture_components_accepts_a_mixture_only_kwarg(self):
+        # k_values defaults to including 1, whose branch delegates to learn_bayesian_network --
+        # a plain function with no **kwargs catch-all. Before the fix, only "restarts" was stripped
+        # from kwargs before that call, so passing any OTHER mixture-only kwarg (e.g. max_iter, a
+        # very natural knob to want) crashed with a bare TypeError the instant 1 was in k_values.
+        from mixle.inference.bayesian_network import select_mixture_components
+
+        rows = _slope_regimes(4, n=300)
+        model, rep = select_mixture_components(rows, (1, 2), em="hard", seed=0, restarts=2, max_iter=5)
+        self.assertIn(1, rep["bic"])
+        self.assertIn(2, rep["bic"])
+
+    def test_rejects_nonpositive_n_components(self):
+        with self.assertRaises(ValueError):
+            learn_mixture_bayesian_network(_slope_regimes(1, n=100), 0)
+
+    def test_handles_min_size_exceeding_a_small_dataset(self):
+        # n=8, n_components=3 -> the old min_size = max(10, 8 // 12) = 10 > n=8, and a starved
+        # cluster's rescue draws min_size DISTINCT points via replace=False -- impossible from a
+        # population of 8. Verified this raises ValueError("Cannot take a larger sample...") on
+        # the prior code; the fix caps min_size at n.
+        model = learn_mixture_bayesian_network(_slope_regimes(2, n=8), 3, restarts=1, max_iter=2, seed=0)
+        self.assertIsInstance(model, MixtureOfBayesianNetworks)
+        self.assertEqual(model.n_components, 3)
+
+
+class DirectConstructionCycleTest(unittest.TestCase):
+    def test_hand_built_cycle_raises_a_clean_error_not_a_recursion_error(self):
+        # learn_bayesian_network's greedy search guards against cycles as it builds (_would_cycle);
+        # direct construction from a hand-built factors list bypasses that guard entirely. Before
+        # the fix, _topo_order's DFS had no notion of "currently on the recursion stack" separate
+        # from "fully visited", so a 2-cycle sent it back and forth between the two nodes forever.
+        f0 = _LinearGaussianFactor(0, [1], {}, np.array([1.0, 0.0]), 1.0)
+        f1 = _LinearGaussianFactor(1, [0], {}, np.array([1.0, 0.0]), 1.0)
+        with self.assertRaises(ValueError):
+            HeterogeneousBayesianNetwork([f0, f1])
 
 
 class GLMFactorTest(unittest.TestCase):

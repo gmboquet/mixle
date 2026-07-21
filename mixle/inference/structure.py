@@ -581,10 +581,15 @@ def learn_mixture_structure(
     random initializations and returns the highest-likelihood fit. Empty or very small clusters are re-seeded so a
     component never collapses.
     """
+    if n_components < 1:
+        raise ValueError(f"n_components must be >= 1, got {n_components}")
     data = list(data)
     n = len(data)
     rng = np.random.RandomState(seed)
-    min_size = max(10, n // (4 * n_components))
+    # capped at n: a starved cluster's rescue (below) draws `min_size` DISTINCT points from the
+    # whole dataset (replace=False) -- uncapped, a small dataset with few components could compute
+    # a min_size > n and crash there instead of just falling back to "use every point available".
+    min_size = min(n, max(10, n // (4 * n_components)))
     best: MixtureOfDependencyTrees | None = None
     best_ll = -np.inf
 
@@ -947,13 +952,24 @@ def _num_free_params(dist: Any) -> int:
 
 
 def _topo_order(parents: Sequence[int | None]) -> list[int]:
-    order, seen = [], set()
+    """Topological order over a single-parent forest. ``learn_structure``'s search guards against
+    cycles as it builds (union-find over undirected links), but a :class:`DependencyTreeDistribution`
+    constructed directly from a hand-built ``parents`` list bypasses that guard entirely -- without
+    tracking which nodes are on the CURRENT recursion path (as opposed to fully visited), a cycle
+    (e.g. ``parents = [1, 0]``) sends ``visit`` back and forth between its members forever, since
+    neither is ever marked ``seen`` before the mutual recursion, raising an unhelpful
+    ``RecursionError`` instead of a clean, immediate diagnosis of the actual problem."""
+    order, seen, on_stack = [], set(), set()
 
     def visit(i: int) -> None:
         if i in seen:
             return
+        if i in on_stack:
+            raise ValueError(f"cycle detected in the dependency tree's parent chain at field {i}")
+        on_stack.add(i)
         if parents[i] is not None:
             visit(parents[i])
+        on_stack.discard(i)
         seen.add(i)
         order.append(i)
 
