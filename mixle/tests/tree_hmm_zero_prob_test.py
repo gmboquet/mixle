@@ -13,7 +13,7 @@ import warnings
 import numpy as np
 
 import mixle.stats as stats
-from mixle.stats.latent.tree_hidden_markov_model import TreeHiddenMarkovModelDistribution
+from mixle.stats.latent.tree_hidden_markov_model import TreeHiddenMarkovEstimator, TreeHiddenMarkovModelDistribution
 
 # tree datum format: list of ((node_id, parent_id), observation); 'c' has zero emission prob in both states.
 _IMPOSSIBLE = [((0, -1), "a"), ((1, 0), "c"), ((2, 0), "b")]
@@ -48,6 +48,41 @@ class TreeHmmZeroProbTest(unittest.TestCase):
             self.assertEqual(ld, -np.inf, f"use_numba={use_numba}")
             self.assertEqual(sl[0], -np.inf, f"use_numba={use_numba}")
             self.assertTrue(np.isfinite(sl[1]), f"use_numba={use_numba}")  # normal tree unaffected
+
+    def test_seq_update_accumulator_is_finite_with_an_impossible_tree_in_the_batch(self):
+        # The docstring's "clamping the beta-normalization divisor" fix above only ever reached
+        # log_density/seq_log_density (scoring). seq_update -- the actual EM M-step accumulator, on
+        # both the numpy and numba paths -- had the identical unguarded betas /= betas_sum, so one
+        # impossible tree in a fit batch turned init_counts/state_counts/trans_counts entirely to NaN,
+        # silently corrupting every other tree's contribution too. Untested until now.
+        for use_numba in (True, False):
+            m = _tree_hmm(use_numba, True)
+            est = TreeHiddenMarkovEstimator(
+                [stats.CategoricalEstimator(), stats.CategoricalEstimator()], use_numba=use_numba
+            )
+            enc = m.dist_to_encoder().seq_encode([_NORMAL, _IMPOSSIBLE, _NORMAL])
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")  # a NaN/divide warning fails the test
+                acc = est.accumulator_factory().make()
+                acc.seq_update(enc, np.ones(3), m)
+            _, init_counts, state_counts, trans_counts, _, _ = acc.value()
+            self.assertTrue(np.all(np.isfinite(init_counts)), f"use_numba={use_numba}: {init_counts}")
+            self.assertTrue(np.all(np.isfinite(state_counts)), f"use_numba={use_numba}: {state_counts}")
+            self.assertTrue(np.all(np.isfinite(trans_counts)), f"use_numba={use_numba}: {trans_counts}")
+            # the two valid trees must still contribute real (nonzero) counts, not be wiped out
+            self.assertGreater(float(np.sum(state_counts)), 0.0, f"use_numba={use_numba}")
+
+    def test_seq_posterior_is_finite_with_an_impossible_tree_in_the_batch(self):
+        # seq_posterior shares the same unguarded betas /= betas_sum shape as seq_update, on both the
+        # numpy and numba (numba_posteriors) paths.
+        for use_numba in (True, False):
+            m = _tree_hmm(use_numba, True)
+            enc = m.dist_to_encoder().seq_encode([_NORMAL, _IMPOSSIBLE])
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                post = m.seq_posterior(enc)
+            for p in post:
+                self.assertTrue(np.all(np.isfinite(p)), f"use_numba={use_numba}: {p}")
 
     def test_numba_numpy_agree_on_normal_data(self):
         # the guards are no-ops on ordinary data, so the two backends must agree to machine precision
