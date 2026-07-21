@@ -51,12 +51,21 @@ import math
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from mixle.epistemic.journal import DecisionRecord, EpistemicJournal
-from mixle.epistemic.loop import EpistemicStep
-from mixle.epistemic.portfolio import Hypothesis, HypothesisPortfolio
 from mixle.utils.parallel.training_health import TrainingHealthMonitor, flop_config_from_causal_lm
+
+if TYPE_CHECKING:
+    # mixle.epistemic.journal -> mixle.epistemic.loop -> mixle.epistemic.likelihood ->
+    # mixle.doe (package init) -> mixle.doe.amplify -> mixle.task (package init) ->
+    # mixle.task.pilot_ladder: a top-level import of any of mixle.epistemic.journal/.loop/
+    # .portfolio here closes that cycle and breaks importing mixle.epistemic (or mixle.doe, or
+    # mixle.task) in a clean process. These names are only ever used as type annotations in this
+    # module (deferred to strings by the `from __future__ import annotations` above); the actual
+    # runtime constructions are local imports inside run_pilot_ladder()/_journal_rung(), at call
+    # time, once every module in the cycle has finished loading.
+    from mixle.epistemic.journal import DecisionRecord, EpistemicJournal
+    from mixle.epistemic.portfolio import Hypothesis
 
 try:
     import numpy as np
@@ -387,6 +396,9 @@ def _journal_rung(
     journal: EpistemicJournal, rung: Rung, artifacts: RungArtifacts, passed: bool, reason: str
 ) -> DecisionRecord:
     """Append one real decision-journal entry: a Bayesian belief update plus the actual GO/NO-GO action."""
+    from mixle.epistemic.loop import EpistemicStep
+    from mixle.epistemic.portfolio import Hypothesis, HypothesisPortfolio
+
     hyps = (Hypothesis(id="go", payload={"rung": rung.name}), Hypothesis(id="no_go", payload={"rung": rung.name}))
     prior = HypothesisPortfolio(hyps, np.array([0.5, 0.5]), w_open=0.0)
 
@@ -439,6 +451,8 @@ def run_pilot_ladder(rungs: Sequence[Rung], *, peak_flops_per_sec: float = 1.0e1
     for MFU to be comparable *across this ladder's own rungs*, which is all the GO/NO-GO gate uses it for.
     """
     _require_torch()
+    from mixle.epistemic.journal import EpistemicJournal
+
     journal = EpistemicJournal()
     outcomes: list[RungOutcome] = []
     halted_at: str | None = None
