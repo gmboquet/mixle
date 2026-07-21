@@ -99,6 +99,7 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         self,
         beta: float,
         name: str | None = None,
+        keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ):
         """Create an exponential distribution with scale ``beta``.
@@ -109,6 +110,7 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         Args:
             beta (float): Positive scale parameter.
             name (Optional[str]): Optional distribution name.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
             prior (Optional): Conjugate parameter prior over the rate ``1/beta``. A
                 :class:`~mixle.stats.univariate.continuous.gamma.GammaDistribution` enables the Bayesian/variational
                 machinery (``expected_log_density`` and the conjugate posterior update); ``None``
@@ -118,6 +120,7 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
             beta (float): Positive scale parameter.
             log_beta (float): ``log(beta)``.
             name (Optional[str]): Optional distribution name.
+            keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
         if beta <= 0.0 or not np.isfinite(beta):
@@ -125,11 +128,12 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         self.beta = float(beta)
         self.log_beta = np.log(self.beta)
         self.name = name
+        self.keys = keys
         self.set_prior(prior)
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the exponential distribution."""
-        return "ExponentialDistribution(%s, name=%s)" % (repr(self.beta), repr(self.name))
+        return "ExponentialDistribution(%s, name=%s, keys=%s)" % (repr(self.beta), repr(self.name), repr(self.keys))
 
     def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
         """Attach a parameter prior and precompute the conjugate Gamma expectations.
@@ -321,10 +325,10 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return ExponentialEstimator(name=self.name, prior=self.prior)
+            return ExponentialEstimator(name=self.name, keys=self.keys, prior=self.prior)
         else:
             return ExponentialEstimator(
-                pseudo_count=pseudo_count, suff_stat=self.beta, name=self.name, prior=self.prior
+                pseudo_count=pseudo_count, suff_stat=self.beta, name=self.name, keys=self.keys, prior=self.prior
             )
 
     def dist_to_encoder(self) -> "ExponentialDataEncoder":
@@ -569,7 +573,7 @@ class ExponentialEstimator(ParameterEstimator):
         s = suff_stat[1] + b
 
         rate = (n - 1.0) / s
-        return ExponentialDistribution(1.0 / rate, name=self.name, prior=GammaDistribution(n, 1.0 / s))
+        return ExponentialDistribution(1.0 / rate, name=self.name, keys=self.keys, prior=GammaDistribution(n, 1.0 / s))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> "ExponentialDistribution":
         """Estimate ExponentialDistribution from suff_stat arg.
@@ -599,7 +603,7 @@ class ExponentialEstimator(ParameterEstimator):
             else:
                 p = 1.0
 
-        return ExponentialDistribution(beta=p, name=self.name)
+        return ExponentialDistribution(beta=p, name=self.name, keys=self.keys)
 
 
 class ExponentialDataEncoder(DataSequenceEncoder):

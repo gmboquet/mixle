@@ -101,6 +101,7 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         self,
         p: float,
         name: str | None = None,
+        keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
         """Create a geometric distribution with success probability ``p``.
@@ -110,6 +111,7 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         Args:
             p: Success probability in ``(0, 1]``.
             name: Optional distribution name.
+            keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate Beta prior on the success probability ``p``. A
                 :class:`~mixle.stats.univariate.continuous.beta.BetaDistribution` enables the Bayesian/variational
                 machinery (``expected_log_density`` and the conjugate posterior update);
@@ -120,6 +122,7 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
             log_p: ``log(p)``.
             log_1p: ``log(1 - p)``.
             name: Optional distribution name.
+            keys: Optional key for merging sufficient statistics.
         """
         if p <= 0.0 or p > 1.0 or not np.isfinite(p):
             raise ValueError("GeometricDistribution requires p in (0, 1].")
@@ -127,11 +130,12 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         self.log_p = np.log(self.p)
         self.log_1p = np.log1p(-self.p)
         self.name = name
+        self.keys = keys
         self.set_prior(prior)
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the geometric distribution."""
-        return "GeometricDistribution(%s, name=%s)" % (repr(self.p), repr(self.name))
+        return "GeometricDistribution(%s, name=%s, keys=%s)" % (repr(self.p), repr(self.name), repr(self.keys))
 
     def set_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
         """Attach a Beta parameter prior and precompute conjugate-prior expectations.
@@ -320,9 +324,11 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if pseudo_count is None:
-            return GeometricEstimator(name=self.name, prior=self.prior)
+            return GeometricEstimator(name=self.name, keys=self.keys, prior=self.prior)
         else:
-            return GeometricEstimator(pseudo_count=pseudo_count, suff_stat=self.p, name=self.name, prior=self.prior)
+            return GeometricEstimator(
+                pseudo_count=pseudo_count, suff_stat=self.p, name=self.name, keys=self.keys, prior=self.prior
+            )
 
     def dist_to_encoder(self) -> "GeometricDataEncoder":
         """Return the encoder for geometric observations."""
@@ -678,7 +684,7 @@ class GeometricEstimator(ParameterEstimator):
             p = 1.0
         else:
             p = 0.5
-        return GeometricDistribution(p, name=self.name, prior=BetaDistribution(a, b))
+        return GeometricDistribution(p, name=self.name, keys=self.keys, prior=BetaDistribution(a, b))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> "GeometricDistribution":
         """Estimate a geometric distribution from weighted count and sum statistics.
@@ -701,7 +707,7 @@ class GeometricEstimator(ParameterEstimator):
             p = suff_stat[0] / suff_stat[1]
 
         p = float(np.clip(p, 1.0e-12, 1.0 - 1.0e-12))
-        return GeometricDistribution(p, name=self.name)
+        return GeometricDistribution(p, name=self.name, keys=self.keys)
 
 
 class GeometricDataEncoder(DataSequenceEncoder):
