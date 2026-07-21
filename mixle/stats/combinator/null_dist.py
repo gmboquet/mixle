@@ -220,17 +220,18 @@ class NullSampler(DistributionSampler):
         self.rng = RandomState(seed)
         self.dist = dist
 
-    def sample(self, size: int | None = None, *, batched: bool = True) -> None:
-        """Returns None for any requested size.
+    def sample(self, size: int | None = None, *, batched: bool = True) -> None | list[None]:
+        """Returns None for a single draw, or a length-``size`` list of Nones for a batch.
 
         Args:
-            size (Optional[int]): Number of samples requested (ignored).
+            size (Optional[int]): Number of samples requested. None draws one observation.
 
         Returns:
-            None.
+            None when size is None, else a list of ``size`` Nones (per the DistributionSampler
+            contract: sample(size=n) returns a length-n collection).
 
         """
-        return None
+        return None if size is None else [None] * size
 
 
 class NullAccumulator(SequenceEncodableStatisticAccumulator):

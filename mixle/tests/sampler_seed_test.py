@@ -578,13 +578,10 @@ class SamplerSeedTestCase(unittest.TestCase):
             second = [_canonical(second_sampler.sample()) for _ in range(6)]
             self.assertEqual(first, second)
 
-    def assert_sized_sample_contract(self, name, dist, null_is_sentinel=False):
+    def assert_sized_sample_contract(self, name, dist):
         with self.subTest(name=name, mode="size_contract"):
             sample = dist.sampler(seed=123).sample(size=4)
-            if null_is_sentinel and isinstance(dist, stats.NullDistribution):
-                self.assertIsNone(sample)
-            else:
-                self.assertEqual(len(sample), 4)
+            self.assertEqual(len(sample), 4)
 
     def test_all_public_stats_samplers_are_seed_repeatable(self):
         catalog = {**_stats_public_distribution_catalog(), **_bayes_only_distribution_catalog()}
@@ -596,7 +593,7 @@ class SamplerSeedTestCase(unittest.TestCase):
                 self.assert_repeatable_conditional_sampler(name, dist, z=np.array([1.5]))
                 continue
             self.assert_repeatable_sampler(name, dist)
-            self.assert_sized_sample_contract(name, dist, null_is_sentinel=True)
+            self.assert_sized_sample_contract(name, dist)
 
     def assert_repeatable_conditional_sampler(self, name, dist, z):
         with self.subTest(name=name, mode="conditional_stream"):
