@@ -1,16 +1,13 @@
 name: Security
 
-# Scan the resolved dependency set for known vulnerabilities. Runs weekly (dependencies can go stale
-# between pushes) and on any change that could affect what gets resolved, plus manual dispatch.
-# Advisory only for now (continue-on-error) -- flip that off once the initial findings, if any, are
-# triaged and the base install is clean.
+# Scan the resolved dependency set for known vulnerabilities. The gate runs weekly, on every active
+# release-tip update, on main, on dependency-changing pull requests, and by manual dispatch. Findings
+# are blocking unless their identifier, rationale, and review date are explicitly recorded in the
+# audited waiver file.
 
 on:
   push:
-    branches: [main]
-    paths:
-      - "pyproject.toml"
-      - ".github/workflows/security.yml"
+    branches: [main, release/0.8.0]
   pull_request:
     paths:
       - "pyproject.toml"
