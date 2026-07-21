@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from mixle.reason.language_bridge import ABSTAIN, Claim, PosteriorDescriber, claim_score, parse_evidence
+from mixle.reason.language_bridge import ABSTAIN, Claim, PosteriorDescriber, _sample_scalar, claim_score, parse_evidence
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 
 SCHEMA = {"text": "categorical", "brightness": "numeric"}
@@ -87,6 +87,33 @@ class ClaimScoreStandaloneTest(unittest.TestCase):
     def test_needs_either_posterior_or_cached_probe(self):
         with self.assertRaises(ValueError):
             claim_score(Claim(field="x", lo=0.0, hi=1.0))
+
+
+class SampleScalarTest(unittest.TestCase):
+    """_sample_scalar's posterior.sample(n, seed=...) / posterior.sample(n) dispatch."""
+
+    def test_a_bug_inside_sample_is_not_masked_by_a_retry_without_seed(self):
+        # sample(self, n, seed=None) accepts seed, so it must be called with it exactly once; a
+        # TypeError from inside its own body must propagate, not be swallowed and silently retried
+        # as sample(n) (which would draw an entirely separate, uncontrolled-seed sample).
+        calls = []
+
+        class BuggyPosterior:
+            def sample(self, n, seed=None):
+                calls.append((n, seed))
+                return None + n  # an internal bug unrelated to whether seed is accepted
+
+        with self.assertRaises(TypeError):
+            _sample_scalar(BuggyPosterior(), 5, seed=3)
+        self.assertEqual(calls, [(5, 3)])  # called once, with seed -- never retried as sample(n)
+
+    def test_sampler_without_seed_support_falls_back_correctly(self):
+        class LegacyPosterior:
+            def sample(self, n):
+                return np.arange(n, dtype=float)
+
+        out = _sample_scalar(LegacyPosterior(), 4, seed=3)
+        np.testing.assert_allclose(out, [0.0, 1.0, 2.0, 3.0])
 
 
 class PosteriorDescriberTest(unittest.TestCase):

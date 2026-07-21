@@ -28,6 +28,7 @@ from typing import Any
 import numpy as np
 
 from mixle.inference.conformal import conformal_label_sets, conformal_label_threshold
+from mixle.utils.callables import accepts_call
 
 ABSTAIN = None  # sentinel returned when no candidate clears the calibrated threshold; equals Cascade's ESCALATE
 
@@ -80,9 +81,9 @@ class CalibratedGenerator:
 
     def _draw(self, prompt: Any, *, seed: int) -> list[Any]:
         rng = np.random.default_rng(seed)
-        try:
+        if accepts_call(self.generate, prompt, self.k, rng=rng):
             cands = self.generate(prompt, self.k, rng=rng)
-        except TypeError:
+        else:
             cands = self.generate(prompt, self.k)
         cands = list(cands)
         if not cands:

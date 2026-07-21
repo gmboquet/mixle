@@ -17,6 +17,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from mixle.utils.callables import accepts_call
+
 _WORD = re.compile(r"[a-z0-9]+")
 # a minimal stoplist so common function words don't manufacture spurious overlap (e.g. matching an
 # action to a question purely on "the"/"is"); relevance should reflect content words, not glue.
@@ -251,10 +253,7 @@ def compute_action(skill: Any, *, name: str | None = None, cost: float = 1.0, de
     desc = description if description is not None else getattr(skill, "description", "")
 
     def _run(question: str) -> list[str]:
-        try:
-            result = skill(question)
-        except TypeError:
-            result = skill()
+        result = skill(question) if accepts_call(skill, question) else skill()
         return [f"{nm} => {result}"]
 
     return Action(name=nm, kind="compute", run=_run, cost=cost, description=desc)

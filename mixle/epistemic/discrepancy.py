@@ -22,6 +22,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.callables import accepts_call
+
 
 def _rng(seed: int | np.random.RandomState | None) -> np.random.RandomState:
     return seed if isinstance(seed, np.random.RandomState) else np.random.RandomState(seed)
@@ -32,10 +34,9 @@ def _sample(dist: Any, n: int, rng: np.random.RandomState) -> np.ndarray:
     ``.sampler(seed).sample(n)`` distribution shape."""
     direct = getattr(dist, "sample", None)
     if callable(direct):
-        try:
+        if accepts_call(direct, n):
             return np.atleast_1d(np.asarray(direct(n), dtype=np.float64))
-        except TypeError:
-            return np.atleast_1d(np.asarray([direct() for _ in range(n)], dtype=np.float64))
+        return np.atleast_1d(np.asarray([direct() for _ in range(n)], dtype=np.float64))
     sampler_fn = getattr(dist, "sampler", None)
     if callable(sampler_fn):
         seed = int(rng.randint(0, 2**31 - 1))
