@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # PyPI distribution name; the import package is `mixle` (cf. scikit-learn -> sklearn).
 name = "mixle"
-version = "0.8.0.dev0"
+version = "0.8.0"
 description = "A package for estimating heterogeneous probability density functions."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -123,8 +123,14 @@ all = ["numba>=0.59", "tbb>=2021.6; platform_machine == 'x86_64'", "pyspark>=3.4
 Homepage = "https://github.com/gmboquet/mixle"
 Repository = "https://github.com/gmboquet/mixle"
 
+[tool.setuptools]
+# Release artifacts do not ship the 400k-line test tree. Runtime data is declared explicitly below;
+# MANIFEST.in retains the changelog and generated compatibility manifests in the sdist.
+include-package-data = false
+
 [tool.setuptools.packages.find]
 include = ["mixle*"]
+exclude = ["mixle.tests*"]
 
 [tool.setuptools.package-data]
 # Ship the Cython kernel sources so an installed mixle can self-compile them (the `kernels` extra);

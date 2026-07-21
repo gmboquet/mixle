@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +23,14 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _package_version() -> str:
-    import mixle
+    """Read the version from this checkout, falling back to installed metadata."""
+    try:
+        with (ROOT / "pyproject.toml").open("rb") as handle:
+            return str(tomllib.load(handle)["project"]["version"])
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        import mixle
 
-    return getattr(mixle, "__version__", "0.0.0")
+        return getattr(mixle, "__version__", "0.0.0")
 
 
 def minor_of(version: str) -> str:

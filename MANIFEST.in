@@ -1,4 +1,7 @@
 include README.md
+include CHANGELOG.md
+recursive-include manifests *.json *.md
+prune mixle/tests
 # Cython sources for the optional in-place-compiled kernels (mixle.engines.build_kernels): the
 # extensions are NOT prebuilt into wheels; users opt in via `pip install mixle[kernels]` and
 # compile_*_kernels(), which needs the .pyx present in the installed tree.

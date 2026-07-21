@@ -41,23 +41,24 @@ the 0.8.0 re-run, marked below).
      - E1
      - ``torch_parity_test`` / ``grad_control_test`` check parity, freezing, and checkpointing (torch extra).
    * - Distillation into a small local model with calibrated deferral and a cost/quality receipt
-     - E1 / E3
-     - Task/calibration/cascade tests (E1); a real Banking77 teacher/student example (E3). Full three
-       flagship real-data workflows are a 0.8.0 gate still in progress.
+     - E1 (E3 pending)
+     - Task/calibration/cascade tests are E1. A real Banking77 teacher/student workflow exists, but its
+       exact-candidate hosted run must complete before it counts as 0.8.0 E3 evidence.
    * - HMM / GMM performance and crossover behavior
-     - E3 (pending 0.8.0 re-run)
-     - Benchmark harness now tracked in git (``benchmarks/``); published numbers must be regenerated on
-       the 0.8.0 candidate before they are cited (worklist B7.3).
+     - No 0.8.0 claim
+     - The harness is tracked in ``benchmarks/``. Older measurements are archived and are not release
+       evidence; numbers may be published only after an exact-candidate retained run.
    * - Distributed estimation over Spark / Dask / Ray / MPI by switching one argument
      - E1
-     - Per-backend encoded-data tests exist but are not installed in the default CI lanes, so they skip;
-       exercising each in CI or a scheduled job is a 0.8.0 gate (worklist D8.3). Wording qualified in the
-       README accordingly.
+     - Per-backend encoded-data tests exist. Dask and torchrun are exercised in the scheduled optional lane;
+       Spark, Ray, MPI, and Lightning remain tested locally but not CI-gated. Wording is qualified in the
+       backend support matrix.
    * - Distributed transformer and MoE training
-     - E3 (CPU objective/checkpoint tests and provider delegation)
+     - E1
      - The native backend executes DDP/FSDP2/HSDP and selected TP/CP paths; Megatron Bridge owns full
-       TP/PP/CP/EP/ETP. GPU throughput, MFU, and multi-node recovery remain unverified until retained
-       hardware receipts exist. Unsupported axes fail capability validation.
+       TP/PP/CP/EP/ETP. CPU objective/checkpoint and provider-delegation tests establish local correctness,
+       not a realistic-scale run. GPU throughput, MFU, and multi-node recovery remain unverified until
+       retained hardware receipts exist. Unsupported axes fail capability validation.
    * - Serialization round-trips and provenance / replay
      - E1
      - Fresh-process serialization tests; lineage/receipt tamper-and-replay tests. Cross-version

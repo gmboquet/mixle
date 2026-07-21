@@ -1,4 +1,4 @@
-"""Generate ``maturity_manifest.json``: every top-level public mixle surface with its maturity tier.
+"""Generate ``manifests/maturity_manifest.json``: every top-level public mixle surface with its maturity tier.
 
 Worklist A1.6 -- the machine-readable maturity manifest. It joins the *public surface* (the top-level
 public subpackages/modules of ``mixle``) with the *maturity registry* (:mod:`mixle.maturity`, worklist
@@ -16,11 +16,15 @@ import os
 import pkgutil
 import sys
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Running ``python scripts/...`` otherwise puts only ``scripts/`` first and can import a different editable
+# checkout. A generator must always describe the tree containing the generator.
+sys.path.insert(0, _REPO_ROOT)
+
 import mixle
 from mixle.maturity import maturity_of, status_of
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MANIFEST_PATH = os.path.join(_REPO_ROOT, "maturity_manifest.json")
+MANIFEST_PATH = os.path.join(_REPO_ROOT, "manifests", "maturity_manifest.json")
 
 
 def _public_surfaces() -> list[str]:
@@ -53,7 +57,10 @@ def main(argv: list[str] | None = None) -> int:
         except OSError:
             current = None
         if current != text:
-            print("maturity_manifest.json is stale; run: python scripts/gen_maturity_manifest.py", file=sys.stderr)
+            print(
+                "manifests/maturity_manifest.json is stale; run: python scripts/gen_maturity_manifest.py",
+                file=sys.stderr,
+            )
             return 1
         return 0
     with open(MANIFEST_PATH, "w") as f:

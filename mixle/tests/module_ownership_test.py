@@ -4,7 +4,7 @@ from pathlib import Path
 
 def test_every_top_level_public_module_has_an_explicit_ownership_decision():
     root = Path(__file__).parents[2]
-    artifact = json.loads((root / "module_ownership.json").read_text())
+    artifact = json.loads((root / "manifests" / "module_ownership.json").read_text())
     observed = set()
     for path in (root / "mixle").iterdir():
         if path.name.startswith("_") or path.name in {"tests", "fixtures"}:

@@ -1,6 +1,6 @@
 """The serialization schema manifest records every serializable type (worklist M11.1).
 
-``serialization_schema_manifest.json`` is the versioned catalog of ``__pysp_type__`` ids -- the serialization
+``manifests/serialization_schema_manifest.json`` is the versioned catalog of ``__pysp_type__`` ids -- the serialization
 schema surface a saved artifact's loadability depends on. This gate makes a schema change visible: a new
 serializable type that is not recorded fails here, prompting a regenerate (and, per M11.2, a cross-version
 fixture). The manifest is generated with the optional backends installed, so it is the *full* surface; this
@@ -15,7 +15,7 @@ from pathlib import Path
 from mixle.utils.serialization import TAG, serializable_class_ids
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MANIFEST = REPO_ROOT / "serialization_schema_manifest.json"
+MANIFEST = REPO_ROOT / "manifests" / "serialization_schema_manifest.json"
 
 
 def _has_torch():
@@ -43,7 +43,7 @@ class SchemaManifestTest(unittest.TestCase):
         self.assertEqual(
             unrecorded,
             [],
-            "serializable types are not in serialization_schema_manifest.json (run "
+            "serializable types are not in manifests/serialization_schema_manifest.json (run "
             "python scripts/gen_schema_manifest.py):\n" + "\n".join(unrecorded),
         )
 

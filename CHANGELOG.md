@@ -21,7 +21,7 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 - A machine-readable ownership decision for every top-level public module,
   with drift coverage and migration destinations that preserve compatibility
   until replacement and deprecation gates are satisfied.
-- A public-API manifest (`api_manifest.json`) and a drift gate so any change to the exported surface
+- A public-API manifest (`manifests/api_manifest.json`) and a drift gate so any change to the exported surface
   is a reviewed diff. Each package entry is tagged with its maturity tier from the `mixle.maturity`
   registry, so the gate blocks on stable/provisional drift while expected `mixle.experimental` churn is
   reported instead of failing the freeze.
@@ -43,7 +43,7 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   `HeterogeneousBayesianNetwork` and its factor classes gained a `describe()` method and a JSON
   serialization registration (`mixle.utils.serialization`), so a heterogeneous structured model now
   persists through the same safe artifact path as every other mixle distribution;
-  `serialization_schema_manifest.json` regenerated to record the 7 newly-registered types (M11.1).
+  `manifests/serialization_schema_manifest.json` regenerated to record the 7 newly-registered types (M11.1).
 - Write-side result egress: `to_dataframe()`/`to_parquet()` on `ParameterPosterior` (posterior
   parameter draws, one row per draw), `CalibrationReport` (its PIT histogram, one row per bin, or a
   one-row summary when there is no scalar predictive CDF), and `MarkovChainLatentPosterior` (an HMM's
@@ -59,6 +59,15 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Fixed
 
+- Release artifacts no longer ship the `mixle.tests` tree in the runtime wheel. Required Cython sources and
+  quantitative-semantics data remain explicit package data, while the source distribution retains the
+  changelog and generated release manifests.
+- Stale pre-0.8 CPU/GPU benchmark results are archived and no longer presented as 0.8.0 performance evidence;
+  new benchmark result documents carry version, release-line, and source-commit provenance.
+- Registry alias reads and atomic-write/lineage regression tests close their files deterministically, removing
+  resource warnings from the release persistence batch.
+- Generated compatibility manifests now live under `manifests/`; tracked research scratch files under
+  `experiments/group_attention` were removed and `/experiments/` is ignored.
 - Block scheduling now prices density, responsibility, and parameter-update work together instead of
   treating density time as the whole block cost; learned controllers receive the same measured cost.
 - Dirichlet-prior block and freeze/roll-up updates now use the exact MAP objective and carry the

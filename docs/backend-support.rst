@@ -48,7 +48,7 @@ Compute engines
      - ``torch``
      - GPU arrays and training.
      - Hardware-gated
-     - E3 (single run) — retained ad-hoc GPU run; not CI-gated.
+     - Unverified for 0.8.0 — historical runs are not candidate evidence.
    * - JAX
      - ``jax``
      - XLA arrays + the NumPyro NUTS backend.
@@ -93,8 +93,8 @@ workers under the same estimation contract.
    * - Dask
      - ``dask``
      - Map/fold over a Dask cluster.
-     - Tested, not CI-gated
-     - E1 — backend test skips in CI.
+     - Optional (CI)
+     - E1 — installed and exercised in the scheduled optional job.
    * - Ray
      - ``ray``
      - Map/fold over a Ray cluster.
@@ -110,9 +110,9 @@ Reading this honestly
 ---------------------
 
 "Tested, not CI-gated" is deliberate wording: the code and its tests exist, but because the backend is
-not installed in any CI lane, a regression would not be caught automatically today. Installing at least
-one such backend in a scheduled CI or hardware job — so its evidence rises to E3 — is tracked in the
-0.8.0 worklist (workstream D). Until then, prefer the Supported and Optional-CI rows for anything you
+not installed in any CI lane, a regression would not be caught automatically today. Dask is installed in
+a scheduled CI lane; the other rows with this label still skip there. Until retained external or hardware
+receipts exist, prefer the Supported and Optional-CI rows for anything you
 depend on, and validate a "Tested, not CI-gated" backend in your own environment before relying on it.
 Multi-node/multi-GPU *frontier-scale* training is out of scope for this release: mixle sits above the
 trainer, not as a replacement for a dedicated large-scale training system.
