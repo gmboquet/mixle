@@ -124,10 +124,19 @@ def blend_to_spec(
         res = branch_and_bound_milp(c_ext, a_ext, b_ext, integer=integer_idx, bounds=bounds_ext, sense="min")
 
     if res is None:
-        iis = irreducible_infeasible_subset(a_ub, b_ub, bounds)
+        if min_parcel is None:
+            iis = irreducible_infeasible_subset(a_ub, b_ub, bounds)
+            row_desc = "element lower/upper windows, then total-tonnage"
+        else:
+            # The MILP actually solved (and found infeasible) is the min-parcel-gated system
+            # (a_ext/b_ext/bounds_ext), not the base one -- diagnosing against a_ub/b_ub/bounds would
+            # name conflicts in a DIFFERENT, ungated system that may itself be perfectly feasible,
+            # producing a self-contradictory "no conflicting rows" result.
+            iis = irreducible_infeasible_subset(a_ext, b_ext, bounds_ext)
+            row_desc = "element lower/upper windows, then total-tonnage, then each source's min-parcel draw gate"
         raise ValueError(
             f"blend_to_spec: no blend of these sources meets the spec window at demand={demand}; "
-            f"infeasible constraint rows (element lower/upper windows, then total-tonnage): {iis}"
+            f"infeasible constraint rows ({row_desc}): {iis}"
         )
     value, x = res
     return float(value), np.asarray(x[:n_sources], dtype=np.float64)

@@ -100,6 +100,30 @@ def test_blend_to_spec_min_parcel_gates_small_draws():
     assert cost >= np.dot(costs, tonnage) - 1e-6
 
 
+def test_blend_to_spec_min_parcel_infeasibility_diagnoses_the_gated_system():
+    # min_parcel=90 exceeds every source's own availability (80 each), so no source can ever be
+    # gated "on" (z_s=1 needs w_s in [90, 80], empty) -- the only min-parcel-respecting solution is
+    # every source at 0, which can never reach demand=100. The BASE (ungated) system alone is
+    # trivially feasible here (a wide-open spec window, plenty of combined tonnage available) --
+    # the diagnostic must run on the min-parcel-gated system that was actually solved, not the base
+    # one, or it reports "no conflicting rows" for a problem that is genuinely infeasible.
+    grades = np.array([[0.5], [0.7]])
+    costs = np.array([10.0, 12.0])
+    avail = np.array([80.0, 80.0])
+    spec_lo = np.array([0.0])
+    spec_hi = np.array([1.0])
+    demand = 100.0
+
+    try:
+        blend_to_spec(grades, costs, spec_lo, spec_hi, avail, demand, min_parcel=90.0)
+    except ValueError as exc:
+        message = str(exc)
+        assert "infeasible" in message.lower()
+        assert "none" not in message.lower()  # must name real conflicting rows, not report iis=None
+    else:
+        raise AssertionError("expected blend_to_spec to raise: no source can meet a min_parcel it can't hold")
+
+
 def test_blend_to_spec_infeasible_raises_with_iis_context():
     grades = np.array([[0.40], [0.45], [0.48], [0.50]])
     costs = np.array([10.0, 12.0, 15.0, 18.0])
