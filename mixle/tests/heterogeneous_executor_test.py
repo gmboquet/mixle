@@ -76,6 +76,17 @@ class ShardingInvarianceTest(unittest.TestCase):
 
 
 class HeterogeneousPrecisionTest(unittest.TestCase):
+    def test_mismatched_shard_sizes_raises_instead_of_silently_dropping_rows(self):
+        # _shard_bounds never checked sum(shard_sizes) == len(data); rows past the last bound were
+        # silently excluded from every shard -- reachable in practice via shards_from_plan() if a
+        # precomputed plan is applied to a differently-sized dataset than it was sized against.
+        rng = np.random.RandomState(5)
+        m = _gmm(rng, 2)
+        data = m.sampler(6).sample(1000)
+        est = m.estimator()
+        with self.assertRaises(ValueError):
+            heterogeneous_em_step(est, m, data, n_shards=2, shard_sizes=[300, 400])  # sums to 700, not 1000
+
     def test_per_shard_float32_runs_and_stays_close(self):
         rng = np.random.RandomState(3)
         m = _gmm(rng, 2)

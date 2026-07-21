@@ -302,6 +302,22 @@ class NodeBackendMechanismTest(unittest.TestCase):
         self.assertEqual(backend.action, RespecializationAction.NONE)
         self.assertAlmostEqual(backend(1.0), dist.log_density(1.0), places=12)
 
+    def test_compile_decision_on_a_non_compile_capable_engine_reports_none_not_compile(self):
+        # apply() used to set action=COMPILE unconditionally whenever the DECISION requested it,
+        # even when compile_forward silently no-op'd (no compile-enabled engine, or torch lacks
+        # .compile) and returned the identical eager callable -- reporting "compiled" when nothing
+        # was actually compiled. A downstream learned controller (D5) would train on that false
+        # signal. `engine=object()` has no .compile attribute at all, forcing the no-op path
+        # regardless of whether torch happens to be installed in this environment.
+        dist = ExponentialDistribution(1.5)
+        backend = NodeBackend(dist, forward=lambda x: dist.log_density(x), engine=object())
+        report = node_report(dist, field_path="root", nobs=2000.0)
+        decision = decide_hot_compile(report, activation_ratio=1.0, expected_remaining_calls=1000.0)
+        self.assertEqual(decision.action, RespecializationAction.COMPILE)  # the decision DID request it
+        backend.apply(decision)
+        self.assertEqual(backend.action, RespecializationAction.NONE)  # but nothing was actually compiled
+        self.assertAlmostEqual(backend(1.0), dist.log_density(1.0), places=12)
+
 
 if __name__ == "__main__":
     unittest.main()

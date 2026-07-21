@@ -70,6 +70,12 @@ def _shard_task(payload: tuple[Any, Any, Any, Any]) -> tuple[int, Any]:
 
 def _shard_bounds(n: int, sizes: list[int] | None, n_shards: int) -> list[tuple[int, int]]:
     if sizes is not None:
+        total = sum(sizes)
+        if total != n:
+            # a mismatch (e.g. a precomputed HeterogeneousPlan sized against a different sample)
+            # used to silently slice off whichever rows fell outside the last bound -- caller-
+            # supplied shard_sizes must cover the data exactly, not less or more.
+            raise ValueError(f"shard_sizes must sum to len(data) ({n}), got {total}.")
         bounds, off = [], 0
         for s in sizes:
             bounds.append((off, off + s))
