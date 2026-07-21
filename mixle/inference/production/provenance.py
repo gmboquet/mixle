@@ -245,8 +245,16 @@ def fit_with_provenance(
     model's ``model_hash`` and the previous iteration's ``parent_hash``, forming a verifiable hash chain
     (check it with :func:`verify_lineage`). This fingerprints the model every iteration; pass
     ``lineage=False`` to skip it for very large models. Any user ``on_step=`` is still called."""
+    import inspect
+
     from mixle.inference.estimation import optimize
 
+    # optimize()'s OWN defaults, not a hardcoded guess: a caller who relies on optimize()'s
+    # defaults (doesn't pass max_its=/delta= explicitly) used to have those recorded as bare
+    # None here instead of the value optimize() actually ran with -- silently breaking the audit
+    # trail this function exists to build. `.get(key, default)` still returns an explicit
+    # delta=None (disable early stopping) correctly, since that key IS present in optimize_kw.
+    _optimize_defaults = inspect.signature(optimize).parameters
     capture = "out" not in optimize_kw
     collector = _EMHistory() if capture else None
     if collector is not None:
@@ -264,8 +272,8 @@ def fit_with_provenance(
 
     training = {
         "method": "em",
-        "max_its": optimize_kw.get("max_its"),
-        "delta": optimize_kw.get("delta"),
+        "max_its": optimize_kw.get("max_its", _optimize_defaults["max_its"].default),
+        "delta": optimize_kw.get("delta", _optimize_defaults["delta"].default),
         "backend": optimize_kw.get("backend", "local"),
         "seed": seed,
     }
@@ -280,7 +288,7 @@ def fit_with_provenance(
         recs = collector.records
         training["convergence"] = recs
         training["iterations"] = recs[-1]["iter"] if recs else 0
-        delta = optimize_kw.get("delta")
+        delta = training["delta"]  # the resolved value (falls back to optimize()'s own default)
         if delta is not None and recs:
             last = recs[-1]["delta"]
             training["converged"] = last is not None and last < delta

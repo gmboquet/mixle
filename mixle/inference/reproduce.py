@@ -71,13 +71,23 @@ def param_fingerprint(model: Any, *, ndigits: int = _NDIGITS) -> str:
 
 @dataclass
 class ReproReceipt:
-    """The recipe to re-derive a fit: data + seed + estimator, plus the parameter fingerprint to check."""
+    """The recipe to re-derive a fit: data + seed + estimator, plus the parameter fingerprint to check.
+
+    ``max_its``/``delta`` must match whatever was actually passed to the original ``optimize()`` call
+    that produced the fingerprinted model (they default to ``optimize()``'s own defaults). Without
+    these, :func:`verify_reproducible` cannot replay the same fit -- an iterative estimator refit
+    with a different iteration budget or convergence tolerance can land at a different (if nearby)
+    optimum and spuriously report ``reproducible: False`` for a fit that would have reproduced exactly
+    under its own original settings.
+    """
 
     data_fingerprint: str
     n: int
     seed: int
     estimator: str  # type name of the estimator used (documentation; the object is supplied to verify)
     param_fingerprint: str
+    max_its: int = 10
+    delta: float | None = 1.0e-9
 
     def as_dict(self) -> dict[str, Any]:
         """Return the receipt as JSON-compatible data."""
@@ -87,6 +97,8 @@ class ReproReceipt:
             "seed": self.seed,
             "estimator": self.estimator,
             "param_fingerprint": self.param_fingerprint,
+            "max_its": self.max_its,
+            "delta": self.delta,
         }
 
     def matches_data(self, data: Any) -> bool:
@@ -98,8 +110,14 @@ class ReproReceipt:
         return param_fingerprint(model) == self.param_fingerprint
 
 
-def record_fit(model: Any, data: Any, *, seed: int, estimator: Any = None) -> ReproReceipt:
-    """Record a :class:`ReproReceipt` for a model fitted on ``data`` with ``seed`` (see module docstring)."""
+def record_fit(
+    model: Any, data: Any, *, seed: int, estimator: Any = None, max_its: int = 10, delta: float | None = 1.0e-9
+) -> ReproReceipt:
+    """Record a :class:`ReproReceipt` for a model fitted on ``data`` with ``seed`` (see module docstring).
+
+    Pass the same ``max_its``/``delta`` actually used for the fit being recorded (they default to
+    ``optimize()``'s own defaults); :func:`verify_reproducible` replays the fit with these exact
+    values."""
     rows = list(data)
     est_name = type(estimator).__name__ if estimator is not None else type(model).__name__
     return ReproReceipt(
@@ -108,25 +126,35 @@ def record_fit(model: Any, data: Any, *, seed: int, estimator: Any = None) -> Re
         seed=int(seed),
         estimator=est_name,
         param_fingerprint=param_fingerprint(model),
+        max_its=int(max_its),
+        delta=delta,
     )
 
 
 def verify_reproducible(
-    estimator: Any, data: Any, receipt: ReproReceipt, *, seed: int | None = None, max_its: int = 25
+    estimator: Any, data: Any, receipt: ReproReceipt, *, seed: int | None = None, max_its: int | None = None
 ) -> dict[str, Any]:
     """Refit ``estimator`` on ``data`` and check the fit reproduces ``receipt`` (data + parameters).
 
     Returns ``{reproducible, data_matches, params_match, refit_fingerprint}``. ``reproducible`` is True
     iff BOTH the data fingerprint and the refit's parameter fingerprint match the receipt -- i.e. the
-    exact fit can be recovered from the recorded recipe. ``seed`` defaults to the receipt's seed."""
+    exact fit can be recovered from the recorded recipe. ``seed`` defaults to the receipt's seed.
+    ``max_its`` defaults to the receipt's own recorded value (the iteration budget the original fit
+    actually used); ``delta`` always replays the receipt's recorded value -- a refit run with a
+    different iteration budget or convergence tolerance than the original fit can land at a
+    different (if nearby) optimum and spuriously report ``reproducible: False`` for a fit that would
+    have reproduced exactly under its own original settings."""
     import numpy as np
 
     from mixle.inference.estimation import optimize
 
     rows = list(data)
     use_seed = receipt.seed if seed is None else int(seed)
+    use_max_its = receipt.max_its if max_its is None else int(max_its)
     data_matches = data_fingerprint(rows) == receipt.data_fingerprint
-    refit = optimize(rows, estimator, out=None, max_its=max_its, rng=np.random.RandomState(use_seed))
+    refit = optimize(
+        rows, estimator, out=None, max_its=use_max_its, delta=receipt.delta, rng=np.random.RandomState(use_seed)
+    )
     refit_fp = param_fingerprint(refit)
     params_match = refit_fp == receipt.param_fingerprint
     return {

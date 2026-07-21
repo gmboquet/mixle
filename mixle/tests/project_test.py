@@ -207,6 +207,19 @@ class FisherMergeTest(unittest.TestCase):
     def test_single_estimate_is_identity(self):
         np.testing.assert_allclose(fisher_merge([np.array([5.0, -1.0])], [np.array([3.0, 3.0])]), [5.0, -1.0])
 
+    def test_stacked_ndarray_fishers_are_read_per_estimate_like_an_equivalent_list(self):
+        # Regression: `isinstance(fishers, (list, tuple))` meant a stacked (m, p) ndarray of
+        # per-estimate diagonal Fishers -- exactly analogous to `estimates` itself being passed as
+        # an (m, p) stack, per this function's own docstring -- fell through to the "single Fisher
+        # broadcast to every estimate" branch whenever m == p, silently reinterpreting the whole
+        # array as one shared (p, p) full-Fisher matrix instead of one diagonal row per estimate.
+        thetas = [np.array([0.0, 0.0, 0.0]), np.array([2.0, 2.0, 2.0]), np.array([4.0, 4.0, 4.0])]
+        fisher_rows = [np.array([1.0, 1.0, 1.0]), np.array([1.0, 1.0, 1.0]), np.array([1.0, 1.0, 1.0])]
+        as_list = fisher_merge(thetas, fisher_rows)
+        as_stacked_array = fisher_merge(thetas, np.stack(fisher_rows))  # m == p == 3 here
+        np.testing.assert_allclose(as_stacked_array, as_list, atol=1e-12)
+        np.testing.assert_allclose(as_stacked_array, [2.0, 2.0, 2.0], atol=1e-12)  # equal precisions -> plain mean
+
 
 if __name__ == "__main__":
     unittest.main()
