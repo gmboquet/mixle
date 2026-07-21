@@ -759,8 +759,8 @@ class DirichletProcessMixtureDataEncoder(DataSequenceEncoder):
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, DirichletProcessMixtureDataEncoder):
-            return self.encoder == other
-        return other.encoder == self.encoder
+            return False
+        return self.encoder == other.encoder
 
     def seq_encode(self, x: Sequence[Any]) -> Any:
         """Encode a sequence of observations with the component encoder."""
