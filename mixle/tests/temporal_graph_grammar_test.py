@@ -529,6 +529,47 @@ class RegimeMomentInitTest(unittest.TestCase):
         self.assertAlmostEqual(ages[0], 20.0, delta=4.0)  # the two attribute regimes are recovered from the seed
         self.assertAlmostEqual(ages[1], 50.0, delta=4.0)
 
+    def test_moment_init_works_on_the_churning_variant(self):
+        # Churning snapshots are (adjacency, node_ids) tuples, unlike every other regime-switching
+        # variant's bare adjacency snapshots -- _regime_signatures previously crashed with AttributeError
+        # (transition_components called directly on the tuple), and regime_moment_init's own
+        # acc._accumulate call separately crashed once past that (Churning's _accumulate expects
+        # already-identity-aligned tuples, not raw observations, unlike its Latent/Attributed siblings).
+        from mixle.stats.graphs.temporal_graph_grammar import regime_moment_init
+
+        rng = np.random.RandomState(0)
+        stable = stats.TemporalGraphGrammarDistribution([0.1, 0.3, 0.35, 0.25], edge_rate=7.0, node_rate=3.0)
+        churn = stats.TemporalGraphGrammarDistribution(
+            [0.25] * 4, edge_rate=1.0, node_rate=3.0, remove_weights=[0.4, 0.3, 0.2, 0.1], edge_remove_rate=4.0
+        )
+        gt = stats.LatentChurningTemporalGraphGrammarDistribution(
+            [stable, churn],
+            node_remove_rates=[0.3, 4.0],
+            initial_probs=[0.5, 0.5],
+            transition_matrix=[[0.85, 0.15], [0.15, 0.85]],
+        )
+        data = [gt.sampler(seed=s).sample_one(num_steps=8, seed_graph=_seed_graph(rng, n=30, p=0.3)) for s in range(35)]
+        est = gt.estimator(pseudo_count=0.3)
+        init = regime_moment_init(est, gt, data, 2, seed=1)
+        self.assertIsInstance(init, stats.LatentChurningTemporalGraphGrammarDistribution)
+        self.assertTrue(np.all(np.isfinite(init.seq_log_density(data))))
+
+        cur = init
+        prev_ll = -np.inf
+        for _ in range(7):
+            acc = est.accumulator_factory().make()
+            acc.seq_update(data, np.ones(len(data)), cur)
+            cur = est.estimate(len(data), acc.value())
+            ll = float(cur.seq_log_density(data).sum())
+            self.assertGreaterEqual(ll, prev_ll - 1.0)  # EM monotone
+            prev_ll = ll
+
+        order = np.argsort([s.edge_rate for s in cur.states])
+        c, s = order[0], order[1]  # churn, stable
+        self.assertGreater(cur.states[s].edge_rate, 4.0)  # stable grows
+        self.assertLess(cur.node_remove_rates[s], 1.5)  # stable: slow turnover
+        self.assertGreater(cur.node_remove_rates[c], 2.5)  # churn: fast turnover
+
 
 if __name__ == "__main__":
     unittest.main()
