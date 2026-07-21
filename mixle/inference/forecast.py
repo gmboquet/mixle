@@ -96,7 +96,7 @@ def forecast(
     los: list[Any] = []
     his: list[Any] = []
     all_draws: list[np.ndarray] = []
-    scalar = True
+    all_scalar = True
     for h in range(horizon):
         p = p @ a_mat  # exact state marginal at T+h+1
         state_probs[h] = p
@@ -108,21 +108,26 @@ def forecast(
                 draws.extend(list(np.asarray(out)) if np.ndim(out) else [out])
         try:
             arr = np.asarray(draws, dtype=np.float64)
+            step_scalar = arr.ndim == 1
         except (TypeError, ValueError):
-            scalar = False
+            step_scalar = False
             arr = None
-        if scalar and arr is not None and arr.ndim == 1:
+        # `step_scalar` is THIS step's own outcome, not sticky across steps -- an earlier
+        # non-scalar step must not misroute a later step that is perfectly capable of a
+        # computed mean/lo/hi into raw draws instead. `all_scalar` (below) separately tracks
+        # whether EVERY step was scalar, which only decides the function's overall return shape.
+        if step_scalar:
             means.append(float(arr.mean()))
             los.append(float(np.quantile(arr, alpha_lo)))
             his.append(float(np.quantile(arr, alpha_hi)))
             all_draws.append(arr)
         else:
-            scalar = False
             means.append(draws)  # non-scalar emissions: hand back the draws per step
             los.append(None)
             his.append(None)
+        all_scalar = all_scalar and step_scalar
 
-    if scalar:
+    if all_scalar:
         return Forecast(
             mean=np.asarray(means),
             lo=np.asarray(los),

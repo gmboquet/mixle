@@ -61,6 +61,15 @@ def poisson_lograte_effect(k_pre: float, t_pre: float, k_post: float, t_post: fl
 
 def _random_effects(y: np.ndarray, v: np.ndarray) -> tuple[float, float, float, np.ndarray]:
     """DerSimonian-Laird random-effects pool. Returns (mean, var_of_mean, tau2, EB-shrunk effects)."""
+    if len(y) == 0:
+        raise ValueError("need at least 1 subject to pool a random-effects estimate")
+    if len(v) != len(y):
+        raise ValueError("effects and variances must have the same length")
+    if np.any(v <= 0):
+        # a per-subject sampling variance of 0 (or negative) is physically impossible -- it would
+        # hand that subject infinite (or negative) precision and silently corrupt every downstream
+        # weighted formula (fe/tau2/mean/shrunk) into a confidently-wrong, well-formed-looking result.
+        raise ValueError("variances must be strictly positive")
     w = 1.0 / v
     fe = float((w * y).sum() / w.sum())
     q = float((w * (y - fe) ** 2).sum())

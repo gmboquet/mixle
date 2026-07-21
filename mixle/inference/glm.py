@@ -254,12 +254,13 @@ def glm(
     y: np.ndarray,
     *,
     family: str | Family = "gaussian",
-    link: str | None = None,
+    link: str | Link | None = None,
     offset: np.ndarray | None = None,
     weights: np.ndarray | None = None,
     max_iter: int = 100,
     tol: float = 1e-8,
     robust: bool = False,
+    theta: float = 1.0,
 ) -> GLMResult:
     """Fit a generalized linear model by iteratively reweighted least squares.
 
@@ -268,13 +269,18 @@ def glm(
         y: ``(n,)`` response (counts, 0/1 or proportions, positive reals, ... per the family).
         family: ``"gaussian"``, ``"binomial"``, ``"poisson"``, ``"gamma"``, ``"inverse_gaussian"``,
             ``"negativebinomial"``, or a :class:`Family`.
-        link: link name; defaults to the family's default link (the canonical link, except gamma /
-            inverse-Gaussian which default to ``log`` -- their canonical ``inverse`` /
-            ``inverse_squared`` links do not keep ``mu`` positive).
+        link: a link name, or a :class:`Link` instance to use directly (e.g. a custom link); defaults
+            to the family's default link (the canonical link, except gamma / inverse-Gaussian which
+            default to ``log`` -- their canonical ``inverse`` / ``inverse_squared`` links do not keep
+            ``mu`` positive).
         offset: ``(n,)`` known additive term on the linear-predictor scale (e.g. ``log`` exposure).
         weights: ``(n,)`` prior weights.
         max_iter, tol: IRLS controls (convergence on the relative deviance change).
         robust: if True report Huber--White sandwich standard errors instead of model-based ones.
+        theta: the negative-binomial dispersion parameter (``family="negativebinomial"`` only;
+            ignored otherwise). Not estimated from data -- pass the value appropriate to your data
+            (e.g. from a prior fit or a method-of-moments estimate); the default ``1.0`` is a plain
+            placeholder, not a fitted value.
 
     Returns:
         A :class:`GLMResult`.
@@ -282,10 +288,13 @@ def glm(
     X = np.atleast_2d(np.asarray(x, dtype=float))
     y = np.asarray(y, dtype=float).ravel()
     n, p = X.shape
-    fam = _resolve_family(
-        family, getattr(family, "extra", 1.0) if isinstance(family, Family) else _nb_theta_default(family)
-    )
-    lk = _LINKS[link or fam.default_link or fam.canonical]
+    if n < 1 or p < 1:
+        raise ValueError("x must have at least 1 row and 1 column")
+    if y.shape[0] != n:
+        raise ValueError("x and y must have the same number of rows")
+    theta_arg = getattr(family, "extra", theta) if isinstance(family, Family) else theta
+    fam = _resolve_family(family, theta_arg)
+    lk = link if isinstance(link, Link) else _LINKS[link or fam.default_link or fam.canonical]
     off = np.zeros(n) if offset is None else np.asarray(offset, dtype=float).ravel()
     w = np.ones(n) if weights is None else np.asarray(weights, dtype=float).ravel()
 
@@ -339,10 +348,6 @@ def glm(
     return GLMResult(beta, se, mu, dev, phi, ll, n_iter, fam.name, lk.name, cov, _link=lk)
 
 
-def _nb_theta_default(family: str) -> float:
-    return 1.0
-
-
 # --------------------------------------------------------------------------- penalized
 
 
@@ -376,6 +381,8 @@ def ridge_regression(
 
     Minimises ``||y - X b||^2 + alpha ||b||^2``; the intercept (if fitted) is not penalised.
     """
+    if alpha < 0:
+        raise ValueError("alpha must be >= 0")
     X = np.atleast_2d(np.asarray(x, dtype=float))
     y = np.asarray(y, dtype=float).ravel()
     if fit_intercept:
@@ -404,6 +411,10 @@ def elastic_net(
     Minimises ``(1/2n) ||y - X b||^2 + alpha ( l1_ratio ||b||_1 + (1 - l1_ratio)/2 ||b||^2 )``.
     ``l1_ratio = 1`` is the lasso (sparse), ``l1_ratio = 0`` is ridge.
     """
+    if alpha < 0:
+        raise ValueError("alpha must be >= 0")
+    if not 0.0 <= l1_ratio <= 1.0:
+        raise ValueError("l1_ratio must be in [0, 1]")
     X = np.atleast_2d(np.asarray(x, dtype=float))
     y = np.asarray(y, dtype=float).ravel()
     n, p = X.shape
