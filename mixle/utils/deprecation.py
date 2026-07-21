@@ -1,4 +1,4 @@
-"""One mechanism for deprecating public names, implementing the policy in ``docs/deprecation-policy.rst``.
+"""One mechanism for deprecating public names, implementing the policy in ``docs/support-policy.rst``.
 
 A deprecated stable name must keep working *and* tell the caller where to go, in a category tools can act
 on. This module is the single place that emits that signal, so every deprecation in the library speaks

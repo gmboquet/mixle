@@ -278,7 +278,7 @@ class GaussianMixtureEstimator(MixtureEstimator):
 
         New code should call ``accumulator_factory``. The camelCase name remains
         available for older callers and returns the same factory, but now emits a
-        ``DeprecationWarning`` (see ``docs/deprecation-policy.rst``).
+        ``DeprecationWarning`` (see ``docs/support-policy.rst``).
         """
         return self.accumulator_factory()
 
