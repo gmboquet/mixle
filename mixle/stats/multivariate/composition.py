@@ -20,9 +20,11 @@ from typing import Any
 import numpy as np
 
 from mixle.stats.compute.pdist import (
+    DataSequenceEncoder,
     DistributionSampler,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
+    SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
 from mixle.stats.multivariate.multivariate_gaussian import (
@@ -157,11 +159,18 @@ class AitchisonNormalSampler(DistributionSampler):
         return ilr_inv(np.atleast_2d(y))[0] if size is None else ilr_inv(np.asarray(y))
 
 
-class AitchisonNormalDataEncoder:
+class AitchisonNormalDataEncoder(DataSequenceEncoder):
     """Encode compositions by the ilr transform, then defer to the Gaussian encoder over ilr coordinates."""
 
     def __init__(self, gaussian_encoder):
         self.gaussian_encoder = gaussian_encoder
+
+    def __str__(self) -> str:
+        return "AitchisonNormalDataEncoder(gaussian_encoder=" + str(self.gaussian_encoder) + ")"
+
+    def __eq__(self, other: object) -> bool:
+        """Return whether ``other`` is an encoder wrapping an equal Gaussian encoder."""
+        return isinstance(other, AitchisonNormalDataEncoder) and self.gaussian_encoder == other.gaussian_encoder
 
     def seq_encode(self, x):
         """Encode compositions as Gaussian ilr-coordinate observations."""
@@ -193,7 +202,7 @@ class AitchisonNormalEstimator(ParameterEstimator):
         return AitchisonNormalDistribution(g.mu, g.covar, name=self.name, keys=self.keys)
 
 
-class AitchisonNormalAccumulator:
+class AitchisonNormalAccumulator(SequenceEncodableStatisticAccumulator):
     """Wrap a Gaussian accumulator; the data arrives already ilr-encoded, so the stats are delegated."""
 
     def __init__(self, gaussian_acc):
