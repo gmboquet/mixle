@@ -94,6 +94,54 @@ def _is_gaussian_like(model: Any) -> bool:
     )
 
 
+def _valid_top_level_indices(model: Any) -> set[int] | None:
+    """The set of valid top-level evidence/assignment field indices for ``model``'s own combinator
+    convention, or ``None`` when any non-negative index is meaningful (open-ended sequence models:
+    :class:`HiddenMarkovModelDistribution` time steps, :class:`SequenceDistribution` steps, or an
+    otherwise-unrecognized model -- left to whatever more specific check its own handler makes)."""
+    if _is_gaussian_like(model):
+        return set(range(int(model.dim)))
+    if isinstance(model, CompositeDistribution):
+        return set(range(model.count))
+    if isinstance(model, MixtureDistribution):
+        dim = getattr(model.components[0], "dim", None)
+        return set(range(int(dim))) if dim is not None else None
+    if isinstance(model, (HiddenMarkovModelDistribution, SequenceDistribution)):
+        return None
+    if isinstance(model, DependencyTreeDistribution):
+        return set(range(len(model.parents)))
+    if isinstance(model, HeterogeneousBayesianNetwork):
+        return {f.child for f in model.factors}
+    if isinstance(model, ConditionalDistribution):
+        return {0, 1}
+    if isinstance(model, OptionalDistribution):
+        return {0}
+    return None
+
+
+def _check_field_indices(model: Any, ev: dict[FieldPath, Any]) -> None:
+    """Raise a clear ``ValueError`` if ``ev`` names a top-level field index that does not exist on
+    ``model``, instead of each caller's own ad hoc failure mode on a bad index: ``condition()``'s
+    exact path silently no-ops (``unobs``/``cond`` never touch the phantom key, so the result is
+    indistinguishable from an unconditioned prior), its SIR fallback never once consults it either
+    (every particle's importance weight comes out identically 1.0, and the receipt reports a
+    deceptively HEALTHY ``ess_ratio == 1.0`` despite zero evidence actually being applied), and
+    ``do()`` crashes with a raw, unhelpful ``IndexError`` deep inside a list assignment -- three
+    different failure modes for the same mistake, two of them silent. Called at every recursive
+    entry point (:func:`_condition_exact`, :func:`_generate_weighted`, :func:`_do_dispatch`), so a
+    bad index nested inside a composite/mixture sub-path is caught at the point it is actually
+    consumed, not just when it is the top-level evidence dict.
+    """
+    valid = _valid_top_level_indices(model)
+    for path in ev:
+        i = path[0]
+        if i < 0 or (valid is not None and i not in valid):
+            allowed = f"valid indices are {sorted(valid)}" if valid is not None else "index must be >= 0"
+            raise ValueError(
+                f"evidence/assignment field index {i} does not exist on this {type(model).__name__} ({allowed})."
+            )
+
+
 def _analytic_mean(dist: Any, j: int | None = None) -> float:
     """The analytic (not Monte-Carlo) mean of a fitted leaf/composite family, or raise."""
     if hasattr(dist, "mu"):
@@ -188,6 +236,7 @@ def condition(
 
 
 def _condition_exact(model: Any, ev: dict[FieldPath, Any], *, seed: int | None) -> Posterior:
+    _check_field_indices(model, ev)
     if _is_gaussian_like(model):
         return _condition_gaussian_like(model, ev)
     if isinstance(model, CompositeDistribution):
@@ -375,6 +424,7 @@ def _condition_hmm(model: HiddenMarkovModelDistribution, ev: dict[FieldPath, Any
 
 def _generate_weighted(model: Any, ev: dict[FieldPath, Any], rng: RandomState) -> tuple[Any, float]:
     """One ``(record, log_weight)`` particle from ``model``'s own generative order, evidence clamped."""
+    _check_field_indices(model, ev)
     top, nested = _split(ev)
 
     if isinstance(model, CompositeDistribution):
@@ -587,6 +637,7 @@ def do(model: Any, assignments: dict[FieldPath | int, Any]) -> Any:
 
 
 def _do_dispatch(model: Any, ev: dict[FieldPath, Any]) -> Any:
+    _check_field_indices(model, ev)
     if isinstance(model, DependencyTreeDistribution):
         return _do_dependency_tree(model, ev)
     if isinstance(model, HeterogeneousBayesianNetwork):

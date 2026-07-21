@@ -12,6 +12,7 @@ Acceptance receipts, one per test:
 """
 
 import numpy as np
+import pytest
 from scipy.stats import norm
 
 from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork, _LinearGaussianFactor, _MarginalFactor
@@ -19,6 +20,7 @@ from mixle.inference.condition import ConditionReceipt, condition, do
 from mixle.inference.structure import DependencyTreeDistribution
 from mixle.stats import (
     CategoricalDistribution,
+    CompositeDistribution,
     ConditionalDistribution,
     GaussianDistribution,
     HiddenMarkovModelDistribution,
@@ -246,3 +248,73 @@ def test_do_sampling_is_deterministic_given_seed():
     r1 = world.sample(20, seed=5)
     r2 = world.sample(20, seed=5)
     assert r1 == r2
+
+
+# --------------------------------------------------------------------------------------------- #
+# (g) field-index validation -- a nonexistent evidence/assignment field must raise, not silently
+#     no-op (exact path), report a fake-healthy SIR receipt, or crash with a raw IndexError (do())
+# --------------------------------------------------------------------------------------------- #
+
+
+def test_condition_rejects_out_of_range_field_on_a_gaussian_leaf():
+    rng = np.random.RandomState(1)
+    ell = rng.normal(size=(3, 3))
+    cov = ell @ ell.T + 3.0 * np.eye(3)
+    model = MultivariateGaussianDistribution(np.array([1.0, -2.0, 0.5]), cov)
+    with pytest.raises(ValueError):
+        condition(model, {5: 2.0}, method="exact")
+
+
+def test_condition_rejects_out_of_range_field_on_a_composite():
+    # Before the fix: `unobs`/`cond` never touch a phantom field index at all, so the "posterior"
+    # returned is indistinguishable from the unconditioned prior -- no error, no warning.
+    model = CompositeDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 1.0)])
+    with pytest.raises(ValueError):
+        condition(model, {5: 2.0}, method="exact")
+
+
+def test_condition_rejects_out_of_range_field_on_a_mixture():
+    mix = MixtureDistribution(
+        [
+            MultivariateGaussianDistribution(np.zeros(2), np.eye(2)),
+            MultivariateGaussianDistribution(np.ones(2), np.eye(2)),
+        ],
+        [0.5, 0.5],
+    )
+    with pytest.raises(ValueError):
+        condition(mix, {5: 1.0}, method="exact")
+    with pytest.raises(ValueError):
+        condition(mix, {5: 1.0}, method="sir", n_particles=100)
+
+
+def test_condition_sir_rejects_out_of_range_field_instead_of_a_fake_healthy_receipt():
+    # Before the fix: a nonexistent field index was never once consulted by the particle loop, so
+    # every importance weight came out identically 1.0 and the receipt reported a perfectly
+    # healthy ess_ratio == 1.0 despite the evidence never actually being applied -- the single most
+    # severe finding of the audit (silent AND healthy-looking).
+    tree, _ = _dependency_tree_fixture()
+    with pytest.raises(ValueError):
+        condition(tree, {99: 2.0}, method="sir", n_particles=500, seed=0)
+
+    net, *_ = _confounded_bn()
+    with pytest.raises(ValueError):
+        condition(net, {99: 2.0}, method="sir", n_particles=500, seed=0)
+
+
+def test_do_rejects_out_of_range_field_with_a_clear_error_not_a_raw_index_error():
+    tree, _ = _dependency_tree_fixture()
+    with pytest.raises(ValueError):
+        do(tree, {99: 2.0})
+
+    net, *_ = _confounded_bn()
+    with pytest.raises(ValueError):
+        do(net, {99: 2.0})
+
+
+def test_hmm_rejects_a_negative_time_index_instead_of_numpy_aliasing_it():
+    # A negative field index for an HMM isn't just semantically meaningless -- `log_b[t, k]` with
+    # t < 0 is valid NUMPY negative indexing, so without this check it would silently alias to a
+    # row counted from the END of the emission matrix instead of being rejected.
+    hmm = _hmm_fixture()
+    with pytest.raises(ValueError):
+        condition(hmm, {-1: 0.0}, method="exact")
