@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from mixle.epistemic.discrepancy import (
+    _sample,
     discrepancy_report,
     js_divergence,
     kl_divergence,
@@ -12,6 +13,41 @@ from mixle.epistemic.discrepancy import (
     wasserstein_distance,
 )
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+
+
+class SampleDispatchTest(unittest.TestCase):
+    """_sample's dist.sample(n) / per-draw dist.sample() fallback dispatch."""
+
+    def test_a_bug_inside_sample_is_not_masked_by_a_retry_looping_n_single_draws(self):
+        # a sample(n) that accepts n must be called with it exactly once; a TypeError from inside
+        # its own body must propagate, not be swallowed and silently retried as n separate sample()
+        # calls -- which would be both wrong (n calls instead of 1) and far more expensive. n=None
+        # has a default specifically so a naive try/except TypeError fallback's sample() retries
+        # are themselves syntactically valid and reach the body (appending to calls) -- otherwise
+        # those retries would fail at argument-binding before ever calling in, and this test could
+        # not tell a single correct call apart from a silent duplicate retry loop.
+        calls = []
+
+        class BuggyDist:
+            def sample(self, n=None):
+                calls.append(n)
+                return None + (n or 0)  # an internal bug unrelated to whether n is accepted
+
+        with self.assertRaises(TypeError):
+            _sample(BuggyDist(), 5, np.random.RandomState(0))
+        self.assertEqual(calls, [5])  # called once, with n -- never retried as 5 separate calls
+
+    def test_legacy_single_draw_sample_falls_back_correctly(self):
+        class LegacySingleDrawDist:
+            def __init__(self):
+                self.i = 0
+
+            def sample(self):
+                self.i += 1
+                return float(self.i)
+
+        out = _sample(LegacySingleDrawDist(), 4, np.random.RandomState(0))
+        np.testing.assert_allclose(out, [1.0, 2.0, 3.0, 4.0])
 
 
 class KLDivergenceTest(unittest.TestCase):

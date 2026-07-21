@@ -29,6 +29,8 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.special import ndtri
 
+from mixle.utils.callables import accepts_call
+
 
 def _as_rng(rng: Any) -> RandomState:
     return rng if isinstance(rng, RandomState) else RandomState(rng)
@@ -274,9 +276,10 @@ def as_belief(obj: Any, node: Any = None) -> GaussianBelief:
             raise TypeError(f"{type(obj).__name__} has no {attr}() to build a belief from")
         if not callable(fn):
             return fn
-        try:
-            return fn(node) if node is not None else fn()
-        except TypeError:
+        if node is None:
             return fn()
+        if accepts_call(fn, node):
+            return fn(node)
+        return fn()
 
     return GaussianBelief(_call("mean"), _call("cov"))

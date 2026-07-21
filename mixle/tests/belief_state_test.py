@@ -183,6 +183,23 @@ class AsBeliefAdapterTest(unittest.TestCase):
         np.testing.assert_allclose(b.mean(), [1.0, 2.0])
         np.testing.assert_allclose(b.var(), [1.0, 4.0])
 
+    def test_a_bug_inside_mean_is_not_masked_by_a_retry_without_node(self):
+        # mean(self, node=None) accepts node, so it must be called with it exactly once; a TypeError
+        # from inside its own body must propagate, not be swallowed and silently retried as mean().
+        calls = []
+
+        class BuggyNode:
+            def mean(self, node=None):
+                calls.append(node)
+                return None + 1  # an internal bug unrelated to whether node is accepted
+
+            def cov(self, node=None):
+                return np.eye(2)
+
+        with self.assertRaises(TypeError):
+            as_belief(BuggyNode(), node="temperature")
+        self.assertEqual(calls, ["temperature"])  # called once, with node -- never retried as mean()
+
 
 if __name__ == "__main__":
     unittest.main()

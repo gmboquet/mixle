@@ -32,6 +32,7 @@ from typing import Any
 import numpy as np
 
 from mixle.task.calibrated_generator import ABSTAIN, CalibratedGenerator
+from mixle.utils.callables import accepts_call
 
 __all__ = [
     "Schema",
@@ -124,9 +125,9 @@ def _sample_scalar(posterior: Any, n: int, seed: int | None) -> np.ndarray:
     if isinstance(posterior, Sequence) and posterior and isinstance(posterior[0], (int, float, np.floating)):
         return np.asarray(posterior, dtype=float)
     if hasattr(posterior, "sample"):
-        try:
+        if accepts_call(posterior.sample, n, seed=seed):
             draws = posterior.sample(n, seed=seed)
-        except TypeError:
+        else:
             draws = posterior.sample(n)
     elif hasattr(posterior, "sampler"):
         draws = posterior.sampler(seed=seed).sample(n)

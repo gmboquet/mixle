@@ -126,6 +126,34 @@ class CascadeIntegrationTest(unittest.TestCase):
         self.assertTrue(all(is_correct(p, r) for p, r in zip(probe_prompts, results)))
 
 
+class DrawDispatchTest(unittest.TestCase):
+    """_draw's generate(prompt, k, rng=...) / generate(prompt, k) dispatch."""
+
+    def test_a_bug_inside_generate_is_not_masked_by_a_retry_without_rng(self):
+        # generate(prompt, k, rng=None) accepts rng, so it must be called with it exactly once; a
+        # TypeError from inside its own body must propagate, not be swallowed and silently retried
+        # as generate(prompt, k) -- which would draw an entirely separate, uncontrolled-seed batch
+        # (e.g. duplicating a real generator/LLM call).
+        calls = []
+
+        def buggy_generate(prompt, k, rng=None):
+            calls.append((prompt, k, rng is not None))
+            return None + k  # an internal bug unrelated to whether rng is accepted
+
+        model = CalibratedGenerator(buggy_generate, score, k=3, seed=0)
+        with self.assertRaises(TypeError):
+            model._draw(5, seed=1)
+        self.assertEqual(calls, [(5, 3, True)])  # called once, with rng -- never retried without it
+
+    def test_legacy_generate_without_rng_support_falls_back_correctly(self):
+        def legacy_generate(prompt, k):
+            return [(prompt, prompt + i) for i in range(k)]
+
+        model = CalibratedGenerator(legacy_generate, score, k=3, seed=0)
+        cands = model._draw(5, seed=1)
+        self.assertEqual(cands, [(5, 5), (5, 6), (5, 7)])
+
+
 class DeterminismTest(unittest.TestCase):
     def test_same_seed_same_outcome(self):
         cal_prompts = list(range(0, 400))

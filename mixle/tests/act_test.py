@@ -105,6 +105,35 @@ class InvestigateTest(unittest.TestCase):
         self.assertTrue(all("action" in t and "kind" in t for t in trace))
 
 
+class ComputeActionDispatchTest(unittest.TestCase):
+    """compute_action's skill(question) / skill() dispatch, independent of investigate()'s own
+    (separate, legitimate) handling of an action raising -- see test_broken_action_does_not_sink_
+    the_investigation above for that layer."""
+
+    def test_a_bug_inside_skill_is_not_masked_by_a_retry_without_question(self):
+        # a skill accepting question must be called with it exactly once; a TypeError from inside
+        # its own body must propagate, not be swallowed and silently retried as skill() -- which
+        # would re-run the skill with an entirely different (missing) argument. question=None has a
+        # default specifically so a naive try/except TypeError fallback's skill() retry is itself
+        # syntactically valid and reaches the body (appending to calls) -- otherwise that retry
+        # would fail at argument-binding before ever calling in, and this test could not tell a
+        # single correct call apart from a silent duplicate retry.
+        calls = []
+
+        def buggy_skill(question=None):
+            calls.append(question)
+            return None + 1  # an internal bug unrelated to whether question is accepted
+
+        action = compute_action(buggy_skill, name="buggy")
+        with self.assertRaises(TypeError):
+            action.run("convert 100C")
+        self.assertEqual(calls, ["convert 100C"])  # called once, with question -- never retried
+
+    def test_skill_without_question_support_falls_back_correctly(self):
+        action = compute_action(lambda: "42", name="const")
+        self.assertEqual(action.run("anything"), ["const => 42"])
+
+
 class CreateAndDelegateTest(unittest.TestCase):
     def test_create_action_reports_a_built_models_guarantee(self):
         def _build(q):
