@@ -91,10 +91,14 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
             num_vals (int): Number of integer values N in the set range.
             orig_log_edit_pmat (np.ndarray): The log_edit_pmat passed at construction.
             log_edit_pmat (np.ndarray): num_vals by 4 matrix of edit log-probabilities (see log_edit_pmat above).
-            log_nsum (float): Sum of log p(missing | missing), the log-probability of the empty-set transition.
+            log_nsum (float): Sum of log p(missing | missing) over non-forced values, the log-probability
+                of the empty-set transition.
             log_dvec (np.ndarray): num_vals by 3 matrix of edit log-probabilities relative to
                 log p(missing | missing); columns are (missing | present), (present | missing),
-                (present | present).
+                (present | present). For forced values (see below) these are the true target
+                log-probabilities directly, not relative to log p(missing | missing).
+            forced (np.ndarray): Boolean mask, true where p_mat(missing | missing) == 0 (log = -inf) --
+                a value that can never stay missing (e.g. p_mat(present | missing) == 1.0 exactly).
 
         """
         num_vals = len(log_edit_pmat)
@@ -106,8 +110,9 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         pmat = np.asarray(log_edit_pmat, dtype=np.float64).copy()
         if pmat.shape[1] == 2:
             log_pmat = np.zeros((num_vals, 4), dtype=np.float64)
-            log_pmat[:, 0] = np.log1p(-np.exp(pmat[:, 0]))  # p_mat(missing | missing) = 1 - p_mat(present | missing)
-            log_pmat[:, 1] = np.log1p(-np.exp(pmat[:, 1]))  # p_mat(missing | present) = 1 - p_mat(present | present)
+            with np.errstate(divide="ignore"):  # log1p(-1) == -inf is expected for a forced value (p == 1.0)
+                log_pmat[:, 0] = np.log1p(-np.exp(pmat[:, 0]))  # p_mat(missing|missing) = 1 - p_mat(present|missing)
+                log_pmat[:, 1] = np.log1p(-np.exp(pmat[:, 1]))  # p_mat(missing|present) = 1 - p_mat(present|present)
             log_pmat[:, 2] = pmat[:, 0]  # p_mat(present | missing)
             log_pmat[:, 3] = pmat[:, 1]  # p_mat(present | present)
         else:
@@ -115,12 +120,20 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
 
         self.orig_log_edit_pmat = pmat
         self.log_edit_pmat = log_pmat
-        self.log_nsum = self.log_edit_pmat[
-            np.isfinite(self.log_edit_pmat[:, 0]), 0
-        ].sum()  # sum [ln p_mat(missing | missing)]
-        self.log_dvec = (
-            self.log_edit_pmat[:, 1:] - self.log_edit_pmat[:, 0, None]
-        )  # ln p_mat (?? | ??) - ln p_mat(missing | missing)
+        # log_nsum/log_dvec are a vectorized trick: start from the "every value stayed missing" baseline
+        # (log_nsum) and add a per-touched-value delta (log_dvec) that cancels the baseline and lands on
+        # the true target log-probability. That cancellation only works in ordinary finite arithmetic --
+        # for a *forced* value (p_mat(missing | missing) == 0, log = -inf; a legal, deterministic input,
+        # e.g. p_mat(present | missing) == 1.0 exactly) the baseline is -inf, so a naive delta
+        # (target - (-inf)) is +inf rather than something that cancels anything. Forced values are
+        # excluded from log_nsum entirely, and their log_dvec row holds the true target log-probabilities
+        # directly (no baseline to cancel against). log_density/seq_log_density separately short-circuit
+        # to -inf whenever an observation leaves a forced value untouched (neither added, removed, nor
+        # kept), since that implies it stayed missing, which is impossible for a forced value.
+        self.forced = ~np.isfinite(self.log_edit_pmat[:, 0])
+        self.log_nsum = self.log_edit_pmat[~self.forced, 0].sum()  # sum [ln p_mat(missing | missing)]
+        self.log_dvec = self.log_edit_pmat[:, 1:] - self.log_edit_pmat[:, 0, None]
+        self.log_dvec[self.forced, :] = self.log_edit_pmat[self.forced, 1:]  # forced: true targets, not deltas
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the distribution."""
@@ -160,6 +173,13 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         xx0 = np.asarray(x[0], dtype=int)
         xx1 = np.asarray(x[1], dtype=int)
 
+        if self.forced.any():
+            touched = np.zeros(self.num_vals, dtype=bool)
+            touched[xx0] = True
+            touched[xx1] = True
+            if np.any(self.forced & ~touched):
+                return -np.inf  # a forced value (missing|missing impossible) stayed missing in both sets
+
         in10 = np.isin(xx1, xx0, invert=False)  # xx0 \cap xx1
         in01 = np.isin(xx0, xx1, invert=True)  # xx0 \cap xx1
 
@@ -190,12 +210,26 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         sz, idx, xs, ys, ym, init_enc = x
         rv = np.bincount(idx, weights=self.log_dvec[xs, ys], minlength=sz)
         rv += self.log_nsum
+
+        if self.forced.any():
+            touched = np.zeros((sz, self.num_vals), dtype=bool)
+            touched[idx, xs] = True
+            impossible = ~touched[:, self.forced].all(axis=1)
+            rv[impossible] = -np.inf  # a forced value stayed missing in both sets for these rows
+
         rv += self.init_dist.seq_log_density(init_enc)
 
         return rv
 
     def backend_seq_log_density(self, x: E, engine: Any) -> Any:
-        """Engine-neutral vectorized log-density for encoded integer edit-set observations."""
+        """Engine-neutral vectorized log-density for encoded integer edit-set observations.
+
+        Note: unlike seq_log_density, this does not short-circuit to -inf when a forced value (see
+        __init__) is left untouched by an observation -- that check needs a per-row boolean "was this
+        value touched" scatter, which index_add's 1-D add-in-place contract doesn't cleanly express.
+        log_dvec itself is still correct here (forced rows hold true targets, not broken deltas), so this
+        only affects the narrow case of an observation that leaves a forced value missing in both sets.
+        """
         from mixle.stats.compute.backend import backend_seq_log_density
 
         sz, idx, xs, ys, ym, init_enc = x
@@ -241,7 +275,11 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
 
     @classmethod
     def backend_stacked_log_density(cls, x: E, params: dict[str, Any], engine: Any) -> Any:
-        """Return an ``(n, k)`` matrix of integer edit-set component log densities."""
+        """Return an ``(n, k)`` matrix of integer edit-set component log densities.
+
+        Note: shares backend_seq_log_density's residual gap -- does not short-circuit to -inf when a
+        forced component value (see __init__) is left untouched by an observation.
+        """
         from mixle.stats.compute.stacked import stacked_component_log_density
 
         sz, idx, xs, ys, ym, init_enc = x
