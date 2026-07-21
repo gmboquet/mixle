@@ -62,6 +62,12 @@ class StratifiedTest(unittest.TestCase):
         for _, te in folds:
             self.assertAlmostEqual(y[te].mean(), 0.25, delta=0.05)
 
+    def test_too_many_splits_raises_instead_of_empty_test_folds(self):
+        # unguarded (unlike kfold/group_kfold), n_splits > n silently produced empty test folds
+        # for the excess splits instead of raising.
+        with self.assertRaises(ValueError):
+            stratified_kfold(np.array([0, 0, 1, 1]), 5)
+
 
 class GroupTest(unittest.TestCase):
     def test_group_kfold_no_leakage(self):
@@ -108,6 +114,16 @@ class TemporalTest(unittest.TestCase):
             if len(tr) and len(te):
                 dmin = np.abs(tr[:, None] - te[None, :]).min()
                 self.assertGreater(dmin, 3)
+
+    def test_purged_kfold_too_many_splits_raises(self):
+        with self.assertRaises(ValueError):
+            purged_kfold(3, n_splits=5)
+
+    def test_gap_leaving_no_valid_fold_raises_instead_of_returning_an_empty_list(self):
+        # every fold's train_end <= 0 under this gap used to silently skip all n_splits folds and
+        # return [] with no error.
+        with self.assertRaises(ValueError):
+            time_series_split(10, n_splits=5, gap=100)
 
 
 class SpatialTest(unittest.TestCase):

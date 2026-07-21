@@ -106,6 +106,8 @@ def stratified_kfold(
     """
     y = np.asarray(y)
     n = y.shape[0]
+    if not 2 <= n_splits <= n:
+        raise ValueError("n_splits must be in [2, n].")
     rng = _as_rng(seed)
     test_assign = np.empty(n, dtype=int)
     for c in np.unique(y):
@@ -194,6 +196,11 @@ def time_series_split(n: int, n_splits: int = 5, *, gap: int = 0, max_train_size
             continue
         train_start = 0 if max_train_size is None else max(0, train_end - max_train_size)
         folds.append((np.arange(train_start, train_end), np.arange(test_start, test_end)))
+    if not folds:
+        raise ValueError(
+            f"gap={gap} leaves no valid training window for any of the {n_splits} requested splits "
+            f"(n={n}); reduce gap or n_splits."
+        )
     return folds
 
 
@@ -213,6 +220,8 @@ def purged_kfold(n: int, n_splits: int = 5, *, embargo: int = 0) -> list[Fold]:
     Returns:
         ``n_splits`` ``(train_index, test_index)`` pairs.
     """
+    if not 2 <= n_splits <= n:
+        raise ValueError("n_splits must be in [2, n].")
     folds = []
     start = 0
     for size in _fold_sizes(n, n_splits):
