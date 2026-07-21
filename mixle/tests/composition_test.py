@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from mixle.inference import estimate
+from mixle.inference import estimate, optimize
 from mixle.stats.multivariate.composition import AitchisonNormalDistribution as AitchisonNormal
 from mixle.stats.multivariate.composition import closure, clr, clr_inv, ilr, ilr_basis, ilr_inv
 
@@ -50,6 +50,17 @@ class AitchisonNormalTest(unittest.TestCase):
         self.assertIsInstance(fit, AitchisonNormal)
         np.testing.assert_allclose(fit.mean, self.true.mean, atol=0.04)
         np.testing.assert_allclose(fit.cov, self.true.cov, atol=0.06)
+
+    def test_optimize_works_despite_the_accumulator_not_declaring_its_base_class(self):
+        # AitchisonNormalAccumulator/DataEncoder didn't inherit SequenceEncodableStatisticAccumulator/
+        # DataSequenceEncoder despite fully implementing their interface -- optimize() (unlike the
+        # lower-level estimate() the other test above uses) raised AttributeError on the resulting
+        # model, since machinery elsewhere assumes every accumulator has the base class's key_merge/
+        # key_replace (a concrete default, not something this class needed to reimplement).
+        s = self.true.sampler(seed=4).sample(2000)
+        fit = optimize([row for row in s], self.true.estimator())
+        self.assertIsInstance(fit, AitchisonNormal)
+        np.testing.assert_allclose(fit.mean, self.true.mean, atol=0.1)
 
     def test_log_density_peaks_at_the_center(self):
         center = self.true.mean_composition()
