@@ -879,7 +879,12 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
                 t, b = stats_dict[self.rule_key]
                 stats_dict[self.rule_key] = (t + self.terminal_counts, b + self.binary_counts)
             else:
-                stats_dict[self.rule_key] = (self.terminal_counts, self.binary_counts)
+                # Copy on adoption: stats_dict must never alias this accumulator's own live
+                # arrays. The "already present" branch above is safe (`+` always allocates a
+                # new array), but without this copy a second tied accumulator's key_replace
+                # would still leave both accumulators pointing at this accumulator's own
+                # original arrays.
+                stats_dict[self.rule_key] = (self.terminal_counts.copy(), self.binary_counts.copy())
         if self.emission_key is not None:
             if self.emission_key in stats_dict:
                 for r, acc in enumerate(stats_dict[self.emission_key]):
@@ -892,7 +897,12 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace keyed rule and emission statistics from ``stats_dict``."""
         if self.rule_key is not None and self.rule_key in stats_dict:
-            self.terminal_counts, self.binary_counts = stats_dict[self.rule_key]
+            # Copy on replace too: without it, every tied accumulator ends up pointing at the
+            # SAME array objects, so any one of them later accumulating new local data would
+            # silently corrupt every other tied accumulator's counts.
+            t, b = stats_dict[self.rule_key]
+            self.terminal_counts = np.asarray(t).copy()
+            self.binary_counts = np.asarray(b).copy()
         if self.emission_key is not None and self.emission_key in stats_dict:
             self.emission_accumulators = stats_dict[self.emission_key]
         for acc in self.emission_accumulators:
