@@ -1,13 +1,17 @@
-"""N2 -- critical-habitat & listed-species constraints into production (workstream N; IC-9, IC-12, IC-1).
+"""N2 -- critical-habitat & listed-species constraints into a network optimizer (workstream N; IC-9,
+IC-12, IC-1).
 
-Turns N1's fitted habitat-suitability field (:class:`~mixle.analysis.sdm.HabitatModel`, IC-12/IC-1) and
-a set of typed, citation-backed listed-species records (``mixle_knowledge.contracts.ListedSpecies`` --
-this module never imports that package, it only duck-types the two attributes it needs, so core mixle
-carries no hard dependency on the paired ``mixle-knowledge`` contract) into the one thing a mine-planning
-network optimizer needs to respect a no-mine constraint: a boolean exclusion mask over blocks, folded
-into an IC-9-shaped network payload. This mirrors G9's ``mixle_pde/reclamation.py:apply_env_constraints``
-almost exactly -- same "excluded blocks become forbidden nodes / zero-capacity arcs" payload shape -- but
-for critical-habitat/listed-species law rather than seepage/subsidence risk.
+A general regulatory-exclusion constraint: turns N1's fitted habitat-suitability field
+(:class:`~mixle.analysis.sdm.HabitatModel`, IC-12/IC-1) and a set of typed, citation-backed
+listed-species records (``mixle_knowledge.contracts.ListedSpecies`` -- this module never imports that
+package, it only duck-types the two attributes it needs, so core mixle carries no hard dependency on
+the paired ``mixle-knowledge`` contract) into a boolean exclusion mask over network nodes, folded into
+an IC-9-shaped network payload -- the one thing ANY siting/routing network optimizer needs to respect
+a hard no-build constraint over critical habitat or listed-species range, not just a mine-planning
+network optimizer (this module's worked instantiation, hence "block" throughout for "node"). This
+mirrors G9's ``mixle_pde/reclamation.py:apply_env_constraints`` almost exactly -- same "excluded
+blocks become forbidden nodes / zero-capacity arcs" payload shape -- but for critical-habitat/listed-
+species law rather than seepage/subsidence risk.
 
 Per the work-plan non-goal, this module never imports or calls the network-flow solver itself (no
 dependency on ``mixle.relations``, and no edit to it); it only produces the payload H1's
