@@ -88,9 +88,18 @@ class Substrate:
 
     # -- CRUD --------------------------------------------------------------------------------------
     def put(self, item: SubstrateItem) -> str:
-        """Add or replace an item; returns its id and schedules semantic-index rebuilds for text items."""
+        """Add or replace an item; returns its id and schedules semantic-index rebuilds for text items.
+
+        Dirty whenever this put could change what :meth:`_text_items` (the embedding index's real
+        inclusion rule -- ANY kind with a truthy ``.text``, not just a fixed subset) would return:
+        the new item itself carries text, OR it replaces an item that used to. That second half
+        matters as much as the first -- clearing an existing item's text (or replacing it with a
+        no-text item) shrinks the indexed corpus exactly as much as adding text grows it, and without
+        it the stale embedding for the old text would keep matching queries after the text is gone.
+        """
+        previous = self._items.get(item.id)
         self._items[item.id] = item
-        if item.kind in ("text", "artifact", "trace", "context") and item.text:
+        if item.text or (previous is not None and previous.text):
             self._dirty = True
         return item.id
 
