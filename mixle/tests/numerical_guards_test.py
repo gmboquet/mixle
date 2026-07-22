@@ -12,6 +12,8 @@ import numpy as np
 from mixle.stats import GaussianDistribution
 from mixle.stats.bayes.dict_dirichlet import DictDirichletDistribution
 from mixle.stats.bayes.normal_gamma import NormalGammaDistribution
+from mixle.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
+from mixle.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
 from mixle.stats.univariate.continuous.gumbel import GumbelDistribution
 from mixle.stats.univariate.continuous.log_gaussian import LogGaussianDistribution
 
@@ -122,6 +124,66 @@ class ConjugateVarianceFloorTest(unittest.TestCase):
         suff = (sx, sx * sx / 3.0 - np.array([1.0e9, 1.0e6]), 3.0)  # both coords negative scatter
         d = est.estimate(None, suff)
         self.assertTrue(np.all(np.isfinite(d.log_density(sx / 3.0))))
+
+
+class DiagonalGaussianConstructorValidationTest(unittest.TestCase):
+    """DiagonalGaussianDistribution.__init__ previously accepted covar entries that were zero,
+    negative, or non-finite with no validation (unlike the scalar GaussianDistribution), silently
+    producing a NaN log-density instead of raising.
+    """
+
+    def test_zero_covar_entry_raises(self):
+        with self.assertRaises(ValueError):
+            DiagonalGaussianDistribution(mu=[0.0, 0.0], covar=[1.0, 0.0])
+
+    def test_negative_covar_entry_raises(self):
+        with self.assertRaises(ValueError):
+            DiagonalGaussianDistribution(mu=[0.0, 0.0], covar=[1.0, -2.0])
+
+    def test_nonfinite_covar_entry_raises(self):
+        with self.assertRaises(ValueError):
+            DiagonalGaussianDistribution(mu=[0.0, 0.0], covar=[1.0, np.nan])
+        with self.assertRaises(ValueError):
+            DiagonalGaussianDistribution(mu=[0.0, 0.0], covar=[1.0, np.inf])
+
+    def test_positive_finite_covar_still_constructs(self):
+        # guards against an overcorrection that rejects valid covariances too.
+        d = DiagonalGaussianDistribution(mu=[0.0, 0.0], covar=[1.0, 2.0])
+        self.assertTrue(np.isfinite(d.log_density(np.array([0.5, 0.5]))))
+
+
+class DiagonalGaussianPseudoCountTest(unittest.TestCase):
+    """DiagonalGaussianDistribution.estimator(pseudo_count=...) previously omitted
+    suff_stat=(self.mu, self.covar), unlike the analogous MultivariateGaussianDistribution.estimator.
+    DiagonalGaussianEstimator.estimate only smooths toward the prior mean/covar when
+    prior_mu/prior_covar (set from suff_stat) are not None, so pseudo_count was a silent no-op.
+    """
+
+    def test_pseudo_count_pulls_estimate_toward_prior_mean(self):
+        dg = DiagonalGaussianDistribution(mu=[10.0, 10.0], covar=[1.0, 1.0])
+        est = dg.estimator(pseudo_count=1000.0)
+        self.assertIsNotNone(est.prior_mu)
+        self.assertIsNotNone(est.prior_covar)
+
+        sum_x = np.array([0.0, 0.0])
+        sum_xx = np.array([0.0, 0.0])
+        d = est.estimate(None, (sum_x, sum_xx, 1.0))
+        # pseudo_count=1000 vastly outweighs 1 real observation at 0, so the fitted mean should sit
+        # very close to the prior mean [10, 10] rather than the raw MLE [0, 0].
+        expected_mu = (1000.0 * 10.0) / (1.0 + 1000.0)
+        np.testing.assert_allclose(d.mu, [expected_mu, expected_mu], atol=1e-10)
+        self.assertFalse(np.allclose(d.mu, [0.0, 0.0]))
+
+    def test_pseudo_count_matches_multivariate_sibling(self):
+        # MultivariateGaussianDistribution.estimator already passes suff_stat=(mu, covar); the
+        # diagonal case should behave identically on a diagonal covariance.
+        mvg = MultivariateGaussianDistribution(mu=[10.0, 10.0], covar=[[1.0, 0.0], [0.0, 1.0]])
+        dg = DiagonalGaussianDistribution(mu=[10.0, 10.0], covar=[1.0, 1.0])
+        sum_x = np.array([0.0, 0.0])
+        sum_xx = np.array([0.0, 0.0])
+        d_mvg = mvg.estimator(pseudo_count=1000.0).estimate(None, (sum_x, sum_xx, 1.0))
+        d_dg = dg.estimator(pseudo_count=1000.0).estimate(None, (sum_x, sum_xx, 1.0))
+        np.testing.assert_allclose(d_dg.mu, d_mvg.mu, atol=1e-8)
 
 
 class PackageDunderAllTest(unittest.TestCase):
