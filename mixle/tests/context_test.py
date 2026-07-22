@@ -57,6 +57,24 @@ class BudgetTest(unittest.TestCase):
         pkt = assemble_context(s, "widgets", budget=ContextBudget(max_chars=10000, max_items=3))
         self.assertLessEqual(len(pkt), 3)
 
+    def test_max_items_zero_is_rejected_at_construction(self):
+        """Regression test: ContextBudget had no validation on max_items, so max_items=0 sailed
+        through construction and only blew up later, as a ZeroDivisionError, inside
+        assemble_context's compress=True path (n_target = min(0, len(hits)) == 0, then
+        max_chars // n_target). Catching it at construction surfaces a clear error at the actual
+        mistake, not a confusing crash several calls downstream."""
+        with self.assertRaises(ValueError):
+            ContextBudget(max_items=0)
+        with self.assertRaises(ValueError):
+            ContextBudget(max_items=-1)
+
+    def test_compress_with_the_smallest_valid_item_cap_does_not_crash(self):
+        s = Substrate()
+        for i in range(5):
+            s.add("text", f"document number {i} about widgets and gadgets")
+        pkt = assemble_context(s, "widgets", budget=ContextBudget(max_chars=500, max_items=1), compress=True)
+        self.assertEqual(len(pkt), 1)
+
 
 class ProvenanceTest(unittest.TestCase):
     def test_every_item_carries_provenance(self):
