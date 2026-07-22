@@ -54,12 +54,16 @@ MATURITY_REGISTRY: dict[str, tuple[Maturity, str]] = {
     # look dead in an earlier pass -- they are simply new and not yet wired into a consumer. Real worklist
     # IDs confirmed against their own module docstrings/tests and this repo's commit history, not guessed:
     # H2 landed in #448 "Ore blending & grade control", H3 in #452 "Production scheduling & block
-    # sequencing", H8 in #461 "Digital-twin simulation of the pipeline".
+    # sequencing", H8 in #461 "Digital-twin simulation of the pipeline". H3's module was later renamed
+    # mixle.mine_planning -> mixle.precedence_scheduling: the computation (maximum-weight closure /
+    # precedence-constrained scheduling) is general, open-pit mine planning is one worked instantiation
+    # of it, not what the module is -- the mine-planning worklist label stays accurate for what MOTIVATED
+    # the module even though its name no longer names that application.
     "mixle.blending": (
         Maturity.PROVISIONAL,
         "Active mine-planning workflow (worklist H2: ore blending & grade control)",
     ),
-    "mixle.mine_planning": (
+    "mixle.precedence_scheduling": (
         Maturity.PROVISIONAL,
         "Active mine-planning workflow (worklist H3: production scheduling & block sequencing)",
     ),
