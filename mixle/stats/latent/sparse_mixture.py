@@ -34,7 +34,14 @@ def log_density_sup(dist: Any) -> float | None:
         pm = getattr(dist, "pmap", None)
         if pm:
             m = max(float(v) for v in pm.values())
-            return math.log(m) if m > 0 else None
+            # The peak isn't necessarily inside pmap: any label outside it scores at
+            # default_value, and CategoricalDistribution.log_density normalizes every label
+            # (in pmap or not) by -log1p(default_value). Both must be accounted for, or this
+            # can UNDER-state the true achievable log-density and break the certified-bracket
+            # invariant (default_value can legally exceed every in-pmap probability).
+            default_value = float(getattr(dist, "default_value", 0.0))
+            sup = max(m, default_value)
+            return math.log(sup) - math.log1p(default_value) if sup > 0 else None
     if t == "PoissonDistribution":  # max pmf at the mode floor(lam)
         lam = float(dist.lam)
         if lam <= 0:
