@@ -1579,13 +1579,17 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             if self.init_key in stats_dict:
                 stats_dict[self.init_key] += self.init_counts
             else:
-                stats_dict[self.init_key] = self.init_counts
+                # Copy on adoption: stats_dict must never alias this accumulator's own live
+                # array, or a later tied accumulator's in-place += above would silently mutate
+                # this accumulator's private init_counts as a side effect of merging.
+                stats_dict[self.init_key] = self.init_counts.copy()
 
         if self.trans_key is not None:
             if self.trans_key in stats_dict:
                 stats_dict[self.trans_key] += self.trans_counts
             else:
-                stats_dict[self.trans_key] = self.trans_counts
+                # Same aliasing hazard as init_key above, for the transition-count matrix.
+                stats_dict[self.trans_key] = self.trans_counts.copy()
 
         if self.state_key is not None:
             if self.state_key in stats_dict:
@@ -1612,11 +1616,14 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         """
         if self.init_key is not None:
             if self.init_key in stats_dict:
-                self.init_counts = stats_dict[self.init_key]
+                # Copy on replace too: without it, every tied accumulator ends up pointing at
+                # the SAME array object, so any one of them later accumulating new local data
+                # would silently corrupt every other tied accumulator's counts.
+                self.init_counts = np.asarray(stats_dict[self.init_key]).copy()
 
         if self.trans_key is not None:
             if self.trans_key in stats_dict:
-                self.trans_counts = stats_dict[self.trans_key]
+                self.trans_counts = np.asarray(stats_dict[self.trans_key]).copy()
 
         if self.state_key is not None:
             if self.state_key in stats_dict:
