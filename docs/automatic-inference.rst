@@ -310,7 +310,8 @@ sizes have a finite sum.
 
 .. code-block:: python
 
-   from mixle.inference import StreamingEstimator, harmonic
+   from mixle.inference import StreamingEstimator
+   from mixle.inference.estimation import harmonic
 
    stream = StreamingEstimator(
        estimator,
