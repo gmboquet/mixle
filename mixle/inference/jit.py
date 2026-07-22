@@ -171,7 +171,9 @@ def jit_em_mixture(model: Any, data: Any, *, max_its: int = 100, engine: Any = N
 
     eng = engine if engine is not None else JaxEngine()
     comps = getattr(model, "components", None)
-    if comps is None or any(type(c) is not type(comps[0]) for c in comps):
+    if not comps:
+        raise NotImplementedError("jit_em_mixture requires a mixture with at least one component.")
+    if any(type(c) is not type(comps[0]) for c in comps):
         raise NotImplementedError("jit_em_mixture needs a mixture of leaves of a single family.")
     fam = _mixture_em_family(comps[0], jnp)
     if fam is None:
