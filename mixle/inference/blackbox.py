@@ -242,8 +242,11 @@ class LaplacePosterior:
         self.acceptance_rate = None
 
     def sample(self, n: int = 1, rng=None):
-        """Draw model samples from the Laplace Gaussian approximation."""
-        rng = rng or np.random.RandomState()
+        """Draw model samples from the Laplace Gaussian approximation. ``rng`` may be ``None``
+        (unseeded), an int seed, or an existing ``RandomState``."""
+        # `rng or np.random.RandomState()` silently discarded seed 0 (falsy) and crashed on any
+        # other int (no .standard_normal method) -- 0 is a perfectly valid seed.
+        rng = rng if isinstance(rng, np.random.RandomState) else np.random.RandomState(rng)
         zs = rng.standard_normal((int(n), len(self.u_mode)))
         draws = self.u_mode[None, :] + zs @ self._chol.T
         models = [self._rebuild(u.copy())[0] for u in draws]

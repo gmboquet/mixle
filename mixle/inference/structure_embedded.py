@@ -132,6 +132,8 @@ def learn_structure_embedded(
     from mixle.inference.bayesian_network import learn_bayesian_network
     from mixle.represent import fit_embedder
 
+    if n_clusters < 1:
+        raise ValueError(f"n_clusters must be >= 1, got {n_clusters}")
     rows = [tuple(r) for r in data]
     if len(rows) < 40:
         raise ValueError("learn_structure_embedded needs at least 40 records")

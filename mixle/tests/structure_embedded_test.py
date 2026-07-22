@@ -66,6 +66,16 @@ class EmbeddedStructureTest(unittest.TestCase):
         vf = [f for f in m.net.factors if f.child == 0]
         self.assertTrue(vf and type(vf[0]).__name__ in ("_VectorMarginalFactor", "_VectorCLGFactor"))
 
+    def test_rejects_nonpositive_n_clusters_with_a_clear_error(self):
+        # _lloyd builds an empty (0, dim) centroids array for n_clusters=0, and the assignment step's
+        # argmax over a zero-width axis raised a cryptic "attempt to get argmax of an empty sequence"
+        # ValueError instead of a clear one naming the actual problem -- both are ValueError, so the
+        # message (not just the type) is what distinguishes the fix from the old cryptic crash.
+        from mixle.inference import learn_structure_embedded
+
+        with self.assertRaisesRegex(ValueError, "n_clusters"):
+            learn_structure_embedded(_rows(60, True), text_fields=[0], n_clusters=0, embed_dim=8, epochs=20, seed=0)
+
     def test_single_record_encode_matches_batch(self):
         from mixle.inference import learn_structure_embedded
 
