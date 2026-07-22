@@ -192,3 +192,442 @@ class BaseProtocolAdoptionTest(unittest.TestCase):
         self.assertIn("inner", stats, "the wrapped child's key must reach the stats dict")
         np.testing.assert_allclose(_flat(acc_a.accumulator.value()), _flat(acc_b.accumulator.value()), rtol=1e-12)
         self.assertAlmostEqual(float(acc_a.accumulator.count), 5.0, places=12)
+
+
+class ArrayAliasingProtocolTest(unittest.TestCase):
+    """A second compiler-review pass, this time over families that pool a raw NumPy array (or a
+    tuple of arrays) directly instead of going through the base class's store-self-and-combine()
+    protocol. ``key_merge`` stored the first tied site's own live array in the dict and then
+    mutated it in place on the next merge (``stats_dict[key] += self.<field>``); ``key_replace``
+    then handed that same array object to every tied site with no copy, so any site's later
+    local accumulation would silently corrupt every other tied site's counts. Fixed by copying on
+    both boundaries: once when a key is first adopted into the dict, and once when a value is
+    read back out of the dict into a site.
+    """
+
+    @staticmethod
+    def _bare(cls):
+        """Construct via __new__, bypassing __init__: these tests target only key_merge's and
+        key_replace's handling of specific fields, not full accumulator construction."""
+        return object.__new__(cls)
+
+    def test_mixture_family_comp_counts_no_aliasing(self):
+        from mixle.stats.latent.heterogeneous_mixture import HeterogeneousMixtureAccumulator
+        from mixle.stats.latent.mixture import MixtureAccumulator
+        from mixle.stats.latent.semi_supervised_mixture import SemiSupervisedMixtureEstimatorAccumulator
+
+        for cls in (MixtureAccumulator, HeterogeneousMixtureAccumulator, SemiSupervisedMixtureEstimatorAccumulator):
+            with self.subTest(cls=cls.__name__):
+                acc_a, acc_b = self._bare(cls), self._bare(cls)
+                for acc in (acc_a, acc_b):
+                    acc.weight_key = "w"
+                    acc.comp_key = None
+                    acc.accumulators = []
+                acc_a.comp_counts = np.array([1.0, 2.0, 3.0])
+                acc_b.comp_counts = np.array([10.0, 20.0, 30.0])
+                stats: dict = {}
+                acc_a.key_merge(stats)
+                acc_b.key_merge(stats)
+                acc_a.key_replace(stats)
+                acc_b.key_replace(stats)
+                np.testing.assert_allclose(acc_a.comp_counts, [11.0, 22.0, 33.0])
+                np.testing.assert_allclose(acc_b.comp_counts, [11.0, 22.0, 33.0])
+                self.assertIsNot(acc_a.comp_counts, acc_b.comp_counts, "tied sites must not share one array")
+                acc_a.comp_counts += 1000.0  # mutating one site must not leak into the other
+                np.testing.assert_allclose(acc_b.comp_counts, [11.0, 22.0, 33.0])
+
+    def test_dirac_length_comp_counts_no_aliasing(self):
+        from mixle.stats.combinator.null_dist import NullAccumulator
+        from mixle.stats.latent.dirac_length import DiracLengthMixtureAccumulator
+
+        acc_a, acc_b = self._bare(DiracLengthMixtureAccumulator), self._bare(DiracLengthMixtureAccumulator)
+        for acc in (acc_a, acc_b):
+            acc.weight_key = "w"
+            acc.comp_key = None
+            acc.accumulator = NullAccumulator()
+        acc_a.comp_counts = np.array([1.0, 2.0])
+        acc_b.comp_counts = np.array([10.0, 20.0])
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        np.testing.assert_allclose(acc_a.comp_counts, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.comp_counts, [11.0, 22.0])
+        self.assertIsNot(acc_a.comp_counts, acc_b.comp_counts, "tied sites must not share one array")
+        acc_a.comp_counts += 1000.0
+        np.testing.assert_allclose(acc_b.comp_counts, [11.0, 22.0])
+
+    def test_hmm_family_init_trans_counts_no_aliasing(self):
+        from mixle.stats.latent.hidden_markov import HiddenMarkovAccumulator
+        from mixle.stats.latent.tree_hidden_markov_model import TreeHiddenMarkovAccumulator
+
+        for cls in (HiddenMarkovAccumulator, TreeHiddenMarkovAccumulator):
+            with self.subTest(cls=cls.__name__):
+                acc_a, acc_b = self._bare(cls), self._bare(cls)
+                for acc in (acc_a, acc_b):
+                    acc.init_key = "i"
+                    acc.trans_key = "t"
+                    acc.state_key = None
+                    acc.accumulators = []
+                    acc.len_accumulator = None
+                acc_a.init_counts = np.array([1.0, 2.0])
+                acc_b.init_counts = np.array([10.0, 20.0])
+                acc_a.trans_counts = np.array([[1.0, 0.0], [0.0, 1.0]])
+                acc_b.trans_counts = np.array([[5.0, 5.0], [5.0, 5.0]])
+                stats: dict = {}
+                acc_a.key_merge(stats)
+                acc_b.key_merge(stats)
+                acc_a.key_replace(stats)
+                acc_b.key_replace(stats)
+                np.testing.assert_allclose(acc_a.init_counts, [11.0, 22.0])
+                np.testing.assert_allclose(acc_b.init_counts, [11.0, 22.0])
+                np.testing.assert_allclose(acc_a.trans_counts, [[6.0, 5.0], [5.0, 6.0]])
+                np.testing.assert_allclose(acc_b.trans_counts, [[6.0, 5.0], [5.0, 6.0]])
+                self.assertIsNot(acc_a.init_counts, acc_b.init_counts, "tied sites must not share one array")
+                self.assertIsNot(acc_a.trans_counts, acc_b.trans_counts, "tied sites must not share one array")
+                acc_a.init_counts += 1000.0
+                acc_a.trans_counts += 1000.0
+                np.testing.assert_allclose(acc_b.init_counts, [11.0, 22.0])
+                np.testing.assert_allclose(acc_b.trans_counts, [[6.0, 5.0], [5.0, 6.0]])
+
+    def test_lookback_hmm_init_trans_counts_no_aliasing(self):
+        from mixle.stats.latent.lookback_hidden_markov_model import LookbackHiddenMarkovModelEstimatorAccumulator
+
+        cls = LookbackHiddenMarkovModelEstimatorAccumulator
+        acc_a, acc_b = self._bare(cls), self._bare(cls)
+        for acc in (acc_a, acc_b):
+            acc.init_key = "i"
+            acc.trans_key = "t"
+            acc.state_key = None
+            acc.init_accumulators = []
+            acc.seq_accumulators = []
+            acc.len_accumulator = None
+        acc_a.init_counts = np.array([1.0, 2.0])
+        acc_b.init_counts = np.array([10.0, 20.0])
+        acc_a.trans_counts = np.array([[1.0, 0.0], [0.0, 1.0]])
+        acc_b.trans_counts = np.array([[5.0, 5.0], [5.0, 5.0]])
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        np.testing.assert_allclose(acc_a.init_counts, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.init_counts, [11.0, 22.0])
+        self.assertIsNot(acc_a.init_counts, acc_b.init_counts, "tied sites must not share one array")
+        self.assertIsNot(acc_a.trans_counts, acc_b.trans_counts, "tied sites must not share one array")
+        acc_a.init_counts += 1000.0
+        acc_a.trans_counts += 1000.0
+        np.testing.assert_allclose(acc_b.init_counts, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.trans_counts, [[6.0, 5.0], [5.0, 6.0]])
+
+    def test_segmental_hmm_init_trans_counts_no_aliasing(self):
+        from mixle.stats.combinator.null_dist import NullAccumulator
+        from mixle.stats.latent.segmental_hidden_markov_model import SegmentalHiddenMarkovAccumulator
+
+        cls = SegmentalHiddenMarkovAccumulator
+        acc_a, acc_b = self._bare(cls), self._bare(cls)
+        for acc in (acc_a, acc_b):
+            acc.init_key = "i"
+            acc.trans_key = "t"
+            acc.state_key = None
+            acc.accumulators = []
+            acc.len_accumulator = NullAccumulator()
+        acc_a.init_counts = np.array([1.0, 2.0])
+        acc_b.init_counts = np.array([10.0, 20.0])
+        acc_a.trans_counts = np.array([[1.0, 0.0], [0.0, 1.0]])
+        acc_b.trans_counts = np.array([[5.0, 5.0], [5.0, 5.0]])
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        np.testing.assert_allclose(acc_a.init_counts, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.init_counts, [11.0, 22.0])
+        self.assertIsNot(acc_a.init_counts, acc_b.init_counts, "tied sites must not share one array")
+        self.assertIsNot(acc_a.trans_counts, acc_b.trans_counts, "tied sites must not share one array")
+        acc_a.init_counts += 1000.0
+        acc_a.trans_counts += 1000.0
+        np.testing.assert_allclose(acc_b.init_counts, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.trans_counts, [[6.0, 5.0], [5.0, 6.0]])
+
+    def test_semi_supervised_hmm_trans_counts_no_aliasing(self):
+        from mixle.stats.combinator.null_dist import NullAccumulator
+        from mixle.stats.latent.semi_supervised_hidden_markov_model import (
+            SemiSupervisedHiddenMarkovEstimatorAccumulator,
+        )
+
+        cls = SemiSupervisedHiddenMarkovEstimatorAccumulator
+        acc_a, acc_b = self._bare(cls), self._bare(cls)
+        for acc in (acc_a, acc_b):
+            acc.trans_key = "t"
+            acc.state_key = None
+            acc.accumulators = []
+            acc.len_accumulator = NullAccumulator()
+        acc_a.trans_counts = np.array([[1.0, 0.0], [0.0, 1.0]])
+        acc_b.trans_counts = np.array([[5.0, 5.0], [5.0, 5.0]])
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        np.testing.assert_allclose(acc_a.trans_counts, [[6.0, 5.0], [5.0, 6.0]])
+        np.testing.assert_allclose(acc_b.trans_counts, [[6.0, 5.0], [5.0, 6.0]])
+        self.assertIsNot(acc_a.trans_counts, acc_b.trans_counts, "tied sites must not share one array")
+        acc_a.trans_counts += 1000.0
+        np.testing.assert_allclose(acc_b.trans_counts, [[6.0, 5.0], [5.0, 6.0]])
+
+    def test_hierarchical_mixture_comp_and_w_counts_no_aliasing(self):
+        from mixle.stats.combinator.null_dist import NullAccumulator
+        from mixle.stats.latent.hierarchical_mixture import HierarchicalMixtureEstimatorAccumulator
+
+        cls = HierarchicalMixtureEstimatorAccumulator
+        acc_a, acc_b = self._bare(cls), self._bare(cls)
+        for acc in (acc_a, acc_b):
+            acc.weight_key = "w"
+            acc.comp_key = None
+            acc.accumulators = []
+            acc.len_accumulator = NullAccumulator()
+        acc_a.comp_counts = np.array([[1.0, 2.0], [3.0, 4.0]])
+        acc_b.comp_counts = np.array([[10.0, 20.0], [30.0, 40.0]])
+        acc_a.w_counts = np.array([1.0, 2.0])
+        acc_b.w_counts = np.array([10.0, 20.0])
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        np.testing.assert_allclose(acc_a.comp_counts, [[11.0, 22.0], [33.0, 44.0]])
+        np.testing.assert_allclose(acc_b.comp_counts, [[11.0, 22.0], [33.0, 44.0]])
+        np.testing.assert_allclose(acc_a.w_counts, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.w_counts, [11.0, 22.0])
+        self.assertIsNot(acc_a.comp_counts, acc_b.comp_counts, "tied sites must not share one array")
+        self.assertIsNot(acc_a.w_counts, acc_b.w_counts, "tied sites must not share one array")
+        acc_a.comp_counts += 1000.0
+        acc_a.w_counts += 1000.0
+        np.testing.assert_allclose(acc_b.comp_counts, [[11.0, 22.0], [33.0, 44.0]])
+        np.testing.assert_allclose(acc_b.w_counts, [11.0, 22.0])
+
+    def test_joint_mixture_comp_and_joint_counts_no_aliasing(self):
+        from mixle.stats.latent.joint_mixture import JointMixtureEstimatorAccumulator
+
+        cls = JointMixtureEstimatorAccumulator
+        acc_a, acc_b = self._bare(cls), self._bare(cls)
+        for acc in (acc_a, acc_b):
+            acc.keys = ("w", None, None)
+            acc.accumulators1 = []
+            acc.accumulators2 = []
+        acc_a.comp_counts1 = np.array([1.0, 2.0])
+        acc_b.comp_counts1 = np.array([10.0, 20.0])
+        acc_a.comp_counts2 = np.array([1.0, 2.0, 3.0])
+        acc_b.comp_counts2 = np.array([10.0, 20.0, 30.0])
+        acc_a.joint_counts = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        acc_b.joint_counts = np.array([[5.0, 5.0, 5.0], [5.0, 5.0, 5.0]])
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        np.testing.assert_allclose(acc_a.comp_counts1, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.comp_counts1, [11.0, 22.0])
+        self.assertIsNot(acc_a.comp_counts1, acc_b.comp_counts1, "tied sites must not share one array")
+        self.assertIsNot(acc_a.comp_counts2, acc_b.comp_counts2, "tied sites must not share one array")
+        self.assertIsNot(acc_a.joint_counts, acc_b.joint_counts, "tied sites must not share one array")
+        acc_a.comp_counts1 += 1000.0
+        acc_a.comp_counts2 += 1000.0
+        acc_a.joint_counts += 1000.0
+        np.testing.assert_allclose(acc_b.comp_counts1, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.comp_counts2, [11.0, 22.0, 33.0])
+        np.testing.assert_allclose(acc_b.joint_counts, [[6.0, 5.0, 5.0], [5.0, 6.0, 5.0]])
+
+    def test_lda_sum_of_logs_and_prev_alpha_no_aliasing(self):
+        from mixle.stats.combinator.null_dist import NullAccumulator
+        from mixle.stats.latent.lda import LDAEstimatorAccumulator
+
+        cls = LDAEstimatorAccumulator
+        acc_a, acc_b = self._bare(cls), self._bare(cls)
+        for acc in (acc_a, acc_b):
+            acc.alpha_key = "a"
+            acc.topics_key = None
+            acc.accumulators = []
+            acc.len_accumulator = NullAccumulator()
+        acc_a.sum_of_logs = np.array([1.0, 2.0])
+        acc_b.sum_of_logs = np.array([10.0, 20.0])
+        acc_a.doc_counts = 3.0
+        acc_b.doc_counts = 7.0
+        acc_a.prev_alpha = np.array([0.5, 0.5])
+        acc_b.prev_alpha = None
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        np.testing.assert_allclose(acc_a.sum_of_logs, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.sum_of_logs, [11.0, 22.0])
+        self.assertEqual(acc_a.doc_counts, 10.0)
+        self.assertEqual(acc_b.doc_counts, 10.0)
+        np.testing.assert_allclose(acc_a.prev_alpha, [0.5, 0.5])
+        np.testing.assert_allclose(acc_b.prev_alpha, [0.5, 0.5])
+        self.assertIsNot(acc_a.sum_of_logs, acc_b.sum_of_logs, "tied sites must not share one array")
+        self.assertIsNot(acc_a.prev_alpha, acc_b.prev_alpha, "tied sites must not share one array")
+        acc_a.sum_of_logs += 1000.0
+        acc_a.prev_alpha += 1000.0
+        np.testing.assert_allclose(acc_b.sum_of_logs, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.prev_alpha, [0.5, 0.5])
+
+    def test_labeled_lda_set_stats_and_prev_alpha_no_aliasing(self):
+        from mixle.stats.latent.labeled_lda import LabeledLDAEstimatorAccumulator, LabeledLDALabelSetStats
+
+        cls = LabeledLDAEstimatorAccumulator
+        acc_a, acc_b = self._bare(cls), self._bare(cls)
+        for acc in (acc_a, acc_b):
+            acc.alpha_key = "a"
+            acc.topics_key = None
+            acc.accumulators = []
+        acc_a.set_stats = LabeledLDALabelSetStats({(0,): [3.0, np.array([1.0, 2.0])]})
+        acc_b.set_stats = LabeledLDALabelSetStats({(0,): [7.0, np.array([10.0, 20.0])]})
+        acc_a.doc_counts = 3.0
+        acc_b.doc_counts = 7.0
+        acc_a.prev_alpha = np.array([0.5, 0.5])
+        acc_b.prev_alpha = None
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        np.testing.assert_allclose(acc_a.set_stats.stats[(0,)][0], 10.0)
+        np.testing.assert_allclose(acc_a.set_stats.stats[(0,)][1], [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.set_stats.stats[(0,)][0], 10.0)
+        np.testing.assert_allclose(acc_b.set_stats.stats[(0,)][1], [11.0, 22.0])
+        self.assertEqual(acc_a.doc_counts, 10.0)
+        self.assertEqual(acc_b.doc_counts, 10.0)
+        np.testing.assert_allclose(acc_a.prev_alpha, [0.5, 0.5])
+        np.testing.assert_allclose(acc_b.prev_alpha, [0.5, 0.5])
+        self.assertIsNot(acc_a.set_stats, acc_b.set_stats, "tied sites must not share one object")
+        self.assertIsNot(acc_a.prev_alpha, acc_b.prev_alpha, "tied sites must not share one array")
+        acc_a.set_stats.stats[(0,)][1] += 1000.0
+        acc_a.prev_alpha += 1000.0
+        np.testing.assert_allclose(acc_b.set_stats.stats[(0,)][1], [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.prev_alpha, [0.5, 0.5])
+
+    def test_heterogeneous_pcfg_terminal_and_binary_counts_no_aliasing(self):
+        from mixle.stats.latent.heterogeneous_pcfg import HeterogeneousPCFGAccumulator
+
+        cls = HeterogeneousPCFGAccumulator
+        acc_a, acc_b = self._bare(cls), self._bare(cls)
+        for acc in (acc_a, acc_b):
+            acc.rule_key = "r"
+            acc.emission_key = None
+            acc.emission_accumulators = []
+        acc_a.terminal_counts = np.array([1.0, 2.0])
+        acc_b.terminal_counts = np.array([10.0, 20.0])
+        acc_a.binary_counts = np.array([1.0, 2.0, 3.0])
+        acc_b.binary_counts = np.array([10.0, 20.0, 30.0])
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        np.testing.assert_allclose(acc_a.terminal_counts, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.terminal_counts, [11.0, 22.0])
+        np.testing.assert_allclose(acc_a.binary_counts, [11.0, 22.0, 33.0])
+        np.testing.assert_allclose(acc_b.binary_counts, [11.0, 22.0, 33.0])
+        self.assertIsNot(acc_a.terminal_counts, acc_b.terminal_counts, "tied sites must not share one array")
+        self.assertIsNot(acc_a.binary_counts, acc_b.binary_counts, "tied sites must not share one array")
+        acc_a.terminal_counts += 1000.0
+        acc_a.binary_counts += 1000.0
+        np.testing.assert_allclose(acc_b.terminal_counts, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.binary_counts, [11.0, 22.0, 33.0])
+
+    def test_integer_plsi_word_comp_doc_counts_no_aliasing(self):
+        from mixle.stats.combinator.null_dist import NullAccumulator
+        from mixle.stats.latent.integer_probabilistic_latent_semantic_indexing import (
+            IntegerProbabilisticLatentSemanticIndexingAccumulator,
+        )
+
+        cls = IntegerProbabilisticLatentSemanticIndexingAccumulator
+        acc_a, acc_b = self._bare(cls), self._bare(cls)
+        for acc in (acc_a, acc_b):
+            acc.wc_key = "wc"
+            acc.sc_key = "sc"
+            acc.dc_key = "dc"
+            acc.len_acc = NullAccumulator()
+        acc_a.word_count = np.array([[1.0, 2.0], [3.0, 4.0]])
+        acc_b.word_count = np.array([[10.0, 20.0], [30.0, 40.0]])
+        acc_a.comp_count = np.array([[1.0, 2.0], [3.0, 4.0]])
+        acc_b.comp_count = np.array([[10.0, 20.0], [30.0, 40.0]])
+        acc_a.doc_count = np.array([1.0, 2.0])
+        acc_b.doc_count = np.array([10.0, 20.0])
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        for field in ("word_count", "comp_count"):
+            np.testing.assert_allclose(getattr(acc_a, field), [[11.0, 22.0], [33.0, 44.0]])
+            np.testing.assert_allclose(getattr(acc_b, field), [[11.0, 22.0], [33.0, 44.0]])
+            self.assertIsNot(getattr(acc_a, field), getattr(acc_b, field), "tied sites must not share one array")
+        np.testing.assert_allclose(acc_a.doc_count, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.doc_count, [11.0, 22.0])
+        self.assertIsNot(acc_a.doc_count, acc_b.doc_count, "tied sites must not share one array")
+        acc_a.word_count += 1000.0
+        acc_a.comp_count += 1000.0
+        acc_a.doc_count += 1000.0
+        np.testing.assert_allclose(acc_b.word_count, [[11.0, 22.0], [33.0, 44.0]])
+        np.testing.assert_allclose(acc_b.comp_count, [[11.0, 22.0], [33.0, 44.0]])
+        np.testing.assert_allclose(acc_b.doc_count, [11.0, 22.0])
+
+    def test_structured_hmm_pi_acc_no_aliasing(self):
+        from mixle.stats.latent.structured_hmm import StructuredHMMAccumulator
+
+        cls = StructuredHMMAccumulator
+        acc_a, acc_b = self._bare(cls), self._bare(cls)
+        for acc in (acc_a, acc_b):
+            acc.init_key = "i"
+            acc.trans_key = None
+            acc.emit = []
+        acc_a.pi_acc = np.array([1.0, 2.0])
+        acc_b.pi_acc = np.array([10.0, 20.0])
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        np.testing.assert_allclose(acc_a.pi_acc, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.pi_acc, [11.0, 22.0])
+        self.assertIsNot(acc_a.pi_acc, acc_b.pi_acc, "tied sites must not share one array")
+        acc_a.pi_acc += 1000.0  # mirrors the in-place += that seq_update/combine/scale perform
+        np.testing.assert_allclose(acc_b.pi_acc, [11.0, 22.0])
+
+    def test_init_trans_keyed_accumulator_mixin_no_aliasing(self):
+        from scipy.sparse import csc_matrix
+
+        from mixle.stats.combinator.null_dist import NullAccumulator
+        from mixle.stats.sequences._keyed_accumulator import InitTransKeyedAccumulator
+
+        class _Host(InitTransKeyedAccumulator):
+            def __init__(self, init_count, trans_count, keys):
+                self.init_key, self.trans_key = keys
+                self.init_count = init_count
+                self.trans_count = trans_count
+                self.size_accumulator = NullAccumulator()
+
+        # Dense init_count (always ndarray) + sparse trans_count (the MarkovTransformAccumulator
+        # shape): .copy() must work polymorphically for both, not just np.asarray(...).copy().
+        acc_a = _Host(np.array([1.0, 2.0]), csc_matrix(np.array([[1.0, 0.0], [0.0, 1.0]])), ("i", "t"))
+        acc_b = _Host(np.array([10.0, 20.0]), csc_matrix(np.array([[5.0, 5.0], [5.0, 5.0]])), ("i", "t"))
+        stats: dict = {}
+        acc_a.key_merge(stats)
+        acc_b.key_merge(stats)
+        acc_a.key_replace(stats)
+        acc_b.key_replace(stats)
+        np.testing.assert_allclose(acc_a.init_count, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.init_count, [11.0, 22.0])
+        np.testing.assert_allclose(acc_a.trans_count.toarray(), [[6.0, 5.0], [5.0, 6.0]])
+        np.testing.assert_allclose(acc_b.trans_count.toarray(), [[6.0, 5.0], [5.0, 6.0]])
+        self.assertIsNot(acc_a.init_count, acc_b.init_count, "tied sites must not share one array")
+        self.assertIsNot(acc_a.trans_count, acc_b.trans_count, "tied sites must not share one sparse matrix")
+        acc_a.init_count += 1000.0
+        acc_a.trans_count *= 1000.0  # sparse += a nonzero scalar is unsupported by scipy; use *=
+        np.testing.assert_allclose(acc_b.init_count, [11.0, 22.0])
+        np.testing.assert_allclose(acc_b.trans_count.toarray(), [[6.0, 5.0], [5.0, 6.0]])
