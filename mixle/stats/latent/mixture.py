@@ -1344,7 +1344,10 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             if self.weight_key in stats_dict:
                 stats_dict[self.weight_key] += self.comp_counts
             else:
-                stats_dict[self.weight_key] = self.comp_counts
+                # Copy on adoption: stats_dict must never alias this accumulator's own live
+                # array, or a later tied accumulator's in-place += above would silently mutate
+                # this accumulator's private comp_counts as a side effect of merging.
+                stats_dict[self.weight_key] = self.comp_counts.copy()
 
         if self.comp_key is not None:
             if self.comp_key in stats_dict:
@@ -1366,7 +1369,10 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         """
         if self.weight_key is not None:
             if self.weight_key in stats_dict:
-                self.comp_counts = stats_dict[self.weight_key]
+                # Copy on replace too: without it, every tied accumulator ends up pointing at
+                # the SAME array object, so any one of them later accumulating new local data
+                # would silently corrupt every other tied accumulator's counts.
+                self.comp_counts = np.asarray(stats_dict[self.weight_key]).copy()
 
         if self.comp_key is not None:
             if self.comp_key in stats_dict:
