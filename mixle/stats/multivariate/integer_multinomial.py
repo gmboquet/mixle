@@ -283,10 +283,17 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         v = val - self.min_val
         u = np.bitwise_and(v >= 0, v < self.num_vals)
+        nz = cnt != 0
         rv = np.zeros(len(v))
         rv.fill(-np.inf)
-        rv[u] = self.log_p_vec[v[u]]
-        rv[u] *= cnt[u]
+        # Only multiply log_p_vec by cnt where cnt != 0: a zero-count entry contributes
+        # nothing even for an in-support category with log_p_vec[k] == -inf (avoids
+        # (-inf) * 0 = NaN). Matches the scalar log_density path's "if cnt == 0: continue"
+        # guard, including for out-of-support categories (those stay masked to -inf above
+        # only when cnt != 0; zero-count rows are zeroed below regardless of support).
+        um = np.bitwise_and(u, nz)
+        rv[um] = self.log_p_vec[v[um]] * cnt[um]
+        rv[~nz] = 0.0
         ll = np.bincount(idx, weights=rv, minlength=sz)
 
         if tcnt is not None:

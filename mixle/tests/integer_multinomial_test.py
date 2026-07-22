@@ -52,5 +52,43 @@ class IntegerMultinomialLenDistTestCase(unittest.TestCase):
         self.assertNotAlmostEqual(d_null.log_density(x), d_poisson.log_density(x), places=6)
 
 
+class IntegerMultinomialZeroProbZeroCountTestCase(unittest.TestCase):
+    """seq_log_density previously computed (-inf) * 0 = NaN for an in-support category k with
+    p_vec[k] == 0 whenever an observation contained (k, count=0). The scalar log_density path
+    already special-cased cnt == 0 to avoid this; seq_log_density now matches it.
+    """
+
+    ZERO_PROB_DATA = [
+        [(0, 0.0), (1, 2.0), (2, 1.0)],  # zero-prob category present with count=0: must not be NaN
+        [(1, 3.0)],  # zero-prob category absent entirely
+        [(0, 1.0), (1, 1.0), (2, 1.0)],  # zero-prob category present with count>0: must be -inf
+        [(0, 0.0)],  # observation consisting solely of a zero-count, zero-prob entry
+    ]
+
+    def _dist(self):
+        return IntegerMultinomialDistribution(min_val=0, p_vec=[0.0, 0.3, 0.7])
+
+    def test_seq_log_density_no_nan_for_zero_count_zero_prob_entry(self):
+        d = self._dist()
+        enc = d.dist_to_encoder().seq_encode(self.ZERO_PROB_DATA)
+        seq = np.asarray(d.seq_log_density(enc))
+        self.assertFalse(np.any(np.isnan(seq)), msg=f"seq_log_density produced NaN: {seq}")
+
+    def test_seq_log_density_matches_scalar_with_zero_prob_category(self):
+        d = self._dist()
+        enc = d.dist_to_encoder().seq_encode(self.ZERO_PROB_DATA)
+        seq = np.asarray(d.seq_log_density(enc))
+        scalar = np.array([d.log_density(x) for x in self.ZERO_PROB_DATA])
+        np.testing.assert_allclose(seq, scalar, atol=1e-10)
+
+    def test_seq_log_density_still_neg_inf_for_nonzero_count_zero_prob_entry(self):
+        # Guards against an overcorrection that zeroes out every zero-prob-category contribution
+        # regardless of count -- it must remain -inf when the count is actually nonzero.
+        d = self._dist()
+        enc = d.dist_to_encoder().seq_encode(self.ZERO_PROB_DATA)
+        seq = np.asarray(d.seq_log_density(enc))
+        self.assertEqual(seq[2], -np.inf)
+
+
 if __name__ == "__main__":
     unittest.main()
