@@ -78,3 +78,15 @@ Each round records the scheduler decision, actual observed-data objective before
 cache invalidation closure, component evaluations, operations, and elapsed time. Internal gain evidence is the
 committed global-objective gain and is labelled `joint_with_coordinator`; it is not presented as an isolated causal
 contribution from one component.
+
+### Local-optimum risk on multimodal objectives
+
+Budgeting which components update each round makes this a different asynchronous coordinate-ascent process than
+full-tree EM, not merely a faster schedule for the same one. On a non-convex mixture likelihood the two processes can
+settle at different fixed points -- occasionally a meaningfully worse one -- even though both are individually
+monotone in their own committed objective the whole way there. This is not a bug a gentler budget fixes: the gap
+shrinks but does not disappear at any budget short of updating every component every round, where it degenerates to
+full EM by construction. A caller that needs the same fixed point full EM would reach should either pass a
+`scheduler` with `budget_fraction=1.0`, or use `mixle.inference.freeze_rollup` instead, which reaches an identical
+fixed point by construction -- it only ever skips a component once its own convergence has already been
+demonstrated, rather than rationing updates among components before any evidence exists to prioritize by.

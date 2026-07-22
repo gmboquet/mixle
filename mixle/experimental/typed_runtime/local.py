@@ -166,6 +166,22 @@ def run_typed_mixture_em(
     contribution. A caller with better per-block probes may supply
     ``gain_provider``; objective compatibility is still enforced by the
     scheduler.
+
+    Budgeting changes convergence dynamics, not only speed: leaving a
+    component's parameters fixed for one or more rounds makes this a different
+    asynchronous coordinate-ascent process than full-tree EM, and on a
+    non-convex mixture likelihood the two can settle at different fixed
+    points -- occasionally a meaningfully worse one -- even though each
+    trajectory is individually monotone in its own committed objective. This
+    is not something a gentler ``scheduler`` fixes: the gap shrinks but does
+    not vanish at every budget short of updating every component every round
+    (see ``mixle/tests/typed_local_mixture_test.py``'s
+    ``LocalOptimumDivergenceRiskTestCase``). A caller that needs the same
+    fixed point full EM would reach should pass a ``scheduler`` with
+    ``budget_fraction=1.0``, or use ``mixle.inference.freeze_rollup`` instead,
+    which reaches an identical fixed point by construction -- it only skips a
+    component once its own convergence has already been demonstrated, rather
+    than rationing updates among components before any evidence exists.
     """
 
     if not isinstance(initial_model, MixtureDistribution) or not isinstance(estimator, MixtureEstimator):
