@@ -1,6 +1,6 @@
-"""Digital-twin simulation of the mine -> plant -> distribution pipeline (H8).
+"""Digital-twin simulation of a min-cost-flow network under stochastic arrivals (H8).
 
-A :class:`PipelineTwin` is a period-stepped re-solve of the production network's flow: each period
+A :class:`PipelineTwin` is a period-stepped re-solve of a production network's flow: each period
 it re-runs :func:`mixle.relations.min_cost_flow` (IC-9) under the current arc capacities/costs and a
 draw of stochastic arrivals, then accumulates queue/bottleneck diagnostics as state. It is wrapped
 as a :class:`mixle.inference.simulate.Simulator` so the per-period stochastic draws come from the
@@ -9,6 +9,12 @@ interventions are registered through the same :class:`~mixle.inference.simulate.
 the simulate module already exposes -- though, unlike a learned Bayesian network, a deterministic
 flow network has no ``do``-operator to route through, so interventions here are applied directly as
 arc/capacity/supply overrides (see :meth:`PipelineTwin._apply_interventions`).
+
+Nothing about the twin itself is domain-specific: it is a general period-stepped supply/demand
+network simulator with pluggable scenario interventions (new/changed arcs, node outages, supply-rate
+shifts, demand shifts). This module's worked instantiation is a mine -> plant -> distribution
+pipeline (source nodes are mines, sinks are customers, "plant-down" and "grade shift" are the named
+interventions below), but the network topology, capacities, and interventions are all caller-supplied.
 
 Network capacities can be tightened by H5 (``mixle_pde.material_transport``) transport-physics
 numbers -- those arrive as a plain ``{(u, v): capacity}`` mapping (no cross-plugin import) and are
@@ -115,7 +121,7 @@ class PipelineTwin:
             self._simulator.scenarios[name] = Scenario(name, {})
 
     def scenario(self, name: str, interventions: dict[str, Any]) -> PipelineTwin:
-        """Register a named intervention (plant-down / grade-shift / demand-spike / new arc / ...).
+        """Register a named intervention (node outage / supply-rate shift / demand-spike / new arc / ...).
 
         Returns a new twin sharing this one's network and seed but with ``name`` available to
         :meth:`run` via its ``scenario=`` argument -- the base twin (and any other scenario already
@@ -150,12 +156,14 @@ class PipelineTwin:
                 for node in nodes:
                     cap[node, :] = 0.0
                     cap[:, node] = 0.0
-            elif kind == "grade_shift":
-                # {node: multiplier} -- perturb a mine's effective usable feed grade/tonnage.
+            elif kind == "supply_multiplier":
+                # {node: multiplier} -- perturb a supply node's rate (this module's mine-planning
+                # instantiation uses it for an effective usable feed grade/tonnage shift).
                 for node, mult in spec.items():
                     supply[node] *= float(mult)
             elif kind == "demand_delta":
-                # {node: additive delta} -- demand-spike (or relief) at a customer node.
+                # {node: additive delta} -- demand-spike (or relief) at a demand node (a customer, in
+                # this module's mine-planning instantiation).
                 for node, delta in spec.items():
                     supply[node] += float(delta)
             else:
@@ -233,9 +241,10 @@ def build_twin(network: dict, transport: dict, *, seed: int = 0) -> PipelineTwin
     """Build a :class:`PipelineTwin` from a network spec and (optionally empty) H5 transport caps.
 
     ``network`` keys: ``cap``/``cost`` (``(n, n)`` arc matrices), ``supply`` (length ``n``, positive
-    = mine/source, negative = customer/demand), ``supply_nodes``/``demand_nodes`` (node-index lists;
-    inferred from the sign of ``supply`` if omitted), and an optional ``arrival_noise`` std-dev for
-    the per-period stochastic-arrivals draw (default 0, deterministic).
+    = source (a mine, in this module's worked instantiation), negative = demand (a customer)),
+    ``supply_nodes``/``demand_nodes`` (node-index lists; inferred from the sign of ``supply`` if
+    omitted), and an optional ``arrival_noise`` std-dev for the per-period stochastic-arrivals draw
+    (default 0, deterministic).
 
     ``transport`` is a plain ``{(u, v): capacity}`` mapping of H5 (``mixle_pde.material_transport``)
     derived real-world throughput ceilings (slurry line / conveyor limits, etc.) -- these are combined
