@@ -192,7 +192,9 @@ class Population:
     bandit, applies them to parents chosen by fitness, gates the challengers with the Phase-1
     champion/challenger rule (Benjamini-Hochberg multiplicity, since a generation produces many
     challengers at once), rewards the bandit with the verified deltas, and keeps the verified-best plus a
-    coarse capability-diversity quota.
+    coarse capability-diversity quota. :meth:`step` / :meth:`run` take an optional ``verify_data`` so
+    challengers are fit on one split and gated + scored on a disjoint held-out split, matching the
+    ``bo`` / ``evolutionary`` search backends.
 
     Args:
         seeds: the initial fitted models (at least one).
@@ -282,9 +284,21 @@ class Population:
         return kept[: self.size]
 
     # -- the generation step -------------------------------------------------
-    def step(self, data: Any) -> GenerationReport:
-        """Run one generation: select -> propose -> gate -> reward -> survivor selection."""
-        self._ensure_initialized(data)
+    def step(self, data: Any, verify_data: Any | None = None) -> GenerationReport:
+        """Run one generation: select -> propose -> gate -> reward -> survivor selection.
+
+        Args:
+            data: the data operators FIT candidates on (the train split, when the caller keeps
+                train/verify separate).
+            verify_data: the held-out data used to score population fitness and to gate every
+                challenger against its parent (:func:`~mixle.evolve.verify.challenger_beats_champion`).
+                Defaults to ``data`` when omitted, reproducing the single-batch behavior older callers
+                relied on -- but scoring a candidate on the same data it was just fit on is a
+                near-tautological test, so a caller that wants a genuine held-out gate (e.g.
+                :func:`~mixle.evolve.search.search`) must pass a disjoint split here.
+        """
+        verify = data if verify_data is None else verify_data
+        self._ensure_initialized(verify)
         report = GenerationReport(best_score=self._champion_score)
         ctx = {"parent_hash": None, "seed": self.seed + self._gen, "objective": self.objective}
 
@@ -313,7 +327,7 @@ class Population:
             verdict = challenger_beats_champion(
                 parent.model,
                 candidate.model,
-                data,
+                verify,
                 objective=self.objective,
                 multiplicity="bh",  # many simultaneous challengers per generation
                 nonnested=nonnested,
@@ -324,7 +338,7 @@ class Population:
             report.rewards.append(delta)
             if verdict.promote:
                 report.verified += 1
-                new_members.append(self._member(candidate.model, data))
+                new_members.append(self._member(candidate.model, verify))
 
         # fold survivors + new verified offspring back into the population.
         self._members = self._survivors_with(new_members)
@@ -342,18 +356,27 @@ class Population:
         self._members = self._members + new_members
         return self._survivors()
 
-    def run(self, data: Any, generations: int = 5) -> Any:
+    def run(self, data: Any, verify_data: Any | None = None, generations: int = 5) -> Any:
         """Evolve for ``generations`` steps; return a :class:`~mixle.evolve.search.SearchResult`.
+
+        Args:
+            data: the data operators fit candidates on each generation (the train split, when the
+                caller keeps train/verify separate).
+            verify_data: the held-out data used to score fitness and gate every challenger; defaults to
+                ``data`` (see :meth:`step`) when omitted -- pass a disjoint split for a genuine held-out
+                gate.
+            generations: number of :meth:`step` calls.
 
         The returned ``best_model`` is the run incumbent, guaranteed no worse than the best seed on the
         objective (anti-regression). ``history`` is one row per generation (proposals / verified / score).
         """
         from mixle.evolve.search import SearchResult
 
-        self._ensure_initialized(data)
+        verify = data if verify_data is None else verify_data
+        self._ensure_initialized(verify)
         history: list[dict[str, Any]] = []
         for _ in range(int(generations)):
-            rep = self.step(data)
+            rep = self.step(data, verify_data)
             history.append(
                 {
                     "proposals": rep.proposals,

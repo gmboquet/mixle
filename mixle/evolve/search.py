@@ -219,7 +219,7 @@ def search(
     elif method == "evolutionary":
         result = _search_evolutionary(space, train, val, objective, build_fn, n_iter=n_iter, seed=seed, **method_kwargs)
     elif method == "bandit":
-        return _search_bandit(space, rows, objective, build_fn, n_iter=n_iter, seed=seed, **method_kwargs)
+        return _search_bandit(space, train, val, objective, build_fn, n_iter=n_iter, seed=seed, **method_kwargs)
     else:
         raise ValueError(f"method must be 'bo' | 'evolutionary' | 'bandit' (got {method!r}).")
 
@@ -311,7 +311,8 @@ def _search_evolutionary(
 
 def _search_bandit(
     space: Space,
-    rows: list[Any],
+    train: list[Any],
+    val: list[Any],
     objective: Objective,
     build_fn: Callable[[dict[str, Any]], Any],
     *,
@@ -325,7 +326,11 @@ def _search_bandit(
 
     The "space" here is *which operator to apply*, not a parameter box: ``build_fn`` instantiates a few
     seed structures (from random configs), and the bandit-driven :class:`Population` evolves them,
-    learning which operators pay off. The returned :class:`SearchResult` carries the population champion.
+    learning which operators pay off. Matching the ``bo`` / ``evolutionary`` backends, every generation
+    fits challengers on ``train`` and gates + scores them on the disjoint ``val`` split
+    (:meth:`~mixle.evolve.population.Population.step`'s ``verify_data``) -- a challenger is never
+    verified against the same data it was just fit on. The returned :class:`SearchResult` carries the
+    population champion.
     """
     from mixle.evolve.population import OperatorBandit, Population
 
@@ -345,7 +350,7 @@ def _search_bandit(
     ops = list(operators) if operators is not None else default_operators()
     bandit = OperatorBandit(ops, seed=seed)
     pop = Population(seeds, objective=objective, operators=ops, bandit=bandit, size=size, seed=seed)
-    return pop.run(rows, generations=n_iter)
+    return pop.run(train, val, generations=n_iter)
 
 
 __all__ = ["auto_select", "search", "SearchResult"]
