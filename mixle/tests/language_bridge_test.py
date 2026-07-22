@@ -1,9 +1,11 @@
 """The language<->belief bridge (roadmap M5, part (c))."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
+import mixle.task.calibrated_generator as calibrated_generator_module
 from mixle.reason.language_bridge import ABSTAIN, Claim, PosteriorDescriber, _sample_scalar, claim_score, parse_evidence
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 
@@ -159,6 +161,76 @@ class PosteriorDescriberTest(unittest.TestCase):
     def test_k_exceeding_width_multiples_rejected(self):
         with self.assertRaises(ValueError):
             PosteriorDescriber("x", tol=1.0, k=99)
+
+
+class _ConstantPosterior:
+    """A deterministic mock posterior: always samples the same constant regardless of seed. Standing
+    in for "one fitted/mock posterior reused across several synthetic calibration points" -- the
+    realistic case named in the id()-keyed-truth-lookup bug below -- while keeping candidate
+    generation/scoring identical no matter which (or how many) object instances are used, so the
+    ONLY thing that can differ between a reused-object and a distinct-objects calibration run is
+    whether each row's true_value was looked up correctly."""
+
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def sample(self, n: int, seed=None):
+        return [self.value] * n
+
+
+def _cal_prob_true_for(calibration_set, *, tol: float = 1.0, seed: int = 0) -> list[float]:
+    """Calibrate and capture the exact per-row "probability mass on the correct candidate" array
+    CalibratedGenerator.calibrate() builds, by spying on conformal_label_threshold -- the first (and
+    only) thing that array is passed to, and not otherwise exposed by the public API."""
+    real = calibrated_generator_module.conformal_label_threshold
+    with mock.patch.object(calibrated_generator_module, "conformal_label_threshold", side_effect=real) as spy:
+        PosteriorDescriber("x", tol=tol, seed=seed).calibrate(calibration_set, seed=seed)
+    return list(spy.call_args[0][0])
+
+
+class CalibrationTruthLookupTest(unittest.TestCase):
+    """Regression test for a bug in ``PosteriorDescriber.calibrate``: it built
+    ``truth = {id(p): v for p, v in calibration_set}``, an id()-keyed dict. If the SAME posterior
+    object appeared more than once in ``calibration_set`` paired with DIFFERENT true values, every
+    row referencing that object was silently graded against only the LAST recorded true value --
+    ``is_correct`` receives only ``(posterior, claim)`` from ``CalibratedGenerator.calibrate`` (no
+    row index), so the fix threads true values through positionally instead (counting calls: exactly
+    ``k`` candidates are generated and scored per row, in order, so ``calls // k`` is that row's
+    index -- correct regardless of how many times, or how adjacently, a posterior object repeats)."""
+
+    def test_reusing_one_posterior_object_calibrates_identically_to_using_distinct_ones(self):
+        tol = 1.0
+        # a mix of distances from the (deterministic) center 5.0, crossing every width_multiples
+        # band boundary (default (1, 3, 10) * tol) and one point outside all of them
+        true_values = [5.0 + d for d in (0.2, 1.5, 5.0, 50.0, 0.5, 2.0, 8.0)]
+
+        reused = _ConstantPosterior(5.0)
+        calibration_set_shared_object = [(reused, v) for v in true_values]
+        calibration_set_distinct_objects = [(_ConstantPosterior(5.0), v) for v in true_values]
+
+        cal_prob_true_shared = _cal_prob_true_for(calibration_set_shared_object, tol=tol)
+        cal_prob_true_distinct = _cal_prob_true_for(calibration_set_distinct_objects, tol=tol)
+
+        # every row's per-candidate draws/scores are identical either way (the mock posterior's
+        # sampling ignores its seed and object identity) -- so a correct truth lookup must produce
+        # the SAME per-row correctness signal whether or not the posterior object happens to repeat
+        self.assertEqual(cal_prob_true_shared, cal_prob_true_distinct)
+        # and it must not be trivially uninformative (all rows collapsed to one value) -- confirms
+        # this calibration set actually exercises different bands across rows
+        self.assertGreater(len(set(cal_prob_true_shared)), 1)
+
+    def test_adjacent_repeats_of_the_same_posterior_object_are_each_graded_on_their_own_row(self):
+        """The harder case: the SAME object at back-to-back rows (not just somewhere in the set)."""
+        tol = 1.0
+        reused = _ConstantPosterior(5.0)
+        true_values = [5.0, 5.0 + 1.5 * tol, 5.0 + 1.5 * tol, 5.0 + 50.0 * tol]  # rows 1 and 2 adjacent
+        calibration_set_shared_object = [(reused, v) for v in true_values]
+        calibration_set_distinct_objects = [(_ConstantPosterior(5.0), v) for v in true_values]
+
+        self.assertEqual(
+            _cal_prob_true_for(calibration_set_shared_object, tol=tol),
+            _cal_prob_true_for(calibration_set_distinct_objects, tol=tol),
+        )
 
 
 if __name__ == "__main__":

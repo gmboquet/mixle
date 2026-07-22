@@ -232,11 +232,25 @@ class PosteriorDescriber:
         never learn to prefer -- or reject -- any one candidate.
         """
         posteriors = [p for p, _ in calibration_set]
-        truth = {id(p): v for p, v in calibration_set}
+        truths = [v for _, v in calibration_set]
         half_widths = sorted(mult * self.tol for mult in self.width_multiples)
+        k = len(self.width_multiples)  # exactly how many claims _generate() draws per posterior
+
+        # `is_correct` is CalibratedGenerator.calibrate()'s correctness oracle: it is called with only
+        # (posterior, claim) -- no row index -- so the matching true_value cannot be recovered by
+        # looking the posterior back up (an id()-keyed dict silently collapses when the SAME posterior
+        # object is reused across several calibration_set rows with different true values, e.g. one
+        # fitted/mock posterior paired with several synthetic points -- a realistic setup, not just a
+        # theoretical one). Instead this counts calls: CalibratedGenerator.calibrate() processes rows
+        # strictly in order, generating exactly `k` candidates and calling `is_correct` exactly `k`
+        # times for row i before ever moving to row i+1, so `calls // k` is that row's index --
+        # correct however many times a posterior object repeats, adjacently or not.
+        calls = {"n": 0}
 
         def is_correct(posterior: Any, claim: Claim) -> bool:
-            dist = abs(truth[id(posterior)] - 0.5 * (claim.lo + claim.hi))
+            true_value = truths[calls["n"] // k]
+            calls["n"] += 1
+            dist = abs(true_value - 0.5 * (claim.lo + claim.hi))
             half = 0.5 * claim.width
             idx = min(range(len(half_widths)), key=lambda j: abs(half_widths[j] - half))
             band_lo = half_widths[idx - 1] if idx > 0 else 0.0
