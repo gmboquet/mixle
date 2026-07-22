@@ -59,6 +59,7 @@ class Boolean(FieldType):
     numpy_dtype = np.bool_
 
     def coerce(self, value: Any) -> bool:
+        """Coerce ``value`` to a Python ``bool``."""
         # bool(value) alone is wrong for the primary use case this module exists for (CSV/SQL/Mongo
         # sources hand back string-typed booleans): bool("False") is True, since any non-empty string
         # is truthy. Parse the common string spellings explicitly; a string that isn't one of them is
@@ -70,7 +71,6 @@ class Boolean(FieldType):
             if s in _BOOLEAN_TRUE_STRINGS:
                 return True
             raise ValueError("cannot coerce string %r to Boolean" % value)
-        """Coerce ``value`` to a Python ``bool``."""
         return bool(value)
 
 
