@@ -11,6 +11,7 @@ Acceptance receipts, one per test:
 """
 
 import numpy as np
+import pytest
 
 from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork, _LinearGaussianFactor, _MarginalFactor
 from mixle.inference.condition import condition as m0_condition
@@ -142,6 +143,20 @@ def test_hmm_horizon_rollout_matches_forward_filtered_projection():
 
     got_mean_t4 = float(np.mean([row[4] for row in rows]))
     assert abs(got_mean_t4 - want_mean_t4) < 0.15
+
+
+def test_hmm_scenario_rejects_nested_evidence_instead_of_silently_truncating_it():
+    """A 2-level FieldPath (e.g. "time step 1's sub-field 0") is meaningless for this HMM's
+    scalar-Gaussian topics. Before the fix, ``Simulator.__init__``'s HMM branch built
+    ``self._hmm_evidence`` as ``{p[0]: v for p, v in evidence.items()}``, silently reducing a
+    nested path down to its top-level time index and treating it as ordinary top-level evidence
+    instead of being rejected -- exactly the nested-evidence case the sibling BN branch
+    (``_condition_after_do_bn``) already refuses with ``NotImplementedError``.
+    """
+    hmm = _hmm_fixture()
+    scenario = Scenario(evidence={0: -1.8, (1, 0): 2.0}, horizon=3)
+    with pytest.raises(NotImplementedError):
+        simulate(scenario, base=hmm, seed=0)
 
 
 # --------------------------------------------------------------------------------------------- #

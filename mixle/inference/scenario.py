@@ -346,6 +346,10 @@ class Simulator:
             working = do(base, dict(interventions))
 
         if isinstance(working, HiddenMarkovModelDistribution) and (evidence or scenario.horizon > 1):
+            if any(len(p) != 1 for p in evidence):
+                raise NotImplementedError(
+                    "nested evidence is not supported for a HiddenMarkovModelDistribution scenario."
+                )
             self._hmm_model = working
             self._hmm_evidence = {p[0]: v for p, v in evidence.items()}
             method = "exact" if evidence else "none"

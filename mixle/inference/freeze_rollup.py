@@ -838,8 +838,19 @@ def run_em_freeze_rollup(
 
         transaction = MutableStateSnapshot.capture(model, estimator)
         candidate = _m_step(enc_payload, estimator, model, gamma, frozen_idx)
-        candidate_frozen = detect_frozen(cache, candidate)
-        ll_mat_c, evals_c = _component_log_density_matrix(candidate, enc_payload, cache, candidate_frozen)
+        # Score `candidate` against the SAME `frozen_idx` computed against `model` above, not a
+        # fresh `detect_frozen(cache, candidate)` call: a frozen component's model object is
+        # carried forward unchanged by `_m_step`, so `frozen_idx` is still exactly correct for
+        # `candidate`'s frozen columns (the cache's own signature check is the belt-and-suspenders
+        # guard against a bad reuse). A second `detect_frozen` call here would instead update
+        # `cache`'s streak/prev_residual/prev_weight bookkeeping from a candidate that might be
+        # REJECTED a few lines below -- `transaction.restore()` undoes `model`/`estimator`'s own
+        # mutable state on rejection, but never touched `cache`'s internal dicts, so a rejected
+        # round's discarded candidate would otherwise leak into next round's convergence signal
+        # (a spuriously "converged" streak reading that the real, accepted trajectory never earned,
+        # eventually freezing a component that never actually converged and permanently skipping
+        # its real M-step).
+        ll_mat_c, evals_c = _component_log_density_matrix(candidate, enc_payload, cache, frozen_idx)
         candidate_log_density = _log_density_from_matrix(ll_mat_c, candidate.log_w)
         candidate_value = objective_value(candidate_log_density, candidate)
 
