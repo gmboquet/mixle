@@ -154,7 +154,22 @@ class SkewNormalDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "SkewNormalEstimator":
         """Return a method-of-moments estimator for ``loc``, ``scale`` and ``shape``."""
-        return SkewNormalEstimator(name=self.name, keys=self.keys)
+        if pseudo_count is None:
+            return SkewNormalEstimator(name=self.name, keys=self.keys)
+        # Convert this distribution's own (loc, scale, shape) into its theoretical central moments
+        # (mean, variance, third central moment) so pseudo_count can merge them as a weighted
+        # pseudo-batch into the accumulated central-moment suff_stat (see estimate()), using the
+        # same Pébay/West merge the accumulator itself uses to combine two batches.
+        mean0 = self.mean()
+        var0 = self.variance()
+        delta = self.shape / math.sqrt(1.0 + self.shape * self.shape)
+        # Theoretical third central moment: skewness = ((4-pi)/2)*(delta*B)^3/(1-B^2 delta^2)^1.5
+        # and var = scale^2*(1-B^2 delta^2), so m3 = skewness*var^1.5 reduces to this closed form
+        # (matches estimate()'s own skew = m3/var**1.5 inversion by construction).
+        m3_0 = ((4.0 - math.pi) / 2.0) * (self.scale * delta * _B) ** 3
+        return SkewNormalEstimator(
+            pseudo_count=pseudo_count, suff_stat=(mean0, var0, m3_0), name=self.name, keys=self.keys
+        )
 
     def dist_to_encoder(self) -> "SkewNormalDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
@@ -287,7 +302,16 @@ class SkewNormalAccumulatorFactory(StatisticAccumulatorFactory):
 class SkewNormalEstimator(ParameterEstimator):
     """Method-of-moments estimator for skew-normal location, scale and shape."""
 
-    def __init__(self, min_scale: float = 1.0e-12, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        pseudo_count: float | None = None,
+        suff_stat: tuple[float, float, float] | None = None,
+        min_scale: float = 1.0e-12,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        self.pseudo_count = pseudo_count
+        self.suff_stat = suff_stat
         self.min_scale = min_scale
         self.name = name
         self.keys = keys
@@ -299,6 +323,14 @@ class SkewNormalEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float]) -> SkewNormalDistribution:
         """Estimate location, scale, and shape from weighted central moments."""
         count, mean, sum_m2, sum_m3 = suff_stat
+        if self.pseudo_count is not None and self.suff_stat is not None:
+            mean0, var0, m3_0 = self.suff_stat
+            # Merge the prior as a weighted pseudo-batch via the accumulator's own parallel-moment
+            # merge, rather than re-deriving that (non-additive) combination formula here.
+            acc = SkewNormalAccumulator()
+            acc.count, acc.mean, acc.m2, acc.m3 = count, mean, sum_m2, sum_m3
+            acc._merge(self.pseudo_count, mean0, self.pseudo_count * var0, self.pseudo_count * m3_0)
+            count, mean, sum_m2, sum_m3 = acc.value()
         if count <= 0.0:
             return SkewNormalDistribution(0.0, 1.0, 0.0, name=self.name, keys=self.keys)
         # ``sum_m2``/``sum_m3`` are the weighted central moments (see SkewNormalAccumulator),
