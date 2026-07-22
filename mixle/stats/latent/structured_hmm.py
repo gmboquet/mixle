@@ -1040,7 +1040,16 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
     def key_merge(self, store):
         """Merge tied initial or transition sufficient statistics into ``store``."""
         if self.init_key is not None:
-            store[self.init_key] = self.pi_acc + store[self.init_key] if self.init_key in store else self.pi_acc
+            if self.init_key in store:
+                store[self.init_key] = self.pi_acc + store[self.init_key]
+            else:
+                # Copy on adoption: store must never alias this accumulator's own live pi_acc
+                # array. The "already present" branch above is safe (`+` always allocates a
+                # new array), but pi_acc IS mutated in place elsewhere (seq_update's `+=`,
+                # combine's `+=`, scale's `*=`), so without this copy a second tied
+                # accumulator's key_replace would still leave both accumulators pointing at
+                # this accumulator's own original, in-place-mutable array.
+                store[self.init_key] = self.pi_acc.copy()
         if self.trans_key is not None:
             store[self.trans_key] = (
                 _add_nested(store[self.trans_key], self.trans_acc) if self.trans_key in store else self.trans_acc
@@ -1052,7 +1061,11 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
     def key_replace(self, store):
         """Replace tied initial or transition statistics from ``store``."""
         if self.init_key is not None and self.init_key in store:
-            self.pi_acc = store[self.init_key]
+            # Copy on replace too: without it, every tied accumulator ends up pointing at the
+            # SAME array object, so any one of them later accumulating new local data (pi_acc
+            # is mutated in place via += in seq_update/combine and *= in scale) would silently
+            # corrupt every other tied accumulator's counts.
+            self.pi_acc = np.asarray(store[self.init_key]).copy()
         if self.trans_key is not None and self.trans_key in store:
             self.trans_acc = store[self.trans_key]
         for e in self.emit:
