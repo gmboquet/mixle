@@ -565,6 +565,14 @@ class ExponentialEstimator(ParameterEstimator):
         The Gamma prior is over the rate; ``[a, b] = [k, 1/theta]`` maps the prior's (k, theta).
         The posterior is Gamma(n, 1/s) with ``n = count + a`` and ``s = sum + b``, the posterior-mode
         rate is ``(n - 1)/s``, and the returned scale is its reciprocal ``s/(n - 1)``.
+
+        The Gamma(n, 1/s) posterior-mode formula ``(n - 1)/s`` is only valid for ``n > 1``: a
+        ``k = 1`` prior (exponential-shaped) combined with a zero/near-zero-weight accumulator can
+        land exactly on ``n = 1``, making the rate 0 (and the returned scale ``1/rate`` a
+        division-by-zero); a ``k < 1`` prior can push ``n`` below 1 entirely, making the rate
+        negative (rejected by ExponentialDistribution's ``beta > 0`` validation). Both are live
+        crashes on a valid (if degenerate) prior/data combination, so fall back to the prior's own
+        mean rate ``a/b`` (Gamma(shape=a, rate=b) has mean a/b) whenever the mode is undefined.
         """
         k, theta = self.prior.get_parameters()
         a, b = k, 1.0 / theta
@@ -572,7 +580,7 @@ class ExponentialEstimator(ParameterEstimator):
         n = suff_stat[0] + a
         s = suff_stat[1] + b
 
-        rate = (n - 1.0) / s
+        rate = (n - 1.0) / s if n > 1.0 else a / b
         return ExponentialDistribution(1.0 / rate, name=self.name, keys=self.keys, prior=GammaDistribution(n, 1.0 / s))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> "ExponentialDistribution":

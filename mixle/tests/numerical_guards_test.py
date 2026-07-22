@@ -14,6 +14,8 @@ from mixle.stats.bayes.dict_dirichlet import DictDirichletDistribution
 from mixle.stats.bayes.normal_gamma import NormalGammaDistribution
 from mixle.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
 from mixle.stats.multivariate.multivariate_gaussian import MultivariateGaussianDistribution
+from mixle.stats.univariate.continuous.exponential import ExponentialDistribution
+from mixle.stats.univariate.continuous.gamma import GammaDistribution
 from mixle.stats.univariate.continuous.gumbel import GumbelDistribution
 from mixle.stats.univariate.continuous.log_gaussian import LogGaussianDistribution
 
@@ -184,6 +186,40 @@ class DiagonalGaussianPseudoCountTest(unittest.TestCase):
         d_mvg = mvg.estimator(pseudo_count=1000.0).estimate(None, (sum_x, sum_xx, 1.0))
         d_dg = dg.estimator(pseudo_count=1000.0).estimate(None, (sum_x, sum_xx, 1.0))
         np.testing.assert_allclose(d_dg.mu, d_mvg.mu, atol=1e-8)
+
+
+class ExponentialConjugateRateGuardTest(unittest.TestCase):
+    """ExponentialEstimator._estimate_conjugate's Gamma(n, 1/s) posterior-mode formula
+    rate = (n - 1)/s is only valid for n > 1. A k=1 (exponential-shaped) prior combined with a
+    zero/near-zero-weight accumulator lands exactly on n = 1 (rate = 0, a division by zero
+    building the returned scale 1/rate); a k < 1 prior can push n below 1 entirely (a negative
+    rate, rejected by ExponentialDistribution's beta > 0 validation). Both were previously
+    unguarded live crashes on a valid (if degenerate) prior/data combination.
+    """
+
+    def test_shape_one_zero_observations_no_crash(self):
+        # k=1, theta=1 -> a=1, b=1 -> n = 0 + 1 = 1 exactly -> rate = (n-1)/s = 0 pre-fix.
+        est = ExponentialDistribution(1.0, prior=GammaDistribution(1.0, 1.0)).estimator()
+        d = est.estimate(None, (0.0, 0.0))
+        self.assertTrue(np.isfinite(d.beta) and d.beta > 0.0)
+        # falls back to the prior mean rate a/b = 1/1 = 1 -> beta = 1/rate = 1.0
+        self.assertAlmostEqual(d.beta, 1.0, places=10)
+
+    def test_shape_below_one_zero_observations_no_crash(self):
+        # k=0.5, theta=1 -> a=0.5, b=1 -> n = 0 + 0.5 = 0.5 < 1 -> rate = (n-1)/s < 0 pre-fix.
+        est = ExponentialDistribution(1.0, prior=GammaDistribution(0.5, 1.0)).estimator()
+        d = est.estimate(None, (0.0, 0.0))
+        self.assertTrue(np.isfinite(d.beta) and d.beta > 0.0)
+        # falls back to the prior mean rate a/b = 0.5/1 = 0.5 -> beta = 1/rate = 2.0
+        self.assertAlmostEqual(d.beta, 2.0, places=10)
+
+    def test_well_posed_case_uses_exact_posterior_mode_unchanged(self):
+        # n > 1 (plenty of data): must still use the exact posterior-mode formula, not the fallback.
+        est = ExponentialDistribution(1.0, prior=GammaDistribution(3.0, 1.0)).estimator()
+        d = est.estimate(None, (5.0, 10.0))
+        n, s = 5.0 + 3.0, 10.0 + 1.0
+        expected_beta = 1.0 / ((n - 1.0) / s)
+        self.assertAlmostEqual(d.beta, expected_beta, places=10)
 
 
 class PackageDunderAllTest(unittest.TestCase):
