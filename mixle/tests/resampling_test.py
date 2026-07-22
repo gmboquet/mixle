@@ -92,6 +92,18 @@ class BootstrapTest(unittest.TestCase):
         r = bootstrap(x, lambda d: float(np.mean(d)), n_boot=400, method="percentile", m=100, seed=8)
         self.assertTrue(np.isfinite(r.ci_low))
 
+    def test_rejects_conflicting_resampling_schemes(self):
+        # _resample_indices honors at most one of groups/clusters/block_length/m by a fixed
+        # priority order (clusters, then groups, then block_length, then m); passing more than one
+        # used to silently resolve to that priority instead of raising, so a caller who meant to
+        # combine schemes (or passed both by mistake) got the OTHER one dropped with no signal.
+        rng = np.random.RandomState(8)
+        x = rng.normal(0, 1, 100)
+        clusters = np.repeat(np.arange(20), 5)
+        groups = np.repeat([0, 1], 50)
+        with self.assertRaisesRegex(ValueError, "at most one"):
+            bootstrap(x, lambda d: float(np.mean(d)), n_boot=50, groups=groups, clusters=clusters, seed=9)
+
 
 class BlockBootstrapTest(unittest.TestCase):
     def test_block_bootstrap_wider_than_iid_for_ar1(self):

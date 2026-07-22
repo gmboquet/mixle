@@ -1015,6 +1015,24 @@ class ConjugatePosteriorTestCase(unittest.TestCase):
             self.assertIsInstance(dist, stats.BinomialDistribution)
             self.assertEqual(dist.n, trials)
 
+    def test_return_distributions_preserves_name_and_keys_for_every_family(self):
+        # return_distributions=True rebuilds a fresh distribution per draw; before the fix, every
+        # family except Binomial silently dropped the original dist's name/keys.
+        stats, _, _ = self._stats()
+        cases = [
+            (stats.GaussianDistribution(0.0, 1.0, name="nm", keys="ky"), [0.1, 0.2, -0.3, 0.4]),
+            (stats.PoissonDistribution(1.0, name="nm", keys="ky"), [1, 2, 3, 2]),
+            (stats.ExponentialDistribution(1.0, name="nm", keys="ky"), [0.5, 1.0, 1.5]),
+            (stats.BernoulliDistribution(0.5, name="nm", keys="ky"), [0, 1, 1, 0]),
+            (stats.GeometricDistribution(0.5, name="nm", keys="ky"), [1, 2, 3]),
+        ]
+        for proto, data in cases:
+            result = sample_conjugate_posterior(proto, data, draws=3, seed=30, return_distributions=True)
+            for dist in result.samples:
+                self.assertIsInstance(dist, type(proto))
+                self.assertEqual(dist.name, "nm", type(proto).__name__)
+                self.assertEqual(dist.keys, "ky", type(proto).__name__)
+
     def test_geometric_beta_conjugate_matches_analytic(self):
         stats, BBeta, _ = self._stats()
         rng = np.random.RandomState(16)
