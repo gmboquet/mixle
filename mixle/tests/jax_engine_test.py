@@ -229,6 +229,19 @@ class JitEmMixtureTest(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             jit_em_mixture(mixed, [0.0, 1.0, 2.0], max_its=2)
 
+    def test_zero_component_mixture_raises_not_implemented_not_index_error(self):
+        """The docstring promises ``NotImplementedError`` for unsupported structure, but a
+        zero-component mixture (constructible: MixtureDistribution's own validation only checks
+        len(components) == len(w), which holds vacuously at 0 == 0) used to fall through both
+        guard clauses -- `any(...)` over an empty `comps` is vacuously False -- and crash with a
+        raw `IndexError` from `comps[0]` instead."""
+        import mixle.stats as S
+        from mixle.inference import jit_em_mixture
+
+        empty = S.MixtureDistribution([], [])
+        with self.assertRaises(NotImplementedError):
+            jit_em_mixture(empty, [0.0, 1.0, 2.0], max_its=2)
+
 
 if __name__ == "__main__":
     unittest.main()
