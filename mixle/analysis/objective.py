@@ -1,16 +1,19 @@
-"""J6 -- the risk-adjusted economic objective: wiring, not new physics (work-plan Sec.7-J, the grand
-synthesis).
+"""J6 -- priced-liability and hard-constraint assembly for a MILP-based selection objective: wiring,
+not new physics (work-plan Sec.7-J, the grand synthesis).
 
-H4's `mixle.stochastic_opt.two_stage_stochastic_plan` already turns grade uncertainty (IC-1
-`Posterior.samples`) into a CVaR-penalized block-extraction decision. J's other tasks each price one more
-externality against the same MILP: J2's `monte_carlo_npv` (revenue/cost DCF), a G9-style no-mine/buffer
-zone, a K6-style public-health exposure cost, an L6-style carbon/emissions price, an N6-style biodiversity
-offset (`mixle.analysis.biodiversity.habitat_offset_liability`/`no_net_loss_constraint`, already landed and
-explicitly written against this module's shape). None of those tasks are this module's dependency --
-this is the reverse: J6 is the pluggable *framework* they register priced terms/constraints INTO, so the
-dependency edge runs G9/K6/L6/N6 -> J6, never J6 -> them (workstream-J.md J6 header note). That means this
-module only fixes the *shape* a priced term or a hard constraint must have to plug in; it derives none of
-the underlying cost models itself (Non-goals).
+A general pattern for any per-item binary-selection MILP (:func:`mixle.stochastic_opt.
+two_stage_stochastic_plan` is this module's worked instantiation, turning grade uncertainty -- IC-1
+`Posterior.samples` -- into a CVaR-penalized block-extraction decision): several independent
+"pricing" tasks each want to add one more externality term or hard constraint to the same objective
+without knowing about each other -- J2's `monte_carlo_npv` (revenue/cost DCF), a G9-style no-mine/
+buffer zone, a K6-style public-health exposure cost, an L6-style carbon/emissions price, an N6-style
+biodiversity offset (`mixle.analysis.biodiversity.habitat_offset_liability`/`no_net_loss_constraint`,
+already landed and explicitly written against this module's shape). None of those tasks are this
+module's dependency -- this is the reverse: J6 is the pluggable *framework* they register priced
+terms/constraints INTO, so the dependency edge runs G9/K6/L6/N6 -> J6, never J6 -> them
+(workstream-J.md J6 header note). That means this module only fixes the *shape* a priced term or a
+hard constraint must have to plug in; it derives none of the underlying cost models itself
+(Non-goals).
 
 Two pieces:
 
