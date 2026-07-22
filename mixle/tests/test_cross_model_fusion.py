@@ -104,3 +104,44 @@ def test_rejects_non_positive_variance_and_empty_claim_list():
         fuse_claims([])
     with pytest.raises(ValueError):
         fuse_claims([ModelClaim(value=1.0, variance=0.0, model_id="bad", version="v1", content_hash="f" * 64)])
+
+
+def test_weights_do_not_collapse_when_claims_share_a_model_id():
+    """Regression test: `weights` used to be built as `{c.model_id: p / total_prec for p, c in
+    zip(...)}`, a dict comprehension keyed by bare model_id -- so when two claims shared a model_id
+    (repeated ensemble members of the same model is the realistic case; see
+    test_climate_ensemble.py), only the LAST one's weight survived and `weights` summed to well
+    under 1.0, contradicting FusedBelief's own "sums to 1" docstring promise.
+
+    variance=1.0 has a true precision-share of 0.9; variance=9.0 has 0.1 (both reliability=1.0, so
+    precisions are 1.0 and 1/9, total 10/9)."""
+    fused = fuse_claims(
+        [
+            ModelClaim(value=10.0, variance=1.0, model_id="X", version="v1", content_hash="a" * 64),
+            ModelClaim(value=20.0, variance=9.0, model_id="X", version="v2", content_hash="b" * 64),
+        ]
+    )
+    assert len(fused.weights) == 2  # one entry per CLAIM, not collapsed to one per model_id
+    assert sum(fused.weights.values()) == pytest.approx(1.0, abs=1e-9)
+    # first claim with a given id keeps the bare model_id; the next is disambiguated "#1"
+    assert fused.weights["X"] == pytest.approx(0.9, abs=1e-9)
+    assert fused.weights["X#1"] == pytest.approx(0.1, abs=1e-9)
+    assert fused.mean == pytest.approx(11.0, abs=1e-9)  # unaffected -- mean/variance were already correct
+
+    by_key = {entry["weight_key"]: entry for entry in fused.provenance["claims"]}
+    assert by_key["X"]["version"] == "v1"
+    assert by_key["X"]["weight"] == pytest.approx(0.9, abs=1e-9)
+    assert by_key["X#1"]["version"] == "v2"
+    assert by_key["X#1"]["weight"] == pytest.approx(0.1, abs=1e-9)
+
+
+def test_weights_key_by_bare_model_id_when_there_is_no_collision():
+    """No duplicate model_ids -- keys/values must be byte-for-byte what they were before the fix."""
+    fused = fuse_claims(
+        [
+            ModelClaim(value=1.0, variance=0.2, model_id="modelA", version="v1", content_hash="c" * 64),
+            ModelClaim(value=2.0, variance=0.2, model_id="modelB", version="v1", content_hash="d" * 64),
+        ]
+    )
+    assert set(fused.weights) == {"modelA", "modelB"}
+    assert all(entry["weight_key"] == entry["model_id"] for entry in fused.provenance["claims"])
