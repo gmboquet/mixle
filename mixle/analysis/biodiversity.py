@@ -8,17 +8,21 @@ Two related pieces share this module because they share the same underlying obje
   Suitability is inverted into a per-cell movement *cost*; :class:`mixle.relations.ShortestPath` gives the
   cheapest corridor between two patches and :func:`mixle.relations.max_flow` over the equivalent
   conductance graph gives a circuit-theory "effective current" connectivity between patch sets.
-  :func:`fragmentation_impact` scores a candidate mine footprint (H3) by how much it raises corridor
-  resistance / drops connectivity relative to the unmined baseline -- the population-viability proxy N6
-  and J's objective consume.
+  :func:`fragmentation_impact` scores a candidate development footprint (a mine footprint, in this
+  module's H3 worked instantiation) by how much it raises corridor resistance / drops connectivity
+  relative to the undisturbed baseline -- the population-viability proxy N6 and J's objective consume.
+  Nothing about the connectivity graph is mining-specific: the same resistance-raster/least-cost-
+  corridor/effective-current construction is standard landscape-ecology practice for any development
+  footprint (a road, a subdivision, a mine) cutting through habitat.
 * **N6 -- reclamation ecology & biodiversity offsets** (:func:`habitat_offset_liability`,
-  :func:`no_net_loss_constraint`): prices the habitat impact of a mine footprint as a liability the same
-  shape as J6's other priced terms (reclamation/remediation, health, carbon) and emits the companion
-  no-net-loss hard constraint, so biodiversity offsets trade off against grade/cost/carbon inside ONE
-  risk-adjusted objective instead of being a separate side calculation. ``habitat_offset_liability``/
-  ``no_net_loss_constraint`` work off the same "lost habitat-hectare-equivalents" quantity: the fitted
-  suitability field (``HabitatModel.mean``, i.e. ``lambda_c``) times per-cell area, summed over whatever
-  footprint of cells a candidate mine plan disturbs.
+  :func:`no_net_loss_constraint`): prices the habitat impact of a development footprint as a liability
+  the same shape as J6's other priced terms (reclamation/remediation, health, carbon) and emits the
+  companion no-net-loss hard constraint, so biodiversity offsets trade off against grade/cost/carbon
+  inside ONE risk-adjusted objective instead of being a separate side calculation.
+  ``habitat_offset_liability``/``no_net_loss_constraint`` work off the same "lost habitat-hectare-
+  equivalents" quantity: the fitted suitability field (``HabitatModel.mean``, i.e. ``lambda_c``) times
+  per-cell area, summed over whatever footprint of cells a candidate disturbance plan (a mine plan, in
+  this module's worked instantiation) disturbs.
 
 Every function here reads only duck-typed attributes off ``habitat`` (``.mean``, optionally
 ``.cell_area``) or takes plain arrays, so anything satisfying the IC-1 ``Posterior`` surface over a
@@ -206,10 +210,11 @@ def fragmentation_impact(
     sources: Sequence[int],
     sinks: Sequence[int],
 ) -> dict:
-    """Habitat-connectivity impact of a mine footprint: baseline vs. mined-out corridor/connectivity.
+    """Habitat-connectivity impact of a development footprint: baseline vs. disturbed corridor/connectivity.
 
-    Sets every ``footprint_mask`` cell's resistance to ``inf`` (impassable / zero conductance -- the H3
-    mine plan) and recomputes both :func:`least_cost_corridor` (between the first ``sources``/``sinks``
+    Sets every ``footprint_mask`` cell's resistance to ``inf`` (impassable / zero conductance -- an H3
+    mine plan, in this module's worked instantiation) and recomputes both :func:`least_cost_corridor`
+    (between the first ``sources``/``sinks``
     cell, taken as the representative patch-to-patch corridor endpoints -- a judgment call: the public API
     only takes cell *sets* here, not a single designated pair) and :func:`habitat_connectivity` (over the
     full ``sources``/``sinks`` sets) before and after. This is the population-viability proxy N6/J feed
