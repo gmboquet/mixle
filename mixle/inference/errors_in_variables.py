@@ -122,7 +122,11 @@ def simex(
         curve[i] = acc / n_sims
     deg = 2 if extrapolation == "quadratic" else 1
     estimate = np.array([np.polyval(np.polyfit(lambdas, curve[:, j], deg), -1.0) for j in range(theta0.shape[0])])
-    return {"estimate": estimate, "naive": curve[0], "lambdas": lambdas, "curve": curve}
+    # "naive" is the documented lambda=0 (no added noise) estimate -- theta0, the direct fit on
+    # the actual data. curve[0] is instead the average of n_sims NOISY refits at whatever
+    # lambdas[0] happens to be, which only coincides with theta0 when the caller's own lambdas
+    # array happens to start at exactly 0.0 (the default does, but a custom one need not).
+    return {"estimate": estimate, "naive": theta0, "lambdas": lambdas, "curve": curve}
 
 
 def propagate_uncertainty(
