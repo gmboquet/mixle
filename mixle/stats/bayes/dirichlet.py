@@ -627,9 +627,9 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum2 += weight * xx * xx
             self.counts += weight
         else:
-            self.sum_of_logs[z] += log(x[z]) * weight
-            self.sum += weight * x
-            self.sum2 += weight * x * x
+            self.sum_of_logs[z] += log(xx[z]) * weight
+            self.sum += weight * xx
+            self.sum2 += weight * xx * xx
             self.counts += weight
 
     def initialize(self, x: np.ndarray | list[float], weight: float, estimate: RandomState | None) -> None:
