@@ -145,7 +145,25 @@ class GeneralizedGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "GeneralizedGaussianEstimator":
         """Return a method-of-moments estimator for ``mu``, ``alpha``, ``beta``."""
-        return GeneralizedGaussianEstimator(name=self.name, keys=self.keys)
+        if pseudo_count is None:
+            return GeneralizedGaussianEstimator(name=self.name, keys=self.keys)
+        # Convert this distribution's own (mu, alpha, beta) into the raw first four moments -- the
+        # space estimate() accumulates in (s1..s4) -- so pseudo_count can blend a prior pseudo-sample
+        # toward them (mirrors GumbelEstimator / WeibullEstimator's suff_stat pattern). The law is
+        # symmetric about mu, so its odd central moments vanish, giving closed-form raw moments from
+        # mean()/variance()/kurtosis() alone:
+        #   E[X] = mu, E[X^2] = var + mu^2, E[X^3] = 3*mu*var + mu^3,
+        #   E[X^4] = (kurt+3)*var^2 + 6*mu^2*var + mu^4.
+        mu0 = self.mean()
+        var0 = self.variance()
+        kurt0 = self.kurtosis()
+        e1 = mu0
+        e2 = var0 + mu0 * mu0
+        e3 = 3.0 * mu0 * var0 + mu0**3
+        e4 = (kurt0 + 3.0) * var0 * var0 + 6.0 * mu0 * mu0 * var0 + mu0**4
+        return GeneralizedGaussianEstimator(
+            pseudo_count=pseudo_count, suff_stat=(e1, e2, e3, e4), name=self.name, keys=self.keys
+        )
 
     def dist_to_encoder(self) -> "GeneralizedGaussianDataEncoder":
         """Return the data encoder used by this distribution (the raw value)."""
@@ -247,8 +265,15 @@ class GeneralizedGaussianEstimator(ParameterEstimator):
     """Method-of-moments estimator: ``mu`` = mean, ``beta`` from excess kurtosis, ``alpha`` from variance."""
 
     def __init__(
-        self, beta_bounds: tuple[float, float] = (0.25, 50.0), name: str | None = None, keys: str | None = None
+        self,
+        pseudo_count: float | None = None,
+        suff_stat: tuple[float, float, float, float] | None = None,
+        beta_bounds: tuple[float, float] = (0.25, 50.0),
+        name: str | None = None,
+        keys: str | None = None,
     ) -> None:
+        self.pseudo_count = pseudo_count
+        self.suff_stat = suff_stat
         self.beta_bounds = beta_bounds
         self.name = name
         self.keys = keys
@@ -264,6 +289,13 @@ class GeneralizedGaussianEstimator(ParameterEstimator):
         from scipy.optimize import brentq
 
         count, s1, s2, s3, s4 = suff_stat
+        if self.pseudo_count is not None and self.suff_stat is not None:
+            e1, e2, e3, e4 = self.suff_stat
+            s1 += self.pseudo_count * e1
+            s2 += self.pseudo_count * e2
+            s3 += self.pseudo_count * e3
+            s4 += self.pseudo_count * e4
+            count += self.pseudo_count
         if count <= 0.0:
             return GeneralizedGaussianDistribution(0.0, 1.0, 2.0, name=self.name, keys=self.keys)
         mu = s1 / count
