@@ -278,7 +278,9 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
 
     def estimator(self, pseudo_count: float | None = None) -> "MultivariateStudentTEstimator":
         """Return an EM estimator that keeps dof fixed at this distribution's value."""
-        return MultivariateStudentTEstimator(dof=self.dof, dim=self.dim, name=self.name, keys=self.keys)
+        return MultivariateStudentTEstimator(
+            dof=self.dof, dim=self.dim, pseudo_count=pseudo_count, name=self.name, keys=self.keys
+        )
 
     def dist_to_encoder(self) -> "MultivariateStudentTDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
@@ -416,12 +418,28 @@ class MultivariateStudentTEstimator(ParameterEstimator):
         self,
         dof: float = 5.0,
         dim: int | None = None,
+        pseudo_count: float | None = None,
         min_ridge: float = _MIN_RIDGE,
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
         if dof <= 0.0 or not np.isfinite(dof):
             raise ValueError("MultivariateStudentTEstimator requires dof > 0.")
+        if pseudo_count is not None:
+            # Unlike the raw-moment method-of-moments estimators (Gumbel, Weibull, ...), this is an
+            # EM/IRLS estimator: the accumulated sufficient statistic (sum_u, sum_ux, sum_uxx) is
+            # reweighted by the latent u_i = (dof+p)/(dof+mahal_i), which depends on the PREVIOUS
+            # iterate's own fitted mu/shape, not a fixed closed form. Blending a prior pseudo-sample
+            # into it correctly would require E[u], E[u*x], E[u*x*x'] under this distribution's own
+            # generating process, i.e. moments of a ratio of independent chi-squared variables
+            # (mahal = (dof/G)*W, G ~ Chi2(dof), W ~ Chi2(p)) -- not a small, safe change to bolt
+            # onto this fixed point. Refuse explicitly rather than silently ignoring pseudo_count.
+            raise ValueError(
+                "MultivariateStudentTEstimator does not support pseudo_count smoothing: its EM/IRLS "
+                "fit reweights the sufficient statistic by a latent factor with no simple closed-form "
+                "expectation under the model, so there is no small, safe way to blend a prior "
+                "pseudo-sample into it. Pass pseudo_count=None (the default)."
+            )
         self.dof = float(dof)
         self.dim = dim
         self.min_ridge = min_ridge

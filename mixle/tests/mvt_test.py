@@ -7,6 +7,7 @@ import scipy.stats
 
 from mixle.inference.estimation import fit
 from mixle.stats import MultivariateStudentTDistribution
+from mixle.stats.multivariate.multivariate_student_t import MultivariateStudentTEstimator
 
 
 def _dist():
@@ -65,6 +66,22 @@ class MultivariateStudentTTestCase(unittest.TestCase):
             MultivariateStudentTDistribution(0.0, [0.0], [[1.0]])
         with self.assertRaises(ValueError):
             MultivariateStudentTDistribution(3.0, [0.0, 0.0], [[1.0, 0.0]])
+
+    def test_pseudo_count_raises_rather_than_silently_ignored(self):
+        # The EM/IRLS fit reweights the sufficient statistic by a latent factor with no simple
+        # closed-form expectation under the model, so pseudo_count cannot be cleanly blended in the
+        # way the method-of-moments estimators (Gumbel, Weibull, ...) do. Rather than silently
+        # no-op-ing (previously: pseudo_count was accepted, not even stored, and had zero effect),
+        # it must now raise explicitly, both via the distribution factory method and the estimator
+        # constructor directly.
+        true = MultivariateStudentTDistribution(5.0, [3.0, -1.0], [[1.5, -0.4], [-0.4, 0.8]])
+        with self.assertRaises(ValueError):
+            true.estimator(pseudo_count=1.0)
+        with self.assertRaises(ValueError):
+            MultivariateStudentTEstimator(dof=5.0, dim=2, pseudo_count=1.0)
+        # pseudo_count=None (the default) must remain unaffected.
+        est = true.estimator()
+        self.assertIsInstance(est, MultivariateStudentTEstimator)
 
 
 if __name__ == "__main__":
