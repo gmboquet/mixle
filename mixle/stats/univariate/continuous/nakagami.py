@@ -178,7 +178,15 @@ class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "NakagamiEstimator":
         """Return a closed-form method-of-moments estimator."""
-        return NakagamiEstimator(name=self.name, keys=self.keys)
+        if pseudo_count is None:
+            return NakagamiEstimator(name=self.name, keys=self.keys)
+        # X^2 ~ Gamma(shape=m, scale=omega/m), so E[X^2] = omega and
+        # E[X^4] = Var(X^2) + E[X^2]^2 = omega^2/m + omega^2 = omega^2*(1+m)/m -- the raw
+        # power-sum space estimate() accumulates in (s2, s4) -- so pseudo_count can blend a prior
+        # pseudo-sample toward them (mirrors GumbelEstimator / WeibullEstimator's suff_stat pattern).
+        s2_0 = self.omega
+        s4_0 = self.omega * self.omega * (1.0 + self.m) / self.m
+        return NakagamiEstimator(pseudo_count=pseudo_count, suff_stat=(s2_0, s4_0), name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "NakagamiDataEncoder":
         """Return the data encoder used by this distribution (the raw value)."""
@@ -269,7 +277,16 @@ class NakagamiAccumulatorFactory(StatisticAccumulatorFactory):
 class NakagamiEstimator(ParameterEstimator):
     """Method-of-moments estimator: ``omega = E[X^2]``, ``m = E[X^2]^2 / Var[X^2]`` (clamped m >= 1/2)."""
 
-    def __init__(self, m_min: float = 0.5, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        pseudo_count: float | None = None,
+        suff_stat: tuple[float, float] | None = None,
+        m_min: float = 0.5,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        self.pseudo_count = pseudo_count
+        self.suff_stat = suff_stat
         self.m_min = m_min
         self.name = name
         self.keys = keys
@@ -281,6 +298,11 @@ class NakagamiEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> NakagamiDistribution:
         """Estimate shape and spread from weighted second and fourth moments."""
         count, s2, s4 = suff_stat
+        if self.pseudo_count is not None and self.suff_stat is not None:
+            s2_0, s4_0 = self.suff_stat
+            s2 += self.pseudo_count * s2_0
+            s4 += self.pseudo_count * s4_0
+            count += self.pseudo_count
         if count <= 0.0:
             return NakagamiDistribution(1.0, 1.0, name=self.name, keys=self.keys)
         omega = s2 / count
