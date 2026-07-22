@@ -57,6 +57,46 @@ def test_tiny_holdout_is_flagged_low_power_not_false_alarmed():
     assert any("LOW POWER" in r for r in verdict.reasons)
 
 
+def test_calibration_status_is_passed_for_a_well_powered_calibrated_posterior():
+    """calibration_status carries the honest three-way state instead of a bool + bolted-on
+    low_power flag (mirrors mixle.evolve.verify.Verdict.calibration_status)."""
+    ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=1.0)  # k=400: ample power
+    verdict = posterior_predictive_calibration(ensemble, y)
+    assert verdict.calibration_status == "passed"
+    assert verdict.passed
+    assert not verdict.low_power
+
+
+def test_calibration_status_is_failed_for_a_miscalibrated_posterior():
+    ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=0.3)
+    verdict = posterior_predictive_calibration(ensemble, y)
+    assert verdict.calibration_status == "failed"
+    assert not verdict.passed
+    assert not verdict.low_power
+
+
+def test_calibration_status_is_low_power_not_a_bare_pass_for_a_tiny_holdout():
+    ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=0.3, k=6)
+    verdict = posterior_predictive_calibration(ensemble, y)
+    assert verdict.calibration_status == "low_power"
+    assert verdict.passed  # low_power still reads as passed=True for the routing-layer predicate
+    assert verdict.low_power
+
+
+def test_a_failure_that_misses_even_a_loose_threshold_is_failed_not_low_power():
+    """A posterior so badly miscalibrated it fails even a LOOSE (low-power) null threshold is real
+    evidence of a problem: calibration_status must read 'failed', not 'low_power', even though the
+    threshold itself was loose enough to admit gross miscalibration -- low_power only qualifies a
+    PASS (see CalibrationVerdict's docstring), it never demotes a genuine failure.
+    """
+    ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=0.02, k=6)
+    verdict = posterior_predictive_calibration(ensemble, y)
+    assert verdict.null_threshold >= 1.0  # confirms this really is the loose-bar (low-power) regime
+    assert verdict.calibration_status == "failed"
+    assert not verdict.passed
+    assert not verdict.low_power
+
+
 def test_null_threshold_shrinks_as_holdout_grows():
     """The threshold must be sample-size-aware -- more held-out data => a tighter bar (more power)."""
     small = posterior_predictive_calibration(*_predictive_ensemble(1.0, 1.0, k=40)).null_threshold
@@ -117,6 +157,7 @@ def test_verifier_passes_a_calibrated_payload():
     ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=1.0)
     verdict = CalibrationVerifier().verify(claim={"payload": {"ensemble": ensemble, "held_out_y": y}})
     assert verdict["passed"] is True
+    assert verdict["calibration_status"] == "passed"
     assert verdict["kind"] == "calibration"
 
 
@@ -124,11 +165,13 @@ def test_verifier_fails_an_overconfident_payload():
     ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=0.3)
     verdict = CalibrationVerifier().verify(claim={"payload": {"ensemble": ensemble, "held_out_y": y}})
     assert verdict["passed"] is False
+    assert verdict["calibration_status"] == "failed"
 
 
 def test_verifier_fails_closed_when_given_nothing_to_check():
     verdict = CalibrationVerifier().verify(claim={"payload": {"some_number": 42}})
     assert verdict["passed"] is False
+    assert verdict["calibration_status"] == "failed"
     assert any("unchecked" in r or "no ensemble" in r for r in verdict["reasons"])
 
 
