@@ -36,6 +36,33 @@ class GeneralizedExtremeValueTest(unittest.TestCase):
             self.assertAlmostEqual(est.scale, scale, delta=0.12)
             self.assertAlmostEqual(est.shape, xi, delta=0.05)
 
+    def test_pseudo_count_smooths_toward_prior(self):
+        # estimator(pseudo_count=...) previously accepted and stored pseudo_count but estimate()
+        # never referenced it -- a silent no-op. A huge pseudo_count must now pull the fit toward
+        # this distribution's own (loc, scale, shape), even against a tiny amount of contrary data.
+        d = GeneralizedExtremeValueDistribution(loc=5.0, scale=2.0, shape=0.1)
+        est = d.estimator(pseudo_count=1.0e6)
+        self.assertIsNotNone(est.suff_stat)
+        fitted = est.estimate(None, (0.0, 0.0, 0.0, 1.0))  # one observation at 0, far from the prior
+        self.assertAlmostEqual(fitted.loc, d.loc, places=2)
+        self.assertAlmostEqual(fitted.scale, d.scale, places=2)
+        self.assertAlmostEqual(fitted.shape, d.shape, places=2)
+
+        # Without pseudo_count, the same single observation must NOT recover the prior.
+        fitted_plain = d.estimator().estimate(None, (0.0, 0.0, 0.0, 1.0))
+        self.assertNotAlmostEqual(fitted_plain.loc, d.loc, places=1)
+
+    def test_pseudo_count_recovers_exact_prior_moments(self):
+        # The suff_stat raw moments stored by estimator(pseudo_count=...) must be internally
+        # consistent with estimate()'s own mean/var/skew inversion: feeding them back through with
+        # no other data must reproduce this distribution's parameters almost exactly.
+        d = GeneralizedExtremeValueDistribution(loc=-3.0, scale=0.7, shape=-0.15)
+        est = d.estimator(pseudo_count=1.0)
+        fitted = est.estimate(None, (0.0, 0.0, 0.0, 0.0))  # zero real data: pure pseudo-count blend
+        self.assertAlmostEqual(fitted.loc, d.loc, places=6)
+        self.assertAlmostEqual(fitted.scale, d.scale, places=6)
+        self.assertAlmostEqual(fitted.shape, d.shape, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
