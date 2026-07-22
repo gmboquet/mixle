@@ -53,6 +53,51 @@ class SubstrateCrudTest(unittest.TestCase):
         self.assertEqual(hits[0][0].text, "the quick brown fox")  # lexical overlap wins
 
 
+class IndexDirtyTrackingTest(unittest.TestCase):
+    """put()'s dirty-tracking condition must match _text_items()'s real embedding-index inclusion
+    rule -- ANY kind with a truthy .text, not a narrower kind whitelist -- on both halves: text
+    arriving (a new or newly-text-bearing item) and text leaving (a clear or an overwrite to no
+    text). None of these need a real embedder fit, only correct _dirty/_embed_ids bookkeeping."""
+
+    def test_clearing_an_items_text_marks_the_index_dirty(self):
+        s = Substrate()
+        tid = s.add("text", "original searchable content")
+        s.search("original", k=1)  # force a reindex; _dirty is now False
+        self.assertFalse(s._dirty)
+        self.assertIn(tid, s._embed_ids)
+
+        s.put(SubstrateItem(id=tid, kind="text", text=""))  # clear the text, same id
+        self.assertTrue(s._dirty)  # the corpus just shrank -- must be scheduled for reindex
+
+    def test_a_new_text_bearing_record_item_marks_the_index_dirty(self):
+        s = Substrate()
+        s.add("text", "seed document")
+        s.search("seed", k=1)  # force a reindex; _dirty is now False
+        self.assertFalse(s._dirty)
+
+        rid = s.add("record", "a record with its own retrievable text surface")
+        self.assertIn(rid, [i.id for i in s._text_items(scope=None)])  # _text_items() already covers it
+        self.assertTrue(s._dirty)  # put() must now agree and schedule a reindex
+
+    def test_a_new_item_with_no_text_does_not_mark_the_index_dirty(self):
+        s = Substrate()
+        s.add("text", "seed")
+        s.search("seed", k=1)  # force a reindex; _dirty is now False
+        self.assertFalse(s._dirty)
+
+        s.add("record", payload={"amount": 42})  # no text at all -- nothing for the index to cover
+        self.assertFalse(s._dirty)
+
+    def test_overwriting_a_text_item_with_a_no_text_item_of_the_same_id_marks_it_dirty(self):
+        s = Substrate()
+        tid = s.add("text", "will be replaced")
+        s.search("replaced", k=1)
+        self.assertFalse(s._dirty)
+
+        s.put(SubstrateItem(id=tid, kind="record", payload={"amount": 1}))  # same id, no text this time
+        self.assertTrue(s._dirty)
+
+
 @unittest.skipUnless(_HAS_TORCH, "represent embedder needs torch")
 class SemanticRetrievalTest(unittest.TestCase):
     def _corpus(self):
@@ -83,6 +128,23 @@ class SemanticRetrievalTest(unittest.TestCase):
             s2 = Substrate(os.path.join(d, "shard"))
             self.assertEqual(len(s2), len(s))
             self.assertTrue(s2.search("energy in cells", k=1, kind="text"))
+
+    def test_clearing_an_items_text_removes_its_stale_semantic_match(self):
+        """End-to-end regression test for the put()/_text_items() dirty-tracking mismatch: search()
+        used to keep matching a query against an item's OLD embedding after its text was cleared,
+        because put() never marked the index dirty for that change."""
+        s = Substrate()
+        ids = ingest_documents(s, self._corpus())
+        target_id = ids[0]  # "the mitochondria produces ATP energy in cellular respiration"
+        query = self._corpus()[0]
+
+        hits = s.search(query, k=1, kind="text")
+        self.assertEqual(hits[0][0].id, target_id)  # sanity: a doc matches its own text as the top hit
+
+        s.put(SubstrateItem(id=target_id, kind="text", text=""))  # clear it, same id
+        hits2 = s.search(query, k=1, kind="text")
+        self.assertNotEqual(hits2[0][0].id, target_id)  # the stale embedding must no longer win
+        self.assertEqual(s.get(target_id).text, "")  # the item itself really is empty now
 
 
 class IngestTest(unittest.TestCase):
