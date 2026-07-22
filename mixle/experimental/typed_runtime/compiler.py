@@ -269,7 +269,7 @@ def _update_kind(model: Any, estimator: Any | None) -> tuple[UpdateKind, bool, t
             return UpdateKind.FIRST_ORDER, False, ()
         if supports(model, ConjugateUpdatable):
             return UpdateKind.EXACT_CLOSED_FORM, True, ()
-    except (ImportError, TypeError):
+    except Exception:  # noqa: BLE001 - capability probing must never break compilation (mirrors _compute_band)
         pass
     return UpdateKind.EXACT_CLOSED_FORM, True, ("conservative accumulator-backed default",)
 
@@ -285,7 +285,7 @@ def _merge_law(model: Any, estimator: Any | None, update_kind: UpdateKind) -> Me
 
         if supports(model, ExponentialFamily):
             return MergeLaw.ADDITIVE
-    except (ImportError, TypeError):
+    except Exception:  # noqa: BLE001 - capability probing must never break compilation (mirrors _compute_band)
         pass
     if estimator is not None and callable(getattr(estimator, "accumulator_factory", None)):
         return MergeLaw.ASSOCIATIVE_MONOID
@@ -296,12 +296,15 @@ def _state_semantics(model: Any, estimator: Any | None, update_kind: UpdateKind)
     if update_kind is UpdateKind.FROZEN:
         return frozenset({StateSemantics.IMMUTABLE_RESULT})
     states: set[StateSemantics] = set()
-    if _has_torch_like_module(model, estimator):
-        states.add(StateSemantics.MUTABLE_PARAMETERS)
-    if hasattr(estimator, "_rng") or update_kind in (UpdateKind.MONTE_CARLO, UpdateKind.FIRST_ORDER):
-        states.add(StateSemantics.STOCHASTIC_RNG)
-    if getattr(estimator, "persistent_optimizer", False):
-        states.add(StateSemantics.MUTABLE_OPTIMIZER)
+    try:
+        if _has_torch_like_module(model, estimator):
+            states.add(StateSemantics.MUTABLE_PARAMETERS)
+        if hasattr(estimator, "_rng") or update_kind in (UpdateKind.MONTE_CARLO, UpdateKind.FIRST_ORDER):
+            states.add(StateSemantics.STOCHASTIC_RNG)
+        if getattr(estimator, "persistent_optimizer", False):
+            states.add(StateSemantics.MUTABLE_OPTIMIZER)
+    except Exception:  # noqa: BLE001 - capability probing must never break compilation (mirrors _compute_band)
+        pass
     return frozenset(states or {StateSemantics.IMMUTABLE_RESULT})
 
 
@@ -316,7 +319,7 @@ def _curvature_kind(model: Any, estimator: Any | None) -> CurvatureKind:
 
         if supports(model, ExponentialFamily):
             return CurvatureKind.FISHER
-    except (ImportError, TypeError):
+    except Exception:  # noqa: BLE001 - capability probing must never break compilation (mirrors _compute_band)
         pass
     return CurvatureKind.UNAVAILABLE
 
@@ -328,7 +331,7 @@ def _decomposition(model: Any) -> tuple[tuple[str, ...], bool]:
         descriptor = decomposition_for(model)
         axes = (descriptor.axis.value,) if descriptor.is_shardable else ()
         return axes, bool(descriptor.exact)
-    except (AttributeError, ImportError, TypeError):
+    except Exception:  # noqa: BLE001 - capability probing must never break compilation (mirrors _compute_band)
         return (), True
 
 
