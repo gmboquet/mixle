@@ -178,6 +178,8 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         self.dim = len(mu)
         self.mu = np.asarray(mu, dtype=float)
         self.covar = np.asarray(covar, dtype=float)
+        if np.any(self.covar <= 0.0) or not np.all(np.isfinite(self.covar)):
+            raise ValueError("DiagonalGaussianDistribution requires finite covar > 0.")
         self.name = name
         self.log_c = -0.5 * (np.log(2.0 * np.pi) * self.dim + np.log(self.covar).sum())
 
@@ -415,7 +417,11 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
             return DiagonalGaussianEstimator(name=self.name, keys=self.keys, prior=self.prior)
         else:
             return DiagonalGaussianEstimator(
-                pseudo_count=(pseudo_count, pseudo_count), name=self.name, keys=self.keys, prior=self.prior
+                pseudo_count=(pseudo_count, pseudo_count),
+                suff_stat=(self.mu, self.covar),
+                name=self.name,
+                keys=self.keys,
+                prior=self.prior,
             )
 
     def dist_to_encoder(self) -> "DiagonalGaussianDataEncoder":
@@ -738,8 +744,11 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         new_mu = (sum_x + old_mu * old_lam) / (old_lam + nobs_loc1)
 
         # Per-coordinate scatter ``sum_xx - (sum_x)^2/n`` is cancellation-prone (see GaussianEstimator):
-        # floor it at 0 so a near-constant coordinate cannot drive ``new_b``/variance negative, which the
-        # diagonal Gaussian's constructor does NOT validate (silent NaN log-density otherwise).
+        # floor it at 0 so a near-constant coordinate cannot drive ``new_b``/variance negative, matching
+        # the MLE path and the scalar/full-covariance conjugate estimators. (The diagonal Gaussian's
+        # constructor now validates covar > 0; the final min_covar floor below is what actually backstops
+        # against a ValueError there, but flooring the scatter here too keeps intermediate quantities
+        # well-defined rather than relying solely on that backstop.)
         new_b0 = np.maximum(sum_xx - sample_mean2 * sum_xxx, 0.0)
         new_b1 = (old_lam * nobs_loc1 / new_n) * np.power(sample_mean1 - old_mu, 2)
         new_b = old_b + 0.5 * (new_b0 + new_b1)
