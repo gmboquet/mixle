@@ -52,19 +52,25 @@ __all__ = [
 
 @dataclass
 class CalibrationVerdict:
-    """The outcome of a calibration check. Carries a ``passed`` flag (so it duck-types the IC-6
-    ``Verdict`` the routing/orchestration layer reads via ``.passed``) plus the diagnostics that
-    justify it -- a gate should say *why* it failed, not just that it did.
+    """The outcome of a calibration check: a three-way ``calibration_status`` (so "passed only
+    because the test had no power to fail" is its own state, not a boolean ``True`` with a
+    footnote flag) plus the diagnostics that justify it -- a gate should say *why*, not just what.
 
     ``null_threshold`` is the key to honest small-sample behaviour: ``pit_error`` is compared against
     the value a *genuinely calibrated* posterior of this exact sample size would produce (the high
     quantile of the finite-sample null), not a fixed constant that would false-alarm on calibrated
-    data at small ``n``. ``low_power`` flags when the sample is so small that even a badly
-    miscalibrated posterior could not be distinguished from a calibrated one -- in which case a
-    ``passed=True`` means "not detectably miscalibrated with this little data," NOT "calibrated."
+    data at small ``n``. ``calibration_status`` is ``'passed'`` when the observed error is at/below
+    that threshold and the threshold itself had real power to catch a problem; ``'low_power'`` when
+    the sample was so small that even a badly miscalibrated posterior would have looked calibrated
+    (the threshold is loose enough to admit gross miscalibration) -- a ``'low_power'`` status means
+    "not detectably miscalibrated with this little data," NOT "calibrated"; ``'failed'`` when the
+    observed error exceeded even that (possibly loose) threshold, which is real evidence of a
+    problem regardless of power. ``passed``/``low_power`` remain available as derived booleans (so
+    this duck-types the IC-6 ``Verdict`` the routing/orchestration layer reads via ``.passed``), but
+    ``calibration_status`` carries the distinction a bare bool cannot.
     """
 
-    passed: bool
+    calibration_status: str  # 'passed' | 'failed' | 'low_power' -- see class docstring
     pit_error: float  # deviation of the PIT/rank histogram from uniform (0 == perfectly calibrated)
     null_threshold: float  # the sample-size-aware threshold pit_error is judged against
     coverage_error: float  # DIAGNOSTIC: max |empirical - nominal| across the coverage curve
@@ -72,9 +78,28 @@ class CalibrationVerdict:
     coverage_at_reference: float  # DIAGNOSTIC: empirical coverage of the reference-level central interval
     mean_interval_width: float
     n_points: int
-    low_power: bool = False
     reasons: list[str] = field(default_factory=list)
     kind: str = "calibration"
+
+    @property
+    def passed(self) -> bool:
+        """True unless ``calibration_status`` is ``'failed'`` -- the routing-layer promotion predicate.
+
+        Kept for callers (e.g. the IC-6 ``Verdict`` duck-type) that only need pass/fail; a
+        ``'low_power'`` status also reads as ``passed=True`` here, since a check that had no power
+        to catch a problem should not itself block on that account alone -- see :attr:`low_power`
+        to distinguish the two.
+        """
+        return self.calibration_status != "failed"
+
+    @property
+    def low_power(self) -> bool:
+        """True iff the held-out sample was too small to detect miscalibration reliably.
+
+        A ``passed=True, low_power=True`` verdict means "undetectable with this little data," not
+        "calibrated" -- see ``calibration_status`` and the class docstring.
+        """
+        return self.calibration_status == "low_power"
 
     @property
     def score(self) -> float:
@@ -213,8 +238,13 @@ def posterior_predictive_calibration(
             f"'undetectable with this little data', not 'calibrated'. Hold out more points."
         )
 
+    # a failed test is real evidence of a problem regardless of power (it missed even a loose bar);
+    # low_power only qualifies a PASS, since that is the verdict low statistical power could produce
+    # even for a genuinely miscalibrated posterior.
+    calibration_status = "failed" if not passed else ("low_power" if low_power else "passed")
+
     return CalibrationVerdict(
-        passed=passed,
+        calibration_status=calibration_status,
         pit_error=pit_err,
         null_threshold=threshold,
         coverage_error=coverage_error,
@@ -222,7 +252,6 @@ def posterior_predictive_calibration(
         coverage_at_reference=coverage_at_ref,
         mean_interval_width=float(ref["mean_width"]),
         n_points=k,
-        low_power=low_power,
         reasons=reasons,
     )
 
@@ -310,7 +339,7 @@ def simulation_based_calibration(
         f"mis-dispersed (over/under-confident) under its own generative model"
     )
     return CalibrationVerdict(
-        passed=passed,
+        calibration_status="passed" if passed else "failed",
         pit_error=sbc_error,
         null_threshold=threshold,
         coverage_error=float("nan"),
@@ -351,6 +380,7 @@ class CalibrationVerifier:
         if ensemble is None or held_out_y is None:
             return {
                 "passed": False,
+                "calibration_status": "failed",
                 "score": 0.0,
                 "kind": "calibration",
                 "reasons": [
@@ -368,12 +398,14 @@ class CalibrationVerifier:
         except (TypeError, ValueError, FloatingPointError) as exc:
             return {
                 "passed": False,
+                "calibration_status": "failed",
                 "score": 0.0,
                 "kind": "calibration",
                 "reasons": [f"calibration input rejected: {exc}"],
             }
         return {
             "passed": verdict.passed,
+            "calibration_status": verdict.calibration_status,
             "score": verdict.score,
             "kind": verdict.kind,
             "reasons": verdict.reasons,
