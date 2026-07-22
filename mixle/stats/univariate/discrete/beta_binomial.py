@@ -105,7 +105,22 @@ class BetaBinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "BetaBinomialEstimator":
         """Return a method-of-moments estimator for ``a, b`` at the fixed number of trials ``n``."""
-        return BetaBinomialEstimator(self.n, name=self.name, keys=self.keys)
+        if pseudo_count is None:
+            return BetaBinomialEstimator(self.n, name=self.name, keys=self.keys)
+        # Convert this distribution's own (n, a, b) into the raw first two moments -- the space
+        # estimate() accumulates in -- so pseudo_count can blend a prior pseudo-sample toward them
+        # (mirrors GumbelEstimator / WeibullEstimator's suff_stat pattern). mean = n*pi,
+        # var = binom_var*(1 + rho*(n-1)) with pi = a/(a+b), rho = 1/(a+b+1) -- the same
+        # mean-inflation relation estimate() inverts (rho = (var/binom_var - 1)/(n-1)).
+        pi0 = self.a / (self.a + self.b)
+        rho0 = 1.0 / (self.a + self.b + 1.0)
+        mean0 = self.n * pi0
+        binom_var0 = self.n * pi0 * (1.0 - pi0)
+        var0 = binom_var0 * (1.0 + rho0 * (self.n - 1.0))
+        second0 = var0 + mean0 * mean0
+        return BetaBinomialEstimator(
+            self.n, pseudo_count=pseudo_count, suff_stat=(mean0, second0), name=self.name, keys=self.keys
+        )
 
     def dist_to_encoder(self) -> "BetaBinomialDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
@@ -219,12 +234,16 @@ class BetaBinomialEstimator(ParameterEstimator):
     def __init__(
         self,
         n: int,
+        pseudo_count: float | None = None,
+        suff_stat: tuple[float, float] | None = None,
         min_conc: float = 1.0e-6,
         max_conc: float = 1.0e8,
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
         self.n = int(n)
+        self.pseudo_count = pseudo_count
+        self.suff_stat = suff_stat
         self.min_conc = min_conc
         self.max_conc = max_conc
         self.name = name
@@ -237,6 +256,11 @@ class BetaBinomialEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> BetaBinomialDistribution:
         """Estimate beta-binomial shape parameters from weighted moments."""
         sum_x, sum_x2, count = suff_stat
+        if self.pseudo_count is not None and self.suff_stat is not None:
+            mean0, second0 = self.suff_stat
+            sum_x += self.pseudo_count * mean0
+            sum_x2 += self.pseudo_count * second0
+            count += self.pseudo_count
         n = self.n
         if count <= 0.0 or n == 0:
             return BetaBinomialDistribution(n, 1.0, 1.0, name=self.name, keys=self.keys)

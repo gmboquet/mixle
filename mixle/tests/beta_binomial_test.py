@@ -42,6 +42,26 @@ class BetaBinomialTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             BetaBinomialDistribution(10, 0.0, 1.0)
 
+    def test_pseudo_count_smooths_toward_prior(self):
+        # estimator(pseudo_count=...) previously ignored pseudo_count entirely -- a silent no-op.
+        est = self.d.estimator(pseudo_count=1.0e6)
+        self.assertIsNotNone(est.suff_stat)
+        fitted = est.estimate(None, (1.0, 100.0, 1.0))  # one observation far from the prior mean
+        self.assertAlmostEqual(fitted.a, self.a, places=2)
+        self.assertAlmostEqual(fitted.b, self.b, places=2)
+
+        fitted_plain = self.d.estimator().estimate(None, (1.0, 100.0, 1.0))
+        self.assertNotAlmostEqual(fitted_plain.a, self.a, places=1)
+
+    def test_pseudo_count_recovers_exact_prior_moments(self):
+        # feeding the stored suff_stat back through with zero real data (pure pseudo-count blend)
+        # must reproduce this distribution's own (a, b) almost exactly.
+        est = self.d.estimator(pseudo_count=1.0)
+        fitted = est.estimate(None, (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(fitted.a, self.a, places=6)
+        self.assertAlmostEqual(fitted.b, self.b, places=6)
+        self.assertEqual(fitted.n, self.n)
+
 
 if __name__ == "__main__":
     unittest.main()
