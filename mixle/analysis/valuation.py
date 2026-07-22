@@ -1,9 +1,14 @@
-"""Mine economics: parametric cost curves and capex/opex roll-up (work-plan Sec.7-J, J4).
+"""Parametric extraction-cost curves and Monte-Carlo project valuation (work-plan Sec.7-J, J4).
 
-J's objective function needs a `$/t` cost that is a function of *where* the ore is (depth), *what* it
-is (grade), and *how fast* it is mined (throughput) before J2 can turn price paths + posterior grade
-draws into an NPV distribution, and before H's block-level optimizers (`mixle.stochastic_opt`,
-`mixle.relations`) have a `block_cost` to subtract from revenue:
+A general project-economics toolkit: a parametric per-unit cost as a function of depth, grade
+(concentration of the recovered constituent), and throughput; a capex/opex roll-up over a
+multi-period plan; and a Monte-Carlo discounted-cash-flow valuation over posterior grade draws and
+price-path scenarios. This module's worked instantiation is mine economics -- J's objective function
+needs a `$/t` cost that is a function of *where* the ore is (depth), *what* it is (grade), and *how
+fast* it is mined (throughput) before J2 can turn price paths + posterior grade draws into an NPV
+distribution, and before H's block-level optimizers (`mixle.stochastic_opt`, `mixle.relations`) have
+a `block_cost` to subtract from revenue -- but the cost curve and DCF machinery apply to any
+extraction/production project with a depth-, grade-, and throughput-sensitive cost structure:
 
   * :func:`cost_curve` -- parametric mining + processing cost in `$/t`, monotone increasing in haul/
     pumping depth, complexity-adjusted by grade, and shaped like the classic economies-of-scale curve
