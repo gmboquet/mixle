@@ -275,3 +275,33 @@ class BehavioralParityTest:
 def test_artifact_vocabulary_contains_context_and_graph_state():
     assert ArtifactKind.CONTEXT_SUMMARIES.value == "context_summaries"
     assert ArtifactKind.GRAPH_STATE.value == "graph_state"
+
+
+class CapabilityProbeRobustnessTest:
+    """``infer_update_contract``'s own docstring promises "a conservative contract without
+    scoring, sampling, or mutating the model", and ``_compute_band``'s own comment says
+    "eligibility probing must never break compilation" -- but the sibling probes (``_update_kind``,
+    ``_merge_law``, ``_curvature_kind``, ``_decomposition`` caught only a narrow exception tuple,
+    and ``_state_semantics`` caught nothing at all) let an unexpected exception from inspecting the
+    model/estimator's own attributes escape uncaught. A model whose own attribute access misbehaves
+    is plausible for the arbitrary, possibly-experimental model trees this compiler exists to
+    introspect, so this used to crash compilation outright instead of degrading to the documented
+    conservative default.
+    """
+
+    def test_a_broken_attribute_property_degrades_to_the_conservative_default_instead_of_crashing(self):
+        class _BrokenAttributeGaussian(GaussianDistribution):
+            @property
+            def state_dict(self):
+                raise RuntimeError("simulated broken property access")
+
+            def load_state_dict(self, *a, **kw):
+                pass
+
+            def parameters(self):
+                return []
+
+        graph = compile_update_graph(_BrokenAttributeGaussian(0.0, 1.0), GaussianEstimator())
+        contract = graph.node(graph.root_node).contract
+        assert contract.update_kind is UpdateKind.EXACT_CLOSED_FORM  # the conservative default
+        assert contract.state_semantics == frozenset({StateSemantics.IMMUTABLE_RESULT})
