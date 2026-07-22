@@ -148,9 +148,17 @@ def _bind_child_estimators(model_children: list[_Child], estimator: Any | None) 
 
     unbound_models = [index for index in range(len(model_children)) if index not in bound]
     unbound_estimators = [index for index in range(len(estimator_children)) if index not in used]
-    if len(unbound_models) == len(unbound_estimators):
-        for model_index, estimator_index in zip(unbound_models, unbound_estimators):
-            bound[model_index] = estimator_children[estimator_index].value
+    # Positional fallback only when there is exactly ONE straggler on each side: pairing the sole
+    # remaining model child with the sole remaining estimator child is the only inference possible
+    # regardless of what either is named. With two or more unbound on each side, matching by
+    # `zip()`'s enumeration order (both lists are built from `sorted(vars(...).items())`, i.e.
+    # alphabetical by attribute name) is a silent coin flip whenever the model's and estimator's
+    # naming conventions don't happen to sort into the same relative order -- it can swap which
+    # estimator a child is bound to with no error raised. Leaving 2+-way mismatches unbound (falling
+    # through to whatever infer_update_contract's own no-estimator branches report) is the safe
+    # default; a wrong-but-confident contract is worse than an honestly conservative one here.
+    if len(unbound_models) == len(unbound_estimators) == 1:
+        bound[unbound_models[0]] = estimator_children[unbound_estimators[0]].value
     return bound
 
 
