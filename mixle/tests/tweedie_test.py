@@ -57,6 +57,27 @@ class TweedieDistributionTest(unittest.TestCase):
         self.assertAlmostEqual(fit.mu, 4.0, delta=0.15)
         self.assertAlmostEqual(fit.phi, 0.7, delta=0.2)
 
+    def test_pseudo_count_smooths_toward_prior(self):
+        # estimator(pseudo_count=...) previously ignored pseudo_count entirely -- a silent no-op.
+        d = TweedieDistribution(3.0, 2.0, 1.5)
+        est = d.estimator(pseudo_count=1.0e6)
+        self.assertIsNotNone(est.suff_stat)
+        fitted = est.estimate(None, (1.0, 0.01, 0.0001))  # one observation far from mu=3.0
+        self.assertAlmostEqual(fitted.mu, d.mu, places=2)
+        self.assertAlmostEqual(fitted.phi, d.phi, places=2)
+
+        fitted_plain = d.estimator().estimate(None, (1.0, 0.01, 0.0001))
+        self.assertNotAlmostEqual(fitted_plain.mu, d.mu, places=1)
+
+    def test_pseudo_count_recovers_exact_prior_moments(self):
+        # feeding the stored suff_stat back through with zero real data (pure pseudo-count blend)
+        # must reproduce this distribution's own (mu, phi) almost exactly.
+        d = TweedieDistribution(1.5, 0.4, 1.2)
+        est = d.estimator(pseudo_count=1.0)
+        fitted = est.estimate(None, (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(fitted.mu, d.mu, places=6)
+        self.assertAlmostEqual(fitted.phi, d.phi, places=6)
+
 
 class TweedieKeyedSharingTest(unittest.TestCase):
     def test_keyed_accumulators_carry_pooled_statistics(self):

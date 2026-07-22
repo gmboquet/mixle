@@ -194,7 +194,16 @@ class TweedieDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "TweedieEstimator":
         """Return a TweedieEstimator (method of moments at the fixed power ``p``)."""
-        return TweedieEstimator(p=self.p, name=self.name, keys=self.keys)
+        if pseudo_count is None:
+            return TweedieEstimator(p=self.p, name=self.name, keys=self.keys)
+        # E[Y] = mu, Var[Y] = phi*mu^p, so E[Y^2] = phi*mu^p + mu^2 -- the raw moment space
+        # estimate() accumulates in (sum, sum2) -- so pseudo_count can blend a prior pseudo-sample
+        # toward them (mirrors GumbelEstimator / WeibullEstimator's suff_stat pattern).
+        mean0 = self.mu
+        second0 = self.phi * self.mu**self.p + self.mu * self.mu
+        return TweedieEstimator(
+            p=self.p, pseudo_count=pseudo_count, suff_stat=(mean0, second0), name=self.name, keys=self.keys
+        )
 
     def dist_to_encoder(self) -> "TweedieDataEncoder":
         """Return the encoder for Tweedie observations."""
@@ -302,7 +311,14 @@ class TweedieAccumulatorFactory(StatisticAccumulatorFactory):
 class TweedieEstimator(ParameterEstimator):
     """Estimate ``(mu, phi)`` at fixed power ``p`` by the (exact) method of moments."""
 
-    def __init__(self, p: float = 1.5, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        p: float = 1.5,
+        pseudo_count: float | None = None,
+        suff_stat: tuple[float, float] | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """Method-of-moments Tweedie estimator at fixed power ``p``.
 
         ``E[Y] = mu`` and ``Var[Y] = phi * mu**p``, so ``mu`` is the sample mean and
@@ -311,6 +327,8 @@ class TweedieEstimator(ParameterEstimator):
         if not (1.0 < p < 2.0):
             raise ValueError("TweedieEstimator requires power p strictly in (1, 2).")
         self.p = float(p)
+        self.pseudo_count = pseudo_count
+        self.suff_stat = suff_stat
         self.name = name
         self.keys = keys
 
@@ -321,6 +339,11 @@ class TweedieEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> "TweedieDistribution":
         """Estimate a Tweedie from the accumulated ``(count, sum, sum2)`` via method of moments."""
         count, xsum, xsum2 = suff_stat
+        if self.pseudo_count is not None and self.suff_stat is not None:
+            mean0, second0 = self.suff_stat
+            xsum += self.pseudo_count * mean0
+            xsum2 += self.pseudo_count * second0
+            count += self.pseudo_count
         if count <= 0.0:
             return TweedieDistribution(1.0, 1.0, self.p, name=self.name, keys=self.keys)
         mean = max(xsum / count, _MIN_TWEEDIE)
