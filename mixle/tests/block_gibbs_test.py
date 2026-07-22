@@ -62,6 +62,23 @@ class BlockGibbsTest(unittest.TestCase):
         self.assertAlmostEqual(mixed["mu"].mean(), allmh["mu"].mean(), delta=0.05)
         self.assertAlmostEqual(mixed["sigma"].mean(), allmh["sigma"].mean(), delta=0.05)
 
+    def test_metropolis_block_stops_adapting_after_burn_in(self):
+        # The class's own docstring says the scale is "adapted... toward a ~0.4 acceptance rate"
+        # during burn-in; before the fix, the `self._tot % 50 == 0` adaptation check fired
+        # unconditionally for the entire run, so the scale kept changing during the post-burn-in
+        # "stationary" phase the retained samples are drawn from -- contrary to the very validity
+        # requirement adaptive MCMC needs (a transition kernel that keeps changing after burn-in
+        # breaks the chain's stationarity guarantee for the retained samples).
+        rng = np.random.RandomState(0)
+        state = {"x": 0.0}
+        block = MetropolisBlock("x", lambda x, s: -0.5 * x * x, scale=0.2)
+        for _ in range(50):
+            state["x"] = block.update(state, rng, in_burn_in=True)
+        scale_after_burn_in = block.scale
+        for _ in range(200):
+            state["x"] = block.update(state, rng, in_burn_in=False)
+        self.assertEqual(block.scale, scale_after_burn_in)
+
 
 if __name__ == "__main__":
     unittest.main()

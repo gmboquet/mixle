@@ -26,8 +26,13 @@ class ConjugateBlock:
         self._draw = draw
         self.kind = "conjugate"
 
-    def update(self, state: dict, rng: np.random.RandomState) -> Any:
-        """Draw an exact full-conditional sample for this block."""
+    def update(self, state: dict, rng: np.random.RandomState, in_burn_in: bool = True) -> Any:
+        """Draw an exact full-conditional sample for this block.
+
+        ``in_burn_in`` is accepted (and ignored) only to keep a uniform call signature with
+        :class:`MetropolisBlock` for :class:`BlockGibbs`'s dispatch loop -- a conjugate draw needs
+        no proposal tuning.
+        """
         return self._draw(state, rng)
 
 
@@ -46,8 +51,15 @@ class MetropolisBlock:
         self._acc = 0
         self._tot = 0
 
-    def update(self, state: dict, rng: np.random.RandomState) -> Any:
-        """Run one random-walk Metropolis update for this block."""
+    def update(self, state: dict, rng: np.random.RandomState, in_burn_in: bool = True) -> Any:
+        """Run one random-walk Metropolis update for this block.
+
+        ``in_burn_in`` gates the scale adaptation below: adapting the proposal after burn-in ends
+        would keep changing the transition kernel during the "stationary" phase the retained
+        samples are drawn from, breaking the chain's own validity requirement that an adaptive
+        proposal converges before samples are collected -- contrary to this class's own docstring
+        promise ("adapted... toward a ~0.4 acceptance rate" during burn-in specifically).
+        """
         cur = state[self.name]
         prop = cur + self.scale * rng.standard_normal(np.shape(cur))
         log_alpha = self._logp(prop, state) - self._logp(cur, state)
@@ -55,7 +67,7 @@ class MetropolisBlock:
         accept = np.log(rng.uniform()) < log_alpha
         if accept:
             self._acc += 1
-        if self._tot % 50 == 0:  # light proposal adaptation during burn-in
+        if in_burn_in and self._tot % 50 == 0:  # light proposal adaptation during burn-in only
             rate = self._acc / self._tot
             self.scale *= np.exp((rate - 0.4) * 0.5)
         return prop if accept else cur
@@ -79,8 +91,9 @@ class BlockGibbs:
         state = dict(self.init)
         chains: dict[str, list] = {b.name: [] for b in self.blocks}
         for it in range(burn + n_samples):
+            in_burn_in = it < burn
             for b in self.blocks:
-                state[b.name] = b.update(state, rng)
+                state[b.name] = b.update(state, rng, in_burn_in)
             if it >= burn:
                 for b in self.blocks:
                     chains[b.name].append(state[b.name])
