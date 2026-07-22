@@ -73,6 +73,27 @@ class SkellamTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             SkellamDistribution(1.0, -2.0)
 
+    def test_pseudo_count_smooths_toward_prior(self):
+        # estimator(pseudo_count=...) previously ignored pseudo_count entirely -- a silent no-op.
+        d = SkellamDistribution(3.0, 1.5)
+        est = d.estimator(pseudo_count=1.0e6)
+        self.assertIsNotNone(est.suff_stat)
+        fitted = est.estimate(None, (1.0, -50.0, 2500.0))  # one observation far from the prior
+        self.assertAlmostEqual(fitted.mu1, d.mu1, places=2)
+        self.assertAlmostEqual(fitted.mu2, d.mu2, places=2)
+
+        fitted_plain = d.estimator().estimate(None, (1.0, -50.0, 2500.0))
+        self.assertNotAlmostEqual(fitted_plain.mu1, d.mu1, places=1)
+
+    def test_pseudo_count_recovers_exact_prior_moments(self):
+        # feeding the stored suff_stat back through with zero real data (pure pseudo-count blend)
+        # must reproduce this distribution's own (mu1, mu2) almost exactly.
+        d = SkellamDistribution(0.8, 2.2)
+        est = d.estimator(pseudo_count=1.0)
+        fitted = est.estimate(None, (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(fitted.mu1, d.mu1, places=6)
+        self.assertAlmostEqual(fitted.mu2, d.mu2, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
