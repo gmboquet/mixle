@@ -17,6 +17,8 @@ from mixle.inference.bayesian_network import (
     HeterogeneousBayesianNetwork,
     MixtureOfBayesianNetworks,
     _LinearGaussianFactor,
+    _VectorCLGFactor,
+    _VectorMarginalFactor,
     learn_bayesian_network,
     learn_mixture_bayesian_network,
 )
@@ -340,6 +342,34 @@ class VectorNodeTest(unittest.TestCase):
         vfac = [f for f in net.factors if f.child == 1]
         self.assertEqual(type(vfac[0]).__name__, "_VectorMarginalFactor")  # no spurious edge -> a bare MVN marginal
         self.assertEqual(net.edges(), [])
+
+
+class VectorFactorCovarianceNormalizationTest(unittest.TestCase):
+    """_VectorMarginalFactor.fit and _VectorCLGFactor.fit's unweighted branch called bare
+    ``np.cov(...)``, whose ddof=1 default (divide by n-1) silently disagreed with their OWN weighted
+    branch (divides by sum(weights)) and every other Gaussian fit in this codebase (all ddof=0/MLE,
+    e.g. MultivariateGaussianEstimator, _LinearGaussianFactor.fit). Weighting every point by 1.0 is
+    mathematically the same operation as no weights at all, so ``fit(weights=None)`` and
+    ``fit(weights=np.ones(n))`` must agree exactly -- before the fix they differed by n/(n-1).
+    """
+
+    def test_vector_marginal_unweighted_matches_uniform_weighted(self):
+        rng = np.random.RandomState(0)
+        n = 30
+        cols = {0: rng.multivariate_normal([1.0, -2.0], [[2.0, 0.3], [0.3, 1.0]], size=n)}
+        unweighted = _VectorMarginalFactor.fit(0, cols)
+        weighted = _VectorMarginalFactor.fit(0, cols, weights=np.ones(n))
+        np.testing.assert_allclose(unweighted.cov, weighted.cov, atol=1e-8)
+
+    def test_vector_clg_unweighted_matches_uniform_weighted(self):
+        rng = np.random.RandomState(1)
+        n = 40
+        x = rng.randn(n)
+        y = np.stack([2.0 * x + 1.0, -1.0 * x + 0.5], axis=1) + 0.2 * rng.randn(n, 2)
+        cols = {0: x.tolist(), 1: y}
+        unweighted = _VectorCLGFactor.fit(1, [0], cols, {}, {})
+        weighted = _VectorCLGFactor.fit(1, [0], cols, {}, {}, weights=np.ones(n))
+        np.testing.assert_allclose(unweighted.cov, weighted.cov, atol=1e-6)
 
 
 class NumFreeParamsTest(unittest.TestCase):

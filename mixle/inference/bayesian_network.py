@@ -144,7 +144,12 @@ class _VectorMarginalFactor:
         y = np.asarray(cols[child], dtype=np.float64)
         if weights is None:
             mean = y.mean(axis=0)
-            cov = np.cov(y, rowvar=False)
+            # ddof=0 (divide by n): matches the weighted branch below (which divides by sum(weights),
+            # not sum(weights)-1) and the codebase's own MLE/M-step convention elsewhere (e.g.
+            # MultivariateGaussianEstimator.estimate, _LinearGaussianFactor.fit below) -- np.cov's
+            # ddof=1 default would silently inflate every unweighted vector-marginal fit by n/(n-1)
+            # relative to the weighted path and every other Gaussian fit in this codebase.
+            cov = np.cov(y, rowvar=False, ddof=0)
         else:
             w = np.asarray(weights, dtype=np.float64)
             sw = w.sum()
@@ -215,7 +220,7 @@ class _VectorCLGFactor:
         if weights is None:
             coef, *_ = np.linalg.lstsq(x, y, rcond=None)
             resid = y - x @ coef
-            cov = np.cov(resid, rowvar=False)
+            cov = np.cov(resid, rowvar=False, ddof=0)  # see _VectorMarginalFactor.fit's ddof=0 note above
         else:
             w = np.asarray(weights, dtype=np.float64)
             sw = np.sqrt(np.maximum(w, 0.0))
