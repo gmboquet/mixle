@@ -245,8 +245,13 @@ def _find_reasonable_eps(theta, lp0, grad0, leapfrog, kinetic, sqrt_m, shape, ge
 
     j1 = joint_after(eps)
     a = 1 if (j1 - joint0) > math.log(0.5) else -1
-    while a * (joint_after(eps) - joint0) > a * math.log(0.5):
+    # isfinite(j1) guard matches the numpy/numba references: without it, a step that diverges to
+    # a non-finite log-density (j1 = -inf) never satisfies the loop's own stopping condition when
+    # a == -1 (-inf is always "below" any finite threshold), so eps keeps halving all the way to
+    # the 1e-10 floor instead of stopping cleanly at the first non-finite reading.
+    while math.isfinite(j1) and a * (j1 - joint0) > a * math.log(0.5):
         eps *= 2.0**a
+        j1 = joint_after(eps)
         if eps < 1e-10 or eps > 1e10:
             break
     return eps

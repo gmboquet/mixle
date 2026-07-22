@@ -73,5 +73,33 @@ class NutsTorchTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.abs(r_np.samples.mean(axis=0) - r_t.samples.mean(axis=0)) < 6.0 * se + 0.2))
 
 
+@unittest.skipUnless(HAS_TORCH, "torch is not installed")
+class FindReasonableEpsTestCase(unittest.TestCase):
+    def test_stops_at_first_nonfinite_reading_instead_of_halving_to_the_floor(self):
+        # joint_after's own per-step isfinite guard already existed; the while LOOP's condition
+        # was missing the equivalent check present in the numpy/numba references, so once a
+        # leapfrog step went non-finite, the a=-1 (halving) branch never stopped via its own
+        # condition (-inf is always "below" any finite threshold) and instead ground all the way
+        # down to the eps<1e-10 floor instead of stopping cleanly at the first bad reading.
+        import math
+
+        import torch
+
+        from mixle.inference.mcmc.nuts_torch import _find_reasonable_eps
+
+        def leapfrog(theta, r, grad, step):
+            lp1 = torch.tensor(-math.inf) if step <= 0.5 else torch.tensor(0.0)
+            return theta, r, lp1, grad
+
+        def kinetic(r):
+            return 0.0
+
+        theta = torch.zeros(1, dtype=torch.float64)
+        grad0 = torch.zeros(1, dtype=torch.float64)
+        gen = torch.Generator().manual_seed(0)
+        eps = _find_reasonable_eps(theta, 10.0, grad0, leapfrog, kinetic, 1.0, (1,), gen, torch.float64, "cpu")
+        self.assertAlmostEqual(eps, 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
