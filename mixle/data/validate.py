@@ -56,11 +56,16 @@ def check_dataset(
             issues.append(f"record {i}: does not conform to schema ({type(exc).__name__}: {exc})")
             conformed.append(None)
     if check_support:
-        for i, (r, c) in enumerate(zip(recs, conformed)):
+        # score the CONFORMED value, not the raw record: a schema that coerces (e.g. a raw list into
+        # the np.ndarray a Vector field's model actually expects) would otherwise have that coercion
+        # undone right back to a raw value for the one check that's supposed to run it through the
+        # model, so a perfectly valid record can fail here for a type reason that has nothing to do
+        # with the model's actual support.
+        for i, c in enumerate(conformed):
             if c is None:
                 continue
             try:
-                lp = model.log_density(r)
+                lp = model.log_density(c)
                 if not np.isfinite(lp):
                     issues.append(f"record {i}: outside the model's support (log-density {lp})")
             except Exception as exc:  # noqa: BLE001

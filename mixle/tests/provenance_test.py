@@ -10,6 +10,7 @@ import numpy as np
 from mixle.data import check_dataset, dataset_hash, load_encoded, save_encoded
 from mixle.inference.production import Header, fit_with_provenance
 from mixle.stats import CategoricalDistribution, CompositeDistribution, GaussianDistribution
+from mixle.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
 
 
 class DatasetHashTest(unittest.TestCase):
@@ -126,6 +127,22 @@ class CheckDatasetTest(unittest.TestCase):
     def test_raise_on_error(self):
         with self.assertRaises(ValueError):
             check_dataset(GaussianDistribution(0.0, 1.0), ["nope"], raise_on_error=True)
+
+    def test_multivariate_list_data_passes_the_same_as_ndarray_data(self):
+        # Bug-2 regression: a dataset of plain Python lists (the natural shape for a multivariate
+        # observation) must be accepted exactly like the same data expressed as a list of np.ndarray --
+        # previously the list form false-rejected every record (misread as "one record, too many
+        # top-level values" against the derived single-Vector-field schema), while the identical data
+        # as ndarrays passed fine.
+        dist = DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0])
+        raw = [[1.0, 2.0], [0.5, -0.5], [3.0, 1.0]]
+
+        rep_list = check_dataset(dist, raw)
+        rep_array = check_dataset(dist, [np.array(r) for r in raw])
+
+        self.assertTrue(rep_list.ok, rep_list)
+        self.assertTrue(rep_array.ok, rep_array)
+        self.assertEqual(rep_list.n_checked, 3)
 
 
 class EncodedIoTest(unittest.TestCase):
