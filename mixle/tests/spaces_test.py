@@ -81,6 +81,27 @@ class PublishTest(unittest.TestCase):
         iid = space.add(kind="text", text="new teamA note")
         self.assertEqual(s.get(iid).scope, "teamA")
 
+    def test_publish_does_not_alias_the_original_items_mutable_fields(self):
+        """Regression test: publish() built the "new" published SubstrateItem with
+        payload=item.payload / tags=item.tags / links=item.links -- BY REFERENCE, so mutating a
+        previously-fetched copy of the item silently mutated the currently-stored published item
+        too (provenance was already copied via dict(item.provenance); payload/tags/links were not)."""
+        s = Substrate()
+        iid = s.add(kind="text", text="alpha", payload={"k": 1}, tags=["a"], links=["other"], scope="teamA")
+        original = s.get(iid)  # fetched BEFORE publish
+
+        publish(s, [iid], to=PUBLIC, by="alice")
+
+        # mutate the pre-publish object a caller might still be holding
+        original.tags.append("MUTATED-TAG")
+        original.payload["k"] = "MUTATED-PAYLOAD"
+        original.links.append("MUTATED-LINK")
+
+        stored = s.get(iid)
+        self.assertNotIn("MUTATED-TAG", stored.tags)
+        self.assertEqual(stored.payload["k"], 1)
+        self.assertNotIn("MUTATED-LINK", stored.links)
+
 
 class VersioningTest(unittest.TestCase):
     def test_each_publish_bumps_version_and_records_history(self):
@@ -134,6 +155,21 @@ class VersioningTest(unittest.TestCase):
     def test_merge_missing_item_returns_none(self):
         s, ids = _shared_store()
         self.assertIsNone(merge_versions(s, ids["a"], "nope"))
+
+    def test_merge_versions_does_not_alias_the_winners_payload(self):
+        """Regression test: merge_versions() passed winner_payload (aliased directly from
+        other.payload or keep.payload, whichever version wins) straight into the surviving
+        SubstrateItem BY REFERENCE."""
+        s = Substrate()
+        a = s.add(kind="text", text="v-a", scope="teamA", payload={"k": "a-payload"})
+        b = s.add(kind="text", text="v-b", scope="teamB", payload={"k": "b-payload"})
+        publish(s, [b], by="bob")  # b -> v1, higher than a's v0: b's payload wins under prefer="latest"
+        original_b = s.get(b)  # fetched BEFORE the merge
+
+        keep = merge_versions(s, a, b, by="carol")
+        original_b.payload["k"] = "MUTATED-PAYLOAD"
+
+        self.assertEqual(s.get(keep).payload["k"], "b-payload")
 
 
 if __name__ == "__main__":

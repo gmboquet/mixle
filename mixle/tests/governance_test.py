@@ -71,6 +71,23 @@ class ApprovalGateTest(unittest.TestCase):
         s, _, gov = _setup()
         self.assertFalse(approve(s, "nope", by="orgadmin", governance=gov))
 
+    def test_approve_does_not_alias_the_original_items_mutable_fields(self):
+        s = Substrate()
+        gov = Governance().grant("orgadmin", "org")
+        item = s.add(kind="artifact", text="term", payload={"k": 1}, tags=["a"], links=["other"], scope="teamA")
+        propose(s, [item], to="org", by="alice")
+        original = s.get(item)  # fetched AFTER propose's restamp, BEFORE approve's publish + restamp
+
+        self.assertTrue(approve(s, item, by="orgadmin", governance=gov))
+        original.tags.append("MUTATED-TAG")
+        original.payload["k"] = "MUTATED-PAYLOAD"
+        original.links.append("MUTATED-LINK")
+
+        stored = s.get(item)
+        self.assertNotIn("MUTATED-TAG", stored.tags)
+        self.assertEqual(stored.payload["k"], 1)
+        self.assertNotIn("MUTATED-LINK", stored.links)
+
 
 class RejectTest(unittest.TestCase):
     def test_reject_keeps_item_and_records_reason(self):
@@ -81,6 +98,26 @@ class RejectTest(unittest.TestCase):
         prop = s.get(item).provenance["proposal"]
         self.assertEqual(prop["status"], REJECTED)
         self.assertEqual(prop["reason"], "duplicate")
+
+    def test_reject_does_not_alias_the_original_items_mutable_fields(self):
+        """Regression test: _restamp() (shared by propose/approve/reject) built the "new"
+        SubstrateItem with payload=item.payload / tags=item.tags / links=item.links -- BY
+        REFERENCE, so mutating a previously-fetched copy of the item silently mutated the
+        currently-stored, just-restamped item too."""
+        s = Substrate()
+        item = s.add(kind="artifact", text="term", payload={"k": 1}, tags=["a"], links=["other"], scope="teamA")
+        propose(s, [item], to="org", by="alice")
+        original = s.get(item)  # fetched AFTER propose's restamp, BEFORE reject's
+
+        self.assertTrue(reject(s, item, by="orgadmin", reason="duplicate"))
+        original.tags.append("MUTATED-TAG")
+        original.payload["k"] = "MUTATED-PAYLOAD"
+        original.links.append("MUTATED-LINK")
+
+        stored = s.get(item)
+        self.assertNotIn("MUTATED-TAG", stored.tags)
+        self.assertEqual(stored.payload["k"], 1)
+        self.assertNotIn("MUTATED-LINK", stored.links)
 
     def test_rejected_item_not_in_pending(self):
         s, item, _ = _setup()
