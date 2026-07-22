@@ -60,6 +60,16 @@ def binomial_rank(
 
         entries.append((llv, ell, n))
 
+    if not entries:
+        # every term was skipped (n == 0 or a -inf log probability for every entry): np.concatenate
+        # below would otherwise raise "need at least one array to concatenate" (or, depending on the
+        # exact inputs, an IndexError on entries[0] further down) -- a confusing low-level failure for
+        # what is really just "there is nothing to build a histogram from."
+        raise ValueError(
+            "binomial_rank: no usable binomial terms (every entry had n == 0 or a -inf log "
+            "probability); cannot build a log-density histogram from an empty term set."
+        )
+
     # Find parameters for a common fixed-space grid [ll0, ll0 + dll, ll0 + 2*dll, ...]
     min_vec = np.asarray([entry[0].min() for entry in entries])
     llv_vec = np.concatenate([entry[0] - entry[0].min() for entry in entries])
