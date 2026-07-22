@@ -80,7 +80,7 @@ from mixle.inference.freeze_rollup import (
     FreezeRollupCache,
     _combine,
     _component_log_density_matrix,
-    _mixture_weights,
+    _mixture_weight_update,
     _resolve_payload,
     detect_frozen,
 )
@@ -444,8 +444,8 @@ def _m_step_hotswap(
             new_components[idx] = estimator.estimators[idx].estimate(float(counts[idx]), acc.value())
             if isinstance(model.components[idx], GradLeaf):
                 n_grad += 1
-    w = _mixture_weights(estimator, counts)
-    return MixtureDistribution(new_components, w, name=estimator.name), n_grad, n_closed
+    w, posterior = _mixture_weight_update(estimator, counts)
+    return MixtureDistribution(new_components, w, name=estimator.name, prior=posterior), n_grad, n_closed
 
 
 def run_em_with_hotswap(
@@ -500,6 +500,13 @@ def run_em_with_hotswap(
     )
     enc_payload = _resolve_payload(enc_data)
     holdout_matrix = None if holdout_data is None else _as_matrix(holdout_data)
+    map_objective = estimator.get_prior() is not None
+
+    def objective_value(log_density: np.ndarray, candidate_model: MixtureDistribution) -> float:
+        value = float(np.sum(log_density))
+        if map_objective:
+            value += float(estimator.model_log_density(candidate_model))
+        return value
 
     model = initial_model
     history: list[LeafHotswapStats] = []
@@ -533,7 +540,7 @@ def run_em_with_hotswap(
         #    responsibilities (computed just below) -- so the swap needs one E-step first.
         ll_mat, evals_e = _component_log_density_matrix(model, enc_payload, cache, frozen_idx | swapped_idx)
         log_density, gamma = _combine(ll_mat, model.log_w)
-        current_value = float(np.sum(log_density))
+        current_value = objective_value(log_density, model)
         if old_value is None:
             old_value = current_value
 
@@ -577,10 +584,16 @@ def run_em_with_hotswap(
         # values for any component that went through an ordinary gradient M-step this round.
         transaction = MutableStateSnapshot.capture(model, estimator)
         candidate, n_grad, n_closed = _m_step_hotswap(enc_payload, estimator, model, gamma, frozen_idx, swapped_idx)
-        candidate_frozen = detect_frozen(cache, candidate)
-        ll_mat_c, evals_c = _component_log_density_matrix(candidate, enc_payload, cache, candidate_frozen | swapped_idx)
+        # Reuse `frozen_idx` (computed against `model` above), not a fresh `detect_frozen(cache,
+        # candidate)` call -- see freeze_rollup.run_em_freeze_rollup's matching comment: a second
+        # detect_frozen call here would update the cache's streak/prev_residual/prev_weight
+        # bookkeeping from a candidate that may be REJECTED below, and that pollution is never
+        # rolled back by this round's `transaction.restore()` (which only undoes model/estimator's
+        # own mutable state), letting a discarded candidate's reading masquerade as convergence
+        # progress the real trajectory never earned.
+        ll_mat_c, evals_c = _component_log_density_matrix(candidate, enc_payload, cache, frozen_idx | swapped_idx)
         candidate_log_density, _ = _combine(ll_mat_c, candidate.log_w)
-        candidate_value = float(np.sum(candidate_log_density))
+        candidate_value = objective_value(candidate_log_density, candidate)
 
         # the slack's relative term absorbs float32-leaf-vs-float64-surrogate path noise (see
         # _DEFAULT_REL_ACCEPT_TOLERANCE); real degradations are orders of magnitude above it

@@ -19,7 +19,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from mixle.inference.em import observed_log_likelihood  # noqa: E402
 from mixle.inference.estimation import optimize  # noqa: E402
+from mixle.inference.freeze_rollup import FreezeRollupCache, detect_frozen  # noqa: E402
 from mixle.inference.leaf_hotswap import (  # noqa: E402
     PlateauMonitor,
     misfit_receipt,
@@ -38,6 +40,7 @@ from mixle.stats import (  # noqa: E402
     MixtureEstimator,
     seq_encode,
 )
+from mixle.stats.bayes.dirichlet import DirichletDistribution  # noqa: E402
 
 
 class DiagGauss(torch.nn.Module):
@@ -470,6 +473,88 @@ class PlateauMonitorTestCase(unittest.TestCase):
         classical = GaussianDistribution(0.0, 1.0)
         self.assertFalse(monitor.is_plateaued(0, classical, nobs=1.0))
         self.assertFalse(monitor.is_plateaued(0, classical, nobs=1.0))
+
+
+class FreezeStreakBookkeepingTestCase(unittest.TestCase):
+    """Mirrors ``freeze_rollup_test.py``'s
+    ``FreezeStreakBookkeepingTestCase``: ``run_em_with_hotswap`` shares D2's
+    ``FreezeRollupCache``/``detect_frozen`` machinery, and before this fix it likewise called
+    ``detect_frozen`` a second time against each round's (about to be discarded) M-step
+    ``candidate``, polluting the cache's streak/prev_residual/prev_weight bookkeeping with a state
+    a rejected round's ``transaction.restore()`` never rolls back.
+    """
+
+    def test_rejected_round_does_not_pollute_cache_bookkeeping_with_discarded_candidate_state(self):
+        rng = np.random.RandomState(50)
+        data = [float(v) for v in np.concatenate([rng.normal(-5.0, 0.6, 200), rng.normal(5.0, 0.6, 200)])]
+        start = MixtureDistribution([GaussianDistribution(-0.3, 3.0), GaussianDistribution(0.3, 3.0)], [0.5, 0.5])
+        estimator = MixtureEstimator([GaussianEstimator(), GaussianEstimator()])
+        enc = seq_encode(data, model=start)
+        cache = FreezeRollupCache(freeze_patience=2)
+
+        model, history, swap_records = run_em_with_hotswap(
+            enc,
+            estimator,
+            start,
+            max_its=1,
+            delta=None,
+            cache=cache,
+            accept_tolerance=-1.0e6,
+            rel_accept_tolerance=-1.0e6,
+        )
+
+        self.assertFalse(history[0].accepted, "accept_tolerance=-1e6 should force this round to be rejected")
+        self.assertIs(model, start, "a rejected round must return the original (unmodified) model")
+        self.assertFalse(swap_records, "no GradLeaf component in this fixture -- nothing should ever swap")
+
+        fresh_cache = FreezeRollupCache(freeze_patience=2)
+        detect_frozen(fresh_cache, start)
+
+        for idx in range(start.num_components):
+            self.assertEqual(
+                cache._prev_residual[idx],
+                fresh_cache._prev_residual[idx],
+                f"component {idx}'s cached residual was polluted by the rejected round's discarded candidate",
+            )
+            self.assertEqual(
+                cache._prev_weight[idx],
+                fresh_cache._prev_weight[idx],
+                f"component {idx}'s cached weight was polluted by the rejected round's discarded candidate",
+            )
+
+
+class DirichletWeightPriorTestCase(unittest.TestCase):
+    """``run_em_with_hotswap`` reuses ``freeze_rollup``'s own ``_mixture_weight_update`` for the
+    weight M-step (so a Dirichlet weight prior correctly steers ``w`` towards the MAP estimate),
+    but -- unlike ``freeze_rollup.run_em_freeze_rollup`` -- never attached the resulting posterior
+    back onto the returned model (``MixtureDistribution(..., prior=posterior)``) and never added
+    the MAP log-prior term to its own accept/reject gate, silently dropping the posterior every
+    round and comparing plain data log-likelihood instead of the true MAP objective the M-step was
+    actually optimizing. Mirrors ``freeze_rollup_test.py``'s own
+    ``test_dirichlet_prior_uses_the_map_objective``, since this module's docstring itself claims
+    parity with D2/D3's gate.
+    """
+
+    def test_dirichlet_prior_uses_the_map_objective_and_is_propagated(self):
+        rng = np.random.RandomState(41)
+        data = [float(v) for v in np.concatenate([rng.normal(-5.0, 0.6, 200), rng.normal(5.0, 0.6, 200)])]
+        start = MixtureDistribution([GaussianDistribution(-0.3, 3.0), GaussianDistribution(0.3, 3.0)], [0.5, 0.5])
+        estimator = MixtureEstimator(
+            [GaussianEstimator(), GaussianEstimator()],
+            prior=DirichletDistribution(np.array([2.0, 2.0])),
+        )
+        enc = seq_encode(data, model=start)
+
+        model, history, swap_records = run_em_with_hotswap(enc, estimator, start, max_its=8, delta=None)
+
+        self.assertFalse(swap_records, "no GradLeaf component in this fixture -- nothing should ever swap")
+        objectives = np.asarray([item.objective for item in history])
+        self.assertTrue(np.all(np.diff(objectives) >= -1.0e-9), objectives)
+
+        data_ll = observed_log_likelihood(enc)(model)
+        expected = data_ll + estimator.model_log_density(model)
+        self.assertAlmostEqual(history[-1].objective, expected, places=8)
+        self.assertIsInstance(model.get_prior()[0], DirichletDistribution)
 
 
 if __name__ == "__main__":
