@@ -164,6 +164,13 @@ class Schema:
     """An ordered set of typed fields."""
 
     fields: tuple[Field, ...]
+    # True iff this schema has exactly one field whose type is ITSELF container-shaped (Vector/Nested):
+    # a raw list/tuple record is then unambiguously that one field's whole value (e.g. a length-k list
+    # for a multivariate model's k-dim observation), never "k scalar values for k fields" -- there is
+    # only one field. Schema.for_model sets this for schemas it derives from such a model. Defaults to
+    # False so a hand-built single-field Vector/Nested Schema keeps conform_record's stricter
+    # raise-on-ambiguity behavior (see ConformRecordLengthTest in mixle/tests/data_schema_test.py).
+    container_value: bool = False
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -173,6 +180,11 @@ class Schema:
     def conform_record(self, record: Any) -> Any:
         """Coerce one record (a scalar for a 1-field schema, else a tuple/dict) to the schema's types."""
         if len(self.fields) == 1 and not isinstance(record, (tuple, list, dict)):
+            return self.fields[0].type.coerce(record)
+        if len(self.fields) == 1 and self.container_value and isinstance(record, (tuple, list)):
+            # this schema's one field IS itself container-shaped -- the whole record is unambiguously
+            # that field's raw value, so skip the "N values for N fields" interpretation entirely
+            # (there is only one field; disambiguation on length is not needed here).
             return self.fields[0].type.coerce(record)
         if isinstance(record, dict):
             return {f.name: f.type.coerce(record[f.name]) for f in self.fields}
@@ -206,8 +218,14 @@ class Schema:
                 if (names is not None and len(names) == len(dists))
                 else [f"field_{i}" for i in range(len(dists))]
             )
-            return Schema(tuple(Field(n, _type_for(c)) for n, c in zip(labels, dists)))
-        return Schema((Field(getattr(model, "name", None) or "value", _type_for(model)),))
+            fields = tuple(Field(n, _type_for(c)) for n, c in zip(labels, dists))
+        else:
+            fields = (Field(getattr(model, "name", None) or "value", _type_for(model)),)
+        # a derived schema of exactly one Vector/Nested field expects its raw record to BE that
+        # field's whole value (e.g. a multivariate model's raw list/ndarray observation) -- see
+        # conform_record's container_value branch.
+        container_value = len(fields) == 1 and isinstance(fields[0].type, (Vector, Nested))
+        return Schema(fields, container_value=container_value)
 
 
 def _type_for(dist: Any) -> FieldType:

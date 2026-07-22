@@ -1,4 +1,4 @@
-"""mixle.data.schema: two real bugs found in an audit and fixed here.
+"""mixle.data.schema: real bugs found in audits and fixed here.
 
 1. Boolean.coerce used bare bool(value), which is True for ANY non-empty string -- including the
    string "False" itself. Since this module's whole reason for existing is coercing string-typed
@@ -7,13 +7,25 @@
    silently stops at the shorter side instead of raising on a record/field-count mismatch -- exactly
    the "connectors silently get wrong" failure mode this module's own docstring says it exists to
    prevent.
+3. Schema.for_model derives a single-field Vector/Nested schema for a multivariate-shaped model (e.g.
+   a DiagonalGaussianDistribution), but conform_record's single-field disambiguation only bypassed the
+   "N values for N fields" interpretation for non-(tuple/list/dict) records -- true for e.g. a raw
+   np.ndarray, FALSE for a plain Python list. A dataset of raw lists (the natural shape for a
+   multivariate observation, e.g. [[1.0, 2.0], [0.5, -0.5]]) was misread as "one record with too many
+   top-level values" and every record raised, while the IDENTICAL data as a list of np.ndarray passed
+   fine. Schema now carries a container_value flag (set by for_model when the derived schema has
+   exactly one Vector/Nested field) that makes conform_record treat a raw list/tuple record as that
+   one field's whole value -- see ForModelContainerValueTest below. A schema built by hand (as
+   ConformRecordLengthTest does) still defaults container_value=False and keeps the stricter
+   raise-on-ambiguity behavior.
 """
 
 import unittest
 
 import numpy as np
 
-from mixle.data.schema import Boolean, Field, Real, Schema, Vector
+from mixle.data.schema import Boolean, Field, Nested, Real, Schema, Vector
+from mixle.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
 
 
 class BooleanCoerceTest(unittest.TestCase):
@@ -80,6 +92,54 @@ class ConformRecordLengthTest(unittest.TestCase):
         # the unambiguous, correctly-wrapped form still works.
         result = s.conform_record(([1.0, 2.0, 3.0],))
         np.testing.assert_array_equal(result[0], np.array([1.0, 2.0, 3.0]))
+
+
+class ForModelContainerValueTest(unittest.TestCase):
+    """Bug-2 regression: a for_model-derived single-Vector-field schema must accept a raw list/tuple
+    record directly, not just an np.ndarray, and not raise the multi-field ambiguity error."""
+
+    def test_for_model_on_a_multivariate_model_sets_container_value(self):
+        dist = DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0])
+        schema = Schema.for_model(dist)
+        self.assertEqual(len(schema.fields), 1)
+        self.assertIsInstance(schema.fields[0].type, Vector)
+        self.assertTrue(schema.container_value)
+
+    def test_raw_list_record_conforms_the_same_as_an_ndarray_record(self):
+        dist = DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0])
+        schema = Schema.for_model(dist)
+        from_list = schema.conform_record([1.0, 2.0])
+        from_array = schema.conform_record(np.array([1.0, 2.0]))
+        np.testing.assert_array_equal(from_list, np.array([1.0, 2.0]))
+        np.testing.assert_array_equal(from_list, from_array)
+
+    def test_raw_tuple_record_also_conforms_directly(self):
+        dist = DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0])
+        schema = Schema.for_model(dist)
+        result = schema.conform_record((1.0, 2.0))
+        np.testing.assert_array_equal(result, np.array([1.0, 2.0]))
+
+    def test_hand_built_schema_keeps_container_value_false_by_default(self):
+        # Schema.for_model opts in; a schema a caller assembles directly (e.g. Schema((Field(...),)))
+        # is unaffected -- container_value defaults to False, so ConformRecordLengthTest's stricter
+        # raise-on-ambiguity behavior for a hand-built single Vector/Nested field is unchanged.
+        s = Schema((Field("v", Vector(dim=None)),))
+        self.assertFalse(s.container_value)
+        with self.assertRaises(ValueError):
+            s.conform_record([1.0, 2.0, 3.0])
+
+    def test_nested_field_type_also_qualifies_for_container_value(self):
+        inner = Schema((Field("x", Real()), Field("y", Real())))
+        s = Schema((Field("n", Nested(inner)),), container_value=True)
+        # a raw list record is handed whole to Nested.coerce (-> inner.conform_record), never split as
+        # "N values for N fields" at the OUTER level -- there is only one outer field. Without
+        # container_value=True this raises the exact same ambiguity error the Vector case did.
+        result = s.conform_record([1.0, 2.0])
+        self.assertEqual(result, inner.conform_record([1.0, 2.0]))
+        self.assertEqual(result, (1.0, 2.0))
+        s_default = Schema((Field("n", Nested(inner)),))  # container_value defaults False
+        with self.assertRaises(ValueError):
+            s_default.conform_record([1.0, 2.0])
 
 
 if __name__ == "__main__":
