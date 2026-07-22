@@ -84,7 +84,9 @@ class DirichletMultinomialDistribution(SequenceEncodableProbabilityDistribution)
 
     def estimator(self, pseudo_count: float | None = None) -> "DirichletMultinomialEstimator":
         """Return a Minka fixed-point MLE estimator for ``alpha`` at the fixed number of trials ``n``."""
-        return DirichletMultinomialEstimator(self.dim, self.n, name=self.name, keys=self.keys)
+        return DirichletMultinomialEstimator(
+            self.dim, self.n, pseudo_count=pseudo_count, name=self.name, keys=self.keys
+        )
 
     def dist_to_encoder(self) -> "DirichletMultinomialDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
@@ -244,9 +246,25 @@ class DirichletMultinomialEstimator(ParameterEstimator):
         n: int,
         max_iter: int = 500,
         tol: float = 1.0e-9,
+        pseudo_count: float | None = None,
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
+        if pseudo_count is not None:
+            # Unlike the raw-moment method-of-moments estimators (Gumbel, Weibull, ...), this is an
+            # iterative Minka fixed-point MLE over a cumulative-count recurrence statistic
+            # c[k, j] = sum_i w_i 1{x_ik > j}, not a simple additive raw moment. Blending a prior
+            # pseudo-sample into it correctly would require its expectation under the current
+            # model -- E[c[k,j]] = pseudo_count * P(X_k > j), the tail of the coordinate-k marginal,
+            # itself a Beta-Binomial(n, alpha_k, sum(alpha)-alpha_k) CDF evaluated at every
+            # j = 0..n-1 for every one of the dim coordinates -- not a small, safe change to bolt
+            # onto this fixed point. Refuse explicitly rather than silently ignoring pseudo_count.
+            raise ValueError(
+                "DirichletMultinomialEstimator does not support pseudo_count smoothing: its Minka "
+                "fixed-point MLE operates on a cumulative-count recurrence statistic, not a simple "
+                "additive moment, so there is no small, safe way to blend a prior pseudo-sample "
+                "into it. Pass pseudo_count=None (the default)."
+            )
         self.dim = dim
         self.n = n
         self.max_iter = int(max_iter)
