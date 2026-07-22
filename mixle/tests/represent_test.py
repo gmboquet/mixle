@@ -59,6 +59,18 @@ class ShapeTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             enc.encode({"proteins": "MKV"})
 
+    def test_patch_segmenter_rejects_image_smaller_than_patch(self):
+        # regression: an image smaller than the patch size in either dimension used to silently
+        # produce a (0, features) array (h // p == 0) instead of erroring -- no patches, no warning.
+        seg = PatchSegmenter(patch=8)
+        with self.assertRaises(ValueError):
+            seg.segment(np.random.rand(5, 5))  # smaller than patch in both dims
+        with self.assertRaises(ValueError):
+            seg.segment(np.random.rand(3, 5, 20))  # (C, H, W) form, smaller than patch in H only
+        # an image exactly the patch size is the boundary case and must still yield one patch.
+        out = seg.segment(np.random.rand(8, 8))
+        self.assertEqual(out.shape, (1, 8 * 8))
+
     def test_dim_mismatch_rejected(self):
         enc = HeterogeneousEncoder(dim=DIM)
         with self.assertRaises(ValueError):

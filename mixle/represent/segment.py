@@ -74,6 +74,14 @@ class PatchSegmenter(Segmenter):
             img = img[None, :, :]
         c, h, w = img.shape
         p = self.patch
+        if h < p or w < p:
+            # h // p or w // p would silently be 0, producing a (0, features) array -- no patches,
+            # no error, no warning. That is almost certainly a caller mistake (wrong patch size for
+            # the image, or the wrong image), so fail loudly instead of returning an empty unit set.
+            raise ValueError(
+                f"PatchSegmenter(patch={p}): image is smaller than the patch size in at least one "
+                f"dimension (got h={h}, w={w}); both must be >= patch."
+            )
         hp, wp = h // p, w // p
         img = img[:, : hp * p, : wp * p].reshape(c, hp, p, wp, p)
         patches = img.transpose(1, 3, 0, 2, 4).reshape(hp * wp, c * p * p)
