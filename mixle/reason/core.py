@@ -8,6 +8,7 @@ credible intervals, per-modality attribution, and an epistemic/aleatoric split o
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -266,14 +267,37 @@ def reason(prior: Any, evidence: Any, *, query: Any = None) -> ReasonedAnswer:
         prior: the latent's prior belief (:class:`GaussianBelief`; build one with :class:`Latent`).
         evidence: a sequence of :class:`LinearGaussianEvidence` and/or :class:`NonlinearEvidence`
             -- one per modality / observation. Nonlinear items assimilate by iterated-EKF
-            linearization (a Gaussian approximation; see :class:`NonlinearEvidence`).
-            They are folded in one at a time (order does not affect the result), and the nats each
-            removes are recorded for :meth:`ReasonedAnswer.attribution`.
+            linearization (a Gaussian approximation; see :class:`NonlinearEvidence`). They are
+            folded in one at a time, and the nats each removes are recorded for
+            :meth:`ReasonedAnswer.attribution`.
+
+            **Order independence holds only when every item is** :class:`LinearGaussianEvidence`:
+            sequential exact Kalman assimilation of linear-Gaussian observations commutes, so folding
+            them in one at a time then equals conditioning on all of them at once, in any order. That
+            guarantee does NOT extend to :class:`NonlinearEvidence`: each nonlinear item linearizes
+            at the CURRENT belief mean, which itself depends on whatever was already folded in before
+            it. Mixing nonlinear evidence with anything else -- other nonlinear evidence included --
+            therefore makes both the posterior and the per-source :meth:`ReasonedAnswer.attribution`
+            depend on the order ``evidence`` is given in (a :class:`RuntimeWarning` is raised when
+            this applies); pass evidence in a fixed, deliberate order rather than relying on
+            permutation invariance.
         query: optional latent coordinate indices to restrict the answer to.
 
     Returns:
         A :class:`ReasonedAnswer` -- the posterior belief plus attribution and prediction UQ.
     """
+    evidence = list(evidence)
+    if len(evidence) > 1 and any(isinstance(e, NonlinearEvidence) for e in evidence):
+        warnings.warn(
+            "reason(): evidence mixes NonlinearEvidence with other evidence. Unlike pure "
+            "LinearGaussianEvidence, the result is ORDER-DEPENDENT: each NonlinearEvidence item "
+            "linearizes at the belief mean at the time it is folded in, which depends on whatever "
+            "was folded in before it, so the posterior and per-source attribution() can differ "
+            "substantially between orderings of the same evidence list. Pass evidence in a fixed, "
+            "deliberate order.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     belief = _to_belief(prior)
     prior_entropy = belief.entropy()
     contributions: dict[str, float] = {}
