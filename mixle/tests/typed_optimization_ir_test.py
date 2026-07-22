@@ -22,6 +22,7 @@ from mixle.experimental.typed_runtime import (
     compile_update_graph,
     validate_update_graph,
 )
+from mixle.experimental.typed_runtime.compiler import _bind_child_estimators, _distribution_children
 from mixle.inference import optimize
 from mixle.models.energy import EnergyModel, EnergyModelEstimator
 from mixle.models.grad_leaf import GradLeaf
@@ -34,6 +35,7 @@ from mixle.stats import (
     MixtureEstimator,
 )
 from mixle.stats.bayes.normal_gamma import NormalGammaDistribution
+from mixle.stats.compute.pdist import ParameterEstimator, ProbabilityDistribution
 
 pytestmark = [pytest.mark.experimental, pytest.mark.fast]
 
@@ -305,3 +307,90 @@ class CapabilityProbeRobustnessTest:
         contract = graph.node(graph.root_node).contract
         assert contract.update_kind is UpdateKind.EXACT_CLOSED_FORM  # the conservative default
         assert contract.state_semantics == frozenset({StateSemantics.IMMUTABLE_RESULT})
+
+
+class _TwoLeafModel(ProbabilityDistribution):
+    """A model with two children whose attribute names share no canonical form with any
+    estimator attribute name -- forces both into _bind_child_estimators's unbound/positional path."""
+
+    def __init__(self, a, b):
+        self.aaa_leaf = a
+        self.zzz_leaf = b
+
+    def log_density(self, x):
+        raise NotImplementedError
+
+    def sampler(self, seed=None):
+        raise NotImplementedError
+
+    def estimator(self, pseudo_count=None):
+        raise NotImplementedError
+
+
+class _TwoLeafEstimator(ParameterEstimator):
+    """Attribute names deliberately don't share a canonical form with _TwoLeafModel's, AND their
+    alphabetical order is reversed relative to the true (constructor-argument) correspondence --
+    est_for_zzz_leaf lands in the alphabetically-first attribute, est_for_aaa_leaf in the second."""
+
+    def __init__(self, est_for_zzz_leaf, est_for_aaa_leaf):
+        self.attr_a = est_for_zzz_leaf
+        self.attr_z = est_for_aaa_leaf
+
+    def accumulator_factory(self):
+        raise NotImplementedError
+
+    def estimate(self, nobs, suff_stat):
+        raise NotImplementedError
+
+
+class BindChildEstimatorsTestCase:
+    """``_bind_child_estimators``'s positional fallback paired ANY equal-count group of unbound
+    model/estimator children by their (both alphabetical, since both lists are built from
+    ``sorted(vars(...).items())``) enumeration order alone -- with no semantic check that the
+    pairing is actually right. Two or more unbound children on each side is a silent coin flip
+    whenever the model's and estimator's naming conventions don't happen to sort into the same
+    relative order: it can swap which estimator a child is bound to, producing a wrong-but-
+    structurally-valid compiled contract with no error raised. A single straggler on each side is
+    safe (there is only one possible pairing either way) and is still resolved.
+    """
+
+    def test_two_or_more_unbound_children_are_left_unbound_not_silently_swapped(self):
+        est_for_aaa = GaussianEstimator(name="est_for_aaa")
+        est_for_zzz = GaussianEstimator(name="est_for_zzz")
+        model = _TwoLeafModel(GaussianDistribution(0.0, 1.0), GaussianDistribution(5.0, 2.0))
+        estimator = _TwoLeafEstimator(est_for_zzz_leaf=est_for_zzz, est_for_aaa_leaf=est_for_aaa)
+
+        model_children = _distribution_children(model)
+        bound = _bind_child_estimators(model_children, estimator)
+
+        assert bound == {}  # neither child gets a (possibly wrong) estimator rather than a guess
+
+    def test_a_single_unbound_child_on_each_side_still_binds_positionally(self):
+        class _OneLeafModel(ProbabilityDistribution):
+            def __init__(self, a):
+                self.solo_leaf = a
+
+            def log_density(self, x):
+                raise NotImplementedError
+
+            def sampler(self, seed=None):
+                raise NotImplementedError
+
+            def estimator(self, pseudo_count=None):
+                raise NotImplementedError
+
+        class _OneLeafEstimator(ParameterEstimator):
+            def __init__(self, a):
+                self.totally_different_name = a
+
+            def accumulator_factory(self):
+                raise NotImplementedError
+
+            def estimate(self, nobs, suff_stat):
+                raise NotImplementedError
+
+        solo_est = GaussianEstimator(name="solo_est")
+        model = _OneLeafModel(GaussianDistribution(0.0, 1.0))
+        bound = _bind_child_estimators(_distribution_children(model), _OneLeafEstimator(solo_est))
+
+        assert bound[0] is solo_est
