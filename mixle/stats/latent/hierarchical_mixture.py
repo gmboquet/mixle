@@ -964,7 +964,10 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
                 keyed_comp_counts += self.comp_counts
                 keyed_w_counts += self.w_counts
             else:
-                stats_dict[self.weight_key] = (self.comp_counts, self.w_counts)
+                # Copy on adoption: stats_dict must never alias this accumulator's own live
+                # arrays, or a later tied accumulator's in-place += above would silently mutate
+                # this accumulator's private comp_counts/w_counts as a side effect of merging.
+                stats_dict[self.weight_key] = (self.comp_counts.copy(), self.w_counts.copy())
 
         if self.comp_key is not None:
             if self.comp_key in stats_dict:
@@ -996,7 +999,12 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         """
         if self.weight_key is not None:
             if self.weight_key in stats_dict:
-                self.comp_counts, self.w_counts = stats_dict[self.weight_key]
+                # Copy on replace too: without it, every tied accumulator ends up pointing at
+                # the SAME array objects, so any one of them later accumulating new local data
+                # would silently corrupt every other tied accumulator's counts.
+                keyed_comp_counts, keyed_w_counts = stats_dict[self.weight_key]
+                self.comp_counts = np.asarray(keyed_comp_counts).copy()
+                self.w_counts = np.asarray(keyed_w_counts).copy()
 
         if self.comp_key is not None:
             if self.comp_key in stats_dict:
