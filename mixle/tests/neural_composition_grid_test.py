@@ -30,7 +30,7 @@ from mixle.stats import (
     PoissonDistribution,
     PoissonEstimator,
 )
-from mixle.utils.serialization import from_json, to_json
+from mixle.utils.serialization import from_json, to_json, trusted_deserialization
 
 
 def _unconditional_seqs(dim=2, n=30, seed=0):
@@ -76,7 +76,8 @@ class UnconditionalNeuralHmmTest:
         )
         fitted = optimize(data, est, prev_estimate=init, max_its=2, out=None)
         ll = fitted.log_density(data[0])
-        back = from_json(to_json(fitted))
+        with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+            back = from_json(to_json(fitted))
         assert np.isclose(back.log_density(data[0]), ll)
 
 
@@ -110,7 +111,8 @@ class ConditionalNeuralHmmTest:
         )
         fitted = optimize(data, est, prev_estimate=init, max_its=2, out=None)
         ll = fitted.log_density(data[0])
-        back = from_json(to_json(fitted))
+        with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+            back = from_json(to_json(fitted))
         assert np.isclose(back.log_density(data[0]), ll)
 
 
@@ -156,7 +158,8 @@ class HeterogeneousNeuralCompositeTest:
         rows = self._rows()
         fitted = optimize(rows, est, max_its=2, out=None)
         ll = fitted.log_density(rows[0])
-        back = from_json(to_json(fitted))
+        with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+            back = from_json(to_json(fitted))
         assert np.isclose(back.log_density(rows[0]), ll)
 
 
@@ -185,7 +188,8 @@ class NeuralGaussianCompositeAndHmmTest:
         fitted = optimize(rows, est, max_its=2, out=None)
         ll = fitted.log_density(rows[0])
         assert np.isfinite(ll)
-        back = from_json(to_json(fitted))
+        with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+            back = from_json(to_json(fitted))
         assert np.isclose(back.log_density(rows[0]), ll)
 
     def test_hmm_emission_fits_and_serializes(self):
@@ -205,7 +209,8 @@ class NeuralGaussianCompositeAndHmmTest:
         fitted = optimize(data, est, prev_estimate=init, max_its=2, out=None)
         ll = fitted.log_density(data[0])
         assert np.isfinite(ll)
-        back = from_json(to_json(fitted))
+        with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+            back = from_json(to_json(fitted))
         assert np.isclose(back.log_density(data[0]), ll)
 
 
@@ -221,7 +226,8 @@ class NeuralConditionalDensityCompositeAndHmmTest:
         fitted = optimize(rows, est, max_its=2, out=None)
         ll = fitted.log_density(rows[0])
         assert np.isfinite(ll)
-        back = from_json(to_json(fitted))
+        with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+            back = from_json(to_json(fitted))
         assert np.isclose(back.log_density(rows[0]), ll)
 
     def test_hmm_emission_fits_and_serializes(self):
@@ -239,5 +245,6 @@ class NeuralConditionalDensityCompositeAndHmmTest:
         fitted = optimize(data, est, prev_estimate=init, max_its=2, out=None)
         ll = fitted.log_density(data[0])
         assert np.isfinite(ll)
-        back = from_json(to_json(fitted))
+        with trusted_deserialization():  # embedded torch module: a self-produced, trusted round-trip
+            back = from_json(to_json(fitted))
         assert np.isclose(back.log_density(data[0]), ll)
