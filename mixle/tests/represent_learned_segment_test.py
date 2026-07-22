@@ -11,7 +11,13 @@ import pytest
 
 pytest.importorskip("torch")  # only for the compose test's embedding; the segmenter itself is torch-free
 
-from mixle.represent import FeatureEmbedding, HeterogeneousEncoder, LearnedSegmenter, WindowSegmenter  # noqa: E402
+from mixle.represent import (  # noqa: E402
+    ByteSegmenter,
+    FeatureEmbedding,
+    HeterogeneousEncoder,
+    LearnedSegmenter,
+    WindowSegmenter,
+)
 
 
 def _regime_signal(seed, runs=3, run_len=40):
@@ -35,6 +41,15 @@ class LearnedSegmentTest(unittest.TestCase):
     def test_requires_fit(self):
         with self.assertRaises(RuntimeError):
             LearnedSegmenter(WindowSegmenter(window=4)).segment(_regime_signal(0))
+
+    def test_fit_on_all_empty_sequences_does_not_raise_when_atomic_has_num_categories(self):
+        # regression: getattr(self.atomic, "num_categories", 1 + max(...)) evaluates the max(...)
+        # fallback EAGERLY regardless of whether num_categories exists, so an all-empty-sequences
+        # batch raised ValueError (max() of an empty generator) even though ByteSegmenter declares
+        # num_categories=256 and the fallback should never have been needed at all.
+        seg = LearnedSegmenter(ByteSegmenter(), n_states=2, max_its=3, seed=0)
+        seg.fit(["", ""])  # every raw segments to a zero-length byte sequence
+        self.assertEqual(seg.feat, 256)
 
     def test_plugs_into_heterogeneous_encoder(self):
         atomic = WindowSegmenter(window=4, hop=4)

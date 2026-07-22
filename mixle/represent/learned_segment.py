@@ -41,7 +41,17 @@ class LearnedSegmenter(Segmenter):
 
         seqs = [self.atomic.segment(r) for r in raws]
         if self.atomic.discrete:
-            self.feat = int(getattr(self.atomic, "num_categories", 1 + max(int(s.max()) for s in seqs if len(s))))
+            # getattr(obj, name, default) always evaluates `default` eagerly (Python has no lazy
+            # default for it), so the max(...) fallback used to run even when num_categories WAS
+            # available -- and raised ValueError on an all-empty-sequences batch (max() of an empty
+            # generator) regardless. Only fall back to scanning seqs when num_categories is truly
+            # absent, and only take max() when at least one sequence actually has content.
+            if hasattr(self.atomic, "num_categories"):
+                self.feat = int(self.atomic.num_categories)
+            elif any(len(s) for s in seqs):
+                self.feat = 1 + max(int(s.max()) for s in seqs if len(s))
+            else:
+                self.feat = 1  # nothing observed and nothing declared -- degenerate, not fatal
             est = st.HiddenMarkovEstimator([st.CategoricalEstimator() for _ in range(self.n_states)])
             data = [[int(v) for v in s] for s in seqs]
         else:
