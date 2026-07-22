@@ -1,15 +1,20 @@
-"""Ore blending & grade control.
+"""Blending: minimum-cost mixture of several sources hitting a target attribute window.
 
-A blend draws tonnage ``w_s`` from each of several sources (stockpiles, mine faces, parcels), each
-with its own per-element grade and unit cost, to hit a head-grade *window* on the combined material
--- ``spec_lo[e] <= (sum_s w_s grades[s,e]) / sum_s w_s <= spec_hi[e]`` for every element ``e`` -- at
-minimum blending cost. Fixing the total blended tonnage to the requested ``demand`` linearizes the
-otherwise-fractional ratio constraint into a pair of linear inequalities, so the whole problem is a
-linear (or, with a minimum-parcel floor per source, mixed-integer) program solved by
+A blend draws quantity ``w_s`` from each of several sources (stockpiles, batches, parcels), each
+with its own per-attribute grade and unit cost, to hit a target *window* on the combined material's
+attributes -- ``spec_lo[e] <= (sum_s w_s grades[s,e]) / sum_s w_s <= spec_hi[e]`` for every attribute
+``e`` -- at minimum blending cost. Fixing the total blended quantity to the requested ``demand``
+linearizes the otherwise-fractional ratio constraint into a pair of linear inequalities, so the whole
+problem is a linear (or, with a minimum-parcel floor per source, mixed-integer) program solved by
 :func:`mixle.relations.branch_and_bound_milp`. When the spec window cannot be met by any blend of the
 given sources, :func:`mixle.relations.irreducible_infeasible_subset` names the conflicting
-constraint rows -- which element window, high or low, is unmeetable -- rather than just reporting
+constraint rows -- which attribute window, high or low, is unmeetable -- rather than just reporting
 "infeasible".
+
+This is the classic blending problem of operations research: fuel/petroleum blending (octane rating),
+feed formulation (protein/nutrient content), alloy composition, and ore blending & grade control
+(the worked example below) all reduce to the identical LP/MILP -- sources, a per-attribute grade
+matrix, and a target window, nothing domain-specific in the construction itself.
 
     >>> import numpy as np
     >>> grades = np.array([[0.50], [0.55], [0.65], [0.70]])  # Fe fraction per stockpile
@@ -95,14 +100,14 @@ def blend_to_spec(
     *,
     min_parcel: float | None = None,
 ) -> tuple[float, np.ndarray]:
-    """Minimum-cost blend hitting a head-grade window, drawing tonnage from several sources.
+    """Minimum-cost blend hitting a target attribute window, drawing quantity from several sources.
 
     ``grades`` is ``(n_sources, n_elements)``, ``costs``/``avail`` are length ``n_sources``,
-    ``spec_lo``/``spec_hi`` are length ``n_elements``. The blend must total ``demand`` tons and, for
-    every element ``e``, ``spec_lo[e] <= blended_grade[e] <= spec_hi[e]``. Solved as an LP by default
+    ``spec_lo``/``spec_hi`` are length ``n_elements``. The blend must total ``demand`` units and, for
+    every attribute ``e``, ``spec_lo[e] <= blended_grade[e] <= spec_hi[e]``. Solved as an LP by default
     (``branch_and_bound_milp`` with no integer variables -> the HiGHS relaxation); pass
     ``min_parcel`` to additionally require that any source actually drawn from contributes at least
-    that many tons (a discrete stockpile-draw floor), which turns it into a MILP.
+    that many units (a discrete parcel-draw floor), which turns it into a MILP.
 
     Returns ``(min blend cost, per-source tonnage)``. Raises :class:`ValueError` -- naming the
     conflicting constraint rows from :func:`mixle.relations.irreducible_infeasible_subset` -- when no
@@ -143,11 +148,11 @@ def blend_to_spec(
 
 
 def blend_feasibility(grades: Any, spec_lo: Any, spec_hi: Any, avail: Any, demand: float) -> list[int] | None:
-    """Whether some blend of the sources can meet the spec window at ``demand`` tons, cost aside.
+    """Whether some blend of the sources can meet the spec window at ``demand`` units, cost aside.
 
     Returns ``None`` when feasible. Otherwise returns the row indices of an irreducible infeasible
     subset (:func:`mixle.relations.irreducible_infeasible_subset`) of the linearized spec-window /
-    total-tonnage system -- the minimal set of conflicting constraints, i.e. which element's window
+    total-quantity system -- the minimal set of conflicting constraints, i.e. which attribute's window
     (and whether its floor or ceiling) cannot be reached given the sources on hand.
     """
     grades = np.asarray(grades, dtype=np.float64)
