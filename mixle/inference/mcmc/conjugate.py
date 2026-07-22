@@ -85,7 +85,11 @@ def sample_conjugate_posterior(
         for mu, tau in posterior.sampler(seed=rng.randint(0, 2**31 - 1)).sample(size=draws):
             tau = max(float(tau), 1.0e-300)
             sigma2 = 1.0 / tau
-            samples.append(type(dist)(float(mu), sigma2) if return_distributions else (float(mu), float(sigma2)))
+            samples.append(
+                type(dist)(float(mu), sigma2, name=dist.name, keys=dist.keys)
+                if return_distributions
+                else (float(mu), float(sigma2))
+            )
     elif cls_name == "PoissonDistribution":
         from mixle.stats.univariate.continuous.gamma import GammaDistribution
 
@@ -94,7 +98,7 @@ def sample_conjugate_posterior(
         k, theta = posterior.get_parameters()
         for _ in range(draws):
             lam = rng.gamma(shape=k, scale=theta)
-            samples.append(type(dist)(lam) if return_distributions else float(lam))
+            samples.append(type(dist)(lam, name=dist.name, keys=dist.keys) if return_distributions else float(lam))
     elif cls_name == "ExponentialDistribution":
         from mixle.stats.univariate.continuous.gamma import GammaDistribution
 
@@ -104,7 +108,7 @@ def sample_conjugate_posterior(
         for _ in range(draws):
             rate = max(float(rng.gamma(shape=k, scale=theta)), 1.0e-300)
             beta = 1.0 / rate
-            samples.append(type(dist)(beta) if return_distributions else float(beta))
+            samples.append(type(dist)(beta, name=dist.name, keys=dist.keys) if return_distributions else float(beta))
     else:
         from mixle.stats.univariate.continuous.beta import BetaDistribution
 
@@ -116,7 +120,7 @@ def sample_conjugate_posterior(
             if return_distributions and cls_name == "BinomialDistribution":
                 samples.append(type(dist)(p, dist.n, min_val=dist.min_val, name=dist.name, keys=dist.keys))
             elif return_distributions:
-                samples.append(type(dist)(p))
+                samples.append(type(dist)(p, name=dist.name, keys=dist.keys))
             else:
                 samples.append(float(p))
 

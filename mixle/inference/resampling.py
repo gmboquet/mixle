@@ -144,6 +144,13 @@ def bootstrap(
     Returns:
         A :class:`BootstrapResult`.
     """
+    n_special = sum(x is not None for x in (groups, clusters, block_length, m))
+    if n_special > 1:
+        raise ValueError(
+            "bootstrap() accepts at most one of groups, clusters, block_length, m; got "
+            f"{n_special} set simultaneously -- _resample_indices would silently honor only one "
+            "(clusters, then groups, then block_length, then m) and drop the rest."
+        )
     rng = _as_rng(seed)
     n = _n_units(data)
     estimate = _call(statistic, data)
