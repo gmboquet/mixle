@@ -1,7 +1,7 @@
 Large-Module Audit
 ==================
 
-Seventeen modules in ``mixle`` exceed 1,500 lines. Size alone is not a defect, and this audit is **not** a
+Eighteen modules in ``mixle`` exceed 1,500 lines. Size alone is not a defect, and this audit is **not** a
 mandate to split them. Its purpose (worklist A1.7) is to record, for each large module, what it owns, the
 state it carries, the optional dependencies it touches, its hot paths, its serialization hooks, and where a
 *safe* extraction boundary lies — so that a future change can be scoped without a blind refactor.
@@ -62,6 +62,23 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Serialization:** ``dist_to_encoder`` / ``seq_encode``.
     * **Extraction boundary:** the ``TransitionOperator`` family (already an internal class hierarchy) is
       the natural module split — a genuine isolated-testing win, low numerical risk.
+
+``mixle/stats/latent/lookback_hidden_markov_model.py`` (1,528)
+    * **Responsibilities:** the lookback-window HMM — a typed rewrite of the sibling
+      ``mixle.stats.lookback_hmm`` — forward/backward and Baum-Welch EM over a bounded lookback
+      horizon, terminal-state/value likelihoods, and (as of the conjugate-prior fix) a Dirichlet
+      chain prior mirroring ``hidden_markov.py``'s own MAP path.
+    * **Stateful globals:** only ``TypeVar``\s (``T``, ``E0``, ``E1``); no mutable registry.
+    * **Optional imports:** none at this layer (the compiled kernels live in
+      ``_hidden_markov_numba_kernels.py``, shared with ``hidden_markov.py``).
+    * **Hot paths:** ``seq_log_density``, ``seq_update`` / ``seq_update_engine``, and the MAP
+      branch inside ``estimate`` (``_hmm_map_probs`` plus Dirichlet posterior propagation,
+      added alongside ``get_prior`` / ``set_prior`` / ``model_log_density``).
+    * **Serialization:** ``dist_to_encoder`` / ``seq_encode``; two backward-compatible aliases
+      (``LookbackHiddenMarkovModelAccumulator`` / ``...AccumulatorFactory``) at module scope.
+    * **Extraction boundary:** leave as-is; the prior/MAP machinery just added mirrors
+      ``hidden_markov.py``'s own inline placement rather than introducing a separable module —
+      the file crossed 1,500 lines to reach that parity, not through unrelated growth.
 
 ``mixle/stats/sequences/markov_chain.py`` (2,009)
     * **Responsibilities:** Markov chain distribution/estimator, Dirichlet prior, stationary distribution,
