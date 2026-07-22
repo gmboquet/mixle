@@ -13,6 +13,7 @@ from mixle.stats import GaussianDistribution
 from mixle.stats.bayes.dict_dirichlet import DictDirichletDistribution
 from mixle.stats.bayes.normal_gamma import NormalGammaDistribution
 from mixle.stats.univariate.continuous.gumbel import GumbelDistribution
+from mixle.stats.univariate.continuous.log_gaussian import LogGaussianDistribution
 
 
 class GumbelOverflowTest(unittest.TestCase):
@@ -80,6 +81,33 @@ class ConjugateVarianceFloorTest(unittest.TestCase):
         for _ in range(5):
             acc.update(1.0e8, 1.0, None)
         d = est.estimate(None, acc.value())
+        self.assertTrue(np.isfinite(d.sigma2) and d.sigma2 > 0.0)
+
+    def test_log_gaussian_negative_scatter_no_crash(self):
+        # LogGaussianEstimator._estimate_conjugate mirrors GaussianEstimator's: same
+        # cancellation-prone reduced-suff-stat scatter, previously unfloored. Unlike the scalar
+        # Gaussian (whose constructor rejects sigma2 <= 0 outright), log_gaussian.py already had a
+        # crude "new_sigma2 if > 0 else 1.0" fallback that swallows the negative value without
+        # crashing -- so a plain isfinite/>0 check alone would pass even pre-fix. Assert the actual
+        # (correctly floored) value instead, which differs sharply from the old constant-1.0 escape hatch.
+        est = LogGaussianDistribution(0.0, 1.0, prior=NormalGammaDistribution(0.0, 1e-12, 1e-9, 1e-12)).estimator()
+        sum_x, n = 3.0e8, 3.0
+        suff = (sum_x, sum_x * sum_x / n - 1.0e9, n, n)  # scatter forced negative
+        d = est.estimate(None, suff)
+        self.assertTrue(np.isfinite(d.sigma2) and d.sigma2 > 0.0)
+        self.assertTrue(np.isfinite(d.log_density(sum_x / n)))
+        self.assertAlmostEqual(d.sigma2, 4999.999994998334, places=3)
+        self.assertNotAlmostEqual(d.sigma2, 1.0, places=2)  # the old unguarded fallback's exact constant
+
+    def test_log_gaussian_zero_denom_no_crash(self):
+        # old_a=0.5 with no observations makes new_a - 0.5 == 0; dividing new_b/denom directly
+        # produced +inf, which passed the old "> 0 else 1.0" guard unfiltered and crashed the
+        # LogGaussianDistribution constructor (requires finite sigma2 > 0).
+        est = LogGaussianDistribution(0.0, 1.0, prior=NormalGammaDistribution(0.0, 1.0, 0.5, 1.0)).estimator()
+        suff = (0.0, 0.0, 0.0, 0.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any divide-by-zero warning becomes a test failure
+            d = est.estimate(None, suff)
         self.assertTrue(np.isfinite(d.sigma2) and d.sigma2 > 0.0)
 
     def test_diagonal_negative_scatter_no_nan(self):

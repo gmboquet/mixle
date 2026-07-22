@@ -689,12 +689,17 @@ class LogGaussianEstimator(ParameterEstimator):
 
         new_mu = (sum_x + old_mu * old_lam) / (old_lam + nobs_loc1)
 
-        new_b0 = sum_xx - sample_mean2 * sum_xxx
+        # The scatter ``sum_xx - (sum_x)^2/n`` from reduced sufficient statistics is the classic
+        # cancellation-prone form: on near-constant / large-offset data it can round slightly negative,
+        # driving ``new_b`` (and hence the variance) negative. Floor it at 0 (the MLE path floors
+        # equivalently), matching the sibling GaussianEstimator._estimate_conjugate.
+        new_b0 = max(sum_xx - sample_mean2 * sum_xxx, 0.0)
         new_b1 = (old_lam * nobs_loc1 / new_n) * np.power(sample_mean1 - old_mu, 2)
         new_b = old_b + 0.5 * (new_b0 + new_b1)
 
-        new_sigma2 = new_b / (new_a - 0.5)
-        new_sigma2 = new_sigma2 if new_sigma2 > 0 else 1.0
+        denom = new_a - 0.5
+        new_sigma2 = new_b / denom if denom > 0.0 else self.min_covar
+        new_sigma2 = max(new_sigma2, self.min_covar)  # match the MLE-path variance floor
         new_prior = NormalGammaDistribution(new_mu, new_n, new_a, new_b)
         return LogGaussianDistribution(new_mu, new_sigma2, name=self.name, keys=self.keys, prior=new_prior)
 
