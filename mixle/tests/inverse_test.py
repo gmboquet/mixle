@@ -155,33 +155,45 @@ def test_rounds_greater_than_one_without_y_obs_raises():
 
 
 def test_sequential_refinement_sharpens_posterior_at_observed_y():
-    rng = np.random.RandomState(0)
+    # A single seed's sharpness_by_round is not reliably monotonic: retraining a small conditional
+    # flow each round is a genuinely noisy fit, and a handful of seeds occasionally land on a round
+    # whose flow is transiently poorly conditioned (checked directly -- even at n_sims=800, several
+    # independent 12-seed panels showed individual per-seed round-3 sharpness spike as high as 62,
+    # swamping that one seed's own comparison). The MEDIAN across a panel of seeds is not: three
+    # independent 12-seed panels (seeds 0-11, 200-211, 300-311) all gave a clean, strictly decreasing
+    # median trajectory despite those same per-seed outliers, so that -- not any one hardcoded run --
+    # is what this test asserts.
     mu0 = np.array([0.0, 0.0])
     var0 = np.array([9.0, 9.0])
     var_obs = 0.25
-    prior = DiagonalGaussianDistribution(mu=mu0, covar=var0)
-
-    def simulator(theta):
-        return np.asarray(theta, dtype=float) + rng.normal(0.0, np.sqrt(var_obs), size=2)
-
     y_obs = np.array([2.0, -2.0])
-    # round 1 deliberately under-trained (few n_sims/m_steps) so refinement has visible room to help.
-    model = learn_inverse(
-        simulator,
-        prior,
-        family="flow",
-        n_sims=60,
-        m_steps=100,
-        rounds=3,
-        y_obs=y_obs,
-        seed=0,
-        n_sbc_replications=20,
-    )
-    sharpness = model.receipts.sharpness_by_round
-    assert len(sharpness) == 3
-    assert sharpness[1] < sharpness[0]
-    assert sharpness[2] < sharpness[1]
-    assert model.receipts.rounds_trained == 3
+
+    panel = []
+    for seed in range(12):
+        prior = DiagonalGaussianDistribution(mu=mu0, covar=var0)
+        rng = np.random.RandomState(seed)
+
+        def simulator(theta, rng=rng):
+            return np.asarray(theta, dtype=float) + rng.normal(0.0, np.sqrt(var_obs), size=2)
+
+        model = learn_inverse(
+            simulator,
+            prior,
+            family="flow",
+            n_sims=800,
+            m_steps=200,
+            rounds=3,
+            y_obs=y_obs,
+            seed=seed,
+            n_sbc_replications=20,
+        )
+        assert len(model.receipts.sharpness_by_round) == 3
+        assert model.receipts.rounds_trained == 3
+        panel.append(model.receipts.sharpness_by_round)
+
+    median_sharpness = np.median(np.asarray(panel), axis=0)
+    assert median_sharpness[1] < median_sharpness[0]
+    assert median_sharpness[2] < median_sharpness[1]
 
 
 # --------------------------------------------------------------------------------------------- #
