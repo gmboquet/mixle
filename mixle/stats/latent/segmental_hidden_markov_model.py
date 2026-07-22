@@ -594,10 +594,14 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace keyed initial, transition, emission, and length statistics."""
+        # Copy on replace: key_merge's `stats_dict.get(key, 0.0) + self.<field>` always
+        # allocates a fresh array, but without copying here too, every tied accumulator would
+        # end up pointing at that SAME fresh array object -- any one of them later
+        # accumulating new local data would silently corrupt every other tied accumulator.
         if self.init_key is not None and self.init_key in stats_dict:
-            self.init_counts = stats_dict[self.init_key]
+            self.init_counts = np.asarray(stats_dict[self.init_key]).copy()
         if self.trans_key is not None and self.trans_key in stats_dict:
-            self.trans_counts = stats_dict[self.trans_key]
+            self.trans_counts = np.asarray(stats_dict[self.trans_key]).copy()
         if self.state_key is not None and self.state_key in stats_dict:
             self.accumulators = stats_dict[self.state_key]
         for acc in self.accumulators:
