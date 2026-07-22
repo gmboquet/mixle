@@ -1209,6 +1209,56 @@ class IntegerMarkovChainEstimator(ParameterEstimator):
         self.name = name
         self.keys = keys
 
+    def get_prior(self):
+        """Returns the implicit per-row symmetric-Dirichlet prior ``pseudo_count`` induces, or None.
+
+        ``pseudo_count`` smoothing (``cond_mat += pseudo_count`` before row-normalizing in
+        :meth:`estimate`) is the exact MAP point estimate under an independent
+        ``SymmetricDirichletDistribution(pseudo_count + 1)`` prior on each row of the conditional
+        matrix -- see :meth:`model_log_density`. Lets
+        :func:`mixle.inference.estimation.optimize` auto-detect the ``'map'`` objective instead of
+        silently tracking plain (unpenalized) MLE for a pseudo-count-regularized fit.
+        """
+        if self.pseudo_count is None:
+            return None
+        from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
+
+        return SymmetricDirichletDistribution(self.pseudo_count + 1.0, dim=self.num_values)
+
+    def model_log_density(self, model: "IntegerMarkovChainDistribution") -> float:
+        """Log-density of the fitted conditional matrix under the implicit row prior (see
+        :meth:`get_prior`), plus ``init_dist``/``len_dist``'s own ``model_log_density`` when the
+        estimator that actually fit them (rather than a fixed, caller-supplied distribution)
+        exposes one. Returns ``0.0`` (a plain MLE fit) when ``pseudo_count`` is None.
+        """
+        rv = 0.0
+        if self.pseudo_count is not None:
+            from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
+
+            # SymmetricDirichletDistribution.log_density takes the raw probability row (it applies
+            # np.log itself); seq_log_density instead expects the PRE-LOGGED array its own
+            # SymmetricDirichletDataEncoder produces -- passing cond_dist's raw rows to
+            # seq_log_density directly would silently score log(row).sum() instead of the true
+            # Dirichlet log-density, which is identically 1.0 for every valid probability row and
+            # so cannot discriminate one fitted matrix from another. The scalar path per row is the
+            # correct, unambiguous one here (cond_dist has at most num_values**lag rows -- never a
+            # hot loop).
+            prior = SymmetricDirichletDistribution(self.pseudo_count + 1.0)
+            rv += float(sum(prior.log_density(row) for row in model.cond_dist))
+        if self.init_dist is None:  # init_dist was fit by init_estimator, not a fixed caller-supplied one
+            fn = getattr(self.init_estimator, "model_log_density", None)
+            if callable(fn):
+                term = fn(model.init_dist)
+                if term is not None:
+                    rv += float(term)
+        if self.len_dist is None:  # likewise for len_dist
+            fn = getattr(self.len_estimator, "model_log_density", None)
+            if callable(fn):
+                term = fn(model.len_dist)
+                if term is not None:
+                    rv += float(term)
+        return rv
+
     def accumulator_factory(self) -> "IntegerMarkovChainAccumulatorFactory":
         """Return an accumulator factory configured from this estimator."""
         len_factory = self.len_estimator.accumulator_factory()
