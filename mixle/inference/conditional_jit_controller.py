@@ -59,6 +59,7 @@ themselves.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Generic, TypeVar
@@ -245,6 +246,14 @@ class BanditController(LearnedController[ControllerState, ControllerAction]):
     that this module does not need to build to satisfy "online bandits ... given the state is a
     real feature vector" (the DesignModel mode already covers the contextual case, see its
     docstring).
+
+    Thread-safe for the reuse pattern the roadmap item and :func:`mixle.inference.block_em.run_block_em`
+    both invite ("the SAME controller object keeps learning ... across several calls/fits"):
+    :meth:`select_action`/:meth:`update` serialize on an internal lock, so sharing one instance
+    across CONCURRENT fits (not just sequential ones) cannot corrupt the wrapped bandit's counters --
+    both :class:`~mixle.task.bandit.UCB1` and :class:`~mixle.task.bandit.ThompsonGaussian` mutate
+    their arm statistics via multi-step (non-atomic) read-modify-write, so two interleaved calls on
+    the same arm without this lock could lose an update.
     """
 
     def __init__(
@@ -265,9 +274,11 @@ class BanditController(LearnedController[ControllerState, ControllerAction]):
             self.bandit = ThompsonGaussian(len(self.budget_levels), seed=seed)
         else:
             raise ValueError("algorithm must be 'ucb1' or 'thompson', got %r." % (algorithm,))
+        self._lock = threading.Lock()
 
     def select_action(self, state: ControllerState) -> ControllerAction:
-        arm = self.bandit.select()
+        with self._lock:
+            arm = self.bandit.select()
         return ControllerAction(
             action_type=ActionType.BUDGET_ALLOCATION,
             budget_fraction=self.budget_levels[arm],
@@ -281,7 +292,8 @@ class BanditController(LearnedController[ControllerState, ControllerAction]):
         if arm is None:
             arm = self.budget_levels.index(action.budget_fraction)
         reward = float(realized_gain) / max(float(realized_cost), 1.0e-12)
-        self.bandit.update(int(arm), reward)
+        with self._lock:
+            self.bandit.update(int(arm), reward)
 
 
 class DesignModelController(LearnedController[ControllerState, ControllerAction]):
@@ -298,6 +310,13 @@ class DesignModelController(LearnedController[ControllerState, ControllerAction]
 
     Before at least two logged rows exist, :meth:`select_action` cannot fit a GP and falls back to
     ``default_budget`` (an honest cold-start, not a fabricated proposal).
+
+    Thread-safe for the same cross-fit reuse pattern :class:`BanditController` documents:
+    :meth:`select_action`/:meth:`update` serialize on an internal lock, since
+    :class:`~mixle.task.edge.DesignModel`'s own ``add`` appends to several parallel lists
+    (``X``/``quality``/``violations``/``tags``) with no atomicity across the group -- two
+    interleaved ``add`` calls without this lock could append rows to those lists in different
+    relative orders and misalign a logged row across them.
     """
 
     def __init__(
@@ -316,12 +335,14 @@ class DesignModelController(LearnedController[ControllerState, ControllerAction]
             else DesignModel(signature="d5-budget-controller", n_constraints=0, n_fingerprint=STATE_FEATURE_DIM)
         )
         self.seed = seed
+        self._lock = threading.Lock()
 
     def select_action(self, state: ControllerState) -> ControllerAction:
         fingerprint = state.as_vector()
-        if len(self.design) < 2:
-            return ControllerAction(action_type=ActionType.BUDGET_ALLOCATION, budget_fraction=self.default_budget)
-        point = self.design.propose([self.bounds], seed=self.seed, fingerprint=fingerprint)
+        with self._lock:
+            if len(self.design) < 2:
+                return ControllerAction(action_type=ActionType.BUDGET_ALLOCATION, budget_fraction=self.default_budget)
+            point = self.design.propose([self.bounds], seed=self.seed, fingerprint=fingerprint)
         budget = float(np.clip(point[0], self.bounds[0], self.bounds[1]))
         return ControllerAction(action_type=ActionType.BUDGET_ALLOCATION, budget_fraction=budget)
 
@@ -329,4 +350,5 @@ class DesignModelController(LearnedController[ControllerState, ControllerAction]
         self, state: ControllerState, action: ControllerAction, realized_gain: float, realized_cost: float
     ) -> None:
         reward = float(realized_gain) / max(float(realized_cost), 1.0e-12)
-        self.design.add([action.budget_fraction], reward, [], fingerprint=list(state.as_vector()))
+        with self._lock:
+            self.design.add([action.budget_fraction], reward, [], fingerprint=list(state.as_vector()))

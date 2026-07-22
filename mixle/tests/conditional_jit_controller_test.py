@@ -13,6 +13,8 @@ Acceptance criteria under test (see the ConditionalJIT track's D5 item):
 """
 
 import importlib.util
+import threading
+import time
 import unittest
 
 import numpy as np
@@ -148,6 +150,87 @@ class BanditControllerCorrectnessTestCase(unittest.TestCase):
             self.assertIn("IMPLEMENTED", ACTION_TYPE_REGISTRY[action_type])
         for action_type in (ActionType.STRUCTURE_EDIT, ActionType.BACKEND_CHOICE):
             self.assertIn("EXTENSION POINT", ACTION_TYPE_REGISTRY[action_type])
+
+
+class ThreadSafetyTestCase(unittest.TestCase):
+    """``run_block_em``'s own docstring invites reusing ONE controller instance "across several
+    calls/fits -- the SAME controller object keeps learning". Neither wrapped backend actually
+    supports that concurrently on its own: ``UCB1``/``ThompsonGaussian.update`` mutate their arm
+    statistics via multi-step (non-atomic) read-modify-write, and ``DesignModel.add`` appends to
+    four parallel lists with no atomicity across the group. These tests prove
+    ``BanditController``/``DesignModelController`` actually serialize concurrent
+    ``select_action``/``update`` calls onto the shared bandit/design object via an internal lock,
+    rather than merely assuming a caller never shares one across concurrent fits.
+
+    Each test instruments the wrapped object's mutating method to record how many threads are
+    EVER inside it at once (holding it open briefly with ``time.sleep`` to widen the window) --
+    a hard, deterministic invariant under a correct lock (``max_concurrent`` can never exceed 1),
+    not a statistical race that might or might not manifest on a given run.
+    """
+
+    def test_bandit_controller_serializes_concurrent_updates(self):
+        controller = BanditController(seed=0)
+        dummy_state = ControllerState.from_scores(0, [], {}, {}, {}, {})
+        action = controller.select_action(dummy_state)
+
+        original_update = controller.bandit.update
+        counter_lock = threading.Lock()
+        counts = {"concurrent": 0, "max_concurrent": 0}
+
+        def instrumented_update(arm, reward):
+            with counter_lock:
+                counts["concurrent"] += 1
+                counts["max_concurrent"] = max(counts["max_concurrent"], counts["concurrent"])
+            time.sleep(0.05)
+            result = original_update(arm, reward)
+            with counter_lock:
+                counts["concurrent"] -= 1
+            return result
+
+        controller.bandit.update = instrumented_update
+
+        threads = [threading.Thread(target=controller.update, args=(dummy_state, action, 1.0, 1.0)) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(
+            counts["max_concurrent"], 1, "BanditController.update let concurrent calls overlap on the shared bandit"
+        )
+
+    def test_design_model_controller_serializes_concurrent_updates(self):
+        controller = DesignModelController(seed=0)
+        dummy_state = ControllerState.from_scores(0, [], {}, {}, {}, {})
+        action = controller.select_action(dummy_state)  # cold-start default_budget action; no rows logged yet
+
+        original_add = controller.design.add
+        counter_lock = threading.Lock()
+        counts = {"concurrent": 0, "max_concurrent": 0}
+
+        def instrumented_add(*args, **kwargs):
+            with counter_lock:
+                counts["concurrent"] += 1
+                counts["max_concurrent"] = max(counts["max_concurrent"], counts["concurrent"])
+            time.sleep(0.05)
+            result = original_add(*args, **kwargs)
+            with counter_lock:
+                counts["concurrent"] -= 1
+            return result
+
+        controller.design.add = instrumented_add
+
+        threads = [threading.Thread(target=controller.update, args=(dummy_state, action, 1.0, 1.0)) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(
+            counts["max_concurrent"],
+            1,
+            "DesignModelController.update let concurrent calls overlap on the shared design ledger",
+        )
 
 
 class LearnedVsGreedyAcceptanceTestCase(unittest.TestCase):
