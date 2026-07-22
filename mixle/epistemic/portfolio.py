@@ -47,6 +47,14 @@ class HypothesisPortfolio:
         self.w_open: float = float(w_open)
         if self.weights.shape != (len(self.hypotheses),):
             raise ValueError(f"weights must have shape ({len(self.hypotheses)},), got {self.weights.shape}")
+        ids = [h.id for h in self.hypotheses]
+        if len(set(ids)) != len(ids):
+            # resample()'s and resurrect()'s docstrings both promise every hypothesis id stays unique
+            # (resurrect reactivates the FIRST match, silently ignoring the rest on a collision), so a
+            # duplicate is a real invariant violation, not a cosmetic one -- reject it here rather than
+            # letting it corrupt lookups downstream.
+            dupes = sorted({i for i in ids if ids.count(i) > 1})
+            raise ValueError(f"hypothesis ids must be unique, got duplicate(s): {dupes!r}")
         if self.w_open < -1e-9 or self.w_open > 1 + 1e-9:
             raise ValueError(f"w_open must be in [0, 1], got {self.w_open}")
         for h, w in zip(self.hypotheses, self.weights):
