@@ -51,6 +51,27 @@ class NakagamiTest(unittest.TestCase):
         self.assertTrue(mixle.supports(d, HasCDF))
         self.assertTrue(mixle.supports(d, HasMoments))
 
+    def test_pseudo_count_smooths_toward_prior(self):
+        # estimator(pseudo_count=...) previously ignored pseudo_count entirely -- a silent no-op.
+        d = N(2.5, 3.0)
+        est = d.estimator(pseudo_count=1.0e6)
+        self.assertIsNotNone(est.suff_stat)
+        fitted = est.estimate(None, (1.0, 0.01, 0.0001))  # one observation far from omega=3.0
+        self.assertAlmostEqual(fitted.m, d.m, places=2)
+        self.assertAlmostEqual(fitted.omega, d.omega, places=2)
+
+        fitted_plain = d.estimator().estimate(None, (1.0, 0.01, 0.0001))
+        self.assertNotAlmostEqual(fitted_plain.omega, d.omega, places=1)
+
+    def test_pseudo_count_recovers_exact_prior_moments(self):
+        # feeding the stored suff_stat back through with zero real data (pure pseudo-count blend)
+        # must reproduce this distribution's own (m, omega) almost exactly.
+        d = N(4.0, 1.2)
+        est = d.estimator(pseudo_count=1.0)
+        fitted = est.estimate(None, (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(fitted.m, d.m, places=6)
+        self.assertAlmostEqual(fitted.omega, d.omega, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
