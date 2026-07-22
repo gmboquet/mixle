@@ -41,6 +41,29 @@ class SkewNormalTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             SkewNormalDistribution(0.0, -1.0, 1.0)
 
+    def test_pseudo_count_smooths_toward_prior(self):
+        # estimator(pseudo_count=...) previously ignored pseudo_count entirely -- a silent no-op.
+        d = SkewNormalDistribution(1.0, 2.0, 3.0)
+        est = d.estimator(pseudo_count=1.0e6)
+        self.assertIsNotNone(est.suff_stat)
+        fitted = est.estimate(None, (1.0, -5.0, 0.0, 0.0))  # one observation far from the prior
+        self.assertAlmostEqual(fitted.loc, d.loc, places=2)
+        self.assertAlmostEqual(fitted.scale, d.scale, places=2)
+        self.assertAlmostEqual(fitted.shape, d.shape, places=2)
+
+        fitted_plain = d.estimator().estimate(None, (1.0, -5.0, 0.0, 0.0))
+        self.assertNotAlmostEqual(fitted_plain.loc, d.loc, places=1)
+
+    def test_pseudo_count_recovers_exact_prior_moments(self):
+        # feeding the stored suff_stat back through with zero real data (pure pseudo-count blend)
+        # must reproduce this distribution's own (loc, scale, shape) almost exactly.
+        d = SkewNormalDistribution(-2.0, 0.7, -1.5)
+        est = d.estimator(pseudo_count=1.0)
+        fitted = est.estimate(None, (0.0, 0.0, 0.0, 0.0))
+        self.assertAlmostEqual(fitted.loc, d.loc, places=6)
+        self.assertAlmostEqual(fitted.scale, d.scale, places=6)
+        self.assertAlmostEqual(fitted.shape, d.shape, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
