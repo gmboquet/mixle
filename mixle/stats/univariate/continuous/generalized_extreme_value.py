@@ -388,7 +388,17 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
     ) -> GeneralizedExtremeValueDistribution:
         """Estimate location, scale, and shape from weighted moments."""
         sum_x, sum_x2, sum_x3, count = suff_stat
-        if self.pseudo_count is not None and self.suff_stat is not None:
+        if (
+            self.pseudo_count is not None
+            and self.suff_stat is not None
+            and np.isfinite(self.pseudo_count)
+            and all(np.isfinite(v) for v in self.suff_stat)
+        ):
+            # A cloned estimator can inherit a prior suff_stat computed from an earlier, already
+            # -degenerate fit elsewhere in a structure-search recursion (e.g. a near-empty or
+            # zero-variance sub-cluster). Blending a non-finite prior into otherwise-healthy real
+            # moments would silently poison sum_x2/sum_x3/var for THIS fit too, so a corrupt prior
+            # is treated as no prior at all rather than propagated.
             mean0, second0, third0 = self.suff_stat
             sum_x += self.pseudo_count * mean0
             sum_x2 += self.pseudo_count * second0
@@ -402,15 +412,33 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
             return GeneralizedExtremeValueDistribution(mean, self.min_scale, 0.0, name=self.name, keys=self.keys)
         m3 = sum_x3 / count - 3.0 * mean * (sum_x2 / count) + 2.0 * mean**3  # central third moment
         skew = m3 / var**1.5
-        xi = _xi_from_skewness(skew, self.xi_min, self.xi_max)
-        if abs(xi) < _XI_TOL:  # Gumbel limit
-            scale = math.sqrt(6.0 * var) / math.pi
-            loc = mean - scale * _EULER
+        # A pseudo_count/suff_stat blend (real data + prior moments) can produce a skew estimate
+        # that maps to a boundary xi where (g2 - g1*g1) is <= 0 -- an out-of-domain fractional
+        # power (NaN) rather than a numerical accident; the un-blended path never reached this
+        # region in practice. Fall back to the same safe Gumbel-shaped degenerate case the
+        # var<=0.0 branch above already uses, rather than let a non-finite parameter reach the
+        # constructor's validation as an opaque crash.
+        gumbel_fallback = math.sqrt(6.0 * var) / math.pi, mean - math.sqrt(6.0 * var) / math.pi * _EULER, 0.0
+        if not np.isfinite(skew):
+            scale, loc, xi = gumbel_fallback
         else:
-            g1, g2 = _gamma(1.0 - xi), _gamma(1.0 - 2.0 * xi)
-            scale = math.sqrt(var) * abs(xi) / math.sqrt(g2 - g1 * g1)
-            loc = mean - scale * (g1 - 1.0) / xi
-        return GeneralizedExtremeValueDistribution(loc, max(scale, self.min_scale), xi, name=self.name, keys=self.keys)
+            xi = _xi_from_skewness(skew, self.xi_min, self.xi_max)
+            if abs(xi) < _XI_TOL:  # Gumbel limit
+                scale = math.sqrt(6.0 * var) / math.pi
+                loc = mean - scale * _EULER
+            else:
+                g1, g2 = _gamma(1.0 - xi), _gamma(1.0 - 2.0 * xi)
+                denom = g2 - g1 * g1
+                if denom <= 0.0 or not np.isfinite(denom):
+                    scale, loc, xi = gumbel_fallback
+                else:
+                    scale = math.sqrt(var) * abs(xi) / math.sqrt(denom)
+                    loc = mean - scale * (g1 - 1.0) / xi
+        scale = max(scale, self.min_scale)
+        if not (np.isfinite(loc) and np.isfinite(scale) and np.isfinite(xi)):
+            scale, loc, xi = gumbel_fallback
+            scale = max(scale, self.min_scale)
+        return GeneralizedExtremeValueDistribution(loc, scale, xi, name=self.name, keys=self.keys)
 
 
 class GeneralizedExtremeValueDataEncoder(DataSequenceEncoder):
