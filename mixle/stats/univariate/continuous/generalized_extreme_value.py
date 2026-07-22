@@ -249,7 +249,21 @@ class GeneralizedExtremeValueDistribution(SequenceEncodableProbabilityDistributi
 
     def estimator(self, pseudo_count: float | None = None) -> "GeneralizedExtremeValueEstimator":
         """Return a method-of-moments estimator for ``loc``, ``scale`` and ``shape``."""
-        return GeneralizedExtremeValueEstimator(pseudo_count=pseudo_count, name=self.name, keys=self.keys)
+        if pseudo_count is None:
+            return GeneralizedExtremeValueEstimator(name=self.name, keys=self.keys)
+        # Convert this distribution's own (loc, scale, shape) into the raw first three moments, the
+        # same space `estimate()` accumulates in, so pseudo_count can blend a prior pseudo-sample
+        # toward them (mirrors GumbelEstimator / WeibullEstimator's suff_stat pattern).
+        mean0 = self.mean()
+        var0 = self.variance()
+        skew0 = _gev_skewness(self.shape)
+        second0 = var0 + mean0 * mean0
+        # Invert estimate()'s own central-moment formula (m3 = E[X^3] - 3*mean*E[X^2] + 2*mean^3):
+        # E[X^3] = skew*var^1.5 + 3*mean*E[X^2] - 2*mean^3.
+        third0 = skew0 * (var0**1.5) + 3.0 * mean0 * second0 - 2.0 * mean0**3
+        return GeneralizedExtremeValueEstimator(
+            pseudo_count=pseudo_count, suff_stat=(mean0, second0, third0), name=self.name, keys=self.keys
+        )
 
     def dist_to_encoder(self) -> "GeneralizedExtremeValueDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
@@ -350,6 +364,7 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
     def __init__(
         self,
         pseudo_count: float | None = None,
+        suff_stat: tuple[float, float, float] | None = None,
         min_scale: float = 1.0e-12,
         xi_max: float = 1.0 / 3.0 - 1.0e-4,  # third moment finite only for xi < 1/3
         xi_min: float = -1.0,
@@ -357,6 +372,7 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
         keys: str | None = None,
     ) -> None:
         self.pseudo_count = pseudo_count
+        self.suff_stat = suff_stat
         self.min_scale = min_scale
         self.xi_max = xi_max
         self.xi_min = xi_min
@@ -372,6 +388,12 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
     ) -> GeneralizedExtremeValueDistribution:
         """Estimate location, scale, and shape from weighted moments."""
         sum_x, sum_x2, sum_x3, count = suff_stat
+        if self.pseudo_count is not None and self.suff_stat is not None:
+            mean0, second0, third0 = self.suff_stat
+            sum_x += self.pseudo_count * mean0
+            sum_x2 += self.pseudo_count * second0
+            sum_x3 += self.pseudo_count * third0
+            count += self.pseudo_count
         if count <= 0.0:
             return GeneralizedExtremeValueDistribution(0.0, 1.0, 0.0, name=self.name, keys=self.keys)
         mean = sum_x / count
