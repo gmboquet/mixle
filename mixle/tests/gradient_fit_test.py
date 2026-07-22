@@ -370,6 +370,32 @@ class GradientFitTestCase(unittest.TestCase):
         self.assertGreater(mapped.pmap["c"], 0.05)
         self.assertGreater(mapped.pmap["a"], mapped.pmap["b"])
 
+    def test_fit_map_dirichlet_prior_mapping_keys_by_integer_category(self):
+        # IntegerCategoricalDistribution has no custom gradient_fit_state hook (unlike
+        # CategoricalDistribution above), so it goes through the generic declaration-backed path,
+        # where _dirichlet_alpha_tensor's Mapping branch used to always raise (the sole caller
+        # hardcoded labels=None). p_vec[i] corresponds to category (min_val + i) -- min_val=5 here
+        # (not 0) specifically to prove the fix resolves the real category labels via the
+        # declaration's support_bound statistic, not positional index 0..K-1 by coincidence.
+        dist = IntegerCategoricalDistribution(5, [1.0 / 3.0] * 3)  # categories 5, 6, 7
+        data = [5] * 45 + [6] * 15
+        enc = dist.dist_to_encoder().seq_encode(data)
+
+        mle, _ = fit_mle(enc, dist, max_its=600, lr=0.08, print_iter=1000)
+        mapped, _ = fit_map(
+            enc,
+            dist,
+            priors=DirichletPrior({5: 1.0, 6: 1.0, 7: 8.0}),
+            prior_strength=0.0,
+            max_its=600,
+            lr=0.08,
+            print_iter=1000,
+        )
+
+        self.assertLess(mle.p_vec[2], 0.001)  # category 7 (never observed) has near-zero MLE mass
+        self.assertGreater(mapped.p_vec[2], 0.05)  # the strong alpha=8 prior smooths it up
+        self.assertGreater(mapped.p_vec[0], mapped.p_vec[1])  # category 5 still more common than 6
+
     def test_fit_map_mixture_prior_helper_regularizes_weights(self):
         start = MixtureDistribution(
             [GaussianDistribution(-2.0, 0.5), GaussianDistribution(2.0, 0.5)],

@@ -404,6 +404,15 @@ class FisherViewTestCase(unittest.TestCase):
         self.assertEqual(set(view.vectorizer.label_strings()), {"'a'", "'b'"})
         np.testing.assert_allclose(mat, [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]])
 
+    def test_vectorizer_warns_instead_of_silently_dropping_a_non_numeric_leaf(self):
+        # A non-numeric leaf (float() raises TypeError/ValueError) used to be silently dropped from
+        # the learned coordinate schema with no signal at all -- observable only as a smaller-than-
+        # expected vector, never as an error or warning naming the actual field.
+        mixed = {"a": 1.0, "b": "not-a-number"}
+        with self.assertWarnsRegex(RuntimeWarning, "non-numeric"):
+            items = list(SufficientStatisticVectorizer._items(mixed))
+        self.assertEqual(items, [(("'a'",), 1.0)])  # the numeric sibling is still vectorized
+
     def test_latent_model_uses_expected_complete_data_statistics(self):
         dist = MixtureDistribution([GaussianDistribution(-2.0, 1.0), GaussianDistribution(2.0, 1.0)], [0.25, 0.75])
         view = dist.to_fisher()

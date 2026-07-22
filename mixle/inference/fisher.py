@@ -74,6 +74,15 @@ class SufficientStatisticVectorizer:
         try:
             yield (path if path else ("value",)), float(value)
         except (TypeError, ValueError):
+            import warnings
+
+            warnings.warn(
+                f"SufficientStatisticVectorizer: dropping non-numeric sufficient-statistic leaf at "
+                f"{path if path else ('value',)} (value={value!r}); it will not appear in the "
+                "vectorized coordinates.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
             return
 
     def fit(self, values: Sequence[Any]) -> SufficientStatisticVectorizer:

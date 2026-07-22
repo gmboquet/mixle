@@ -22,6 +22,16 @@ class DriftMetricsTest(unittest.TestCase):
         self.assertLess(population_stability_index(self.ref, same), 0.1)
         self.assertGreater(population_stability_index(self.ref, shifted), 0.25)
 
+    def test_psi_detects_drift_away_from_a_constant_reference(self):
+        # A constant reference feature has no quantile spread to bin against; this used to
+        # unconditionally return 0.0 ("no drift") regardless of `current` -- even when current has
+        # moved entirely away from the reference's one value, the most extreme drift possible.
+        constant_ref = np.full(500, 7.0)
+        same = np.full(300, 7.0)
+        drifted = np.full(300, 50.0)
+        self.assertEqual(population_stability_index(constant_ref, same), 0.0)
+        self.assertGreater(population_stability_index(constant_ref, drifted), 5.0)
+
     def test_ks_orders_shift(self):
         same = self.rng.normal(0, 1, 1000)
         shifted = self.rng.normal(2, 1, 1000)

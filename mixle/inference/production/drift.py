@@ -32,13 +32,22 @@ def population_stability_index(reference: Any, current: Any, *, bins: int = 10) 
     cur = cur[np.isfinite(cur)]
     if ref.size == 0 or cur.size == 0:
         return float("inf")
+    eps = 1e-6
     edges = np.unique(np.quantile(ref, np.linspace(0, 1, bins + 1)))
     if edges.size < 2:
-        return 0.0
+        # The reference feature is literally constant (a single distinct value): quantile binning
+        # has nothing left to bin against, so this used to unconditionally report 0.0 ("no drift")
+        # regardless of `current` -- even a current sample that has moved entirely away from that
+        # one value. Compare the mass still AT the reference value vs. everywhere else instead --
+        # the degenerate two-bin case of the same PSI formula below, not a silent short-circuit.
+        v = float(ref[0])
+        c_at = float(np.mean(np.isclose(cur, v)))
+        rp = np.array([1.0, 0.0]) + eps
+        cp = np.array([c_at, 1.0 - c_at]) + eps
+        return float(np.sum((cp - rp) * np.log(cp / rp)))
     edges[0], edges[-1] = -np.inf, np.inf
     r = np.histogram(ref, edges)[0].astype(float)
     c = np.histogram(cur, edges)[0].astype(float)
-    eps = 1e-6
     rp = r / r.sum() + eps
     cp = c / c.sum() + eps
     return float(np.sum((cp - rp) * np.log(cp / rp)))
