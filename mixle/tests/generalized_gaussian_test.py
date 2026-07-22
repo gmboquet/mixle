@@ -49,6 +49,30 @@ class GeneralizedGaussianTest(unittest.TestCase):
         for cap in (HasCDF, HasMoments, HasEntropy):
             self.assertTrue(mixle.supports(d, cap))
 
+    def test_pseudo_count_smooths_toward_prior(self):
+        # estimator(pseudo_count=...) previously ignored pseudo_count entirely (didn't even thread
+        # it into the returned estimator) -- a silent no-op.
+        d = GG(2.0, 1.5, 3.0)
+        est = d.estimator(pseudo_count=1.0e6)
+        self.assertIsNotNone(est.suff_stat)
+        fitted = est.estimate(None, (1.0, 0.0, 0.0, 0.0, 0.0))  # one observation at 0, far from mu=2
+        self.assertAlmostEqual(fitted.mu, d.mu, places=2)
+        self.assertAlmostEqual(fitted.alpha, d.alpha, places=2)
+        self.assertAlmostEqual(fitted.beta, d.beta, places=2)
+
+        fitted_plain = d.estimator().estimate(None, (1.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertNotAlmostEqual(fitted_plain.mu, d.mu, places=1)
+
+    def test_pseudo_count_recovers_exact_prior_moments(self):
+        # feeding the stored suff_stat back through with zero real data (pure pseudo-count blend)
+        # must reproduce this distribution's own (mu, alpha, beta) almost exactly.
+        d = GG(-1.0, 0.6, 4.0)
+        est = d.estimator(pseudo_count=1.0)
+        fitted = est.estimate(None, (0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertAlmostEqual(fitted.mu, d.mu, places=6)
+        self.assertAlmostEqual(fitted.alpha, d.alpha, places=6)
+        self.assertAlmostEqual(fitted.beta, d.beta, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
