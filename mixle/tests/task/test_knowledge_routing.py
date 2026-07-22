@@ -263,3 +263,99 @@ def test_a_one_arg_invoke_is_completely_unaffected():
     proposer = init_decomposition_proposer([["physics"]] * 20)
     result = route_task("plain question", catalog, proposer=proposer, budget=3)
     assert result.answer["resolved_gap_ids"] == ["gap-0-physics"]
+
+
+def test_a_transient_tool_failure_is_retried_in_place_not_desynced_onto_later_gaps():
+    """Regression test for a gap-skipping desync: `_RoutingWorld._cursor` used to advance on every
+    `step()` call (including a call that raised), while `_sequential_plan` picked the next gap index
+    from `len(history)`. `orchestrate`'s re-plan-on-failure path calls `world.step()` twice for one
+    failed turn but appends to `history` only once, so the two counters fell out of sync: the failed
+    gap was silently skipped forever, the gap after it got processed twice, and the last gap in the
+    sequence was never attempted because `world.done` fired one call early.
+
+    Four domains, ordered physics/economic/climate/geology by the seeded proposer. The economic tool
+    raises on its first call and would succeed on a second -- a realistic transient failure -- so a
+    correct implementation must retry that SAME gap (not skip to climate) and still go on to resolve
+    climate and geology afterward."""
+    economic_calls = {"n": 0}
+
+    def _physics_tool(gap):
+        return {"tonnage_mt": 12.5}
+
+    def _economic_tool(gap):
+        economic_calls["n"] += 1
+        if economic_calls["n"] == 1:
+            raise RuntimeError("transient upstream failure")
+        return {"npv_usd": 4.2e7}
+
+    def _climate_tool(gap):
+        return {"precip_delta_pct": -8.0}
+
+    def _geology_tool(gap):
+        return {"assay_grade": 1.1}
+
+    catalog = [
+        CatalogEntry(
+            id="physics_survey",
+            schema={"invoke": _physics_tool, "output": {}},
+            owner="physics",
+            cost=0.1,
+            reliability=0.9,
+            verifier=_PassVerifier(),
+        ),
+        CatalogEntry(
+            id="economic_model",
+            schema={"invoke": _economic_tool, "output": {}},
+            owner="economic",
+            cost=0.1,
+            reliability=0.9,
+            verifier=_PassVerifier(),
+        ),
+        CatalogEntry(
+            id="climate_projection",
+            schema={"invoke": _climate_tool, "output": {}},
+            owner="climate",
+            cost=0.1,
+            reliability=0.9,
+            verifier=_PassVerifier(),
+        ),
+        CatalogEntry(
+            id="geology_survey",
+            schema={"invoke": _geology_tool, "output": {}},
+            owner="geology",
+            cost=0.1,
+            reliability=0.9,
+            verifier=_PassVerifier(),
+        ),
+    ]
+    seed = [["physics", "economic", "climate", "geology"]] * 20
+    proposer = init_decomposition_proposer(seed)
+
+    result = route_task("needs physics, economic, climate, and geology evidence", catalog, proposer=proposer, budget=10)
+
+    # the economic tool was actually retried (called twice), not silently abandoned after one failure
+    assert economic_calls["n"] == 2
+
+    # every gap resolved -- none silently skipped, none left unattempted because `done` fired early
+    assert result.answer["unresolved_gap_ids"] == []
+    assert result.answer["resolved_gap_ids"] == [
+        "gap-0-physics",
+        "gap-1-economic",
+        "gap-2-climate",
+        "gap-3-geology",
+    ]
+    assert set(result.answer["catalog_ids_considered"]) == {
+        "physics_survey",
+        "economic_model",
+        "climate_projection",
+        "geology_survey",
+    }
+
+    # each gap was resolved exactly once -- no gap got double-processed as a side effect of the desync
+    resolved_gap_ids_in_updates = [u["gap_id"] for u in result.delta["gap_updates"] if u["status"] == "resolved"]
+    assert sorted(resolved_gap_ids_in_updates) == sorted(set(resolved_gap_ids_in_updates))
+    assert len(resolved_gap_ids_in_updates) == 4
+
+    # exactly one add_items entry per gap -- no gap produced a duplicate item
+    domains_produced = [item["metadata"]["domain"] for item in result.delta["add_items"]]
+    assert sorted(domains_produced) == ["climate", "economic", "geology", "physics"]
