@@ -287,6 +287,10 @@ class _RoutingWorld:
     add_items: list[dict[str, Any]] = field(default_factory=list)
     gap_updates: list[dict[str, Any]] = field(default_factory=list)
     tried_catalog_ids: set[str] = field(default_factory=set)
+    # Number of gaps that have COMPLETED a step (``_resolve_gap`` returned without raising) -- not a
+    # raw ``step()``-call counter. ``orchestrate`` calls ``step()`` a second time, on the SAME gap,
+    # when the first call raises (its re-plan-on-failure path); only counting completed calls here
+    # keeps `done` from firing before every gap has actually had a real, terminal attempt.
     _cursor: int = 0
 
     @property
@@ -296,8 +300,13 @@ class _RoutingWorld:
     def step(self, action: dict[str, Any]) -> Any:
         idx = int(action["args"]["index"])
         gap = self.gaps[idx]
-        self._cursor += 1
         outcome = _resolve_gap(gap, self.known_items + self.add_items, self.catalog)
+        # Advance only now that `_resolve_gap` has returned without raising -- see the `_cursor`
+        # field comment. A raising call must not count: orchestrate() is about to retry this exact
+        # gap (via `_sequential_plan`'s result-counting below), and counting the failed call here
+        # would let `_cursor` outrun the number of gaps actually given a terminal outcome, firing
+        # `done` early and leaving later gaps unattempted.
+        self._cursor += 1
         attempt = outcome["attempt"]
         if attempt is not None and attempt.get("tool_or_model"):
             self.tried_catalog_ids.add(attempt["tool_or_model"])
@@ -320,10 +329,18 @@ class _RoutingWorld:
 
 def _sequential_plan(n_gaps: int):
     """A trivial plan model: resolve gap 0, 1, 2, ... in order, then STOP -- the decomposition order
-    was already decided by the proposer; ``orchestrate`` just needs a step/stop signal per gap."""
+    was already decided by the proposer; ``orchestrate`` just needs a step/stop signal per gap.
+
+    Counts only history entries carrying a ``"result"`` key (a gap that actually completed a step)
+    rather than raw ``len(history)``. ``orchestrate``'s re-plan-on-failure path calls this a second
+    time within the same turn with a one-off ``[*history, {..., "error": ...}]`` list -- one entry
+    longer, but that entry is the FAILED step, not a completed one. Trusting raw length there would
+    read as "one more gap done" and skip straight to the next index instead of retrying the gap that
+    just failed (the desync this guards against: a naive index-from-length count and orchestrate's
+    retry convention disagree on what the extra history entry means)."""
 
     def plan(_question: str, history: list[dict[str, Any]]) -> dict[str, Any] | None:
-        i = len(history)
+        i = sum(1 for h in history if "result" in h)
         if i >= n_gaps:
             return None
         return {"tool": "resolve_gap", "args": {"index": i}}
