@@ -665,8 +665,13 @@ def kernel_for(
         plan = analyze(dist)
         flat_worth_it = plan is not None and (plan.num_components > 1 or len(plan.leaf_templates) > 1)
         # nested scalar trees (Mixture-of-Mixture, Composite-with-Mixture-factor, ...) the flat analyzer
-        # declines but the recursive path fuses -- they are always worth fusing (multi-node by construction)
-        nested_worth_it = plan is None and fusible(dist)
+        # declines but the recursive path fuses -- they are always worth fusing (multi-node by construction).
+        # bare_bridge=False: this is exactly the "would a fused kernel beat this schedule" performance
+        # question fusible()'s own docstring calls out -- its default (bare_bridge=True) also accepts the
+        # last-resort bridge path, which is host-speed with a fused softmax, not a single-pass win, and
+        # would otherwise route e.g. a bare Laplace mixture (no leaf template) into a FusedKernel that
+        # buys nothing over its existing registered kernel.
+        nested_worth_it = plan is None and fusible(dist, bare_bridge=False)
         if flat_worth_it or nested_worth_it:
             if estimator is None or fusible_estep(dist):
                 return FusedKernel(dist, engine, estimator=estimator)
