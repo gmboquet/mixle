@@ -75,6 +75,81 @@ def test_population_improves_bad_seed():
     assert obj.scalar(result.best_model, data) <= obj.scalar(seed_model, data)
 
 
+def test_population_step_scores_verify_data_not_train():
+    # Bug-1 regression: op.propose must fit on `data` (train); challenger_beats_champion and the
+    # population's own fitness scoring must run on the disjoint `verify_data` -- never on `data` itself
+    # (scoring a candidate on the same rows it was just fit on is a near-tautological "test").
+    real_obj = nll_objective()
+    scored_ids = []
+
+    class _SpyObjective:
+        name = "spy_nll"
+        lower_is_better = True
+
+        def pointwise(self, model, data):
+            scored_ids.append(id(data))
+            return real_obj.pointwise(model, data)
+
+        def scalar(self, model, data):
+            scored_ids.append(id(data))
+            return real_obj.scalar(model, data)
+
+    train = list(np.random.RandomState(11).normal(5.0, 1.0, 40))
+    verify = list(np.random.RandomState(12).normal(5.0, 1.0, 40))
+    seed_model = GaussianDistribution(0.0, 1.0)
+
+    pop = Population([seed_model], objective=_SpyObjective(), seed=0)
+    pop.step(train, verify)
+
+    assert scored_ids, "expected the spy objective to be invoked at least once (seed scoring)"
+    assert all(sid == id(verify) for sid in scored_ids)  # every score call used the SAME verify object
+    assert id(train) not in scored_ids  # train (the fit data) must never be scored
+
+
+def test_search_bandit_scores_on_held_out_split():
+    # Bug-1 regression: search(method="bandit") must gate/score every candidate on the held-out val
+    # split search() computes up front -- not on the unsplit rows / the train split it was fit on.
+    from mixle.evolve.improve import _split
+
+    obj = nll_objective()
+    data = list(np.random.RandomState(4).normal(5.0, 1.0, 80))
+    holdout, seed = 0.25, 0
+    expected_train, expected_val = _split(data, holdout, seed)
+    expected_train_sorted = sorted(expected_train)
+    expected_val_sorted = sorted(expected_val)
+
+    scored_batches = []
+
+    class _SpyObjective:
+        name = obj.name
+        lower_is_better = obj.lower_is_better
+
+        def pointwise(self, model, batch):
+            scored_batches.append(sorted(batch))
+            return obj.pointwise(model, batch)
+
+        def scalar(self, model, batch):
+            scored_batches.append(sorted(batch))
+            return obj.scalar(model, batch)
+
+    sp = Space({"mu": Real(-2.0, 8.0)})
+    res = search(
+        sp,
+        data,
+        objective=_SpyObjective(),
+        build_fn=lambda cfg: GaussianDistribution(float(cfg["mu"]), 1.0),
+        method="bandit",
+        n_iter=2,
+        seed=seed,
+        holdout=holdout,
+    )
+    assert isinstance(res, SearchResult) and res.best_model is not None
+    assert scored_batches, "expected the objective to be invoked for scoring"
+    for batch in scored_batches:
+        assert batch == expected_val_sorted, "every scoring call must use the held-out val split"
+        assert batch != expected_train_sorted
+
+
 def test_recompose_captures_bimodal_structure():
     rng = np.random.RandomState(0)
     data = list(rng.normal(-4.0, 0.5, 120)) + list(rng.normal(4.0, 0.5, 120))  # clearly bimodal

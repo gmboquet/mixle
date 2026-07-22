@@ -383,6 +383,13 @@ class ClosedLoopSelfEvolution:
         4. propose + gate the challenger,
         5. reward the bandit with the verified (anti-regression) delta,
         6. deploy + record a genealogy receipt iff the gate promotes.
+
+        Note on ``verify``: when omitted, ``verify_data`` defaults to the WHOLE ``batch``, while
+        ``train_data`` (what the challenger is fit on) is ``acquire``'s top-priority SUBSET of that same
+        ``batch`` -- so the default gate scores the challenger on a set that overlaps the data it was
+        just fit on, weaker evidence than a disjoint split. Callers that want a clean held-out gate
+        should pass an explicit ``verify`` batch of observations not also handed to this step's
+        ``train_data``.
         """
         self._n_steps += 1
         batch = list(batch)
