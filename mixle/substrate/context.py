@@ -215,6 +215,14 @@ class ContextBudget:
     max_items: int = 20
     shape: str = "passages"  # 'passages' (LLM) | 'brief' (human) | 'features' (student)
 
+    def __post_init__(self) -> None:
+        # Caught here, not where it would otherwise surface: assemble_context's compress=True path
+        # divides budget.max_chars by min(max_items, len(hits)), so max_items=0 is a ZeroDivisionError
+        # far from this, its actual cause -- and every other max_items use (packing loops, receiver
+        # profiles) presumes "at least one item" is a meaningful budget too.
+        if self.max_items < 1:
+            raise ValueError(f"ContextBudget.max_items must be >= 1, got {self.max_items!r}")
+
 
 @dataclass
 class ContextPacket:
