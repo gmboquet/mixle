@@ -839,19 +839,22 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
             if self.wc_key in stats_dict:
                 stats_dict[self.wc_key] += self.word_count
             else:
-                stats_dict[self.wc_key] = self.word_count
+                # Copy on adoption: stats_dict must never alias this accumulator's own live
+                # array, or a later tied accumulator's in-place += above would silently mutate
+                # this accumulator's private word_count as a side effect of merging.
+                stats_dict[self.wc_key] = self.word_count.copy()
 
         if self.sc_key is not None:
             if self.sc_key in stats_dict:
                 stats_dict[self.sc_key] += self.comp_count
             else:
-                stats_dict[self.sc_key] = self.comp_count
+                stats_dict[self.sc_key] = self.comp_count.copy()
 
         if self.dc_key is not None:
             if self.dc_key in stats_dict:
                 stats_dict[self.dc_key] += self.doc_count
             else:
-                stats_dict[self.dc_key] = self.doc_count
+                stats_dict[self.dc_key] = self.doc_count.copy()
 
         self.len_acc.key_merge(stats_dict)
 
@@ -868,15 +871,18 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
             stats_dict: Mapping from merge keys to sufficient statistics.
 
         """
+        # Copy on replace too: without it, every tied accumulator ends up pointing at the SAME
+        # array object, so any one of them later accumulating new local data would silently
+        # corrupt every other tied accumulator's counts.
         if self.wc_key is not None:
             if self.wc_key in stats_dict:
-                self.word_count = stats_dict[self.wc_key]
+                self.word_count = np.asarray(stats_dict[self.wc_key]).copy()
         if self.sc_key is not None:
             if self.sc_key in stats_dict:
-                self.comp_count = stats_dict[self.sc_key]
+                self.comp_count = np.asarray(stats_dict[self.sc_key]).copy()
         if self.dc_key is not None:
             if self.dc_key in stats_dict:
-                self.doc_count = stats_dict[self.dc_key]
+                self.doc_count = np.asarray(stats_dict[self.dc_key]).copy()
 
         self.len_acc.key_replace(stats_dict)
 
