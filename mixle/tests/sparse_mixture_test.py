@@ -26,6 +26,25 @@ class LogDensitySupTest(unittest.TestCase):
     def test_unbounded_or_unknown_returns_none(self):
         self.assertIsNone(log_density_sup(st.GammaDistribution(0.5, 1.0)))  # density -> inf at 0
 
+    def test_categorical_default_value_dominant(self):
+        # default_value (0.99) exceeds every in-pmap probability (0.005 each): the true peak
+        # log-density is achieved by a label OUTSIDE pmap, not by max(pmap.values()). The sup
+        # must also apply CategoricalDistribution's -log1p(default_value) normalizer.
+        cat = st.CategoricalDistribution({"a": 0.005, "b": 0.005}, default_value=0.99)
+        sup = log_density_sup(cat)
+        outside_label_density = cat.log_density("not_in_pmap")
+        self.assertAlmostEqual(sup, outside_label_density, places=10)
+        # The bound must actually dominate every achievable log-density, in and out of pmap.
+        self.assertGreaterEqual(sup + 1e-12, cat.log_density("a"))
+        self.assertGreaterEqual(sup + 1e-12, cat.log_density("b"))
+        self.assertGreaterEqual(sup + 1e-12, outside_label_density)
+
+    def test_categorical_default_value_zero_matches_pre_existing_formula(self):
+        # default_value=0.0 (the default): log1p(0)=0, so this must reduce exactly to the
+        # pre-existing math.log(m) formula already covered by test_known_family_peaks.
+        cat = st.CategoricalDistribution({"a": 0.6, "b": 0.4})
+        self.assertAlmostEqual(log_density_sup(cat), math.log(0.6))
+
 
 class SparseScoreTest(unittest.TestCase):
     def test_bracket_contains_exact(self):
@@ -55,6 +74,27 @@ class SparseScoreTest(unittest.TestCase):
         self.assertGreaterEqual(widths[0] + 1e-12, widths[1])
         self.assertGreaterEqual(widths[1] + 1e-12, widths[2])
         self.assertAlmostEqual(widths[2], 0.0, places=9)  # exact at full k
+
+    def test_bracket_holds_with_default_value_dominant_categorical(self):
+        # comp0's default_value (0.99) dwarfs its in-pmap probabilities (0.005 each), so its true
+        # peak log-density (achieved by labels outside its pmap) previously wasn't reflected in
+        # log_density_sup. Rank comp0 last (its low weight * correct-or-buggy sup keeps it out of
+        # the top 2, i.e. in the dropped tail whose bound comes purely from log_density_sup), then
+        # query a label outside every component's pmap: the true (exact) log-density is driven
+        # entirely by comp0's default_value branch, which the pre-fix bound understated -- upper
+        # was < exact, breaking "lower <= log p(x) <= upper".
+        comps = [
+            st.CategoricalDistribution({"a": 0.005, "b": 0.005}, default_value=0.99),
+            st.CategoricalDistribution({"a": 0.9, "b": 0.05}),
+            st.CategoricalDistribution({"a": 0.5, "b": 0.5}),
+        ]
+        m = st.MixtureDistribution(comps, [0.2, 0.5, 0.3])
+        for x in ("a", "b", "unseen_label"):
+            exact = m.log_density(x)
+            sc = sparse_mixture_score(m, x, max_components=2)
+            with self.subTest(x=x):
+                self.assertLessEqual(sc.lower, exact + 1e-9)
+                self.assertGreaterEqual(sc.upper, exact - 1e-9)  # certified bracket must hold
 
     def test_unbounded_component_falls_back_to_exact(self):
         # a Gamma(shape<1) leaf has unbounded density -> cannot certify -> exact full scoring
