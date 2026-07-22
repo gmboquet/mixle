@@ -13,8 +13,8 @@ arc/capacity/supply overrides (see :meth:`PipelineTwin._apply_interventions`).
 Nothing about the twin itself is domain-specific: it is a general period-stepped supply/demand
 network simulator with pluggable scenario interventions (new/changed arcs, node outages, supply-rate
 shifts, demand shifts). This module's worked instantiation is a mine -> plant -> distribution
-pipeline (source nodes are mines, sinks are customers, "plant-down" and "grade shift" are the named
-interventions below), but the network topology, capacities, and interventions are all caller-supplied.
+pipeline (source nodes are mines, sinks are customers, "plant-down" and "supply-rate shift" are the
+named interventions below), but the network topology, capacities, and interventions are all caller-supplied.
 
 Network capacities can be tightened by H5 (``mixle_pde.material_transport``) transport-physics
 numbers -- those arrive as a plain ``{(u, v): capacity}`` mapping (no cross-plugin import) and are
