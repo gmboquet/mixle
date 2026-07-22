@@ -156,10 +156,23 @@ def _fit_round(module: Any, ys: np.ndarray, thetas: np.ndarray, *, m_steps: int,
 
 
 def _posterior_sharpness(module: Any, y_obs: np.ndarray, theta_dim: int, *, n: int, seed: int | None) -> float:
-    """A scalar "how spread out is q(theta | y_obs)" receipt -- sum of per-dimension sample variance.
-    Lower is sharper; used to assert refinement rounds measurably sharpen the posterior (test (e))."""
+    """A scalar "how spread out is q(theta | y_obs)" receipt -- sum of per-dimension TRIMMED sample
+    variance (middle 80%, i.e. the top/bottom decile of draws dropped before computing variance).
+    Lower is sharper; used to assert refinement rounds measurably sharpen the posterior (test (e)).
+
+    Plain ``np.var`` is not robust to the occasional extreme-value draw an under-trained conditional
+    flow can produce -- a single sample landing far outside the flow's well-conditioned region (a
+    known pathology, more likely exactly in the small-``n_sims`` regime this receipt is meant to
+    characterize) can inflate raw variance by orders of magnitude without the bulk of the posterior
+    mass having moved at all. Trimming keeps the receipt reporting the posterior's actual central
+    spread instead of one unlucky sample.
+    """
     samples = _sample_given(module, y_obs, n, seed=seed)
-    return float(np.sum(np.var(samples, axis=0)))
+    trimmed = np.sort(samples, axis=0)
+    cut = int(0.1 * len(trimmed))
+    if cut > 0:
+        trimmed = trimmed[cut:-cut]
+    return float(np.sum(np.var(trimmed, axis=0)))
 
 
 def _calibration_receipts(
