@@ -9,7 +9,7 @@ public release.
 Current Inventory
 -----------------
 
-The core package currently ships 57 Python example scripts:
+The core package currently ships 58 Python example scripts:
 
 .. list-table::
    :header-rows: 1
@@ -18,7 +18,7 @@ The core package currently ships 57 Python example scripts:
      - Examples
      - Release tier
    * - Base distribution galleries
-     - ``gallery_*``, ``auto_example.py``, ``ppl_example.py``
+     - ``gallery_*``, ``auto_example.py``, ``ppl_example.py``, ``quickstart_example.py``
      - smoke/validation
    * - Latent and structured models
      - HMM, mixture, association, and structure-learning examples
@@ -198,6 +198,12 @@ reproduces the identical held-out mean log-likelihood (-2.0762). This pass also:
   serving an overconfident claim -- the script passes, but the underlying fit
   quality is a separate, open question from execution status.
 
+**2026-07-23 addition.** ``quickstart_example.py`` was added to close a
+coverage gap: neither ``mixle.describe()`` (the package docstring's own
+"start here") nor ``mixle.propose()`` (headlined in the README's Package
+highlights, paired with ``optimize()``) had a runnable example calling them
+directly. Passes in a base install, no optional dependencies, 3.4s.
+
 Execution status should be recorded as evidence, not inferred from import
 success or from an earlier notebook run. If an example writes an artifact, the
 artifact path and any cleanup policy should be captured with the status.
@@ -352,6 +358,8 @@ Inventory
      - Execute with artifact-output path recorded.
    * - ``examples/project_neural_to_structured.py``
      - Execute with optional-dependency status recorded.
+   * - ``examples/quickstart_example.py``
+     - Execute.
    * - ``examples/real_receipt_banking77.py``
      - Blocked on ``torch`` in a base install (``mixle.task.distill._fit_mlp``,
        same chokepoint as ``win_demo_example.py``); with ``torch`` installed,
