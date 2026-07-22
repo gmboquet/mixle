@@ -8,6 +8,7 @@ ordinary ``dist.log_density(x)`` models easy to sample from.
 
 from __future__ import annotations
 
+import copy
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -1003,7 +1004,12 @@ def run_chains(
     for c in range(num_chains):
         chain_rng = np.random.RandomState(rng.randint(0, 2**31 - 1))
         initial = initials(chain_rng) if callable(initials) else seq[c]
-        results.append(sampler(initial=initial, rng=chain_rng, **sampler_kwargs))
+        # Deep-copy per chain: an adaptive proposal (e.g. AdaptiveRandomWalkProposal) carries
+        # mutable state that its own sampler updates in place. Sharing one instance across
+        # "independent" chains would let a later chain's adaptation start from wherever an
+        # earlier chain's run left it, correlating supposedly-independent chains and
+        # underpinning an invalid R-hat (which assumes genuinely independent chains).
+        results.append(sampler(initial=initial, rng=chain_rng, **copy.deepcopy(sampler_kwargs)))
     return results, gelman_rubin(results)
 
 

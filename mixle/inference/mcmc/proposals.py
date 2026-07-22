@@ -43,14 +43,26 @@ class RandomWalkProposal(Proposal):
         """Draw a Gaussian random-walk proposal centered at ``current``."""
         cur = np.asarray(current, dtype=float)
         value = cur + rng.normal(size=cur.shape) * self.scale
-        return float(value) if value.ndim == 0 else value
+        # Checked against `cur`, not `value`: when `current` is scalar but `self.scale` is an
+        # array (e.g. shape (1,)), broadcasting upgrades `value` to that same shape, so checking
+        # `value.ndim` would silently hand a naive caller (and MCMCResult's own diagnostics) a
+        # shape-(1,) array where every other scalar-state chain step is a plain float. Extract via
+        # ravel()[0] (not a bare float(value)): `value` itself may no longer be 0-D even though
+        # `cur` was, and float() rejects a non-0-D array outright.
+        return float(np.asarray(value).reshape(-1)[0]) if cur.ndim == 0 else value
 
     def log_density(self, proposed: Any, current: Any) -> float:
         """Return the Gaussian random-walk transition log density."""
         prop = np.asarray(proposed, dtype=float)
         cur = np.asarray(current, dtype=float)
         resid = prop - cur
-        scale = np.broadcast_to(self.scale, resid.shape)
+        # Broadcast both to their common shape rather than assuming resid.shape is the larger
+        # side: a scalar state (resid.shape == ()) with an array-shaped scale (e.g. (1,), from a
+        # generic multi-parameter code path) previously crashed here -- broadcast_to cannot
+        # reduce a (1,)-shaped scale down to a 0-D target, only broadcast a smaller shape UP.
+        shape = np.broadcast_shapes(resid.shape, self.scale.shape)
+        resid = np.broadcast_to(resid, shape)
+        scale = np.broadcast_to(self.scale, shape)
         dim = int(resid.size) if resid.ndim > 0 else 1
         return float(
             -0.5 * dim * np.log(2.0 * np.pi) - np.sum(np.log(scale)) - 0.5 * np.sum((resid / scale) * (resid / scale))
