@@ -79,11 +79,18 @@ class ModelClaim:
 class FusedBelief:
     """The precision-weighted fusion of several :class:`ModelClaim`, with attribution and an honesty gate.
 
-    ``weights`` is each model's share of the fused precision (sums to 1). ``disagreement`` fires when the
-    worst pairwise standardized distance between two claims exceeds ``sigma_flag`` (default 3-sigma);
-    ``abstained`` is only ever ``True`` when ``disagreement`` is ``True`` AND no single claim clears the
-    conformal accept bar under cross-model adjudication -- the mean/variance are still the precision-weighted
-    values even then, but callers MUST check ``abstained`` before surfacing ``mean`` as a driller-facing number.
+    ``weights`` has exactly one entry per input claim (always sums to 1), keyed by that claim's
+    ``model_id`` -- except when two or more claims share a ``model_id`` (repeated ensemble members of
+    the same model is the realistic case; see :func:`skill_weighted_fuse`), in which case only the
+    FIRST such claim keeps the bare ``model_id`` key and every later one is disambiguated
+    ``"{model_id}#{n}"`` (matching the id-collision convention in
+    :meth:`mixle.epistemic.portfolio.HypothesisPortfolio.resample`) so no claim's share is dropped.
+    ``provenance["claims"]`` entries carry this same key under ``"weight_key"`` for exact correlation.
+    ``disagreement`` fires when the worst pairwise standardized distance between two claims exceeds
+    ``sigma_flag`` (default 3-sigma); ``abstained`` is only ever ``True`` when ``disagreement`` is
+    ``True`` AND no single claim clears the conformal accept bar under cross-model adjudication -- the
+    mean/variance are still the precision-weighted values even then, but callers MUST check
+    ``abstained`` before surfacing ``mean`` as a driller-facing number.
     """
 
     mean: float
@@ -182,7 +189,19 @@ def fuse_claims(
     prec_fused = total_prec + prior_prec
     mean = sum(p * c.value for p, c in zip(precisions, claims)) / prec_fused
     variance = 1.0 / prec_fused
-    weights = {c.model_id: p / total_prec for p, c in zip(precisions, claims)}
+    per_claim_weight = [p / total_prec for p in precisions]
+
+    # One weight-dict key per CLAIM, not per distinct model_id -- see FusedBelief's docstring. A
+    # claim keeps its bare model_id as the key unless an earlier claim in this list already claimed
+    # it, in which case it is disambiguated "{model_id}#{n}"; either way every claim's own precision
+    # share survives into `weights`, so it always sums to 1.0 even with duplicate model_ids.
+    seen: dict[str, int] = {}
+    weight_keys: list[str] = []
+    for c in claims:
+        count = seen.get(c.model_id, 0)
+        seen[c.model_id] = count + 1
+        weight_keys.append(c.model_id if count == 0 else f"{c.model_id}#{count}")
+    weights = dict(zip(weight_keys, per_claim_weight))
 
     max_z = _max_pairwise_standardized_distance(claims)
     disagreement = max_z > sigma_flag
@@ -194,9 +213,10 @@ def fuse_claims(
                 "model_id": c.model_id,
                 "version": c.version,
                 "content_hash": c.content_hash,
-                "weight": weights[c.model_id],
+                "weight": w,
+                "weight_key": k,
             }
-            for c in claims
+            for c, w, k in zip(claims, per_claim_weight, weight_keys)
         ],
         "max_pairwise_standardized_distance": max_z,
         "sigma_flag": sigma_flag,
@@ -265,9 +285,13 @@ def skill_weighted_fuse(
     ]
     fused = fuse_claims(claims, sigma_flag=sigma_flag, verifier=verifier)
 
-    skill_by_id = {m.model_id: m.skill for m in members}
-    for entry in fused.provenance["claims"]:
-        entry["skill"] = skill_by_id[entry["model_id"]]
+    # Positional, not an id-keyed dict lookup: `claims` (and so `fused.provenance["claims"]`, which
+    # fuse_claims builds by iterating `claims` in order without reordering or filtering) is exactly
+    # `members` mapped 1:1 in order, so this is safe even when two members share a model_id -- the
+    # realistic case for a multi-realization CMIP ensemble member, which an id-keyed dict would
+    # silently collapse to only the last member's skill for every entry sharing that id.
+    for entry, m in zip(fused.provenance["claims"], members):
+        entry["skill"] = m.skill
     return fused
 
 

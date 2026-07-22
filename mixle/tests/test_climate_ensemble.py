@@ -56,3 +56,29 @@ def test_strongly_disagreeing_ensemble_abstains():
     )
     assert fused.disagreement is True
     assert fused.abstained is True
+
+
+def test_repeated_realizations_of_the_same_model_keep_distinct_weights_and_skill():
+    """Regression test: a real CMIP ensemble routinely submits several realizations of the SAME
+    model (e.g. CESM2's r1i1p1f1, r2i1p1f1, ...), sharing model_id but with their own variance and
+    (sometimes) their own per-realization skill. `skill_weighted_fuse` used to stamp every
+    provenance entry sharing a model_id with the LAST such member's skill via an id-keyed
+    `{m.model_id: m.skill for m in members}` dict -- the same collapse bug fuse_claims's `weights`
+    had, one level up."""
+    fused = skill_weighted_fuse(
+        [
+            ClimateMember(
+                value=2.0, variance=1.0, model_id="CESM2", version="r1i1p1f1", content_hash="a" * 64, skill=2.0
+            ),
+            ClimateMember(
+                value=2.2, variance=1.0, model_id="CESM2", version="r2i1p1f1", content_hash="b" * 64, skill=5.0
+            ),
+        ]
+    )
+    assert sum(fused.weights.values()) == pytest.approx(1.0, abs=1e-9)
+    assert len(fused.provenance["claims"]) == 2
+
+    by_version = {entry["version"]: entry for entry in fused.provenance["claims"]}
+    # each realization's OWN skill, not both collapsed onto the last one's (5.0)
+    assert by_version["r1i1p1f1"]["skill"] == pytest.approx(2.0, abs=1e-9)
+    assert by_version["r2i1p1f1"]["skill"] == pytest.approx(5.0, abs=1e-9)
