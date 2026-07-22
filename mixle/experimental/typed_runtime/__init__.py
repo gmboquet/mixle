@@ -1,9 +1,13 @@
 """Experimental statistically typed optimization and context-runtime foundation.
 
 The package implements the semantic compiler, measured scheduler, transactional
-proposal runtime, structured placement, and local exact model-parallel adapter.
-Real multi-host transport, optimizer geometry execution, and context actions
-remain behind later dependency gates.
+proposal runtime, structured placement, local exact model-parallel adapter,
+geometry-routed torch optimizer execution, and transactional context-action
+execution. Real multi-host transport (today's structured executor uses local
+worker threads), a general execution adapter for every compiled estimator, and
+persistent external retrieval/vector-store adapters remain behind later
+dependency gates -- see this package's README.md ("Not implemented yet") for
+the full, current boundary.
 """
 
 from mixle.experimental.typed_runtime.acceptance import (
