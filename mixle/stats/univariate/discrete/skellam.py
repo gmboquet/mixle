@@ -205,7 +205,15 @@ class SkellamDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "SkellamEstimator":
         """Return a SkellamEstimator (method of moments)."""
-        return SkellamEstimator(name=self.name, keys=self.keys)
+        if pseudo_count is None:
+            return SkellamEstimator(name=self.name, keys=self.keys)
+        # E[K] = mu1 - mu2, Var[K] = mu1 + mu2, so E[K^2] = (mu1+mu2) + (mu1-mu2)^2 -- the raw
+        # moment space estimate() accumulates in (sum, sum2) -- so pseudo_count can blend a prior
+        # pseudo-sample toward them (mirrors GumbelEstimator / WeibullEstimator's suff_stat pattern).
+        mean0 = self.mu1 - self.mu2
+        var0 = self.mu1 + self.mu2
+        second0 = var0 + mean0 * mean0
+        return SkellamEstimator(pseudo_count=pseudo_count, suff_stat=(mean0, second0), name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "SkellamDataEncoder":
         """Return the encoder for Skellam observations."""
@@ -351,13 +359,21 @@ class SkellamAccumulatorFactory(StatisticAccumulatorFactory):
 class SkellamEstimator(ParameterEstimator):
     """Estimate ``(mu1, mu2)`` by the (exact, closed-form) method of moments."""
 
-    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        pseudo_count: float | None = None,
+        suff_stat: tuple[float, float] | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
         """Method-of-moments Skellam estimator.
 
         ``E[K] = mu1 - mu2`` and ``Var[K] = mu1 + mu2``, so ``mu1 = (v + m)/2`` and
         ``mu2 = (v - m)/2`` for sample mean ``m`` and variance ``v``. Both rates are clamped to a
         small positive floor (a near-degenerate sample can drive one rate non-positive).
         """
+        self.pseudo_count = pseudo_count
+        self.suff_stat = suff_stat
         self.name = name
         self.keys = keys
 
@@ -368,6 +384,11 @@ class SkellamEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> "SkellamDistribution":
         """Estimate a Skellam from the accumulated ``(count, sum, sum2)`` via method of moments."""
         count, xsum, xsum2 = suff_stat
+        if self.pseudo_count is not None and self.suff_stat is not None:
+            mean0, second0 = self.suff_stat
+            xsum += self.pseudo_count * mean0
+            xsum2 += self.pseudo_count * second0
+            count += self.pseudo_count
         if count <= 0.0:
             return SkellamDistribution(1.0, 1.0, name=self.name, keys=self.keys)
         mean = xsum / count
