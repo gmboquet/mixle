@@ -6,13 +6,13 @@ import itertools
 
 import numpy as np
 
-from mixle.mine_planning import schedule_extraction, ultimate_pit
+from mixle.precedence_scheduling import maximum_weight_closure, schedule_activities
 
 
 def _brute_force_ultimate_pit(value: np.ndarray, precedence: list[tuple[int, int]]) -> np.ndarray:
     """Exhaustive Lerchs-Grossmann reference: try every subset, keep the best precedence-closed one.
 
-    Independent of :mod:`mixle.mine_planning`'s max-flow construction -- a subset is *closed* when
+    Independent of :mod:`mixle.precedence_scheduling`'s max-flow construction -- a subset is *closed* when
     every block in it also has its predecessors in it, and the reference is simply the
     highest-value closed subset over all ``2**n`` subsets. Fine for the small toy block model this
     test uses; not how a real pit optimizer would scale.
@@ -56,7 +56,7 @@ def test_ultimate_pit_matches_lerchs_grossmann_reference():
     value, precedence = _toy_2d_block_model()
     reference_mask = _brute_force_ultimate_pit(value, precedence)
 
-    mask = ultimate_pit(value, precedence)
+    mask = maximum_weight_closure(value, precedence)
 
     assert mask.dtype == np.bool_
     np.testing.assert_array_equal(mask, reference_mask)
@@ -64,7 +64,7 @@ def test_ultimate_pit_matches_lerchs_grossmann_reference():
     np.testing.assert_array_equal(mask, [False, False, False, True, True, True, False, False, True, True, False, True])
 
 
-def test_schedule_extraction_respects_precedence_and_capacity():
+def test_schedule_activities_respects_precedence_and_capacity():
     # The right-hand pyramid alone, relabeled 0..5 (surface 0,1,2 / middle 3,4 / bottom 5), scheduled
     # over 3 periods with capacity for exactly 2 blocks each -- capacity exactly matches the 6 blocks
     # that are worth mining, so every period must be filled and every block eventually mined.
@@ -73,7 +73,7 @@ def test_schedule_extraction_respects_precedence_and_capacity():
     mill_capacity = np.array([2.0, 2.0, 2.0])
     n_periods = 3
 
-    npv, period = schedule_extraction(block_value, precedence, mill_capacity, n_periods, discount=0.1)
+    npv, period = schedule_activities(block_value, precedence, mill_capacity, n_periods, discount=0.1)
 
     assert period.shape == (6,)
     assert set(period.tolist()) <= {-1, 0, 1, 2}
@@ -92,14 +92,14 @@ def test_schedule_extraction_respects_precedence_and_capacity():
     assert npv > 0.0
 
 
-def test_schedule_extraction_can_leave_unprofitable_blocks_unmined():
+def test_schedule_activities_can_leave_unprofitable_blocks_unmined():
     # Same shape as the pit test's left-hand pyramid: the ore block (value +5) does not cover the
     # waste (2 surface + 2 middle at cost 2 each -- total 8), so an optimal schedule mines nothing.
     block_value = np.array([-2.0, -2.0, -2.0, -3.0, -3.0, 5.0])
     precedence = [(3, 0), (3, 1), (4, 1), (4, 2), (5, 3), (5, 4)]
     mill_capacity = np.array([2.0, 2.0, 2.0])
 
-    npv, period = schedule_extraction(block_value, precedence, mill_capacity, 3, discount=0.0)
+    npv, period = schedule_activities(block_value, precedence, mill_capacity, 3, discount=0.0)
 
     np.testing.assert_array_equal(period, [-1, -1, -1, -1, -1, -1])
     assert npv == 0.0
