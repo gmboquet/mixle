@@ -204,7 +204,18 @@ class RicianDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "RicianEstimator":
         """Return a closed-form method-of-moments estimator."""
-        return RicianEstimator(name=self.name, keys=self.keys)
+        if pseudo_count is None:
+            return RicianEstimator(name=self.name, keys=self.keys)
+        # X^2 = Z1^2 + Z2^2 with Z1 ~ N(nu, sigma^2), Z2 ~ N(0, sigma^2) is a scaled noncentral
+        # chi-squared (df=2, noncentrality nu^2/sigma^2), giving E[X^2] = nu^2 + 2*sigma^2 and
+        # Var(X^2) = 4*sigma^2*(sigma^2 + nu^2) in closed form -- the raw power-sum space
+        # estimate() accumulates in (s2, s4). Cross-checked against estimate()'s own inversion:
+        # substituting nu^2 = m2 - 2*sig2 into E[X^4] reproduces its "disc = 2*m2^2 - m4" quadratic
+        # exactly, confirming this is the same moment relationship in reverse.
+        m2_0 = self.nu * self.nu + 2.0 * self._sig2
+        var_x2_0 = 4.0 * self._sig2 * (self._sig2 + self.nu * self.nu)
+        m4_0 = var_x2_0 + m2_0 * m2_0
+        return RicianEstimator(pseudo_count=pseudo_count, suff_stat=(m2_0, m4_0), name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "RicianDataEncoder":
         """Return the data encoder used by this distribution (the raw value)."""
@@ -297,7 +308,15 @@ class RicianAccumulatorFactory(StatisticAccumulatorFactory):
 class RicianEstimator(ParameterEstimator):
     """Method-of-moments estimator from ``E[X^2]`` and ``E[X^4]`` (closed-form quadratic in sigma^2)."""
 
-    def __init__(self, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        pseudo_count: float | None = None,
+        suff_stat: tuple[float, float] | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        self.pseudo_count = pseudo_count
+        self.suff_stat = suff_stat
         self.name = name
         self.keys = keys
 
@@ -308,6 +327,11 @@ class RicianEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> RicianDistribution:
         """Estimate Rician noncentrality and scale from second and fourth moments."""
         count, s2, s4 = suff_stat
+        if self.pseudo_count is not None and self.suff_stat is not None:
+            m2_0, m4_0 = self.suff_stat
+            s2 += self.pseudo_count * m2_0
+            s4 += self.pseudo_count * m4_0
+            count += self.pseudo_count
         if count <= 0.0:
             return RicianDistribution(0.0, 1.0, name=self.name, keys=self.keys)
         m2 = s2 / count
