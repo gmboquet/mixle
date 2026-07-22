@@ -974,11 +974,20 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             if self.alpha_key in stats_dict:
                 p_sol, p_doc, p_pa = stats_dict[self.alpha_key]
 
-                prev_alpha = self.prev_alpha if self.prev_alpha is not None else p_pa
+                # Copy this accumulator's own prev_alpha before it can be adopted into
+                # stats_dict below -- otherwise a later key_replace would leave this
+                # accumulator's private prev_alpha aliased into another tied accumulator.
+                prev_alpha = self.prev_alpha.copy() if self.prev_alpha is not None else p_pa
                 stats_dict[self.alpha_key] = (self.sum_of_logs + p_sol, self.doc_counts + p_doc, prev_alpha)
 
             else:
-                stats_dict[self.alpha_key] = (self.sum_of_logs, self.doc_counts, self.prev_alpha)
+                # Copy on adoption: stats_dict must never alias this accumulator's own live
+                # arrays. doc_counts is a plain float (immutable, safe to store as-is).
+                stats_dict[self.alpha_key] = (
+                    self.sum_of_logs.copy(),
+                    self.doc_counts,
+                    self.prev_alpha.copy() if self.prev_alpha is not None else None,
+                )
 
         if self.topics_key is not None:
             if self.topics_key in stats_dict:
@@ -1005,9 +1014,12 @@ class LDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """
         if self.alpha_key is not None:
             if self.alpha_key in stats_dict:
+                # Copy on replace too: without it, every tied accumulator ends up pointing at
+                # the SAME array objects, so any one of them later accumulating new local data
+                # would silently corrupt every other tied accumulator's counts.
                 p_sol, p_doc, p_pa = stats_dict[self.alpha_key]
-                self.prev_alpha = p_pa
-                self.sum_of_logs = p_sol
+                self.prev_alpha = np.asarray(p_pa).copy() if p_pa is not None else None
+                self.sum_of_logs = np.asarray(p_sol).copy()
                 self.doc_counts = p_doc
 
         if self.topics_key is not None:
