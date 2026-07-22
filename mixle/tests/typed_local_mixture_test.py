@@ -135,3 +135,90 @@ class TypedLocalExecutionTest:
         assert receipt.committed_objective == pytest.approx(receipt.objective_before)
         assert receipt.invalidation is None
         assert run.model is start
+
+
+def _many_decoy_problem(seed=42, nobs=400):
+    """Mirrors ``freeze_rollup_test.py``'s ``_make_problem`` exactly (same numbers) so the two
+    modules' behavior on the identical fixture is directly comparable: 2 slow-converging real
+    components plus 6 far-away decoys whose optimal weight is small but nonzero.
+    """
+    truth = MixtureDistribution([GaussianDistribution(-5.0, 0.6), GaussianDistribution(5.0, 0.6)], [0.5, 0.5])
+    data = truth.sampler(seed=seed).sample(size=nobs)
+    start = MixtureDistribution(
+        [
+            GaussianDistribution(-0.3, 3.0),
+            GaussianDistribution(0.3, 3.0),
+            GaussianDistribution(-14.0, 3.0),
+            GaussianDistribution(14.0, 3.0),
+            GaussianDistribution(-40.0, 3.0),
+            GaussianDistribution(40.0, 3.0),
+            GaussianDistribution(-70.0, 3.0),
+            GaussianDistribution(70.0, 3.0),
+        ],
+        [0.4, 0.4] + [0.025] * 6,
+    )
+    estimator = MixtureEstimator([GaussianEstimator() for _ in range(8)])
+    return start, estimator, seq_encode(data, model=start)
+
+
+class LocalOptimumDivergenceRiskTestCase:
+    """Characterizes a real, previously-undocumented limitation of budgeted local EM.
+
+    Unlike ``mixle.inference.freeze_rollup`` (which only ever skips a component once its own
+    convergence is demonstrated, and so reliably reaches the SAME fixed point as full-tree EM --
+    see ``freeze_rollup_test.py``'s ``FreezeRollupSpeedupTestCase`` on this identical fixture),
+    ``run_typed_mixture_em``'s default budget rations updates among components from round zero,
+    before any gain evidence exists to justify the ranking. On a non-convex mixture likelihood
+    this asynchronous coordinate-ascent process can settle at a different, meaningfully worse
+    fixed point than full-tree EM -- confirmed here, and confirmed (in exploratory testing, not
+    asserted below) to persist in some form at every ``budget_fraction`` short of 1.0, i.e. short
+    of updating every component every round. This is not a bug fixed by tuning the default
+    budget; it is a documented tradeoff (see local.py's ``run_typed_mixture_em`` docstring and
+    this package's README, "Local-optimum risk on multimodal objectives"). This test exists so a
+    future change that makes the gap dramatically worse -- or silently closes it, which would
+    mean this note and its citation should be removed -- gets noticed rather than passing quietly.
+    """
+
+    def test_typed_local_em_can_settle_at_a_different_fixed_point_than_full_tree_em(self):
+        start, estimator, encoded = _many_decoy_problem()
+        rounds = 500
+        typed = run_typed_mixture_em(encoded, estimator, start, max_its=rounds, delta=None)
+
+        objective = observed_log_likelihood(encoded)
+        strategy = PosteriorTransformEM()
+        full_model = start
+        full_trace = []
+        for _ in range(rounds):
+            full_model = strategy.step(encoded, estimator, full_model, objective=objective).model
+            full_trace.append(objective(full_model))
+
+        # Both trajectories must still be individually well-behaved: monotone and finite. The
+        # limitation under test is WHICH fixed point each lands on, not whether either is broken.
+        assert all(np.isfinite(typed.objective_trace))
+        assert all(right >= left - 1.0e-9 for left, right in zip(typed.objective_trace, typed.objective_trace[1:]))
+        assert all(np.isfinite(full_trace))
+        assert all(right >= left - 1.0e-9 for left, right in zip(full_trace, full_trace[1:]))
+
+        # Both traces have actually settled (small last-20-round movement), so the comparison
+        # below is between two fixed points, not an artifact of one trajectory still moving.
+        assert max(typed.objective_trace[-20:]) - min(typed.objective_trace[-20:]) < 1.0e-2
+        assert max(full_trace[-20:]) - min(full_trace[-20:]) < 1.0e-2
+
+        diff = abs(typed.objective_trace[-1] - full_trace[-1])
+        # Non-vacuous: this fixture is known (see class docstring) to actually diverge, not just
+        # converge slowly -- a diff near zero here would mean the limitation this test documents
+        # has been fixed, which is good news, but means this test and its README/docstring
+        # citations are stale and should be revisited rather than left describing a risk that no
+        # longer reproduces.
+        assert diff > 3.0, (
+            "expected fixture-specific divergence was not reproduced -- if a real fix landed, "
+            "update this test and the limitation notes it documents instead of loosening this bound"
+        )
+        # Regression ceiling: catches the gap becoming dramatically worse, not the gap existing.
+        assert diff < 40.0, "typed local EM diverged from full-tree EM by far more than previously observed"
+
+        # However far apart the two objectives land, typed's own final model must still be a
+        # valid mixture -- this is a different-optimum risk, not a license to produce garbage.
+        assert np.isfinite(typed.model.w).all()
+        assert typed.model.w.sum() == pytest.approx(1.0, abs=1.0e-6)
+        assert (typed.model.w >= 0.0).all()
