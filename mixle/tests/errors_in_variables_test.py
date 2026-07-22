@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from mixle.inference.errors_in_variables import deming_regression, propagate_uncertainty
+from mixle.inference.errors_in_variables import deming_regression, propagate_uncertainty, simex
 
 
 class DemingRegressionTest(unittest.TestCase):
@@ -74,6 +74,28 @@ class PropagateUncertaintyTest(unittest.TestCase):
         want = samples / samples.sum(axis=1, keepdims=True)
         np.testing.assert_allclose(out["mean"], want.mean(axis=0))
         np.testing.assert_allclose(out["samples"], want)
+
+
+class SimexTest(unittest.TestCase):
+    def test_naive_key_is_the_direct_fit_not_a_noisy_refit_at_lambdas_zero(self):
+        # "naive" is documented as the lambda=0 (no added noise) estimate -- before the fix it was
+        # curve[0], the average of n_sims NOISY refits at whatever lambdas[0] happens to be. That
+        # coincides with the true lambda=0 fit only when the caller's lambdas array happens to
+        # start at exactly 0.0 (the default does); a custom lambdas array that skips 0 entirely
+        # (as here) exposes the difference directly.
+        rng = np.random.RandomState(0)
+        x = rng.normal(0, 1, 500)
+        y = 2.0 * x + rng.normal(0, 0.3, 500)
+
+        def fit_slope(xx, yy):
+            xx = np.asarray(xx, dtype=float).ravel()
+            return np.array([np.sum(xx * yy) / np.sum(xx * xx)])
+
+        theta0 = fit_slope(x, y)
+        result = simex(fit_slope, x, y, sigma_u=0.3, lambdas=np.array([0.5, 1.0, 1.5]), n_sims=200, seed=1)
+
+        np.testing.assert_allclose(result["naive"], theta0, atol=1e-10)
+        self.assertFalse(np.allclose(result["naive"], result["curve"][0]))
 
 
 if __name__ == "__main__":
