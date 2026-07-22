@@ -77,6 +77,30 @@ class ApplyAddEdgeFixTest(unittest.TestCase):
         result = apply_add_edge_fix(_buggy_net(), fault, _make_rows(50, seed=2))
         self.assertIsNone(result)
 
+    def test_direction_is_chosen_by_fit_quality_not_field_index_order(self):
+        # The true relationship here is field1 -> field0 (field0 = 0.6*field1 + noise) -- the
+        # OPPOSITE of this module's other fixture (field0 -> field1, where field0 happens to have
+        # the smaller index and IS the true parent, so that fixture alone can't catch this bug).
+        # `parent, child = sorted(idx)` always picked the smaller field index as parent regardless
+        # of which orientation the data actually supports; this fixture is specifically built so
+        # that "smaller index = parent" gives the WRONG (reversed) answer.
+        from mixle.inference.explain import FaultReport
+
+        rng = np.random.RandomState(5)
+        n = 400
+        f1 = rng.normal(0.0, 1.0, size=n)
+        f0 = 0.6 * f1 + rng.normal(0.0, 0.6, size=n)
+        f2 = rng.normal(0.0, 1.0, size=n)
+        f3 = rng.normal(0.0, 1.0, size=n)
+        data = [(float(a), float(b), float(c), float(d)) for a, b, c, d in zip(f0, f1, f2, f3)]
+
+        fault = FaultReport(dominant="field[0]|x+field[1]|y", suggested_fix="add_edge")
+        fixed = apply_add_edge_fix(_buggy_net(), fault, data)
+        self.assertIsNotNone(fixed)
+        edges = fixed.edges()
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0], (1, 0))  # parent=field1, child=field0: the true generating direction
+
 
 class RefineVsBlindSearchTest(unittest.TestCase):
     def test_directed_correction_beats_blind_search_in_trials(self):

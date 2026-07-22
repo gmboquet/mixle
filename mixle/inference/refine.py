@@ -40,17 +40,28 @@ def apply_add_edge_fix(
 
     Returns ``None`` (never guesses) when ``fault.suggested_fix`` is not ``"add_edge"``, or ``dominant``
     does not name exactly two fields (nothing dominant, or a shape this translation doesn't understand).
+
+    ``fault.dominant`` names an undirected pair -- it carries no information about which field is the
+    parent. Both orientations are fit and the better-fitting one on ``data`` is kept: field-index order
+    (which field happens to have the smaller schema index) has no relationship to causal direction, so
+    always taking ``parent, child = sorted(idx)`` risked silently adding the edge backwards.
     """
     if fault.suggested_fix != "add_edge":
         return None
     idx = sorted({int(m) for m in re.findall(r"field\[(\d+)\]", fault.dominant)})
     if len(idx) != 2:
         return None
-    parent, child = idx
     cols = [[row[i] for row in data] for i in range(len(data[0]))]
-    new_factor = _LinearGaussianFactor.fit(child, [parent], cols, {})
-    factors = [f for f in model.factors if f.child != child] + [new_factor]
-    return HeterogeneousBayesianNetwork(factors)
+
+    def _with_edge(parent: int, child: int) -> tuple[HeterogeneousBayesianNetwork, float]:
+        new_factor = _LinearGaussianFactor.fit(child, [parent], cols, {})
+        factors = [f for f in model.factors if f.child != child] + [new_factor]
+        net = HeterogeneousBayesianNetwork(factors)
+        return net, held_out_log_likelihood(net, data)
+
+    net_ab, score_ab = _with_edge(idx[0], idx[1])
+    net_ba, score_ba = _with_edge(idx[1], idx[0])
+    return net_ab if score_ab >= score_ba else net_ba
 
 
 @dataclass
