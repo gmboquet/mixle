@@ -137,6 +137,94 @@ class TypedLocalExecutionTest:
         assert run.model is start
 
 
+def _realistic_scale_held_out_problems():
+    """Five DIFFERENT fit problems (different seed and dataset size each), 3-9x the toy-scale
+    (nobs=80) fixture used by ``test_reaches_same_target_with_fewer_component_evaluations_...``
+    above -- mirrors ``conditional_jit_controller_test.py``'s ``_held_out_problems()`` convention
+    of reporting real, per-problem numbers across several fits instead of one cherry-picked ratio.
+    """
+    return [(7, 300), (13, 500), (19, 700), (42, 300), (99, 500)]
+
+
+class RealisticScaleEfficiencyBenchmarkTestCase:
+    """Reports typed local EM's efficiency against full-tree EM at a more realistic scale than the
+    existing toy-scale test above, across several held-out problems.
+
+    Honesty note: at this scale the per-problem ratio is modest and not always above 1 -- typed
+    occasionally needs marginally MORE component evaluations than full-tree EM to reach the same
+    shared target objective (see the mean printed below, and compare against the toy-scale test's
+    reliable >1.05x). This is measured on the SAME small (2 real + 2 decoy) fixture family as the
+    toy-scale test, verified quality-safe: full-tree and typed EM reach the same or a very close
+    objective on every held-out problem here. Contrast this with
+    ``LocalOptimumDivergenceRiskTestCase``, which uses a DIFFERENT, many-decoy fixture family where
+    typed and full-tree EM can settle at genuinely different objectives -- a regime where an
+    evaluation-count ratio would be comparing apples to oranges, not a regime this test's fixture
+    exercises. Given the realistic-scale ratio's modesty, this test asserts what is actually
+    reliable here -- quality parity and a sane, non-degenerate ratio on every held-out problem --
+    and reports (rather than hard-asserts a floor on) the aggregate picture, mirroring
+    ``conditional_jit_controller_test.py``'s ``LearnedVsGreedyAcceptanceTestCase`` precedent of
+    printing real per-problem numbers instead of promising a universal speedup.
+    """
+
+    def test_efficiency_and_quality_parity_across_held_out_problems(self):
+        rounds = 100
+        ratios = []
+        for seed, nobs in _realistic_scale_held_out_problems():
+            start, estimator, encoded = _problem(seed=seed, nobs=nobs)
+            typed = run_typed_mixture_em(encoded, estimator, start, max_its=rounds, delta=None)
+
+            objective = observed_log_likelihood(encoded)
+            strategy = PosteriorTransformEM()
+            full_model = start
+            full_trace = []
+            for _ in range(rounds):
+                full_model = strategy.step(encoded, estimator, full_model, objective=objective).model
+                full_trace.append(objective(full_model))
+
+            assert all(np.isfinite(typed.objective_trace))
+            assert all(right >= left - 1.0e-9 for left, right in zip(typed.objective_trace, typed.objective_trace[1:]))
+
+            diff = abs(typed.objective_trace[-1] - full_trace[-1])
+            assert diff < 10.0, (
+                "seed=%d nobs=%d: typed and full-tree EM diverged by %.4f nats -- outside the range "
+                "this fixture family is verified quality-safe for" % (seed, nobs, diff)
+            )
+
+            target = min(typed.objective_trace[-1], full_trace[-1]) - 1.0e-3
+            typed_evals = next(
+                (
+                    sum(receipt.work.model_evaluations for receipt in typed.rounds[: index + 1])
+                    for index, value in enumerate(typed.objective_trace)
+                    if value >= target
+                ),
+                None,
+            )
+            full_evals = next(
+                (2 * start.num_components * (index + 1) for index, value in enumerate(full_trace) if value >= target),
+                None,
+            )
+            assert typed_evals is not None, "seed=%d nobs=%d: typed never reached the shared target" % (seed, nobs)
+            assert full_evals is not None, "seed=%d nobs=%d: full-tree EM never reached the shared target" % (
+                seed,
+                nobs,
+            )
+
+            ratio = full_evals / typed_evals
+            ratios.append(ratio)
+            print(
+                "\n[typed local EM, realistic scale] seed=%d nobs=%d: diff=%.4f typed=%d evals full=%d evals "
+                "ratio=%.3fx" % (seed, nobs, diff, typed_evals, full_evals, ratio)
+            )
+            # A sanity floor, not a performance promise -- see class docstring on why the ratio is
+            # not reliably above 1 at this scale.
+            assert ratio > 0.5, "seed=%d nobs=%d: typed needed far more evaluations than full-tree EM" % (seed, nobs)
+
+        print(
+            "\n[typed local EM, realistic scale] mean ratio across %d held-out problems: %.3fx"
+            % (len(ratios), np.mean(ratios))
+        )
+
+
 def _many_decoy_problem(seed=42, nobs=400):
     """Mirrors ``freeze_rollup_test.py``'s ``_make_problem`` exactly (same numbers) so the two
     modules' behavior on the identical fixture is directly comparable: 2 slow-converging real
