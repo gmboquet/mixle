@@ -418,7 +418,12 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
             if self.trans_key in stats_dict:
                 stats_dict[self.trans_key] = stats_dict[self.trans_key] + self.trans_counts
             else:
-                stats_dict[self.trans_key] = self.trans_counts
+                # Copy on adoption: stats_dict must never alias this accumulator's own live
+                # array. The "already present" branch above is safe (`+` always allocates a
+                # new array), but without this copy a second tied accumulator's key_replace
+                # would still leave both accumulators pointing at this accumulator's own
+                # original array.
+                stats_dict[self.trans_key] = self.trans_counts.copy()
         if self.state_key is not None:
             if self.state_key in stats_dict:
                 acc = stats_dict[self.state_key]
@@ -433,7 +438,10 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
     def key_replace(self, stats_dict):
         """Replace transition, state, and child statistics from keyed entries when present."""
         if self.trans_key is not None and self.trans_key in stats_dict:
-            self.trans_counts = stats_dict[self.trans_key]
+            # Copy on replace too: without it, every tied accumulator ends up pointing at the
+            # SAME array object, so any one of them later accumulating new local data would
+            # silently corrupt every other tied accumulator's counts.
+            self.trans_counts = np.asarray(stats_dict[self.trans_key]).copy()
         if self.state_key is not None and self.state_key in stats_dict:
             self.accumulators = stats_dict[self.state_key]
         for acc in self.accumulators:
