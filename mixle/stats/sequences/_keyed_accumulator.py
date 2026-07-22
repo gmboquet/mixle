@@ -31,13 +31,18 @@ class InitTransKeyedAccumulator:
             if self.init_key in stats_dict:
                 stats_dict[self.init_key] += self.init_count
             else:
-                stats_dict[self.init_key] = self.init_count
+                # Copy on adoption: stats_dict must never alias this accumulator's own live
+                # array, or a later tied accumulator's in-place += above would silently mutate
+                # this accumulator's private init_count as a side effect of merging. Plain
+                # .copy() (not np.asarray(...).copy()) because trans_count on the sparse model
+                # is a scipy.sparse matrix, not an ndarray -- both types implement .copy().
+                stats_dict[self.init_key] = self.init_count.copy()
 
         if self.trans_key is not None:
             if self.trans_key in stats_dict:
                 stats_dict[self.trans_key] += self.trans_count
             else:
-                stats_dict[self.trans_key] = self.trans_count
+                stats_dict[self.trans_key] = self.trans_count.copy()
 
         if self.size_accumulator is not None:
             self.size_accumulator.key_merge(stats_dict)
@@ -46,11 +51,14 @@ class InitTransKeyedAccumulator:
         """Replace ``init_count`` and ``trans_count`` from ``stats_dict``, then the size acc."""
         if self.init_key is not None:
             if self.init_key in stats_dict:
-                self.init_count = stats_dict[self.init_key]
+                # Copy on replace too: without it, every tied accumulator ends up pointing at
+                # the SAME array object, so any one of them later accumulating new local data
+                # would silently corrupt every other tied accumulator's counts.
+                self.init_count = stats_dict[self.init_key].copy()
 
         if self.trans_key is not None:
             if self.trans_key in stats_dict:
-                self.trans_count = stats_dict[self.trans_key]
+                self.trans_count = stats_dict[self.trans_key].copy()
 
         if self.size_accumulator is not None:
             self.size_accumulator.key_replace(stats_dict)
