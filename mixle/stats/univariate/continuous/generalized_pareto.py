@@ -210,7 +210,17 @@ class GeneralizedParetoDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "GeneralizedParetoEstimator":
         """Return a method-of-moments estimator for ``scale`` and ``shape`` at the fixed threshold ``loc``."""
-        return GeneralizedParetoEstimator(loc=self.loc, pseudo_count=pseudo_count, name=self.name, keys=self.keys)
+        if pseudo_count is None:
+            return GeneralizedParetoEstimator(loc=self.loc, name=self.name, keys=self.keys)
+        # Convert this distribution's own (scale, shape) into the raw first two moments -- the
+        # space estimate() accumulates in -- so pseudo_count can blend a prior pseudo-sample toward
+        # them (mirrors GumbelEstimator / WeibullEstimator's suff_stat pattern).
+        mean0 = self.mean()
+        var0 = self.variance()
+        second0 = var0 + mean0 * mean0
+        return GeneralizedParetoEstimator(
+            loc=self.loc, pseudo_count=pseudo_count, suff_stat=(mean0, second0), name=self.name, keys=self.keys
+        )
 
     def dist_to_encoder(self) -> "GeneralizedParetoDataEncoder":
         """Return the data encoder used by this distribution for vectorized methods."""
@@ -306,6 +316,7 @@ class GeneralizedParetoEstimator(ParameterEstimator):
         self,
         loc: float = 0.0,
         pseudo_count: float | None = None,
+        suff_stat: tuple[float, float] | None = None,
         min_scale: float = 1.0e-12,
         xi_max: float = 0.5 - 1.0e-6,
         xi_min: float = -10.0,
@@ -314,6 +325,7 @@ class GeneralizedParetoEstimator(ParameterEstimator):
     ) -> None:
         self.loc = float(loc)
         self.pseudo_count = pseudo_count
+        self.suff_stat = suff_stat
         self.min_scale = min_scale
         self.xi_max = xi_max  # method of moments needs a finite variance (xi < 1/2)
         self.xi_min = xi_min
@@ -327,6 +339,11 @@ class GeneralizedParetoEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> GeneralizedParetoDistribution:
         """Estimate scale and shape from exceedance moments at the fixed location."""
         sum_x, sum_x2, count = suff_stat
+        if self.pseudo_count is not None and self.suff_stat is not None:
+            mean0, second0 = self.suff_stat
+            sum_x += self.pseudo_count * mean0
+            sum_x2 += self.pseudo_count * second0
+            count += self.pseudo_count
         if count <= 0.0:
             return GeneralizedParetoDistribution(1.0, 0.0, loc=self.loc, name=self.name, keys=self.keys)
         mean_x = sum_x / count

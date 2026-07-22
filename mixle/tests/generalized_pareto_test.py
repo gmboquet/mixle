@@ -40,6 +40,29 @@ class GeneralizedParetoTest(unittest.TestCase):
         self.assertAlmostEqual(est.scale, 1.5, delta=0.1)
         self.assertAlmostEqual(est.shape, -0.25, delta=0.05)
 
+    def test_pseudo_count_smooths_toward_prior(self):
+        # estimator(pseudo_count=...) previously accepted and stored pseudo_count but estimate()
+        # never referenced it -- a silent no-op.
+        d = GeneralizedParetoDistribution(scale=2.0, shape=0.1, loc=1.0)
+        est = d.estimator(pseudo_count=1.0e6)
+        self.assertIsNotNone(est.suff_stat)
+        fitted = est.estimate(None, (1.0, 1.0, 1.0))  # one observation exactly at the threshold
+        self.assertAlmostEqual(fitted.scale, d.scale, places=2)
+        self.assertAlmostEqual(fitted.shape, d.shape, places=2)
+
+        fitted_plain = d.estimator().estimate(None, (1.0, 1.0, 1.0))
+        self.assertNotAlmostEqual(fitted_plain.scale, d.scale, places=1)
+
+    def test_pseudo_count_recovers_exact_prior_moments(self):
+        # feeding the stored suff_stat back through with zero real data (pure pseudo-count blend)
+        # must reproduce this distribution's own scale/shape almost exactly.
+        d = GeneralizedParetoDistribution(scale=0.8, shape=-0.2, loc=3.0)
+        est = d.estimator(pseudo_count=1.0)
+        fitted = est.estimate(None, (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(fitted.scale, d.scale, places=6)
+        self.assertAlmostEqual(fitted.shape, d.shape, places=6)
+        self.assertEqual(fitted.loc, d.loc)
+
 
 if __name__ == "__main__":
     unittest.main()
