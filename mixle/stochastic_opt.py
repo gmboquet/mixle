@@ -16,11 +16,12 @@ numbers — it emits the extra ``eta`` (Value-at-Risk) / ``u_k`` (excess-loss) v
 MILP built on :func:`mixle.relations.branch_and_bound_milp`.
 
 Repo-boundary note (see the PR body for the full explanation): H1 (`min_cost_flow` et al., IC-9) and H3
-(`mixle.mine_planning`) had not landed on ``release/0.8.0`` as of this PR. Neither this task's frozen
-Public API nor its Algorithm section actually calls into either module directly — the scenario program
-here is built entirely on the already-landed :mod:`mixle.reason.posterior_protocol` (IC-1) and
-:func:`mixle.relations.branch_and_bound_milp` — so this module imports neither `mixle.relations`' new
-flow surface nor `mixle.mine_planning`.
+(`mixle.mine_planning`) had not landed on ``release/0.8.0`` as of this PR, so neither this task's frozen
+Public API nor its Algorithm section was written to call into either module directly — the scenario
+program here is built entirely on the already-landed :mod:`mixle.reason.posterior_protocol` (IC-1) and
+:func:`mixle.relations.branch_and_bound_milp`. Both H1 and H3 have since landed, but this module still
+imports neither `mixle.relations`' flow surface nor `mixle.mine_planning`: its scenario program never
+needed them, so the boundary held on its own merits rather than by landing-order accident.
 
 J6 (the grand synthesis, work-plan §7-J) extends this scenario program with :func:`risk_adjusted_plan`:
 the same grade-uncertainty CVaR objective, but net of the priced environmental/health/carbon liabilities

@@ -31,7 +31,34 @@ mirroring how `torch`/`numba`/`jax`/`optional` mark backend-gated tests elsewher
 
 ## Current contents
 
-- `program.py` / `graduation.py` — see `mixle/experimental/__init__.py` for what each module is.
-- `typed_runtime/` — statistically typed update contracts, a side-effect-free model compiler, dependency-aware
-  invalidation, gain-per-cost scheduling, benchmark/failure receipts, and the first objective-gated local mixture
-  execution adapter. See `typed_runtime/README.md` for implemented and explicitly unsupported semantics.
+`mixle/experimental/__init__.py`'s own module docstring is the maintained, detailed listing — one entry per
+module, cross-referenced to its roadmap item (Track E long-context, Track P theory/verification, program.py,
+graduation.py, `typed_runtime/`) and its design note under `notes/designs/` where one exists. Read it there
+rather than here, so this file doesn't drift into a second, competing list.
+
+That docstring only covers modules the package actually re-exports, though, and the directory has grown past
+that: eight modules currently exist as files but aren't imported (lazily or otherwise) by `__init__.py`, so
+they don't appear in its listing and are only reachable by their full dotted path. Documented here instead,
+since an omission from both files at once is a real gap, not a formatting choice:
+
+- `growth_operators.py` — function-preserving network growth (depth/width-split, structure-expansion) over a
+  real transformer; the inverse of G3's coarsening, which folds capacity down instead of splitting it up.
+- `kv_cache_quant.py` — two KV-cache quantization mechanisms built on already-existing machinery: quantized
+  exact outliers plus parametric tails for a far-field attention bank's own outlier bookkeeping.
+- `law_discovery.py` — the "propose a relationship" discovery tier: fits and selects among candidate
+  functional forms for a black-box simulator's input/output behavior (distinct from `equation_discovery.py`'s
+  SINDy recovery of a *known* operator, graded against ground truth).
+- `moment_closure_attention.py` — E2, a far-field attention mechanism keeping bounded moment-closure summary
+  statistics of evicted tokens alongside E1's exact near-field sliding window.
+- `quantized_key_attention.py` — E10, product-quantized-key "cell" attention: attention weights exact by
+  construction once keys are quantized onto a learned per-block codebook lattice.
+- `sketch_state_attention.py` — E3, a far-field sketch-based (tensor-sketch / frequent-directions) state with
+  a provable approximation guarantee, contrasted with E2's adaptive learned closure.
+- `structure_edit_schedule.py` — a real architecture-edit action space (grow / prune / reshape) wired into
+  `mixle.inference.conditional_jit_controller`'s previously-unimplemented `STRUCTURE_EDIT` extension point.
+- `tying_discovery.py` — the R1 profile/permutation (copula-style) decomposition of a weight tensor's
+  flattened values, surfacing tying structure in trained weights.
+
+Whether these eight should graduate into `__init__.py`'s exports, stay reachable only by full path, or get
+folded elsewhere is a separate decision from documenting that they exist; this list makes that decision
+visible rather than silently deferring it.
