@@ -24,6 +24,10 @@ Recommended First Runs
    * - Script
      - What it demonstrates
      - Needs
+   * - ``quickstart_example.py``
+     - The two front-door entry points, ``mixle.describe()`` and ``mixle.propose()``: what an
+       object can do, and a verified out-of-sample frontier search over candidate models.
+     - Base install
    * - ``gallery_univariate_example.py``
      - Scalar continuous and discrete families.
      - Base install
@@ -47,6 +51,7 @@ Run them directly:
 
 .. code-block:: sh
 
+   python examples/quickstart_example.py
    python examples/gallery_univariate_example.py
    python examples/gallery_combinators_example.py
    python examples/gallery_structured_example.py
