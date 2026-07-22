@@ -589,7 +589,8 @@ def _gradient_log_prior_state(state, priors, prior_strength: float, torch, engin
                 "row_simplex_matrix",
                 "column_simplex_matrix",
             ):
-                alpha = _dirichlet_alpha_tensor(param_prior.get("alpha"), None, value, engine, torch)
+                labels = _simplex_labels(shadow, declaration, value)
+                alpha = _dirichlet_alpha_tensor(param_prior.get("alpha"), labels, value, engine, torch)
                 # Clamp away from 0: a saturated softmax tail can drive a component to exactly 0,
                 # making log(value) == -inf and poisoning the whole MAP objective.
                 value = torch.clamp(value, 1.0e-12, 1.0 - 1.0e-12)
@@ -643,6 +644,20 @@ def _dirichlet_alpha_tensor(alpha, labels, logits, engine, torch):
     if alpha_t.ndim == 0:
         return alpha_t + torch.zeros_like(logits)
     return alpha_t
+
+
+def _simplex_labels(shadow, declaration, value):
+    """Integer support labels for a simplex-constrained parameter, keyed the same way the family's
+    own support is (e.g. ``IntegerCategoricalDistribution``'s ``p_vec[i]`` <-> category ``min_val + i``),
+    so a Mapping-valued Dirichlet alpha can be keyed by the family's real category labels instead of
+    positional index. Returns ``None`` when the declaration has no ``support_bound`` statistic --
+    assuming positional integer keys (``0..K-1``) generically would be a guess, not a known contract.
+    """
+    bound_name = next((s.name for s in declaration.statistics if s.kind == "support_bound"), None)
+    if bound_name is None:
+        return None
+    min_val = int(getattr(shadow, bound_name))
+    return list(range(min_val, min_val + int(value.shape[0])))
 
 
 def _state_leaves(state):
