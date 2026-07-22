@@ -79,6 +79,21 @@ class BlackboxLaplaceTest(unittest.TestCase):
         draw = post.sample(1, rng=np.random.RandomState(1))
         self.assertEqual(len(draw.factors), len(bn.factors))  # a valid draw rebuilt into a network
 
+    def test_sample_accepts_an_int_seed_including_zero(self):
+        # `rng or np.random.RandomState()` treated seed 0 as falsy (silently discarding it for a
+        # fresh, unseeded RandomState) and crashed on any other int (no .standard_normal method).
+        rng = np.random.RandomState(0)
+        data = list(rng.normal(5.0, 2.0, 400))
+        fit = optimize(data, S.GaussianDistribution(0, 1).estimator(), max_its=20, out=None)
+        post = laplace_posterior(fit, data)
+
+        d0a = post.sample(50, rng=0)
+        d0b = post.sample(50, rng=0)
+        self.assertTrue(np.allclose([m.mu for m in d0a], [m.mu for m in d0b]))  # seed 0 is deterministic
+
+        d1 = post.sample(50, rng=1)
+        self.assertFalse(np.allclose([m.mu for m in d0a], [m.mu for m in d1]))  # a different seed differs
+
     def test_unsupported_structure_raises_clearly(self):
         hmm = S.HiddenMarkovModelDistribution(
             [S.GaussianDistribution(-1, 1), S.GaussianDistribution(1, 1)], [0.5, 0.5], [[0.7, 0.3], [0.3, 0.7]]
