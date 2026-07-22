@@ -81,10 +81,6 @@
       "maturity": "provisional",
       "status": "Unclassified (provisional by default)"
     },
-    "mixle.mine_planning": {
-      "maturity": "provisional",
-      "status": "Active mine-planning workflow (worklist H3: production scheduling & block sequencing)"
-    },
     "mixle.models": {
       "maturity": "provisional",
       "status": "Incubating applied helpers"
@@ -104,6 +100,10 @@
     "mixle.ppl": {
       "maturity": "provisional",
       "status": "Active development"
+    },
+    "mixle.precedence_scheduling": {
+      "maturity": "provisional",
+      "status": "Active mine-planning workflow (worklist H3: production scheduling & block sequencing)"
     },
     "mixle.process": {
       "maturity": "provisional",
