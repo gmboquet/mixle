@@ -806,7 +806,12 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
                 x1, x2, x3 = stats_dict[weight_key]
                 stats_dict[weight_key] = (x1 + self.comp_counts1, x2 + self.comp_counts2, x3 + self.joint_counts)
             else:
-                stats_dict[weight_key] = (self.comp_counts1, self.comp_counts2, self.joint_counts)
+                # Copy on adoption: stats_dict must never alias this accumulator's own live
+                # arrays. The "already present" branch above is safe (`+` always allocates a
+                # new array), but without this copy a second tied accumulator's key_replace
+                # would still leave both accumulators pointing at this accumulator's own
+                # original arrays.
+                stats_dict[weight_key] = (self.comp_counts1.copy(), self.comp_counts2.copy(), self.joint_counts.copy())
 
         if acc1_key is not None:
             if acc1_key in stats_dict:
@@ -835,10 +840,13 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         if weight_key is not None:
             if weight_key in stats_dict:
+                # Copy on replace too: without it, every tied accumulator ends up pointing at
+                # the SAME array objects, so any one of them later accumulating new local data
+                # would silently corrupt every other tied accumulator's counts.
                 x1, x2, x3 = stats_dict[weight_key]
-                self.comp_counts1 = x1
-                self.comp_counts2 = x2
-                self.joint_counts = x3
+                self.comp_counts1 = np.asarray(x1).copy()
+                self.comp_counts2 = np.asarray(x2).copy()
+                self.joint_counts = np.asarray(x3).copy()
 
         if acc1_key is not None:
             if acc1_key in stats_dict:
