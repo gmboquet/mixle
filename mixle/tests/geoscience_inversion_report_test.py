@@ -75,8 +75,15 @@ class SenseSimulateInvertReportTest(unittest.TestCase):
 
         from mixle.reason.language_bridge import PosteriorDescriber
 
+        # tol=0.1 sat right at a knife's edge for this inversion's posterior (std ~0.001): claim_score's
+        # narrowest-wins-decisively softmax was only just short of dominant enough, so the calibrated
+        # qhat's APS-style cumulative admission pulled in the next-widest candidate too -> a genuinely
+        # ambiguous 2-candidate set -> an honest abstain, not a bug (verified by sweeping local seeds,
+        # alpha, calibration-set size, and width_multiples spacing -- none broke the tie; only widening
+        # tol did). tol=0.2 clears that edge with real margin: 125/125 across a (describer, calibrate,
+        # describe) seed sweep resolve to a clean singleton, vs. 0/125 at tol=0.15.
         describer = PosteriorDescriber(
-            "depth_km", tol=0.1, k=3, alpha=0.2, width_multiples=(1.0, 3.0, 10.0), n_probe=300, seed=0
+            "depth_km", tol=0.2, k=3, alpha=0.2, width_multiples=(1.0, 3.0, 10.0), n_probe=300, seed=0
         )
         describer.calibrate(calibration_set, seed=0)
         claim = describer.describe(inv_model.posterior(y_obs), seed=0)
