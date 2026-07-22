@@ -686,12 +686,17 @@ def _resolve_objective(
         return obj
     if hasattr(model, "seq_local_elbo"):
         return "vb"
-    # Prefer the explicit prior signal: get_prior() is None exactly when the estimator carries no
-    # parameter prior. This is robust even when the log-prior happens to evaluate to 0.0 at init
-    # (which the model_log_density != 0.0 heuristic below would misclassify as MLE).
+    # Prefer the explicit prior signal when it says yes: get_prior() is not None is robust even
+    # when the log-prior happens to evaluate to 0.0 at init (which the model_log_density != 0.0
+    # heuristic below would misclassify as MLE). But get_prior() is None only rules out a prior
+    # the estimator ITSELF carries at its own (outer) level -- a compound estimator (e.g. a mixture
+    # whose per-component estimators have priors but whose own weight prior does not, or an HMM
+    # whose per-state topic estimators have priors but whose own chain prior does not) can have
+    # get_prior() is None while model_log_density is still genuinely non-zero from a nested child's
+    # prior, so a None get_prior() falls through to that check rather than concluding 'mle' outright.
     get_prior = getattr(estimator, "get_prior", None)
-    if callable(get_prior):
-        return "map" if get_prior() is not None else "mle"
+    if callable(get_prior) and get_prior() is not None:
+        return "map"
     if _model_objective(estimator, model) != 0.0:
         return "map"
     return "mle"

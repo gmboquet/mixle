@@ -81,6 +81,7 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
         name: str | None = None,
         weights: np.ndarray = MISSING,
         terminal_states: set[int] | Sequence[int] | None = None,
+        prior=None,
     ) -> None:
         """Distribution for sequences with lagged hidden-state emission dependence.
 
@@ -98,6 +99,8 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
                 number of hidden positions (len(x) - lag + 1 when lag > 0, len(x) when lag == 0).
                 Defaults to NullDistribution.
             name (Optional[str]): Optional distribution name.
+            prior: Optional conjugate chain prior over w/transitions, ``(init_prior, row_priors)``
+                -- mirrors :class:`~mixle.stats.latent.hidden_markov.HiddenMarkovModelDistribution`.
 
         Attributes:
             topics (Sequence[SequenceEncodableProbabilityDistribution]): Per-state emission distributions.
@@ -130,6 +133,45 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
             if self.terminal_states is not None:
                 self._terminal_mask = np.zeros(self.num_states, dtype=bool)
                 self._terminal_mask[list(self.terminal_states)] = True
+        self.set_prior(prior)
+
+    def get_prior(self):
+        """Returns the chain conjugate prior in ``(init_prior, row_priors)`` form (or None).
+
+        Per-state emission/init component priors are owned by those distributions themselves --
+        mirrors :meth:`~mixle.stats.latent.hidden_markov.HiddenMarkovModelDistribution.get_prior`.
+        """
+        if not self.has_conj_prior:
+            return None
+        return (self.init_prior, list(self.row_priors))
+
+    def set_prior(self, prior) -> None:
+        """Set the conjugate Dirichlet chain prior over w/transitions and flag ``has_conj_prior``.
+
+        Mirrors :meth:`~mixle.stats.latent.hidden_markov.HiddenMarkovModelDistribution.set_prior`
+        exactly (no digamma-expectation caching: this class has no ``expected_log_density``
+        counterpart to feed). ``prior=None`` leaves the distribution a plain point model.
+
+        Args:
+            prior: ``(init_prior, row_priors)`` tuple or None.
+        """
+        from mixle.stats.bayes.dirichlet import DirichletDistribution
+        from mixle.stats.latent.hidden_markov import _unpack_hmm_chain_prior
+
+        if prior is None:
+            self.prior = None
+            self.init_prior = None
+            self.row_priors = None
+            self.has_conj_prior = False
+            return
+
+        init_prior, row_priors = _unpack_hmm_chain_prior(prior)
+        self.prior = prior
+        self.init_prior = init_prior
+        self.row_priors = row_priors
+        self.has_conj_prior = isinstance(init_prior, DirichletDistribution) and all(
+            isinstance(u, DirichletDistribution) for u in row_priors
+        )
 
     def _windowed_log_b(self, x: Sequence[Any]) -> np.ndarray:
         """Per-position, per-state emission log-densities ``(obs_cnt, num_states)`` for the lookback windows."""
@@ -1159,6 +1201,7 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
         name: str | None = None,
         keys: tuple[str | None, str | None, str | None] | None = (None, None, None),
         terminal_states=None,
+        prior=None,
     ):
         """Create an estimator for a lookback hidden Markov model.
 
@@ -1177,6 +1220,11 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
             name (Optional[str]): Assign string name to the estimated distribution.
             keys (Optional[Tuple[Optional[str], Optional[str], Optional[str]]]): Keys for
                 initial-state counts, transition counts, and state accumulators.
+            prior: Optional conjugate chain prior over w/transitions, ``(init_prior, row_priors)``
+                -- mirrors :class:`~mixle.stats.latent.hidden_markov.HiddenMarkovEstimator`. When
+                set, ``estimate`` uses the true Dirichlet MAP update instead of ``pseudo_count``
+                smoothing, and ``get_prior``/``model_log_density`` let
+                :func:`mixle.inference.estimation.optimize` auto-detect the ``'map'`` objective.
 
         """
         self.num_states = len(estimators)
@@ -1194,6 +1242,74 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
             self.init_estimators = [NullEstimator() for xx in range(self.num_states)]
         else:
             self.init_estimators = init_estimators
+        self.set_prior(prior)
+
+    def get_prior(self):
+        """Returns the chain conjugate prior in ``(init_prior, row_priors)`` form (or None).
+
+        Mirrors :meth:`~mixle.stats.latent.hidden_markov.HiddenMarkovEstimator.get_prior`.
+        """
+        if not self.has_conj_prior:
+            return None
+        return (self.init_prior, list(self.row_priors))
+
+    def set_prior(self, prior) -> None:
+        """Set the conjugate Dirichlet chain prior and flag whether it admits the conjugate update.
+
+        Mirrors :meth:`~mixle.stats.latent.hidden_markov.HiddenMarkovEstimator.set_prior` exactly.
+
+        Args:
+            prior: ``(init_prior, row_priors)`` tuple or None; has_conj_prior is set when both the
+                initial-state prior and all row priors are Dirichlet.
+        """
+        from mixle.stats.bayes.dirichlet import DirichletDistribution
+
+        if prior is None:
+            self.prior = None
+            self.init_prior = None
+            self.row_priors = None
+            self.has_conj_prior = False
+            return
+
+        init_prior, row_priors = prior[0], list(prior[1])
+        self.prior = prior
+        self.init_prior = init_prior
+        self.row_priors = row_priors
+        self.has_conj_prior = isinstance(init_prior, DirichletDistribution) and all(
+            isinstance(u, DirichletDistribution) for u in row_priors
+        )
+
+    def model_log_density(self, model: "LookbackHiddenMarkovModelDistribution") -> float:
+        """Log-density of the model parameters under the priors (ELBO global term).
+
+        Sums the Dirichlet log-densities of the initial-state and transition probabilities (when a
+        conjugate chain prior is set) plus each topic/init-segment estimator's own
+        ``model_log_density`` of its fitted distribution. Mirrors
+        :meth:`~mixle.stats.latent.hidden_markov.HiddenMarkovEstimator.model_log_density` (which
+        does not include its own ``len_estimator`` either -- kept at parity here rather than
+        widening scope beyond the sibling class).
+
+        Args:
+            model (LookbackHiddenMarkovModelDistribution): Model to score.
+
+        Returns:
+            Prior log-density of the model parameters.
+        """
+        rv = 0.0
+        if self.has_conj_prior:
+            tiny = 1.0e-300
+            rv += float(self.init_prior.log_density(np.maximum(model.w, tiny)))
+            for i, row_prior in enumerate(self.row_priors):
+                rv += float(row_prior.log_density(np.maximum(model.transitions[i, :], tiny)))
+        for est, topic in zip(self.estimators, model.topics):
+            fn = getattr(est, "model_log_density", None)
+            if callable(fn):
+                rv += float(fn(topic))
+        for est, init in zip(self.init_estimators, model.init_dist):
+            fn = getattr(est, "model_log_density", None)
+            if callable(fn):
+                rv += float(fn(init))
+        return rv
 
     def accumulator_factory(self):
         """Create a LookbackHiddenMarkovModelEstimatorAccumulatorFactory from the member estimators.
@@ -1229,6 +1345,33 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
 
         topics = [self.estimators[i].estimate(state_counts[i], topic_ss[i]) for i in range(num_states)]
         init_dist = [self.init_estimators[i].estimate(init_counts[i], init_ss[i]) for i in range(num_states)]
+
+        if self.has_conj_prior:
+            from mixle.stats.bayes.dirichlet import DirichletDistribution
+            from mixle.stats.latent.hidden_markov import _hmm_map_probs
+
+            a0 = np.asarray(self.init_prior.get_parameters(), dtype=float)
+            w = _hmm_map_probs(init_counts, a0)
+            init_posterior = DirichletDistribution(init_counts + a0)
+
+            transitions = np.zeros((num_states, num_states), dtype=np.float64)
+            row_posteriors = []
+            for i in range(num_states):
+                ai = np.asarray(self.row_priors[i].get_parameters(), dtype=float)
+                transitions[i, :] = _hmm_map_probs(trans_counts[i, :], ai)
+                row_posteriors.append(DirichletDistribution(trans_counts[i, :] + ai))
+
+            return LookbackHiddenMarkovModelDistribution(
+                topics,
+                w,
+                transitions,
+                lag=lag,
+                init_dist=init_dist,
+                len_dist=len_dist,
+                name=self.name,
+                terminal_states=self.terminal_states,
+                prior=(init_posterior, row_posteriors),
+            )
 
         if self.pseudo_count[0] is not None:
             p1 = self.pseudo_count[0] / float(num_states)
