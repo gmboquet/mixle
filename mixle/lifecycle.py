@@ -401,7 +401,11 @@ def propose(
         from mixle.utils.automatic import get_estimator
 
         indep = get_estimator(rows)
-        if repr(indep) != repr(rec.estimator):
+        # ParameterEstimator has no value-based __repr__ (it falls back to the default object repr,
+        # keyed on identity/memory address), so a repr() comparison here never matches even when the
+        # two estimators are structurally identical -- the "skip when identical" intent silently
+        # never fires, doubling the frontier's fit cost. to_dict() is the real structural comparison.
+        if indep.to_dict() != rec.estimator.to_dict():
             candidates.append(("independent", indep))
     except Exception:  # noqa: BLE001 - a baseline that can't build is just absent from the frontier
         pass

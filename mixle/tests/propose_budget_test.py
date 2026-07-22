@@ -8,10 +8,12 @@ is unchanged.
 """
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 import mixle
+from mixle.utils.automatic import get_estimator as _real_get_estimator
 
 
 def _records(n=300, seed=0):
@@ -19,15 +21,29 @@ def _records(n=300, seed=0):
     return [("free" if rng.rand() < 0.5 else "paid", float(rng.randn()), int(rng.poisson(3))) for _ in range(n)]
 
 
+def _two_distinct_candidates():
+    # _records()'s fields are drawn independently, so the dependency-aware recommendation and the
+    # plain independence baseline are structurally identical (propose() correctly dedupes them --
+    # see lifecycle_test.py's test_propose_skips_independent_baseline_when_structurally_identical).
+    # These budget tests are about the search-budget mechanism, not about how often the two happen
+    # to differ, so the baseline is forced to a distinct (still real, still fittable) estimator via
+    # a different pseudo_count -- guaranteeing >=2 candidates deterministically.
+    return patch(
+        "mixle.utils.automatic.get_estimator", side_effect=lambda rows: _real_get_estimator(rows, pseudo_count=0.5)
+    )
+
+
 class ProposeBudgetTest(unittest.TestCase):
     def test_unbounded_by_default_evaluates_all_candidates(self):
-        m = mixle.propose(_records())
-        self.assertGreaterEqual(len(m.frontier), 2)  # heterogeneous records -> >=2 proposers
+        with _two_distinct_candidates():
+            m = mixle.propose(_records())
+        self.assertGreaterEqual(len(m.frontier), 2)
         self.assertEqual([f for f in m.frontier if "skipped" in f], [])  # nothing skipped
         self.assertTrue(any("heldout_mean_log_density" in f for f in m.frontier))
 
     def test_max_candidates_bounds_the_search_and_records_skips(self):
-        m = mixle.propose(_records(), max_candidates=1)
+        with _two_distinct_candidates():
+            m = mixle.propose(_records(), max_candidates=1)
         evaluated = [f for f in m.frontier if "heldout_mean_log_density" in f]
         skipped = [f for f in m.frontier if "skipped" in f]
         self.assertEqual(len(evaluated), 1)  # only the first (recommended) candidate is fit
