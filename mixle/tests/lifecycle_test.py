@@ -66,6 +66,26 @@ class LifecycleTest(unittest.TestCase):
         self.assertIs(m.spec, scored[0]["estimator"])  # the winner is the returned model
         self.assertIsNotNone(m.fitted)
 
+    def test_propose_skips_independent_baseline_when_structurally_identical(self):
+        # _records(300)'s recommended (dependency-aware) and independent (plain) estimators come back
+        # structurally identical here -- confirmed via to_dict(), the real structural comparison.
+        # repr() differs regardless (default object repr is identity/memory-address-based), so a
+        # repr()-based dedup check would never skip the redundant candidate; to_dict() must.
+        import mixle
+        from mixle.task import recommend_model
+        from mixle.utils.automatic import get_estimator
+
+        rows = _records(300)
+        rec_estimator = recommend_model(rows).estimator
+        indep_estimator = get_estimator(rows)
+        self.assertNotEqual(repr(indep_estimator), repr(rec_estimator))
+        self.assertEqual(indep_estimator.to_dict(), rec_estimator.to_dict())
+
+        m = mixle.propose(rows, fit=True)
+        names = [f["name"] for f in m.frontier]
+        self.assertEqual(names.count("independent"), 0)
+        self.assertEqual(names.count("recommended"), 1)
+
     def test_fit_with_explicit_spec_and_enumerate(self):
         import mixle
         from mixle.stats import CategoricalEstimator
