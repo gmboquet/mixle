@@ -58,6 +58,13 @@ class InvariantTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             HypothesisPortfolio(hyps, np.array([0.5, 0.6]), w_open=0.0)
 
+    def test_constructor_rejects_duplicate_hypothesis_ids(self):
+        # resample()'s and resurrect()'s docstrings both promise every hypothesis id stays unique;
+        # a duplicate would make resurrect() silently reactivate only the first match.
+        hyps = [Hypothesis("a", 1), Hypothesis("a", 2), Hypothesis("b", 3)]
+        with self.assertRaises(ValueError):
+            HypothesisPortfolio(hyps, np.array([0.2, 0.3, 0.5]), w_open=0.0)
+
 
 class PruneResurrectRoundTripTest(unittest.TestCase):
     def test_pruned_mass_folds_into_open_world_and_resurrect_reverses_it(self):
