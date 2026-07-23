@@ -101,7 +101,8 @@ class Ontology:
 
     # -- auditing a graph (cross-triple axioms live here) --------------------------------------------
     def check_graph(self, triples: Any, types: dict[str, str]) -> dict[str, Any]:
-        """Audit a triple set: per-triple violations plus the cross-triple axioms (functional/asymmetric).
+        """Audit a triple set: per-triple violations plus the cross-triple axioms (functional/symmetric/
+        asymmetric/transitive).
 
         Returns ``{consistent, n_triples, violations: [{triple, problems}]}`` -- every problem named."""
         triple_list = [tuple(t) for t in triples]
@@ -140,6 +141,30 @@ class Ontology:
                 for h, rr, t in triple_list:
                     if rr == r and (t, r, h) in present and h != t:
                         violations.append({"triple": (h, r, t), "problems": ["asymmetric: both directions asserted"]})
+            if "symmetric" in ax:
+                for h, rr, t in triple_list:
+                    if rr == r and h != t and (t, r, h) not in present:
+                        violations.append(
+                            {
+                                "triple": (h, r, t),
+                                "problems": [f"symmetric: {r!r} has {h!r}->{t!r} without the reverse {t!r}->{h!r}"],
+                            }
+                        )
+            if "transitive" in ax:
+                for h, rr, m in triple_list:
+                    if rr != r:
+                        continue
+                    for m2, rr2, t in triple_list:
+                        if rr2 == r and m2 == m and (h, r, t) not in present:
+                            violations.append(
+                                {
+                                    "triple": (h, r, t),
+                                    "problems": [
+                                        f"transitive: {r!r} has {h!r}->{m!r}->{t!r} without the closure edge "
+                                        f"{h!r}->{t!r}"
+                                    ],
+                                }
+                            )
         return {"consistent": not violations, "n_triples": len(triple_list), "violations": violations}
 
     def filter_triples(self, triples: Any, types: dict[str, str]) -> tuple[list[tuple], list[dict[str, Any]]]:
