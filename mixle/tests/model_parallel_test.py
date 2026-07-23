@@ -373,6 +373,77 @@ class SparkDataModelTest(unittest.TestCase):
         self.assertTrue(np.isclose(_ll(base, data), _ll(fit, data), rtol=1e-6), (_ll(base, data), _ll(fit, data)))
 
 
+class SparkSequenceFoldTest(unittest.TestCase):
+    """mixle.stats.compute.sequence's RDD branch merges per-partition sufficient statistics via
+    ``RDD.treeReduce`` rather than a single-root ``collect()`` fold on the driver (the same
+    driver-memory/OOM risk at high partition counts that mixle.inference.spark_executor's
+    treeReduce fixed for the heterogeneous-EM executor). A tied-parameter 2-component Gaussian
+    mixture has an exact closed-form fixed point after one M-step: since per-observation
+    responsibilities across the two tied components sum to 1, the shared ``mu``/``sigma2`` equal
+    the plain pooled sample mean/variance regardless of the E-step responsibilities. This pins that
+    fixed point -- against both the closed form and the non-Spark ``seq_estimate`` path -- across
+    several adversarial partition counts, including more partitions than rows (guaranteed empty
+    partitions), so a reordering/aggregation regression in the fold is caught immediately.
+    """
+
+    def _spark_context_or_skip(self, name, n_workers=3):
+        try:
+            from pyspark import SparkConf, SparkContext
+        except ImportError:
+            self.skipTest("pyspark not installed")
+        _ensure_java_home()
+        _ensure_pyspark_worker_python()
+        java_home = os.environ.get("JAVA_HOME")
+        java_bin = (os.path.join(java_home, "bin", "java") if java_home else None) or shutil.which("java")
+        try:
+            if java_bin is None or subprocess.run([java_bin, "-version"], capture_output=True).returncode != 0:
+                self.skipTest("no functional Java runtime for Spark")
+        except OSError:
+            self.skipTest("no functional Java runtime for Spark")
+        sc = SparkContext(
+            conf=SparkConf().setMaster(f"local[{n_workers}]").setAppName(name).set("spark.ui.enabled", "false")
+        )
+        sc.setLogLevel("ERROR")
+        return sc
+
+    def test_tied_gaussian_mixture_pooled_fixed_point_across_partition_counts(self):
+        from mixle.stats.compute.sequence import seq_encode, seq_estimate
+        from mixle.stats.latent.mixture import MixtureDistribution, MixtureEstimator
+        from mixle.stats.univariate.continuous.gaussian import GaussianDistribution, GaussianEstimator
+
+        # Small n on purpose: the "more partitions than rows" case below needs total partition count
+        # to exceed len(data), and local-mode per-task scheduling overhead makes thousands of
+        # (mostly empty) partitions impractically slow in a test. The pooled-fixed-point identity is
+        # an exact algebraic property of the tied M-step, not a large-n asymptotic one, so a small
+        # dataset still pins the fold's correctness just as tightly as a large one would.
+        rng = np.random.RandomState(0)
+        data = [float(v) for v in np.concatenate([rng.normal(-3, 1, 100), rng.normal(3, 2, 100)])]
+        pooled_mu = float(np.mean(data))
+        pooled_sigma2 = float(np.var(data))
+
+        model = MixtureDistribution([GaussianDistribution(-2.0, 1.5), GaussianDistribution(2.0, 1.5)], [0.5, 0.5])
+        keyed = MixtureEstimator([GaussianEstimator(keys="shared"), GaussianEstimator(keys="shared")])
+
+        # non-Spark reference for the identical data/model
+        local_enc = [(len(data), model.dist_to_encoder().seq_encode(data))]
+        local_fit = seq_estimate(local_enc, keyed, model)
+
+        sc = self._spark_context_or_skip("sequence-treereduce-fold")
+        try:
+            for n_partitions in (1, 5, 11, len(data) + 60):  # last: more partitions than rows (many empty)
+                with self.subTest(n_partitions=n_partitions):
+                    rdd = sc.parallelize(data, n_partitions)
+                    enc_data = seq_encode(rdd, model=model)
+                    fit = seq_estimate(enc_data, keyed, model)
+                    for c in fit.components:
+                        self.assertAlmostEqual(c.mu, pooled_mu, places=9)
+                        self.assertAlmostEqual(c.sigma2, pooled_sigma2, places=7)
+                        self.assertAlmostEqual(c.mu, local_fit.components[0].mu, places=9)
+                        self.assertAlmostEqual(c.sigma2, local_fit.components[0].sigma2, places=7)
+        finally:
+            sc.stop()
+
+
 _MPI_SCRIPT = r"""
 import sys
 import numpy as np

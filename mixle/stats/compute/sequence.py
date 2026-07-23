@@ -309,15 +309,13 @@ def seq_estimate(
 
             return rv
 
-        temp = enc_data.mapPartitionsWithIndex(acc, True).cache()
+        # Fold in Spark via treeReduce (O(log W) levels) rather than a single-root collect --
+        # the driver-memory/OOM risk at high partition counts flagged by the scaling audit and
+        # fixed the same way in mixle.inference.spark_executor's spark_em_step/spark_fit.
+        nobs, stats_value = pickle.loads(enc_data.mapPartitionsWithIndex(acc, True).treeReduce(red))
 
-        nobs = 0.0
         accumulator = estimator.accumulator_factory().make()
-
-        for stuff in temp.collect():
-            nobs_for_split, stats_for_split = pickle.loads(stuff)
-            nobs = nobs + nobs_for_split
-            accumulator.combine(stats_for_split)
+        accumulator.combine(stats_value)
 
         stats_dict = dict()
         accumulator.key_merge(stats_dict)
@@ -325,7 +323,6 @@ def seq_estimate(
 
         estimate_broadcast.destroy()
         estimator_broadcast.destroy()
-        temp.unpersist()
         enc_data.localCheckpoint()
 
         return estimator.estimate(nobs, accumulator.value())
@@ -417,15 +414,13 @@ def seq_initialize(
 
             return rv
 
-        temp = enc_data.mapPartitionsWithIndex(acc, True).cache()
+        # Fold in Spark via treeReduce (O(log W) levels) rather than a single-root collect --
+        # the driver-memory/OOM risk at high partition counts flagged by the scaling audit and
+        # fixed the same way in mixle.inference.spark_executor's spark_em_step/spark_fit.
+        nobs, stats_value = pickle.loads(enc_data.mapPartitionsWithIndex(acc, True).treeReduce(red))
 
-        nobs = 0.0
         accumulator = estimator.accumulator_factory().make()
-
-        for stuff in temp.collect():
-            nobs_for_split, stats_for_split = pickle.loads(stuff)
-            nobs = nobs + nobs_for_split
-            accumulator.combine(stats_for_split)
+        accumulator.combine(stats_value)
 
         stats_dict = dict()
         accumulator.key_merge(stats_dict)
@@ -433,7 +428,6 @@ def seq_initialize(
 
         seeds_broadcast.destroy()
         estimator_broadcast.destroy()
-        temp.unpersist()
         enc_data.localCheckpoint()
 
         return estimator.estimate(nobs, accumulator.value())
