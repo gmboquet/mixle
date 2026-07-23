@@ -15,9 +15,12 @@ network's weights, trained or not. This is the same "hard constraint, not a soft
 :func:`~mixle.models.energy.build_convex_energy_net` (which enforce a shape by reparameterizing weights):
 here the architecture itself makes conservation a property of the *dynamics*, not of the density.
 
-``leapfrog_rollout`` integrates the learned (or true) vector field with a symplectic (leapfrog) scheme, which
-keeps the *discretized* trajectory's energy error bounded and oscillating rather than drifting away over long
-rollouts -- the numerical-integration counterpart of the continuous-time conservation property above.
+``leapfrog_rollout`` integrates the learned (or true) vector field with a leapfrog scheme, which -- when ``H``
+is separable (``H(q, p) = T(p) + V(q)``) -- is exactly symplectic, keeping the *discretized* trajectory's
+energy error bounded and oscillating rather than drifting away over long rollouts: the numerical-integration
+counterpart of the continuous-time conservation property above. ``HamiltonianNet`` does not enforce that
+separable structure (one MLP over the concatenated ``(q, p)``), so for a genuinely non-separable learned ``H``
+the scheme is not exactly symplectic; in practice this has not been observed to cause unbounded energy drift.
 
 Requires torch.
 """
@@ -64,28 +67,50 @@ class HamiltonianNet:
 
 
 def leapfrog_rollout(net: HamiltonianNet, q0: Any, p0: Any, dt: float, n_steps: int) -> tuple[Any, Any]:
-    """Symplectic leapfrog integration of ``net``'s learned (or untrained) Hamiltonian flow.
+    """Leapfrog integration of ``net``'s learned (or untrained) Hamiltonian flow.
 
     Returns ``(qs, ps)``, each shaped ``(n_steps + 1, *q0.shape)`` -- the trajectory including the initial
-    state. A symplectic integrator is the right numerical counterpart to a conservative continuous-time
-    system: unlike a generic (e.g. Euler) integrator, its energy error stays bounded and oscillates rather
-    than drifting monotonically over long rollouts.
+    state. This scheme is exactly symplectic when ``H`` is separable in ``(q, p)``; ``HamiltonianNet`` does
+    not enforce that structure. A symplectic integrator is the right numerical counterpart to a conservative
+    continuous-time system: unlike a generic (e.g. Euler) integrator, its energy error stays bounded and
+    oscillates rather than drifting monotonically over long rollouts -- and in practice this has held up
+    even for the non-separable case here, though it is not guaranteed by the exact-symplecticity argument.
     """
     torch = _torch()
     q, p = q0.clone(), p0.clone()
     qs, ps = [q.clone()], [p.clone()]
     for _ in range(int(n_steps)):
-        q_req, p_req = q.detach().requires_grad_(True), p.detach().requires_grad_(True)
+        # `.clone().requires_grad_(True)` (not `.detach().requires_grad_(True)`) -- ``time_derivative``
+        # needs its inputs to require grad (it calls ``torch.autograd.grad`` on them), but we must NOT
+        # sever them from the incoming graph: doing so would block gradients from ever reaching ``q0``/
+        # ``p0`` or, via the values threaded step to step, ``net``'s own parameters, making a rollout-loss
+        # training loop a silent no-op. `.clone()` (unlike `.detach()`) keeps that upstream connection
+        # while still handing ``time_derivative`` a fresh tensor object of its own -- which matters:
+        # `q` is used as an input to TWO separate `create_graph=True` autograd.grad() calls per step (the
+        # kick and the drift below), and reusing the exact same tensor object for both (e.g. plain
+        # in-place `q.requires_grad_(True)`, without cloning) was measured to perturb the forward-pass
+        # floating point result by ~1 float32 ULP per step relative to giving each call its own object --
+        # negligible on its own, but on a well-trained net whose learned flow is only approximately
+        # energy-conserving, a long rollout (e.g. 200 steps) can amplify that ULP-scale perturbation into a
+        # macroscopic trajectory difference. Cloning avoids the object reuse (matching how `.detach()`
+        # always produced a fresh object too) and reproduces the pre-fix code's forward-pass numerics
+        # bit-for-bit while still fixing the actual bug. This does NOT support being called under an
+        # ambient ``torch.no_grad()``: that disables graph-building outright, and ``time_derivative``'s
+        # ``torch.autograd.grad(..., create_graph=True)`` needs an active graph regardless of any tensor's
+        # ``requires_grad`` flag -- true both before and after this fix (verified), so it is not a
+        # regression. Callers who don't need gradients can simply not call ``.backward()`` on the result;
+        # the graph is freed once it goes out of scope.
+        q_req, p_req = q.clone().requires_grad_(True), p.clone().requires_grad_(True)
         _, dp_half = net.time_derivative(q_req, p_req)
-        p_half = p + 0.5 * dt * dp_half.detach()
+        p_half = p + 0.5 * dt * dp_half
 
-        q_req2, p_req2 = q.detach().requires_grad_(True), p_half.detach().requires_grad_(True)
+        q_req2, p_req2 = q.clone().requires_grad_(True), p_half.clone().requires_grad_(True)
         dq_full, _ = net.time_derivative(q_req2, p_req2)
-        q = q + dt * dq_full.detach()
+        q = q + dt * dq_full
 
-        q_req3, p_req3 = q.detach().requires_grad_(True), p_half.detach().requires_grad_(True)
+        q_req3, p_req3 = q.clone().requires_grad_(True), p_half.clone().requires_grad_(True)
         _, dp_half2 = net.time_derivative(q_req3, p_req3)
-        p = p_half + 0.5 * dt * dp_half2.detach()
+        p = p_half + 0.5 * dt * dp_half2
 
         qs.append(q.clone())
         ps.append(p.clone())
