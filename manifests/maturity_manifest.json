@@ -33,10 +33,6 @@
       "maturity": "provisional",
       "status": "Unclassified (provisional by default)"
     },
-    "mixle.distribution": {
-      "maturity": "provisional",
-      "status": "Unclassified (provisional by default)"
-    },
     "mixle.doe": {
       "maturity": "provisional",
       "status": "Active application/research workflows"
@@ -62,6 +58,10 @@
       "status": "No compatibility guarantee"
     },
     "mixle.fault": {
+      "maturity": "provisional",
+      "status": "Unclassified (provisional by default)"
+    },
+    "mixle.fulfillment": {
       "maturity": "provisional",
       "status": "Unclassified (provisional by default)"
     },

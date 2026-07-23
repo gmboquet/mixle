@@ -1,10 +1,16 @@
-"""H6 DoD: forecast_demand's calibrated coverage, and route_distribution vs a min_cost_flow reference."""
+"""H6 DoD: forecast_demand's calibrated coverage, and route_distribution vs a min_cost_flow reference.
+
+Renamed from mixle.distribution to mixle.fulfillment -- "distribution" collided with mixle.dist (the
+object-namespace alias for mixle.stats): same word, unrelated meanings (probability distribution vs.
+supply-chain distribution/routing). The H6 label is a stable worklist identifier and stays put; only
+the module name changed.
+"""
 
 from __future__ import annotations
 
 import numpy as np
 
-from mixle.distribution import forecast_demand, route_distribution
+from mixle.fulfillment import forecast_demand, route_distribution
 from mixle.inference.forecast import Forecast
 from mixle.relations import min_cost_flow
 
