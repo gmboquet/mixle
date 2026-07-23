@@ -71,6 +71,34 @@ class GraphAuditTest(unittest.TestCase):
         rep = ont.check_graph(g, TYPES)
         self.assertFalse(rep["consistent"])
 
+    def test_symmetric_one_directional_edge_is_flagged(self):
+        # married_to is declared symmetric (see _ont()); asserting only one direction must be named.
+        g = [("ada", "married_to", "bob")]
+        rep = _ont().check_graph(g, TYPES)
+        self.assertFalse(rep["consistent"])
+        self.assertTrue(any("symmetric" in v["problems"][0] for v in rep["violations"]))
+
+    def test_symmetric_both_directions_passes(self):
+        g = [("ada", "married_to", "bob"), ("bob", "married_to", "ada")]
+        self.assertTrue(_ont().check_graph(g, TYPES)["consistent"])
+
+    def test_transitive_closure_gap_is_flagged(self):
+        ont = _ont().add_relation("ancestor_of", "Person", "Person", "transitive")
+        g = [("ada", "ancestor_of", "bob"), ("bob", "ancestor_of", "acme")]
+        rep = ont.check_graph(g, {**TYPES, "acme": "Person"})
+        self.assertFalse(rep["consistent"])
+        self.assertTrue(any("transitive" in v["problems"][0] for v in rep["violations"]))
+
+    def test_transitive_closed_graph_passes(self):
+        ont = _ont().add_relation("ancestor_of", "Person", "Person", "transitive")
+        g = [
+            ("ada", "ancestor_of", "bob"),
+            ("bob", "ancestor_of", "acme"),
+            ("ada", "ancestor_of", "acme"),  # closure edge present
+        ]
+        rep = ont.check_graph(g, {**TYPES, "acme": "Person"})
+        self.assertTrue(rep["consistent"])
+
     def test_consistent_graph_passes(self):
         g = [("acme", "employs", "ada"), ("ada", "lives_in", "paris")]
         self.assertTrue(_ont().check_graph(g, TYPES)["consistent"])
