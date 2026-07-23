@@ -12,10 +12,24 @@ import numpy as np
 
 import mixle.stats as stats
 from mixle.inference import optimize
+from mixle.tests.spark_encoded_data_test import _ensure_java_home
 from mixle.utils.parallel.model_parallel import ModelParallelEncodedData, ModelParallelEstimator
 from mixle.utils.parallel.planner import available_encoded_data_backends, encoded_data
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _ensure_pyspark_worker_python() -> None:
+    """Pin PYSPARK_PYTHON/PYSPARK_DRIVER_PYTHON to this interpreter.
+
+    Without this, pyspark resolves the worker's python fresh from PATH, which can be a different
+    minor version than the venv actually running the tests (observed on this machine: PATH's
+    python3 -> 3.14 vs the venv's 3.12), and every task then fails with a pyspark
+    PYTHON_VERSION_MISMATCH RuntimeError. Same fix as mixle.tests.spark_encoded_data_test's
+    ``_spark_context()``, applied here since this file builds its own SparkContext directly.
+    """
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
 
 
 def _composite():
@@ -297,6 +311,8 @@ class SparkDataModelTest(unittest.TestCase):
             from pyspark import SparkConf, SparkContext
         except ImportError:
             self.skipTest("pyspark not installed")
+        _ensure_java_home()  # Homebrew JDKs aren't on PATH/JAVA_HOME by default; same probe as spark_encoded_data_test
+        _ensure_pyspark_worker_python()
         java_home = os.environ.get("JAVA_HOME")
         java_bin = (os.path.join(java_home, "bin", "java") if java_home else None) or shutil.which("java")
         try:  # the macOS /usr/bin/java stub exists but is non-functional -> probe it, skip if it fails
@@ -330,6 +346,8 @@ class SparkDataModelTest(unittest.TestCase):
             from pyspark import SparkConf, SparkContext
         except ImportError:
             self.skipTest("pyspark not installed")
+        _ensure_java_home()  # Homebrew JDKs aren't on PATH/JAVA_HOME by default; same probe as spark_encoded_data_test
+        _ensure_pyspark_worker_python()
         java_home = os.environ.get("JAVA_HOME")
         java_bin = (os.path.join(java_home, "bin", "java") if java_home else None) or shutil.which("java")
         try:
