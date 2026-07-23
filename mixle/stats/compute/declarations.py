@@ -532,6 +532,14 @@ _NUMBA_FUNC_OPS = {
 _GENERIC_NUMBA_KERNEL_CACHE: dict[type[Any], tuple[Any, int, tuple[str, ...]] | None] = {}
 
 
+_NUMBA_NAMED_CONSTANTS = {
+    "pi": "math.pi",
+    "e": "math.e",
+    "euler_gamma": repr(0.5772156649015328606),  # no math.euler_gamma in the stdlib
+    "inf": "_INF",
+}
+
+
 def _lower_symbolic_to_numba(expr: Any) -> str:
     """Lower a SymbolicExpression to a numba-compatible Python expression string."""
     op = expr.op
@@ -549,6 +557,12 @@ def _lower_symbolic_to_numba(expr: Any) -> str:
         if math.isnan(fvalue):
             return "_NAN"
         return repr(fvalue)
+    if op in _NUMBA_NAMED_CONSTANTS and not expr.args:
+        # nullary named constants (SymbolicEngine.pi/e/euler_gamma/inf) -- distinct from "const",
+        # which wraps an actual numeric value. These entered traced expressions for the first time
+        # once engine-parameterized backend formulas started reading engine.pi instead of a frozen
+        # Python float baked in at trace time (see gaussian.py/student_t.py/etc.'s pi fix).
+        return _NUMBA_NAMED_CONSTANTS[op]
 
     sub = [_lower_symbolic_to_numba(arg) for arg in expr.args]
 
