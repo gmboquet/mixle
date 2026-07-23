@@ -179,6 +179,41 @@ def _tune_recipe(kind: str, inputs: list, labels: list, distill_kw: dict, budget
     return max(trials, key=lambda t: t[0])[1]
 
 
+def _fit_edge_student(
+    inputs: list,
+    labels: list,
+    device: Any,
+    device_space: Any,
+    propose_budget: int,
+    seed: int,
+    design: Any = None,
+) -> Any:
+    """Structure x recipe search for a student that fits ``device`` -- the shared core of ``solve()``'s
+    initial edge search and :meth:`Solution.improve`'s re-search under the SAME budget. Passing the
+    prior search's ``design`` (a :class:`~mixle.task.edge.DesignModel`) warm-starts the surrogate from
+    what it already learned, so re-searching after harvesting new labels isn't a cold restart."""
+    from mixle.task.edge import distill_for_edge
+
+    n_val = max(2, len(inputs) // 4)
+    val_order = np.random.RandomState(seed).permutation(len(inputs))
+    v_idx, f_idx = val_order[:n_val], val_order[n_val:]
+    n_init = min(4, max(2, propose_budget // 2))
+    return distill_for_edge(
+        None,
+        [inputs[i] for i in f_idx],
+        [inputs[i] for i in v_idx],
+        device,
+        train_labels=[labels[i] for i in f_idx],
+        val_labels=[labels[i] for i in v_idx],
+        labels=sorted(set(labels)),
+        space=device_space,
+        design=design,
+        n_init=n_init,
+        n_iter=max(1, propose_budget - n_init),
+        seed=seed,
+    )
+
+
 @dataclass
 class Solution:
     """A deployed task: a calibrated student in front of the teacher, plus the loop to improve it.
@@ -204,6 +239,9 @@ class Solution:
     synthesized: int = 0  # synthetic (generative-sampled, teacher-labeled) inputs in the training set
     gate_inputs: list = field(default_factory=list)  # real inputs only -- what the p(x) gate is fit on
     edge: Any = None  # EdgeDistillResult when solve() ran under a DeviceSpec (footprint, pareto, design)
+    device: Any = None  # DeviceSpec solve() searched under (edge != None) -- improve() re-searches the SAME budget
+    device_space: Any = None  # EdgeSpace the edge search used (None = default); reused to warm-start from edge.design
+    propose_budget: int = 8  # edge-search effort improve() reuses when re-searching under device
 
     def __call__(self, x: Any) -> Any:
         if not self.promoted:
@@ -237,6 +275,12 @@ class Solution:
 
         Returns True when a better student was promoted. The calibration slice is never trained on, so the
         conformal guarantee and the agreement comparison remain valid across rounds.
+
+        When the original ``solve()`` ran under a device budget (``self.edge`` is set), the harvested
+        labels are re-searched under that SAME ``DeviceSpec``/``EdgeSpace`` -- warm-started from the
+        prior search's design ledger -- instead of being refit with a generic, unconstrained student. A
+        candidate that no longer fits the device is rejected exactly like any other anti-regression
+        failure, so a promoted student never silently exceeds the budget ``device=`` promised.
         """
         if not self.cal_inputs:
             raise RuntimeError(
@@ -248,7 +292,22 @@ class Solution:
             return False
         inputs = self.train_inputs + list(new_inputs)
         labels = self.train_labels + [str(y) for y in new_labels]
-        student = _fit_student(self.kind, inputs, labels, self.distill_kw)
+        new_edge = None
+        if self.edge is not None:
+            new_edge = _fit_edge_student(
+                inputs,
+                labels,
+                self.device,
+                self.device_space,
+                self.propose_budget,
+                self.seed,
+                design=self.edge.design,
+            )
+            if not new_edge.feasible:
+                return False  # nothing this round fits the device budget: keep the current, compliant student
+            student = new_edge.model
+        else:
+            student = _fit_student(self.kind, inputs, labels, self.distill_kw)
         alpha = self.cascade.model.alpha
         # the gate stays real-inputs-only: harvested escalations are real, synthetic training rows are not
         gate_inputs = self.gate_inputs + list(new_inputs)
@@ -265,6 +324,8 @@ class Solution:
         self.promoted = self.promoted or self._passes_target(agree)
         self.cascade.stats.escalated_texts.clear()
         self.cascade.stats.escalated_labels.clear()
+        if new_edge is not None:
+            self.edge = new_edge  # keep report()'s device fields honest about what's actually deployed
         return True
 
     def _passes_target(self, agree: float) -> bool:
@@ -480,24 +541,7 @@ def solve(
     if device is not None:
         # "this capability on that device": structure x precision x recipe search under the hard
         # budget, on the labels already computed -- the teacher is never re-called.
-        from mixle.task.edge import distill_for_edge
-
-        n_val = max(2, len(train_inputs) // 4)
-        val_order = np.random.RandomState(seed).permutation(len(train_inputs))
-        v_idx, f_idx = val_order[:n_val], val_order[n_val:]
-        edge_result = distill_for_edge(
-            None,
-            [train_inputs[i] for i in f_idx],
-            [train_inputs[i] for i in v_idx],
-            device,
-            train_labels=[train_labels[i] for i in f_idx],
-            val_labels=[train_labels[i] for i in v_idx],
-            labels=sorted(set(train_labels)),
-            space=device_space,
-            n_init=min(4, max(2, propose_budget // 2)),
-            n_iter=max(1, propose_budget - min(4, max(2, propose_budget // 2))),
-            seed=seed,
-        )
+        edge_result = _fit_edge_student(train_inputs, train_labels, device, device_space, propose_budget, seed)
         student = edge_result.model
     else:
         if propose == "auto":
@@ -522,10 +566,15 @@ def solve(
         escalation_rate=float(esc),
         promoted=bool(promoted),
         target_agreement=target_agreement,
-        distill_kw=dict(distill_kw),
+        # under device=, **distill_kw is never consulted for the winning student -- the edge search's
+        # own recipe is -- so record THAT (what was actually fit) rather than the caller's unused kwargs
+        distill_kw=dict(edge_result.recipe) if edge_result is not None else dict(distill_kw),
         ood=ood,
         seed=seed,
         synthesized=n_synth,
         gate_inputs=list(train_inputs[: len(train_inputs) - n_synth]),
         edge=edge_result,
+        device=device,
+        device_space=device_space,
+        propose_budget=propose_budget,
     )
