@@ -147,7 +147,7 @@ def _json_task_model():
 
 
 def test_registry_rejects_duplicate_entry_id_instead_of_overwriting():
-    from mixle.registry import Registry
+    from mixle.system import Registry
 
     with tempfile.TemporaryDirectory() as d:
         reg = Registry(d)
@@ -158,7 +158,7 @@ def test_registry_rejects_duplicate_entry_id_instead_of_overwriting():
 
 
 def test_registry_auto_ids_scan_past_taken_ones():
-    from mixle.registry import Registry
+    from mixle.system import Registry
 
     with tempfile.TemporaryDirectory() as d:
         reg = Registry(d)
@@ -173,7 +173,7 @@ def test_registry_auto_ids_scan_past_taken_ones():
 
 
 def test_tier_stack_reordering_costs_override_yields_ascending_tiers():
-    from mixle.registry import Registry
+    from mixle.system import Registry
 
     with tempfile.TemporaryDirectory() as d:
         reg = Registry(d)
@@ -219,7 +219,7 @@ def test_cardinality_milp_rejects_nonfinite_bounds():
 
 # --------------------------------------------------------------- C-10: route_past guards
 def test_route_past_guards_empty_tiers_and_length_mismatch():
-    from mixle.fault import route_past
+    from mixle.system import route_past
 
     with pytest.raises(ValueError, match="at least one tier"):
         route_past([])

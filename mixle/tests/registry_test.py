@@ -1,4 +1,4 @@
-"""Registry (mixle.registry): a dir-backed catalog of registered task models, queried by capability/fingerprint.
+"""Registry (mixle.system.registry): a dir-backed catalog of registered task models, queried by capability/fingerprint.
 
 Card REG-a (workstream J2): register writes a real task-artifact directory + a JSON index entry; find_for and
 tier_stack read the index back, including in a fresh Registry instance pointed at the same dir.
@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("safetensors")
 
-from mixle.registry import Registry  # noqa: E402
+from mixle.system import Registry  # noqa: E402
 from mixle.task.calibrate import ESCALATE  # noqa: E402
 from mixle.task.distill import distill_for_routing  # noqa: E402
 from mixle.task.router import Router  # noqa: E402

@@ -1871,6 +1871,28 @@
         "visible_scopes"
       ]
     },
+    "mixle.system": {
+      "maturity": "provisional",
+      "names": [
+        "DegradedResult",
+        "ImprovementOption",
+        "MetaImprovementReport",
+        "Query",
+        "Registry",
+        "RegistryEntry",
+        "RegressionReport",
+        "Spend",
+        "System",
+        "SystemConfig",
+        "SystemScorecard",
+        "abstain_on_timeout",
+        "detect_regression",
+        "evaluate",
+        "improve_by_regret",
+        "route_past",
+        "with_fallback"
+      ]
+    },
     "mixle.task": {
       "maturity": "provisional",
       "names": [

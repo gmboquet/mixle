@@ -1,10 +1,9 @@
-"""System scorecard (mixle.scorecard), CARD SCORE-a: evaluate() over a fixed set; catch a worsening round."""
+"""System scorecard (mixle.system.scorecard), CARD SCORE-a: evaluate() over a fixed set; catch a worsening round."""
 
 import unittest
 
-from mixle.scorecard import detect_regression, evaluate
 from mixle.substrate.core import Substrate, SubstrateItem
-from mixle.system import Query, System, SystemConfig
+from mixle.system import Query, System, SystemConfig, detect_regression, evaluate
 
 
 class EvaluateTest(unittest.TestCase):

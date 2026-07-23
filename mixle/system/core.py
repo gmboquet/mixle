@@ -1,5 +1,11 @@
 """Facade for answering, ingesting knowledge, and improving a Mixle system.
 
+Part of :mod:`mixle.system` (formerly the flat top-level ``mixle.system`` module; now
+``mixle.system.core``, alongside its former siblings ``mixle.spend``, ``mixle.fault``,
+``mixle.scorecard``, ``mixle.meta``, and ``mixle.registry`` -- one cohesive local-application-facade
+package instead of six cross-importing top-level files). Import from :mod:`mixle.system` directly
+(``from mixle.system import System``); the old flat names still work via a deprecation shim.
+
 The facade exposes three verbs: ``answer`` serves a query, ``ingest`` stores a
 model output as credence-weighted knowledge, and ``improve`` spends a budget on
 measured improvement. The shell is deliberately thin: ``answer`` routes to the
@@ -7,13 +13,13 @@ configured teacher and attaches a receipt, ``ingest`` writes through the
 available store boundary, and ``improve`` promotes harvested answers into an
 explicit captured cache.
 
-The :class:`~mixle.spend.Spend` ledger treats ``budget`` as a hard ceiling
-measured in :meth:`~mixle.spend.Spend.total_units`. A request that cannot afford
+The :class:`~mixle.system.spend.Spend` ledger treats ``budget`` as a hard ceiling
+measured in :meth:`~mixle.system.spend.Spend.total_units`. A request that cannot afford
 the minimum-cost answer path is refused with the shortfall named on the receipt.
 Successful calls add incremental spend to :attr:`System.total_spend`, and
 receipts carry both incremental and running totals.
 
-Named degraded modes from :mod:`mixle.fault` use the same verbs. ``answer`` can
+Named degraded modes from :mod:`mixle.system.fault` use the same verbs. ``answer`` can
 fall back to captured or store-only reasoning when the teacher raises
 (``teacher_down``), and ``ingest`` can acknowledge without accumulating when a
 store write raises (``store_down``). Both paths flag ``degraded_mode`` and
@@ -32,8 +38,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from mixle.fault import with_fallback
-from mixle.spend import Spend
+from mixle.system.fault import with_fallback
+from mixle.system.spend import Spend
 from mixle.task.llm import LLM, OpenAICompatLLM
 
 

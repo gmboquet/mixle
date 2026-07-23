@@ -1,8 +1,8 @@
-"""Spend ledger (mixle.spend), CARD SPEND-a: a summable cost total shared across every spending subsystem."""
+"""Spend ledger (mixle.system.spend), CARD SPEND-a: a summable cost total shared across every spending subsystem."""
 
 import unittest
 
-from mixle.spend import Spend
+from mixle.system import Spend
 
 
 class SpendTest(unittest.TestCase):

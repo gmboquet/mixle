@@ -358,8 +358,12 @@ ignore_errors = true
 module = [
     "mixle.scorecard",
     "mixle.spend",
-    "mixle.system",
     "mixle.registry",
+    "mixle.system",
+    "mixle.system.core",
+    "mixle.system.spend",
+    "mixle.system.registry",
+    "mixle.system.scorecard",
 ]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
