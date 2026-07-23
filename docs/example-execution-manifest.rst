@@ -238,8 +238,8 @@ independent hand or brute-force calculation, not just "exited zero":
   no network -- a real LM plugs into the same ``next_logprobs`` interface).
   2.2s. Instruments the model callable itself to show the number of distinct
   prefixes actually queried stays far below the full sequence-space size.
-  Separately found (not fixed; see below): ``nucleus_size()`` is wrong for
-  this class.
+  Separately found and since fixed (see below): ``nucleus_size()`` was wrong
+  for this class.
 * ``model_comparison_example.py`` -- ``mixle.ppl``'s ``waic``/``loo``/``compare()``,
   ranking a deliberately-wrong unimodal fit against a correct 2-component
   mixture and a second wrong (Student-t) fit on genuinely bimodal data. Base
@@ -254,13 +254,41 @@ independent hand or brute-force calculation, not just "exited zero":
   fitting the same procedure on the same data.
 
 Two real, non-blocking issues were found incidentally while building these
-(not introduced by them) and were **not** fixed as part of this addition --
-each was handed off separately with a full repro: ``SYMBOLIC_ENGINE``'s
-constants not staying symbolic, and ``AutoregressiveEnumerable.nucleus_size()``
-returning an incorrect size (``size_lower=size_upper=0`` when the correct
-answer is 5, confirmed against brute force) while its ``covered_mass`` field
-stays correct -- traced to ``count_dp_top_p`` in ``density_rank.py`` mixing
-two incompatible bucket-keying schemes for this class.
+(not introduced by them): ``SYMBOLIC_ENGINE``'s constants not staying
+symbolic (still open, handed off separately with a full repro), and
+``AutoregressiveEnumerable.nucleus_size()`` returning an incorrect size
+(``size_lower=size_upper=0`` when the correct answer is 5, confirmed against
+brute force) while its ``covered_mass`` field stayed correct -- see the
+2026-07-23 follow-up below for the fix.
+
+**2026-07-23 follow-up: nucleus_size() fixed.** Root cause: ``nucleus_size()``
+delegated to the generic ``density_rank.count_dp_top_p``, which assumes its
+exact per-item mass histogram (bucketed by the floor of the EXACT total
+log-density) and the count index share one bucket numbering -- true for
+Composite/Record/Sequence, false for ``AutoregressiveEnumerable``, whose
+``quantized_count_index`` buckets a sequence by the SUM of its per-step
+floor-quantized buckets (``floor(a) + floor(b) <= floor(a + b)``, so the
+structural bucket is systematically <= the exact one, confirmed both
+theoretically and empirically -- a 0-1 bucket gap per real sequence at
+``oversample=64, L=3``). Fixed by giving ``nucleus_size()`` its own
+implementation (mirroring ``mass_above``'s existing fix for the identical
+discrepancy) that derives every quantity from the structural count index
+alone, rather than delegating to ``count_dp_top_p``; also fixed
+``nucleus_size()`` silently ignoring the instance's own ``oversample`` /
+``bin_width_bits``. ``mixture_cross_rank`` and the other
+``quantized_count_index`` call sites in ``density_rank.py`` were checked for
+the same coupling assumption and found unaffected -- each builds and reads
+one self-consistent histogram rather than mixing two independently-bucketed
+ones. Verified against the exact repro (previously 0, now matches
+brute-force truth of 5) across a full sweep of targets on both a
+fixed-length and a terminating (``eos``) model; a naive fix that always
+searched for a fully-certified bracket was correct but required exponential
+search depth on the terminating model (steps_bound scales with the
+model's ``max_depth`` safety cap, not the depth of sequences actually
+relevant to a given target) -- the shipped fix instead uses a fast,
+bounded search and reports ``truncated=True`` (a documented, pre-existing
+part of ``CountDPTopPResult``'s contract: ``size_upper`` is a floor, not a
+cover, when truncated) rather than searching indefinitely for a certificate.
 
 Execution status should be recorded as evidence, not inferred from import
 success or from an earlier notebook run. If an example writes an artifact, the
