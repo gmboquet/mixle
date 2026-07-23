@@ -3,16 +3,21 @@ Package Map
 
 ``mixle`` is broad because it is meant to keep heterogeneous modeling work in a
 single composable environment. The package is easier to navigate if you think of
-it as seven layers:
+it as nine layers:
 
 1. the user-facing lifecycle and recommendation surface;
-2. composable probability distributions and estimators;
-3. inference, enumeration, uncertainty, and operations over those models;
-4. applied neural, LLM, task, reasoning, design, and evolution workflows built
+2. cross-project contracts for capability, semantics, and causal claims;
+3. composable probability distributions and estimators;
+4. inference, enumeration, uncertainty, and operations over those models;
+5. applied neural, LLM, task, reasoning, design, and evolution workflows built
    on the same contracts where practical;
-5. substrate, skill, pool, and telemetry surfaces around local applications;
-6. compute, serialization, data, and parallel runtime support;
-7. optional assembled applications such as ``mixle.scientist``.
+6. operations-research building blocks -- blending, precedence scheduling,
+   stochastic optimization, network simulation, and forecast-to-dispatch
+   routing -- reducing to a shared handful of combinatorial solvers;
+7. substrate, skill, pool, telemetry, and system-facade surfaces around local
+   applications;
+8. compute, serialization, data, and parallel runtime support;
+9. optional assembled applications such as ``mixle.scientist``.
 
 The generated API reference is available at :doc:`api/modules`. This page is a
 human map for choosing where to start.
@@ -55,6 +60,41 @@ Important top-level exports include:
     High-level distribution and estimator namespace. This is the first import
     location for most probabilistic modeling code.
 
+Cross-Project Contracts and Governance
+--------------------------------------
+
+A few modules exist to keep claims -- about identification, capability, or
+meaning -- honest across project boundaries, rather than to compute anything
+themselves:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Namespace
+     - Use it for
+   * - ``mixle.contracts``
+     - Every ABC/Protocol Mixle defines, gathered into one import:
+       ``Distribution``, ``Enumerable``, ``Conditionable``, ``Relation``,
+       ``ComputeEngine``, ``Surrogate``, ``EMStrategy``, and related roles.
+   * - ``mixle.semantics``
+     - Domain-neutral contracts for what an uncertain value or inference
+       result *means*, independent of solver, backend, or storage location.
+   * - ``mixle.causal``
+     - Dependency-free schema for causal claims -- estimands, assumptions,
+       interventions, counterfactual queries, and identification status --
+       so a result cannot silently claim more than it identified.
+   * - ``mixle.capability_lifecycle``
+     - Governed lifecycle records (evaluation, maturity, availability,
+       authorization, corroboration) for a capability shared across
+       projects, kept as independent facts rather than one collapsed
+       status. See :doc:`capability-lifecycle`.
+
+Maturity is tracked the same way: ``mixle.maturity`` is the machine-readable
+registry behind :doc:`maturity` and the generated API manifest, resolving a
+dotted module name to a stability tier by longest matching prefix.
+
+Use :doc:`capabilities-contracts` for the capability-protocol narrative guide.
+
 Distribution and Model Objects
 ------------------------------
 
@@ -81,6 +121,11 @@ Use :doc:`distributions`, :doc:`stats-univariate`, :doc:`stats-structured`, and
 :doc:`stats-latent-bayes` for the stable family catalog. Use :doc:`models`
 when you specifically need an applied helper that is not an ordinary
 distribution family.
+
+``mixle.dist`` is a bare re-export of ``mixle.stats`` (``from mixle.stats
+import *``), kept as a friendly object-namespace alias from the
+concern-oriented reorg. Use whichever reads better at the call site; both
+names stay in sync automatically since one is a re-export of the other.
 
 Inference and Probability Operations
 ------------------------------------
@@ -158,6 +203,16 @@ Local application surfaces connect fitted models to operational workflows:
 
    * - Namespace
      - Use it for
+   * - ``mixle.system``
+     - The answer/ingest/improve facade for a local application: a cost
+       ledger (``Spend``), named degradation modes instead of silent
+       fallbacks (``with_fallback``, ``abstain_on_timeout``, ``route_past``),
+       a held-out scorecard with regression detection, a meta-improvement
+       budget allocator, and the model registry fitted task models are read
+       from and written into. Formerly six cross-importing flat modules;
+       ``mixle.spend``, ``mixle.fault``, ``mixle.scorecard``, ``mixle.meta``,
+       and ``mixle.registry`` still work as deprecated aliases that forward
+       here with a warning.
    * - ``mixle.substrate``
      - Typed, scoped, provenanced storage for documents, records, artifacts,
        traces, context packets, graph facts, retrieval, multi-hop evidence,
@@ -178,8 +233,8 @@ Local application surfaces connect fitted models to operational workflows:
        distillation receipts.
 
 Use :doc:`reasoning-ecosystem` for the narrative guide and
-:doc:`api/mixle.substrate`, :doc:`api/mixle.pool`, :doc:`api/mixle.telemetry`,
-and :doc:`api/mixle.scientist` for API reference.
+:doc:`api/mixle.system`, :doc:`api/mixle.substrate`, :doc:`api/mixle.pool`,
+:doc:`api/mixle.telemetry`, and :doc:`api/mixle.scientist` for API reference.
 
 Scientific Design and Analysis
 ------------------------------
@@ -221,6 +276,45 @@ structured optimization, or repeated model improvement.
 Scientific workflows should record the design objective, constraints, random
 seed, and validation metric. A selector, optimizer, or evolutionary search
 result is only as trustworthy as the evidence attached to the chosen candidate.
+
+Operations-Research Building Blocks
+-----------------------------------
+
+A family of applied modules reduce to the same handful of combinatorial
+solvers in ``mixle.relations`` (max-flow/min-cut, min-cost flow, branch-and-
+bound MILP). Each names one recurring OR problem shape; the worked example in
+each module (ore blending, mine scheduling, ...) is a domain instantiation of
+a construction built entirely from caller-supplied sources, capacities, and
+costs, not something specific to that domain:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Namespace
+     - Use it for
+   * - ``mixle.blending``
+     - Minimum-cost mixture of several sources to hit a target attribute
+       window -- fuel, feed, alloy, and ore blending all reduce to the same
+       LP/MILP.
+   * - ``mixle.precedence_scheduling``
+     - Maximum-weight closure (Picard's min-cut construction) and
+       time-phased, capacity-constrained scheduling under a precedence
+       relation between items.
+   * - ``mixle.stochastic_opt``
+     - Two-stage stochastic programming with CVaR risk (Rockafellar-Uryasev)
+       over a calibrated posterior of uncertain per-item value -- the same
+       construction as portfolio or project selection under uncertain
+       returns.
+   * - ``mixle.pipeline_twin``
+     - Digital-twin, period-stepped re-simulation of a min-cost-flow network
+       under stochastic arrivals, with named scenario interventions,
+       wrapped as a ``mixle.inference.simulate.Simulator``.
+   * - ``mixle.fulfillment``
+     - Demand forecasting (a regime-switching HMM recalibrated with split
+       conformal prediction) chained into minimum-cost supply routing
+       against that forecast.
+
+See ``examples/precedence_scheduling_example.py`` for a worked walkthrough.
 
 Data, Engines, and Runtime
 --------------------------
