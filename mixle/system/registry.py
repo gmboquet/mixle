@@ -1,0 +1,256 @@
+"""``Registry`` -- a local directory + index of fitted task models, queryable by capability and fingerprint.
+
+The registry is the local library catalog that orchestrators, routers, capture
+flows, and accumulation workflows can read from or write into. Deliberately a
+directory plus a JSON index, not a server: every entry is a saved
+:class:`~mixle.task.model.TaskModel`, :class:`~mixle.task.calibrate.CalibratedTaskModel`, or an IC-1
+``Posterior``-conforming field-posterior artifact directory (see :mod:`mixle.task.artifact` for the
+first two; the third is written/read through ``mixle_pde.io.artifacts`` -- IC-2 -- lazily imported so
+this module never hard-depends on the ``mixle_pde`` plugin). A small index record names each entry's
+capabilities, task fingerprint (:func:`~mixle.task.edge.task_fingerprint`), and capture profile.
+``find_for`` answers "do I already have something for this task"; ``tier_stack`` turns a matching
+capability into an ascending-cost tier list -- the shape :class:`~mixle.task.router.Router` consumes
+directly (``Router(tiers=stack)``), with the frontier appended last as the router's own fallback tier.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+
+from mixle.task.calibrate import CalibratedTaskModel
+from mixle.task.model import TaskModel
+
+_INDEX_NAME = "index.json"
+
+
+def _is_field_posterior(model: Any) -> bool:
+    """True when ``model`` is a ``mixle_pde`` field posterior (the "field_posterior" `Registry` kind, IC-2).
+
+    Checks the concrete ``mixle_pde.latent.PosteriorField3D`` type rather than the abstract IC-1
+    ``Posterior`` protocol so this keeps working whether or not the field posterior has picked up the
+    ``samples``-method rename the protocol freezes -- this module only cares which artifact I/O to call,
+    not full protocol conformance. Returns ``False`` (never raises) when ``mixle_pde`` isn't installed, so
+    a bare `mixle` checkout never fails ``isinstance``/``TypeError`` dispatch for a class it can't see.
+    """
+    try:
+        from mixle_pde.latent import PosteriorField3D
+    except ImportError:
+        return False
+    return isinstance(model, PosteriorField3D)
+
+
+def _save_field_posterior(model: Any, path: str) -> None:
+    """Delegate to ``mixle_pde.io.artifacts.save_posterior`` (IC-2), imported lazily.
+
+    ``mixle_pde`` depends on ``mixle``, never the reverse (see ``mixle_pde``'s package docstring), so this
+    module never imports it at module scope -- only here, when a caller actually registers a field
+    posterior.
+    """
+    try:
+        from mixle_pde.io.artifacts import save_posterior
+    except ImportError as exc:
+        raise ImportError(
+            "registering a field_posterior kind requires the mixle_pde package "
+            "(install mixle_pde, or add its checkout to PYTHONPATH)"
+        ) from exc
+    save_posterior(model, path)
+
+
+def _load_field_posterior(path: str) -> Any:
+    """Delegate to ``mixle_pde.io.artifacts.load_posterior`` (IC-2), imported lazily (see `_save_field_posterior`)."""
+    try:
+        from mixle_pde.io.artifacts import load_posterior
+    except ImportError as exc:
+        raise ImportError(
+            "loading a field_posterior kind requires the mixle_pde package "
+            "(install mixle_pde, or add its checkout to PYTHONPATH)"
+        ) from exc
+    return load_posterior(path)
+
+
+@dataclass
+class RegistryEntry:
+    """One catalog record: where the artifact lives, what it's registered under, and how much it costs to run."""
+
+    entry_id: str
+    path: str
+    kind: str  # "task", "calibrated", or "field_posterior" -- which loader reloads the artifact at ``path``
+    capabilities: list[str] = field(default_factory=list)
+    fingerprint: list[float] | None = None
+    profile: dict[str, Any] = field(default_factory=dict)
+    cost: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the registry entry into JSON-compatible fields."""
+        return {
+            "entry_id": self.entry_id,
+            "path": self.path,
+            "kind": self.kind,
+            "capabilities": list(self.capabilities),
+            "fingerprint": list(self.fingerprint) if self.fingerprint is not None else None,
+            "profile": self.profile,
+            "cost": self.cost,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> RegistryEntry:
+        """Create a registry entry from a JSON index record."""
+        return cls(
+            entry_id=d["entry_id"],
+            path=d["path"],
+            kind=d["kind"],
+            capabilities=list(d.get("capabilities", [])),
+            fingerprint=d.get("fingerprint"),
+            profile=d.get("profile", {}),
+            cost=float(d.get("cost", 0.0)),
+        )
+
+
+class Registry:
+    """A ``dir``-backed catalog of registered models: ``register`` writes an artifact + index entry;
+    ``find_for``/``tier_stack`` query it. Re-opening the same ``dir`` in a fresh process sees every entry."""
+
+    def __init__(self, dir: str) -> None:
+        self.dir = dir
+        os.makedirs(dir, exist_ok=True)
+        self._entries: list[RegistryEntry] = self._read_index()
+
+    def _index_path(self) -> str:
+        return os.path.join(self.dir, _INDEX_NAME)
+
+    def _read_index(self) -> list[RegistryEntry]:
+        if not os.path.exists(self._index_path()):
+            return []
+        with open(self._index_path()) as f:
+            return [RegistryEntry.from_dict(d) for d in json.load(f)]
+
+    def _write_index(self) -> None:
+        with open(self._index_path(), "w") as f:
+            json.dump([e.to_dict() for e in self._entries], f, indent=2, sort_keys=True)
+
+    def register(
+        self,
+        model: TaskModel | CalibratedTaskModel | Any,
+        *,
+        capabilities: Sequence[str],
+        fingerprint: Sequence[float] | None = None,
+        profile: dict[str, Any] | None = None,
+        cost: float = 0.0,
+        entry_id: str | None = None,
+    ) -> RegistryEntry:
+        """Save ``model``'s artifact under ``dir`` and add its index entry; return the entry.
+
+        ``model`` is a fitted :class:`~mixle.task.model.TaskModel`, a
+        :class:`~mixle.task.calibrate.CalibratedTaskModel`, or a ``mixle_pde`` field posterior (a
+        "field_posterior" kind, IC-2) -- the three artifact-saveable model kinds. ``capabilities`` names
+        what this model answers (matched by :meth:`find_for`); ``fingerprint`` is typically
+        :func:`~mixle.task.edge.task_fingerprint`'s vector for the training data; ``profile`` is
+        free-form (e.g. a :func:`~mixle.task.capability.capture_profile` dict); ``cost`` is the per-request
+        cost used to order :meth:`tier_stack`. An explicit ``entry_id`` that already exists (in the index
+        or as an artifact directory) raises rather than duplicating the index row and silently
+        overwriting the artifact; auto-generated ids scan past taken ones.
+        """
+        if isinstance(model, CalibratedTaskModel):
+            kind = "calibrated"
+        elif isinstance(model, TaskModel):
+            kind = "task"
+        elif _is_field_posterior(model):
+            kind = "field_posterior"
+        else:
+            raise TypeError(
+                f"Registry only stores TaskModel/CalibratedTaskModel/field-posterior artifacts, got {type(model)!r}"
+            )
+        taken = {e.entry_id for e in self._entries}
+        if entry_id is not None:
+            if entry_id in taken or os.path.exists(os.path.join(self.dir, entry_id)):
+                raise ValueError(f"registry already has an entry {entry_id!r}; entry ids must be unique")
+        else:
+            # a len()-based id collides after manual index edits, explicit ids, or another writer's
+            # artifacts -- scan forward until the id is free in BOTH the index and the directory
+            i = len(self._entries)
+            while f"entry_{i:04d}" in taken or os.path.exists(os.path.join(self.dir, f"entry_{i:04d}")):
+                i += 1
+            entry_id = f"entry_{i:04d}"
+        path = os.path.join(self.dir, entry_id)
+        if kind == "field_posterior":
+            _save_field_posterior(model, path)
+        else:
+            model.save(path)
+        entry = RegistryEntry(
+            entry_id=entry_id,
+            path=path,
+            kind=kind,
+            capabilities=list(capabilities),
+            fingerprint=list(fingerprint) if fingerprint is not None else None,
+            profile=dict(profile or {}),
+            cost=float(cost),
+        )
+        self._entries.append(entry)
+        self._write_index()
+        return entry
+
+    def load(self, entry_id: str) -> TaskModel | CalibratedTaskModel | Any:
+        """Reload a registered model by ``entry_id`` (round-trips through the artifact on disk)."""
+        entry = self._get(entry_id)
+        if entry.kind == "field_posterior":
+            return _load_field_posterior(entry.path)
+        cls = CalibratedTaskModel if entry.kind == "calibrated" else TaskModel
+        return cls.load(entry.path)
+
+    def _get(self, entry_id: str) -> RegistryEntry:
+        for e in self._entries:
+            if e.entry_id == entry_id:
+                return e
+        raise KeyError(f"no registry entry {entry_id!r}")
+
+    def find_for(self, query: str | Sequence[float], *, top_k: int | None = None) -> list[RegistryEntry]:
+        """Entries matching ``query``: a capability name (``str``, containment match) or a task fingerprint
+        vector (array-like of floats, nearest-neighbor match). ``top_k`` caps how many are returned -- every
+        capability match by default, or the single nearest fingerprint match by default."""
+        if isinstance(query, str):
+            matches = [e for e in self._entries if query in e.capabilities]
+            return matches[:top_k] if top_k is not None else matches
+        q: np.ndarray = np.asarray(query, dtype=np.float64)
+        scored = sorted(
+            (
+                (float(np.linalg.norm(np.asarray(e.fingerprint, dtype=np.float64) - q)), e)
+                for e in self._entries
+                if e.fingerprint is not None
+            ),
+            key=lambda t: t[0],
+        )
+        k = top_k if top_k is not None else 1
+        return [e for _, e in scored[:k]]
+
+    def tier_stack(
+        self,
+        task: str,
+        *,
+        frontier: Any,
+        costs: Sequence[float] | None = None,
+        names: Sequence[str] | None = None,
+    ) -> list[tuple[str, Any, float]]:
+        """Ascending-cost ``(name, model, cost)`` tiers for capability ``task``, ``frontier`` appended last.
+
+        Matching entries are loaded (:meth:`load`) and ordered by their *effective* cost -- the ``costs``
+        override when given, else the registered per-entry cost. The result is exactly the shape
+        :class:`~mixle.task.router.Router` takes as ``tiers=``: each non-final tier exposes ``decide(x)``,
+        the final tier is the callable ``frontier`` fallback. ``costs`` (one entry per matching solution in
+        registered-cost order, plus one for ``frontier``, mirroring
+        :meth:`~mixle.task.router.Router.from_solutions`) overrides the registered per-entry costs when given.
+        """
+        pool = sorted(self.find_for(task), key=lambda e: e.cost)
+        if costs is not None and len(costs) != len(pool) + 1:
+            raise ValueError("costs needs one entry per matching solution plus one for the frontier")
+        tier_costs = [float(c) for c in costs] if costs is not None else [e.cost for e in pool] + [1.0]
+        tier_names = list(names) if names is not None else [e.entry_id for e in pool] + ["frontier"]
+        tiers = [(tier_names[i], self.load(e.entry_id), tier_costs[i]) for i, e in enumerate(pool)]
+        tiers.sort(key=lambda t: t[2])  # a costs= override can reorder the pool; Router assumes ascending tiers
+        tiers.append((tier_names[-1], frontier, tier_costs[-1]))
+        return tiers

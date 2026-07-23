@@ -14,7 +14,7 @@ A receipt makes four claims, each independently checkable from data the receipt 
     dict shape :class:`mixle.substrate.core.SubstrateItem.provenance` and
     :class:`mixle.substrate.context.ContextPacket` citations already use.
 
-Any of the four may be absent (a thin-shell :class:`~mixle.system.System` answer has no ledger yet);
+Any of the four may be absent (a thin-shell :class:`~mixle.system.core.System` answer has no ledger yet);
 :func:`verify_receipt` only checks what is present and marks the rest ``"absent"`` -- it never invents a
 pass for a claim the receipt does not make.
 """

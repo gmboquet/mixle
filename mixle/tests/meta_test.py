@@ -3,8 +3,7 @@ scorecard gain (workstream META-a)."""
 
 import unittest
 
-from mixle.meta import ImprovementOption, improve_by_regret
-from mixle.system import Query, System, SystemConfig
+from mixle.system import ImprovementOption, Query, System, SystemConfig, improve_by_regret
 
 _QUESTIONS = [(Query("Q1"), "A1"), (Query("Q2"), "A2"), (Query("Q3"), "A3")]
 

@@ -1,8 +1,8 @@
-"""Degradation policy primitives (mixle.fault), CARD FAULT-a: named modes, each flagged, never silent."""
+"""Degradation policy primitives (mixle.system.fault), CARD FAULT-a: named modes, each flagged, never silent."""
 
 import unittest
 
-from mixle.fault import DegradedResult, abstain_on_timeout, route_past, with_fallback
+from mixle.system import DegradedResult, abstain_on_timeout, route_past, with_fallback
 
 
 class WithFallbackTest(unittest.TestCase):

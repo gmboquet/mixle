@@ -45,7 +45,10 @@ jobs:
       # pyproject.toml). --follow-imports=skip keeps the check to these modules' own annotations so a
       # dependency's or an untyped sibling's errors cannot leak in. The list grows as more modules qualify.
       - name: mypy (typed core, blocking)
-        run: mypy --follow-imports=skip mixle/scorecard.py mixle/spend.py mixle/system.py mixle/registry.py
+        run: |
+          mypy --follow-imports=skip mixle/scorecard.py mixle/spend.py mixle/registry.py \
+            mixle/system/__init__.py mixle/system/core.py mixle/system/spend.py \
+            mixle/system/registry.py mixle/system/scorecard.py
       # The whole-tree mypy stays advisory until the rest of the type-checking backlog is addressed.
       - name: mypy (whole tree, advisory)
         continue-on-error: true

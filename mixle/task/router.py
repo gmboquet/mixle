@@ -23,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.fault import DegradedResult
+from mixle.system.fault import DegradedResult
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 
 

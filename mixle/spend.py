@@ -1,50 +1,36 @@
-"""Unified budget ledger for subsystem and query-level spending.
+"""Compatibility shim: ``mixle.spend`` moved to :mod:`mixle.system.spend`.
 
-One cost total is summed across query paths: cascade or router tiers
-(``frontier_calls``), oracle-scored search loops (``oracle_calls``), and
-wall-clock or dollar cost wherever those are tracked. ``System.answer`` carries
-the incremental ``Spend`` of the current call plus the running ``total_spend``
-on every receipt, and treats ``budget`` as a hard ceiling.
+``Spend`` and its siblings (``System``, degradation modes, the scorecard, the meta-improvement
+allocator, and the registry) are now one cohesive package, :mod:`mixle.system`, instead of six
+cross-importing top-level modules. Existing ``from mixle.spend import X`` imports keep working (with a
+:class:`DeprecationWarning`); new code should import from ``mixle.system`` (or ``mixle.system.spend``)
+directly.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import warnings
+from typing import Any
+
+_MOVED = "mixle.system.spend"
 
 
-@dataclass(frozen=True)
-class Spend:
-    """A summable cost total. ``total_units()`` is the scalar figure ``budget=`` is checked against."""
+def __getattr__(name: str) -> Any:
+    import importlib
 
-    frontier_calls: int = 0
-    oracle_calls: int = 0
-    wall_ms: float = 0.0
-    dollars: float = 0.0
+    try:
+        value = getattr(importlib.import_module(_MOVED), name)
+    except AttributeError:
+        raise AttributeError(f"module 'mixle.spend' has no attribute {name!r}") from None
+    warnings.warn(
+        f"mixle.spend is deprecated and moved to {_MOVED}; import {name!r} from there instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return value
 
-    def __add__(self, other: Spend) -> Spend:
-        return Spend(
-            frontier_calls=self.frontier_calls + other.frontier_calls,
-            oracle_calls=self.oracle_calls + other.oracle_calls,
-            wall_ms=self.wall_ms + other.wall_ms,
-            dollars=self.dollars + other.dollars,
-        )
 
-    def total_units(self) -> float:
-        """The scalar cost a ``budget=`` integer is measured against.
+def __dir__() -> list[str]:
+    import importlib
 
-        Currently ``frontier_calls + oracle_calls`` -- the two countable,
-        per-call costs the existing routes measure budget in. ``wall_ms`` and
-        ``dollars`` are carried and reported on every receipt but are not yet
-        priced into the hard-ceiling check; extend this method when a concrete
-        dollar cost model is introduced.
-        """
-        return float(self.frontier_calls + self.oracle_calls)
-
-    def to_dict(self) -> dict[str, float | int]:
-        """Serialize the spend ledger into primitive numeric fields."""
-        return {
-            "frontier_calls": self.frontier_calls,
-            "oracle_calls": self.oracle_calls,
-            "wall_ms": self.wall_ms,
-            "dollars": self.dollars,
-        }
+    return sorted(n for n in dir(importlib.import_module(_MOVED)) if not n.startswith("_"))

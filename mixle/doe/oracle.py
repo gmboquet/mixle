@@ -30,7 +30,7 @@ from typing import Any
 import numpy as np
 
 from mixle.doe.designs import Bounds
-from mixle.fault import abstain_on_timeout
+from mixle.system.fault import abstain_on_timeout
 
 # The declared verifiability tiers, weakest to strongest. "self_graded" is deliberately excluded: a
 # model grading its own candidates is the banned reward, rejected at VerifiableOracle construction.
