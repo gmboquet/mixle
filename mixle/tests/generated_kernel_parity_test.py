@@ -134,6 +134,33 @@ class GeneratedKernelParityTestCase(unittest.TestCase):
                 self.assertTrue(s.generated_numba_log_density_available(dist))
                 self.assertEqual(s.capabilities_for(type(dist)).kernel_status, "numba_adapter")
 
+    def test_lower_symbolic_to_numba_handles_named_constants(self):
+        # Regression: _build_generic_numba_kernel traces backend_log_density_from_params with a
+        # FRESH SymbolicEngine() to compile a kernel. Once distributions started reading engine.pi
+        # instead of a frozen Python float baked in at trace time, the constant entered the traced
+        # expression as a genuine nullary "pi" node for the first time -- and _lower_symbolic_to_numba
+        # had no case for it (only "symbol" and "const"), so it raised _UnsupportedNumbaLowering("pi")
+        # for every affected family, silently caught by _build_generic_numba_kernel's blanket except
+        # and reported as "no kernel available" rather than a compile error. Confirmed via
+        # StudentTDistribution, which regressed from available=True to available=False.
+        from mixle.engines.symbolic_engine import SymbolicEngine
+        from mixle.stats.compute.declarations import _lower_symbolic_to_numba
+
+        engine = SymbolicEngine()
+        cases = {
+            "pi": (engine.pi, "math.pi"),
+            "e": (engine.e, "math.e"),
+            "euler_gamma": (engine.euler_gamma, repr(0.5772156649015328606)),
+            "inf": (engine.inf, "_INF"),
+        }
+        for name, (node, expected) in cases.items():
+            with self.subTest(constant=name):
+                self.assertEqual(_lower_symbolic_to_numba(node), expected)
+        # And in-context: the same expression the real bug hit.
+        x, pi = engine.symbol("x"), engine.pi
+        body = _lower_symbolic_to_numba(engine.log(x * pi))
+        self.assertEqual(body, "math.log((x * math.pi))")
+
     def test_generated_benchmark_informational(self):
         # Not asserted - just records generated-vs-legacy timing so regressions in the harness
         # surface in -v output without making CI flaky.
