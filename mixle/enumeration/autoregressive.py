@@ -701,7 +701,107 @@ class AutoregressiveEnumerable:
         return cumulative_probability(self, tuple(sequence))
 
     def nucleus_size(self, p: float):
-        """Size of the minimal ``>= p``-mass set (:class:`CountDPTopPResult`), without materializing it."""
-        from mixle.enumeration.density_rank import count_dp_top_p
+        """Size of the minimal ``>= p``-mass set (:class:`~mixle.enumeration.density_rank.CountDPTopPResult`),
+        without materializing it.
 
-        return count_dp_top_p(self, p)
+        Deliberately does NOT delegate to the generic
+        :func:`~mixle.enumeration.density_rank.count_dp_top_p`: that function assumes its exact per-item
+        mass histogram (bucketed by the floor of the EXACT total log-density) and its count index share one
+        bucket numbering, which holds for Composite/Record/Sequence but not here -- :meth:`quantized_count_index`
+        buckets a sequence by the SUM of its per-step floor-quantized buckets, and floor(a) + floor(b) <=
+        floor(a + b), so the structural bucket is systematically <= the exact one (same discrepancy
+        :meth:`mass_above` documents). Looking counts up at the exact-mass bucket key lands on the wrong
+        (usually empty) slot in the count histogram -- confirmed: it returns a nucleus size of 0 against a
+        brute-force ground truth of 5. This mirrors :meth:`mass_above`'s fix instead: every quantity is
+        derived from the SAME structural count histogram, with each bucket's per-item probability bounded
+        by ``[2**(-(b + steps_bound) * bpb), 2**(-b * bpb)]`` (identical bound, same derivation), so the
+        result is a provable bracket rather than an exact mass -- the same contract shape
+        ``count_dp_top_p`` documents, just derived from bounds instead of a wrongly-keyed exact histogram.
+        """
+        from mixle.enumeration.density_rank import CountDPTopPResult
+
+        if not 0.0 <= p <= 1.0:
+            raise ValueError("p must be in [0, 1].")
+        if p <= 0.0:
+            return CountDPTopPResult(0, 0, 0.0, float("inf"), p, False, self.oversample)
+
+        tol = 1.0e-9
+        si = self.seek_index()
+        q = si.quantizer
+        bits_per_bucket = q.bin_width_bits / q.oversample
+        # steps_bound is a GLOBAL worst case (mirrors mass_above), so it can be far looser than the actual
+        # sequences a given crossing needs -- for a terminating model with a generous max_depth safety cap,
+        # forcing the pessimistic bound below to provably cross p can require capturing near-100% of the
+        # true mass (see mass_above's own docstring: "the lower bound loosens for long terminating
+        # sequences"), which is exponentially expensive to search for. So deepening below is driven by the
+        # cheap OPTIMISTIC bound (matching count_dp_top_p's own fast deepening loop) -- size_upper is then
+        # only certified (truncated=False) when the pessimistic bound independently confirms it at that
+        # depth; otherwise it is honestly reported as a floor, not a cover (matching CountDPTopPResult's
+        # own documented truncated=True contract), rather than searching indefinitely for a certificate.
+        steps_bound = self._depth if self.terminating else self.max_len
+
+        depth_bits = max(q.bin_width_bits, 64.0 * bits_per_bucket)
+        while True:
+            hist = si.fine_histogram(depth_bits).hist
+            hi_total = sum(
+                hist.data[j] * 2.0 ** (-(hist.base + j) * bits_per_bucket)
+                for j in range(len(hist.data))
+                if hist.data[j]
+            )
+            if hi_total >= p - tol or not si.truncated or depth_bits >= si.max_depth_bits:
+                break
+            depth_bits = min(depth_bits * 2.0, si.max_depth_bits)
+
+        # Upper bound on size: include whole structural buckets, most-probable first, until even the
+        # pessimistic (least-probable-edge) cumulative mass provably reaches p -- so the true nucleus is
+        # no larger. covered_mass is that same sound lower bound on the true covered mass, reported
+        # honestly rather than as a false-precision exact value. If the pessimistic sum never gets there
+        # within the built depth (only possible once the optimistic bound above already confirmed the true
+        # mass exists), size_upper falls back to everything seen -- a floor, not a certified cover, exactly
+        # exactly like count_dp_top_p's own "never crosses" fallback, and truncated stays True to say so.
+        cum_count = 0
+        cum_lo = 0.0
+        size_upper = 0
+        boundary_bucket = hist.base + len(hist.data) - 1 if hist.data else 0
+        covered_mass = 0.0
+        truncated = True
+        for j in range(len(hist.data)):
+            c = hist.data[j]
+            if not c:
+                continue
+            b = hist.base + j
+            cum_count += c
+            cum_lo += c * 2.0 ** (-(b + steps_bound) * bits_per_bucket)
+            if cum_lo >= p - tol:
+                size_upper = cum_count
+                boundary_bucket = b
+                covered_mass = cum_lo
+                truncated = False
+                break
+        else:
+            size_upper = cum_count
+            covered_mass = cum_lo
+
+        # Lower bound on size: cap every item in bucket b at its maximum possible probability
+        # 2**(-b*bpb) (mirrors count_dp_top_p's own, already bucket-correct, size_lower derivation).
+        cap_mass = 0.0
+        cap_count = 0
+        size_lower = cum_count
+        for j in range(len(hist.data)):
+            c = hist.data[j]
+            if not c:
+                continue
+            b = hist.base + j
+            cap_here = 2.0 ** (-b * bits_per_bucket)
+            if cap_mass + c * cap_here >= p - tol:
+                residual = p - cap_mass
+                need = math.ceil(residual / cap_here - tol)
+                size_lower = cap_count + max(0, min(need, c))
+                break
+            cap_mass += c * cap_here
+            cap_count += c
+
+        log_prob_threshold = -float(boundary_bucket) * bits_per_bucket * math.log(2.0)
+        return CountDPTopPResult(
+            int(size_lower), int(size_upper), float(covered_mass), log_prob_threshold, p, truncated, self.oversample
+        )
