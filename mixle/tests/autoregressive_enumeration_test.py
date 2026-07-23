@@ -125,6 +125,60 @@ class AutoregressiveEnumerableTest(unittest.TestCase):
         self.assertLessEqual(res.size_lower, k)
         self.assertGreaterEqual(res.size_upper, k)
 
+    def test_nucleus_size_matches_brute_across_targets(self):
+        # nucleus_size delegated to the generic density_rank.count_dp_top_p, which assumes its exact
+        # per-item mass histogram and the count index share one bucket numbering -- true for
+        # Composite/Record/Sequence, false here (quantized_count_index buckets a sequence by the SUM of
+        # per-step floors, not the floor of the exact total; floor(a)+floor(b) <= floor(a+b), so the two
+        # numbering schemes diverge). This model/seed/scale (unlike this file's default _VOCAB=4/_LEN=3
+        # fixture, whose particular rounding happens not to expose the gap at p=0.5) reproducibly hit it:
+        # nucleus_size(0.5) returned size_lower=size_upper=0 against a brute-force truth of 5.
+        vocab, length = 5, 3
+        rng = np.random.RandomState(0)
+        table = rng.randn(length, vocab, vocab) * 1.5
+
+        def next_logprobs(prefix):
+            depth = len(prefix)
+            last = prefix[-1] if prefix else 0
+            logits = table[depth, last]
+            return list(enumerate(logits - _logsumexp(logits)))
+
+        brute = []
+        for seq in itertools.product(range(vocab), repeat=length):
+            lp, prefix = 0.0, ()
+            for t in seq:
+                lp += dict(next_logprobs(prefix))[t]
+                prefix += (t,)
+            brute.append((tuple(seq), lp))
+        brute.sort(key=lambda u: -u[1])
+
+        ar = AutoregressiveEnumerable(next_logprobs, max_len=length, oversample=64)
+        for p in (0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99, 1.0):
+            cum, k = 0.0, 0
+            for _, lp in brute:
+                cum += math.exp(lp)
+                k += 1
+                if cum >= p - 1e-9:
+                    break
+            res = ar.nucleus_size(p)
+            self.assertLessEqual(res.size_lower, k, msg=f"p={p}")
+            if not res.truncated:
+                self.assertGreaterEqual(res.size_upper, k, msg=f"p={p}")
+
+    def test_nucleus_size_forwards_instance_oversample(self):
+        # nucleus_size used to call density_rank.count_dp_top_p(self, p) with no oversample/bin_width_bits
+        # forwarded, so the instance's own oversample was silently ignored -- the returned
+        # CountDPTopPResult.oversample field (and the bracket's tightness) never reflected it.
+        ar_coarse = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, oversample=8)
+        ar_fine = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, oversample=4096)
+        res_coarse = ar_coarse.nucleus_size(0.5)
+        res_fine = ar_fine.nucleus_size(0.5)
+        self.assertEqual(res_coarse.oversample, 8)
+        self.assertEqual(res_fine.oversample, 4096)
+        self.assertGreaterEqual(
+            res_coarse.size_upper - res_coarse.size_lower, res_fine.size_upper - res_fine.size_lower
+        )
+
     def test_plugs_into_core_count_budget_driver(self):
         # The adapter is a drop-in for the existing count-budget driver (not just its own convenience methods).
         ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN)
