@@ -104,7 +104,7 @@ class StudentTDistribution(SequenceEncodableProbabilityDistribution):
         log_const = (
             engine.gammaln((df + one) * half)
             - engine.gammaln(df * half)
-            - half * engine.log(df * engine.asarray(math.pi))
+            - half * engine.log(df * engine.asarray(engine.pi))
             - engine.log(scale)
         )
         return log_const - half * (df + one) * engine.log(one + (z * z) / df)

@@ -183,7 +183,9 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         eta1 = engine.matmul(params["inv_covar"], mu[..., None])[..., 0]
         quad = engine.sum(mu * eta1, axis=-1)
         return engine.asarray(0.5) * (
-            quad + params["log_det"] + engine.asarray(float(params["dim"])) * engine.log(engine.asarray(2.0 * pi))
+            quad
+            + params["log_det"]
+            + engine.asarray(float(params["dim"])) * engine.log(engine.asarray(2.0 * engine.pi))
         )
 
     @staticmethod
@@ -393,7 +395,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         soln = engine.matmul(diff, inv_covar)
         quad = engine.sum(diff * soln, axis=-1)
         dim = float(mu.shape[-1])
-        return -0.5 * (engine.asarray(dim) * engine.log(engine.asarray(2.0 * pi)) + log_det + quad)
+        return -0.5 * (engine.asarray(dim) * engine.log(engine.asarray(2.0 * engine.pi)) + log_det + quad)
 
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
@@ -427,7 +429,7 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         soln = engine.matmul(diff[:, :, None, :], params["inv_covar"][None, :, :, :])[:, :, 0, :]
         quad = engine.sum(diff * soln, axis=2)
         return -0.5 * (
-            engine.asarray(float(params["dim"])) * engine.log(engine.asarray(2.0 * pi))
+            engine.asarray(float(params["dim"])) * engine.log(engine.asarray(2.0 * engine.pi))
             + params["log_det"][None, :]
             + quad
         )
