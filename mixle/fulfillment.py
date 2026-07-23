@@ -1,7 +1,9 @@
-"""Demand forecasting + distribution routing/dispatch.
+"""mixle.fulfillment — demand forecasting + supply routing/dispatch (worklist H6).
 
 Two steps, chained: forecast tomorrow's demand honestly, then route today's supply to meet it at
-minimum cost.
+minimum cost. Renamed from ``mixle.distribution``: "distribution" collided with :mod:`mixle.dist`
+(the object-namespace alias for :mod:`mixle.stats`) -- same word, unrelated meanings (probability
+distribution vs. supply-chain distribution/routing).
 
 :func:`forecast_demand` fits a small regime-switching (Gaussian-emission HMM) model directly from a
 raw history series and calls the existing :func:`mixle.inference.forecast.forecast` front door for
