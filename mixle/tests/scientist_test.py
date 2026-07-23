@@ -60,6 +60,24 @@ class CertifiedPerceptionTest(unittest.TestCase):
         self.assertLess(self.model.train_seconds, 5.0)  # the head fit itself is near-instant
 
 
+class ScientistConstructorTest(unittest.TestCase):
+    """Scientist's constructor surface matches what it actually does -- no dead knobs."""
+
+    def test_no_max_entropy_parameter(self):
+        # max_entropy used to be accepted and stored but never read anywhere: ask()'s abstention
+        # comes from retrieval confidence and the factuality check (see ask()'s own docstring), not
+        # from the local model's self-assessed uncertainty -- a real, separate mechanism
+        # (mixle.inference.uq, wrapped by substrate.interop.ExternalModel) that Scientist never
+        # used. A parameter that silently does nothing is worse than no parameter at all, so it was
+        # removed rather than wired up to a feature this class deliberately doesn't use.
+        from mixle.scientist import Scientist
+
+        Scientist()  # still constructs fine with no arguments
+        with self.assertRaises(TypeError):
+            Scientist(max_entropy=0.5)
+        self.assertFalse(hasattr(Scientist(), "max_entropy"))
+
+
 class VerifiedReasoningTest(unittest.TestCase):
     """Grounded QA through the local LLM: answers only what the substrate supports, abstains otherwise."""
 
