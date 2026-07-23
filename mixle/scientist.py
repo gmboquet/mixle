@@ -347,15 +347,19 @@ class Scientist:
 
     Args:
         knowledge: a :class:`~mixle.substrate.Substrate` of what it may cite (built if omitted).
-        max_entropy: the local LLM's semantic-entropy gate -- above it, the model may not answer
-            from its own weights (it must ground in the substrate or abstain).
+
+    ``ask``'s abstention decision comes from retrieval confidence and the post-hoc factuality
+    check (see ``ask``'s own docstring), not from the local model's self-assessed uncertainty --
+    a 360M model's own confidence is a poor abstention signal. Semantic-entropy gating of the
+    kind :mod:`mixle.inference.uq` provides is a real, separate mechanism in this package
+    (:class:`~mixle.substrate.interop.ExternalModel` wraps it); ``Scientist`` deliberately uses
+    the retrieval/factuality path instead.
     """
 
-    def __init__(self, knowledge: Any = None, *, max_entropy: float = 0.9) -> None:
+    def __init__(self, knowledge: Any = None) -> None:
         from mixle.substrate import Substrate
 
         self.knowledge = knowledge if knowledge is not None else Substrate()
-        self.max_entropy = float(max_entropy)
         self._skills: list[Any] = []
         self._actions: list[Any] = []
 
