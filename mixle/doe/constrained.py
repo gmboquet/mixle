@@ -69,6 +69,14 @@ def _predict_std(gp: Surrogate, x: np.ndarray, y: np.ndarray, candidates: np.nda
 
 def _best_feasible(y: np.ndarray, c: np.ndarray, maximize: bool = False) -> tuple[int, np.ndarray]:
     """Return (index of incumbent, feasibility mask). Incumbent = best feasible, else least-infeasible."""
+    if y.size == 0:
+        # np.argmin on an empty violation/masked array crashes with an opaque "attempt to get argmin
+        # of an empty sequence" ValueError. Same documented path as bayesopt._propose_one: there is no
+        # incumbent to identify yet with zero observations, so name that clearly instead of a generic
+        # numpy crash. propose_next_constrained is a public, directly-callable entry point -- unlike its
+        # one internal caller (task/edge.py), which already special-cases len(self.X) < 2 -- so external
+        # callers can reach this with zero observations too.
+        raise ValueError("cannot determine a best-feasible incumbent with zero observations; call tell() first.")
     feasible = np.all(c <= 0.0, axis=1)
     if np.any(feasible):
         masked = np.where(feasible, y, -np.inf if maximize else np.inf)

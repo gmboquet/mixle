@@ -90,6 +90,12 @@ def propose_qei_batch(
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     xs, ys = _validate_xy(x, y)
+    if ys.size == 0:
+        # ys.min()/ys.max() on an empty ys crashes with an opaque "zero-size array" ValueError. Same
+        # documented path as bayesopt._propose_one: BayesianOptimizer.ask(q) with q > n_init before any
+        # tell() calls propose_qei_batch with zero observations -- there is no incumbent to score q-EI
+        # against yet, so name that clearly instead of a generic numpy crash.
+        raise ValueError("cannot propose a q-EI batch with zero observations; call tell() first.")
     gp = _fit_surrogate(xs, ys, gp, fit_kwargs)
     best = float(ys.max() if maximize else ys.min())
     candidates = latin_hypercube(b, int(n_candidates), rng)
@@ -139,6 +145,10 @@ def propose_local_penalization(
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     xs, ys = _validate_xy(x, y)
+    if ys.size == 0:
+        # same defect class as propose_qei_batch/bayesopt._propose_one: ys.min()/ys.max() on an empty
+        # ys crashes with an opaque "zero-size array" ValueError instead of naming the real cause.
+        raise ValueError("cannot propose a local-penalization batch with zero observations; call tell() first.")
     gp = _fit_surrogate(xs, ys, gp, fit_kwargs)
     best = float(ys.max() if maximize else ys.min())
     cand = latin_hypercube(b, int(n_candidates), rng)
