@@ -129,6 +129,46 @@ class SymbolicSympyExportTestCase(unittest.TestCase):
         self.assertIsInstance(latex, str)
         self.assertTrue(latex)
 
+    def test_pi_stays_symbolic_not_a_decimal(self):
+        # gaussian.py / log_gaussian.py / student_t.py / multivariate_gaussian.py got pi via
+        # `from mixle.engines.arithmetic import *` (or, for student_t, `math.pi` directly) inside
+        # functions that also take an explicit `engine` argument. `from module import *` binds a
+        # STATIC snapshot at the IMPORTING module's own import time (ordinary Python import
+        # semantics, not something arithmetic.py's PEP-562 __getattr__ can override), so it was
+        # always NUMPY_ENGINE's plain-float pi -- regardless of which engine a given call later
+        # passed in. Passing SYMBOLIC_ENGINE explicitly never made it symbolic: the LaTeX literally
+        # contained "6.28318530717959" instead of "\pi". Fixed by reading `engine.pi` off the
+        # actual passed-in engine (every ComputeEngine already exposes it: math.pi on the numpy/
+        # torch engines, a genuine SymbolicExpression on SYMBOLIC_ENGINE) instead of the frozen
+        # import.
+        from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+        from mixle.stats.univariate.continuous.log_gaussian import LogGaussianDistribution
+        from mixle.stats.univariate.continuous.student_t import StudentTDistribution
+
+        x = SYMBOLIC_ENGINE.symbol("x")
+        cases = [
+            GaussianDistribution(2.0, 1.5).backend_seq_log_density(x, SYMBOLIC_ENGINE),
+            LogGaussianDistribution(0.5, 1.2).backend_seq_log_density(x, SYMBOLIC_ENGINE),
+            StudentTDistribution(4.0, 0.0, 1.0).backend_seq_log_density(x, SYMBOLIC_ENGINE),
+        ]
+        for expr in cases:
+            latex = to_latex(expr)
+            self.assertIn(r"\pi", latex)
+            self.assertNotIn("6.283", latex)  # 2*pi as a decimal
+            self.assertNotIn("3.14159", latex)  # pi as a decimal
+
+    def test_pi_numeric_value_unchanged_for_the_default_numpy_engine(self):
+        # engine.pi must be a drop-in for the old frozen-import pi on the ordinary (non-symbolic)
+        # path -- same float, so no numeric drift for real callers who never touch SYMBOLIC_ENGINE.
+        from mixle.engines import NUMPY_ENGINE
+        from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+
+        d = GaussianDistribution(2.0, 1.5)
+        x = NUMPY_ENGINE.asarray([-1.0, 0.0, 3.0, 7.0])
+        got = d.backend_seq_log_density(x, NUMPY_ENGINE)
+        want = np.array([d.log_density(float(v)) for v in [-1.0, 0.0, 3.0, 7.0]])
+        np.testing.assert_allclose(got, want, atol=1e-12)
+
     def test_engine_wrappers(self):
         x = SYMBOLIC_ENGINE.symbol("x")
         expr = ar.log(ar.exp(x) + 1.0)

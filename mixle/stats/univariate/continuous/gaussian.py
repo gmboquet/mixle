@@ -131,7 +131,7 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         """Return Gaussian log partition for generated scoring."""
         mu = params["mu"]
         sigma2 = params["sigma2"]
-        return 0.5 * engine.log(engine.asarray(2.0 * pi) * sigma2) + 0.5 * mu * mu / sigma2
+        return 0.5 * engine.log(engine.asarray(2.0 * engine.pi) * sigma2) + 0.5 * mu * mu / sigma2
 
     def __init__(
         self,
@@ -276,7 +276,7 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
     @staticmethod
     def backend_log_density_from_params(x: Any, mu: Any, sigma2: Any, engine: Any) -> Any:
         """Engine-neutral Gaussian log-density from explicit parameters."""
-        return -0.5 * engine.log(engine.asarray(2.0 * pi) * sigma2) - 0.5 * (x - mu) * (x - mu) / sigma2
+        return -0.5 * engine.log(engine.asarray(2.0 * engine.pi) * sigma2) - 0.5 * (x - mu) * (x - mu) / sigma2
 
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
