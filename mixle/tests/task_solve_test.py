@@ -254,6 +254,39 @@ class SolveOnDeviceTest(unittest.TestCase):
             local = sol.cascade.model.decide(t)
             self.assertEqual(got, local if local is not None else _route(t))
 
+    def test_improve_respects_device_budget(self):
+        """Regression: improve() used to refit with the generic, unconstrained default student
+        (a full-size torch MLP) no matter what device budget solve() originally searched under,
+        so a promoted post-improve() artifact could blow way past the budget while report() kept
+        reporting the stale pre-improve() footprint as if nothing had changed."""
+        from mixle.task import DeviceSpec, footprint, solve
+        from mixle.task.edge import EdgeSpace
+
+        space = EdgeSpace(families=("mlp",), dim_choices=(32,), hidden_range=(2, 3), epochs_range=(30, 60))
+        sol = solve(
+            _route,
+            _tickets(300),
+            alpha=0.15,
+            device=DeviceSpec(max_bytes=6000),
+            device_space=space,
+            propose_budget=4,
+            seed=0,
+        )
+        self.assertTrue(sol.edge.feasible)
+        self.assertLessEqual(sol.edge.footprint.bytes, 6000)
+
+        for t in _tickets(500, seed=7):  # harvest live escalations
+            sol(t)
+        self.assertTrue(sol.cascade.stats.escalated_labels)  # sanity: this run actually harvests something
+
+        self.assertTrue(sol.improve())  # this exact seed/data folds the harvest in and promotes
+
+        fp = footprint(sol.cascade.model.task)
+        self.assertLessEqual(fp.bytes, 6000)  # the DEPLOYED student must still respect the original budget
+        # report() must describe what's actually deployed, not a stale pre-improve() snapshot
+        self.assertEqual(sol.report()["device"]["bytes"], fp.bytes)
+        self.assertTrue(sol.report()["device"]["feasible"])
+
     def test_torch_free_device_gives_deployable_torch_free_artifact(self):
         import tempfile
 
