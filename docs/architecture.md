@@ -12,15 +12,20 @@ Core is organized as composable layers:
    encoders, combinators, and latent structures.
 2. mixle.inference, mixle.ppl, and mixle.enumeration fit, condition, compare,
    sample, calibrate, and traverse those models.
-3. mixle.capability, mixle.contracts, and mixle.semantics expose typed
-   capability and quantitative-meaning boundaries.
+3. mixle.capability, mixle.contracts, mixle.semantics, mixle.causal, and
+   mixle.capability_lifecycle expose typed capability, quantitative-meaning,
+   and causal-claim boundaries.
 4. mixle.engines, mixle.data, and mixle.utils provide compute, storage,
    serialization, and parallel support without moving domain logic into the
    runtime.
 5. mixle.models, mixle.task, mixle.reason, mixle.doe, mixle.evolve, and
-   mixle.experimental assemble newer workflows over the shared contracts.
-6. mixle.telemetry, mixle.inference.receipt, and related artifact surfaces
-   carry execution and evidence metadata.
+   mixle.experimental assemble newer workflows over the shared contracts;
+   mixle.blending, mixle.precedence_scheduling, mixle.stochastic_opt,
+   mixle.pipeline_twin, and mixle.fulfillment do the same for a family of
+   operations-research problems built on mixle.relations.
+6. mixle.system, mixle.telemetry, mixle.inference.receipt, and related
+   artifact surfaces carry execution and evidence metadata around a local
+   application.
 
 The human package map is in package-map.rst. Generated module reference is in
 docs/api/.
