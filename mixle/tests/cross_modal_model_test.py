@@ -134,6 +134,32 @@ class CrossModalModelTest(unittest.TestCase):
         # (finite-sample conformal guarantee), give or take sampling slack on 300 test points.
         self.assertGreater(coverage, 1 - alpha - 0.06)
 
+    def test_calibrate_widens_to_unbounded_radius_when_k_exceeds_n_cal(self):
+        # split-conformal edge case: when ceil((n_cal+1)(1-alpha)) > n_cal, NO calibration score can
+        # certify the stated level. calibrate() must widen to an infinite (unbounded) radius instead
+        # of silently substituting scores.max() -- the substitution regime measures coverage at the
+        # exact theoretical shortfall n_cal/(n_cal+1) (e.g. 0.8889 for n_cal=8), violating the
+        # documented ">= 1 - alpha" simultaneous-coverage guarantee. Mirrors the k >= len(scores)
+        # handling in mixle.scientist.study().
+        from mixle.reason import CrossModalModel
+
+        rng = np.random.RandomState(11)
+        s, xA, xB = _two_view_data(rng, 300, k=2, dA=4, dB=3)
+        m = CrossModalModel(latent_dim=3, seed=10)
+        m.add_modality("A", 4).add_modality("B", 3)
+        m.fit({"A": xA, "B": xB}, epochs=150, beta=0.3)
+
+        alpha, n_cal = 0.1, 8
+        k = int(np.ceil((n_cal + 1) * (1.0 - alpha)))
+        self.assertGreater(k, n_cal)  # confirms this exercises the k > n regime, not a typo
+
+        m.calibrate({"A": xA[:n_cal], "B": xB[:n_cal]}, target="B", alpha=alpha)
+        _, _, q = m._conformal["B"]
+        self.assertTrue(np.isinf(q))  # unbounded radius, not the finite scores.max()
+
+        lo, hi = m.predict_interval({"A": xA[n_cal]}, target="B")
+        self.assertTrue(np.all(np.isinf(hi - lo)))  # the box itself is genuinely unbounded
+
     def test_predict_interval_needs_calibration(self):
         from mixle.reason import CrossModalModel
 

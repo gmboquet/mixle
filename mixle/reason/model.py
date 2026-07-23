@@ -224,7 +224,10 @@ class CrossModalModel:
         scale = resid.std(axis=0) + 1e-8  # per-dim normalization so no dimension dominates the box
         scores = (resid / scale).max(axis=1)  # (n,) max-normalized nonconformity -> simultaneous cover
         k = int(np.ceil((n + 1) * (1.0 - alpha)))
-        q = float(np.sort(scores)[min(k, n) - 1]) if k <= n else float(scores.max())
+        # finite-sample split conformal: when ceil((n+1)(1-alpha)) exceeds n, no calibration score
+        # certifies the level -- the radius is +inf (the box is unbounded), not the max score. Mirrors
+        # mixle.scientist.study()'s identical k > n handling for the same split-conformal edge case.
+        q = float(np.sort(scores)[k - 1]) if k <= n else float("inf")
         self._conformal[target] = (float(alpha), scale, q)
         return self
 
