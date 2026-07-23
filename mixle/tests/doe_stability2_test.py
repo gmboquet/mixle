@@ -19,6 +19,12 @@ bugs found and fixed here.
    initial-design draws in the parallel/async campaigns this class explicitly supports. Fixing this
    surfaced an EIGHTH bug: _propose_one crashed with an opaque "zero-size array" ValueError when
    called with zero observations (ask(q > n_init) before any tell()), now a clear, named error.
+9. The bug #8 fix (a clear, named error instead of an opaque numpy crash on zero observations) was
+   never propagated to the sibling functions that share the same "fit surrogate, then take an
+   incumbent from y" pattern: batch.propose_qei_batch and batch.propose_local_penalization still hit
+   the raw "zero-size array to reduction operation minimum which has no identity" ValueError from
+   ys.min()/ys.max(), and constrained._best_feasible (reached via the public propose_next_constrained)
+   hit "attempt to get argmin of an empty sequence" from np.argmin on an empty violation array.
 """
 
 import importlib.util
@@ -27,7 +33,8 @@ import unittest
 import numpy as np
 
 from mixle.doe import design_diagnostics, fast_indices, polynomial_features
-from mixle.doe.batch import propose_local_penalization
+from mixle.doe.batch import propose_local_penalization, propose_qei_batch
+from mixle.doe.constrained import propose_next_constrained
 from mixle.doe.optimizer import BayesianOptimizer
 from mixle.doe.trust_region import _thompson_batch, turbo_minimize
 
@@ -141,6 +148,57 @@ class AskBeforeTellDuplicateInitPointsTest(unittest.TestCase):
         x_gp = opt.ask(1)
         self.assertEqual(x_gp.shape, (2,))
         self.assertEqual(opt.n_observations, 3)
+
+
+class ZeroObservationIncumbentValidationTest(unittest.TestCase):
+    """batch.propose_qei_batch, batch.propose_local_penalization, and constrained.propose_next_constrained
+    share bug #8's "fit surrogate, then take an incumbent from y" pattern, but not its guard: called with
+    zero observations they crashed with an opaque numpy ValueError (ys.min()/ys.max()'s "zero-size array
+    to reduction operation minimum which has no identity", or np.argmin's "attempt to get argmin of an
+    empty sequence") instead of a clear, named one. assertRaisesRegex (not just assertRaises(ValueError))
+    matters here: both the opaque numpy error and the clear one are ValueErrors, so only the message
+    distinguishes them.
+    """
+
+    def setUp(self):
+        self.bounds = [(0.0, 1.0), (0.0, 1.0)]
+
+    def test_propose_qei_batch_rejects_zero_observations_with_a_clear_error(self):
+        with self.assertRaisesRegex(ValueError, "zero observations"):
+            propose_qei_batch(np.empty((0, 2)), np.empty(0), self.bounds, q=2, seed=0)
+
+    def test_propose_local_penalization_rejects_zero_observations_with_a_clear_error(self):
+        with self.assertRaisesRegex(ValueError, "zero observations"):
+            propose_local_penalization(np.empty((0, 2)), np.empty(0), self.bounds, q=2, seed=0)
+
+    def test_propose_next_constrained_rejects_zero_observations_with_a_clear_error(self):
+        with self.assertRaisesRegex(ValueError, "zero observations"):
+            propose_next_constrained(np.empty((0, 2)), np.empty(0), np.empty((0, 1)), self.bounds, seed=0)
+
+    @unittest.skipUnless(HAS_TORCH, "torch not installed")
+    def test_propose_qei_batch_still_works_with_real_observations(self):
+        rng = np.random.RandomState(0)
+        x = rng.uniform(0, 1, size=(5, 2))
+        y = rng.normal(size=5)
+        batch = propose_qei_batch(x, y, self.bounds, q=2, n_candidates=16, mc_samples=16, seed=0)
+        self.assertEqual(batch.shape, (2, 2))
+
+    @unittest.skipUnless(HAS_TORCH, "torch not installed")
+    def test_propose_local_penalization_still_works_with_real_observations(self):
+        rng = np.random.RandomState(0)
+        x = rng.uniform(0, 1, size=(5, 2))
+        y = rng.normal(size=5)
+        batch = propose_local_penalization(x, y, self.bounds, q=2, n_candidates=16, seed=0)
+        self.assertEqual(batch.shape, (2, 2))
+
+    @unittest.skipUnless(HAS_TORCH, "torch not installed")
+    def test_propose_next_constrained_still_works_with_real_observations(self):
+        rng = np.random.RandomState(0)
+        x = rng.uniform(0, 1, size=(5, 2))
+        y = rng.normal(size=5)
+        c = rng.normal(size=(5, 1)) - 1.0
+        point = propose_next_constrained(x, y, c, self.bounds, n_candidates=16, seed=0)
+        self.assertEqual(point.shape, (2,))
 
 
 if __name__ == "__main__":
