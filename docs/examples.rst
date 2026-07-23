@@ -71,6 +71,18 @@ Choose by Workflow
    * - Heterogeneous records
      - ``auto_example.py``, ``gallery_combinators_example.py``
      - :doc:`quickstart`, :doc:`tutorials/heterogeneous-records`
+   * - Capability introspection
+     - ``capability_layer_example.py``
+     - :doc:`capabilities-contracts`
+   * - Correlated continuous columns (copulas and vines)
+     - ``copula_vine_example.py``
+     - :doc:`distributions`, :doc:`stats-structured`
+   * - Combinatorial scheduling (max-weight closure, time-phased MILP)
+     - ``precedence_scheduling_example.py``
+     - :doc:`relations`, :doc:`inference-toolkit`
+   * - Symbolic export (LaTeX / SymPy / Sage)
+     - ``symbolic_export_example.py``
+     - :doc:`engines`
    * - Mixtures and latent state models
      - ``gallery_structured_example.py``, ``structured_hmm_example.py``
      - :doc:`hmms-latent`, :doc:`stats-latent-bayes`
@@ -91,8 +103,12 @@ Choose by Workflow
    * - Probabilistic programming
      - ``ppl_example.py``
      - :doc:`ppl`, :doc:`tutorials/ppl-mixture`
+   * - Model comparison (WAIC / LOO / compare)
+     - ``model_comparison_example.py``
+     - :doc:`ppl`, :doc:`uncertainty`
    * - Exact support traversal
-     - ``enumeration_example.py``, ``enumeration_showcase_example.py``
+     - ``enumeration_example.py``, ``enumeration_showcase_example.py``,
+       ``autoregressive_enumeration_example.py``
      - :doc:`enumeration`, :doc:`tutorials/enumeration-ranking`
    * - Scaling and engines
      - ``scaling_example.py``, ``engine_benchmark_example.py``

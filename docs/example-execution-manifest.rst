@@ -9,7 +9,7 @@ public release.
 Current Inventory
 -----------------
 
-The core package currently ships 58 Python example scripts:
+The core package currently ships 64 Python example scripts:
 
 .. list-table::
    :header-rows: 1
@@ -18,14 +18,20 @@ The core package currently ships 58 Python example scripts:
      - Examples
      - Release tier
    * - Base distribution galleries
-     - ``gallery_*``, ``auto_example.py``, ``ppl_example.py``, ``quickstart_example.py``
+     - ``gallery_*``, ``auto_example.py``, ``ppl_example.py``, ``quickstart_example.py``,
+       ``capability_layer_example.py``
      - smoke/validation
    * - Latent and structured models
      - HMM, mixture, association, and structure-learning examples
      - validation
    * - DOE, enumeration, production, and scaling
-     - DOE, enumeration, registry/provenance, and backend examples
+     - DOE, enumeration (including ``autoregressive_enumeration_example.py``), registry/provenance,
+       and backend examples
      - validation/manual
+   * - Model comparison, dependence structure, symbolic export, and combinatorial scheduling
+     - ``model_comparison_example.py``, ``copula_vine_example.py``, ``symbolic_export_example.py``,
+       ``precedence_scheduling_example.py``
+     - validation (``symbolic_export_example.py`` needs the ``sympy`` extra)
    * - Task and distillation workflows
      - task distillation, active labeling, extraction, cascade economics
      - validation/manual
@@ -204,6 +210,58 @@ coverage gap: neither ``mixle.describe()`` (the package docstring's own
 highlights, paired with ``optimize()``) had a runnable example calling them
 directly. Passes in a base install, no optional dependencies, 3.4s.
 
+**2026-07-23 addition (batch 2).** Six more scripts closed the remaining
+README-headlined coverage gaps identified in the same audit. All were run
+directly (not just imported) and their printed output checked against an
+independent hand or brute-force calculation, not just "exited zero":
+
+* ``precedence_scheduling_example.py`` -- ``mixle.precedence_scheduling``
+  (maximum-weight closure, time-phased MILP scheduling), on a software-release
+  dependency DAG rather than the test suite's mine-planning framing, to show
+  the module's generality is real. Base install, 2.3s. The script's own
+  in-line assertions verify the returned schedule against the raw capacity
+  and precedence arrays.
+* ``capability_layer_example.py`` -- the rest of ``mixle.capability``
+  (``capabilities``, ``supports``, ``require``, ``catalog``, ``what_supports``,
+  ``summarize``) beyond ``describe()``. Base install, 2.2s.
+* ``symbolic_export_example.py`` -- ``mixle.engines.symbolic_engine`` /
+  ``symbolic_export`` (LaTeX / SymPy / optional Sage). Needs ``mixle[sympy]``;
+  3.5s. Differentiates each of two families' closed-form log-density to its
+  score function and confirms Gaussian's score grows without bound as an
+  observation moves further from the mean, while Student-t's saturates back
+  toward zero -- checked against the textbook closed forms by
+  hand, not just printed. Separately found (not fixed; see below): constants
+  like ``pi`` render as decimals rather than staying symbolic under
+  ``SYMBOLIC_ENGINE`` -- correct value, not textbook-pretty LaTeX.
+* ``autoregressive_enumeration_example.py`` -- ``mixle.enumeration.AutoregressiveEnumerable``
+  over a small synthetic prefix-dependent logit table (base install, no torch,
+  no network -- a real LM plugs into the same ``next_logprobs`` interface).
+  2.2s. Instruments the model callable itself to show the number of distinct
+  prefixes actually queried stays far below the full sequence-space size.
+  Separately found (not fixed; see below): ``nucleus_size()`` is wrong for
+  this class.
+* ``model_comparison_example.py`` -- ``mixle.ppl``'s ``waic``/``loo``/``compare()``,
+  ranking a deliberately-wrong unimodal fit against a correct 2-component
+  mixture and a second wrong (Student-t) fit on genuinely bimodal data. Base
+  install, 3.1s. The mixture wins by a ~20x-standard-error margin -- an
+  unambiguous result, not a coin flip.
+* ``copula_vine_example.py`` -- direct ``CopulaDistribution`` /
+  ``RVineCopulaDistribution`` fitting on Clayton-generated (genuine
+  lower-tail-dependent) heterogeneous-marginal data, contrasted against a
+  Gaussian-copula core fit to the same data. Base install, 10.3s. The vine
+  recovers 100% of the true joint lower-tail rate (77x the independence
+  baseline); the elliptical Gaussian copula recovers only 58% of it despite
+  fitting the same procedure on the same data.
+
+Two real, non-blocking issues were found incidentally while building these
+(not introduced by them) and were **not** fixed as part of this addition --
+each was handed off separately with a full repro: ``SYMBOLIC_ENGINE``'s
+constants not staying symbolic, and ``AutoregressiveEnumerable.nucleus_size()``
+returning an incorrect size (``size_lower=size_upper=0`` when the correct
+answer is 5, confirmed against brute force) while its ``covered_mass`` field
+stays correct -- traced to ``count_dp_top_p`` in ``density_rank.py`` mixing
+two incompatible bucket-keying schemes for this class.
+
 Execution status should be recorded as evidence, not inferred from import
 success or from an earlier notebook run. If an example writes an artifact, the
 artifact path and any cleanup policy should be captured with the status.
@@ -272,8 +330,14 @@ Inventory
      - Expected status before release
    * - ``examples/auto_example.py``
      - Execute or record failure.
+   * - ``examples/autoregressive_enumeration_example.py``
+     - Execute. Base install (numpy only; synthetic toy model, no torch/network).
    * - ``examples/calibrated_report_demo.py``
      - Execute with optional-dependency status recorded.
+   * - ``examples/capability_layer_example.py``
+     - Execute. Base install.
+   * - ``examples/copula_vine_example.py``
+     - Execute. Base install.
    * - ``examples/cross_modal_fit_receipt.py``
      - Execute with optional-dependency status recorded.
    * - ``examples/doe_example.py``
@@ -347,6 +411,8 @@ Inventory
      - Execute.
    * - ``examples/mixture_reduction_benchmark.py``
      - Manual/benchmark or bounded smoke run.
+   * - ``examples/model_comparison_example.py``
+     - Execute. Base install.
    * - ``examples/multimodal_stage1_demo.py``
      - Execute with optional-dependency status recorded.
    * - ``examples/peft_lora_grad_leaf.py``
@@ -354,6 +420,8 @@ Inventory
        not a mixle dependency).
    * - ``examples/ppl_example.py``
      - Execute.
+   * - ``examples/precedence_scheduling_example.py``
+     - Execute. Base install.
    * - ``examples/production_example.py``
      - Execute with artifact-output path recorded.
    * - ``examples/project_neural_to_structured.py``
@@ -386,6 +454,11 @@ Inventory
      - Execute.
    * - ``examples/structured_leaves_example.py``
      - Execute.
+   * - ``examples/symbolic_export_example.py``
+     - Blocked on ``sympy`` in a base install (optional ``mixle[sympy]`` extra,
+       not a core dependency); execute with ``sympy`` installed. Section 4
+       (Sage export) is separately gated and skips gracefully without
+       ``mixle[sage]``.
    * - ``examples/task_cascade_economics_example.py``
      - Blocked on ``torch`` in a base install (``mixle.task.distill._fit_mlp``,
        same chokepoint as ``win_demo_example.py``); execute with ``torch``
