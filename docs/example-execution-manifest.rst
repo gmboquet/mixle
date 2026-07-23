@@ -254,12 +254,35 @@ independent hand or brute-force calculation, not just "exited zero":
   fitting the same procedure on the same data.
 
 Two real, non-blocking issues were found incidentally while building these
-(not introduced by them): ``SYMBOLIC_ENGINE``'s constants not staying
-symbolic (still open, handed off separately with a full repro), and
+(not introduced by them), both since fixed -- see the 2026-07-23 follow-ups
+below: ``SYMBOLIC_ENGINE``'s constants not staying symbolic, and
 ``AutoregressiveEnumerable.nucleus_size()`` returning an incorrect size
 (``size_lower=size_upper=0`` when the correct answer is 5, confirmed against
-brute force) while its ``covered_mass`` field stayed correct -- see the
-2026-07-23 follow-up below for the fix.
+brute force) while its ``covered_mass`` field stayed correct.
+
+**2026-07-23 follow-up: pi fixed.** Root cause: ``GaussianDistribution`` /
+``LogGaussianDistribution`` / ``MultivariateGaussianDistribution`` got ``pi``
+via ``from mixle.engines.arithmetic import *`` (``StudentTDistribution`` used
+``math.pi`` directly); both are ordinary Python import/reference semantics --
+the value is bound once, at each family module's own import time, against
+whichever engine was the default THEN. Passing an explicit
+``engine=SYMBOLIC_ENGINE`` to a ``backend_log_density_from_params`` /
+``backend_seq_log_density`` / ``exp_family_log_partition`` call never
+revisited that binding, so the LaTeX output always showed a decimal literal
+regardless of which engine was requested. Fixed by reading ``engine.pi`` off
+the actual passed-in engine at each of the 8 confirmed call sites across the
+4 affected families (every ``ComputeEngine`` already exposes ``.pi``); no
+numeric change on the ordinary numpy path (``engine.pi`` is the same
+``math.pi`` value), confirmed by the full ``backend_scoring_test.py`` suite
+(264 subtests) plus a dedicated regression test. Checked every other family
+using the same import pattern for the same bug -- ``diagonal_gaussian.py``
+and ``von_mises_fisher.py``'s ``pi`` hits were false positives (a docstring
+formula and plain-float ``__init__`` setup respectively), and
+``markov_chain.py`` / ``hidden_markov.py`` / ``lookback_hidden_markov_model.py``'s
+were the unrelated HMM initial-state-distribution variable of the same name.
+``MultivariateGaussianDistribution``'s fix is verified correct but its full
+symbolic export still hits a separate, pre-existing array-conversion
+limitation in the symbolic engine, unrelated to this bug and not fixed here.
 
 **2026-07-23 follow-up: nucleus_size() fixed.** Root cause: ``nucleus_size()``
 delegated to the generic ``density_rank.count_dp_top_p``, which assumes its
