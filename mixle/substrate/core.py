@@ -47,7 +47,21 @@ MODALITIES = (
 
 @dataclass
 class SubstrateItem:
-    """One typed, provenanced, scoped item in the substrate."""
+    """One typed, provenanced, scoped item in the substrate.
+
+    Edge typing (MXR-080-0261): ``links`` and ``derived_from`` are both lists of item ids, but they
+    are NOT interchangeable. ``links`` is the generic, untyped KG-relation surface -- "related to",
+    "mentions", "co-occurs with", anything :mod:`~mixle.substrate.kg_rag`/:mod:`~mixle.substrate.multihop`
+    want to associate two items by. ``derived_from`` is narrower and load-bearing: it is the ONLY place
+    genuine provenance/ancestry ("this item was derived from that one") is recorded, and it is the only
+    field :func:`~mixle.substrate.trust.verify_lineage` ever traverses. Before this field existed, lineage
+    verification walked ``links`` itself, so a merely-related entity was indistinguishable from a true
+    derivation parent -- putting a citation-worthy relation into ``links`` silently made it certifiable
+    ancestry. Keeping the two lists separate (rather than tagging each entry with a type) is a deliberate
+    minimal-diff choice: every existing reader of ``links`` (:mod:`kg_rag`, :mod:`multihop`,
+    :mod:`freshness`, :mod:`context`, :mod:`governance`, :mod:`spaces`) keeps reading exactly the same
+    untyped list it always has, with no change to its shape or meaning.
+    """
 
     kind: str  # one of MODALITIES
     text: str = ""  # a retrievable text surface (the document, a summary, a serialized record)
@@ -55,7 +69,12 @@ class SubstrateItem:
     provenance: dict[str, Any] = field(default_factory=dict)  # where it came from (source, hashes, parent ids)
     scope: str = "local"  # access scope: "local" or a team id
     tags: list[str] = field(default_factory=list)
-    links: list[str] = field(default_factory=list)  # ids of related items (KG edges, lineage)
+    links: list[str] = field(default_factory=list)  # ids of RELATED items (generic KG edges) -- not ancestry
+    # ids this item genuinely DERIVES FROM (true provenance/ancestry parents) -- the only edges
+    # mixle.substrate.trust.verify_lineage() traverses (MXR-080-0261). Deliberately a separate list
+    # rather than a type tag on `links`'s entries: every pre-existing reader of `links` is unaffected,
+    # and an item with no recorded ancestry simply has an empty `derived_from`, not a guess.
+    derived_from: list[str] = field(default_factory=list)
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:16])
     created_at: float = field(default_factory=time.time)
 
