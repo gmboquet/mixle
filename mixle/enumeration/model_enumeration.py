@@ -80,6 +80,23 @@ def _validate_pruning_bounds(top_k: int | None, top_p: float | None) -> None:
         raise ValueError(f"top_p must be a value in (0, 1], got {top_p!r}.")
 
 
+# 2**1023 is the largest integer power of two that still converts to a finite float64 (2**1024 raises
+# OverflowError) -- well beyond any bucket resolution a caller could sensibly want (the default is 12),
+# but validated explicitly rather than left to surface as an opaque OverflowError deep inside push().
+_MAX_BUCKET_BITS = 1023
+
+
+def _validate_bucket_bits(bucket_bits: Any) -> int:
+    """Coerce ``bucket_bits`` to an ``int`` in ``[0, 1023]`` so ``2**bucket_bits`` is a finite float."""
+    try:
+        n = int(bucket_bits)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"bucket_bits must be an integer, got {bucket_bits!r}.") from exc
+    if n != bucket_bits or not (0 <= n <= _MAX_BUCKET_BITS):
+        raise ValueError(f"bucket_bits must be an integer in [0, {_MAX_BUCKET_BITS}], got {bucket_bits!r}.")
+    return n
+
+
 def best_first(
     start: Any,
     successors: Callable[[Any], Iterable[Any]],
@@ -333,21 +350,45 @@ def quantized_best_first_decode(
         max_len: maximum sequence length. Give ``eos`` and/or ``max_len``.
         top_k: keep only the ``top_k`` highest-probability tokens per step.
         top_p: keep the smallest set of tokens per step whose probability sums to >= ``top_p`` (nucleus).
-        bucket_bits: score-quantization resolution; larger = finer ordering, slower bookkeeping.
+        bucket_bits: score-quantization resolution; larger = finer ordering, slower bookkeeping. Must be
+            an integer in ``[0, 1023]`` (so ``2**bucket_bits`` is a finite float).
         batch_next_logprobs: optional ``batch_next_logprobs([prefix, ...]) -> [[(token, log_prob), ...], ...]``
-            scoring a batch of prefixes in one forward pass.
-        batch_size: number of frontier prefixes expanded per (batched) scoring call.
+            scoring a batch of prefixes in one forward pass. MUST return exactly one step table per
+            requested prefix, in the same order -- a short or long return is a caller bug and raises
+            ``ValueError`` naming the mismatch, rather than silently pairing up (and dropping) prefixes
+            with ``zip()``.
+        batch_size: number of frontier prefixes expanded per (batched) scoring call. Must be a positive
+            integer -- a non-positive value previously could take an empty slice of a non-empty bucket
+            without consuming it, hanging the search forever (MXR-080-0227).
         start: initial prefix.
-        max_results: stop after this many complete sequences.
-        min_mass: stop once the yielded sequences cover at least this much probability mass.
+        max_results: stop after this many complete sequences. Must be a positive integer when given.
+        min_mass: stop once the yielded sequences cover at least this much probability mass. Must be a
+            finite value >= 0.0 when given.
 
     Yields:
         ``(sequence_tuple, total_log_prob)``, highest probability first (exact across score buckets).
+
+    Raises:
+        ValueError: for any invalid control (``batch_size``, ``bucket_bits``, ``max_results``,
+            ``min_mass``, ``top_k``, ``top_p``), or if a batched callback returns a different number of
+            step tables than prefixes requested.
     """
     if next_logprobs is None and batch_next_logprobs is None:
         raise ValueError("provide next_logprobs or batch_next_logprobs.")
     if eos is None and max_len is None:
         raise ValueError("quantized_best_first_decode needs eos and/or max_len to know when a sequence is complete.")
+    # Validate every control up front, before any work happens, so a bad caller input fails fast and
+    # atomically instead of raising (or hanging -- MXR-080-0227) partway through an already-started
+    # search that has silently yielded some results.
+    batch_size = _positive_int(batch_size, "batch_size")
+    bucket_bits = _validate_bucket_bits(bucket_bits)
+    if max_results is not None:
+        max_results = _positive_int(max_results, "max_results")
+    if min_mass is not None:
+        min_mass = float(min_mass)
+        if not math.isfinite(min_mass) or min_mass < 0.0:
+            raise ValueError(f"min_mass must be a finite value >= 0.0, got {min_mass!r}.")
+    _validate_pruning_bounds(top_k, top_p)
 
     scale = float(2**bucket_bits)
 
@@ -378,13 +419,47 @@ def quantized_best_first_decode(
             heapq.heappop(bucket_heap)
             buckets.pop(b, None)
             continue
-        # take a batch from the current (highest) bucket
-        if len(lst) > batch_size:
-            take = lst[-batch_size:]
-            del lst[-batch_size:]
-        else:
-            take = lst
+        # Peek (do NOT yet remove) a batch from the current (highest) bucket. Removal from the live
+        # bucket is deferred until any batched scoring call for this batch has returned and been
+        # validated, so a callback that raises or under/over-returns leaves the frontier exactly as it
+        # was. The previous code did this the other way around: remove the batch first, then pair it
+        # with the callback's results via zip() -- which silently stops at the shorter of the two
+        # lists, dropping any prefix the callback failed to score with no error at all (MXR-080-0227;
+        # the reproduced case was a single live prefix and an under-returning callback, which came back
+        # as an empty enumeration -- the whole search silently vanished).
+        before = len(lst)
+        take_all = before <= batch_size
+        take = lst if take_all else lst[-batch_size:]
+        to_expand = [u for u in take if not _is_complete(u[1])]
+        steps: list[Iterable[tuple[Any, float]]] = []
+        if to_expand:
+            prefixes = [pf for _, pf in to_expand]
+            if batch_next_logprobs is not None:
+                steps = list(batch_next_logprobs(prefixes))
+            else:
+                steps = [next_logprobs(pf) for pf in prefixes]
+            if len(steps) != len(prefixes):
+                raise ValueError(
+                    "batch_next_logprobs must return exactly one step table per requested prefix "
+                    f"(expected {len(prefixes)}, got {len(steps)})."
+                )
+        # Commit: scoring for this batch succeeded (or was not needed), so it is now safe to remove it
+        # from the live bucket. batch_size is validated positive and `lst` is non-empty here, so this
+        # must always strictly shrink the bucket -- checked explicitly rather than trusted, so a similar
+        # slicing bug can never again hang the loop silently: a negative batch_size previously took an
+        # empty slice right here without shrinking the live bucket at all, so the loop revisited the
+        # same non-empty bucket forever (MXR-080-0227).
+        if take_all:
             buckets[b] = []
+            after = 0
+        else:
+            del lst[-batch_size:]
+            after = len(lst)
+        if after >= before:
+            raise RuntimeError(
+                f"quantized_best_first_decode: bucket {b} did not shrink this iteration "
+                f"({before} -> {after}); refusing to loop forever."
+            )
         # yield completed sequences in this batch, exact order within the bucket
         for sc, pf in sorted((u for u in take if _is_complete(u[1])), key=lambda u: -u[0]):
             yield pf, sc
@@ -392,13 +467,6 @@ def quantized_best_first_decode(
             covered += math.exp(sc)
             if (max_results is not None and emitted >= max_results) or (min_mass is not None and covered >= min_mass):
                 return
-        to_expand = [u for u in take if not _is_complete(u[1])]
-        if to_expand:
-            prefixes = [pf for _, pf in to_expand]
-            if batch_next_logprobs is not None:
-                steps = batch_next_logprobs(prefixes)
-            else:
-                steps = [next_logprobs(pf) for pf in prefixes]
-            for (sc, pf), step in zip(to_expand, steps):
-                for token, token_lp in _prune_step(step, top_k, top_p):
-                    push(pf + (token,), sc + token_lp)
+        for (sc, pf), step in zip(to_expand, steps):
+            for token, token_lp in _prune_step(step, top_k, top_p):
+                push(pf + (token,), sc + token_lp)
