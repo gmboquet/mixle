@@ -208,6 +208,53 @@ def _bin_cell_counts(cell_indices: Sequence[float] | np.ndarray, num_cells: int)
     return counts[:num_cells].astype(np.float64)
 
 
+def _clipped_rates(beta: np.ndarray, design: np.ndarray, log_offset: np.ndarray) -> np.ndarray:
+    """Per-cell fitted rate ``exp(clip(eta))`` at the linear predictor ``eta = design @ beta + log_offset``.
+
+    The clip is a standard optimizer-robustness guard: a wild L-BFGS-B line-search step can otherwise send
+    ``eta`` far enough that ``exp(eta)`` overflows to ``inf``, which
+    ``InhomogeneousPoissonProcessDistribution`` itself rejects outright (it requires finite rates) -- an
+    unclipped evaluation would risk aborting the whole optimization on a step the line search would
+    otherwise have corrected on its own.
+    """
+    eta = design @ beta + log_offset
+    return np.exp(np.clip(eta, -_RATE_CLIP, _RATE_CLIP))
+
+
+def _nll_and_grad(
+    beta: np.ndarray, design: np.ndarray, counts: np.ndarray, log_offset: np.ndarray, ridge: float, edges: np.ndarray
+) -> tuple[float, np.ndarray]:
+    """Penalized negative log-likelihood and its gradient at ``beta``.
+
+    The frozen ``InhomogeneousPoissonProcessDistribution.seq_log_density`` is reused as-is, never
+    reimplemented, to score the NLL value; only its (closed-form, standard Poisson-GLM) gradient is
+    supplied locally, for speed. A module-level function (rather than a closure over ``_fit_beta``'s
+    locals) so it can be exercised and finite-differenced directly by tests, independent of the optimizer.
+    """
+    rates = _clipped_rates(beta, design, log_offset)
+    dist = InhomogeneousPoissonProcessDistribution(rates, edges=edges)
+    log_lik = float(dist.seq_log_density(counts[None, :])[0])
+    nll = -log_lik + ridge * float(beta @ beta)
+    grad = design.T @ (rates - counts) + 2.0 * ridge * beta
+    return nll, grad
+
+
+def _penalized_hessian(beta: np.ndarray, design: np.ndarray, log_offset: np.ndarray, ridge: float) -> np.ndarray:
+    """Exact Hessian of :func:`_nll_and_grad`'s objective at ``beta`` -- the Laplace posterior's precision.
+
+    ``d^2/dbeta^2 [-loglik] = X^T diag(rates) X`` is the standard Poisson-GLM Fisher information (MXR-080-
+    0112 numerically verified this term against finite-differencing :func:`_nll_and_grad`'s gradient).
+    ``d^2/dbeta^2 [ridge * beta @ beta] = 2 * ridge * I``: the gradient's ridge term is ``2 * ridge * beta``
+    (correct), but differentiating a *first* derivative of ``2 * ridge * beta`` once more with respect to
+    ``beta`` reproduces the same constant factor, ``2 * ridge * I`` -- not ``ridge * I``, which is what this
+    Hessian previously added (MXR-080-0112), silently understating posterior uncertainty by folding in only
+    half of the prior's actual curvature.
+    """
+    rates = _clipped_rates(beta, design, log_offset)
+    p = design.shape[1]
+    return design.T @ (rates[:, None] * design) + 2.0 * ridge * np.eye(p)
+
+
 def _fit_beta(
     design: np.ndarray, counts: np.ndarray, log_offset: np.ndarray, ridge: float
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -225,22 +272,14 @@ def _fit_beta(
     num_cells, p = design.shape
     edges = np.arange(num_cells + 1, dtype=np.float64)
 
-    def _nll_and_grad(beta: np.ndarray) -> tuple[float, np.ndarray]:
-        log_lambda = design @ beta
-        rates = np.exp(np.clip(log_lambda + log_offset, -_RATE_CLIP, _RATE_CLIP))
-        dist = InhomogeneousPoissonProcessDistribution(rates, edges=edges)
-        log_lik = float(dist.seq_log_density(counts[None, :])[0])
-        nll = -log_lik + ridge * float(beta @ beta)
-        grad = -(design.T @ (counts - rates)) + 2.0 * ridge * beta
-        return nll, grad
-
     beta0 = np.zeros(p, dtype=np.float64)
-    result = minimize(_nll_and_grad, beta0, jac=True, method="L-BFGS-B")
+    result = minimize(
+        _nll_and_grad, beta0, args=(design, counts, log_offset, ridge, edges), jac=True, method="L-BFGS-B"
+    )
     beta_hat = result.x
-    rates_hat = np.exp(np.clip(design @ beta_hat + log_offset, -_RATE_CLIP, _RATE_CLIP))
-    # Laplace covariance: (X^T diag(lambda_c * area_c) X + ridge * I)^{-1}
-    hessian = design.T @ (rates_hat[:, None] * design) + ridge * np.eye(p)
+    hessian = _penalized_hessian(beta_hat, design, log_offset, ridge)
     beta_cov = np.linalg.inv(hessian)
+    rates_hat = _clipped_rates(beta_hat, design, log_offset)
     return beta_hat, beta_cov, rates_hat
 
 
