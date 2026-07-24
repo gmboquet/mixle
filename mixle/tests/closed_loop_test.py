@@ -13,6 +13,7 @@ from mixle.evolve.closed_loop import (
     OperatorCreditBandit,
     accuracy_objective,
 )
+from mixle.evolve.improve import _split
 from mixle.inference.estimation import optimize
 from mixle.stats.univariate.discrete.categorical import CategoricalEstimator
 
@@ -287,6 +288,94 @@ class GenealogyReconstructionTest(unittest.TestCase):
         unrelated = _fit_categorical(_gen_batch([0.05, 0.05, 0.9], 300, np.random.RandomState(999)))
         self.assertNotEqual(loop.genealogy._id_for(unrelated), loop.genealogy._id_for(loop.champion))
         self.assertEqual(loop.genealogy.lineage(unrelated), [])
+
+
+class _RecordingObjective:
+    """Wraps a real Objective, recording the exact ``data`` list every ``pointwise``/``scalar`` call
+    receives -- lets a test see exactly which rows the loop actually scored on, without step() exposing
+    its internal train/verify split as part of its public API."""
+
+    def __init__(self, real):
+        self._real = real
+        self.name = real.name
+        self.lower_is_better = real.lower_is_better
+        self.calls: list[list] = []
+
+    def pointwise(self, model, data):
+        self.calls.append(list(data))
+        return self._real.pointwise(model, data)
+
+    def scalar(self, model, data):
+        self.calls.append(list(data))
+        return self._real.scalar(model, data)
+
+
+class DataRoleDisjointnessTest(unittest.TestCase):
+    """Regression coverage (audit MXR-080-0042, Critical): step()'s default verify_data used to be the
+    WHOLE arriving batch, which CONTAINS train_data (acquire's top-priority subset of it) -- so the gate
+    scored a challenger partly on rows it had just been fit on. The fix splits the batch into a
+    candidate pool and verify_data FIRST, before harvest/acquire ever touch it, specifically so
+    verify_data stays a representative sample rather than the (biased) complement of acquire's own
+    hardest-example selection -- see step()'s "Note on verify" docstring."""
+
+    def test_step_default_verify_is_disjoint_from_the_candidate_pool(self):
+        rng = np.random.RandomState(20)
+        real_obj = accuracy_objective()
+        spy = _RecordingObjective(real_obj)
+        champion = _fit_categorical(_gen_batch([0.7, 0.2, 0.1], 300, rng))
+        loop = ClosedLoopSelfEvolution(champion, objective=spy, seed=20, acquire_k=40)
+        batch = _gen_batch([0.2, 0.7, 0.1], 60, rng)
+        # replicate step()'s own (documented, deterministic) split exactly: this is step #1, so
+        # _n_steps is 1 by the time the split runs.
+        expected_pool, expected_verify = _split(batch, loop.holdout, loop.seed + 1)
+
+        loop.step(batch)
+
+        self.assertTrue(spy.calls, "expected the objective to be invoked")
+        self.assertTrue(
+            all(len(c) < len(batch) for c in spy.calls),
+            f"every scored slice must be a strict split, never the full {len(batch)}-row batch: "
+            f"{[len(c) for c in spy.calls]}",
+        )
+        for c in spy.calls:
+            self.assertTrue(
+                c == expected_pool or c == expected_verify,
+                "objective was scored on data outside the (candidate_pool, verify_data) split",
+            )
+        self.assertTrue(any(c == expected_verify for c in spy.calls), "expected a gate/score call on verify_data")
+
+    def test_default_verify_differs_from_the_pre_fix_whole_batch_alias(self):
+        # Explicit before/after: the pre-fix default was literally `verify_data = list(verify) if
+        # verify is not None else batch` -- i.e. the WHOLE batch. The new default must be a strict,
+        # disjoint subset that never coincides with that old, buggy default.
+        rng = np.random.RandomState(22)
+        champion = _fit_categorical(_gen_batch([0.7, 0.2, 0.1], 300, rng))
+        loop = ClosedLoopSelfEvolution(champion, objective=accuracy_objective(), seed=22, acquire_k=40)
+        batch = _gen_batch([0.2, 0.7, 0.1], 60, rng)
+
+        _, new_verify = _split(batch, loop.holdout, loop.seed + 1)
+        old_verify = batch  # the exact pre-fix default
+
+        self.assertNotEqual(new_verify, old_verify)
+        self.assertLess(len(new_verify), len(old_verify))
+
+    def test_step_explicit_verify_still_respected_and_bypasses_the_auto_split(self):
+        # Negative control: a caller that explicitly supplies verify= (its own held-out batch) must
+        # still have it used AS GIVEN -- this fix only changes the DEFAULT when verify is omitted.
+        rng = np.random.RandomState(21)
+        real_obj = accuracy_objective()
+        spy = _RecordingObjective(real_obj)
+        champion = _fit_categorical(_gen_batch([0.7, 0.2, 0.1], 300, rng))
+        loop = ClosedLoopSelfEvolution(champion, objective=spy, seed=21, acquire_k=40)
+        batch = _gen_batch([0.2, 0.7, 0.1], 60, rng)
+        explicit_verify = _gen_batch([0.2, 0.7, 0.1], 25, rng)
+
+        loop.step(batch, verify=explicit_verify)
+
+        self.assertTrue(spy.calls)
+        self.assertTrue(
+            any(c == explicit_verify for c in spy.calls), "the explicit verify batch must be used for gating/scoring"
+        )
 
 
 if __name__ == "__main__":

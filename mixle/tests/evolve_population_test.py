@@ -215,20 +215,25 @@ def test_population_step_with_scalar_only_objective_does_not_crash_on_nan_pvalue
     champion_score = 1.0
     seed_model = _ScalarOnlyModel(champion_score)
     ops = [
-        _ScalarOnlyOp("better", score=0.5),  # lower is better -> genuine improvement, should promote
+        _ScalarOnlyOp("better", score=0.5),  # lower is better -> a genuine favored-direction win...
         _ScalarOnlyOp("worse", score=1.5),  # genuine regression, must not promote
         _ScalarOnlyOp("tie", score=1.0),  # no change at all, must not promote
     ]
+    # 4 placeholder observations (not 1): this objective never touches `data`'s CONTENT, but
+    # Population.step() now auto-splits `data` into a disjoint (fit, verify) pair by default
+    # (MXR-080-0042) whenever verify_data is omitted, and mixle.evolve.improve._split requires at
+    # least 4 observations to do that honestly.
     pop = Population([seed_model], objective=obj, operators=ops, size=8, diversity_quota=0, seed=0)
-
-    report = pop.step([0.0])  # this objective never touches `data`; a placeholder is enough
+    report = pop.step([0.0, 1.0, 2.0, 3.0])
 
     assert report.proposals == 3
-    # not just "didn't crash": the scalar-only verdict's OWN (unadjusted, there being no p-value for a
-    # population-wide correction to act on) promotion decision must stand -- exactly the genuinely
-    # better candidate promotes, not the tied or regressed ones.
-    assert report.verified == 1
-    assert report.rewards == [0.5, 0.0, 0.0]
+    # not just "didn't crash": every scalar-only verdict's OWN (unadjusted, there being no p-value for
+    # a population-wide correction to act on) promotion decision must stand -- and per verify.py's
+    # has_statistical_evidence guard (a bare scalar delta carries no sampling-uncertainty estimate), a
+    # scalar-only verdict's promote is now ALWAYS False, regardless of favored direction: not even
+    # "better"'s genuine favorable delta auto-promotes on its own.
+    assert report.verified == 0
+    assert report.rewards == [0.0, 0.0, 0.0]
 
 
 def test_scalar_only_verdict_carries_nan_p_value_contract():
@@ -242,4 +247,183 @@ def test_scalar_only_verdict_carries_nan_p_value_contract():
     assert math.isnan(verdict.p_value)
     assert all(math.isnan(c) for c in verdict.ci)
     assert verdict.favored == "challenger"
+    # promote requires has_statistical_evidence (p_value not nan) as of verify.py's da1fec0b fix: a
+    # scalar-only verdict can never auto-promote, however favorable its raw delta, since no sampling-
+    # uncertainty estimate backs it.
+    assert verdict.promote is False
+
+
+# ---------------------------------------------------------------------------
+# Regression (MXR-080-0042, Critical): verification must not silently equal training data by default
+# ---------------------------------------------------------------------------
+class _RecordingSpy:
+    """Wraps a real Objective, recording the exact ``data`` list every ``pointwise``/``scalar`` call
+    receives -- so a test can see exactly which rows Population actually scored on, without Population
+    exposing its internal split as part of its public API."""
+
+    def __init__(self, real):
+        self._real = real
+        self.name = real.name
+        self.lower_is_better = real.lower_is_better
+        self.calls: list[list] = []
+
+    def pointwise(self, model, data):
+        self.calls.append(list(data))
+        return self._real.pointwise(model, data)
+
+    def scalar(self, model, data):
+        self.calls.append(list(data))
+        return self._real.scalar(model, data)
+
+
+def test_population_step_default_verify_is_disjoint_from_fit_data():
+    # Bug regression (MXR-080-0042): Population.step()/.run() used to default verify_data to `data`
+    # ITSELF (the exact same object) whenever a caller omitted it, so a challenger's parent was scored,
+    # and every challenger gated, against the very rows it (or the population's own fitness bookkeeping)
+    # was just fit on -- a near-tautological "held-out" test. The default must now derive a genuinely
+    # disjoint (fit, verify) split instead.
+    spy = _RecordingSpy(_NullObjective(_N_OBS))
+    seed_model = _NullModel(None)
+    ops = [_NullOp("op0", noise_seed=1)]
+    data = list(range(_N_OBS))
+    pop = Population([seed_model], objective=spy, operators=ops, size=4, diversity_quota=0, seed=0)
+
+    pop.step(data)  # verify_data OMITTED -- exercises exactly the default path this fix changes
+
+    assert spy.calls, "expected at least one scoring call"
+    # the OLD (buggy) default aliased verify_data to `data`, so every scoring call would have seen the
+    # FULL _N_OBS-observation data; the fix must make every one of them strictly smaller.
+    assert all(len(c) < _N_OBS for c in spy.calls), (
+        f"verify scoring saw the full {_N_OBS}-observation `data` -- no disjoint split happened: "
+        f"{[len(c) for c in spy.calls]}"
+    )
+
+
+def test_population_default_verify_differs_from_the_pre_fix_full_data_alias():
+    # Explicit before/after: the pre-fix default was literally `verify = data if verify_data is None
+    # else verify_data` -- i.e. `data` itself. The new default (an auto-derived split) must be a STRICT
+    # subset that never coincides with that old, buggy default.
+    seed_model = _NullModel(None)
+    ops = [_NullOp("op0", noise_seed=1)]
+    data = list(range(_N_OBS))
+    pop = Population([seed_model], objective=_NullObjective(_N_OBS), operators=ops, size=4, diversity_quota=0, seed=0)
+
+    _, new_verify = pop._auto_split(data)
+    old_verify = data  # the exact pre-fix default
+
+    assert new_verify != old_verify
+    assert len(new_verify) < len(old_verify)
+    assert set(new_verify).issubset(set(old_verify))
+
+
+def test_population_run_reuses_one_auto_split_verify_set_across_all_generations():
+    # The auto-derived split must be resolved ONCE per run (not re-derived every generation) --
+    # otherwise a champion's score would be measured against a different yardstick each generation,
+    # corrupting the anti-regression bookkeeping worse than the train/verify overlap this fix replaces.
+    # _auto_split is deterministic given (len(data), self.seed), so calling it twice with the same data
+    # must reproduce the exact same split -- exactly what run() relies on internally.
+    seed_model = _NullModel(None)
+    pop = Population([seed_model], objective=_NullObjective(_N_OBS), size=4, diversity_quota=0, seed=0)
+    data = list(range(_N_OBS))
+
+    fit1, verify1 = pop._auto_split(data)
+    fit2, verify2 = pop._auto_split(data)
+
+    assert fit1 == fit2
+    assert verify1 == verify2
+    assert set(fit1).isdisjoint(set(verify1))
+    assert fit1 and verify1
+
+
+def test_population_step_explicit_verify_data_still_respected():
+    # Negative control: a caller that explicitly WANTS verify_data == data (e.g. to reproduce the old
+    # single-batch behavior on purpose, exactly as the multiplicity tests above do via pop.step(data,
+    # data)) must still be able to -- this fix only changes the DEFAULT, never a caller's own explicit
+    # choice.
+    spy = _RecordingSpy(_NullObjective(_N_OBS))
+    seed_model = _NullModel(None)
+    ops = [_NullOp("op0", noise_seed=1)]
+    data = list(range(_N_OBS))
+    pop = Population([seed_model], objective=spy, operators=ops, size=4, diversity_quota=0, seed=0)
+
+    pop.step(data, data)  # verify_data EXPLICITLY passed as `data` itself
+
+    assert spy.calls
+    assert all(len(c) == _N_OBS for c in spy.calls)
+
+
+# ---------------------------------------------------------------------------
+# Regression (MXR-080-0042): evaluate_holdout is the one genuinely evidence-bearing, one-shot check
+# ---------------------------------------------------------------------------
+class _GapModel:
+    """A bare placeholder carrying a fixed mean offset from a shared random baseline."""
+
+    def __init__(self, mean):
+        self.mean = mean
+
+
+class _GapObjective:
+    """Deterministic per-observation scores: a shared low-noise baseline plus ``model.mean`` -- unlike
+    _NullObjective (zero true effect by construction, for the multiplicity tests above), two _GapModels
+    with different ``mean``s have a REAL, robustly-detectable paired difference, so evaluate_holdout has
+    something genuine to find."""
+
+    name = "gap"
+    lower_is_better = True
+
+    def __init__(self, n_obs, base_seed=777, noise_scale=0.05):
+        self._base = np.random.RandomState(base_seed).normal(0.0, noise_scale, n_obs)
+
+    def pointwise(self, model, data):
+        return self._base + model.mean
+
+    def scalar(self, model, data):
+        return float(np.mean(self.pointwise(model, data)))
+
+
+def test_evaluate_holdout_uses_only_the_holdout_data_never_the_runs_internal_data():
+    # evaluate_holdout must be computed strictly from the caller-supplied holdout_data -- never from
+    # whatever `data`/`verify_data` a prior step()/run() call used internally.
+    spy = _RecordingSpy(_NullObjective(_N_OBS))
+    seed_model = _NullModel(None)
+    ops = [_NullOp("op0", noise_seed=1)]
+    data = list(range(_N_OBS))
+    pop = Population([seed_model], objective=spy, operators=ops, size=4, diversity_quota=0, seed=0)
+    pop.step(data)
+    spy.calls.clear()
+
+    holdout_data = list(range(1000, 1000 + _N_OBS))
+    pop.evaluate_holdout(holdout_data, require_calibration=False)
+
+    assert spy.calls, "expected evaluate_holdout to score something"
+    assert all(c == holdout_data for c in spy.calls), "evaluate_holdout must score ONLY the given holdout_data"
+
+
+def test_evaluate_holdout_detects_a_genuine_improvement_with_real_statistical_evidence():
+    # Unlike step()'s internally-reused verify_data (a heuristic search signal -- see Population's
+    # class docstring), evaluate_holdout's one-shot Verdict must carry REAL statistical evidence when
+    # there is a genuine, robust improvement to detect.
+    obj = _GapObjective(_N_OBS)
+    worse = _GapModel(1.0)
+    better = _GapModel(0.0)  # lower is better -> genuinely, robustly better
+    pop = Population([worse], objective=obj, size=4, diversity_quota=0, seed=0)
+    pop._ensure_initialized(list(range(_N_OBS)))  # snapshot `worse` as the pre-run incumbent
+    pop._champion = better  # stand in for "step()/run() already promoted a genuinely better model"
+
+    verdict = pop.evaluate_holdout(list(range(_N_OBS)), require_calibration=False)
+
+    assert verdict.favored == "challenger"
+    assert verdict.has_statistical_evidence
     assert verdict.promote is True
+
+
+def test_evaluate_holdout_does_not_promote_without_a_real_difference():
+    # Negative control: no genuine gap between reference and champion -> no promotion.
+    obj = _GapObjective(_N_OBS)
+    same = _GapModel(1.0)
+    pop = Population([same], objective=obj, size=4, diversity_quota=0, seed=0)
+
+    verdict = pop.evaluate_holdout(list(range(_N_OBS)), require_calibration=False)
+
+    assert verdict.favored == "tie"
+    assert verdict.promote is False
