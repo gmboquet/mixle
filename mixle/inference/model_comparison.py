@@ -59,7 +59,9 @@ def paired_score_difference(
 
     Returns:
         ``{'mean_diff', 'se', 'ci_low', 'ci_high', 't', 'p_value', 'favored'}`` where ``mean_diff`` is
-        ``mean(a - b)`` and ``favored`` is ``'A'`` / ``'B'`` / ``'tie'`` at the given level.
+        ``mean(a - b)`` and ``favored`` is ``'A'`` / ``'B'`` / ``'tie'`` at the given level. A zero-
+        variance paired difference (every observation agrees exactly) is maximally significant when
+        the shared value is nonzero, not an automatic tie -- see the ``se == 0`` handling below.
     """
     a = np.asarray(scores_a, dtype=float).ravel()
     b = np.asarray(scores_b, dtype=float).ravel()
@@ -69,7 +71,20 @@ def paired_score_difference(
     mean_diff = float(d.mean())
     se = float(d.std(ddof=1) / np.sqrt(n))
     tcrit = stats.t.ppf(0.5 + ci_level / 2.0, n - 1)
-    t_stat = mean_diff / se if se > 0 else 0.0
+    if se > 0:
+        t_stat = mean_diff / se
+    elif mean_diff != 0.0:
+        # Every paired difference is identically the same nonzero value: se == 0 exactly, and
+        # ci_low/ci_high below collapse to the single point `mean_diff` -- already reporting
+        # certainty. `mean_diff / se` would naively be +-inf/nan depending on how it's evaluated;
+        # the old `else 0.0` fallback instead threw away the sign and forced t=0/p=1 ("no evidence"),
+        # exactly backwards -- zero dispersion with a nonzero mean is the STRONGEST evidence a paired
+        # test can produce, not the weakest. Signed infinity is the honest t -> +-inf limit as
+        # se -> 0 with a fixed nonzero numerator; mirrors geweke_z's identical denom==0-with-nonzero
+        # -diff fix in mixle/inference/diagnostics.py.
+        t_stat = np.inf if mean_diff > 0 else -np.inf
+    else:
+        t_stat = 0.0  # d is exactly zero everywhere -- a real tie, not just underpowered.
     p = float(2.0 * stats.t.sf(abs(t_stat), n - 1))
     favored = "tie"
     if p < 1.0 - ci_level:
@@ -179,7 +194,9 @@ def compare_elpd(pointwise_a: np.ndarray, pointwise_b: np.ndarray) -> dict:
         pointwise_a, pointwise_b: ``(n,)`` per-observation elpd contributions (higher is better).
 
     Returns:
-        ``{'elpd_diff', 'se', 'z', 'favored'}`` -- ``elpd_diff = sum(a - b)``.
+        ``{'elpd_diff', 'se', 'z', 'favored'}`` -- ``elpd_diff = sum(a - b)``. A zero-variance
+        pointwise difference is maximally significant when ``elpd_diff`` is nonzero, not an automatic
+        tie -- see the ``se == 0`` handling below (same degeneracy as :func:`paired_score_difference`).
     """
     a = np.asarray(pointwise_a, dtype=float).ravel()
     b = np.asarray(pointwise_b, dtype=float).ravel()
@@ -188,7 +205,16 @@ def compare_elpd(pointwise_a: np.ndarray, pointwise_b: np.ndarray) -> dict:
     n = d.shape[0]
     elpd_diff = float(d.sum())
     se = float(np.sqrt(n) * d.std(ddof=1))
-    z = elpd_diff / se if se > 0 else 0.0
+    if se > 0:
+        z = elpd_diff / se
+    elif elpd_diff != 0.0:
+        # Same zero-SE-with-nonzero-diff degeneracy as paired_score_difference (see its comment): a
+        # deterministic, exactly-repeated pointwise difference has se == 0, and reporting `se: 0.0`
+        # right next to a nonzero `elpd_diff` already claims certainty -- z must agree, not silently
+        # fall back to "tie".
+        z = np.inf if elpd_diff > 0 else -np.inf
+    else:
+        z = 0.0  # pointwise difference is exactly zero everywhere -- a real tie.
     favored = "tie" if abs(z) < 2.0 else ("A" if elpd_diff > 0 else "B")
     return {"elpd_diff": elpd_diff, "se": se, "z": float(z), "favored": favored}
 
