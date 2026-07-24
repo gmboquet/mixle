@@ -77,6 +77,26 @@ proportions of ``pmap``'s registered labels regardless of whether they happen to
 all-zero-weight (or empty) ``pmap`` at construction time, since there is then no relative
 proportion left to sample from and ``RandomState.choice`` cannot sample from an all-zero-weight
 distribution either.
+
+A fifth-wave finding, in a different module entirely: ``IntegerChowLiuTreeDistribution.__init__``
+(``mixle/stats/trees/integer_chow_liu_tree.py``) accepted its per-feature ``conditional_log_densities``
+tables with no check that they exponentiate to an actual probability distribution. A reproduced model
+built from a table with raw "probabilities" ``[1.04, 1.04]`` (summing to 2.08, not 1.0) constructed
+without error; ``log_density()``/``seq_log_density()`` kept returning finite (just meaningless) scores,
+and the sampler crashed with numpy's "probabilities do not sum to 1", deep inside
+``np.random.choice``, on the first call. Unlike ``CategoricalDistribution.pmap`` /
+``IntegerCategoricalDistribution.p_vec``, this class's own factorization contract (a tree of
+``P(root) * prod P(child | parent)`` terms) requires every table to be a genuine distribution for
+``log_density()`` to mean anything, so -- like ``MixtureDistribution.w`` -- this is a hard rejection: a
+1-d root table must sum to 1.0 once exponentiated, and a 2-d conditional table (indexed
+``table[parent_val, child_val]``) must sum to 1.0 along each row. One legitimate exception: a
+conditional row is also accepted summing to ~0.0 (every entry ``-inf``), because
+``IntegerChowLiuTreeEstimator.estimate()`` itself produces exactly that for a feature whose realized
+value range is narrower than the tree's shared ``num_states`` -- confirmed directly against the
+estimator (not just reasoned about) in
+``IntegerChowLiuTreeValidationTestCase.test_unreachable_parent_state_row_still_constructs`` below; a
+plain "every row sums to 1" rule would have turned that legitimate estimator output into a
+constructor-time rejection.
 """
 
 import math
@@ -85,6 +105,7 @@ import unittest
 import numpy as np
 
 from mixle.stats.latent.mixture import MixtureDistribution
+from mixle.stats.trees.integer_chow_liu_tree import IntegerChowLiuTreeDistribution, IntegerChowLiuTreeEstimator
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
 from mixle.stats.univariate.discrete.integer_categorical import IntegerCategoricalDistribution
@@ -279,6 +300,96 @@ class IntegerUniformSpikeValidationTestCase(unittest.TestCase):
     def test_valid_p_still_constructs(self):
         d = IntegerUniformSpikeDistribution(k=0, num_vals=3, p=0.6, min_val=0)
         self.assertTrue(np.isfinite(d.log_density(0)))
+
+
+class IntegerChowLiuTreeValidationTestCase(unittest.TestCase):
+    def test_unnormalized_root_table_rejected_at_construction(self):
+        # Regression pin for the actual reported failure mode: a root (single-feature, no edges)
+        # table built from raw "probabilities" [1.04, 1.04] -- summing to 2.08, not 1.0 -- used to
+        # construct without error. log_density() kept returning finite (just meaningless) scores;
+        # sampling was where it actually failed, deep inside np.random.choice, with "probabilities
+        # do not sum to 1", far from the actual mistake.
+        bad_root = np.log(np.array([1.04, 1.04]))
+        self.assertAlmostEqual(float(np.exp(bad_root).sum()), 2.08, places=8)
+        with self.assertRaisesRegex(ValueError, "sum to 1"):
+            IntegerChowLiuTreeDistribution([None], [bad_root])
+
+    def test_unnormalized_conditional_row_rejected_at_construction(self):
+        root = np.log([0.6, 0.4])
+        bad_edge = np.log(np.array([[0.5, 0.5], [0.9, 0.9]]))  # second row sums to 1.8, not 1.0
+        with self.assertRaisesRegex(ValueError, "sum to 1"):
+            IntegerChowLiuTreeDistribution([None, 0], [root, bad_edge])
+
+    def test_nan_entry_rejected_at_construction(self):
+        # `nan < 0.0` (and every other ordered comparison) is always False, so a plain non-negativity
+        # check alone -- the pmap/p_vec style check -- would let a NaN entry straight through; this
+        # class instead requires every entry finite (or -inf) up front, matching the same gap fixed
+        # for CategoricalDistribution.pmap / IntegerCategoricalDistribution.p_vec / MixtureDistribution.w
+        # elsewhere in this module.
+        with self.assertRaises(ValueError):
+            IntegerChowLiuTreeDistribution([None], [np.array([0.0, float("nan")])])
+
+    def test_infinite_entry_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            IntegerChowLiuTreeDistribution([None], [np.array([0.0, float("inf")])])
+
+    def test_wrong_dimension_root_table_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            IntegerChowLiuTreeDistribution([None], [np.log([[0.5, 0.5], [0.5, 0.5]])])
+
+    def test_wrong_dimension_conditional_table_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            IntegerChowLiuTreeDistribution([None, 0], [np.log([0.6, 0.4]), np.log([0.5, 0.5])])
+
+    def test_valid_tables_still_construct(self):
+        dist = IntegerChowLiuTreeDistribution([None, 0], [np.log([0.6, 0.4]), np.log([[0.7, 0.3], [0.2, 0.8]])])
+        self.assertTrue(np.isfinite(dist.log_density([0, 0])))
+        samples = dist.sampler(seed=0).sample(50)
+        self.assertEqual(len(samples), 50)
+
+    def test_tables_summing_to_one_within_float_tolerance_still_construct(self):
+        # 1/3 + 1/3 + 1/3 == 0.9999999999999999 in float64, not exactly 1.0.
+        root = np.log(np.array([1 / 3, 1 / 3, 1 / 3]))
+        dist = IntegerChowLiuTreeDistribution([None], [root])
+        self.assertTrue(np.isfinite(dist.log_density([0])))
+
+    def test_explicit_zero_probability_state_still_constructs(self):
+        # A -inf entry (an explicit, legitimate zero-probability state) must not be confused with a
+        # NaN or +inf entry: this table still sums to 1.0 once exponentiated, so it must construct.
+        root = np.log(np.array([0.5, 0.5, 0.0]))
+        dist = IntegerChowLiuTreeDistribution([None], [root])
+        self.assertEqual(dist.log_density([2]), float("-inf"))
+
+    def test_unreachable_parent_state_row_still_constructs(self):
+        # See this module's docstring: IntegerChowLiuTreeEstimator.estimate() legitimately produces a
+        # conditional table with a row that sums to 0.0 (every entry -inf), not 1.0, whenever a parent
+        # feature's realized value range is narrower than the tree's shared num_states. Confirmed
+        # directly against the estimator (not synthesized by hand), since this is exactly the
+        # scenario a naive "every row must sum to 1" check would wrongly reject: feature 0 and 1 here
+        # only ever take values 0/1, but feature 2 rarely reaches up to 4, so num_states is forced to
+        # 5 for every feature even though 0/1 are the only states feature 0 (the learned parent of the
+        # other two) ever actually takes.
+        rng = np.random.RandomState(0)
+        data = []
+        for _ in range(500):
+            f0 = int(rng.randint(0, 2))
+            f1 = f0 if rng.rand() < 0.9 else 1 - f0
+            f2 = int(rng.randint(0, 5)) if rng.rand() < 0.02 else f0
+            data.append([f0, f1, f2])
+
+        estimator = IntegerChowLiuTreeEstimator()
+        acc = estimator.accumulator_factory().make()
+        for row in data:
+            acc.update(row, 1.0, None)
+        model = estimator.estimate(len(data), acc.value())  # must not raise
+
+        row_sums = [
+            np.exp(table).sum(axis=1) for table in model.conditional_log_densities if np.asarray(table).ndim == 2
+        ]
+        self.assertTrue(any(np.any(np.isclose(rs, 0.0, atol=1e-8)) for rs in row_sums))
+
+        samples = model.sampler(seed=1).sample(200)
+        self.assertEqual(len(samples), 200)
 
 
 if __name__ == "__main__":
