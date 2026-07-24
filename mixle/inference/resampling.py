@@ -384,8 +384,9 @@ def permutation_test(
     at zero by construction (difference statistics) and compared on absolute value.
 
     Args:
-        x, y: the two samples (1-D). For ``paired=True`` they must have equal length and pairing is
-            preserved by sign-flipping the within-pair differences.
+        x, y: the two samples (1-D), each with at least one observation. For ``paired=True`` they
+            must have equal length and pairing is preserved by sign-flipping the within-pair
+            differences.
         statistic: ``f(x, y) -> float``; defaults to the difference in means. For ``paired`` it is
             applied to ``(differences, zeros)`` so the default reduces to the mean paired difference.
         n_perm: number of random rearrangements (ignored if the exact set is enumerated).
@@ -399,10 +400,25 @@ def permutation_test(
 
     Returns:
         A :class:`PermutationResult`.
+
+    Raises:
+        ValueError: if ``x`` or ``y`` is empty. A single observation per group (or a single paired
+            difference) is still a legitimate, if weak, test -- e.g. one-vs-one has 2 distinct label
+            swaps and correctly returns ``pvalue=1.0``, not an error. But an empty group has ZERO
+            rearrangements to enumerate: exact enumeration falls back to ``comb(n, 0) == 1``, silently
+            "enumerating" one degenerate combination that recomputes ``stat`` on the same empty-vs-
+            everything split, producing a null distribution of a single NaN. ``NaN >= NaN`` is False
+            in numpy, so the observed-vs-null comparison in :func:`_pvalue` counts 0 exceedances out
+            of 1 and returns an exact p-value of ``0.0`` -- reading as maximal significance from zero
+            evidence instead of failing loudly.
     """
     rng = _as_rng(seed)
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
+    if x.shape[0] == 0 or y.shape[0] == 0:
+        raise ValueError(
+            f"permutation_test requires at least one observation in each of x and y, got {x.shape[0]} and {y.shape[0]}."
+        )
     stat = statistic if statistic is not None else _mean_diff
 
     if paired:

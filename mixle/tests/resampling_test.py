@@ -199,6 +199,50 @@ class PermutationTest(unittest.TestCase):
         r = permutation_test(a, b, statistic=var_ratio, alternative="less", n_perm=3000, seed=6)
         self.assertLess(r.pvalue, 0.05)
 
+    def test_rejects_empty_groups_instead_of_a_fake_zero_pvalue(self):
+        # exact enumeration with an empty group falls back to comb(n, 0) == 1: it "enumerates" one
+        # degenerate combination that recomputes stat() on the same empty-vs-everything split,
+        # producing a null distribution of a single NaN. NaN >= NaN is False in numpy, so the
+        # exceedance count was 0 out of 1 and the exact p-value formula (count / n) silently
+        # returned 0.0 -- maximal significance from zero evidence -- instead of raising.
+        empty = np.array([])
+        nonempty = np.array([1.0, 2.0, 3.0])
+        with self.assertRaisesRegex(ValueError, "at least one observation"):
+            permutation_test(empty, empty, exact_max=100)
+        with self.assertRaisesRegex(ValueError, "at least one observation"):
+            permutation_test(empty, nonempty, exact_max=100)
+        with self.assertRaisesRegex(ValueError, "at least one observation"):
+            permutation_test(nonempty, empty, exact_max=100)
+
+    def test_rejects_empty_paired_input(self):
+        empty = np.array([])
+        with self.assertRaisesRegex(ValueError, "at least one observation"):
+            permutation_test(empty, empty, paired=True, exact_max=100)
+
+    def test_rejects_empty_group_under_stratify(self):
+        # the stratify branch has its own Monte-Carlo loop and bypasses the exact-enumeration
+        # arithmetic entirely, but an empty group is just as degenerate there (every stratum
+        # permutation is a no-op on a single-label array) -- the entry guard must catch this too,
+        # not just the exact-enumeration path.
+        with self.assertRaisesRegex(ValueError, "at least one observation"):
+            permutation_test(np.array([1.0, 2.0]), np.array([]), stratify=np.array([0, 1]), n_perm=50, exact_max=100)
+
+    def test_single_observation_per_group_is_not_swept_into_the_empty_guard(self):
+        # a single observation per group is a legitimately different case from empty: there are 2
+        # distinct label-swap rearrangements (comb(2, 1) == 2), so it's a real, if maximally weak,
+        # exact test -- it should run and correctly report no evidence (pvalue == 1.0), not raise.
+        r = permutation_test(np.array([5.0]), np.array([1.0]), exact_max=100)
+        self.assertTrue(r.exact)
+        self.assertEqual(r.n_perm, 2)
+        self.assertEqual(r.pvalue, 1.0)
+
+    def test_single_pair_is_not_swept_into_the_empty_guard(self):
+        # same reasoning for paired mode: n=1 still has 2 sign-flip rearrangements (2**1 == 2).
+        r = permutation_test(np.array([5.0]), np.array([1.0]), paired=True, exact_max=100)
+        self.assertTrue(r.exact)
+        self.assertEqual(r.n_perm, 2)
+        self.assertEqual(r.pvalue, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
