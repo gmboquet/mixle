@@ -2,14 +2,16 @@
 the captured student (workstream D10, AMPLIFY-a research spike). Proven against the same closed-form
 oracle doe_oracle_test.py uses, per the plan's own build order (no domain oracle exists yet).
 
-MXR-080-0161 regression coverage: the original "beats a single input" gate compared round 1's
+MXR-080-0161/0162 regression coverage: the original "beats a single input" gate compared round 1's
 best-of-budget against ONE extra random draw -- a multiple-comparisons trap in which passage became
-increasingly automatic as the budget grew even for a search with provably zero real skill (empirically
-confirmed against the unfixed code: pass rate for a search with i.i.d.-noise, x-independent scores tracks
-the exact closed form N / (N+1) for max-of-N-iid vs one more iid draw, e.g. ~0.92 at budget 12), and the
-extra baseline draw was never counted against the stated budget. Fixed here with a budget-matched random
-baseline plus a one-sided permutation test on best-of-budget; see mixle/doe/amplify.py's docstrings for
-the full statistical reasoning.
+increasingly automatic as the budget grew even for a search with provably zero real skill, and the extra
+baseline draw was never counted against the stated budget. And round 2's candidate pool used to include
+round 1's own oracle-verified points, spending round 2's budget re-verifying them and tautologically
+guaranteeing round2_beats_round1 (confirmed against the unfixed code: 100/100 True, 100/100 pool
+contamination, seed 0's round1-best point literally re-selected into round2 with an identical score).
+Both are fixed in mixle/doe/amplify.py: a budget-matched random baseline plus a one-sided permutation
+test on best-of-budget for the first, and a round-2 pool restricted to fresh candidates for the second.
+See that module's docstrings for the full statistical reasoning.
 """
 
 import unittest
@@ -119,18 +121,72 @@ class AmplifyAndCaptureTest(unittest.TestCase):
             f"(the old, unmatched-budget gate's exact null rate at this budget is {budget / (budget + 1):.3f})",
         )
 
-    def test_round2_at_matched_budget_beats_or_matches_round1(self):
-        oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
-        report = amplify_and_capture(oracle, _BOUNDS, n_init=4, n_iter=8, seed=0)
+    def test_round2_pool_excludes_round1s_own_points(self):
+        """MXR-080-0162 structural regression: round 1's points must never appear in round 2's
+        oracle-verified candidates. Against the unfixed code, at this exact budget (n_init=4/n_iter=8,
+        a real Bayesian-optimization search that converges close enough to the target that the student
+        ranks round 1's own points highly), this was violated in 40/40 sampled seeds -- round 1's best
+        point was re-selected into round 2's history with an identical (re-verified,
+        deterministic-oracle) score every time. Bayesian optimization's proposal step is not perfectly
+        reproducible from ``seed`` alone across process contexts (a pre-existing property of the
+        surrogate this module builds on, unrelated to this fix), so this checks every seed that
+        actually reaches round 2 rather than asserting on one -- the disjointness must hold for all of
+        them, and at least one must reach round 2 or the check below is vacuous."""
+        saw_round2 = False
+        for seed in range(6):
+            oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
+            report = amplify_and_capture(oracle, _BOUNDS, n_init=4, n_iter=8, seed=seed)
+            if report.round2 is None:
+                continue
+            saw_round2 = True
+            self.assertEqual(len(report.round2.run.history), len(report.round1.run.history))  # matched budget
+            round1_xs = {tuple(np.round(x, 12)) for x in report.round1.xs}
+            round2_xs = {tuple(np.round(x, 12)) for x in report.round2.xs}
+            self.assertEqual(round1_xs & round2_xs, set(), f"seed {seed}: round 2 re-offered a round 1 point")
+        self.assertTrue(saw_round2, "no seed in range(6) reached round 2; the check above never ran")
 
+    def test_round2_beats_round1_is_no_longer_tautological_for_a_misspecified_student(self):
+        """MXR-080-0162 non-circularity regression. Against the unfixed code, round2_beats_round1 was
+        True 100/100 sampled runs -- tautological, since round 1's own best point was always present
+        (and re-verified) in round 2's pool, floor-ing round2.best_score at round1.best_score by
+        construction. With round 1's points excluded, round 2 must stand on its own: a student that
+        cannot represent the oracle's true shape (a straight line fit to a curved bowl -- textbook
+        underfitting, not a numerical edge case) generalizes badly to the fresh candidate pool, and
+        round 2 can now legitimately score worse than round 1. n_init=12/n_iter=0/seed=7 is a fully
+        deterministic case (no Bayesian-optimization/GP step at n_iter=0, so nothing here depends on
+        process call history): round 1 clears the baseline gate, making round 2 eligible to run at
+        all, which is what makes this a real demonstration of round 2 losing, not a case that never
+        got the chance to win."""
+        oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
+        report = amplify_and_capture(oracle, _BOUNDS, n_init=12, n_iter=0, degree=1, seed=7)
+
+        self.assertTrue(report.beats_baseline)
         self.assertIsNotNone(report.round2)
-        self.assertEqual(len(report.round2.run.history), len(report.round1.run.history))  # matched budget
+        self.assertFalse(report.round2_beats_round1)
+        self.assertLess(report.round2.best_score, report.round1.best_score)
+        self.assertFalse(report.collapse.ok)
+        self.assertEqual(report.collapse.reason, "score_decreased")
+        # the retained incumbent is bookkeeping, separate from the (honestly failing) round-2 claim
+        self.assertEqual(report.incumbent_best_score, report.round1.best_score)
+
+    def test_genuinely_improving_students_round2_beats_round1_still_reports_true(self):
+        """Negative control for 0162's fix: same deterministic scenario as the misspecified-student
+        test above, differing only in ``degree`` -- a student whose functional form actually matches
+        the oracle's (a degree-2 fit to a quadratic bowl) generalizes well to the fresh pool, and
+        round2_beats_round1 must still be able to report True honestly. The fix must not make this
+        metric impossible to satisfy, only stop guaranteeing it by construction."""
+        oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
+        report = amplify_and_capture(oracle, _BOUNDS, n_init=12, n_iter=0, degree=2, seed=7)
+
+        self.assertTrue(report.beats_baseline)
+        self.assertIsNotNone(report.round2)
         self.assertTrue(report.round2_beats_round1)
         self.assertGreaterEqual(report.round2.best_score, report.round1.best_score)
+        self.assertEqual(report.incumbent_best_score, report.round2.best_score)
 
     def test_collapse_monitor_is_run_and_reused_not_reimplemented(self):
         oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
-        report = amplify_and_capture(oracle, _BOUNDS, n_init=4, n_iter=8, seed=0)
+        report = amplify_and_capture(oracle, _BOUNDS, n_init=12, n_iter=0, degree=2, seed=7)
 
         self.assertIsNotNone(report.collapse)
         self.assertTrue(report.collapse.ok)
