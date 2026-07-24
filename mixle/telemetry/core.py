@@ -90,13 +90,21 @@ class Telemetry:
         """
         with self._lock:
             self._clock += 1.0
+            ts = float(when) if when is not None else self._clock
+            # Fold an explicitly-supplied `when` into the fallback clock's high-water mark too --
+            # otherwise a caller-provided timestamp could silently leave `_clock` behind, and a
+            # later default-timestamped record() would hand out a ts smaller than one a caller
+            # just set explicitly. This does not reject/reorder out-of-order `when` values (tests
+            # rely on being able to inject arbitrary deterministic times); it only ensures the
+            # fallback clock itself never regresses because of one.
+            self._clock = max(self._clock, ts)
             ev = Event(
                 kind=kind,
                 features=dict(features or {}),
                 choice=choice,
                 outcome=dict(outcome or {}),
                 tags=dict(tags or {}),
-                ts=float(when) if when is not None else self._clock,
+                ts=ts,
             )
             self._buffer.append(ev)
             self._unflushed.append(ev)
@@ -145,6 +153,14 @@ class Telemetry:
                 if line:
                     row = json.loads(line)
                     self._buffer.append(Event(**row))
+        # Advance the fallback clock past whatever timestamps this log already contains.
+        # Without this, a freshly constructed instance's _clock restarts at 0.0, oblivious to
+        # what it just loaded, and the next default-timestamped record() would hand out a ts
+        # that collides with (or falls below) an event already on disk -- e.g. a log ending in
+        # ts=100.0 gets a ts=1.0 event appended after it, corrupting any ordering/causality
+        # assumption downstream code makes about this log.
+        if self._buffer:
+            self._clock = max(self._clock, max(ev.ts for ev in self._buffer))
 
 
 # --- a process-global default recorder so record(...) is a one-liner anywhere in the stack ---------
