@@ -24,6 +24,13 @@ cdef int64_t LOG_ZERO_CODE = np.iinfo(np.int64).min
 cdef int64_t CODE_MIN = -2305843009213693952  # == -(2**61); safely in range, no literal-folding hazard
 cdef int64_t CODE_MAX = 2305843009213693952  # == 2**61
 
+# MXR-080-0157: bounds for the checked int64 accumulation in cross_entropy_rows below. _INT64_MIN is the
+# identical bit pattern to LOG_ZERO_CODE above (both are np.iinfo(np.int64).min) but named separately --
+# this use is int64-overflow arithmetic, unrelated to the log-zero sentinel meaning. Not a bare
+# `-9223372036854775808` literal for the same reason LOG_ZERO_CODE above isn't (see that comment).
+cdef int64_t _INT64_MIN = np.iinfo(np.int64).min
+cdef int64_t _INT64_MAX = 9223372036854775807  # == 2**63 - 1; fits directly as a positive int64 literal
+
 
 cdef inline int64_t _logadd(
     int64_t a, int64_t b, int64_t[::1] lut, int dmax, int64_t log_zero, int64_t code_min, int64_t code_max
@@ -103,14 +110,43 @@ def cross_entropy_rows(int64_t[:, ::1] k, int64_t[::1] targets, int64_t[::1] lut
     The tree-fold log-partition and the target-logit gather in one pass over a reused buffer, no temporaries.
     Caller multiplies by ``step`` and divides by N for the mean negative log-likelihood.
 
-    Target/shape validation is out of scope here (see MXR-080-0140/0141, tracked separately against
-    mixle/engines/lns_nn.py); the internal tree fold below passes the module-level sentinel/range
-    constants into `_logadd` purely so its MXR-080-0138 fix (this fold has the identical overflowed-LUT-
-    index hazard as `logsumexp_rows`) applies here too, without changing this function's own signature.
+    The primary target/shape validation lives in the Python wrapper (MXR-080-0140/0141, see
+    mixle.engines.lns_nn.cross_entropy) -- it runs before this function is ever called, on the ordinary
+    call path. What is below is defense-in-depth for any caller that reaches this compiled entry point
+    directly, since this file runs with boundscheck disabled:
+
+    * MXR-080-0140: ``k`` must have >=1 class, ``targets`` must have exactly one entry per row, and
+      every entry must be a valid class index -- checked up front (before the GIL is released) so a bad
+      index can never reach the unchecked ``k[i, targets[i]]`` read below.
+    * MXR-080-0157: row losses accumulate into a checked ``int64`` total that raises rather than
+      silently wrapping. A target whose own logit is ``LOG_ZERO_CODE`` (a legitimate zero-probability
+      value) is also rejected here rather than subtracted raw -- that subtraction is an unclamped
+      ``INT64_MIN`` operand, i.e. exactly the "extreme code range" that overflows int64 on its own,
+      independent of how many rows there are. (The Python wrapper already handles this case gracefully,
+      by returning ``+inf`` -- a mathematically infinite loss isn't itself an error -- before ever
+      calling in here; a direct caller that skips that check gets a clear exception instead of a wrapped
+      int64 pretending to be a valid, finite loss.)
+
+    The internal tree fold below passes the module-level sentinel/range constants into `_logadd` purely
+    so its MXR-080-0138 fix (this fold has the identical overflowed-LUT-index hazard as
+    `logsumexp_rows`) applies here too, without changing this function's own signature.
     """
-    cdef Py_ssize_t n = k.shape[0], m = k.shape[1], i, j, half, sz
-    cdef int64_t total = 0
-    buf_np = np.empty(m if m > 0 else 1, dtype=np.int64)
+    cdef Py_ssize_t n = k.shape[0], m = k.shape[1], nt = targets.shape[0], i, j, half, sz
+    cdef int64_t total = 0, row_lse, tgt_code, diff
+    cdef Py_ssize_t bad_row = -1
+    cdef int bad_kind = 0  # 0=ok, 1=LOG_ZERO_CODE target (infinite row loss), 2=checked-accumulator overflow
+
+    if m == 0:
+        raise ValueError("cross_entropy_rows: k has zero classes (k.shape[1] == 0); classes must be nonempty")
+    if nt != n:
+        raise ValueError("cross_entropy_rows: targets length %d does not match batch size %d" % (nt, n))
+    for i in range(n):
+        if targets[i] < 0 or targets[i] >= m:
+            raise ValueError(
+                "cross_entropy_rows: target index %d at row %d out of range [0, %d)" % (targets[i], i, m)
+            )
+
+    buf_np = np.empty(m, dtype=np.int64)
     cdef int64_t[::1] buf = buf_np
     with nogil:
         for i in range(n):
@@ -126,5 +162,32 @@ def cross_entropy_rows(int64_t[:, ::1] k, int64_t[::1] targets, int64_t[::1] lut
                     sz = half + 1
                 else:
                     sz = half
-            total += buf[0] - k[i, targets[i]]
+            row_lse = buf[0]
+            tgt_code = k[i, targets[i]]
+            if tgt_code == LOG_ZERO_CODE:
+                bad_kind = 1
+                bad_row = i
+                break
+            diff = row_lse - tgt_code
+            if diff >= 0:
+                if total > _INT64_MAX - diff:
+                    bad_kind = 2
+                    bad_row = i
+                    break
+            else:
+                if total < _INT64_MIN - diff:
+                    bad_kind = 2
+                    bad_row = i
+                    break
+            total += diff
+    if bad_kind == 1:
+        raise OverflowError(
+            "cross_entropy_rows: row %d's target logit is LOG_ZERO_CODE (probability exactly zero); "
+            "the loss for that row is infinite and not representable as a finite code total" % bad_row
+        )
+    elif bad_kind == 2:
+        raise OverflowError(
+            "cross_entropy_rows: accumulated loss overflowed int64 at row %d; this batch/code range is "
+            "not representable in a checked int64 total" % bad_row
+        )
     return total
