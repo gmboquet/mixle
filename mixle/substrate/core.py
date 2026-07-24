@@ -86,13 +86,24 @@ class Substrate:
     index), is independent of what any caller does with its own reference afterward. The only way to
     change a stored item is :meth:`put` (replace wholesale) or :meth:`update` (change named fields);
     both revalidate the result and correctly invalidate the semantic index, exactly like a fresh write.
+
+    Scope isolation contract: ``search(..., scope=X)`` ranks using an embedding index fit ONLY on
+    scope ``X``'s own text items (see :meth:`reindex`) -- a scoped query's results, and the model that
+    produced them, never depend on any other scope's content, so the presence or content of items in a
+    scope you cannot pass never leaks through a scope you can. ``scope=None`` (the default) is the one
+    deliberate exception: it asks for every item across every scope, so its index is fit over
+    everything, same as asking for all of it directly through ``all()``/``get()`` would show you.
     """
 
     def __init__(self, root: str | None = None) -> None:
         self._items: dict[str, SubstrateItem] = {}
         self.root = Path(root) if root is not None else None
-        self._embedder: Any = None
-        self._embed_ids: list[str] = []  # the text-item ids the current embedder index covers
+        # One embedder PER visibility domain (see reindex()): _embedders[scope] / _embed_ids[scope] is
+        # fit ONLY on that scope's own text items, so a scoped query's transform and ranking never
+        # depend on another scope's content. Key None is the unrestricted (scope=None) index, fit over
+        # every item -- the caller asking for that already gets everything, so pooling is not a leak.
+        self._embedders: dict[str | None, Any] = {}
+        self._embed_ids: dict[str | None, list[str]] = {}  # per-index: the text-item ids it covers
         self._dirty = True  # the embedding index needs a rebuild
         if self.root is not None and (self.root / "items.jsonl").exists():
             self.load()
@@ -189,28 +200,49 @@ class Substrate:
         return [i for i in self._items.values() if i.text and (scope is None or i.scope == scope)]
 
     def reindex(self) -> None:
-        """(Re)fit the embedding index over the current text-bearing items. Idempotent, lazy-called."""
-        items = self._text_items(scope=None)
+        """(Re)fit one embedding index PER visibility domain. Idempotent, lazy-called.
+
+        MXR-080-0237: a single embedder fit over every scope's text pooled together makes a scoped
+        query's transform and ranking depend on inaccessible scopes' content -- a membership side
+        channel (whether some distinctive text exists in a scope you can never read is inferable from
+        how it shifts your OWN scoped query's scores). Fixed by fitting one embedder per distinct scope
+        value present, each ONLY on that scope's own text items, plus one unrestricted index (key
+        ``None``) fit over everything for callers that pass ``scope=None`` -- that caller is asking for
+        every scope by construction, so pooling there asserts no isolation boundary to violate.
+        :meth:`search` picks the index matching its own ``scope`` argument, so a scope's results and the
+        model that produced them never see a single byte of another scope's text.
+        """
+        self._embedders, self._embed_ids = {}, {}
+        scopes_present = {i.scope for i in self._items.values() if i.text}
+        for scope_key in (*scopes_present, None):
+            self._fit_index(scope_key)
+        self._dirty = False
+
+    def _fit_index(self, scope_key: str | None) -> None:
+        """Fit (or fall back to lexical-only) the embedding index for one visibility domain."""
+        items = self._text_items(scope=scope_key)
         if len(items) < 8:  # small corpus: a learned embedder can over-rank unsupported queries
             # (an out-of-vocabulary query lands close to SOMETHING when there are only a handful of
             # vectors), so retrieval stays on the deterministic lexical path until the corpus can
-            # actually support an embedding; small corpora stay on lexical retrieval.
-            self._embedder, self._embed_ids, self._dirty = None, [i.id for i in items], False
+            # actually support an embedding; small corpora stay on lexical retrieval. This threshold now
+            # applies PER scope: a scope can't borrow another scope's items to clear it, by design.
+            self._embedders[scope_key] = None
+            self._embed_ids[scope_key] = [i.id for i in items]
             return
         from mixle.represent import fit_embedder
 
-        self._embed_ids = [i.id for i in items]
-        self._embedder = fit_embedder([i.text for i in items], kind="text", dim=16, epochs=80, seed=0)
-        self._dirty = False
+        self._embed_ids[scope_key] = [i.id for i in items]
+        self._embedders[scope_key] = fit_embedder([i.text for i in items], kind="text", dim=16, epochs=80, seed=0)
 
     def search(
         self, query: str, k: int = 5, *, kind: str | None = None, scope: str | None = None
     ) -> list[tuple[SubstrateItem, float]]:
         """The ``k`` most relevant items to ``query`` as ``(item, score)``, filtered by kind/scope.
 
-        Text-bearing items rank by cosine similarity in the learned embedding space; when there are too
-        few items to learn one (or for a non-text query), ranking falls back to a lexical token overlap.
-        Structured items with no text always rank lexically over their serialized payload + tags.
+        Text-bearing items rank by cosine similarity in the learned embedding space fit for THIS
+        ``scope`` alone (see :meth:`reindex`); when there are too few same-scope items to learn one (or
+        for a non-text query), ranking falls back to a lexical token overlap. Structured items with no
+        text always rank lexically over their serialized payload + tags.
         """
         if self._dirty:
             self.reindex()
@@ -218,11 +250,12 @@ class Substrate:
         if not candidates:
             return []
 
+        embedder = self._embedders.get(scope)
         scored: list[tuple[SubstrateItem, float]] = []
-        if self._embedder is not None:
-            qv = self._embedder.transform(query)
-            id_to_row = {iid: r for r, iid in enumerate(self._embed_ids)}
-            vecs = self._embedder.corpus_vectors
+        if embedder is not None:
+            qv = embedder.transform(query)
+            id_to_row = {iid: r for r, iid in enumerate(self._embed_ids.get(scope, []))}
+            vecs = embedder.corpus_vectors
             for item in candidates:
                 if item.id in id_to_row:
                     scored.append((item, float(vecs[id_to_row[item.id]] @ qv)))
