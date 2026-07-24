@@ -20,7 +20,7 @@ from mixle.enumeration.quantization.core import (
     count_budget_index,
     leaf_count_index,
 )
-from mixle.enumeration.quantization.parallel import distributed_unrank
+from mixle.enumeration.quantization.parallel import ConvolutionExecutor, distributed_unrank, resolve_workers
 from mixle.enumeration.quantization.semiring import CountSemiring, enumerate_and_bin, ordered_stream_from_count_index
 from mixle.stats import *
 
@@ -478,6 +478,131 @@ class ParallelTestCase(unittest.TestCase):
         self.assertEqual(
             [(freeze(v), round(lp, 9)) for v, lp in serial], [(freeze(v), round(lp, 9)) for v, lp in dist_items]
         )
+
+
+class ParallelValidationTestCase(unittest.TestCase):
+    """MXR-080-0209: resolve_workers/distributed_unrank/ConvolutionExecutor reject invalid worker
+    counts, rank ranges, and backend spellings instead of silently clamping, truncating, or
+    rerouting a caller's request to local execution.
+    """
+
+    def setUp(self):
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2, "d": 0.05, "e": 0.05})
+        self.seq = SequenceDistribution(cat, len_dist=GeometricDistribution(0.5))
+
+    def test_nonpositive_and_fractional_worker_counts_rejected(self):
+        # Before: `max(1, int(num_workers))` clamped a non-positive value up to 1 and truncated a
+        # fractional one, silently hiding a caller bug instead of surfacing it.
+        with self.assertRaises(ValueError):
+            resolve_workers(0)
+        with self.assertRaises(ValueError):
+            resolve_workers(-3)
+        with self.assertRaises(ValueError):
+            resolve_workers(2.5)
+        with self.assertRaises(TypeError):
+            resolve_workers(True)  # bool is never a meaningful worker count
+        for bad in (0, -2, 1.5):
+            with self.subTest(num_workers=bad):
+                with self.assertRaises(ValueError):
+                    distributed_unrank(self.seq, budget_bits=32, count=10, num_workers=bad, backend="local")
+
+    def test_negative_and_fractional_ranges_rejected_before_range_splitting(self):
+        # Before: a negative/fractional start or count reached `_split_range` unvalidated, producing
+        # nonsensical negative-rank sub-ranges or a bare TypeError deep inside `range()`.
+        with self.assertRaises(ValueError):
+            distributed_unrank(self.seq, budget_bits=32, start=-1, count=10, num_workers=2, backend="local")
+        with self.assertRaises(ValueError):
+            distributed_unrank(self.seq, budget_bits=32, start=1.5, count=10, num_workers=2, backend="local")
+        with self.assertRaises(ValueError):
+            distributed_unrank(self.seq, budget_bits=32, start=0, count=-5, num_workers=2, backend="local")
+        with self.assertRaises(ValueError):
+            distributed_unrank(self.seq, budget_bits=32, start=0, count=3.7, num_workers=2, backend="local")
+
+    def test_backend_typos_rejected_not_silently_rerouted_to_local(self):
+        # Before: anything other than the literal string "spark" fell through to local execution --
+        # a typo'd/near-miss backend silently ran (potentially cluster-sized) work on this machine.
+        for spelling in ("Spark", "spark ", " spark", "pyspark", "SPARK", "Local", "LOCAL", "dask", ""):
+            with self.subTest(backend=spelling):
+                with self.assertRaises(ValueError):
+                    distributed_unrank(self.seq, budget_bits=32, count=10, num_workers=2, backend=spelling)
+
+    def test_valid_backends_still_select_intended_execution(self):
+        """Negative control: exactly 'local' and 'spark' are still honored, not just accepted."""
+        local_items = distributed_unrank(self.seq, budget_bits=32, start=0, count=50, num_workers=2, backend="local")
+        self.assertEqual(len(local_items), 50)
+
+        calls = {"parallelize": 0, "flatMap": 0, "collect": 0}
+
+        class _FakeRDD:
+            def __init__(self, ranges):
+                self._ranges = ranges
+                self._mapped = None
+
+            def flatMap(self, fn):
+                calls["flatMap"] += 1
+                out = []
+                for r in self._ranges:
+                    out.extend(fn(r))
+                self._mapped = out
+                return self
+
+            def collect(self):
+                calls["collect"] += 1
+                return self._mapped
+
+        class _FakeSparkContext:
+            def parallelize(self, ranges, n):
+                calls["parallelize"] += 1
+                return _FakeRDD(ranges)
+
+        spark_items = distributed_unrank(
+            self.seq,
+            budget_bits=32,
+            start=0,
+            count=50,
+            num_workers=2,
+            backend="spark",
+            spark_context=_FakeSparkContext(),
+        )
+        self.assertEqual(calls, {"parallelize": 1, "flatMap": 1, "collect": 1})  # the spark path genuinely ran
+        self.assertEqual(
+            [(freeze(v), round(lp, 9)) for v, lp in spark_items], [(freeze(v), round(lp, 9)) for v, lp in local_items]
+        )
+        with self.assertRaises(ValueError):  # backend='spark' still requires a spark_context
+            distributed_unrank(self.seq, budget_bits=32, count=10, num_workers=2, backend="spark")
+
+    def test_legitimate_worker_counts_and_ranges_still_distribute_work(self):
+        """Negative control: well-formed positive-integer workers and non-negative ranges are unaffected."""
+        serial = self.seq.count_budget_index(budget_bits=64, oversample=8)
+        want = [serial.get(i) for i in range(30, 80)]
+        got = distributed_unrank(
+            self.seq, budget_bits=64, start=30, count=50, oversample=8, num_workers=3, backend="local"
+        )
+        self.assertEqual([(freeze(v), round(lp, 9)) for v, lp in want], [(freeze(v), round(lp, 9)) for v, lp in got])
+        # An exact-integer float (3.0) is accepted like the int 3 -- only fractional values are rejected.
+        got_float_workers = distributed_unrank(
+            self.seq, budget_bits=64, start=30, count=50, oversample=8, num_workers=3.0, backend="local"
+        )
+        self.assertEqual(
+            [(freeze(v), round(lp, 9)) for v, lp in want], [(freeze(v), round(lp, 9)) for v, lp in got_float_workers]
+        )
+        # count=0 is a legitimate empty range, not an error.
+        empty = distributed_unrank(self.seq, budget_bits=32, start=0, count=0, num_workers=2, backend="local")
+        self.assertEqual(empty, [])
+
+    def test_convolution_executor_min_parallel_width_validated(self):
+        with self.assertRaises(ValueError):
+            ConvolutionExecutor(num_workers=1, min_parallel_width=-1)
+        with self.assertRaises(ValueError):
+            ConvolutionExecutor(num_workers=1, min_parallel_width=10.5)
+        with self.assertRaises(ValueError):
+            ConvolutionExecutor(num_workers=0)
+        exe = ConvolutionExecutor(num_workers=2, min_parallel_width=0)  # 0 is legitimate: always parallelize
+        try:
+            self.assertEqual(exe.min_parallel_width, 0)
+            self.assertEqual(exe.num_workers, 2)
+        finally:
+            exe.close()
 
 
 class CanonicalDedupCompletenessTestCase(unittest.TestCase):
