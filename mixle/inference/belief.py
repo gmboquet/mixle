@@ -153,6 +153,11 @@ class GaussianBelief(BeliefState):
 
     def __init__(self, mean: Any, cov: Any) -> None:
         m = np.atleast_1d(np.asarray(mean, dtype=float))
+        # Rejected explicitly, same as cov below: nothing downstream re-derives mean from anything
+        # that would surface a NaN as an error, so a NaN mean would otherwise construct silently and
+        # only surface much later, far from its actual cause.
+        if not np.isfinite(m).all():
+            raise ValueError("mean must be finite (no NaN or inf)")
         P = np.atleast_2d(np.asarray(cov, dtype=float))
         if P.shape != (m.size, m.size):
             raise ValueError(f"cov shape {P.shape} must be ({m.size}, {m.size}) to match mean of size {m.size}")
@@ -224,6 +229,17 @@ class GaussianBelief(BeliefState):
             Hm = Hm.reshape(-1, self._dim)
         k = Hm.shape[0]
         yv = np.atleast_1d(np.asarray(y, dtype=float)).reshape(k)
+        # Rejected explicitly, for two different reasons depending on which argument: a NaN in H
+        # always eventually reaches P_new (every P_new term routes through the gain K, itself derived
+        # from Hm), so it does get caught -- but only via the *returned* belief's own cov check below,
+        # raising a "cov must be finite" error that misattributes the actual cause. A NaN in y, by
+        # contrast, only reaches m_new (P_new's formula never references yv at all), so it is not
+        # caught downstream at all -- it silently returns a belief with a corrupted mean and an
+        # otherwise-valid-looking covariance.
+        if not np.isfinite(Hm).all():
+            raise ValueError("H must be finite (no NaN or inf)")
+        if not np.isfinite(yv).all():
+            raise ValueError("y must be finite (no NaN or inf)")
         Rm = np.asarray(R, dtype=float)
         if Rm.ndim == 0:
             Rm = Rm * np.eye(k)

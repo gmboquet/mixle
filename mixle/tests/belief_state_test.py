@@ -112,6 +112,13 @@ class GaussianBeliefBasicsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             GaussianBelief([0.0], [[np.nan]])
 
+    def test_rejects_nan_mean(self):
+        # Unlike cov, mean has no downstream check (eigenvalue-based or otherwise) that a NaN could
+        # slip past -- nothing re-derives it -- so a NaN mean would otherwise construct successfully
+        # and silently corrupt every later query (mean(), sample(), interval(), ...).
+        with self.assertRaises(ValueError):
+            GaussianBelief([np.nan, 0.0], [[1.0, 0.0], [0.0, 1.0]])
+
 
 class KalmanUpdateTest(unittest.TestCase):
     def test_scalar_update_matches_closed_form(self):
@@ -192,6 +199,24 @@ class KalmanUpdateTest(unittest.TestCase):
             b.update([1.0, 0.0], [0.5], [-10.0])
         with self.assertRaises(ValueError):
             b.update(np.eye(2), [0.5, 0.5], np.diag([-1.0, -1.0]))
+
+    def test_rejects_nan_observation_value(self):
+        # y reaches only m_new (P_new's formula never references yv), so a NaN y is not caught
+        # downstream at all: it would otherwise return a belief with a silently corrupted mean and an
+        # otherwise-valid-looking covariance -- worse than H's case below, which does at least surface
+        # indirectly.
+        b = GaussianBelief([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]])
+        with self.assertRaises(ValueError):
+            b.update([1.0, 0.0], [np.nan], 0.1)
+
+    def test_rejects_nan_observation_matrix(self):
+        # H reaches P_new via the gain K, so a NaN H already raised even before this check existed --
+        # but only via the *returned* belief's own cov check, misattributing the cause as "cov" rather
+        # than H (a plain assertRaises(ValueError) would pass either way and miss the regression this
+        # test exists to guard: matching on the message is what actually pins the correct attribution).
+        b = GaussianBelief([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]])
+        with self.assertRaisesRegex(ValueError, "^H must be finite"):
+            b.update([np.nan, 0.0], [1.0], 0.1)
 
     def test_allows_zero_observation_noise_covariance(self):
         # R=0 (a noiseless observation) is the documented R -> 0 limit and must still be allowed --
