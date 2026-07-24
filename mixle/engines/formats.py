@@ -6,8 +6,11 @@ A :class:`NumericFormat` is a lossy codec: ``quantize`` maps a ``float64`` array
 representation, ``dequantize`` maps it back, and ``max_abs_error`` / ``max_rel_error`` bound the round
 trip. The bound is the "logic" a caller uses to spend minimal bits while keeping error under a target
 (see :func:`min_float_mantissa_bits`). Fixed-point and codebook codecs store an actually smaller array
-(real compression, vectorized in numpy); the float codec rounds to an ``n``-bit float's representable set
-to *measure* that band's accuracy (true sub-byte bit-packing is the Cython/C tail).
+(real compression, vectorized in numpy) with a hard range/index limit enforced at construction or
+quantize time; the float codec instead rounds each value's MANTISSA to an ``n``-bit band's precision with
+an unbounded exponent (no overflow/underflow/subnormal handling -- see :class:`FloatFormat`) to *measure*
+that band's rounding accuracy at any magnitude (true sub-byte bit-packing, and a real range-limited fpN
+encoding, are the Cython/C tail).
 """
 
 from __future__ import annotations
@@ -57,38 +60,62 @@ class NumericFormat:
 
 
 class FloatFormat(NumericFormat):
-    """A float with ``mantissa_bits`` of mantissa -- rounds ``x`` to that band's representable set.
+    """Round-to-nearest MANTISSA rounding at ``mantissa_bits``, nominally styled after an IEEE-ish fpN
+    split (see :meth:`fp`).
 
-    Below ~52 mantissa bits this is lossy (fp4/fp8/fp16 storage); the round trip *measures* the band's
-    accuracy. ``max_rel_error == 2**-(mantissa_bits+1)`` from round-to-nearest.
+    ``quantize`` rounds each value's significand to ``mantissa_bits`` explicit bits (round-to-nearest);
+    the exponent passes through UNCHANGED, with no range limit. ``exp_bits`` therefore only feeds
+    ``name`` / ``bits_per_value`` (the advertised bit budget an allocation pass compares against) -- it is
+    NOT enforced: there is no overflow/underflow, no saturation or flush-to-zero, no subnormals, and no
+    NaN/Inf bit-pattern encoding. This is a deliberate scope choice, not an oversight: an unbounded
+    exponent is what makes ``max_rel_error`` a genuine bound for *any* finite magnitude (see that
+    property's docstring), so a caller can read the round trip as a pure mantissa-rounding measurement
+    independent of range.
+
+    A consequence: this codec does NOT faithfully emulate a real bounded fpN storage format. A real 8-bit
+    float cannot represent ``1e100`` at all, but ``FloatFormat.fp(8).round_trip([1e100])`` rounds
+    ``1e100``'s mantissa to 3 bits and returns a value that is still ~1e100 in magnitude -- by design, per
+    the above, not a bug. Do not use ``fp(8)``/``fp(16)``/etc. where actual overflow/underflow/saturation
+    behavior matters; they measure mantissa-rounding error only.
     """
 
     def __init__(self, mantissa_bits: int, exp_bits: int = 11) -> None:
         self.mantissa_bits = int(mantissa_bits)
         self.exp_bits = int(exp_bits)
-        self.name = "fp%d" % (1 + self.exp_bits + self.mantissa_bits)
-        self.bits_per_value = float(1 + self.exp_bits + self.mantissa_bits)
+        total_bits = 1 + self.exp_bits + self.mantissa_bits
+        # "nominal_fpN": N is the IEEE-ish total bit count exp_bits/mantissa_bits would imply for a real
+        # bounded float, but only mantissa_bits is actually enforced by quantize -- see the class
+        # docstring. Deliberately not named "fpN" alone: that would claim a bounded-range storage format
+        # this codec does not implement.
+        self.name = "mantissa_round(m%d,nominal_fp%d)" % (self.mantissa_bits, total_bits)
+        self.bits_per_value = float(total_bits)
 
     @classmethod
     def fp(cls, total_bits: int) -> FloatFormat:
-        """Build an ``n``-bit float format with an IEEE-like exponent/mantissa split (n = 1..1024+)."""
+        """Build a format whose ``mantissa_bits``/``exp_bits`` follow an IEEE-like split of
+        ``total_bits`` (n = 1..1024+). Only the resulting ``mantissa_bits`` affects ``quantize``'s
+        numeric behavior -- ``exp_bits`` is bit-budget bookkeeping only (see the class docstring); this
+        does NOT build a range-limited fpN codec.
+        """
         exp = _exp_bits_for(int(total_bits))
         mant = max(0, int(total_bits) - 1 - exp)
         return cls(mantissa_bits=mant, exp_bits=exp)
 
     @property
     def max_rel_error(self) -> float:
-        """Return the nominal worst-case relative rounding error."""
+        """Return the worst-case relative rounding error -- a universal bound, true for every finite
+        input regardless of magnitude (the exponent is never range-limited; see the class docstring)."""
         return 2.0 ** -(self.mantissa_bits + 1)
 
     def quantize(self, x: Any) -> np.ndarray:
-        """Round values to this floating mantissa precision."""
+        """Round values to this mantissa precision; the exponent passes through exactly, unclamped."""
         x = np.asarray(x, dtype=np.float64)
         if self.mantissa_bits >= 52:
             return x.copy()  # float64 already carries 52 mantissa bits
         m, e = np.frexp(x)  # x == m * 2**e, m in [0.5, 1)
         # Round the significand to mantissa_bits explicit bits + 1 implicit leading bit, so the
-        # round-to-nearest relative error is 2**-(mantissa_bits+1), matching ``max_rel_error``.
+        # round-to-nearest relative error is 2**-(mantissa_bits+1), matching ``max_rel_error`` for any
+        # finite x -- e passes through unclamped, so no magnitude can overflow or underflow this rounding.
         scale = float(1 << (self.mantissa_bits + 1))
         return np.ldexp(np.round(m * scale) / scale, e)
 
