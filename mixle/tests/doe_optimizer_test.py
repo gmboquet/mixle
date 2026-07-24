@@ -42,23 +42,29 @@ class AskTellMechanicsTest(unittest.TestCase):
         self.assertTrue(all(self._in_bounds(p) for p in batch))
 
     def test_tell_records_and_best_tracks_minimum(self):
+        # tell() only accepts points this optimizer's own ask() actually returned (MXR-080-0188), so
+        # -- unlike the arbitrary hand-picked x's this test used before that fix -- these must be
+        # real, currently-pending proposals; ask() one at a time and tell() each back.
         opt = BayesianOptimizer(self.bounds, n_init=4, seed=0)
-        opt.tell([0.0, 1.0], 5.0).tell([1.0, 2.0], 2.0).tell([-1.0, 4.0], 9.0)
+        p0, p1, p2 = opt.ask(), opt.ask(), opt.ask()
+        opt.tell(p0, 5.0).tell(p1, 2.0).tell(p2, 9.0)
         self.assertEqual(opt.n_observations, 3)
         self.assertEqual(opt.x.shape, (3, 2))
         self.assertEqual(opt.y.shape, (3,))
         self.assertEqual(opt.best.best_y, 2.0)
-        np.testing.assert_array_equal(opt.best.best_x, [1.0, 2.0])
+        np.testing.assert_array_equal(opt.best.best_x, p1)
 
     def test_tell_accepts_batches(self):
         opt = BayesianOptimizer(self.bounds, n_init=4, seed=0)
-        opt.tell([[0.0, 1.0], [1.0, 2.0]], [3.0, 1.0])
+        batch = opt.ask(2)  # tell() requires real, currently-pending proposals (MXR-080-0188)
+        opt.tell(batch, [3.0, 1.0])
         self.assertEqual(opt.n_observations, 2)
         self.assertEqual(opt.best.best_y, 1.0)
 
     def test_maximize_flips_incumbent(self):
         opt = BayesianOptimizer(self.bounds, maximize=True, n_init=4, seed=0)
-        opt.tell([[0.0, 1.0], [1.0, 2.0]], [3.0, 1.0])
+        batch = opt.ask(2)  # tell() requires real, currently-pending proposals (MXR-080-0188)
+        opt.tell(batch, [3.0, 1.0])
         self.assertEqual(opt.best.best_y, 3.0)
 
     def test_validation(self):
@@ -121,14 +127,20 @@ class InitialDesignBoundaryTest(unittest.TestCase):
         np.testing.assert_array_equal(combined, direct)
         self.assertEqual(split._init_used, 5)
 
-    def test_overshooting_the_boundary_in_one_call_dispenses_the_full_init_design_first(self):
-        # n_init=4, ask(6) with nothing told yet: the first 4 slots must still come from the
-        # initial design (verified via _init_used, since the zero-observations GP error below
-        # discards the returned batch); only the remaining 2 attempt -- and, with no observations
-        # yet, fail -- GP acquisition. Must be 4, not fewer, despite the double-counting bug.
+    def test_overshooting_the_boundary_in_one_call_is_atomic_and_safe_to_retry(self):
+        # n_init=4, ask(6) with nothing told yet: 4 init points are available but the remaining 2
+        # require GP acquisition, which fails with zero observations. ask() is atomic (MXR-080-0188):
+        # a failed call leaves _init_used/pending untouched rather than burning the 4 real
+        # init-design points the caller never received, so a subsequent in-budget ask(4) must still
+        # return the full, uncorrupted initial design -- not fewer than 4 due to the double-counting
+        # bug, and not skipped over due to a partially-committed failed call.
         opt = BayesianOptimizer(self.bounds, n_init=4, seed=1)
         with self.assertRaises(ValueError):
             opt.ask(6)
+        self.assertEqual(opt._init_used, 0)
+        self.assertEqual(opt.n_pending, 0)
+        retry = opt.ask(4)
+        self.assertEqual(retry.shape, (4, 2))
         self.assertEqual(opt._init_used, 4)
 
     def test_batch_overshoot_after_the_design_is_already_exhausted_raises_cleanly(self):
@@ -176,6 +188,217 @@ class InitialDesignBoundaryTest(unittest.TestCase):
         self.assertEqual(len({tuple(p) for p in all_points}), 9)
         self.assertTrue(all(self._in_bounds(p) for p in all_points))
         self.assertEqual(opt.n_observations, 9)
+
+
+class NInitValidationTest(unittest.TestCase):
+    """Regression coverage for MXR-080-0188: an invalid n_init (zero, negative, non-integer) used to
+    be silently raised to 1 (``max(1, int(n_init))``) instead of rejected -- a caller typo produced a
+    working-looking but wrong-sized initial design rather than a clear error.
+    """
+
+    bounds = [(-2.0, 2.0), (0.0, 5.0)]
+
+    def test_zero_n_init_is_rejected(self):
+        with self.assertRaises(ValueError):
+            BayesianOptimizer(self.bounds, n_init=0)
+
+    def test_negative_n_init_is_rejected(self):
+        with self.assertRaises(ValueError):
+            BayesianOptimizer(self.bounds, n_init=-3)
+
+    def test_fractional_n_init_is_rejected(self):
+        with self.assertRaises(ValueError):
+            BayesianOptimizer(self.bounds, n_init=2.5)
+
+    def test_bool_n_init_is_rejected(self):
+        # bool is a technically-valid int subclass in Python but never a meaningful count.
+        with self.assertRaises(TypeError):
+            BayesianOptimizer(self.bounds, n_init=True)
+
+    def test_none_n_init_still_uses_the_documented_default(self):
+        # n_init=None is the documented "use 2*dim+1" default, not a validation-rejection case.
+        opt = BayesianOptimizer(self.bounds, n_init=None)
+        self.assertEqual(opt.n_init, 2 * opt.dim + 1)
+
+    def test_valid_n_init_still_works(self):
+        opt = BayesianOptimizer(self.bounds, n_init=7)
+        self.assertEqual(opt.n_init, 7)
+
+
+class TellValidationTest(unittest.TestCase):
+    """Regression coverage for MXR-080-0188: tell() used to accept out-of-bounds/non-finite points,
+    NaN/Inf outcomes, duplicate tells, and observations for points never asked, all without
+    validation. Every case here stays within the n_init budget (no torch/GP fit needed): the
+    validation being tested runs identically regardless of which phase a point came from.
+    """
+
+    bounds = [(-2.0, 2.0), (0.0, 5.0)]
+
+    def test_out_of_bounds_point_is_rejected(self):
+        opt = BayesianOptimizer(self.bounds, n_init=4, seed=0)
+        opt.ask()
+        with self.assertRaises(ValueError):
+            opt.tell([10.0, 10.0], 1.0)  # well outside both dimensions' bounds
+
+    def test_non_finite_point_is_rejected(self):
+        opt = BayesianOptimizer(self.bounds, n_init=4, seed=0)
+        opt.ask()
+        with self.assertRaises(ValueError):
+            opt.tell([float("nan"), 1.0], 1.0)
+
+    def test_non_finite_outcome_is_rejected(self):
+        opt = BayesianOptimizer(self.bounds, n_init=4, seed=0)
+        p = opt.ask()
+        with self.assertRaises(ValueError):
+            opt.tell(p, float("nan"))
+        with self.assertRaises(ValueError):
+            opt.tell(p, float("inf"))
+
+    def test_unsolicited_point_is_rejected(self):
+        # A point this optimizer's own ask() never returned -- a likely caller bug (wrong array, a
+        # stale point from a different optimizer) -- is rejected by default rather than silently
+        # accepted.
+        opt = BayesianOptimizer(self.bounds, n_init=4, seed=0)
+        opt.ask()
+        with self.assertRaises(ValueError):
+            opt.tell([0.0, 1.0], 1.0)
+
+    def test_duplicate_tell_for_an_already_told_point_is_rejected(self):
+        # tell() is write-once per point; there is no "update an existing observation" path.
+        opt = BayesianOptimizer(self.bounds, n_init=4, seed=0)
+        p = opt.ask()
+        opt.tell(p, 1.0)
+        with self.assertRaises(ValueError):
+            opt.tell(p, 2.0)
+
+    def test_duplicate_point_repeated_within_one_tell_call_is_rejected(self):
+        opt = BayesianOptimizer(self.bounds, n_init=4, seed=0)
+        p = opt.ask()
+        with self.assertRaises(ValueError):
+            opt.tell([p, p], [1.0, 2.0])
+
+    def test_invalid_tell_does_not_partially_apply(self):
+        # row 0 is a real pending point, row 1 is unsolicited -- the whole call must be rejected
+        # and neither row recorded (validation covers the whole batch before anything is applied).
+        opt = BayesianOptimizer(self.bounds, n_init=4, seed=0)
+        p = opt.ask()
+        with self.assertRaises(ValueError):
+            opt.tell([p, [0.0, 1.0]], [1.0, 2.0])
+        self.assertEqual(opt.n_observations, 0)
+        self.assertEqual(opt.n_pending, 1)  # p is still pending, untouched by the failed call
+
+    def test_valid_tell_resolves_the_matching_pending_proposal(self):
+        opt = BayesianOptimizer(self.bounds, n_init=4, seed=0)
+        p = opt.ask()
+        self.assertEqual(opt.n_pending, 1)
+        opt.tell(p, 1.0)
+        self.assertEqual(opt.n_pending, 0)
+        self.assertEqual(opt.n_observations, 1)
+
+
+class PendingProposalTrackingTest(unittest.TestCase):
+    """Regression coverage for MXR-080-0188: beyond the initial design, outstanding (asked-but-not-
+    told) points were not tracked at all, so a second, overlapping ask() before any tell() had no way
+    to avoid re-proposing a point the first ask() already handed out.
+    """
+
+    bounds = [(-2.0, 2.0), (0.0, 5.0)]
+
+    def test_ask_tracks_its_return_value_as_pending_until_told(self):
+        opt = BayesianOptimizer(self.bounds, n_init=3, seed=0)
+        p0 = opt.ask()
+        self.assertEqual(opt.n_pending, 1)
+        np.testing.assert_array_equal(opt.pending[0], p0)
+        opt.tell(p0, 1.0)
+        self.assertEqual(opt.n_pending, 0)
+        self.assertEqual(opt.pending.shape, (0, 2))
+
+    def test_pending_points_from_a_prior_ask_are_folded_into_the_next_gp_fit_as_fantasy_observations(self):
+        # White-box wiring proof, independent of torch/randomness: patch out the surrogate-fit and
+        # acquisition-proposal seams ask() calls through with a fake GP and a spy, and confirm the
+        # SECOND overlapping ask() (before any tell()) feeds the surrogate one more row than the
+        # first call did -- the first ask()'s still-pending point, fantasized in.
+        import mixle.doe.optimizer as optimizer_module
+
+        class _FakeGP:
+            def predict(self, x, y, query, return_cov=False):
+                return np.zeros(query.shape[0])
+
+        captured_y_lengths: list[int] = []
+
+        def _fake_fit_surrogate(x, y, gp, fit_kwargs):
+            return _FakeGP()
+
+        def _spy_propose_next(x, y, bounds, **kwargs):
+            captured_y_lengths.append(len(y))
+            return np.array([0.1, 0.1])
+
+        opt = BayesianOptimizer(self.bounds, n_init=1, seed=0)
+        opt.tell(opt.ask(), 1.0)  # one real observation, nothing pending; init design now exhausted
+
+        original_fit, original_propose = optimizer_module._fit_surrogate, optimizer_module.propose_next
+        optimizer_module._fit_surrogate = _fake_fit_surrogate
+        optimizer_module.propose_next = _spy_propose_next
+        try:
+            opt.ask()  # remaining=1, GP phase, nothing pending yet -> plain y (1 real observation)
+            opt.ask()  # the previous ask()'s point is now pending -> fantasy-augmented y (1 + 1)
+        finally:
+            optimizer_module._fit_surrogate = original_fit
+            optimizer_module.propose_next = original_propose
+        self.assertEqual(captured_y_lengths, [1, 2])
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_two_overlapping_asks_before_any_tell_do_not_return_duplicate_points(self):
+        # Integration-level companion to the white-box test above, with a real GP: exhaust the init
+        # design and tell() it, then ask() twice more with nothing told in between (the parallel/
+        # async-campaign scenario the finding names) and confirm the two GP-acquired proposals are
+        # not the same point.
+        bounds = [(-2.0, 2.0), (-2.0, 2.0)]
+
+        def objective(p):
+            return float(np.sum(p**2))
+
+        opt = BayesianOptimizer(bounds, n_init=3, seed=0, n_candidates=256, fit_kwargs={"max_its": 40})
+        init = opt.ask(3)
+        opt.tell(init, [objective(p) for p in init])
+        first = opt.ask()
+        second = opt.ask()
+        self.assertEqual(opt.n_pending, 2)
+        self.assertFalse(np.allclose(first, second))
+
+
+@unittest.skipUnless(HAS_TORCH, "torch is not installed")
+class NormalUsageEndToEndTest(unittest.TestCase):
+    """Negative control for MXR-080-0188: an ordinary, well-behaved ask/tell campaign -- every
+    proposal matched to its correct tell(), no duplicates, no invalid inputs -- must still work
+    end to end across both the initial-design and GP-acquisition phases with the new pending
+    tracking and tell() validation in place.
+    """
+
+    def test_a_well_behaved_ask_tell_campaign_still_works_end_to_end(self):
+        target = np.array([0.5, -1.0])
+        bounds = [(-3.0, 3.0), (-3.0, 3.0)]
+
+        def objective(p):
+            return float(np.sum((p - target) ** 2))
+
+        opt = BayesianOptimizer(bounds, n_init=4, n_candidates=128, seed=0, fit_kwargs={"max_its": 40})
+        seen = []
+        for _ in range(10):
+            x = opt.ask()
+            self.assertEqual(opt.n_pending, 1)
+            opt.tell(x, objective(x))
+            self.assertEqual(opt.n_pending, 0)
+            seen.append(tuple(x))
+        self.assertEqual(len(seen), len(set(seen)))  # no duplicates across the whole campaign
+        self.assertEqual(opt.n_observations, 10)
+        self.assertIsNotNone(opt.best)
+
+        # A batched tail, spanning nothing (already well past n_init): still resolves cleanly.
+        batch = opt.ask(3)
+        opt.tell(batch, [objective(p) for p in batch])
+        self.assertEqual(opt.n_observations, 13)
+        self.assertEqual(opt.n_pending, 0)
 
 
 @unittest.skipUnless(HAS_TORCH, "torch is not installed")
