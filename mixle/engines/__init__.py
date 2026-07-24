@@ -214,6 +214,39 @@ def engine_of(x: Any, default: ComputeEngine = NUMPY_ENGINE) -> ComputeEngine:
     return default if found is None else found
 
 
+def _contains_engine_value(x: Any) -> bool:
+    """Return whether ``x`` is, or recursively contains, a directly engine-owned value.
+
+    Used by :func:`to_numpy` to decide whether a dict/list/tuple must be
+    walked leaf by leaf -- each leaf handed to its OWN owning engine -- rather
+    than handed whole to a single engine's conversion routine, which is only
+    correct for plain nested Python data with no engine-owned array inside.
+    """
+    if _direct_engine(x) is not None:
+        return True
+    if isinstance(x, dict):
+        return any(_contains_engine_value(v) for v in x.values())
+    if isinstance(x, (list, tuple)):
+        return any(_contains_engine_value(v) for v in x)
+    return False
+
+
 def to_numpy(x: Any) -> Any:
-    """Convert an engine array/tensor payload to NumPy at an explicit boundary."""
+    """Convert an engine array/tensor payload to NumPy at an explicit boundary.
+
+    A dict, list, or tuple that contains an engine-owned value is converted
+    leaf by leaf, preserving container structure and resolving each leaf's own
+    owning engine independently. Resolving a single engine for the whole
+    container up front and handing it the container as-is -- the previous
+    behavior -- fails to stack a ragged list of Torch tensors, leaves
+    dictionary values unconverted, and can hand a device tensor to
+    ``np.asarray`` without transferring it to host memory first. Plain nested
+    data with no engine-owned value is still handed to the resolved engine as
+    one unit, unchanged.
+    """
+    if isinstance(x, dict) and _contains_engine_value(x):
+        return {k: to_numpy(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)) and _contains_engine_value(x):
+        converted = [to_numpy(v) for v in x]
+        return tuple(converted) if isinstance(x, tuple) else converted
     return engine_of(x).to_numpy(x)

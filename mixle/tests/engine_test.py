@@ -13,6 +13,7 @@ from mixle.engines import (
     engine_of,
     engine_with_precision,
     precision_name,
+    to_numpy,
 )
 from mixle.engines import arithmetic as ar
 
@@ -193,6 +194,54 @@ class EngineTestCase(unittest.TestCase):
         # the generic rule is unaffected for plain (non-subclassed) ndarrays
         self.assertIsInstance(engine_of(np.asarray([1.0, 2.0])), NumpyEngine)
 
+    def test_to_numpy_flat_array_still_converts_correctly(self):
+        # Negative control for the recursive to_numpy fix (MXR-080-0123): a plain, non-nested
+        # array must still convert exactly as before.
+        x = np.asarray([1.0, 2.0, 3.0])
+        np.testing.assert_allclose(to_numpy(x), x)
+
+    def test_to_numpy_plain_nested_list_without_engine_values_is_unchanged(self):
+        # Negative control: nested Python data with no engine-owned leaf inside is still handed
+        # to the resolved engine as ONE unit (a single 2D array), not walked leaf by leaf.
+        out = to_numpy([[1.0, 2.0], [3.0, 4.0]])
+        self.assertIsInstance(out, np.ndarray)
+        np.testing.assert_allclose(out, [[1.0, 2.0], [3.0, 4.0]])
+
+    def test_to_numpy_recurses_ragged_list_of_arrays(self):
+        # Regression (MXR-080-0123): to_numpy used to resolve ONE engine for the whole container
+        # and hand it the entire container as-is -- np.asarray on a ragged list of differently
+        # shaped arrays raises ValueError. Each leaf must convert independently, preserving the
+        # list structure (this reproduces the finding's "ragged list" failure mode without
+        # needing torch: np.asarray(ragged) already raises for the same structural reason
+        # np.asarray(list_of_torch_tensors) does).
+        ragged = [np.asarray([1.0, 2.0]), np.asarray([1.0, 2.0, 3.0])]
+        with self.assertRaises(ValueError):
+            np.asarray(ragged)  # confirms the old single-shot conversion really would fail
+
+        out = to_numpy(ragged)
+        self.assertIsInstance(out, list)
+        self.assertEqual(len(out), 2)
+        np.testing.assert_allclose(out[0], [1.0, 2.0])
+        np.testing.assert_allclose(out[1], [1.0, 2.0, 3.0])
+
+    def test_to_numpy_recurses_dict_values(self):
+        # Regression (MXR-080-0123): to_numpy used to hand the whole dict to a single engine's
+        # to_numpy (np.asarray on a dict wraps it in a useless 0-d object array instead of
+        # touching its values); dict VALUES must each convert in place, preserving keys.
+        payload = {"a": np.asarray([1.0, 2.0]), "b": np.asarray([3.0, 4.0, 5.0])}
+        out = to_numpy(payload)
+        self.assertIsInstance(out, dict)
+        self.assertEqual(set(out), {"a", "b"})
+        np.testing.assert_allclose(out["a"], [1.0, 2.0])
+        np.testing.assert_allclose(out["b"], [3.0, 4.0, 5.0])
+
+    def test_to_numpy_preserves_tuple_container_type(self):
+        payload = (np.asarray([1.0]), np.asarray([2.0, 3.0]))
+        out = to_numpy(payload)
+        self.assertIsInstance(out, tuple)
+        np.testing.assert_allclose(out[0], [1.0])
+        np.testing.assert_allclose(out[1], [2.0, 3.0])
+
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_torch_engine_recovery_and_arithmetic(self):
         x = torch.tensor([1.0, 4.0, 9.0], dtype=torch.float64)
@@ -370,6 +419,44 @@ class EngineTestCase(unittest.TestCase):
         mask = torch.tensor([True, False, True])
         self.assertIsInstance(engine_of(mask), TorchEngine)  # discovery on the mask itself
         self.assertTrue(torch.equal(values[mask], torch.tensor([10.0, 30.0])))
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_to_numpy_recurses_ragged_list_of_torch_tensors(self):
+        # Regression (MXR-080-0123), exact audit scenario: a ragged list of Torch tensors used
+        # to be handed whole to one engine's to_numpy, which falls through to
+        # np.asarray(list_of_tensors) and fails on the mismatched shapes.
+        ragged = [torch.tensor([1.0, 2.0]), torch.tensor([1.0, 2.0, 3.0])]
+        out = to_numpy(ragged)
+        self.assertIsInstance(out, list)
+        np.testing.assert_allclose(out[0], [1.0, 2.0])
+        np.testing.assert_allclose(out[1], [1.0, 2.0, 3.0])
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_to_numpy_recurses_dict_of_torch_tensors(self):
+        # Regression (MXR-080-0123): dictionary VALUES used to remain un-converted tensors.
+        payload = {"obs": torch.tensor([1.0, 2.0]), "count": torch.tensor([3, 4, 5])}
+        out = to_numpy(payload)
+        self.assertIsInstance(out["obs"], np.ndarray)
+        self.assertIsInstance(out["count"], np.ndarray)
+        np.testing.assert_allclose(out["obs"], [1.0, 2.0])
+        np.testing.assert_allclose(out["count"], [3, 4, 5])
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_to_numpy_transfers_non_cpu_tensor_to_host(self):
+        # Device-transfer half of MXR-080-0123. Prefers a real accelerator (CUDA, then MPS) when
+        # available; otherwise this still exercises the structural fix on CPU, since
+        # TorchEngine.to_numpy always routes through .detach().cpu().numpy() -- the host-transfer
+        # call is on the path (as a no-op) even without real device hardware in this environment.
+        if torch.cuda.is_available():
+            dev = "cuda"
+        elif torch.backends.mps.is_available():
+            dev = "mps"
+        else:
+            dev = "cpu"
+        payload = {"x": torch.tensor([1.0, 2.0, 3.0], device=dev)}
+        out = to_numpy(payload)
+        self.assertIsInstance(out["x"], np.ndarray)
+        np.testing.assert_allclose(out["x"], [1.0, 2.0, 3.0])
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_torch_engine_mesh_replicates_and_component_shards(self):
