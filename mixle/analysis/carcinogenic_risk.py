@@ -45,7 +45,10 @@ class SlopeFactor:
         inhalation_iur: inhalation unit risk, (ug/m3)^-1. ``None`` if no established inhalation
             potency.
         sigma_log: log-scale standard deviation of a multiplicative log-normal uncertainty band
-            around the point-estimate slope factor (0.0 = treat the slope factor as fixed).
+            around the point-estimate slope factor (0.0 = treat the slope factor as fixed). Must be
+            finite and non-negative -- validated at construction (a negative or NaN value has no
+            valid meaning as a standard deviation, so it is rejected here rather than silently
+            treated as zero/fixed uncertainty downstream).
         source: provenance tag for the potency values (default the EPA IRIS database, the
             regulatory-toxicology standard; caller-supplied values should override this).
     """
@@ -55,6 +58,9 @@ class SlopeFactor:
     sigma_log: float = 0.0
     source: str = "EPA-IRIS"
 
+    def __post_init__(self) -> None:
+        _require_finite_nonnegative(self.sigma_log, "SlopeFactor.sigma_log")
+
 
 @dataclass
 class RiskQuantity:
@@ -63,10 +69,24 @@ class RiskQuantity:
     Structurally satisfies the IC-1 ``DerivedQuantity`` protocol (``samples``, ``prior_dominated``,
     ``credible_interval``) and additionally exposes ``mean`` -- the point estimate callers actually
     read off first.
+
+    Construction validates ``samples``: non-empty, finite, and a valid probability-like value in
+    ``[0, 1]`` (the range the ``excess_lifetime_cancer_risk``/``radon_wlm_risk`` LNT pushforward
+    always produces from validated non-negative inputs -- see :func:`_lnt_risk`). This is
+    defense-in-depth: invalid state cannot silently flow downstream to a caller even if some upstream
+    pushforward fails to validate its own inputs.
     """
 
     samples: np.ndarray
     prior_dominated: bool = False
+
+    def __post_init__(self) -> None:
+        arr = np.asarray(self.samples, dtype=float)
+        if arr.size == 0:
+            raise ValueError("RiskQuantity.samples must be non-empty.")
+        _require_finite_nonnegative(self.samples, "RiskQuantity.samples")
+        if np.any(arr > 1.0):
+            raise ValueError(f"RiskQuantity.samples must be <= 1 (a valid probability-like risk), got {self.samples!r}")
 
     @property
     def mean(self) -> float:
@@ -110,6 +130,16 @@ def _require_finite_nonnegative(value: np.ndarray | float, name: str) -> None:
         raise ValueError(f"{name} must be non-negative, got {value!r}")
 
 
+def _require_positive_int(value: int, name: str) -> None:
+    """Raise a clear error unless ``value`` is an exact positive integer (a Monte-Carlo draw count).
+
+    ``n <= 0`` (or a non-integer count) would otherwise silently produce an empty -- or undefined --
+    risk-sample array whose mean/credible interval are meaningless (NaN, or a crash on an empty
+    quantile), rather than a clear failure at the call that requested it."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+
+
 def excess_lifetime_cancer_risk(
     exposure: Posterior | np.ndarray | float,
     sf: SlopeFactor,
@@ -135,11 +165,13 @@ def excess_lifetime_cancer_risk(
             way to guess, on the caller's behalf, which route/chemical/time point/receptor a
             genuinely multi-dimensional draw was meant to represent, so that case is rejected with a
             clear error rather than silently collapsed to its first column).
-        sf: the chemical's :class:`SlopeFactor`. Its potency coefficient for ``route`` must be finite
-            and non-negative.
+        sf: the chemical's :class:`SlopeFactor`. Its potency coefficient for ``route``, and its
+            ``sigma_log``, must be finite and non-negative (``sigma_log`` is also validated at
+            ``SlopeFactor`` construction).
         route: ``"oral"`` or ``"inhalation"``.
         n: number of posterior draws to take when ``exposure`` is a ``Posterior``, or the number of
             slope-factor draws to take when ``exposure`` is a bare scalar and ``sf.sigma_log > 0``.
+            Must be a positive exact integer.
         rng: numpy random Generator (a fresh default one is created if omitted).
 
     Returns:
@@ -151,6 +183,10 @@ def excess_lifetime_cancer_risk(
     if csf is None:
         raise ValueError(f"SlopeFactor has no {route} potency coefficient set.")
     _require_finite_nonnegative(csf, f"SlopeFactor.{'oral_csf' if route == 'oral' else 'inhalation_iur'}")
+    # Re-validated here (in addition to `SlopeFactor.__post_init__`) as defense-in-depth against a
+    # `SlopeFactor` whose `sigma_log` was mutated to an invalid value after construction.
+    _require_finite_nonnegative(sf.sigma_log, "SlopeFactor.sigma_log")
+    _require_positive_int(n, "n")
     rng = rng if rng is not None else np.random.default_rng()
 
     def _apply(draws: np.ndarray) -> np.ndarray:
