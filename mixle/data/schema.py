@@ -10,6 +10,7 @@ records (coerce + validate) before encoding -- the thing connectors silently get
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,13 +41,34 @@ class Real(FieldType):
 
 
 class Count(FieldType):
-    """An integer count logical type."""
+    """A non-negative integer count logical type."""
 
     numpy_dtype = np.int64
 
     def coerce(self, value: Any) -> int:
-        """Coerce ``value`` to a Python ``int``."""
-        return int(value)
+        """Coerce ``value`` to a non-negative Python ``int``, validating exactness first.
+
+        Bare ``int(value)`` used to silently truncate (``1.9`` -> ``1``), silently accept ``True``/
+        ``False`` (bool is an ``int`` subclass in Python) as ``1``/``0``, and silently accept negative
+        values -- turning a data problem into a wrong-but-plausible-looking observation instead of an
+        error. A numeric string (``"42"``) is still accepted, since that is common, legitimate
+        connector input (CSV/SQL text columns); a bool, a non-integral value, a negative value, or a
+        non-finite (NaN/Inf) value is rejected instead of silently coerced.
+        """
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError("cannot coerce bool %r to Count (not a genuine count)" % (value,))
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("cannot coerce %r to Count" % (value,)) from None
+        if not np.isfinite(f):
+            raise ValueError("cannot coerce non-finite value %r to Count" % (value,))
+        if f != int(f):
+            raise ValueError("cannot coerce non-integral value %r to Count" % (value,))
+        n = int(f)
+        if n < 0:
+            raise ValueError("cannot coerce negative value %r to Count" % (value,))
+        return n
 
 
 _BOOLEAN_FALSE_STRINGS = frozenset({"false", "f", "no", "n", "0"})
@@ -229,12 +251,22 @@ class Schema:
 
 
 def _type_for(dist: Any) -> FieldType:
-    """Infer a logical type from a distribution's support (capability-based, with safe fallbacks)."""
+    """Infer a logical type from a distribution's support (capability-based, with safe fallbacks).
+
+    A ``Discrete`` capability alone is not enough to conclude ``Count``: a categorical label set and a
+    genuine integer count are BOTH ``Discrete`` (finite support), so this module's actual job is
+    telling them apart. When the capability check says a distribution is discrete, the distribution's
+    OWN declared support values are inspected (via its enumerator -- the codebase's uniform "what is
+    my support" surface) and classified by what they actually are, before ever defaulting to ``Count``
+    -- see :func:`_type_for_discrete_support`. That ordering is the fix: a ``CategoricalDistribution``
+    over string labels (e.g. ``{"red": .5, "blue": .5}``) is ``Discrete`` (finite support) but its
+    support values are not integers, so it must resolve to ``Categorical``, never ``Count``.
+    """
     try:
         from mixle.capability import Continuous, Discrete, supports
 
         if supports(dist, Discrete):
-            return Count()
+            return _type_for_discrete_support(dist)
         if supports(dist, Continuous):
             return Real()
     except Exception:  # noqa: BLE001
@@ -245,3 +277,31 @@ def _type_for(dist: Any) -> FieldType:
     if "multivariate" in cls or "gaussian" in cls and "diag" in cls:
         return Vector()
     return Real()
+
+
+def _type_for_discrete_support(dist: Any, *, peek: int = 16) -> FieldType:
+    """Classify a ``Discrete`` distribution's logical type from its own declared support values.
+
+    Draws up to ``peek`` values from ``dist.enumerator()`` (lazily -- ``itertools.islice`` never pulls
+    more than ``peek`` items, so this is safe even for the unbounded-support enumerators, e.g. Poisson
+    or negative-binomial, that stream in descending-probability order rather than materializing their
+    whole support). All-``bool`` support -> :class:`Boolean`; all non-boolean-integer support ->
+    :class:`Count`; anything else (strings, tuples, mixed types, ...) -> :class:`Categorical`. Falls
+    back to :class:`Count` -- the prior behaviour for every ``Discrete`` distribution -- only when the
+    support cannot be inspected at all (no working enumerator), so this never regresses a distribution
+    this module previously handled correctly.
+    """
+    enumerator = getattr(dist, "enumerator", None)
+    values: list[Any] = []
+    if callable(enumerator):
+        try:
+            values = [v for v, _ in itertools.islice(enumerator(), peek)]
+        except Exception:  # noqa: BLE001
+            values = []
+    if not values:
+        return Count()
+    if all(isinstance(v, (bool, np.bool_)) for v in values):
+        return Boolean()
+    if all(isinstance(v, (int, np.integer)) and not isinstance(v, (bool, np.bool_)) for v in values):
+        return Count()
+    return Categorical()
