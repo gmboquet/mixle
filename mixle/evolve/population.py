@@ -3,11 +3,22 @@
 The operator-choice problem is a **non-stationary bandit**: each step, pick an operator (arm), apply it
 through the propose-and-verify gate, observe the *verified* gate delta as reward (0 if the
 challenger was rejected), and update the arm's value. Because the reward is the anti-regression
-verified delta, the policy cannot be fooled by overfit in-sample gains.
+verified delta rather than an in-sample fit score, the policy cannot be fooled by a challenger
+overfitting the data it was FIT on.
 
-* :class:`OperatorBandit` -- Thompson or UCB over a fixed operator pool. Reward is the verified delta;
-  cost is tracked for a report. Non-stationary: a forgetting factor decays stale arm statistics so the
-  policy can follow a problem whose best operator changes over the run.
+It can still be fooled by a subtler failure: adaptive reuse of the data it is VERIFIED on. A
+:class:`Population` run queries the SAME reusable validation set every single generation, and both
+survivor selection and :class:`OperatorBandit` adapt to what they saw there -- exactly the setting
+where a held-out set stops being a fair test the more times you look at it and act on what you saw
+(the same reason a test set quietly becomes a training signal if you tune against it repeatedly). See
+:class:`Population`'s docstring ("Data roles", MXR-080-0042) for the three roles this module keeps
+separate -- fit data, the reused validation signal (a heuristic, not evidence), and the genuine
+one-shot final holdout (:meth:`Population.evaluate_holdout`).
+
+* :class:`OperatorBandit` -- Thompson or UCB over a fixed operator pool. Reward is the verified delta
+  from that reused validation signal (see above); cost is tracked for a report. Non-stationary: a
+  forgetting factor decays stale arm statistics so the policy can follow a problem whose best operator
+  changes over the run.
 * :class:`Population` -- a diversity-preserving population of model structures evolved by the bandit:
   select operators, apply them to parents, gate the challengers, reward the bandit, and keep the
   verified-best plus a coarse capability-diversity quota. ``run`` returns a
@@ -24,6 +35,7 @@ from typing import Any
 import numpy as np
 
 from mixle.capability import capabilities
+from mixle.evolve.improve import _split
 from mixle.evolve.objective import Objective
 from mixle.evolve.operators import Candidate, ImprovementOperator, default_operators
 from mixle.evolve.structure import structural_distance
@@ -212,9 +224,32 @@ class Population:
     champion/challenger rule -- pooling the whole generation's p-values for a single Benjamini-Hochberg
     correction before the per-candidate gate, since a generation produces many challengers at once --
     rewards the bandit with the verified deltas, and keeps the verified-best plus a coarse
-    capability-diversity quota. :meth:`step` / :meth:`run` take an optional ``verify_data`` so
-    challengers are fit on one split and gated + scored on a disjoint held-out split, matching the
-    ``bo`` / ``evolutionary`` search backends.
+    capability-diversity quota.
+
+    **Data roles (MXR-080-0042).** This class keeps three distinct data roles separate:
+
+    1. **Fit data** -- what operators actually fit challengers on (``data`` in :meth:`step` / :meth:`run`,
+       or its auto-derived fit-split when ``verify_data`` is omitted -- see below).
+    2. **Reusable validation data** (``verify_data``) -- read by :meth:`step` every single generation, to
+       gate every challenger (:func:`~mixle.evolve.verify.challenger_beats_champion`) AND to score
+       population fitness / drive survivor selection. When omitted, :meth:`step` / :meth:`run` derive a
+       genuinely disjoint split from ``data`` (:meth:`_auto_split`) rather than the old default of
+       reusing ``data`` itself verbatim -- but disjointness from the fit data is only half the fix.
+       This SAME ``verify_data`` is then queried again, adaptively, by EVERY generation of a
+       :meth:`run`: survivor selection keeps whoever currently scores best against it, and
+       :class:`OperatorBandit` learns from whichever operators currently win against it. The
+       per-generation Benjamini-Hochberg pool (see :meth:`step`) only controls multiplicity WITHIN one
+       generation's simultaneous comparisons; it does nothing to correct for that same set being
+       re-queried, and acted on, by every OTHER generation -- the textbook way a held-out set stops
+       being a fair test once you repeatedly tune against it. Treat every ``Verdict``/score this class
+       computes against a reused ``verify_data`` as a NOISY HEURISTIC that steers the search, never as
+       a promotion-grade statistical claim on its own.
+    3. **One-shot final holdout** -- data never passed to this population as ``data`` or ``verify_data``
+       at any point, evaluated exactly ONCE via :meth:`evaluate_holdout` after every intended
+       :meth:`step` / :meth:`run` call is done. This is the only comparison this class makes that
+       carries real evidentiary weight -- a caller that needs a defensible promotion decision (as
+       opposed to search guidance) must use it rather than trusting :attr:`champion` or a
+       :class:`GenerationReport` alone.
 
     Args:
         seeds: the initial fitted models (at least one).
@@ -224,7 +259,10 @@ class Population:
         size: the carrying capacity of the population.
         diversity_quota: how many of ``size`` slots are reserved for capability-diverse members (the rest
             go to the fittest); the quota keeps the search from collapsing onto one structure too early.
-        seed: RNG seed for parent sampling and the bandit.
+        holdout: fraction of ``data`` reserved for the auto-derived ``verify_data`` split
+            (:meth:`_auto_split`) whenever a caller omits ``verify_data`` -- irrelevant if the caller
+            always passes an explicit, already-disjoint ``verify_data``.
+        seed: RNG seed for parent sampling, the bandit, and the auto-derived split.
     """
 
     def __init__(
@@ -236,6 +274,7 @@ class Population:
         bandit: OperatorBandit | None = None,
         size: int = 12,
         diversity_quota: int = 2,
+        holdout: float = 0.25,
         seed: int = 0,
     ) -> None:
         seeds = list(seeds)
@@ -243,11 +282,14 @@ class Population:
             raise ValueError("Population needs at least one seed model.")
         if size < 1:
             raise ValueError("size must be positive.")
+        if not 0.0 < holdout < 1.0:
+            raise ValueError("holdout must be in (0, 1).")
         self.objective = objective
         self.operators = list(operators) if operators is not None else default_operators()
         self.bandit = bandit if bandit is not None else OperatorBandit(self.operators, seed=seed)
         self.size = int(size)
         self.diversity_quota = max(0, int(diversity_quota))
+        self.holdout = float(holdout)
         self.seed = int(seed)
         self.rng = np.random.RandomState(seed)
         self._gen = 0
@@ -258,6 +300,9 @@ class Population:
         # the incumbent over the whole run (anti-regression: never replaced by a worse model).
         self._champion: Any = seeds[0]
         self._champion_score: float = float("nan")
+        # the incumbent BEFORE any step()/run() call -- the one-shot evaluate_holdout()'s default
+        # comparison point (data role 3 in the class docstring above).
+        self._initial_champion: Any = seeds[0]
 
     # -- scoring helpers -----------------------------------------------------
     def _score(self, model: Any, data: Any) -> float:
@@ -275,6 +320,29 @@ class Population:
         best = min(self._members, key=lambda m: m.score)
         self._champion = best.model
         self._champion_score = best.score
+        # the run's starting incumbent, snapshotted the ONE time this runs -- evaluate_holdout()'s
+        # default reference point (data role 3: the one-shot final holdout).
+        self._initial_champion = best.model
+
+    def _auto_split(self, data: Any) -> tuple[Any, Any]:
+        """(fit, verify) split of ``data``, used by :meth:`step` / :meth:`run` whenever a caller omits
+        ``verify_data`` (data role 2 in the class docstring).
+
+        Delegates to :func:`mixle.evolve.improve._split` -- the same helper
+        :func:`~mixle.evolve.search.search` / :func:`~mixle.evolve.improve.improve` use for their own
+        train/verify splits -- seeded by ``self.seed`` (deliberately NOT ``self._gen``): calling this
+        repeatedly with data of the same length reproduces the exact SAME split every time. That
+        determinism is load-bearing, not incidental -- :meth:`run` relies on every generation seeing
+        the SAME auto-derived ``verify_data``, so a champion's score is comparable across generations;
+        re-splitting on every call would score generation N and generation N+1 against different
+        yardsticks, corrupting the anti-regression ``champion_score`` bookkeeping far worse than the
+        train/verify overlap this replaces.
+
+        Raises ``ValueError`` (from ``_split``) if ``data`` has fewer than 4 observations -- too little
+        to split honestly. Pass an explicit ``verify_data`` for those cases instead of relying on the
+        default.
+        """
+        return _split(data, self.holdout, self.seed)
 
     # -- selection -----------------------------------------------------------
     def _select_parents(self, k: int) -> list[_Member]:
@@ -308,14 +376,19 @@ class Population:
         """Run one generation: select -> propose -> gate -> reward -> survivor selection.
 
         Args:
-            data: the data operators FIT candidates on (the train split, when the caller keeps
-                train/verify separate).
+            data: the pool operators FIT candidates from (data role 1, "fit data", in the class
+                docstring). When ``verify_data`` is omitted, ``data`` is split (:meth:`_auto_split`)
+                and only the fit-half is actually fit on -- the other half becomes the auto-derived
+                ``verify_data`` below, so a challenger is never fit and scored on the same rows.
             verify_data: the held-out data used to score population fitness and to gate every
-                challenger against its parent (:func:`~mixle.evolve.verify.challenger_beats_champion`).
-                Defaults to ``data`` when omitted, reproducing the single-batch behavior older callers
-                relied on -- but scoring a candidate on the same data it was just fit on is a
-                near-tautological test, so a caller that wants a genuine held-out gate (e.g.
-                :func:`~mixle.evolve.search.search`) must pass a disjoint split here.
+                challenger against its parent (:func:`~mixle.evolve.verify.challenger_beats_champion`)
+                -- data role 2, "reusable validation data", in the class docstring: read again every
+                generation, and its repeated, adaptive use across a :meth:`run` is a HEURISTIC search
+                signal, not evidence on its own -- see :meth:`evaluate_holdout` for the genuine
+                one-shot check. Defaults to the verify-half of :meth:`_auto_split` applied to ``data``
+                when omitted (never ``data`` itself -- MXR-080-0042: the old default silently made
+                verification equal training data). Pass an explicit, already-disjoint split here (e.g.
+                :func:`~mixle.evolve.search.search` does) to control the split yourself instead.
 
         A generation proposes many challengers at once, so the gate applies a genuine population-wide
         Benjamini-Hochberg correction: every candidate is first compared on its own RAW p-value (pass 1
@@ -324,7 +397,10 @@ class Population:
         candidate's promotion finalized against its adjusted p-value (pass 3). Correcting each
         candidate's single p-value in isolation -- family size 1 -- is the identity transform for every
         method in :mod:`~mixle.inference.multiple_testing`, which is why
-        :func:`~mixle.evolve.verify.challenger_beats_champion` refuses to do that itself.
+        :func:`~mixle.evolve.verify.challenger_beats_champion` refuses to do that itself. This pooled
+        correction operates WITHIN one generation only -- it does not, and cannot, correct for the same
+        ``verify_data`` being queried again by every OTHER generation of a :meth:`run` (see the class
+        docstring's "Data roles" note and :meth:`evaluate_holdout`).
 
         A scalar-only ``self.objective`` (:func:`~mixle.evolve.objective.calibration_objective`,
         :func:`~mixle.evolve.objective.decision_regret_objective`) has no paired test to run at all --
@@ -332,9 +408,12 @@ class Population:
         design (see that function's scalar-only branch) -- so pass 2 excludes non-finite p-values from
         the pooled family entirely rather than handing them to ``adjust_pvalues`` (which rejects
         non-finite input outright); such a candidate's own unadjusted ``verdict.promote`` stands as its
-        final promotion decision, since there is no p-value for a population-wide correction to act on.
+        final promotion decision, since there is no p-value for a population-wide correction to act on
+        -- which, per :attr:`~mixle.evolve.verify.Verdict.promote`, is now ALWAYS ``False`` for a
+        scalar-only objective regardless of ``favored`` (no sampling-uncertainty estimate backs a bare
+        scalar delta -- see :attr:`~mixle.evolve.verify.Verdict.has_statistical_evidence`).
         """
-        verify = data if verify_data is None else verify_data
+        fit_data, verify = (data, verify_data) if verify_data is not None else self._auto_split(data)
         self._ensure_initialized(verify)
         report = GenerationReport(best_score=self._champion_score)
         ctx = {"parent_hash": None, "seed": self.seed + self._gen, "objective": self.objective}
@@ -354,9 +433,9 @@ class Population:
             slot = _GenerationSlot(op=op, cost=cost)
             slots.append(slot)
             try:
-                if not op.applicable(parent.model, data, ctx=ctx):
+                if not op.applicable(parent.model, fit_data, ctx=ctx):
                     continue
-                candidate = op.propose(parent.model, data, ctx=ctx)
+                candidate = op.propose(parent.model, fit_data, ctx=ctx)
             except Exception:  # noqa: BLE001
                 continue
             report.proposals += 1
@@ -428,23 +507,36 @@ class Population:
         """Evolve for ``generations`` steps; return a :class:`~mixle.evolve.search.SearchResult`.
 
         Args:
-            data: the data operators fit candidates on each generation (the train split, when the
-                caller keeps train/verify separate).
-            verify_data: the held-out data used to score fitness and gate every challenger; defaults to
-                ``data`` (see :meth:`step`) when omitted -- pass a disjoint split for a genuine held-out
-                gate.
+            data: the pool operators fit candidates from each generation (data role 1, "fit data", in
+                the class docstring). When ``verify_data`` is omitted, ``data`` is split ONCE, up front
+                (:meth:`_auto_split`), and only the fit-half is fit on for every generation of this run.
+            verify_data: the held-out data used to score fitness and gate every challenger -- data role
+                2, "reusable validation data" (see the class docstring's "Data roles" note): the SAME
+                split is reused for EVERY generation, and both survivor selection and
+                :class:`OperatorBandit` adapt to it, which is exactly the sequential/adaptive reuse the
+                class docstring warns is a heuristic search signal, not evidence. Defaults to the
+                verify-half of :meth:`_auto_split` applied to ``data`` when omitted (never ``data``
+                itself -- MXR-080-0042). Pass an explicit, already-disjoint split for a caller-controlled
+                gate (e.g. :func:`~mixle.evolve.search.search` always does).
             generations: number of :meth:`step` calls.
 
-        The returned ``best_model`` is the run incumbent, guaranteed no worse than the best seed on the
-        objective (anti-regression). ``history`` is one row per generation (proposals / verified / score).
+        The returned ``best_model`` is the run incumbent, guaranteed no worse than the best seed *on
+        whatever ``verify_data`` this run used* (anti-regression is relative to that reused validation
+        signal, not an unconditional guarantee about unseen data -- see :meth:`evaluate_holdout` for the
+        one-shot check that actually earns that stronger claim). ``history`` is one row per generation
+        (proposals / verified / score).
         """
         from mixle.evolve.search import SearchResult
 
-        verify = data if verify_data is None else verify_data
+        fit_data, verify = (data, verify_data) if verify_data is not None else self._auto_split(data)
         self._ensure_initialized(verify)
         history: list[dict[str, Any]] = []
         for _ in range(int(generations)):
-            rep = self.step(data, verify_data)
+            # the SAME (fit_data, verify) pair every generation -- resolved ONCE above, not re-derived
+            # per call, so every generation is scored against one consistent yardstick (see
+            # _auto_split's docstring) and step() never re-triggers its own (redundant, and here
+            # unreachable since verify is always explicit below) default-split path.
+            rep = self.step(fit_data, verify)
             history.append(
                 {
                     "proposals": rep.proposals,
@@ -462,6 +554,49 @@ class Population:
             best_score=float(native_best),
             history=history,
         )
+
+    def evaluate_holdout(
+        self,
+        holdout_data: Any,
+        *,
+        reference: Any | None = None,
+        **verdict_kwargs: Any,
+    ) -> Verdict:
+        """The one genuinely evidence-bearing check this class can make (data role 3, "one-shot final
+        holdout", in the class docstring) -- call this EXACTLY ONCE, after every :meth:`step` /
+        :meth:`run` call you intend to make is already done, on ``holdout_data`` that was never passed
+        to this population as ``data`` or ``verify_data`` at any point.
+
+        Every ``Verdict`` / score :meth:`step` computes internally along the way is checked against the
+        SAME reused ``verify_data``, generation after generation -- a heuristic search signal, not a
+        defensible promotion claim (see the class docstring's "Data roles" note). This method is the
+        genuine, single-look alternative: ONE :func:`~mixle.evolve.verify.challenger_beats_champion`
+        comparison between ``reference`` (defaults to this population's incumbent BEFORE its first
+        :meth:`step` / :meth:`run` call -- i.e. the best seed) and :attr:`champion` (the current
+        incumbent).
+
+        Calling this more than once against the same ``holdout_data`` reintroduces exactly the
+        adaptive-reuse problem it exists to avoid -- treat ``holdout_data`` as spent after one call, the
+        same as any other held-out test set.
+
+        Args:
+            holdout_data: fresh data this population has never scored anything on. Verifying that is
+                the caller's responsibility -- ``Population`` has no way to check it from the object
+                alone.
+            reference: the champion to compare :attr:`champion` against; defaults to the pre-run
+                incumbent (see above). Pass the currently-deployed production model explicitly if that
+                differs.
+            verdict_kwargs: forwarded to :func:`~mixle.evolve.verify.challenger_beats_champion` (e.g.
+                ``alpha``, ``min_effect``, ``seed``); ``nonnested`` defaults to whether ``reference`` and
+                :attr:`champion` are different model types, but can be overridden.
+
+        Returns:
+            The one-shot :class:`~mixle.evolve.verify.Verdict`; ``verdict.promote`` is the genuine,
+            evidence-backed promotion decision.
+        """
+        ref = self._initial_champion if reference is None else reference
+        verdict_kwargs.setdefault("nonnested", type(self._champion).__name__ != type(ref).__name__)
+        return challenger_beats_champion(ref, self._champion, holdout_data, objective=self.objective, **verdict_kwargs)
 
     @property
     def champion(self) -> Any:

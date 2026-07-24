@@ -11,6 +11,17 @@ ADOPTED champion gets a genealogy receipt (:class:`GenealogyLedger`, built direc
 :class:`~mixle.evolve.ledger.EvolutionLedger`) recording its parent, the operator that produced it,
 and the measured gap -- a real, walk-backable lineage.
 
+**Data roles (MXR-080-0042).** :meth:`ClosedLoopSelfEvolution.step` splits each arriving batch into a
+candidate pool and a held-out ``verify_data`` split BEFORE harvest/acquire touch anything, fits a
+challenger only on an acquired subset of the candidate pool, and gates it against ``verify_data`` by
+default (see :meth:`step`'s "Note on verify") -- never on data the challenger was just fit on, and
+never on the biased-by-construction complement of acquire's own hardest-example selection. See
+:mod:`mixle.evolve.population`'s module docstring for the fuller three-role framing (fit / reusable
+validation / one-shot holdout) this loop shares: unlike :class:`~mixle.evolve.population.Population`,
+each step here ordinarily gates against a FRESH batch from the caller's stream, so a single step's
+promotion decision is itself evidence-bearing; only the per-context :class:`OperatorCreditBandit`'s
+reward, accumulated across many steps, is a heuristic search signal in the same sense.
+
 **Which subsystems this wires, not rebuilds:**
 
 * :mod:`mixle.task.router` -- :func:`harvested_from_router` reads a real
@@ -54,6 +65,7 @@ from typing import Any
 import numpy as np
 
 from mixle.data.hashing import model_hash
+from mixle.evolve.improve import _split
 from mixle.evolve.ledger import EvolutionLedger
 from mixle.evolve.objective import Objective, _ScalarObjective
 from mixle.evolve.operators import AutoSelect, ImprovementOperator, Mutate, Refit
@@ -354,7 +366,11 @@ class ClosedLoopSelfEvolution:
         acquire_k: how many harvested failures A5's ``acquire`` prioritizes per step.
         acquire_strategy: the ``acquire()`` ranking strategy (default ``"entropy"``, the one that works
             for a marginal/non-conditional champion via :class:`_ConstantProbaAdapter`).
-        seed: RNG seed threaded through the bandit and the gate.
+        holdout: fraction of each arriving ``batch`` set aside, BEFORE harvest/acquire ever see it, as
+            the default ``verify_data`` when a caller omits ``verify`` in :meth:`step` -- see
+            :meth:`step`'s "Note on verify" (MXR-080-0042). Irrelevant if the caller always passes an
+            explicit ``verify``.
+        seed: RNG seed threaded through the bandit, the split, and the gate.
     """
 
     def __init__(
@@ -367,14 +383,18 @@ class ClosedLoopSelfEvolution:
         acquire_k: int = 32,
         acquire_strategy: str = "entropy",
         bandit_c: float = 1.0,
+        holdout: float = 0.25,
         seed: int = 0,
     ) -> None:
+        if not 0.0 < holdout < 1.0:
+            raise ValueError("holdout must be in (0, 1).")
         self.champion = champion
         self.objective = objective
         self.operators = dict(operators) if operators is not None else default_challenger_operators()
         self.context_fn = context_fn or (lambda batch: "default")
         self.acquire_k = int(acquire_k)
         self.acquire_strategy = acquire_strategy
+        self.holdout = float(holdout)
         self.bandit = OperatorCreditBandit(list(self.operators), c=bandit_c, seed=seed)
         self.genealogy = GenealogyLedger()
         self.seed = int(seed)
@@ -401,12 +421,31 @@ class ClosedLoopSelfEvolution:
         5. reward the bandit with the verified (anti-regression) delta,
         6. deploy + record a genealogy receipt iff the gate promotes.
 
-        Note on ``verify``: when omitted, ``verify_data`` defaults to the WHOLE ``batch``, while
-        ``train_data`` (what the challenger is fit on) is ``acquire``'s top-priority SUBSET of that same
-        ``batch`` -- so the default gate scores the challenger on a set that overlaps the data it was
-        just fit on, weaker evidence than a disjoint split. Callers that want a clean held-out gate
-        should pass an explicit ``verify`` batch of observations not also handed to this step's
-        ``train_data``.
+        Note on ``verify`` (MXR-080-0042 -- data roles, see :mod:`mixle.evolve.population`'s module
+        docstring for the fuller three-role framing this loop shares): ``train_data`` (what the
+        challenger is fit on) is ``acquire``'s top-priority SUBSET of ``batch``. When ``verify`` is
+        omitted, ``verify_data`` no longer defaults to the whole ``batch`` (which CONTAINS
+        ``train_data``, so the gate used to score a challenger on rows it had just been fit on -- weaker
+        evidence than a disjoint split). Instead, ``batch`` is split (:func:`~mixle.evolve.improve._split`,
+        fraction ``self.holdout``) into a candidate pool and ``verify_data`` FIRST, before harvest/acquire
+        ever see it, and ONLY the candidate pool is harvested + ranked for ``train_data``. This is
+        deliberately a RANDOM split up front, not ``batch`` minus whatever ``acquire`` happened to pick:
+        ``acquire`` selects the pool's most informative/hardest-to-classify items on purpose (that is the
+        whole point of active acquisition), so its complement is systematically skewed toward whatever the
+        CURRENT champion already gets right -- an unrepresentative, biased verify set that would
+        under-detect exactly the improvement the loop exists to find, which is arguably worse than the
+        overlap it would replace. Splitting first keeps ``verify_data`` a fair, representative sample of
+        ``batch``'s actual distribution, genuinely disjoint from anything harvest/acquire/the challenger's
+        fit ever touches. Callers who want to control the split themselves (or whose ``batch`` is already
+        disjoint from wherever ``train_data`` will come from) should pass an explicit ``verify`` batch
+        instead. Note too that ONE step's gate decision (``verdict.promote`` above) is a fresh, one-shot
+        look at that step's own (now-disjoint, representative) data -- the per-step promotion decision
+        itself is evidence-bearing. What is only a heuristic is the per-CONTEXT
+        :class:`OperatorCreditBandit`'s ACCUMULATED reward across many steps: exactly like
+        :class:`~mixle.evolve.population.Population`'s bandit, it is fine when each step draws fresh data
+        (the normal :meth:`run`-over-a-stream usage), but a caller who calls :meth:`step` repeatedly
+        against the SAME (or overlapping) ``verify``/``batch`` data should treat the bandit's learned
+        preferences as search guidance, not as a promotion-grade statistical claim about any one operator.
 
         Note on ``budget_remaining``: when given, the bandit-selected operator's own ``cost_hint`` is
         checked against it BEFORE the operator runs -- an operator whose cost exceeds what remains is
@@ -419,12 +458,20 @@ class ClosedLoopSelfEvolution:
         batch = list(batch)
         ctx = context if context is not None else self.context_fn(batch)
 
-        failures = harvest_failures(self.champion, batch, self.objective)
-        pool = failures if failures else batch
+        if verify is not None:
+            verify_data = list(verify)
+            candidate_pool = batch
+        else:
+            # split FIRST, before harvest/acquire touch anything -- see the Note on `verify` above for
+            # why the complement of acquire's OWN selection would be a biased, unrepresentative verify
+            # set rather than a merely smaller one.
+            candidate_pool, verify_data = _split(batch, self.holdout, self.seed + self._n_steps)
+
+        failures = harvest_failures(self.champion, candidate_pool, self.objective)
+        pool = failures if failures else candidate_pool
         train_data = _acquire_priority(self.champion, pool, self.acquire_k, strategy=self.acquire_strategy)
         if not train_data:
             train_data = pool
-        verify_data = list(verify) if verify is not None else batch
 
         op_name = self.bandit.select(ctx)
         operator = self.operators[op_name]
