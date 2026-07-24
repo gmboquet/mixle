@@ -33,25 +33,37 @@ from mixle.stats.compute.pdist import (
 from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias
 
 
-def _robust_cho_factor(covar: np.ndarray):
+def _robust_cho_factor(covar: np.ndarray) -> tuple[tuple[np.ndarray, bool], np.ndarray]:
     """Cholesky-factor a covariance, self-healing a covariance that lost positive-definiteness.
 
     A sample covariance ``E[xx^T] - mu mu^T`` is PD in exact arithmetic, but float32 accumulation (GPU /
     MPS engines) can lose PD-ness to catastrophic cancellation, and a near-empty EM component can go
     singular. The fast path (a genuinely PD float64 covariance) is UNCHANGED. On failure, symmetrize
     (fixes float32 asymmetry) and add a trace-scaled jitter, escalating until PD -- so the fit proceeds
-    instead of crashing at ``cho_factor``. The jitter is minimal (starts at 1e-10 * mean-diagonal)."""
+    instead of crashing at ``cho_factor``. The jitter is minimal (starts at 1e-10 * mean-diagonal).
+
+    ``cho_factor`` only reads one triangle of its input, so an asymmetric-but-PD ``covar`` factors
+    "successfully" against a matrix that silently differs from ``covar`` itself (the other triangle is
+    ignored). To keep every consumer -- scoring AND sampling -- agreeing on one effective covariance,
+    this always symmetrizes before factoring (bit-for-bit a no-op when ``covar`` is already symmetric)
+    and returns that exact matrix alongside the factor. Callers must store/propagate the returned
+    covariance, not the original ``covar``, as the distribution's effective covariance.
+
+    Returns:
+        Tuple of (``scipy.linalg.cho_factor`` output, the covariance matrix that factor corresponds to).
+    """
+    sym = 0.5 * (covar + covar.T)
     try:
-        return scipy.linalg.cho_factor(covar)
+        return scipy.linalg.cho_factor(sym), sym
     except (scipy.linalg.LinAlgError, np.linalg.LinAlgError):
-        sym = 0.5 * (covar + covar.T)
         scale = float(np.trace(sym)) / max(sym.shape[0], 1)
         scale = scale if np.isfinite(scale) and scale > 0 else 1.0
         eye = np.eye(sym.shape[0])
         jitter = 1e-10 * scale
         for _ in range(12):
+            healed = sym + jitter * eye
             try:
-                return scipy.linalg.cho_factor(sym + jitter * eye)
+                return scipy.linalg.cho_factor(healed), healed
             except (scipy.linalg.LinAlgError, np.linalg.LinAlgError):
                 jitter *= 10.0
         raise
@@ -220,7 +232,9 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         Attributes:
             dim: Dimension of the Gaussian.
             mu: Mean vector.
-            covar: Covariance matrix.
+            covar: Effective covariance matrix -- symmetrized, and self-healed if the input was only
+                PD after regularization (see ``_robust_cho_factor``). Always the exact matrix backing
+                ``chol``/``log_det``/``inv_covar``, so scoring and sampling agree.
             chol: Cholesky factor when available.
             name: Optional diagnostic name.
             keys: Optional sufficient-statistic key.
@@ -233,7 +247,13 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         self.mu = np.asarray(mu, dtype=float)
         self.covar = np.asarray(covar, dtype=float)
         self.covar = np.reshape(self.covar, (len(self.mu), len(self.mu)))
-        self.chol = _robust_cho_factor(self.covar)
+        # self.covar is reassigned here to the EXACT (symmetrized, and self-healed if necessary)
+        # covariance _robust_cho_factor actually factorized -- not the possibly asymmetric/indefinite
+        # input -- so every downstream reader of self.covar (the sampler, __str__, condition/marginal,
+        # the Fisher view, ...) agrees with what chol/log_det/inv_covar drive scoring from. Previously
+        # self.covar kept the raw input, so an accepted-but-invalid covariance (asymmetric, or PD only
+        # after healing) made scoring and sampling silently disagree about the effective covariance.
+        self.chol, self.covar = _robust_cho_factor(self.covar)
         self.name = name
         self.keys = keys
 
