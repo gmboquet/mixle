@@ -11,6 +11,7 @@ from scipy.stats import norm, spearmanr
 import mixle.stats as st
 from mixle.inference import optimize
 from mixle.stats.combinator.copula import CopulaDistribution
+from mixle.stats.multivariate.frank_copula import FrankCopulaDistribution
 from mixle.stats.multivariate.gaussian_copula import GaussianCopulaDistribution
 
 
@@ -96,6 +97,65 @@ class CopulaDistributionTest(unittest.TestCase):
     def test_requires_at_least_two_marginals(self):
         with self.assertRaises(ValueError):
             CopulaDistribution([st.GaussianDistribution(0.0, 1.0)], GaussianCopulaDistribution(np.eye(1)))
+
+    def test_rejects_a_discrete_marginal(self):
+        # CopulaDistribution's log_density/seq_log_density apply the CONTINUOUS Sklar decomposition
+        # f(x) = c(F(x)) * prod_i f_i(x_i), valid only when every f_i is a genuine density. For a discrete
+        # marginal, log_density is a probability MASS, not a density -- plugging a mass into the continuous
+        # copula-density formula does not produce a model that sums to 1 (see the reviewer's concrete
+        # example below), so this must be rejected at construction rather than silently scored.
+        with self.assertRaises(ValueError):
+            CopulaDistribution(
+                [st.BernoulliDistribution(0.5), st.GaussianDistribution(0.0, 1.0)],
+                GaussianCopulaDistribution(np.array([[1.0, 0.7], [0.7, 1.0]])),
+            )
+
+    def test_rejects_a_mixed_discrete_continuous_pair_even_though_one_marginal_is_continuous(self):
+        # a single discrete marginal is enough to break the continuous-Sklar formula for the whole joint --
+        # "one of the marginals happens to be continuous" does not rescue it.
+        with self.assertRaises(ValueError):
+            CopulaDistribution(
+                [st.GaussianDistribution(0.0, 1.0), st.BernoulliDistribution(0.3)],
+                GaussianCopulaDistribution(np.array([[1.0, 0.7], [0.7, 1.0]])),
+            )
+
+    def test_two_discrete_bernoulli_marginals_would_not_sum_to_one_if_construction_were_allowed(self):
+        # Regression for the concrete failure mode the discrete-marginal rejection above is guarding
+        # against: bypass the constructor's guard (build via __new__ to set up the same state the checked
+        # __init__ would) and confirm the old unconditional Sklar formula really does report a total
+        # probability far from 1 across the four Bernoulli x Bernoulli outcomes -- i.e. the rejection in
+        # test_rejects_a_discrete_marginal is not a false positive on an actually-fine computation.
+        cop = object.__new__(CopulaDistribution)
+        cop.marginals = [st.BernoulliDistribution(0.5), st.BernoulliDistribution(0.5)]
+        cop.dim = 2
+        cop.copula = GaussianCopulaDistribution(np.array([[1.0, 0.7], [0.7, 1.0]]))
+        cop.name = None
+        cop.keys = None
+        total = sum(cop.density((a, b)) for a in (0, 1) for b in (0, 1))
+        self.assertGreater(total, 1000.0)  # nowhere near a valid probability model (should be exactly 1)
+
+    def test_rejects_a_copula_dimension_mismatched_with_the_marginal_count(self):
+        # three marginals but a two-dimensional Frank copula used to succeed at construction (and even at
+        # scoring, since seq_log_density only ever touches as many columns as the copula core expects) and
+        # only blow up later, at sampling time, with an opaque reshape error.
+        with self.assertRaises(ValueError):
+            CopulaDistribution(
+                [
+                    st.GaussianDistribution(0.0, 1.0),
+                    st.GaussianDistribution(0.0, 1.0),
+                    st.GaussianDistribution(0.0, 1.0),
+                ],
+                FrankCopulaDistribution(2, 3.0),
+            )
+
+    def test_matching_copula_dimension_and_marginal_count_still_constructs(self):
+        # negative control for the dimension check: equal counts must still work.
+        cop = CopulaDistribution(
+            [st.GaussianDistribution(0.0, 1.0), st.GaussianDistribution(0.0, 1.0), st.GaussianDistribution(0.0, 1.0)],
+            GaussianCopulaDistribution(np.eye(3)),
+        )
+        self.assertEqual(cop.dim, 3)
+        self.assertEqual(cop.copula.dim, 3)
 
     def test_scalar_pit_rejects_a_marginal_cdf_outside_the_unit_interval(self):
         # a broken marginal.cdf() (bug, or a value outside the marginal's support) used to be silently

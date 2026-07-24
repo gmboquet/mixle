@@ -2,8 +2,9 @@
 
 ``GaussianCopulaDistribution`` (``mixle.stats.multivariate``) models *only* dependence, on the unit cube
 ``(0,1)^d`` -- it assumes its inputs are already the uniform scores ``u_i``. This combinator is the piece
-that makes copulas *composable*: give it your marginals (any mixle leaves exposing ``cdf`` -- a Gamma, a
-StudentT, a VonMises, mixed freely) and a copula core, and it forms the joint
+that makes copulas *composable*: give it your CONTINUOUS marginals (any mixle leaves exposing ``cdf`` --
+a Gamma, a StudentT, a VonMises, any continuous family mixed freely) and a copula core, and it forms the
+joint
 
     f(x_1, ..., x_d) = c(F_1(x_1), ..., F_d(x_d)) * prod_i f_i(x_i)                       (Sklar)
 
@@ -11,13 +12,24 @@ where each ``F_i = marginals[i].cdf`` is the probability-integral transform (PIT
 density. That is the whole point of copulas: pick any marginals you like and couple them through one
 dependence object, instead of hand-writing a bespoke multivariate leaf for every marginal combination.
 
+This continuous-Sklar formula is only valid when every ``f_i`` is a genuine density. A DISCRETE marginal's
+``log_density`` is a probability MASS, not a density; plugging a mass into the continuous copula-*density*
+formula over/under-counts and the resulting "probabilities" no longer sum to 1 (two Bernoulli(0.5) margins
+coupled by a correlated Gaussian copula, e.g., report outcome probabilities summing to roughly 2.5e8, not
+1). The mathematically correct joint for a discrete or mixed marginal instead needs copula-*CDF* rectangle
+differences (inclusion-exclusion over ``C``, not ``c``, at the corners of each discrete cell) -- none of
+this combinator's copula cores (Gaussian/Clayton/Frank/Student-t/vine) currently expose a CDF, so rather
+than silently producing an invalid probability model, ``CopulaDistribution.__init__`` rejects any marginal
+with enumerable (discrete/atomic) support. Discrete/mixed marginals are not yet supported.
+
 Estimation is **IFM** (Inference Functions for Margins): fit each marginal on its own column, PIT the data
 through the fitted marginals, then fit the copula on the uniform scores. This is exact in a single M-step
 (the accumulator buffers the raw columns, the same pattern the neural leaves use), not an approximate
 coupled iteration.
 
 The copula core is pluggable: any distribution on ``(0,1)^d`` implementing the mixle five-piece contract
-works. :class:`~mixle.stats.multivariate.gaussian_copula.GaussianCopulaDistribution` is the first supported
+works, as long as it also exposes a ``dim`` attribute matching ``len(marginals)`` (checked at construction).
+:class:`~mixle.stats.multivariate.gaussian_copula.GaussianCopulaDistribution` is the first supported
 core; Clayton/Frank/t cores can be dropped in later with no change here.
 
 Reference: Nelsen, *An Introduction to Copulas* (2nd ed., Springer, 2006); Joe, *Dependence Modeling with
@@ -34,6 +46,7 @@ import numpy as np
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
+    EnumerationError,
     ParameterEstimator,
     SequenceEncodableProbabilityDistribution,
     SequenceEncodableStatisticAccumulator,
@@ -44,13 +57,38 @@ from mixle.stats.multivariate._copula_common import reject_out_of_unit_cube
 _CLIP = 1.0e-12  # keep PIT scores strictly inside (0,1) so the copula's Phi^{-1} stays finite
 
 
+def _is_discrete_marginal(marginal: Any) -> bool:
+    """Return whether ``marginal`` has enumerable (discrete/atomic) support.
+
+    Probes :meth:`~mixle.stats.compute.pdist.SequenceEncodableProbabilityDistribution.enumerator` the same
+    way :func:`mixle.stats.combinator.truncated._is_discrete_base` /
+    :func:`mixle.stats.combinator.censored._is_discrete_base` already do: a distribution with atomic support
+    overrides ``enumerator()``, while a continuous one inherits the base class's default and raises
+    :class:`EnumerationError`. A marginal that does not even expose ``enumerator`` (e.g. a minimal
+    duck-typed stub) is likewise treated as continuous, matching the base class's own default. This is how
+    the constructor below tells apart a ``marginal.log_density(x)`` that is a probability MASS (discrete
+    support) from one that is a genuine density (continuous support) -- see the module docstring for why
+    that distinction is load-bearing for the continuous Sklar decomposition this class implements.
+    """
+    if not hasattr(marginal, "enumerator"):
+        return False
+    try:
+        marginal.enumerator()
+    except EnumerationError:
+        return False
+    return True
+
+
 class CopulaDistribution(SequenceEncodableProbabilityDistribution):
     """Joint over ``d`` scalar fields = ``d`` marginals coupled by a copula core (Sklar's theorem).
 
-    ``marginals`` is a length-``d`` sequence of mixle leaves, each exposing ``log_density``, ``cdf``, a
-    ``sampler()`` with ``sample()``, and the estimator/encoder contract. ``copula`` is a distribution on
-    ``(0,1)^d`` (e.g. :class:`GaussianCopulaDistribution`). An observation is a length-``d`` tuple/array of
-    scalars ``(x_1, ..., x_d)``.
+    ``marginals`` is a length-``d`` sequence of CONTINUOUS mixle leaves, each exposing ``log_density``,
+    ``cdf``, a ``sampler()`` with ``sample()``, and the estimator/encoder contract -- a marginal with
+    enumerable (discrete/atomic) support is rejected at construction (see module docstring: the continuous
+    Sklar density formula this class implements is not a valid probability model for discrete marginals).
+    ``copula`` is a distribution on ``(0,1)^d`` (e.g. :class:`GaussianCopulaDistribution`) whose ``dim``
+    must equal ``len(marginals)``. An observation is a length-``d`` tuple/array of scalars
+    ``(x_1, ..., x_d)``.
     """
 
     def __init__(
@@ -64,6 +102,28 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
         self.dim = len(self.marginals)
         if self.dim < 2:
             raise ValueError("CopulaDistribution needs at least 2 marginals; got %d" % self.dim)
+        discrete = [i for i, m in enumerate(self.marginals) if _is_discrete_marginal(m)]
+        if discrete:
+            raise ValueError(
+                "CopulaDistribution only supports continuous marginals. Its log_density/seq_log_density "
+                "apply the continuous Sklar decomposition f(x) = c(F_1(x_1),...,F_d(x_d)) * prod_i f_i(x_i), "
+                "which is valid only when every f_i (marginals[i].log_density) is a genuine density; "
+                "marginal(s) at index %s have enumerable (discrete/atomic) support, where log_density is a "
+                "probability MASS instead -- plugging a mass into the continuous copula-density formula "
+                "over/under-counts and the model no longer sums to 1. A correct discrete/mixed joint needs "
+                "copula-CDF rectangle differences, which none of this combinator's copula cores currently "
+                "expose; discrete/mixed marginals are not yet supported." % discrete
+            )
+        copula_dim = getattr(copula, "dim", None)
+        if copula_dim is None:
+            raise ValueError(
+                "CopulaDistribution's copula core must expose a `dim` attribute; %s does not." % type(copula).__name__
+            )
+        if int(copula_dim) != self.dim:
+            raise ValueError(
+                "CopulaDistribution has %d marginals but its copula core (%s) is %d-dimensional; "
+                "these must match." % (self.dim, type(copula).__name__, int(copula_dim))
+            )
         self.copula = copula
         self.name = name
         self.keys = keys
