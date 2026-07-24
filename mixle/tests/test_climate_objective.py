@@ -135,9 +135,10 @@ def test_climate_terms_prices_carbon_and_flags_water_infeasibility():
     assert dirty["water_feasible"] is False
     assert dirty["water_binding"] is True
 
-    # shortfall_prob reads the water budget's own step trajectory: 3 of 12 dirty steps sit at zero.
-    assert clean["shortfall_prob"] == 0.0
-    assert dirty["shortfall_prob"] == pytest.approx(3.0 / 12.0)
+    # shortfall_time_fraction reads the water budget's own step trajectory: 3 of 12 dirty steps sit at
+    # zero. It is a single-trajectory duration statistic, not a probability (MXR-080-0087).
+    assert clean["shortfall_time_fraction"] == 0.0
+    assert dirty["shortfall_time_fraction"] == pytest.approx(3.0 / 12.0)
 
 
 def test_climate_terms_water_limit_alone_can_bind():
@@ -149,15 +150,101 @@ def test_climate_terms_water_limit_alone_can_bind():
     assert terms["water_feasible"] is False
 
 
-def test_climate_terms_none_water_is_permissive():
+def test_climate_terms_none_water_is_unknown_not_permissive():
+    # Regression for MXR-080-0087: an absent water budget used to default to "feasible" (a silent,
+    # permissive pass). It is now an explicit unknown/not-evaluated state -- carbon_cost is still a
+    # definite number (it never depended on water evidence), but the water terms are all None rather
+    # than a fabricated "known feasible".
     footprint = Footprint(scope1=1.0, scope2=1.0, scope3=1.0, total=3.0)
     terms = climate_terms(footprint, None, carbon_price=5.0)
     assert terms == {
         "carbon_cost": 15.0,
-        "water_feasible": True,
-        "water_binding": False,
-        "shortfall_prob": 0.0,
+        "water_feasible": None,
+        "water_binding": None,
+        "shortfall_time_fraction": None,
     }
+
+
+def test_non_finite_shortfall_m3_is_unknown_not_feasible():
+    # Regression for MXR-080-0087: `shortfall_m3 > 0.0` is False for NaN (NaN-comparison-is-False), so
+    # an invalid/unknown shortfall reading used to silently mark the option feasible. It must now come
+    # back as an explicit unknown rather than a permissive pass.
+    footprint = Footprint(scope1=1.0, scope2=0.0, scope3=0.0, total=1.0)
+    water = SimpleNamespace(shortfall_m3=float("nan"))
+    terms = climate_terms(footprint, water, carbon_price=1.0)
+    assert terms["water_feasible"] is None
+    assert terms["water_binding"] is None
+    assert terms["shortfall_time_fraction"] is None
+
+
+def test_non_finite_water_limit_is_unknown_not_feasible():
+    # A non-finite water_limit_m3 makes the demand-vs-limit check unevaluable; it must not silently
+    # fall through to "not binding".
+    footprint = Footprint(scope1=1.0, scope2=0.0, scope3=0.0, total=1.0)
+    water = SimpleNamespace(shortfall_m3=0.0, demand_m3=5_000.0)
+    terms = climate_terms(footprint, water, carbon_price=1.0, water_limit_m3=float("nan"))
+    assert terms["water_feasible"] is None
+    assert terms["water_binding"] is None
+
+
+def test_non_finite_demand_is_unknown_not_feasible():
+    footprint = Footprint(scope1=1.0, scope2=0.0, scope3=0.0, total=1.0)
+    water = SimpleNamespace(shortfall_m3=0.0, demand_m3=float("nan"))
+    terms = climate_terms(footprint, water, carbon_price=1.0, water_limit_m3=1_000.0)
+    assert terms["water_feasible"] is None
+    assert terms["water_binding"] is None
+
+
+def test_confirmed_binding_survives_an_unknown_from_the_other_check():
+    # Three-valued OR: a confirmed shortfall (True) must not be erased by an unrelated unevaluable
+    # water-limit check (Unknown) -- True dominates Unknown dominates False.
+    footprint = Footprint(scope1=1.0, scope2=0.0, scope3=0.0, total=1.0)
+    water = SimpleNamespace(shortfall_m3=250.0)  # confirmed binding
+    terms = climate_terms(footprint, water, carbon_price=1.0, water_limit_m3=float("nan"))  # unknown check
+    assert terms["water_binding"] is True
+    assert terms["water_feasible"] is False
+
+
+def test_non_finite_storage_entries_make_shortfall_time_fraction_unknown():
+    # A storage trajectory with non-finite entries can't yield a reliable duration statistic -- NaN
+    # entries must not silently compare False against the zero threshold and dilute the fraction.
+    footprint = Footprint(scope1=1.0, scope2=0.0, scope3=0.0, total=1.0)
+    water = SimpleNamespace(shortfall_m3=1.0, storage=np.array([0.0, 0.0, float("nan"), 5.0]))
+    terms = climate_terms(footprint, water, carbon_price=1.0)
+    assert terms["shortfall_time_fraction"] is None
+
+
+def test_shortfall_prob_key_no_longer_exists():
+    # The old key name claimed a probability it never computed; confirm the rename actually took.
+    footprint = Footprint(scope1=1.0, scope2=0.0, scope3=0.0, total=1.0)
+    water = SimpleNamespace(shortfall_m3=0.0, storage=np.full(4, 10.0))
+    terms = climate_terms(footprint, water, carbon_price=1.0)
+    assert "shortfall_prob" not in terms
+    assert "shortfall_time_fraction" in terms
+
+
+def test_shortfall_probability_over_ensemble_matches_known_fraction():
+    # A genuine cross-realization probability, given an explicit ensemble: 2 of 4 independent
+    # trajectories hit a binding zero storage at some point -> analytically expected probability 0.5.
+    from mixle.analysis.emissions import _shortfall_probability_over_ensemble
+
+    ensemble = np.array(
+        [
+            [10.0, 5.0, 0.0, 3.0],  # hits shortfall
+            [10.0, 8.0, 6.0, 4.0],  # never hits shortfall
+            [1.0, 0.0, 0.0, 0.0],  # hits shortfall
+            [5.0, 5.0, 5.0, 5.0],  # never hits shortfall
+        ]
+    )
+    assert _shortfall_probability_over_ensemble(ensemble) == pytest.approx(0.5)
+
+
+def test_shortfall_probability_over_ensemble_rejects_a_single_trajectory():
+    # A single 1-D trajectory is a duration statistic (_shortfall_time_fraction), not an ensemble.
+    from mixle.analysis.emissions import _shortfall_probability_over_ensemble
+
+    with pytest.raises(ValueError, match="2-D"):
+        _shortfall_probability_over_ensemble(np.array([1.0, 2.0, 0.0, 3.0]))
 
 
 def test_posterior_stub_conforms_to_ic1():

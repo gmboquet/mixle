@@ -181,4 +181,4 @@ def test_climate_terms_still_duck_types_an_unrelated_water_object():
     fp = emissions_footprint(ACTIVITY, FACTORS)
     result = climate_terms(fp, ThirdPartyWaterBudget(), carbon_price=10.0)
     assert result["water_feasible"] is True
-    assert result["shortfall_prob"] == pytest.approx(1.0 / 3.0)
+    assert result["shortfall_time_fraction"] == pytest.approx(1.0 / 3.0)

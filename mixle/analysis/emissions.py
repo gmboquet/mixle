@@ -17,8 +17,9 @@ GHG-Protocol-style :class:`EmissionFactors`.
     (uncertainty-aware, not just a point estimate) plus a mean-value scenario ranking.
   * :func:`climate_terms` -- folds a :class:`Footprint` and an optional water budget into the two
     numbers J6's objective (``analysis/valuation.py``) and H4's optimizer (``stochastic_opt.py``)
-    need: a priced carbon cost, and a hard water-feasibility flag, plus a probability-of-shortfall
-    downside term.
+    need: a priced carbon cost, and a hard water-feasibility flag (an explicit ``None``/unknown state,
+    not a permissive default, when water evidence is missing or non-finite), plus a shortfall
+    time-fraction downside term -- a single-trajectory duration statistic, not a probability.
 
 Emission factors are always supplied by the caller (or an upstream knowledge store) -- this module
 vendors no lifecycle-inventory database; see the work-plan Non-goals for L1.
@@ -62,7 +63,7 @@ class WaterBudget(Protocol):
     duck-typed via ``getattr(water, ..., default)`` throughout this module, so a caller-supplied
     object satisfying only ``shortfall_m3`` (the one required field) still works -- the optional
     fields default to absent, matching the "or None if absent" fallbacks already documented on
-    :func:`_water_demand_m3` and :func:`_shortfall_probability`.
+    :func:`_water_demand_m3` and :func:`_shortfall_time_fraction`.
     """
 
     shortfall_m3: float
@@ -457,21 +458,77 @@ def _water_demand_m3(water: Any) -> float | None:
     return None
 
 
-def _shortfall_probability(water: Any, shortfall_m3: float) -> float:
-    """Fraction of the water budget's own per-step trajectory sitting at a binding (zero) storage.
+def _shortfall_time_fraction(water: Any, shortfall_m3: float) -> float | None:
+    """Fraction of ONE deterministic water-budget trajectory's time steps sitting at a binding (zero)
+    storage -- a duration/occupancy statistic, NOT a probability: it summarizes a single
+    already-simulated trajectory and carries no information about uncertainty. A genuine probability
+    of shortfall requires a defined ENSEMBLE of trajectories under different realizations (e.g.
+    resampled inflow/demand) and the fraction of members that hit shortfall -- see
+    :func:`_shortfall_probability_over_ensemble` for that computation, given an explicit ensemble; this
+    module has no water-uncertainty model of its own to draw one from (see the module's repo-boundary
+    note).
 
     Uses the `WaterBudget.storage` per-step array L2's algorithm always populates (one entry per routed
-    time step) as the empirical distribution for a shortfall-downside probability -- the storage march
-    already *is* a discretized sample path over the planning horizon, so no separate Monte-Carlo layer
-    is needed here. Falls back to a 0/1 point estimate keyed on ``shortfall_m3`` when no ``storage``
-    trajectory is available (e.g. a caller-supplied summary rather than a full `WaterBudget`).
+    time step) when available. Falls back to a 0/1 point read of ``shortfall_m3`` when no ``storage``
+    trajectory is available (e.g. a caller-supplied summary rather than a full `WaterBudget`). Returns
+    ``None`` -- an explicit "not evaluable", rather than a silently wrong number -- when the available
+    evidence is non-finite: a storage trajectory containing non-finite entries, or a non-finite
+    ``shortfall_m3`` with no trajectory to fall back on.
     """
     storage = getattr(water, "storage", None)
     if storage is not None:
         arr = np.asarray(storage, dtype=np.float64)
         if arr.size:
+            if not np.all(np.isfinite(arr)):
+                return None
             return float(np.mean(arr <= 0.0))
+    if not np.isfinite(shortfall_m3):
+        return None
     return 1.0 if shortfall_m3 > 0.0 else 0.0
+
+
+def _shortfall_probability_over_ensemble(trajectories: np.ndarray) -> float:
+    """Genuine cross-realization probability of shortfall, given an EXPLICIT ensemble of independent
+    storage trajectories (one row per realization -- e.g. resampled inflow/demand scenarios from an
+    upstream uncertainty model).
+
+    Unlike :func:`_shortfall_time_fraction` (a duration statistic over ONE deterministic trajectory),
+    this treats each row as a distinct possible future and returns the empirical fraction of
+    realizations whose trajectory hits a binding (zero) storage at any point -- a real probability over
+    uncertainty, not over time. This module has no water-uncertainty model of its own (see the module's
+    repo-boundary note), so the ensemble must be supplied by the caller; a single 1-D trajectory is not
+    a valid ensemble (use :func:`_shortfall_time_fraction` for that).
+
+    ``trajectories`` is a ``(n_members, n_steps)`` array, one storage path per ensemble member.
+    """
+    arr = np.asarray(trajectories, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError(
+            "_shortfall_probability_over_ensemble: trajectories must be a 2-D (n_members, n_steps) "
+            f"array, one storage path per realization; got shape {arr.shape}. A single 1-D trajectory "
+            "is a duration statistic, not a probability -- see _shortfall_time_fraction."
+        )
+    n_members, n_steps = arr.shape
+    if n_members == 0 or n_steps == 0:
+        raise ValueError(
+            f"_shortfall_probability_over_ensemble: trajectories must be nonempty in both axes; got shape {arr.shape}"
+        )
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("_shortfall_probability_over_ensemble: trajectories must be finite")
+    member_hits_shortfall = np.any(arr <= 0.0, axis=1)  # (n_members,)
+    return float(np.mean(member_hits_shortfall))
+
+
+def _kleene_or(a: bool | None, b: bool | None) -> bool | None:
+    """Three-valued OR: a confirmed ``True`` dominates (a real risk signal from one check cannot be
+    erased by another check's unknown), then Unknown, then confirmed ``False`` -- so a missing or
+    non-finite check never silently downgrades a confirmed positive, and never rounds up to a false
+    "feasible" either."""
+    if a is True or b is True:
+        return True
+    if a is None or b is None:
+        return None
+    return False
 
 
 def climate_terms(
@@ -483,46 +540,69 @@ def climate_terms(
 ) -> dict:
     """Fold an emissions footprint and a water budget into J6's carbon cost + H4's water constraint.
 
-    Returns ``{"carbon_cost": float, "water_feasible": bool, "water_binding": bool, "shortfall_prob":
-    float}``:
+    Returns ``{"carbon_cost": float, "water_feasible": bool | None, "water_binding": bool | None,
+    "shortfall_time_fraction": float | None}``:
 
     - ``carbon_cost = footprint.total * carbon_price`` -- the priced carbon term J6's objective
-      (`analysis/valuation.py`) subtracts alongside `capex_opex`'s cost roll-up.
+      (`analysis/valuation.py`) subtracts alongside `capex_opex`'s cost roll-up. Always a definite
+      float; it does not depend on water evidence.
     - ``water_binding`` is set when the L2 `WaterBudget.shortfall_m3 > 0` (the routed water balance
       already ran dry at some point over the plan) OR when a caller-supplied ``water_limit_m3`` is given
       and the budget's demand exceeds it; ``water_feasible`` is its negation -- a hard constraint H4
       (`stochastic_opt.py`) folds into a per-option cost (derating or dropping the option) rather than
-      into the mean-grade objective.
-    - ``shortfall_prob`` is the fraction of the water budget's own per-step storage trajectory sitting at
-      a binding zero (:func:`_shortfall_probability`) -- a climate-physical downside term that is
-      reported independently of ``water_limit_m3`` even for options that are feasible on average but
-      fragile.
+      into the mean-grade objective. Either can come back ``None`` (unknown) instead of a definite
+      ``bool`` -- see below.
+    - ``shortfall_time_fraction`` is the fraction of the water budget's own per-step storage trajectory
+      sitting at a binding zero (:func:`_shortfall_time_fraction`) -- a deterministic duration/occupancy
+      statistic over ONE trajectory, reported independently of ``water_limit_m3`` even for options that
+      are feasible on average but fragile. This is NOT a probability: it carries no uncertainty
+      information. A genuine cross-realization probability requires an explicit ensemble of
+      trajectories (:func:`_shortfall_probability_over_ensemble`), which is not available from a single
+      ``water`` object.
 
-    When ``water`` is ``None`` (no water budget available for this option -- e.g. an inland option with
-    no catchment exposure), the water terms take the permissive defaults: feasible, non-binding, zero
-    shortfall probability. Climate risk for that option is carbon-only.
+    Missing or non-finite water evidence is an explicit UNKNOWN state, never a permissive pass:
+
+    - When ``water`` is ``None`` (no water budget available for this option -- e.g. an inland option
+      with no catchment exposure), ``water_feasible``, ``water_binding``, and
+      ``shortfall_time_fraction`` are all ``None``: climate risk for that option is carbon-only, but
+      the water terms are reported as "not evaluated", not silently "known feasible".
+    - When ``shortfall_m3``, the water-limit demand, or ``water_limit_m3`` itself is non-finite
+      (NaN/inf), that check contributes ``None`` (unknown) rather than silently comparing false and
+      passing as non-binding. The two binding checks combine via three-valued (Kleene) OR: a confirmed
+      binding signal from either check always wins, an unknown never gets rounded down to "feasible".
     """
     carbon_cost = float(footprint.total) * float(carbon_price)
 
     if water is None:
         return {
             "carbon_cost": carbon_cost,
-            "water_feasible": True,
-            "water_binding": False,
-            "shortfall_prob": 0.0,
+            "water_feasible": None,
+            "water_binding": None,
+            "shortfall_time_fraction": None,
         }
 
-    shortfall_m3 = float(getattr(water, "shortfall_m3", 0.0) or 0.0)
-    water_binding = shortfall_m3 > 0.0
+    raw_shortfall = getattr(water, "shortfall_m3", 0.0)
+    shortfall_m3 = float(raw_shortfall) if raw_shortfall is not None else 0.0
+    shortfall_known = np.isfinite(shortfall_m3)
+    shortfall_binding: bool | None = (shortfall_m3 > 0.0) if shortfall_known else None
 
+    demand_binding: bool | None = False  # no water_limit_m3 configured: this check is inapplicable, not unknown
     if water_limit_m3 is not None:
+        limit = float(water_limit_m3)
         demand = _water_demand_m3(water)
-        if demand is not None and demand > float(water_limit_m3):
-            water_binding = True
+        if demand is None:
+            demand_binding = None  # a limit was configured but there is no demand evidence to check it against
+        elif not (np.isfinite(limit) and np.isfinite(demand)):
+            demand_binding = None
+        else:
+            demand_binding = demand > limit
+
+    water_binding = _kleene_or(shortfall_binding, demand_binding)
+    water_feasible = None if water_binding is None else (not water_binding)
 
     return {
         "carbon_cost": carbon_cost,
-        "water_feasible": not water_binding,
+        "water_feasible": water_feasible,
         "water_binding": water_binding,
-        "shortfall_prob": _shortfall_probability(water, shortfall_m3),
+        "shortfall_time_fraction": _shortfall_time_fraction(water, shortfall_m3),
     }
