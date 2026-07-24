@@ -5,6 +5,7 @@ import unittest
 
 import numpy as np
 
+from mixle.inference.estimation import optimize
 from mixle.stats.combinator.exponential_tilt import (
     ExponentialTiltedDistribution,
     register_exponential_tilt,
@@ -148,6 +149,78 @@ class TiltEstimatorTestCase(unittest.TestCase):
         fitted = est.estimate(len(data), acc.value())
         self.assertIsInstance(fitted, ExponentialTiltedDistribution)
         self.assertAlmostEqual(float(np.atleast_1d(fitted.theta)[0]), 0.5, delta=TOL)  # theta held fixed
+
+
+class TiltColdStartTestCase(unittest.TestCase):
+    """Regression tests for the cold-start path: ``optimize()`` with no ``prev_estimate``, which
+    drives ``ExponentialTiltedAccumulator.acc_to_encoder()``/``initialize()``/``seq_initialize()``
+    before any estimate exists (as opposed to ``update()``/``seq_update()``, exercised by a warm
+    start / second pass)."""
+
+    def test_cold_optimize_does_not_crash(self):
+        # acc_to_encoder() used to advertise only the child's (base) encoder while seq_initialize
+        # expected the (base_enc, tvals) pair that a prev_estimate=None (cold) optimize() pass
+        # encodes data with -- raising "ValueError: too many values to unpack".
+        base = GaussianDistribution(0.0, 1.0)
+        proto = ExponentialTiltedDistribution(base, theta=0.0)
+        estimator = proto.estimator(fit="theta")
+        data = [2.0] * 200
+        fitted = optimize(data, estimator, out=None)
+        self.assertIsInstance(fitted, ExponentialTiltedDistribution)
+        self.assertAlmostEqual(float(np.atleast_1d(fitted.theta)[0]), 2.0, delta=1e-4)
+
+    def test_cold_fit_estimates_theta_matching_warm_path(self):
+        # initialize() used to only forward observations to the child (base) accumulator, leaving
+        # sum_t=0/count=0 -- so fitting from scratch (a single initialize() pass, no prior
+        # estimate) on data that's all 2.0 estimated theta=0. update() (a warm-start / second pass
+        # given a prior estimate) correctly estimates theta ~= 2.0.
+        #
+        # This drives the module-level initialize()/update() accumulator calls directly rather
+        # than going through optimize()'s EM loop: for this closed-form score-equation fit, each EM
+        # iteration re-derives theta from a fresh seq_update() independent of the previous theta,
+        # so optimize() happens to self-correct a bad cold-start estimate after a single step --
+        # masking this bug end-to-end once Bug 1 (the encoder crash) is fixed.
+        from mixle.stats.compute.sequence import initialize as free_initialize
+
+        base = GaussianDistribution(0.0, 1.0)
+        proto = ExponentialTiltedDistribution(base, theta=0.0)
+        estimator = proto.estimator(fit="theta")
+        data = [2.0] * 200
+
+        # p=1.0 keeps every observation (no random subsampling), so the result is deterministic.
+        cold = free_initialize(data=data, estimator=estimator, rng=np.random.RandomState(0), p=1.0)
+
+        acc_warm = estimator.accumulator_factory().make()
+        for v in data:
+            acc_warm.update(v, 1.0, None)
+        warm = estimator.estimate(len(data), acc_warm.value())
+
+        cold_theta = float(np.atleast_1d(cold.theta)[0])
+        warm_theta = float(np.atleast_1d(warm.theta)[0])
+        self.assertAlmostEqual(cold_theta, 2.0, delta=1e-4)
+        self.assertAlmostEqual(warm_theta, 2.0, delta=1e-4)
+        self.assertAlmostEqual(cold_theta, warm_theta, delta=1e-6)
+
+    def test_cold_initialize_accumulates_tilt_statistic(self):
+        # Direct accumulator-level check (bypassing optimize()) that initialize()/seq_initialize()
+        # accumulate the tilt's own sum_t/count -- not just the child's sufficient statistics.
+        base = GaussianDistribution(0.0, 1.0)
+        proto = ExponentialTiltedDistribution(base, theta=0.0)
+        estimator = proto.estimator(fit="theta")
+        data = [2.0] * 200
+        rng = np.random.RandomState(0)
+
+        acc = estimator.accumulator_factory().make()
+        for v in data:
+            acc.initialize(v, 1.0, rng)
+        self.assertEqual(acc.count, 200.0)
+        np.testing.assert_allclose(acc.sum_t, [400.0], atol=1e-9)
+
+        acc_seq = estimator.accumulator_factory().make()
+        enc = acc_seq.acc_to_encoder().seq_encode(data)
+        acc_seq.seq_initialize(enc, np.ones(len(data)), rng)
+        self.assertEqual(acc_seq.count, 200.0)
+        np.testing.assert_allclose(acc_seq.sum_t, [400.0], atol=1e-9)
 
 
 class TiltValidationTestCase(unittest.TestCase):

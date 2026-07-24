@@ -372,13 +372,28 @@ class ExponentialTiltedAccumulator(SingleChildAccumulator):
         self.base_accumulator.seq_update(base_enc, w, None if estimate is None else estimate.base)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
-        """Initialize the child sufficient statistics for one weighted observation."""
+        """Initialize this accumulator's tilt statistic and the child sufficient statistics for one
+        weighted observation.
+
+        There is no estimate yet to evaluate a configured (possibly non-identity) statistic
+        against, so -- matching :meth:`update`'s own ``estimate is None`` fallback -- the tilt
+        statistic accumulated here is the identity ``T(x) = x``.
+        """
+        t = np.atleast_1d(np.asarray(x, dtype=float))
+        self.sum_t += weight * t
+        self.count += weight
         self.base_accumulator.initialize(x, weight, rng)
 
     def seq_initialize(self, x: tuple[Any, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
-        """Initialize child sufficient statistics from encoded observations."""
-        base_enc, _ = x
-        self.base_accumulator.seq_initialize(base_enc, np.asarray(weights, dtype=float), rng)
+        """Initialize this accumulator's tilt statistic and the child sufficient statistics from
+        ``(base_enc, tvals)``-encoded observations (see :meth:`acc_to_encoder`)."""
+        base_enc, tvals = x
+        w = np.asarray(weights, dtype=float)
+        tv = np.asarray(tvals, dtype=float)
+        tv2 = tv.reshape(len(w), -1)
+        self.sum_t += tv2.T @ w
+        self.count += float(w.sum())
+        self.base_accumulator.seq_initialize(base_enc, w, rng)
 
     def combine(self, suff_stat: Any) -> "ExponentialTiltedAccumulator":
         """Merge serialized tilt and child sufficient statistics into this accumulator."""
@@ -408,8 +423,17 @@ class ExponentialTiltedAccumulator(SingleChildAccumulator):
         return self
 
     def acc_to_encoder(self) -> "DataSequenceEncoder":
-        """Return the child encoder used by the delegated base accumulator."""
-        return self.base_accumulator.acc_to_encoder()
+        """Return an encoder matching what ``seq_update``/``seq_initialize`` consume: the child's
+        own encoding plus a statistic column (the ``(base_enc, tvals)`` contract described in the
+        module docstring).
+
+        Before any estimate exists there is no fitted distribution to evaluate a configured
+        (possibly non-identity) statistic against, so -- matching :meth:`update`'s own
+        ``estimate is None`` fallback -- the statistic column here is the identity ``T(x) = x``.
+        ``ExponentialTiltedDistribution.dist_to_encoder`` (used once an estimate exists) computes
+        the exact configured statistic instead.
+        """
+        return ExponentialTiltedAccumulatorEncoder(self.base_accumulator.acc_to_encoder())
 
 
 class ExponentialTiltedAccumulatorFactory(StatisticAccumulatorFactory):
@@ -549,3 +573,18 @@ class ExponentialTiltedDataEncoder(MaskedBaseEncoder):
 
     def _extra_columns(self, x: Sequence[Any]) -> tuple[np.ndarray]:
         return (np.asarray([self._dist._statistic(v) for v in x], dtype=float),)
+
+
+class ExponentialTiltedAccumulatorEncoder(MaskedBaseEncoder):
+    """Cold-start encoder for :meth:`ExponentialTiltedAccumulator.acc_to_encoder`.
+
+    Encodes via the base encoder plus the identity-statistic column ``T(x) = x`` -- the same
+    approximation :meth:`ExponentialTiltedAccumulator.update` falls back to when there is no
+    estimate yet to consult for the configured statistic. Exact for the default identity
+    statistic; :class:`ExponentialTiltedDataEncoder` (used once a distribution/estimate exists)
+    computes the exact configured statistic instead (including ``log_density`` tempering or a
+    custom callable).
+    """
+
+    def _extra_columns(self, x: Sequence[Any]) -> tuple[np.ndarray]:
+        return (np.asarray(x, dtype=float),)
