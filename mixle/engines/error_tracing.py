@@ -10,6 +10,14 @@ Interval arithmetic is sound but pessimistic because it ignores correlations
 between operands. Affine arithmetic can tighten the bound when that extra
 complexity is justified. This module provides the vectorized, dependency-free
 core.
+
+Soundness invariants, enforced at construction (:meth:`Interval.__init__`): endpoints are never NaN
+(a NaN bound cannot certify anything) and ``lo <= hi`` always holds (``+/-inf`` endpoints are legal --
+``[-inf, inf]`` and degenerate points like ``[inf, inf]`` both pass -- only NaN and reversed order are
+rejected). Every operation is written to either produce a result that satisfies those invariants or to
+raise, rather than let IEEE-754's indeterminate forms (``0 * inf``, ``inf - inf``) leak a ``NaN`` bound
+out as if it were a valid enclosure. See :func:`_ivl_mul` for the ``0 * inf = 0`` extended-real rule
+multiplication relies on.
 """
 
 from __future__ import annotations
@@ -32,15 +40,54 @@ def _up(x: np.ndarray) -> np.ndarray:
     return np.nextafter(x, _POS_INF)
 
 
+def _ivl_mul(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Elementwise product, plus a mask of which entries are exact, under the extended-real
+    interval-arithmetic convention for ``0 * inf``.
+
+    IEEE-754 defines ``0 * (+/-inf) == NaN`` -- correct for flagging an indeterminate *limit*, but
+    wrong here: a factor that is exactly zero denotes a degenerate, zero-width interval, so the
+    enclosed quantity is provably zero regardless of how unbounded the other factor is. There is
+    nothing indeterminate about it (unlike, say, ``inf - inf``): every pair of finite values drawn
+    from ``{0} x (-inf, inf)`` multiplies to exactly ``0``, so the sound *and* tightest enclosure is
+    ``0``, not "give up". Special-case that one pattern (either sign of zero, either operand order)
+    and fall through to ordinary IEEE-754 multiplication for everything else -- finite*finite,
+    finite*inf, and inf*inf are all already correct as-is.
+
+    The second return value flags entries where *either* factor is a literal zero: IEEE-754
+    multiplication by zero never rounds (``0 * finite`` is exact, and ``0 * inf`` is exact by the
+    convention above), so these carry no rounding error for the caller to pad against -- unlike, say,
+    two tiny nonzero finite factors that underflow *to* zero, which are not flagged and still need
+    the pad, since their true product is nonzero even though it is not representable.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    zero_times_inf = ((x == 0.0) & np.isinf(y)) | ((y == 0.0) & np.isinf(x))
+    with np.errstate(invalid="ignore"):  # the 0*inf corners computed here are overridden just below
+        p = x * y
+    p = np.where(zero_times_inf, 0.0, p)
+    exact = (x == 0.0) | (y == 0.0)
+    return p, exact
+
+
 class Interval:
     """A guaranteed enclosure ``[lo, hi]`` of a value (scalar or numpy array), outward-rounded."""
 
     __slots__ = ("lo", "hi")
 
     def __init__(self, lo: Any, hi: Any) -> None:
-        self.lo = np.asarray(lo, dtype=np.float64)
-        self.hi = np.asarray(hi, dtype=np.float64) + np.zeros_like(self.lo)
-        self.lo = self.lo + np.zeros_like(self.hi)
+        lo_arr = np.asarray(lo, dtype=np.float64)
+        hi_arr = np.asarray(hi, dtype=np.float64) + np.zeros_like(lo_arr)
+        lo_arr = lo_arr + np.zeros_like(hi_arr)
+        # A NaN bound cannot certify anything: reject before it can be mistaken for a valid
+        # enclosure by any downstream consumer (+/-inf remains legal -- only NaN is not a number).
+        if np.any(np.isnan(lo_arr)) or np.any(np.isnan(hi_arr)):
+            raise ValueError("Interval endpoints must not be NaN: lo=%r, hi=%r" % (lo_arr, hi_arr))
+        # A reversed bound is not an enclosure of anything; +/-inf endpoints stay legal (e.g.
+        # [-inf, inf], [0, inf], and the degenerate point [inf, inf] are all fine -- lo <= hi holds).
+        if np.any(lo_arr > hi_arr):
+            raise ValueError("Interval lower bound must not exceed the upper bound: lo=%r, hi=%r" % (lo_arr, hi_arr))
+        self.lo = lo_arr
+        self.hi = hi_arr
 
     @classmethod
     def exact(cls, x: Any) -> Interval:
@@ -61,16 +108,35 @@ class Interval:
         return cls(_down(q - d), _up(q + d))
 
     def width(self) -> np.ndarray:
-        """The guaranteed error bound: ``hi - lo`` (outward-rounded)."""
-        return _up(self.hi - self.lo)
+        """The guaranteed error bound: ``hi - lo`` (outward-rounded).
+
+        A degenerate point exactly at ``+/-inf`` (``lo == hi == +/-inf``, legal per the constructor)
+        has zero width by definition -- but IEEE-754 computes ``inf - inf == NaN`` for it, which
+        would otherwise leak a NaN out of this function with no constructor downstream to catch it.
+        Special-case that one pattern directly; every other case (including an ordinary, non-
+        degenerate unbounded interval like ``[0, inf]``, whose width is correctly ``inf``) is
+        unaffected.
+        """
+        degenerate_at_infinity = np.isinf(self.lo) & (self.lo == self.hi)
+        with np.errstate(invalid="ignore"):  # the inf-inf case computed here is discarded just below
+            d = _up(self.hi - self.lo)
+        return np.where(degenerate_at_infinity, 0.0, d)
 
     def max_width(self) -> float:
         """Return the largest interval width."""
         return float(np.max(self.width())) if self.lo.size else 0.0
 
     def midpoint(self) -> np.ndarray:
-        """Return interval midpoints."""
-        return self.lo + 0.5 * (self.hi - self.lo)
+        """Return interval midpoints.
+
+        Same ``inf - inf`` gap as :meth:`width`: a degenerate point at ``+/-inf`` is its own
+        midpoint by definition, computed directly rather than via the subtraction that would
+        otherwise produce NaN.
+        """
+        degenerate_at_infinity = np.isinf(self.lo) & (self.lo == self.hi)
+        with np.errstate(invalid="ignore"):  # the inf-inf case computed here is discarded just below
+            m = self.lo + 0.5 * (self.hi - self.lo)
+        return np.where(degenerate_at_infinity, self.lo, m)
 
     def contains(self, value: Any) -> np.ndarray:
         """Return a boolean mask for values inside the interval."""
@@ -78,15 +144,43 @@ class Interval:
         return (self.lo <= v) & (v <= self.hi)
 
     def __add__(self, other: Interval) -> Interval:
+        # Unlike multiplication's 0*inf, addition's only indeterminate form (inf + -inf) has no
+        # single correct finite answer, and is only reachable at all when one operand is a
+        # degenerate point exactly at +/-inf (an ordinary unbounded interval like [5, inf] has a
+        # finite lo, so finite + -inf = -inf here, never NaN). When it is reached, the constructor
+        # below rejects the resulting NaN bound and raises rather than silently certifying an
+        # unsound result -- refusing to answer is sound, a fabricated finite bound would not be.
         return Interval(_down(self.lo + other.lo), _up(self.hi + other.hi))
 
     def __sub__(self, other: Interval) -> Interval:
+        # Same inf - inf gap as __add__ above, same resolution: let the constructor's NaN check
+        # turn it into a raised error instead of a silently unsound [nan, ...] bound.
         return Interval(_down(self.lo - other.hi), _up(self.hi - other.lo))
 
     def __mul__(self, other: Interval) -> Interval:
-        # the product range is spanned by the four corner products
-        p = np.stack([self.lo * other.lo, self.lo * other.hi, self.hi * other.lo, self.hi * other.hi])
-        return Interval(_down(np.min(p, axis=0)), _up(np.max(p, axis=0)))
+        # The product range is spanned by the four corner products. Each corner goes through
+        # _ivl_mul rather than raw `*` so a 0*inf corner comes back exactly 0 (see _ivl_mul) instead
+        # of NaN -- construction-time validation guarantees self/other never carry a NaN endpoint, so
+        # 0*inf is the only way a corner could turn up NaN here.
+        #
+        # Each corner is outward-rounded on its own rather than after combining (equivalent for any
+        # corner that does need rounding, since _down/_up are monotonic: rounding the min/max of a
+        # set equals the min/max of the rounded set) -- except an exact corner (a literal-zero
+        # factor, per _ivl_mul) skips the pad entirely, since there is no rounding error on it to
+        # compensate for. Without this, e.g. [0,0]*[-inf,inf] would report a spurious 1-ULP-wide
+        # [-5e-324, 5e-324] "certificate" around a product that is exactly, not approximately, 0.
+        corners = [
+            _ivl_mul(self.lo, other.lo),
+            _ivl_mul(self.lo, other.hi),
+            _ivl_mul(self.hi, other.lo),
+            _ivl_mul(self.hi, other.hi),
+        ]
+        lo = np.min(np.stack([np.where(exact, p, _down(p)) for p, exact in corners]), axis=0)
+        hi = np.max(np.stack([np.where(exact, p, _up(p)) for p, exact in corners]), axis=0)
+        # np.min/np.max propagate NaN (unlike np.fmin/np.fmax, which silently discard it) -- so if a
+        # corner is ever still NaN despite the above, it reaches the constructor below and raises
+        # there instead of this function quietly handing back an unsound "certificate".
+        return Interval(lo, hi)
 
     def __repr__(self) -> str:
         return "Interval(lo=%r, hi=%r)" % (self.lo, self.hi)

@@ -55,6 +55,130 @@ class IntervalSoundnessTest(unittest.TestCase):
         cb = CodebookFormat.fit(x, 64)
         self.assertTrue(np.all(Interval.from_quantized(x, cb).contains(x)))
 
+    # -- MXR-080-0125: [0,0] * [-inf,inf] used to come back [nan,nan] (IEEE 0*inf), and the
+    # constructor accepted reversed bounds and NaN endpoints without complaint. --
+
+    def test_mul_zero_times_unbounded_is_exact_zero(self):
+        # the audit's exact repro, plus the sign variants it calls out by name
+        cases = [
+            (Interval(0.0, 0.0), Interval(-np.inf, np.inf)),
+            (Interval(0.0, 0.0), Interval(0.0, np.inf)),
+            (Interval(0.0, 0.0), Interval(-np.inf, 0.0)),
+            (Interval(-0.0, 0.0), Interval(-np.inf, np.inf)),  # negative-zero lower bound
+        ]
+        for zero, unbounded in cases:
+            for r in (zero * unbounded, unbounded * zero):  # both operand orders
+                self.assertFalse(bool(np.any(np.isnan(r.lo))) or bool(np.any(np.isnan(r.hi))), r)
+                self.assertEqual(float(r.lo), 0.0)
+                self.assertEqual(float(r.hi), 0.0)
+
+    def test_mul_finite_matches_hand_computed_corners(self):
+        # negative control: ordinary finite multiplication never touches the 0*inf special case and
+        # must be unaffected by it
+        cases = [
+            ((2.0, 3.0), (4.0, 5.0), (8.0, 15.0)),
+            ((-3.0, 2.0), (-1.0, 4.0), (-12.0, 8.0)),
+            ((-5.0, -2.0), (-3.0, -1.0), (2.0, 15.0)),
+        ]
+        for (a_lo, a_hi), (b_lo, b_hi), (exp_lo, exp_hi) in cases:
+            iv = Interval(a_lo, a_hi) * Interval(b_lo, b_hi)
+            self.assertLessEqual(float(iv.lo), exp_lo)
+            self.assertGreaterEqual(float(iv.hi), exp_hi)
+            self.assertAlmostEqual(float(iv.lo), exp_lo, places=9)  # sound, and not pathologically loose
+            self.assertAlmostEqual(float(iv.hi), exp_hi, places=9)
+
+    def test_mul_property_finite_samples_stay_enclosed_across_zero_and_infinite_bounds(self):
+        # The actual definition of a sound enclosure: every finite value that could legitimately be
+        # drawn from within each factor interval, multiplied together, lands inside the computed
+        # product -- not just the specific named edge cases above. Bounds are drawn from a mix of
+        # finite, zero, and infinite endpoints so both the 0*inf corner case and ordinary rounding
+        # are exercised together.
+        rng = np.random.RandomState(7)
+        bound_choices = [-np.inf, -1e6, -100.0, -1.0, -1e-3, 0.0, 1e-3, 1.0, 100.0, 1e6, np.inf]
+
+        def is_degenerate_infinite_point(lo, hi):
+            # [inf, inf] / [-inf, -inf]: a degenerate point exactly at +/-inf has no finite elements
+            # to sample from at all (unlike [-inf, hi] or [lo, inf], where the infinite endpoint just
+            # means "no bound" and every finite value up to the finite side is a legitimate sample) --
+            # out of scope for this specific "sample finite values, check enclosure" methodology; the
+            # degenerate-infinity behavior itself is covered directly by the width/midpoint and
+            # add/sub tests above.
+            return bool(lo == hi and np.isinf(lo))
+
+        def sample_within(lo, hi):
+            big = 1e10  # finite stand-in for a one-sided infinite endpoint
+            lo_s = -big if np.isinf(lo) else lo
+            hi_s = big if np.isinf(hi) else hi
+            return lo_s if lo_s == hi_s else rng.uniform(lo_s, hi_s)
+
+        with mpmath.workprec(200):
+            checked = 0
+            while checked < 300:
+                lo_a, hi_a = sorted(rng.choice(bound_choices, size=2))
+                lo_b, hi_b = sorted(rng.choice(bound_choices, size=2))
+                if is_degenerate_infinite_point(lo_a, hi_a) or is_degenerate_infinite_point(lo_b, hi_b):
+                    continue
+                checked += 1
+                iv = Interval(float(lo_a), float(hi_a)) * Interval(float(lo_b), float(hi_b))
+                for _ in range(5):
+                    a = sample_within(lo_a, hi_a)
+                    b = sample_within(lo_b, hi_b)
+                    true = mpmath.mpf(float(a)) * mpmath.mpf(float(b))
+                    self.assertLessEqual(mpmath.mpf(float(iv.lo)), true)
+                    self.assertGreaterEqual(mpmath.mpf(float(iv.hi)), true)
+
+    def test_construction_rejects_reversed_bounds(self):
+        with self.assertRaises(ValueError):
+            Interval(5.0, 2.0)
+        with self.assertRaises(ValueError):
+            Interval(np.array([0.0, 3.0]), np.array([1.0, 2.0]))  # reversed only at index 1
+
+    def test_construction_rejects_nan_endpoints(self):
+        with self.assertRaises(ValueError):
+            Interval(np.nan, 1.0)
+        with self.assertRaises(ValueError):
+            Interval(0.0, np.nan)
+        with self.assertRaises(ValueError):
+            Interval.exact(np.nan)
+
+    def test_construction_allows_infinite_bounds(self):
+        # unbounded intervals are a normal, useful part of interval arithmetic -- only NaN and
+        # reversed order are rejected, not +/-inf (including the degenerate point [inf, inf], since
+        # lo == hi there is not a reversed bound)
+        Interval(-np.inf, np.inf)
+        Interval(0.0, np.inf)
+        Interval(-np.inf, 0.0)
+        Interval(np.inf, np.inf)
+        Interval(-np.inf, -np.inf)
+
+    def test_add_sub_degenerate_infinite_operand_raises_instead_of_returning_nan(self):
+        # inf + -inf (unlike 0*inf) has no single correct finite answer -- refusing via the
+        # constructor's NaN rejection is the sound response to an unrepresentable result, not
+        # fabricating a bound. Only reachable via a *degenerate* point exactly at +/-inf; see
+        # test_add_ordinary_unbounded_intervals_do_not_raise for the (unaffected) normal case.
+        with self.assertRaises(ValueError):
+            Interval.exact(np.inf) + Interval(-np.inf, 3.0)
+        with self.assertRaises(ValueError):
+            Interval.exact(np.inf) - Interval.exact(np.inf)
+        with self.assertRaises(ValueError):
+            Interval.exact(-np.inf) - Interval.exact(-np.inf)
+
+    def test_add_ordinary_unbounded_intervals_do_not_raise(self):
+        # negative control: an ordinary unbounded (non-degenerate) interval has a finite lo or hi,
+        # so it never hits the inf + -inf gap above
+        r = Interval(5.0, np.inf) + Interval(-np.inf, 3.0)
+        self.assertEqual(float(r.lo), -np.inf)
+        self.assertEqual(float(r.hi), np.inf)
+
+    def test_width_and_midpoint_of_degenerate_infinite_point(self):
+        self.assertEqual(float(Interval.exact(np.inf).width()), 0.0)
+        self.assertEqual(float(Interval.exact(-np.inf).width()), 0.0)
+        self.assertEqual(float(Interval.exact(np.inf).midpoint()), np.inf)
+        self.assertEqual(float(Interval.exact(-np.inf).midpoint()), -np.inf)
+        # negative control: an ordinary non-degenerate unbounded interval is unaffected
+        self.assertEqual(float(Interval(0.0, np.inf).width()), np.inf)
+        self.assertEqual(float(Interval(0.0, np.inf).midpoint()), np.inf)
+
 
 class SumErrorTracingTest(unittest.TestCase):
     def _true(self, x):
