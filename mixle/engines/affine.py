@@ -17,6 +17,8 @@ This is the tighter *estimate*; the fully IEEE-sound enclosure is :mod:`mixle.en
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -133,13 +135,72 @@ class AffineForm:
         return AffineForm(self.center, terms)
 
 
-def allocate_precision(center_magnitude: float, op_count: int, target_abs_error: float) -> str:
+@dataclass
+class PrecisionResult:
+    """Result of :func:`allocate_precision`: the selected dtype plus a certificate of the estimated
+    error it actually achieves, so a caller can verify the target was met rather than trust the choice
+    implicitly.
+
+    ``status`` is one of:
+
+    * ``"ok"``: ``estimated_abs_error`` is certified ``<= target_abs_error`` -- ``dtype`` genuinely meets
+      the caller's target.
+    * ``"insufficient"``: not even ``qd`` (the highest-precision dtype this dial models) can certify the
+      target at this ``op_count`` / ``center_magnitude``. ``dtype`` is still ``"qd"`` -- the best
+      available effort -- and ``estimated_abs_error`` reports how far short it falls, for diagnostics
+      only; callers that require the accuracy guarantee must treat this as a failure, not a certified
+      answer.
+
+    Attributes:
+        dtype: the selected dtype name (best-effort, uncertified, when ``status == "insufficient"``).
+        estimated_abs_error: ``op_count * unit_roundoff(dtype) * center_magnitude`` -- the estimated
+            absolute roundoff ``dtype`` accumulates (an analytic estimate, not a measurement).
+        target_abs_error: the caller's requested target, echoed back for convenience.
+        status: see above.
+    """
+
+    dtype: str
+    estimated_abs_error: float
+    target_abs_error: float
+    status: str = "ok"
+
+    @property
+    def met_target(self) -> bool:
+        """``True`` only when ``estimated_abs_error`` is certified to meet ``target_abs_error``."""
+        return self.status == "ok"
+
+
+def allocate_precision(center_magnitude: float, op_count: float, target_abs_error: float) -> PrecisionResult:
     """Lowest-cost dtype whose accumulated roundoff over ``op_count`` ops keeps error under target.
 
-    Each op injects ~``u(d) * |magnitude|``; ``op_count`` of them accumulate to ``op_count*u*|mag|``.
-    Walk from lower to higher precision and return the first dtype that fits the budget.
+    Each op injects ~``u(d) * magnitude``; ``op_count`` of them accumulate to ``op_count*u*magnitude``.
+    Walks from lower to higher precision and returns a :class:`PrecisionResult` certifying the first
+    dtype whose estimated error fits the budget. When even ``qd`` -- the highest-precision dtype this
+    dial models -- cannot certify the target, the result's ``status`` is ``"insufficient"`` rather than
+    silently returning ``qd`` as though it were a verified answer (MXR-080-0154).
+
+    Raises ``ValueError`` unless ``center_magnitude`` and ``op_count`` are both finite and nonnegative and
+    ``target_abs_error`` is finite and strictly positive. Before this validation existed, a negative
+    ``op_count`` flipped the estimated error negative, which spuriously satisfies every dtype's budget
+    comparison and misselects ``float16`` -- the least precise dtype -- regardless of how large the
+    magnitude or how tight the target; a negative ``target_abs_error`` made every dtype's comparison fail
+    and fell through to silently returning ``qd`` even though no dtype can certify a negative bound
+    (impossible by definition); and a NaN/Inf value anywhere in the formula rode
+    comparison-with-NaN-is-always-False (or Inf's unpredictable propagation) into whatever the fallthrough
+    dtype happened to be, not a principled decision.
     """
+    if not math.isfinite(center_magnitude) or center_magnitude < 0:
+        raise ValueError("center_magnitude must be finite and nonnegative, got %r" % (center_magnitude,))
+    if not math.isfinite(op_count) or op_count < 0:
+        raise ValueError("op_count must be finite and nonnegative, got %r" % (op_count,))
+    if not math.isfinite(target_abs_error) or target_abs_error <= 0:
+        raise ValueError("target_abs_error must be finite and positive, got %r" % (target_abs_error,))
+
     for name in ("float16", "bfloat16", "float32", "float64", "dd", "qd"):
-        if op_count * UNIT_ROUNDOFF[name] * abs(center_magnitude) <= target_abs_error:
-            return name
-    return "qd"
+        estimated = op_count * UNIT_ROUNDOFF[name] * center_magnitude
+        if estimated <= target_abs_error:
+            return PrecisionResult(name, estimated, target_abs_error, "ok")
+    # qd is the highest-precision dtype this dial models, and its own check above already failed:
+    # report that honestly (status="insufficient") instead of returning it as an uncertified last format.
+    estimated = op_count * UNIT_ROUNDOFF["qd"] * center_magnitude
+    return PrecisionResult("qd", estimated, target_abs_error, "insufficient")
