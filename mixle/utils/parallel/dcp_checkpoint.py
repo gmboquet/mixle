@@ -157,9 +157,14 @@ def save_training_state(
     rank, world_size = _rank_world()
     destination = Path(path)
     destination.mkdir(parents=True, exist_ok=True)
-    success = destination / "_SUCCESS"
-    if rank == 0 and success.exists():
-        success.unlink()
+    # Do NOT remove an existing _SUCCESS marker here. When this call is replacing an already-valid
+    # checkpoint at the same path, invalidating the marker before the new write has even started
+    # would leave a window -- if dcp.save/_write_sidecar below then fails (crash, disk full,
+    # exception) -- where neither the old checkpoint (marker gone) nor the new one (write
+    # incomplete) is loadable, even though the OLD checkpoint's data is still fully intact on disk.
+    # _finalize_checkpoint's final ``os.replace(success_temporary, path / "_SUCCESS")`` already
+    # atomically supersedes any old marker with the new one in a single step, once (and only once)
+    # the new write has fully succeeded, so an explicit early removal is both unnecessary and unsafe.
     payload = _sidecar_payload(
         step=step,
         scheduler=scheduler,
@@ -277,9 +282,9 @@ def async_save_training_state(
     rank, world_size = _rank_world()
     destination = Path(path)
     destination.mkdir(parents=True, exist_ok=True)
-    success = destination / "_SUCCESS"
-    if rank == 0 and success.exists():
-        success.unlink()
+    # See the matching comment in save_training_state: an existing _SUCCESS marker must survive
+    # until _finalize_checkpoint's atomic os.replace supersedes it, not be removed up front -- a
+    # failed/never-awaited async save must never leave a replaced checkpoint with no valid marker.
     payload = _sidecar_payload(
         step=step,
         scheduler=scheduler,
