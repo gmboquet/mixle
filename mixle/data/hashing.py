@@ -16,31 +16,70 @@ from typing import Any
 import numpy as np
 
 
+def _len_prefixed(payload: bytes) -> bytes:
+    """8-byte big-endian length prefix + ``payload``.
+
+    Every variable-length byte string ``_canonical`` emits goes through this, so its extent is explicit
+    rather than inferred by scanning for a separator byte -- one the payload's own content could also
+    contain.
+    """
+    return len(payload).to_bytes(8, "big") + payload
+
+
 def _canonical(obj: Any) -> bytes:
-    """Deterministic bytes for a record component (numbers, strings, arrays, tuples, dicts, None)."""
+    """Deterministic, self-delimiting bytes for a record component (numbers, strings, arrays, tuples, dicts, None).
+
+    Every case is a tag byte plus content whose length is either fixed by the tag alone (bool, None, a
+    non-NaN float's 8 raw bytes) or given by an explicit prefix (:func:`_len_prefixed` for strings/bytes/
+    array fields, an 8-byte big-endian count for dict/list/tuple) -- never inferred from a bare separator
+    character. That makes every encoding self-delimiting: concatenating several ``_canonical`` outputs
+    (done both by the dict/list/tuple cases below and by ``dataset_hash``'s record loop) can always be
+    split back into exactly the pieces that produced it, so two structurally different inputs can never
+    land on identical bytes (short of an actual SHA-256 collision).
+
+    A prior version joined dict/list elements with a bare ``,``/``:`` and encoded strings/bytes as a tag
+    plus raw, un-length-prefixed content. A string, key, or record containing those separator bytes could
+    then make one structure's join collide byte-for-byte with a different structure's join -- e.g.
+    ``["X", "Y"]`` and ``["X,sY"]`` both encoded as ``b"t[sX,sY]"`` -- so distinct data could hash
+    identically. See ``mixle/tests/data/test_hashing.py`` for the regression coverage.
+    """
     if obj is None:
         return b"N"
     if isinstance(obj, (bool, np.bool_)):
         return b"b1" if obj else b"b0"
     if isinstance(obj, (int, np.integer)):
-        return b"i" + repr(int(obj)).encode()
+        return b"i" + _len_prefixed(repr(int(obj)).encode())
     if isinstance(obj, (float, np.floating)):
-        # struct-stable float bytes; NaN normalized so missing entries hash consistently
         f = float(obj)
-        return b"fNaN" if f != f else b"f" + np.float64(f).tobytes()
+        if f != f:
+            # NaN has many bit patterns; normalize to one canonical marker so missing entries hash
+            # consistently. Its own tag ("F", not "f") keeps it a fixed, unambiguous length rather than a
+            # same-tag, shorter-content special case of the line below -- exactly the kind of tag-sharing,
+            # content-dependent-length ambiguity this rewrite eliminates everywhere else.
+            return b"F"
+        return b"f" + np.float64(f).tobytes()
     if isinstance(obj, (bytes, bytearray)):
-        return b"y" + bytes(obj)
+        return b"y" + _len_prefixed(bytes(obj))
     if isinstance(obj, str):
-        return b"s" + obj.encode("utf-8")
+        return b"s" + _len_prefixed(obj.encode("utf-8"))
     if isinstance(obj, np.ndarray):
+        arr = np.ascontiguousarray(obj)
         return (
-            b"a" + str(obj.dtype).encode() + b":" + str(obj.shape).encode() + b":" + np.ascontiguousarray(obj).tobytes()
+            b"a"
+            + _len_prefixed(str(arr.dtype).encode())
+            + _len_prefixed(str(arr.shape).encode())
+            + _len_prefixed(arr.tobytes())
         )
     if isinstance(obj, Mapping):
-        return b"d{" + b",".join(_canonical(k) + b":" + _canonical(v) for k, v in sorted(obj.items(), key=repr)) + b"}"
+        # sort by each key's own canonical bytes (not repr of the (k, v) pair): well-defined since dict
+        # keys are unique, and -- unlike repr -- doesn't also depend on the value or risk an insertion-
+        # order-dependent tie between two structurally-equal dicts built in different key orders.
+        pairs = sorted(((_canonical(k), v) for k, v in obj.items()), key=lambda kv: kv[0])
+        body = b"".join(k_bytes + _canonical(v) for k_bytes, v in pairs)
+        return b"d" + len(pairs).to_bytes(8, "big") + body
     if isinstance(obj, (tuple, list)):
-        return b"t[" + b",".join(_canonical(v) for v in obj) + b"]"
-    return b"r" + repr(obj).encode()  # last resort: stable repr
+        return b"t" + len(obj).to_bytes(8, "big") + b"".join(_canonical(v) for v in obj)
+    return b"r" + _len_prefixed(repr(obj).encode())  # last resort: stable repr
 
 
 def model_hash(model: Any) -> str:
@@ -98,8 +137,7 @@ def dataset_hash(data: Any, *, sort: bool = False, max_records: int | None = Non
     for i, r in enumerate(recs):
         if max_records is not None and i >= max_records:
             break
-        h.update(_canonical(r))
-        h.update(b"|")
+        h.update(_canonical(r))  # self-delimiting (see _canonical) -- no inter-record separator needed
         n += 1
     h.update(b"#")
     h.update(str(n).encode())
