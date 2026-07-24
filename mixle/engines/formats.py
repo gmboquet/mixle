@@ -169,15 +169,36 @@ class FixedPointFormat(NumericFormat):
         return np.asarray(q, dtype=np.float64) / self._scale
 
 
+def _require_positive_int(name: str, value: Any) -> int:
+    """Validate a positive, exact-integer count (e.g. ``n_codes``/``iters``); returns it as ``int``."""
+    try:
+        as_int = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("%s must be a positive integer, got %r" % (name, value)) from None
+    if as_int != value or as_int <= 0:
+        raise ValueError("%s must be a positive integer, got %r" % (name, value))
+    return as_int
+
+
 class CodebookFormat(NumericFormat):
     """Scalar vector-quantization: store an index into a learned codebook; ``log2(K)`` bits per value.
 
     The genuine pure-numpy compression codec -- quantize gathers the nearest code (an unsigned index
     array), dequantize gathers the code values back. Fit the codebook to data with :meth:`fit`.
+
+    The codebook must be finite and nonempty (validated at construction, ``ValueError`` otherwise).
+    Duplicate entries are allowed: a repeated code costs a wasted, unreachable index but does not break
+    nearest-code assignment or decoding (both entries decode to the same, correct value), and
+    :meth:`fit`'s Lloyd iteration can legitimately converge two cluster means onto the same value on
+    degenerate/skewed data -- rejecting that outcome would be pure loss, not a correctness fix.
     """
 
     def __init__(self, codebook: Any) -> None:
         self.codebook = np.asarray(codebook, dtype=np.float64)
+        if self.codebook.size == 0:
+            raise ValueError("codebook must be nonempty")
+        if not np.all(np.isfinite(self.codebook)):
+            raise ValueError("codebook entries must be finite (no NaN/Inf)")
         self.codebook.sort()  # sorted codes let quantize use searchsorted (O(n log K))
         k = self.codebook.size
         self.name = "codebook(K=%d)" % k
@@ -186,7 +207,12 @@ class CodebookFormat(NumericFormat):
 
     @classmethod
     def fit(cls, data: Any, n_codes: int, iters: int = 25, seed: int = 0) -> CodebookFormat:
-        """Learn ``n_codes`` codes by 1-D k-means (Lloyd) on ``data``; codes are the cluster means."""
+        """Learn ``n_codes`` codes by 1-D k-means (Lloyd) on ``data``; codes are the cluster means.
+
+        Raises ``ValueError`` if ``n_codes`` or ``iters`` is not a positive integer.
+        """
+        n_codes = _require_positive_int("n_codes", n_codes)
+        iters = _require_positive_int("iters", iters)
         x = np.asarray(data, dtype=np.float64).ravel()
         if x.size == 0:
             return cls(np.zeros(1))
@@ -218,26 +244,48 @@ class CodebookFormat(NumericFormat):
         return self.codebook[np.asarray(q, dtype=np.intp)]
 
     def _pack_bits(self) -> int:
-        """Power-of-two index width used by :meth:`compress`; rounds ``bits_per_value`` up to {1,2,4,8}."""
+        """Index width used by :meth:`compress`: sub-byte {1,2,4,8} widths for ``K <= 256`` (bit-packed
+        via :mod:`mixle.engines.packing`), else a byte-aligned 16 or 32 bits matching ``_idx_dtype``.
+
+        Wide codebooks are NOT capped down to 8 bits: every code :meth:`quantize` can produce also fits
+        through :meth:`compress` (a 300-code format's code 299 needs 9 bits and gets a 16-bit slot, not a
+        forced-and-broken 8-bit one).
+        """
         b = int(self.bits_per_value)
-        return next(w for w in (1, 2, 4, 8) if w >= b) if b <= 8 else 8
+        if b <= 8:
+            return next(w for w in (1, 2, 4, 8) if w >= b)
+        return 16 if b <= 16 else 32
 
     def compress(self, x: Any) -> tuple[np.ndarray, int]:
-        """Quantize ``x`` and bit-pack the indices to bytes: returns ``(packed_uint8, count)``.
+        """Quantize ``x`` and pack the indices to bytes: returns ``(packed_uint8, count)``.
 
-        For ``K <= 16`` codes the indices are sub-byte and pack ``8//bits`` per byte, realizing the
-        advertised compression (e.g. 16 codes -> 4-bit indices -> 2 values/byte -> 16x vs float64).
+        For ``K <= 256`` codes the indices are sub-byte or byte-exact and :func:`~mixle.engines.packing.
+        pack_bits` bit-packs them (e.g. 16 codes -> 4-bit indices -> 2 values/byte -> 16x vs float64).
+        Larger codebooks need 16- or 32-bit indices, which are not sub-byte-packable -- those are stored
+        byte-aligned (little-endian), still returned as a flat ``uint8`` array.
         """
-        from mixle.engines.packing import pack_bits
-
         idx = self.quantize(x)
-        return pack_bits(idx, self._pack_bits()), int(np.asarray(x).size)
+        bits = self._pack_bits()
+        if bits <= 8:
+            from mixle.engines.packing import pack_bits
+
+            packed = pack_bits(idx, bits)
+        else:
+            dtype = np.dtype("<u2") if bits == 16 else np.dtype("<u4")
+            packed = idx.astype(dtype).view(np.uint8)
+        return packed, int(np.asarray(x).size)
 
     def decompress(self, packed: Any, count: int) -> np.ndarray:
         """Inverse of :meth:`compress`: unpack indices and gather the codebook back to ``float64``."""
-        from mixle.engines.packing import unpack_bits
+        bits = self._pack_bits()
+        if bits <= 8:
+            from mixle.engines.packing import unpack_bits
 
-        return self.dequantize(unpack_bits(packed, self._pack_bits(), count))
+            idx = unpack_bits(packed, bits, count)
+        else:
+            dtype = np.dtype("<u2") if bits == 16 else np.dtype("<u4")
+            idx = np.frombuffer(np.asarray(packed, dtype=np.uint8).tobytes(), dtype=dtype)[:count]
+        return self.dequantize(idx)
 
 
 def min_float_mantissa_bits(target_rel_error: float) -> int:
