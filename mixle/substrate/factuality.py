@@ -7,6 +7,10 @@ the claim SUPPORTED only when retrieved evidence both scores above a floor and o
 attaching the citing item as provenance. The result is a :class:`FactualityReceipt`: every claim tagged
 supported/unsupported with its evidence, plus the grounded fraction.
 
+An answer with no extractable claims (empty, unparseable, or evasive) is UNKNOWN, not grounded:
+``grounded_fraction`` is ``None`` and :meth:`FactualityReceipt.is_grounded` fails closed (``False``) --
+there is nothing to have verified, so it is never reported as a perfect factuality result.
+
 This is the knowledge-grounded twin of :meth:`mixle.reason.llm.LLMUncertainty.assess_claims` (which
 corroborates against self-consistency samples): same claim-level discipline, but the corroborator is the
 substrate, so "is this answer true?" becomes "which of its claims can I cite, and which can't I?" -- the
@@ -40,10 +44,14 @@ class FactualityReceipt:
     verdicts: list[ClaimVerdict] = field(default_factory=list)
 
     @property
-    def grounded_fraction(self) -> float:
-        """Fraction of extracted claims supported by substrate evidence."""
+    def grounded_fraction(self) -> float | None:
+        """Fraction of extracted claims supported by substrate evidence.
+
+        ``None`` when the answer had no extractable claims at all (empty, unparseable, or evasive) --
+        there is nothing that was checked, so this is UNKNOWN rather than a vacuous 1.0.
+        """
         if not self.verdicts:
-            return 1.0
+            return None
         return round(sum(v.supported for v in self.verdicts) / len(self.verdicts), 4)
 
     def unsupported(self) -> list[ClaimVerdict]:
@@ -51,13 +59,19 @@ class FactualityReceipt:
         return [v for v in self.verdicts if not v.supported]
 
     def is_grounded(self, threshold: float = 1.0) -> bool:
-        """True iff the grounded fraction meets ``threshold`` (default 1.0: every claim must be cited)."""
-        return self.grounded_fraction >= threshold
+        """True iff the grounded fraction meets ``threshold`` (default 1.0: every claim must be cited).
+
+        Fails closed when there is nothing to assess: an answer with no extractable claims is never
+        reported as "grounded", regardless of ``threshold`` -- a full-grounding gate must not wave
+        through silence just because a vacuous fraction happens to clear the bar.
+        """
+        gf = self.grounded_fraction
+        return gf is not None and gf >= threshold
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable factuality receipt."""
         return {
-            "grounded_fraction": self.grounded_fraction,
+            "grounded_fraction": self.grounded_fraction,  # None serializes to JSON null, not 0.0/1.0
             "n_claims": len(self.verdicts),
             "n_unsupported": len(self.unsupported()),
             "claims": [
