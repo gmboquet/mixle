@@ -1,8 +1,11 @@
 """Space (P1): team-scoped views over the substrate with explicit, audited publish.
 
-MXR-080-0264 hardening: every read/write/publish is checked against a centralized
+MXR-080-0264/0265/0266 hardening: every read/write/publish/merge is checked against a centralized
 :class:`AccessPolicy` rather than trusting caller-supplied scope parameters (``AccessPolicyTest``,
-``CrossTenantLeakTest``).
+``CrossTenantLeakTest``); publish/merge persist immutable, content-addressed revisions of the state
+they overwrite or delete, recoverable with :func:`revision` (``RevisionTest``); and ``merge_versions``
+requires a typed strategy, authorized common lineage, and an explicit ``confirm=True`` for its
+destructive step (``MergeAuthorizationTest``).
 """
 
 import unittest
@@ -11,11 +14,13 @@ from mixle.substrate import (
     PUBLIC,
     AccessDeniedError,
     AccessPolicy,
+    MergeStrategy,
     Space,
     Substrate,
     history,
     merge_versions,
     publish,
+    revision,
     version_of,
     visible_scopes,
 )
@@ -33,7 +38,7 @@ def _shared_store():
 
 def _staffed_policy() -> AccessPolicy:
     """alice staffs teamA, bob staffs teamB, carol is an org-level reconciler authorized for both --
-    the standing every direct (non-Space) publish call below needs to move something OUT of a
+    the standing every direct (non-Space) publish/merge call below needs to move something OUT of a
     non-public, non-PUBLIC scope it doesn't itself share a name with."""
     return AccessPolicy().grant("alice", "teamA").grant("bob", "teamB").grant("carol", "teamA").grant("carol", "teamB")
 
@@ -98,6 +103,13 @@ class AccessPolicyTest(unittest.TestCase):
     def test_require_write_raises_access_denied(self):
         with self.assertRaises(AccessDeniedError):
             AccessPolicy().require_write("teamA", "teamB")
+
+    def test_no_principal_can_ever_be_granted_the_internal_revisions_scope(self):
+        # a determined caller who guesses/knows the reserved scope name still gets nothing -- the
+        # policy hard-denies it regardless of any grant (see spaces._REVISIONS_SCOPE).
+        policy = AccessPolicy().grant("anyone", "__substrate_revisions__")
+        self.assertFalse(policy.can_read("anyone", "__substrate_revisions__"))
+        self.assertFalse(policy.can_write("anyone", "__substrate_revisions__"))
 
 
 class CrossTenantLeakTest(unittest.TestCase):
@@ -230,6 +242,93 @@ class PublishTest(unittest.TestCase):
         self.assertNotIn("MUTATED-LINK", stored.links)
 
 
+class RevisionTest(unittest.TestCase):
+    """MXR-080-0265: publish persists an immutable, content-addressed snapshot of the state it is
+    about to overwrite, and version_history references it -- "the prior state is always recoverable"
+    is an enforced property, not just an audit-trail claim."""
+
+    def test_publish_persists_a_recoverable_snapshot_of_the_pre_publish_state(self):
+        s = Substrate()
+        iid = s.add(
+            kind="text",
+            text="original roadmap text",
+            payload={"draft": 1},
+            tags=["roadmap"],
+            links=["parent"],
+            scope="teamA",
+        )
+        policy = _staffed_policy()
+        publish(s, [iid], to=PUBLIC, by="alice", policy=policy)  # v1: teamA -> public
+
+        edited = s.get(iid)
+        edited.text = "REVISED roadmap text"
+        edited.payload["draft"] = 2
+        s.put(edited)
+        publish(s, [iid], to=PUBLIC, by="alice", policy=policy)  # v2: public -> public, re-shared after edit
+
+        h = history(s, iid)
+        self.assertEqual(len(h), 2)
+        first_digest = h[0]["revision"]
+        self.assertIsInstance(first_digest, str)
+        snap = revision(s, first_digest)
+        self.assertIsNotNone(snap)
+        self.assertEqual(snap["text"], "original roadmap text")  # the PRE-publish text, not the edit
+        self.assertEqual(snap["payload"], {"draft": 1})
+        self.assertEqual(snap["scope"], "teamA")  # its scope before THIS publish moved it
+        self.assertEqual(snap["tags"], ["roadmap"])
+        self.assertEqual(snap["links"], ["parent"])
+        self.assertIn("created_at", snap)
+
+    def test_revision_of_unknown_digest_is_none(self):
+        s = Substrate()
+        self.assertIsNone(revision(s, "0" * 64))
+
+    def test_revision_survives_the_items_own_further_mutation(self):
+        """The whole point: the ORIGINAL state survives even after the live item has since been
+        overwritten again and again -- unlike version_history's who/from/to alone, which never held
+        any content to begin with."""
+        s = Substrate()
+        iid = s.add(kind="text", text="v0", scope="teamA")
+        policy = _staffed_policy()
+        publish(s, [iid], to=PUBLIC, by="alice", policy=policy)
+        v0_digest = history(s, iid)[0]["revision"]
+
+        for n in range(1, 4):
+            cur = s.get(iid)
+            cur.text = f"v{n}"
+            s.put(cur)
+            publish(s, [iid], to=PUBLIC, by="alice", policy=policy)
+
+        self.assertEqual(s.get(iid).text, "v3")  # the live item has moved on
+        self.assertEqual(revision(s, v0_digest)["text"], "v0")  # v0 remains fully recoverable
+
+    def test_revision_snapshots_are_never_visible_through_a_space(self):
+        """Snapshots live in a reserved internal scope: they must never leak into a team's own view."""
+        s = Substrate()
+        iid = s.add(kind="text", text="v0", scope="teamA")
+        policy = _staffed_policy()
+        publish(s, [iid], to=PUBLIC, by="alice", policy=policy)
+        visible = Space(s, "teamA", policy=policy).all()
+        self.assertEqual({i.id for i in visible}, {iid})  # exactly the one real item, nothing hidden
+        for i in visible:
+            self.assertNotEqual(i.scope, "__substrate_revisions__")
+
+    def test_returned_revision_is_independent_of_the_stored_snapshot(self):
+        """A caller mutating the dict revision() returned must never corrupt the persisted snapshot."""
+        s = Substrate()
+        iid = s.add(kind="text", text="v0", tags=["t"], scope="teamA")
+        policy = _staffed_policy()
+        publish(s, [iid], to=PUBLIC, by="alice", policy=policy)
+        digest = history(s, iid)[0]["revision"]
+
+        snap = revision(s, digest)
+        snap["tags"].append("MUTATED")
+        snap["text"] = "MUTATED"
+
+        self.assertEqual(revision(s, digest)["tags"], ["t"])
+        self.assertEqual(revision(s, digest)["text"], "v0")
+
+
 class VersioningTest(unittest.TestCase):
     def test_each_publish_bumps_version_and_records_history(self):
         s, ids = _shared_store()
@@ -252,7 +351,7 @@ class VersioningTest(unittest.TestCase):
         publish(s, [a], by="alice", policy=policy)  # a -> v1
         publish(s, [b], by="bob", policy=policy)
         publish(s, [b], by="bob", policy=policy)  # b -> v2 (higher)
-        keep = merge_versions(s, a, b, by="carol")
+        keep = merge_versions(s, a, b, by="carol", policy=policy, confirm=True)
         merged = s.get(keep)
         self.assertEqual(merged.text, "v-b")  # higher version wins
         self.assertEqual(merged.tags, ["plan", "price"])  # unioned
@@ -267,7 +366,7 @@ class VersioningTest(unittest.TestCase):
         policy = _staffed_policy()
         publish(s, [a], by="alice", policy=policy)
         publish(s, [b], by="bob", policy=policy)
-        keep = merge_versions(s, a, b, by="carol")
+        keep = merge_versions(s, a, b, by="carol", policy=policy, confirm=True)
         last = history(s, keep)[-1]
         self.assertEqual(last["merged_by"], "carol")
         parent_ids = {p["id"] for p in last["parents"]}
@@ -280,7 +379,7 @@ class VersioningTest(unittest.TestCase):
         policy = _staffed_policy()
         publish(s, [b], by="bob", policy=policy)
         publish(s, [b], by="bob", policy=policy)  # b higher version
-        keep = merge_versions(s, a, b, prefer="keep")
+        keep = merge_versions(s, a, b, by="carol", prefer="keep", policy=policy, confirm=True)
         self.assertEqual(s.get(keep).text, "keep-me")  # keep wins despite lower version
 
     def test_merge_missing_item_returns_none(self):
@@ -298,10 +397,106 @@ class VersioningTest(unittest.TestCase):
         publish(s, [b], by="bob", policy=policy)  # b -> v1, higher than a's v0: b's payload wins under prefer="latest"
         original_b = s.get(b)  # fetched BEFORE the merge
 
-        keep = merge_versions(s, a, b, by="carol")
+        keep = merge_versions(s, a, b, by="carol", policy=policy, confirm=True)
         original_b.payload["k"] = "MUTATED-PAYLOAD"
 
         self.assertEqual(s.get(keep).payload["k"], "b-payload")
+
+
+class MergeAuthorizationTest(unittest.TestCase):
+    """MXR-080-0266: merge_versions requires an authenticated, dual-scope-authorized principal, a
+    typed merge strategy, matching kind, and an explicit confirm=True before it will perform its
+    destructive step -- closing 'merge_versions() checks no common identity, kind, schema, scope,
+    authorization, or compatible lineage ... deletes the other item ... not recoverable'."""
+
+    def test_merging_unrelated_kinds_is_rejected_even_when_fully_authorized(self):
+        """The audit's exact adversarial repro: two items with different identity/kind/scope/lineage
+        and nothing in common except both existing. Even a principal authorized over BOTH scopes must
+        not be able to silently reconcile them -- kind mismatch alone is a hard, unconditional reject."""
+        s = Substrate()
+        a = s.add(kind="text", text="quarterly roadmap notes", scope="teamA", tags=["roadmap"])
+        b = s.add(
+            kind="record",
+            payload={"unrelated": "customer churn table"},
+            scope="teamB",
+            tags=["churn"],
+        )
+        policy = AccessPolicy().grant("carol", "teamA").grant("carol", "teamB")  # fully authorized both sides
+        with self.assertRaises(ValueError):
+            merge_versions(s, a, b, by="carol", policy=policy, confirm=True)
+        # nothing was touched: no silent merge, no deletion, no data loss
+        self.assertIsNotNone(s.get(a))
+        self.assertIsNotNone(s.get(b))
+        self.assertEqual(s.get(a).text, "quarterly roadmap notes")
+        self.assertEqual(s.get(b).payload, {"unrelated": "customer churn table"})
+
+    def test_merge_without_standing_over_both_scopes_is_rejected(self):
+        """A caller with standing over only ONE side cannot reconcile -- and thereby delete -- the
+        other team's item merely by knowing its id."""
+        s = Substrate()
+        a = s.add(kind="text", text="a", scope="teamA")
+        b = s.add(kind="text", text="b", scope="teamB")
+        policy = AccessPolicy().grant("alice", "teamA")  # alice has NO standing over teamB
+        with self.assertRaises(AccessDeniedError):
+            merge_versions(s, a, b, by="alice", policy=policy, confirm=True)
+        self.assertIsNotNone(s.get(b))  # teamB's item survives, untouched
+
+    def test_merge_requires_an_authenticated_principal(self):
+        s = Substrate()
+        a = s.add(kind="text", text="a", scope="teamA")
+        b = s.add(kind="text", text="b", scope="teamA")
+        with self.assertRaises(AccessDeniedError):
+            merge_versions(s, a, b, by="", confirm=True)
+        self.assertIsNotNone(s.get(b))
+
+    def test_merge_without_confirm_is_rejected_and_nondestructive(self):
+        s = Substrate()
+        a = s.add(kind="text", text="a", scope="teamA")
+        b = s.add(kind="text", text="b", scope="teamA")
+        policy = AccessPolicy().grant("alice", "teamA")
+        with self.assertRaises(ValueError):
+            merge_versions(s, a, b, by="alice", policy=policy)  # confirm defaults to False
+        self.assertIsNotNone(s.get(b))  # NOT deleted -- the destructive step never ran
+
+    def test_merge_rejects_an_unrecognized_strategy(self):
+        s = Substrate()
+        a = s.add(kind="text", text="a", scope="teamA")
+        b = s.add(kind="text", text="b", scope="teamA")
+        policy = AccessPolicy().grant("alice", "teamA")
+        with self.assertRaises(ValueError):
+            merge_versions(
+                s, a, b, by="alice", prefer="lattest", policy=policy, confirm=True
+            )  # typo, was silently "keep"
+        self.assertIsNotNone(s.get(b))  # rejected before anything destructive happened
+
+    def test_merge_accepts_the_typed_strategy_enum_directly(self):
+        s = Substrate()
+        a = s.add(kind="text", text="keep-me", scope="teamA")
+        b = s.add(kind="text", text="newer", scope="teamA")
+        policy = AccessPolicy().grant("alice", "teamA")
+        keep = merge_versions(s, a, b, by="alice", prefer=MergeStrategy.KEEP, policy=policy, confirm=True)
+        self.assertEqual(s.get(keep).text, "keep-me")
+
+    def test_merge_persists_recoverable_revisions_of_both_the_deleted_and_surviving_parent(self):
+        """MXR-080-0265+0266 together: even though `other` is genuinely, permanently gone as a LIVE
+        item, its full pre-merge state is not lost -- it is recoverable via the immutable revision."""
+        s = Substrate()
+        a = s.add(kind="text", text="keep-text", scope="teamA", payload={"k": "a"})
+        b = s.add(kind="text", text="doomed-text", scope="teamA", payload={"k": "b"})
+        policy = AccessPolicy().grant("alice", "teamA")
+        keep = merge_versions(s, a, b, by="alice", prefer="keep", policy=policy, confirm=True)
+        self.assertIsNone(s.get(b))  # genuinely gone as a live item
+
+        last = history(s, keep)[-1]
+        parents = {p["id"]: p["revision"] for p in last["parents"]}
+        other_snapshot = revision(s, parents[b])
+        self.assertIsNotNone(other_snapshot)
+        self.assertEqual(other_snapshot["text"], "doomed-text")  # fully recoverable despite the delete
+        self.assertEqual(other_snapshot["payload"], {"k": "b"})
+
+        keep_snapshot = revision(s, parents[a])
+        self.assertIsNotNone(keep_snapshot)
+        self.assertEqual(keep_snapshot["text"], "keep-text")  # the surviving side's pre-merge state too
 
 
 if __name__ == "__main__":
