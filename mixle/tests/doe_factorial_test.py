@@ -4,7 +4,14 @@ import unittest
 
 import numpy as np
 
-from mixle.doe import box_behnken, central_composite, fractional_factorial, plackett_burman
+from mixle.doe import (
+    box_behnken,
+    central_composite,
+    central_composite_point_kinds,
+    fractional_factorial,
+    generator_alias_structure,
+    plackett_burman,
+)
 
 
 class FractionalFactorialTest(unittest.TestCase):
@@ -30,6 +37,70 @@ class FractionalFactorialTest(unittest.TestCase):
     def test_rejects_mismatched_generators(self):
         with self.assertRaises(ValueError):
             fractional_factorial([(-1, 1)] * 3, "a b")  # 2 tokens, 3 dims
+
+    def test_infinite_or_nan_bounds_rejected(self):
+        # MXR-080-0174: shared with mixle.doe.designs._as_bounds.
+        with self.assertRaises(ValueError):
+            fractional_factorial([(-1, 1), (0.0, np.inf)], "a b")
+        with self.assertRaises(ValueError):
+            fractional_factorial([(np.nan, 1.0), (-1, 1)], "a b")
+
+
+class GeneratorTokenValidationTest(unittest.TestCase):
+    """MXR-080-0179: generator tokens that repeat a factor into a constant or duplicate column must
+    raise instead of silently producing a degenerate design."""
+
+    def test_letters_cancelling_to_a_constant_column_rejected(self):
+        with self.assertRaises(ValueError):
+            fractional_factorial([(-1, 1)] * 3, "a b aa")  # aa -> all-ones constant column
+        with self.assertRaises(ValueError):
+            fractional_factorial([(-1, 1)] * 2, "aabb b")  # a,a,b,b all cancel -> constant
+
+    def test_two_factors_aliased_with_each_other_rejected(self):
+        # Distinct from the *intentional* aliasing a fractional design is built on (a compound token
+        # like "ab" is fine) -- this is two of the *named* factors being perfectly redundant.
+        with self.assertRaises(ValueError):
+            fractional_factorial([(-1, 1)] * 3, "a b a")  # factors 0 and 2 identical
+        with self.assertRaises(ValueError):
+            fractional_factorial([(-1, 1)] * 3, "a b -a")  # factors 0 and 2 exact opposites
+
+    def test_intentional_compound_generators_still_allowed(self):
+        # Negative control: a compound token that is NOT a duplicate of another factor's own word is
+        # exactly the mechanism fractional designs are built on and must not be rejected.
+        x = fractional_factorial([(-1, 1)] * 3, "a b ab", coded=True)
+        self.assertEqual(x.shape, (4, 3))
+        np.testing.assert_allclose(x[:, 2], x[:, 0] * x[:, 1])
+
+    def test_malformed_token_still_rejected(self):
+        with self.assertRaises(ValueError):
+            fractional_factorial([(-1, 1)] * 2, "a b1")  # '1' is not a base-factor letter
+        with self.assertRaises(ValueError):
+            fractional_factorial([(-1, 1)] * 2, "a +")  # empty token after stripping its sign
+
+
+class GeneratorAliasStructureTest(unittest.TestCase):
+    """MXR-080-0179: the alias structure fractional_factorial builds is published, not discarded."""
+
+    def test_matches_textbook_2_to_the_5_minus_2(self):
+        # Montgomery-style 2^(5-2): D = AB, E = AC; A, B, C are the generating (base) factors.
+        structure = generator_alias_structure("a b c ab ac")
+        self.assertEqual(structure, {"x3": "ab", "x4": "ac"})
+
+    def test_matches_textbook_2_to_the_3_minus_1(self):
+        # Resolution-III 2^(3-1): C = AB.
+        self.assertEqual(generator_alias_structure("a b ab"), {"x2": "ab"})
+
+    def test_negated_generator_is_sign_prefixed(self):
+        self.assertEqual(generator_alias_structure("a b -ab"), {"x2": "-ab"})
+
+    def test_full_factorial_has_no_aliasing(self):
+        self.assertEqual(generator_alias_structure("a b c"), {})
+
+    def test_raises_the_same_way_as_fractional_factorial_for_degenerate_generators(self):
+        with self.assertRaises(ValueError):
+            generator_alias_structure("a b aa")
+        with self.assertRaises(ValueError):
+            generator_alias_structure("a b a")
 
 
 class PlackettBurmanTest(unittest.TestCase):
@@ -62,7 +133,7 @@ class CentralCompositeTest(unittest.TestCase):
 
 
 class CentralCompositeValidationTest(unittest.TestCase):
-    """MXR-080-0174: central_composite's center-count control, shared with designs.py's helper."""
+    """MXR-080-0174/0179: center-count and alpha validation, and the factorial-cube-vs-axial distinction."""
 
     bounds = [(-1.0, 1.0)] * 3
 
@@ -75,6 +146,34 @@ class CentralCompositeValidationTest(unittest.TestCase):
     def test_center_zero_is_legitimate(self):
         x = central_composite(self.bounds, center=0, coded=True)
         self.assertEqual(x.shape, (8 + 6 + 0, 3))
+
+    def test_numeric_alpha_rejects_nan_inf_and_nonpositive(self):
+        # NaN previously slipped through `a <= 0.0` (always False for NaN) and silently produced a
+        # design with NaN axial points.
+        for bad_alpha in (float("nan"), float("inf"), float("-inf"), -1.0, 0.0):
+            with self.subTest(alpha=bad_alpha):
+                with self.assertRaises(ValueError):
+                    central_composite(self.bounds, alpha=bad_alpha)
+
+    def test_rotatable_axial_points_exceed_bounds_but_factorial_and_center_do_not(self):
+        bounds = [(-1.0, 1.0)] * 3
+        design = central_composite(bounds, center=4, alpha="rotatable", coded=False)
+        kinds = central_composite_point_kinds(bounds, center=4)
+        self.assertEqual(kinds.shape, (design.shape[0],))
+        self.assertEqual(list(kinds[:8]), ["factorial"] * 8)
+        self.assertEqual(list(kinds[8:14]), ["axial"] * 6)
+        self.assertEqual(list(kinds[14:]), ["center"] * 4)
+        axial_rows = design[kinds == "axial"]
+        self.assertGreater(np.max(np.abs(axial_rows)), 1.0)  # extends past the +/-1 factorial cube
+        non_axial = design[kinds != "axial"]
+        self.assertTrue(np.all(non_axial >= -1.0 - 1e-9) and np.all(non_axial <= 1.0 + 1e-9))
+
+    def test_face_alpha_keeps_axial_points_within_bounds_too(self):
+        bounds = [(-1.0, 1.0)] * 3
+        design = central_composite(bounds, center=4, alpha="face", coded=False)
+        kinds = central_composite_point_kinds(bounds, center=4)
+        axial_rows = design[kinds == "axial"]
+        self.assertTrue(np.all(axial_rows >= -1.0 - 1e-9) and np.all(axial_rows <= 1.0 + 1e-9))
 
 
 class BoxBehnkenTest(unittest.TestCase):

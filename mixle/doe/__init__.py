@@ -97,7 +97,9 @@ from mixle.doe.entropy import (
 from mixle.doe.factorial import (
     box_behnken,
     central_composite,
+    central_composite_point_kinds,
     fractional_factorial,
+    generator_alias_structure,
     plackett_burman,
 )
 from mixle.doe.mixture import simplex_centroid, simplex_lattice, to_pseudocomponents
@@ -147,8 +149,10 @@ __all__ = [
     "multitask_distillation_design",
     "cross_modal_distillation_design",
     "fractional_factorial",
+    "generator_alias_structure",
     "plackett_burman",
     "central_composite",
+    "central_composite_point_kinds",
     "box_behnken",
     "simplex_lattice",
     "simplex_centroid",

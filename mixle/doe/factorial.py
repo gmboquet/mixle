@@ -9,6 +9,12 @@ and returns a ``(n_runs, d)`` array. The design is built in *coded* units -- two
 ``-1`` / ``+1``, response-surface axial/centre points relative to that -- then mapped into ``bounds``
 so ``-1`` -> ``low``, ``+1`` -> ``high``, ``0`` -> the midpoint. Pass ``coded=True`` to get the raw
 coded matrix instead (the natural input to the analysis routines in :mod:`mixle.doe.analysis`).
+
+``bounds`` is a hard requirement only for the *factorial cube* itself: :func:`central_composite`'s
+rotatable/orthogonal axial points are placed by a design-theory property, not clamped to ``bounds``,
+and routinely extend past them on purpose -- see its docstring and :func:`central_composite_point_kinds`.
+:func:`fractional_factorial`'s generator-string aliasing is likewise published, not just used
+internally, via :func:`generator_alias_structure`.
 """
 
 from __future__ import annotations
@@ -42,6 +48,36 @@ def _two_level_full(k: int) -> np.ndarray:
     return np.stack(cols, axis=1)
 
 
+def _split_generator_tokens(generators: str | list) -> list[str]:
+    """Split a ``generators`` spec into its individual token strings."""
+    return generators.split() if isinstance(generators, str) else [str(t) for t in generators]
+
+
+def _reduce_generator_token(token: str, letters: list[str], *, label: str) -> tuple[int, frozenset[str]]:
+    """Parse one fractional-factorial generator token into a sign and its base-letter word.
+
+    In ``+/-1`` coding, a letter multiplied by itself is the all-ones column, so repeated letters
+    cancel *in pairs* -- e.g. ``"aabc"`` reduces to the same column as ``"bc"``, and ``"aabb"`` reduces
+    to the empty word (every letter cancels, leaving a column that is constant across every run).
+    Raises ``ValueError`` if the token references a letter outside ``letters``, or reduces to the empty
+    word -- a generator that, after cancellation, defines a factor that never varies (MXR-080-0179).
+    """
+    sign = -1 if token.startswith("-") else 1
+    name = token.lstrip("+-")
+    if not name or any(ch not in letters for ch in name):
+        raise ValueError(f"{label} {token!r} references an undefined base factor.")
+    reduced: set[str] = set()
+    for ch in name:
+        reduced.symmetric_difference_update({ch})
+    if not reduced:
+        raise ValueError(
+            f"{label} {token!r} has every base letter cancel in pairs, which collapses to a constant "
+            "(all +1 or all -1) column -- a factor generator must leave an odd number of at least one "
+            "base letter."
+        )
+    return sign, frozenset(reduced)
+
+
 def fractional_factorial(bounds: Bounds, generators: str | list, *, coded: bool = False) -> np.ndarray:
     """Two-level fractional factorial ``2**(k-p)`` from pyDOE-style generator strings.
 
@@ -50,12 +86,20 @@ def fractional_factorial(bounds: Bounds, generators: str | list, *, coded: bool 
     Base factors are the distinct single letters; each token is the elementwise product of its letters,
     optionally negated with a leading ``-``. The number of tokens must equal ``len(bounds)``.
 
+    Rejects a ``generators`` spec that collapses a factor to a constant column (repeated letters
+    cancelling entirely, e.g. ``"aa"``) or that aliases two of the *named* factors with each other
+    (two tokens whose reduced letter-words are identical or exact opposites, e.g. tokens ``"a"`` and
+    ``"-a"``) -- both silently produced a degenerate design with no diagnostic before (MXR-080-0179).
+    This does not affect the intentional aliasing a fractional design is built on: a compound token
+    like ``"ab"`` is fine and expected, it just cannot repeat another factor's own word. Use
+    :func:`generator_alias_structure` to see which factors are aliased with which interaction.
+
     Returns a ``(2**k, d)`` design (``k`` = number of base factors) mapped into ``bounds`` -- or the
     raw coded ``+/-1`` matrix if ``coded=True``.
     """
     b = _as_bounds(bounds)
     d = b.shape[0]
-    tokens = generators.split() if isinstance(generators, str) else [str(t) for t in generators]
+    tokens = _split_generator_tokens(generators)
     if len(tokens) != d:
         raise ValueError("generators must name exactly one column per dimension (len(bounds)).")
     letters = sorted({ch for t in tokens for ch in t if ch.isalpha()})
@@ -63,16 +107,61 @@ def fractional_factorial(bounds: Bounds, generators: str | list, *, coded: bool 
         raise ValueError("generators must reference at least one base-factor letter.")
     base = _two_level_full(len(letters))
     col_of = {letters[i]: base[:, i] for i in range(len(letters))}
+
+    seen: dict[frozenset[str], int] = {}
     out = np.empty((base.shape[0], d), dtype=np.float64)
     for j, token in enumerate(tokens):
-        name = token.lstrip("+-")
-        if not name or any(ch not in col_of for ch in name):
-            raise ValueError(f"generator token {token!r} references an undefined base factor.")
+        sign, reduced = _reduce_generator_token(token, letters, label="generator token")
+        if reduced in seen:
+            raise ValueError(
+                f"generator tokens {tokens[seen[reduced]]!r} (factor {seen[reduced]}) and {token!r} "
+                f"(factor {j}) define the same or exactly opposite column -- those two factors would "
+                "be perfectly aliased with each other, not merely with an interaction; use distinct "
+                "generators per factor."
+            )
+        seen[reduced] = j
         col = np.ones(base.shape[0])
-        for ch in name:
+        for ch in reduced:
             col = col * col_of[ch]
-        out[:, j] = -col if token.startswith("-") else col
+        out[:, j] = -col if sign < 0 else col
     return out if coded else _coded_to_bounds(out, b)
+
+
+def generator_alias_structure(generators: str | list) -> dict[str, str]:
+    """Return the classical alias structure a fractional-factorial ``generators`` spec defines.
+
+    For each factor whose token is a *compound* generator (a product of two or more base letters,
+    e.g. the ``"d = ab"`` in :func:`fractional_factorial`'s docstring example), maps its positional
+    label (``"x0"``, ``"x1"``, ... in token order, matching :func:`mixle.doe.analysis.factorial_effects`'
+    term naming) to the letters of the interaction it is aliased with (e.g. ``{"x3": "ab"}``, sign-
+    prefixed with ``"-"`` for a negated generator). Base (single-letter) factors are omitted -- they
+    are the generating columns, not aliased with anything; a full (non-fractional) factorial returns
+    an empty dict. Published so the aliasing :func:`fractional_factorial` builds into the design is
+    available to the caller rather than only computed-and-discarded internally (MXR-080-0179).
+
+    Raises the same ``ValueError`` as :func:`fractional_factorial` for a ``generators`` spec that is
+    malformed or degenerate (an undefined letter, a constant column, or two factors aliased with each
+    other), so a design and its published alias structure can never silently disagree.
+    """
+    tokens = _split_generator_tokens(generators)
+    letters = sorted({ch for t in tokens for ch in t if ch.isalpha()})
+    if not letters:
+        raise ValueError("generators must reference at least one base-factor letter.")
+    seen: dict[frozenset[str], int] = {}
+    structure: dict[str, str] = {}
+    for j, token in enumerate(tokens):
+        sign, reduced = _reduce_generator_token(token, letters, label="generator token")
+        if reduced in seen:
+            raise ValueError(
+                f"generator tokens {tokens[seen[reduced]]!r} (factor {seen[reduced]}) and {token!r} "
+                f"(factor {j}) define the same or exactly opposite column -- those two factors would "
+                "be perfectly aliased with each other, not merely with an interaction; use distinct "
+                "generators per factor."
+            )
+        seen[reduced] = j
+        if len(reduced) > 1:
+            structure[f"x{j}"] = ("-" if sign < 0 else "") + "".join(sorted(reduced))
+    return structure
 
 
 def _pb_cyclic(gen: str) -> np.ndarray:
@@ -130,7 +219,8 @@ def central_composite(
 ) -> np.ndarray:
     """Central-composite design (CCD) for fitting a full second-order response surface.
 
-    A CCD stacks three parts: the ``2**d`` two-level factorial corners (estimate linear and
+    A CCD stacks three parts, in this row order (see :func:`central_composite_point_kinds` to recover
+    which output row is which): the ``2**d`` two-level factorial corners (estimate linear and
     interaction terms), ``2*d`` axial / star points at distance ``alpha`` on each axis (estimate the
     pure-quadratic curvature), and ``center`` replicates at the centre (estimate pure error and
     curvature). ``alpha`` sets the axial distance:
@@ -139,7 +229,16 @@ def central_composite(
         distance from the centre;
       * ``"orthogonal"`` -- the value making the second-order terms orthogonal (depends on ``center``);
       * ``"face"`` (a face-centred CCD / CCF) -- ``alpha = 1``, keeping every run inside the cube;
-      * a positive float -- used directly.
+      * a positive, finite float -- used directly.
+
+    ``bounds`` defines the *factorial cube* (``-1``/``+1`` map to each factor's ``low``/``high``): the
+    factorial-corner and centre rows are therefore always exactly within ``bounds``. Axial points sit
+    at coded distance ``alpha`` on a single axis, and for ``"rotatable"``/``"orthogonal"`` that distance
+    is normally **greater than 1** -- a mathematical requirement of the rotatability/orthogonality
+    property, not a clamp to ``bounds`` -- so those rows routinely fall *outside* ``bounds`` on purpose.
+    Only ``alpha="face"`` (or a numeric ``alpha <= 1``) guarantees every row stays within ``bounds``
+    (MXR-080-0179); use :func:`central_composite_point_kinds` to tell the row kinds apart
+    programmatically when that distinction matters to the caller.
 
     Returns ``(2**d + 2*d + center, d)`` rows mapped into ``bounds`` (or coded if ``coded=True``).
     """
@@ -160,8 +259,8 @@ def central_composite(
             raise ValueError("alpha must be 'rotatable', 'orthogonal', 'face', or a positive float.")
     else:
         a = float(alpha)
-        if a <= 0.0:
-            raise ValueError("numeric alpha must be positive.")
+        if not np.isfinite(a) or a <= 0.0:
+            raise ValueError("numeric alpha must be finite and positive.")
     axial = np.zeros((2 * d, d))
     for i in range(d):
         axial[2 * i, i] = -a
@@ -170,13 +269,35 @@ def central_composite(
     return coded_design if coded else _coded_to_bounds(coded_design, b)
 
 
+def central_composite_point_kinds(bounds: Bounds, *, center: int = 4) -> np.ndarray:
+    """Row-kind labels for :func:`central_composite`'s output, in the same row order.
+
+    Returns a length-``(2**d + 2*d + center)`` string array of ``"factorial"`` / ``"axial"`` /
+    ``"center"`` entries. ``"factorial"`` and ``"center"`` rows are always exactly within ``bounds``;
+    ``"axial"`` rows are guaranteed within ``bounds`` only when :func:`central_composite` was called
+    with ``alpha="face"`` (or a numeric ``alpha <= 1``) -- see its docstring for why rotatable/
+    orthogonal axial points routinely extend past ``bounds`` on purpose (MXR-080-0179). Pass the same
+    ``center`` used in the matching :func:`central_composite` call so the lengths line up, e.g.::
+
+        design = central_composite(bounds, center=4, alpha="rotatable")
+        kinds = central_composite_point_kinds(bounds, center=4)
+        in_bounds_rows = design[kinds != "axial"]
+    """
+    b = _as_bounds(bounds)
+    d = b.shape[0]
+    nc = _require_exact_positive_int(center, "center", minimum=0)
+    nf = 2**d
+    return np.array(["factorial"] * nf + ["axial"] * (2 * d) + ["center"] * nc)
+
+
 def box_behnken(bounds: Bounds, *, center: int | None = None, coded: bool = False) -> np.ndarray:
     """Box-Behnken response-surface design (3 levels per factor, no corner runs).
 
     For every pair of factors it runs the four ``(+/-1, +/-1)`` combinations with all other factors at
     the centre, plus ``center`` centre replicates. Unlike a CCD it never sets all factors to an extreme
     at once (no cube corners), which is useful when those combinations are expensive or infeasible, and
-    it needs only three levels per factor. Requires ``d >= 3``.
+    it needs only three levels per factor. Every row is always within ``bounds`` (no analogue of a CCD's
+    rotatable axial points here). Requires ``d >= 3``.
 
     Returns ``(4 * C(d, 2) + center, d)`` rows mapped into ``bounds`` (or coded if ``coded=True``).
     """
