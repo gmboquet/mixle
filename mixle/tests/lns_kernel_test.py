@@ -138,6 +138,125 @@ class CompiledLnsKernelTest(unittest.TestCase):
         self.assertTrue(np.array_equal(compiled, reference))
 
 
+class CrossEntropyRowsSafetyTest(unittest.TestCase):
+    """MXR-080-0140 / MXR-080-0157, exercised directly against the compiled entry point (bypassing
+    mixle.engines.lns_nn.cross_entropy's own Python-level validation entirely -- the same way a caller
+    reaching into mixle.engines._lns_kernel directly could). The Python wrapper already rejects every
+    one of these cases before ever calling in (mixle/tests/lns_nn_test.py's
+    CrossEntropyTargetValidationTest); this class is specifically about the compiled kernel's OWN
+    defense-in-depth, matching the "add compiled boundary checks before releasing the GIL" instruction.
+
+    The out-of-range-index and too-short-targets scenarios were independently proven to be genuine
+    heap-buffer-overflow reads PRE-FIX via a standalone AddressSanitizer-instrumented C reproduction of
+    the exact ``k[i, targets[i]]`` / ``targets[i]`` expressions this function used to evaluate unchecked
+    (mirroring the rigor of the MXR-080-0138 fix's own C/ASan verification this session): ASan reported
+    a heap-buffer-overflow READ 8 bytes before the ``k`` allocation for a negative index, a
+    heap-buffer-overflow READ 0 bytes past the ``targets`` allocation for a too-short array, and a wild
+    SIGBUS read for a grossly out-of-range index -- and zero ASan errors once the same expressions were
+    guarded by the validation now in :func:`~mixle.engines._lns_kernel.cross_entropy_rows`. That C
+    harness is a throwaway verification artifact, not part of this repo (this extension is Cython, not
+    hand-written C); the tests below are the Python-visible behavioral proof that the same guards ship.
+    """
+
+    def test_out_of_range_target_index_raises_instead_of_reading_out_of_bounds(self):
+        lns = LogNumberSystem(step=0.01)
+        k = np.ascontiguousarray(np.zeros((4, 8), dtype=np.int64))
+        for bad in (8, 999999, -1, -999999):
+            targets = np.ascontiguousarray(np.array([0, 1, 2, bad], dtype=np.int64))
+            with self.assertRaises(ValueError):
+                cross_entropy_rows(k, targets, lns.lut, lns.dmax)
+
+    def test_out_of_range_target_index_is_deterministically_rejected_across_many_calls(self):
+        # pytest can't run under ASan itself; this is the "weaker but still meaningful" fallback signal
+        # for the same hazard -- many fresh adversarial calls, each must raise cleanly every time, never
+        # crash and never return a value (which would indicate a read that "happened to" land somewhere
+        # readable instead of being caught).
+        lns = LogNumberSystem(step=0.01)
+        rng = np.random.RandomState(21)
+        for _ in range(500):
+            n, m = rng.randint(1, 9), rng.randint(1, 9)
+            k = rng.randint(-1000, 1000, size=(n, m)).astype(np.int64)
+            targets = rng.randint(0, m, size=n).astype(np.int64)
+            targets[rng.randint(0, n)] = m + rng.randint(0, 1000)  # force one index out of range
+            with self.assertRaises(ValueError):
+                cross_entropy_rows(np.ascontiguousarray(k), np.ascontiguousarray(targets), lns.lut, lns.dmax)
+
+    def test_too_short_targets_raises_instead_of_reading_past_its_buffer(self):
+        lns = LogNumberSystem(step=0.01)
+        k = np.ascontiguousarray(np.zeros((6, 4), dtype=np.int64))
+        targets = np.ascontiguousarray(np.array([0, 1], dtype=np.int64))  # only 2 entries for 6 rows
+        with self.assertRaises(ValueError):
+            cross_entropy_rows(k, targets, lns.lut, lns.dmax)
+
+    def test_too_long_targets_also_rejected(self):
+        lns = LogNumberSystem(step=0.01)
+        k = np.ascontiguousarray(np.zeros((2, 4), dtype=np.int64))
+        targets = np.ascontiguousarray(np.array([0, 1, 2, 3], dtype=np.int64))
+        with self.assertRaises(ValueError):
+            cross_entropy_rows(k, targets, lns.lut, lns.dmax)
+
+    def test_zero_classes_raises_instead_of_reading_uninitialized_scratch(self):
+        # pre-fix, `np.empty(m if m > 0 else 1, ...)` for m==0 meant buf[0] was read straight back
+        # without ever being written -- whatever garbage np.empty happened to hand back for that one
+        # element. Post-fix this is rejected outright, before any scratch buffer is even allocated.
+        lns = LogNumberSystem(step=0.01)
+        k = np.ascontiguousarray(np.zeros((3, 0), dtype=np.int64))
+        targets = np.ascontiguousarray(np.zeros(3, dtype=np.int64))
+        with self.assertRaises(ValueError):
+            cross_entropy_rows(k, targets, lns.lut, lns.dmax)
+
+    def test_log_zero_code_target_raises_instead_of_wrapping_int64(self):
+        # MXR-080-0157: a target logit of exactly LOG_ZERO_CODE (== INT64_MIN) subtracted raw from an
+        # ordinary row logsumexp is precisely the "extreme code range" that overflows int64 on its own,
+        # independent of batch size -- confirmed corrupted (a deeply-negative-looking finite loss where
+        # the true answer is +inf) against the pre-fix kernel during development of this fix.
+        lns = LogNumberSystem(step=0.01)
+        k = np.ascontiguousarray(np.array([[0, 5, LOG_ZERO_CODE, -3]], dtype=np.int64))
+        targets = np.ascontiguousarray(np.array([2], dtype=np.int64))
+        with self.assertRaises(OverflowError):
+            cross_entropy_rows(k, targets, lns.lut, lns.dmax)
+
+    def test_accumulator_overflow_raises_instead_of_returning_corrupted_total(self):
+        # MXR-080-0157: an adversarial batch where every row's loss is ~2*CODE_MAX in magnitude -- just
+        # a handful of such rows already exceeds int64 range. Cross-checked against an independent
+        # reference: _numpy_tree_row (a standalone Python reimplementation below, calling no compiled
+        # code) per row, summed with Python's own arbitrary-precision int arithmetic (which cannot
+        # itself silently overflow, unlike the int64_t total this is standing in for).
+        lns = LogNumberSystem(step=0.01)
+        n, m = 8, 4
+        k = np.full((n, m), CODE_MAX, dtype=np.int64)
+        k[:, 0] = CODE_MIN
+        targets = np.zeros(n, dtype=np.int64)
+
+        true_total = sum(_numpy_tree_row(k[i], lns) - int(k[i, targets[i]]) for i in range(n))
+        self.assertGreater(abs(true_total), 2**63 - 1)  # confirm this really is beyond int64 range
+
+        with self.assertRaises(OverflowError):
+            cross_entropy_rows(np.ascontiguousarray(k), np.ascontiguousarray(targets), lns.lut, lns.dmax)
+
+    def test_negative_control_well_formed_batch_with_incidental_log_zero_entries(self):
+        # a well-formed batch (valid shapes/indices, no LOG_ZERO_CODE at any TARGET position) may still
+        # contain LOG_ZERO_CODE at OTHER positions within a row (an ordinary masked/impossible class);
+        # confirm this is unaffected by the MXR-080-0140/0157 checks and matches an independent
+        # reference exactly.
+        lns = LogNumberSystem(step=0.01)
+        rng = np.random.RandomState(22)
+        n, m = 50, 6
+        k = lns.quantize(rng.randn(n, m) * 10)
+        drop = rng.rand(n, m) < 0.15
+        k = np.where(drop, LOG_ZERO_CODE, k).astype(np.int64)
+        targets = rng.randint(0, m, size=n).astype(np.int64)
+        for i in range(n):  # make sure no target itself landed on a dropped entry (tested separately above)
+            while k[i, targets[i]] == LOG_ZERO_CODE:
+                targets[i] = (targets[i] + 1) % m
+        k = np.ascontiguousarray(k)
+        targets = np.ascontiguousarray(targets)
+
+        total = cross_entropy_rows(k, targets, lns.lut, lns.dmax)
+        ref_total = sum(_numpy_tree_row(k[i], lns) - int(k[i, targets[i]]) for i in range(n))
+        self.assertEqual(int(total), ref_total)
+
+
 def _numpy_tree_row(row, lns):
     """Standalone reference tree fold (independent of LogNumberSystem.logadd): mirrors the compiled
     kernel's MXR-080-0138 sentinel/saturation handling by hand, for an independent bit-identical check.
