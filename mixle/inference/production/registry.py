@@ -8,6 +8,7 @@ to an alias (e.g. ``"production"``) -- the swap point a serving layer reads from
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from collections.abc import Callable
@@ -86,13 +87,20 @@ class Registry:
         """Store ``model`` under ``name`` as a new version; return its version id.
 
         ``header`` defaults to ``model.header`` if present. The model is serialized with the safe mixle
-        registry; the header (a :class:`Header` or dict) and ``metadata`` are stored alongside."""
+        registry; the header (a :class:`Header` or dict) and ``metadata`` are stored alongside.
+
+        Allocating the next version number is a read-modify-write over ``versions(name)``: two
+        concurrent callers (two threads, or two processes) can both read the same existing versions,
+        both compute the same "next" number, and both write it -- one write silently clobbers the
+        other, with no error to either caller. To prevent that, the number allocation and the write
+        are serialized per model name with an ``fcntl.flock`` on a lock file in the model's directory
+        (held for both the read and the write, so a second writer waits and is correctly given the
+        NEXT free number rather than racing for the same one). The write itself additionally uses
+        ``O_CREAT | O_EXCL`` as an independent, belt-and-suspenders guard: if a file for that version
+        exists anyway (e.g. flock is a no-op on the underlying filesystem), it raises instead of
+        silently overwriting the earlier registration.
+        """
         d = self._dir(name)
-        # the NEXT version number, not the current COUNT: a deleted version (v2 removed from v1,v2,v3)
-        # must not free up its number for reuse, or the next register() overwrites the surviving v3.
-        existing = self.versions(name)
-        next_n = max((int(v[1:]) for v in existing if v[1:].isdigit()), default=0) + 1
-        ver = f"v{next_n}"
         attached = getattr(model, "header", None)
         if header is None:
             header = attached
@@ -107,15 +115,36 @@ class Registry:
         finally:
             if had_attr:
                 model.header = attached
-        payload = {
-            "version": ver,
-            "registered_at": _now(),
-            "model": model_ser,
-            "header": hdr,
-            "metadata": metadata or {},
-        }
-        with open(os.path.join(d, ver + ".json"), "w") as f:
-            json.dump(payload, f)
+
+        lock_path = os.path.join(d, ".register.lock")
+        with open(lock_path, "w") as lock_f:
+            fcntl.flock(lock_f, fcntl.LOCK_EX)
+            try:
+                # the NEXT version number, not the current COUNT: a deleted version (v2 removed from
+                # v1,v2,v3) must not free up its number for reuse, or the next register() overwrites
+                # the surviving v3.
+                existing = self.versions(name)
+                next_n = max((int(v[1:]) for v in existing if v[1:].isdigit()), default=0) + 1
+                ver = f"v{next_n}"
+                payload = {
+                    "version": ver,
+                    "registered_at": _now(),
+                    "model": model_ser,
+                    "header": hdr,
+                    "metadata": metadata or {},
+                }
+                path = os.path.join(d, ver + ".json")
+                try:
+                    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                except FileExistsError:
+                    raise RuntimeError(
+                        f"registry conflict: {name!r} version {ver!r} already exists -- another writer "
+                        "claimed it concurrently; retry register()"
+                    ) from None
+                with os.fdopen(fd, "w") as f:
+                    json.dump(payload, f)
+            finally:
+                fcntl.flock(lock_f, fcntl.LOCK_UN)
         return ver
 
     def checkpointer(self, name: str, *, every: int = 1) -> Callable[[Any], None]:
