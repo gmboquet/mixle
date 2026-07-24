@@ -209,21 +209,33 @@ class PowerLawHawkesEstimator(ParameterEstimator):
         return PowerLawHawkesAccumulatorFactory(self.window, self.alpha_fixed, name=self.name, keys=self.keys)
 
     def estimate(self, nobs, suff_stat) -> PowerLawHawkesDistribution:
-        """Fit Hawkes parameters by numerical maximum likelihood."""
+        """Fit Hawkes parameters by weighted numerical maximum likelihood.
+
+        Each realization's log-likelihood is scaled by its accumulated weight, so this is the
+        weighted MLE ``argmax sum_i weight_i * log_density(realization_i)`` -- the objective EM
+        responsibilities and other weighted ``optimize()`` callers rely on.
+        """
         realizations, window, alpha_fixed = suff_stat
         unmarked = alpha_fixed is not None
         unpack = PowerLawHawkesDistribution._unpack
-        data = [unpack(r) for r in realizations]
-        n_total = sum(len(t) for t, _ in data)
+        data = [(unpack(r), float(weight)) for r, weight in realizations]
+        n_total = sum(weight * len(t) for (t, _), weight in data)
+        total_weight = sum(weight for _, weight in data)
 
         def negll(theta):
             mu, a, c, pm1 = np.exp(theta[[0, 1, 3, 4]])
             alpha = alpha_fixed if unmarked else theta[2]
             d = PowerLawHawkesDistribution(mu, a, c, 1.0 + pm1, window, alpha=alpha)
-            ll = sum(d.log_density(r) for r in data)
+            ll = sum(weight * d.log_density(r) for r, weight in data)
             return -ll if np.isfinite(ll) else 1e12
 
-        x0 = [np.log(max(n_total / (len(data) * window), 1e-3)), np.log(0.5), 0.0, np.log(0.02), np.log(0.3)]
+        x0 = [
+            np.log(max(n_total / (max(total_weight, 1e-9) * window), 1e-3)),
+            np.log(0.5),
+            0.0,
+            np.log(0.02),
+            np.log(0.3),
+        ]
         bounds = [
             (np.log(1e-4), np.log(1e3)),
             (np.log(1e-4), np.log(1e3)),
@@ -238,51 +250,67 @@ class PowerLawHawkesEstimator(ParameterEstimator):
 
 
 class PowerLawHawkesAccumulator(SequenceEncodableStatisticAccumulator):
-    """Collects realizations (the MLE needs the full event times, not closed-form sufficient statistics)."""
+    """Collects weighted realizations (the MLE needs the full event times, not closed-form sufficient statistics).
+
+    Each stored entry is a ``(realization, weight)`` pair; ``PowerLawHawkesEstimator.estimate`` fits by
+    weighted maximum likelihood, ``argmax sum_i weight_i * log_density(realization_i)``, so a
+    realization's weight controls how much it contributes -- e.g. EM component responsibilities or
+    ``optimize()``-supplied sample weights -- exactly like a closed-form accumulator's weighted sufficient
+    statistics would.
+    """
 
     def __init__(self, window: float, alpha_fixed: float | None, name=None, keys=None):
         self.window = float(window)
         self.alpha_fixed = alpha_fixed
-        self.realizations: list[Any] = []
+        self.realizations: list[tuple[Any, float]] = []  # (realization, weight) pairs
         self.name = name
         self.keys = keys
 
     def update(self, x, weight, estimate):
-        """Store one realization for maximum-likelihood fitting."""
-        self.realizations.append(x)
+        """Store one realization together with its weight for maximum-likelihood fitting."""
+        self.realizations.append((x, float(weight)))
 
     def initialize(self, x, weight, rng):
-        """Store one realization during initialization."""
-        self.realizations.append(x)
+        """Store one realization together with its weight during initialization."""
+        self.realizations.append((x, float(weight)))
 
     def seq_update(self, x, weights, estimate):
-        """Store a batch of realizations for maximum-likelihood fitting."""
-        self.realizations.extend(x)
+        """Store a batch of realizations together with their weights for maximum-likelihood fitting."""
+        x = list(x)
+        w = np.ones(len(x)) if weights is None else np.asarray(weights, dtype=float)
+        self.realizations.extend((xi, float(wi)) for xi, wi in zip(x, w))
 
     def seq_initialize(self, x, weights, rng):
-        """Store a batch of realizations during initialization."""
-        self.realizations.extend(x)
+        """Store a batch of realizations together with their weights during initialization."""
+        x = list(x)
+        w = np.ones(len(x)) if weights is None else np.asarray(weights, dtype=float)
+        self.realizations.extend((xi, float(wi)) for xi, wi in zip(x, w))
 
     def combine(self, suff_stat):
-        """Merge stored realization catalogues."""
+        """Merge stored weighted realization catalogues."""
         self.realizations.extend(suff_stat[0])
         return self
 
     def scale(self, c: float) -> PowerLawHawkesAccumulator:
-        """Leave raw catalogues unchanged because they are not weighted sufficient statistics."""
-        # The accumulator stores raw realizations (no weighted sufficient statistics), so there is
-        # nothing meaningful to rescale; keep it a safe no-op rather than corrupting the catalogue.
+        """Multiply every stored realization's weight by ``c``.
+
+        The raw event catalogue (times/marks) is data, not a sufficient statistic, and must stay
+        unscaled -- only the weight that says how much each realization counts is linear and gets
+        rescaled, matching the sibling Hawkes accumulators' ``scale()`` contract of multiplying
+        every accumulated weighted quantity by ``c`` (see e.g. HawkesProcessAccumulator.scale).
+        """
+        self.realizations = [(x, weight * c) for x, weight in self.realizations]
         return self
 
     def value(self):
-        """Return stored realizations with the shared window and alpha constraint."""
+        """Return stored weighted realizations with the shared window and alpha constraint."""
         # copy on extract: returning self.realizations directly would alias the live list, so a later
         # in-place update()/seq_update()/combine() on this accumulator would silently mutate an already-
         # returned value() too (same hazard from_value's own copy-on-restore comment guards against).
         return (list(self.realizations), self.window, self.alpha_fixed)
 
     def from_value(self, x):
-        """Restore stored realizations, window, and alpha constraint."""
+        """Restore stored weighted realizations, window, and alpha constraint."""
         # copy on restore: assigning the pooled LIST reference would alias every tied site to one
         # list, so a later in-place extend at any site mutates all of them (copy-on-adopt precedent)
         self.realizations = list(x[0])
