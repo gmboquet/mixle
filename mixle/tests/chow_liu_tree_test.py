@@ -170,7 +170,9 @@ class ChowLiuTreeTestCase(unittest.TestCase):
             ),
         )
         self.assertIn("marginal_0", declaration.child_roles)
-        self.assertIn("conditional_1_given_0='left'", declaration.child_roles)
+        # Role labels embed repr(freeze(parent_value)), not the raw value's own repr -- derive the
+        # expectation from freeze() itself rather than hardcoding its canonical key shape.
+        self.assertIn("conditional_1_given_0=%s" % repr(freeze("left")), declaration.child_roles)
         self.assertFalse(declaration.differentiable)
 
     def test_accumulator_scale_matches_reweighted_update(self):

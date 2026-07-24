@@ -22,9 +22,31 @@ def freeze(x: Any) -> Hashable:
     """Return a canonical hashable key for x, for de-duplicating support values.
 
     Lists/tuples freeze element-wise to tuples, dicts to frozensets of (key, value)
-    pairs, sets to frozensets, numpy arrays to (shape, bytes), numpy scalars to their
-    python equivalents, and NaN to a shared sentinel (so nan == nan for dedup purposes).
-    Raises TypeError for values that cannot be canonicalized.
+    pairs, sets to frozensets, numpy arrays to (shape, dtype string, bytes), numpy
+    scalars to their python equivalents, and NaN to a shared sentinel (so nan == nan
+    for dedup purposes). Raises TypeError for values that cannot be canonicalized.
+
+    Cross-type equality policy (deliberate, not incidental): type is part of a value's
+    identity for dedup purposes, so this never falls back to Python's native cross-type
+    equality/hashing.
+
+      - ndarrays are keyed by (shape, dtype.str, bytes). Bytes alone are ambiguous --
+        e.g. an int8 array holding -56 and a uint8 array holding 200 have identical
+        ``tobytes()`` output but represent different numbers -- so omitting dtype would
+        silently merge genuinely distinct support values.
+      - Every other value is keyed by (type(x), x) rather than bare ``x``, after numpy
+        scalars are unwrapped to their python equivalent via ``.item()``. Plain ``x``
+        would let Python's own cross-type equality collide unrelated values that
+        happen to compare equal -- ``True == 1``, ``False == 0``, ``1 == 1.0`` -- even
+        though a typed distribution's support can legitimately contain both a bool and
+        an int (or an int and a float) as distinct outcomes. Note ``.item()`` collapses
+        numpy integer width (int8/uint8/int64 all become python ``int``), which is safe
+        because ``.item()`` -- unlike an array's raw ``.tobytes()`` -- already applies
+        each dtype's own signed/unsigned interpretation, so equal post-``.item()``
+        values really are the same number.
+      - The one exception: every NaN float collapses to a single shared sentinel
+        regardless of which NaN produced it, since IEEE 754 ``nan != nan`` would
+        otherwise make each NaN a unique, never-deduplicated key.
     """
     if isinstance(x, (list, tuple)):
         return tuple(freeze(u) for u in x)
@@ -33,7 +55,7 @@ def freeze(x: Any) -> Hashable:
     if isinstance(x, (set, frozenset)):
         return frozenset(freeze(u) for u in x)
     if isinstance(x, np.ndarray):
-        return (x.shape, x.tobytes())
+        return (x.shape, x.dtype.str, x.tobytes())
     if isinstance(x, np.generic):
         x = x.item()
     if isinstance(x, float) and math.isnan(x):
@@ -42,7 +64,7 @@ def freeze(x: Any) -> Hashable:
         hash(x)
     except TypeError:
         raise TypeError("Cannot compute an enumeration dedup key for value of type %s" % type(x).__name__)
-    return x
+    return (type(x), x)
 
 
 def supports_enumeration(dist) -> bool:
