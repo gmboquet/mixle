@@ -373,11 +373,29 @@ class StochasticBlockGraphSampler(DistributionSampler):
         return self.rng.choice(self.dist.num_blocks, size=n, p=self.dist.block_prior).astype(np.int64)
 
     def sample_graph(
-        self, num_nodes: int | None = None, block_assignments: Any | None = None, return_assignments: bool = False
+        self,
+        num_nodes: int | None = None,
+        block_assignments: Any | None = None,
+        return_assignments: bool | None = None,
     ) -> Any:
-        """Draw one graph, optionally returning the assignments used."""
+        """Draw one graph, optionally returning the assignments used.
+
+        ``return_assignments=None`` (the default) auto-includes the assignments -- returning an
+        ``(adjacency, assignments)`` pair instead of a bare adjacency matrix -- exactly when they
+        were freshly drawn from ``block_prior`` here (a "population" SBM, i.e. ``block_assignments``
+        is not fixed on the distribution and none were passed to this call) and so have no other
+        recorded home. Without them attached, the returned adjacency alone is not enough for
+        ``log_density``/``seq_log_density`` to score it: this family conditions on block
+        assignments and, by design (see the class docstring), never marginalizes over unknown
+        ones, so a distribution's own sampler must hand back something its own scorer accepts.
+        When assignments ARE recoverable another way -- fixed on the distribution, or supplied by
+        the caller via ``block_assignments`` here -- the bare matrix is returned by default,
+        unchanged from prior behavior. Pass ``True``/``False`` to always/never include them
+        regardless of this auto-detection.
+        """
         from mixle.data.sources.graph_source import _edge_indices, _validate_block_indices
 
+        sampled_from_prior = False
         if block_assignments is None:
             if self.dist.block_assignments is not None and num_nodes is None:
                 assignments = self.dist.block_assignments
@@ -385,6 +403,7 @@ class StochasticBlockGraphSampler(DistributionSampler):
                 if num_nodes is None:
                     raise ValueError("num_nodes is required when block_assignments are not fixed.")
                 assignments = self.sample_assignments(int(num_nodes))
+                sampled_from_prior = True
         else:
             assignments = np.asarray(block_assignments, dtype=np.int64)
         _validate_block_indices(assignments, self.dist.num_blocks)
@@ -397,18 +416,23 @@ class StochasticBlockGraphSampler(DistributionSampler):
             mat[i, j] = edge
             if not self.dist.directed and i != j:
                 mat[j, i] = edge
-        return (mat, assignments.copy()) if return_assignments else mat
+        include_assignments = sampled_from_prior if return_assignments is None else return_assignments
+        return (mat, assignments.copy()) if include_assignments else mat
 
     def sample(
         self,
         size: int | None = None,
         num_nodes: int | None = None,
         block_assignments: Any | None = None,
-        return_assignments: bool = False,
+        return_assignments: bool | None = None,
         *,
         batched: bool = True,
     ) -> Any:
-        """Draw one graph or a list of graphs from the SBM."""
+        """Draw one graph or a list of graphs from the SBM.
+
+        See :meth:`sample_graph` for how ``return_assignments=None`` (the default) auto-includes
+        assignments only when they are not otherwise recoverable for scoring.
+        """
         if size is None:
             return self.sample_graph(
                 num_nodes=num_nodes, block_assignments=block_assignments, return_assignments=return_assignments
