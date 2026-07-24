@@ -36,18 +36,28 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.utils.special import gammaln
+from mixle.utils.vector import cholesky_logdet
 
 _MIN_RIDGE = 1.0e-12
 
 
 def _safe_inverse_and_logdet(shape: np.ndarray) -> tuple[np.ndarray, float]:
-    """Return (Sigma^{-1}, log|Sigma|) with a tiny ridge fallback for near-singular Sigma."""
+    """Return (Sigma^{-1}, log|Sigma|), retrying once with a tiny ridge for a near-singular Sigma.
+
+    Positive-definiteness is checked via Cholesky (``cholesky_logdet``), not a determinant-sign
+    check: a matrix can have a positive determinant while being negative definite or indefinite
+    (e.g. -I in an even dimension has determinant +1 while every eigenvalue is negative), so
+    ``np.linalg.slogdet``'s sign is not a valid substitute. Raises if Sigma is still not
+    positive-definite after the ridge retry, rather than silently returning a bogus log|Sigma|.
+    """
     mat = np.asarray(shape, dtype=float)
-    sign, log_det = np.linalg.slogdet(mat)
-    if sign <= 0.0 or not np.isfinite(log_det):
+    log_det = cholesky_logdet(mat)
+    if log_det is None:
         mat = mat + np.eye(mat.shape[0]) * _MIN_RIDGE
-        sign, log_det = np.linalg.slogdet(mat)
-    return np.linalg.inv(mat), float(log_det)
+        log_det = cholesky_logdet(mat)
+    if log_det is None:
+        raise ValueError("MultivariateStudentTDistribution requires a positive-definite scale matrix.")
+    return np.linalg.inv(mat), log_det
 
 
 class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution):
@@ -113,7 +123,8 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         Args:
             dof: Degrees of freedom, which must be positive and finite.
             loc: Location vector of length ``p``.
-            shape: ``p`` by ``p`` symmetric positive-definite scale matrix.
+            shape: ``p`` by ``p`` symmetric positive-definite scale matrix. Raises if ``shape`` is
+                not symmetric or not positive-definite.
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
 
@@ -136,6 +147,8 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         dim = len(mu)
         if shape.shape != (dim, dim):
             raise ValueError("MultivariateStudentTDistribution shape must be a (p, p) matrix matching loc.")
+        if not np.allclose(shape, shape.T):
+            raise ValueError("MultivariateStudentTDistribution shape must be symmetric.")
 
         self.dof = float(dof)
         self.mu = mu
