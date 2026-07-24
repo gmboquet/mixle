@@ -17,11 +17,29 @@ from mixle.models._kernels import stationary_kernel
 
 __all__ = ["calibrate", "KOCalibration"]
 
+_NOISE_VAR_FLOOR = 1e-8  # one positive-variance floor, shared by every likelihood term (MXR-080-0171)
+
 
 def _rbf(x1: np.ndarray, x2: np.ndarray, ls: float, amp: float) -> np.ndarray:
     # Squared-exponential covariance via mixle's shared NumPy kernel: identical
     # `sum((x1-x2)**2)/ls**2 -> amp**2 * exp(-d2/2)` shape, so results are unchanged.
     return stationary_kernel(x1, x2, ls, amp, "rbf")
+
+
+def _iid_gaussian_neg_ll(r: np.ndarray, noise: float) -> float:
+    """Negative log-likelihood of iid residuals ``r`` under ``N(0, noise**2)``, the no-discrepancy
+    (plain least-squares) branch's noise model.
+
+    The quadratic penalty and the log normalizer both use the SAME floored variance (``noise**2 +
+    _NOISE_VAR_FLOOR``) -- coherent at every ``noise``, including 0. Flooring only the quadratic
+    term's denominator while leaving the normalizer's ``log(noise)`` unfloored (the previous bug)
+    let the optimizer drive ``noise`` toward 0 for an unbounded improvement in the normalizer while
+    the quadratic penalty stayed bounded by its floor: a spurious global "optimum" at zero noise
+    regardless of how large the actual residuals were.
+    """
+    n = len(r)
+    var = noise**2 + _NOISE_VAR_FLOOR
+    return 0.5 * np.sum(r**2) / var + 0.5 * n * np.log(var) + 0.5 * n * np.log(2 * np.pi)
 
 
 class KOCalibration:
@@ -88,14 +106,9 @@ def calibrate(
         theta = p[:nth]
         r = y - np.asarray(simulator(x, theta), dtype=float).ravel()
         if not discrepancy:
-            noise = np.exp(p[nth])
-            # + 1e-8 floor mirrors the discrepancy branch's kernel-diagonal jitter below -- noise=exp(...)
-            # can't hit exactly 0, but Nelder-Mead can still drive p[nth] negative enough that noise**2
-            # underflows toward 0, blowing up this division; the two sibling branches should defend
-            # against degenerate noise the same way.
-            return 0.5 * np.sum(r**2) / (noise**2 + 1e-8) + n * np.log(noise)  # Gaussian iid residual
+            return _iid_gaussian_neg_ll(r, np.exp(p[nth]))
         amp, noise = np.exp(p[nth : nth + 2])
-        k = _rbf(x, x, ls, amp) + (noise**2 + 1e-8) * np.eye(n)
+        k = _rbf(x, x, ls, amp) + (noise**2 + _NOISE_VAR_FLOOR) * np.eye(n)
         try:
             chol = np.linalg.cholesky(k)
         except np.linalg.LinAlgError:
