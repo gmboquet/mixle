@@ -6,6 +6,7 @@ import numpy as np
 from numpy import trapezoid
 
 from mixle.analysis import (
+    KDE,
     intensity,
     kde,
     kde_mode,
@@ -303,6 +304,187 @@ class DegenerateInputTest(unittest.TestCase):
         lam = intensity(events, grid, domain=(0, 10), bandwidth=0.5)
         self.assertTrue(np.all(np.isfinite(lam)))
         self.assertTrue(np.all(lam >= 0.0))
+
+
+class MultivariateTest(unittest.TestCase):
+    """MXR-080-0099: KDE.__init__ used to call .ravel() on an (n, d) sample, turning n paired
+    d-dimensional observations into n*d unrelated 1-D observations -- destroying both which axis was
+    which variable and which values came from the same observation. KDE now implements a true
+    (n, d) axis-aligned Gaussian product kernel with a per-dimension bandwidth (Silverman/Scott
+    generalized to the joint-dimension n^(-1/(d+4)) rate), preserving row-pairing throughout. bounds
+    (reflection boundary correction) remains 1-D only and is now explicitly rejected for d > 1, and
+    kde_mode/intensity -- which never claimed multivariate support -- now explicitly reject (n, d)
+    input instead of silently flattening it the same way."""
+
+    def test_construction_preserves_shape_and_pairing(self):
+        # a (3, 2) input must stay (3, 2) -- not flattened to (6,) -- and rows must be untouched.
+        data = np.array([[0.0, 0.0], [10.0, 10.0], [20.0, 20.0]])
+        f = KDE(data)
+        self.assertEqual(f.n, 3)
+        self.assertEqual(f.d, 2)
+        self.assertEqual(f.data.shape, (3, 2))
+        np.testing.assert_array_equal(f.data, data)
+
+    def test_flattening_would_have_lost_the_correlation_pre_fix(self):
+        # the audit's own reproduction: 3 paired 2-D points with an obvious cross-dimensional
+        # correlation (each row's two coordinates are equal). Flattened to n*d = 6 unrelated 1-D
+        # scalars [0, 0, 10, 10, 20, 20], no density over those 6 numbers alone could possibly encode
+        # "coordinate 0 and coordinate 1 always match within a row" -- that information only exists
+        # in the row pairing, which flattening discards. Demonstrate the paired (2-D) construction
+        # keeps n and d distinct from the flattened count, which is the crux of the bug.
+        data = np.array([[0.0, 0.0], [10.0, 10.0], [20.0, 20.0]])
+        flattened_n = data.size  # what the old .ravel()-based constructor would have used as n
+        f = KDE(data)
+        self.assertEqual(f.n, 3)
+        self.assertNotEqual(f.n, flattened_n)
+        self.assertEqual(f.d, 2)
+
+    def test_correlated_2d_sample_density_is_higher_on_the_diagonal(self):
+        # a 2-D sample where the two dimensions are strongly correlated (x1 ~= x0): a genuine
+        # product-kernel joint density must concentrate mass near the diagonal x0 == x1 and assign
+        # much less density off it. This is only possible because sample pairing survived
+        # construction -- a flattened version has no notion of "which x0 went with which x1".
+        rng = np.random.RandomState(0)
+        n = 400
+        base = rng.normal(0, 1, n)
+        x0 = base
+        x1 = base + rng.normal(0, 0.05, n)
+        data = np.column_stack([x0, x1])
+        f = kde(data)
+        self.assertEqual(f.d, 2)
+        on_diag = f.evaluate(np.array([[0.0, 0.0], [1.0, 1.0], [-1.0, -1.0]]))
+        off_diag = f.evaluate(np.array([[0.0, 3.0], [1.0, -1.0], [-1.0, 2.0]]))
+        self.assertTrue(np.all(on_diag > off_diag * 10))
+
+    def test_correlated_2d_sample_recovers_approximate_correlation(self):
+        # a more quantitative version of the above: integrate the fitted joint density over a grid to
+        # get an (approximate) correlation coefficient, and check it roughly matches the true sample
+        # correlation -- the multivariate KDE's estimated correlation structure should track the
+        # true one, which is impossible if pairing were destroyed by flattening.
+        rng = np.random.RandomState(0)
+        n = 400
+        base = rng.normal(0, 1, n)
+        x0 = base
+        x1 = base + rng.normal(0, 0.05, n)
+        f = kde(np.column_stack([x0, x1]))
+        g1 = np.linspace(-3, 3, 60)
+        g2 = np.linspace(-3, 3, 60)
+        gg1, gg2 = np.meshgrid(g1, g2)
+        pts = np.column_stack([gg1.ravel(), gg2.ravel()])
+        dens = f.evaluate(pts).reshape(gg1.shape)
+        dens = dens / dens.sum()
+        m1 = np.sum(dens * gg1)
+        m2 = np.sum(dens * gg2)
+        cov12 = np.sum(dens * (gg1 - m1) * (gg2 - m2))
+        var1 = np.sum(dens * (gg1 - m1) ** 2)
+        var2 = np.sum(dens * (gg2 - m2) ** 2)
+        est_corr = cov12 / np.sqrt(var1 * var2)
+        true_corr = np.corrcoef(x0, x1)[0, 1]
+        self.assertAlmostEqual(est_corr, true_corr, delta=0.15)
+
+    def test_multivariate_density_integrates_to_one(self):
+        rng = np.random.RandomState(7)
+        data = rng.normal(0, 1, (1500, 2))
+        f = kde(data)
+        g = np.linspace(-5, 5, 250)
+        gg1, gg2 = np.meshgrid(g, g)
+        pts = np.column_stack([gg1.ravel(), gg2.ravel()])
+        dens = f.evaluate(pts).reshape(gg1.shape)
+        dx = g[1] - g[0]
+        integral = float(dens.sum() * dx * dx)
+        self.assertAlmostEqual(integral, 1.0, delta=0.03)
+
+    def test_per_dimension_bandwidth_uses_joint_dimension_exponent(self):
+        # Scott/Silverman must scale each dimension's bandwidth by n^(-1/(d+4)) using the TRUE joint
+        # dimension d, not the univariate n^(-1/5) rate -- get the exponent wrong and the per-dimension
+        # bandwidths silently don't match what selecting each column's bandwidth for a d-D product
+        # kernel actually calls for.
+        rng = np.random.RandomState(1)
+        col0 = rng.normal(0, 3, 500)
+        col1 = rng.normal(0, 1, 500)
+        f = KDE(np.column_stack([col0, col1]), bandwidth="scott")
+        expected = np.array([scott_bandwidth(col0, d=2), scott_bandwidth(col1, d=2)])
+        np.testing.assert_allclose(f.bandwidth, expected)
+        # negative control: must NOT match the univariate (d=1) exponent for the same columns.
+        univariate0 = scott_bandwidth(col0, d=1)
+        self.assertFalse(np.isclose(f.bandwidth[0], univariate0))
+
+    def test_explicit_per_dimension_bandwidth_vector(self):
+        rng = np.random.RandomState(1)
+        data = rng.normal(0, 1, (300, 2))
+        f = KDE(data, bandwidth=[0.5, 0.25])
+        np.testing.assert_allclose(f.bandwidth, [0.5, 0.25])
+
+    def test_scalar_bandwidth_broadcasts_to_every_dimension(self):
+        rng = np.random.RandomState(1)
+        data = rng.normal(0, 1, (300, 3))
+        f = KDE(data, bandwidth=0.4)
+        np.testing.assert_allclose(f.bandwidth, [0.4, 0.4, 0.4])
+
+    def test_wrong_length_bandwidth_vector_rejected(self):
+        rng = np.random.RandomState(1)
+        data = rng.normal(0, 1, (300, 2))
+        with self.assertRaises(ValueError):
+            KDE(data, bandwidth=[0.5, 0.25, 0.1])
+
+    def test_bounds_rejected_for_multivariate(self):
+        rng = np.random.RandomState(1)
+        data = rng.normal(0, 1, (300, 2))
+        with self.assertRaises(ValueError):
+            KDE(data, bounds=(0.0, None))
+
+    def test_adaptive_bandwidth_supported_for_multivariate(self):
+        rng = np.random.RandomState(1)
+        data = rng.normal(0, 1, (800, 2))
+        f = KDE(data, adaptive=True)
+        val = f.evaluate(np.array([[0.0, 0.0], [1.0, 1.0]]))
+        self.assertTrue(np.all(np.isfinite(val)))
+        self.assertTrue(np.all(val > 0.0))
+
+    def test_evaluate_rejects_dimension_mismatch(self):
+        rng = np.random.RandomState(1)
+        data = rng.normal(0, 1, (300, 3))
+        f = KDE(data)
+        with self.assertRaises(ValueError):
+            f.evaluate(np.array([[0.0, 0.0]]))  # 2-D point against a 3-D KDE
+
+    def test_more_than_2d_input_rejected(self):
+        with self.assertRaises(ValueError):
+            KDE(np.zeros((5, 2, 2)))
+
+    def test_kde_mode_rejects_multivariate_input(self):
+        rng = np.random.RandomState(1)
+        data = rng.normal(0, 1, (300, 2))
+        with self.assertRaises(ValueError):
+            kde_mode(data)
+
+    def test_intensity_rejects_multivariate_input(self):
+        rng = np.random.RandomState(1)
+        data = rng.normal(0, 1, (300, 2))
+        with self.assertRaises(ValueError):
+            intensity(data, np.linspace(0, 1, 5))
+
+    def test_negative_control_1d_kde_unaffected(self):
+        # 1-D construction and evaluation must behave exactly as before the multivariate rewrite.
+        rng = np.random.RandomState(0)
+        x = rng.normal(0, 1, 3000)
+        f = kde(x)
+        self.assertEqual(f.d, 1)
+        self.assertIsInstance(f.bandwidth, float)
+        grid = np.linspace(-7, 7, 3000)
+        self.assertAlmostEqual(trapezoid(f(grid), grid), 1.0, delta=0.01)
+
+    def test_negative_control_1d_kde_mode_unaffected(self):
+        rng = np.random.RandomState(0)
+        x = rng.normal(5.0, 1.0, 5000)
+        self.assertAlmostEqual(kde_mode(x), 5.0, delta=0.3)
+
+    def test_negative_control_1d_intensity_unaffected(self):
+        rng = np.random.RandomState(0)
+        events = np.sort(rng.uniform(0, 10, 200))
+        grid = np.linspace(0, 10, 1000)
+        lam = intensity(events, grid, domain=(0, 10), bandwidth=0.5)
+        self.assertAlmostEqual(trapezoid(lam, grid), 200.0, delta=20.0)
 
 
 if __name__ == "__main__":
