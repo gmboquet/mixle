@@ -1,6 +1,7 @@
 """Extreme-value & boundary estimation (mixle.stats.extreme)."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -56,6 +57,56 @@ class GPDTest(unittest.TestCase):
         self.assertGreater(fit.n_exceedances, 500)
         rl = return_level(fit, 10000)
         self.assertGreater(rl, x.max() * 0.5)
+
+    # -- MXR-080-0090: filtering must be receipted, not silent; fits must be validated. --
+
+    def test_rejects_nan_exceedances(self):
+        z = np.array([1.0, 2.0, np.nan, 4.0, 5.0])
+        with self.assertRaises(ValueError):
+            gpd_fit(z, method="pwm")
+
+    def test_receipts_dropped_nonpositive(self):
+        z = np.array([1.0, 2.0, -3.0, 0.0, 4.0, 5.0])
+        fit = gpd_fit(z, method="pwm")
+        self.assertEqual(fit.n_exceedances, 4)
+        self.assertEqual(fit.n_dropped_nonpositive, 2)
+
+    def test_n_total_zero_not_silently_replaced(self):
+        # Before the fix, `n_total or n` silently swapped an explicit 0 for n (0 is falsy). Now an
+        # n_total inconsistent with the exceedance count is rejected outright instead of being
+        # coerced into something else silently.
+        with self.assertRaises(ValueError):
+            gpd_fit(np.array([1.0, 2.0, 3.0, 4.0]), method="pwm", n_total=0)
+
+    def test_n_total_explicit_value_preserved(self):
+        fit = gpd_fit(np.array([1.0, 2.0, 3.0, 4.0]), method="pwm", n_total=10)
+        self.assertEqual(fit.n_total, 10)
+
+    def test_mle_nonconvergence_raises(self):
+        bad_result = mock.Mock(success=False, message="did not converge", x=np.array([0.1, 1.0]))
+        with mock.patch("mixle.analysis.extreme.optimize.minimize", return_value=bad_result):
+            with self.assertRaises(ValueError):
+                gpd_fit(np.array([1.0, 2.0, 3.0, 4.0, 5.0]), method="mle")
+
+    def test_pwm_rejects_support_violating_fit(self):
+        # PWM is a closed-form moment match with no built-in domain constraint; on this sample it
+        # returns a shape/scale whose implied endpoint is below the sample's own maximum -- a fit that
+        # asserts its own fitting data was impossible.
+        z = np.array([0.285569, 0.704949, 0.371616, 0.466864, 0.744378, 1.388677])
+        with self.assertRaises(ValueError):
+            gpd_fit(z, method="pwm")
+
+    def test_well_behaved_sample_fits_cleanly(self):
+        # Negative control for all of the above: ordinary data trips none of the new validation.
+        rng = np.random.RandomState(4)
+        z = _rgpd(rng, 4000, 0.25, 1.5)
+        fit = gpd_fit(z, method="mle")
+        self.assertEqual(fit.n_dropped_nonpositive, 0)
+        self.assertTrue(np.isfinite(fit.shape))
+        self.assertGreater(fit.scale, 0)
+        fit_pwm = gpd_fit(z, method="pwm")
+        self.assertEqual(fit_pwm.n_dropped_nonpositive, 0)
+        self.assertGreater(fit_pwm.scale, 0)
 
 
 class TailIndexTest(unittest.TestCase):
