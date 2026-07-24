@@ -35,6 +35,18 @@ class WishartTest(unittest.TestCase):
         self.assertEqual(seq[0], -np.inf)
         self.assertAlmostEqual(seq[1], self.d.log_density(self.V), places=9)
 
+    def test_asymmetric_observation_is_minus_inf(self):
+        # a Wishart RV is by definition a symmetric matrix, so an asymmetric observation is not a
+        # member of the support at all. batched_pd_logdet reads one triangle only (like
+        # np.linalg.eigvalsh, which it wraps, defaults to UPLO='L'), so this used to be silently
+        # read as np.eye(2) (is_pd=True, logdet=0) and scored a finite density instead of -inf.
+        asym = np.array([[1.0, 100.0], [0.0, 1.0]])
+        self.assertFalse(np.allclose(asym, asym.T))
+        self.assertEqual(self.d.log_density(asym), -np.inf)
+        seq = self.d.seq_log_density(np.array([asym, self.V]))
+        self.assertEqual(seq[0], -np.inf)
+        self.assertAlmostEqual(seq[1], self.d.log_density(self.V), places=9)
+
     def test_negative_definite_scale_with_positive_determinant_raises(self):
         # the constructor's own explicit check must reject this, with its own message -- not rely
         # on np.linalg.cholesky() happening to raise (a LinAlgError, which subclasses ValueError,

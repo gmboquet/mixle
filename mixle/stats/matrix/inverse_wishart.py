@@ -28,7 +28,12 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableProbabilityDistribution,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.matrix.wishart import WishartDistribution, _MeanScatterAccumulator
+from mixle.stats.matrix.wishart import (
+    WishartDistribution,
+    _batched_is_symmetric,
+    _is_symmetric,
+    _MeanScatterAccumulator,
+)
 from mixle.utils.vector import batched_pd_logdet, cholesky_logdet
 
 
@@ -72,7 +77,8 @@ class InverseWishartDistribution(SequenceEncodableProbabilityDistribution):
         return math.exp(self.log_density(x))
 
     def log_density(self, x: np.ndarray) -> float:
-        """Return the log-density at a single ``(p, p)`` SPD matrix (``-inf`` if not positive definite).
+        """Return the log-density at a single ``(p, p)`` SPD matrix (``-inf`` if not symmetric or
+        not positive definite).
 
         Mirrors :meth:`seq_log_density`'s routines exactly rather than merely approximately: uses
         :func:`batched_pd_logdet` (the same eigenvalue-based check) instead of :func:`cholesky_logdet`
@@ -85,20 +91,31 @@ class InverseWishartDistribution(SequenceEncodableProbabilityDistribution):
         """
         xx = np.asarray(x, dtype=np.float64)
         is_pd, logdet = batched_pd_logdet(xx)
-        if not is_pd:
+        if not is_pd or not _is_symmetric(xx):
             return -np.inf
         x_inv = np.linalg.inv(xx)
         tr = np.einsum("ab,ba->", self.scale, x_inv, optimize=True)
         return float(self._log_norm - (self.df + self.dim + 1.0) / 2.0 * logdet - 0.5 * tr)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
-        """Vectorized log-density for a stack of SPD matrices, shape ``(N, p, p)``."""
+        """Vectorized log-density for a stack of SPD matrices, shape ``(N, p, p)`` (``-inf`` per
+        row that is not symmetric or not positive definite).
+
+        ``np.linalg.inv``, like ``np.linalg.cholesky`` (see :func:`batched_pd_logdet`'s
+        docstring), raises ``LinAlgError`` for the WHOLE batch if even one matrix is singular --
+        singular is just the not-positive-definite boundary case, already scored ``-inf`` below via
+        ``is_valid``, so its inverse is never actually used. Substitute the identity for invalid
+        rows before inverting so the call always succeeds, mirroring how the scalar
+        :meth:`log_density` path never calls ``inv`` on a matrix it is about to reject.
+        """
         xx = np.asarray(x, dtype=np.float64)
         is_pd, logdet = batched_pd_logdet(xx)
-        x_inv = np.linalg.inv(xx)
+        is_valid = is_pd & _batched_is_symmetric(xx)
+        safe_xx = np.where(is_valid[:, None, None], xx, np.eye(self.dim))
+        x_inv = np.linalg.inv(safe_xx)
         tr = np.einsum("ab,nba->n", self.scale, x_inv, optimize=True)
         rv = self._log_norm - (self.df + self.dim + 1.0) / 2.0 * logdet - 0.5 * tr
-        return np.where(is_pd, rv, -np.inf)
+        return np.where(is_valid, rv, -np.inf)
 
     def sampler(self, seed: int | None = None) -> "InverseWishartSampler":
         """Return a sampler for drawing SPD matrices from this distribution."""
