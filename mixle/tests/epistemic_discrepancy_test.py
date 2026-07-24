@@ -195,6 +195,80 @@ class DiscrepancyReportTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             discrepancy_report(np.zeros(5), np.zeros(5), metric="not_a_real_metric")
 
+    def test_seeded_auto_dispatch_is_reproducible(self):
+        # The exact branch that used to construct an unseeded internal RNG: predicted is a
+        # distribution, observed is a plain array, so 'auto' routes to mmd(samples_from(predicted),
+        # observed). Same seed in -> same value out, and the seed actually used is on the result.
+        predicted = GaussianDistribution(0.0, 1.0)
+        observed = np.random.RandomState(7).normal(loc=0.3, size=20)
+        first = discrepancy_report(predicted, observed, metric="auto", seed=123)
+        second = discrepancy_report(predicted, observed, metric="auto", seed=123)
+        self.assertEqual(first.value, second.value)
+        self.assertEqual(first.seed, 123)
+        self.assertEqual(second.seed, 123)
+        self.assertEqual(first.n_samples, 512)
+
+    def test_unseeded_call_still_records_a_reproducible_seed(self):
+        # No seed supplied: discrepancy_report must still generate one, use it, and record it, so a
+        # caller can reproduce a specific unseeded call after the fact via result.seed even though
+        # they never picked the seed themselves.
+        predicted = GaussianDistribution(0.0, 1.0)
+        observed = np.random.RandomState(7).normal(loc=0.3, size=20)
+        result = discrepancy_report(predicted, observed, metric="auto")
+        self.assertIsInstance(result.seed, int)
+        reproduced = discrepancy_report(predicted, observed, metric="auto", seed=result.seed)
+        self.assertEqual(result.value, reproduced.value)
+
+    def test_different_seeds_typically_give_different_values(self):
+        # Negative control: seed must actually drive the sampling, not just be cosmetically recorded
+        # while the same draw happens underneath regardless of what's passed in.
+        predicted = GaussianDistribution(0.0, 1.0)
+        observed = np.random.RandomState(7).normal(loc=0.3, size=20)
+        a = discrepancy_report(predicted, observed, metric="auto", seed=1)
+        b = discrepancy_report(predicted, observed, metric="auto", seed=2)
+        self.assertNotEqual(a.value, b.value)
+
+    def test_exact_closed_form_records_no_seed_or_sample_count(self):
+        # Negative control: the exact Gaussian-pair closed form never samples, so it must not claim
+        # a seed or sample count -- that would misleadingly imply randomness that was never used.
+        p = GaussianDistribution(0.0, 1.0)
+        q = GaussianDistribution(1.0, 1.0)
+        result = discrepancy_report(p, q)
+        self.assertIsNone(result.seed)
+        self.assertIsNone(result.n_samples)
+
+    def test_seeded_reproducible_for_sample_based_kl_pair(self):
+        # The *other* internal-sampling branch: both sides are distributions but not the exact
+        # Gaussian pair, so 'auto' falls back to kl_divergence's Monte Carlo estimate. Uses mixle's
+        # own .sampler(seed).sample(n) shape so the stub's draws genuinely depend on the RNG
+        # discrepancy_report threads through, rather than a fixed internal seed that would make this
+        # test pass trivially regardless of whether seed-threading actually works.
+        class _NormalSampler:
+            def __init__(self, loc, seed):
+                self.rng = np.random.RandomState(seed)
+                self.loc = loc
+
+            def sample(self, n):
+                return self.rng.normal(loc=self.loc, size=n)
+
+        class SamplerBasedDist:
+            def __init__(self, loc):
+                self.loc = loc
+
+            def log_density(self, x):
+                return float(-0.5 * (x - self.loc) ** 2)
+
+            def sampler(self, seed=None):
+                return _NormalSampler(self.loc, seed)
+
+        p, q = SamplerBasedDist(0.0), SamplerBasedDist(1.0)
+        first = discrepancy_report(p, q, seed=42)
+        second = discrepancy_report(p, q, seed=42)
+        third = discrepancy_report(p, q, seed=43)
+        self.assertEqual(first.value, second.value)
+        self.assertEqual(first.seed, 42)
+        self.assertNotEqual(first.value, third.value)
+
 
 if __name__ == "__main__":
     unittest.main()
