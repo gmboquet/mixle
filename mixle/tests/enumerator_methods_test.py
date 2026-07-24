@@ -18,7 +18,7 @@ class EnumeratorMethodsTest(unittest.TestCase):
         r = c.enumerator().rank("b")
         self.assertEqual(r.rank, 1)  # one outcome ('a') is strictly more probable
         self.assertAlmostEqual(r.cumulative_probability, 0.8, places=6)  # p(a)+p(b)
-        self.assertAlmostEqual(c.enumerator().cumulative("c"), 1.0, places=6)
+        self.assertAlmostEqual(c.enumerator().cumulative("c").probability, 1.0, places=6)
 
     def test_seek_is_inverse_of_rank(self):
         c = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})

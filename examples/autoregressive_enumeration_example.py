@@ -151,8 +151,9 @@ def main():
     cum = ar_term.cumulative(target)
     print(f"     rank({target}) -> {r.rank}  (0-based count of strictly-more-probable sequences; exact={r.exact})")
     print(
-        f"     cumulative({target}) -> {cum:.4f}  (mass of every sequence at least as probable as this one; "
-        f"agrees with rank()'s own cumulative_probability: {abs(cum - r.cumulative_probability) < 1e-9})"
+        f"     cumulative({target}) -> {cum.probability:.4f}  (mass of every sequence at least as probable as "
+        f"this one; agrees with rank()'s own cumulative_probability: "
+        f"{abs(cum.probability - r.cumulative_probability) < 1e-9}; exact={cum.exact})"
     )
 
 

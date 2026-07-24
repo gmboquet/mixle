@@ -813,7 +813,12 @@ class DistributionEnumerator(ABC):
         return marginal_seek(self.dist, index)
 
     def cumulative(self, value: Any):
-        """``G(value) = P(p(Y) >= p(value))`` -- total mass of outcomes at least as probable as ``value``."""
+        """``G(value) = P(p(Y) >= p(value))`` -- total mass of outcomes at least as probable as ``value``.
+
+        Returns a :class:`~mixle.enumeration.density_rank.CumulativeProbabilityResult` with
+        ``.probability`` plus explicit certification (``.exact``, ``.dropped_upper``) of what that
+        figure rests on.
+        """
         from mixle.enumeration.density_rank import cumulative_probability
 
         return cumulative_probability(self.dist, value)

@@ -408,7 +408,10 @@ class CumulativeProbabilityTestCase(unittest.TestCase):
             return sum(math.exp(lp[y]) for y in support if lp[y] >= t - 1e-12)
 
         for x in support:
-            self.assertAlmostEqual(cumulative_probability(comp, list(x), oversample=16), brute(x), places=10)
+            r = cumulative_probability(comp, list(x), oversample=16)
+            self.assertAlmostEqual(r.probability, brute(x), places=10)
+            self.assertTrue(r.exact)
+            self.assertEqual(r.dropped_upper, 0.0)
 
     def test_sequence_exact(self):
         from mixle.enumeration.density_rank import cumulative_probability
@@ -426,7 +429,89 @@ class CumulativeProbabilityTestCase(unittest.TestCase):
             return sum(math.exp(lp[tuple(y)]) for y in support if lp[tuple(y)] >= t - 1e-12)
 
         for x in support:
-            self.assertAlmostEqual(cumulative_probability(seq, x, oversample=16), brute(x), places=10)
+            r = cumulative_probability(seq, x, oversample=16)
+            self.assertAlmostEqual(r.probability, brute(x), places=10)
+            self.assertTrue(r.exact)
+
+    def test_default_tie_tolerance_matches_true_rank_convention(self):
+        # MXR-080-0218: the band comparison used to hardcode 1e-9; it now defaults to this module's
+        # 1e-12 convention, so a gap strictly inside (1e-12, 1e-9) is NOT treated as a tie by default.
+        from mixle.enumeration.density_rank import cumulative_probability
+        from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
+
+        gap = 2e-10
+        p0 = 0.2
+        p1 = p0 * math.exp(gap)
+        rest = (1 - p0 - p1) / 2
+        cat = CategoricalDistribution({"a": p0, "b": p1, "c": rest, "d": rest})
+        r_default = cumulative_probability(cat, "b", oversample=64)
+        self.assertAlmostEqual(r_default.probability, rest + rest + p1, places=9)
+        r_loose = cumulative_probability(cat, "b", oversample=64, tol=1e-9)
+        self.assertAlmostEqual(r_loose.probability, rest + rest + p1 + p0, places=9)
+
+    def test_defect_raises_instead_of_silently_clamping(self):
+        # MXR-080-0218: a real defect (here, simulated duplicate counting -- each item enumerated twice,
+        # consistently inflating both the mass-histogram prefix and the count-index band) must be
+        # surfaced, not silently clamped to a valid-looking probability under 1.0.
+        from mixle.enumeration.density_rank import cumulative_probability
+        from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
+
+        class _DupCategorical(CategoricalDistribution):
+            def enumerator(self):
+                items = list(super().enumerator())
+                doubled = []
+                for item in items:
+                    doubled.append(item)
+                    doubled.append(item)
+                return iter(doubled)
+
+        cat = _DupCategorical({"a": 0.5, "b": 0.3, "c": 0.2})
+        with self.assertRaises(ValueError):
+            cumulative_probability(cat, "c", oversample=16)  # least probable -> true G is near 1, doubled >> 1
+
+    def test_roundoff_scale_excursion_is_still_clamped(self):
+        # the same defect check must NOT fire on ordinary floating-point roundoff -- only genuine defects.
+        from mixle.enumeration.density_rank import cumulative_probability
+        from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
+
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
+        r = cumulative_probability(cat, "c", oversample=16)  # least probable -> G should be ~1.0
+        self.assertAlmostEqual(r.probability, 1.0, places=9)
+        self.assertLessEqual(r.probability, 1.0)
+        self.assertTrue(r.exact)
+
+    def test_dropped_upper_propagates_and_marks_inexact(self):
+        # MXR-080-0218: an approximate-search family's count index can carry a nonzero dropped_upper
+        # (e.g. an autoregressive branch_cap build) WITHOUT its own `truncated` flag ever being set --
+        # cumulative_probability must surface that as real, actionable uncertainty (exact=False), not
+        # silently fold it into a single unqualified number.
+        from mixle.enumeration.density_rank import cumulative_probability
+        from mixle.enumeration.quantization.core import CountIndex
+        from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
+
+        class _DroppedUpperCategorical(CategoricalDistribution):
+            def quantized_count_index(self, quantizer, max_fine_bucket):
+                idx, truncated = super().quantized_count_index(quantizer, max_fine_bucket)
+                return CountIndex(idx.hist, idx._getter, dropped_upper=2.0), truncated
+
+        cat = _DroppedUpperCategorical({"a": 0.5, "b": 0.3, "c": 0.2})
+        r = cumulative_probability(cat, "b", oversample=16)
+        self.assertFalse(r.exact)
+        self.assertEqual(r.dropped_upper, 2.0)
+        # the probability figure itself is still whatever was computed -- only the certification flips.
+        self.assertAlmostEqual(r.probability, 0.8, places=9)
+
+    def test_index_truncated_field_is_exposed(self):
+        # the count-index build's own truncated flag is surfaced for transparency (even though, per its
+        # docstring, it is not itself a soundness signal for this function).
+        from mixle.enumeration.density_rank import cumulative_probability
+
+        rng = np.random.RandomState(0)
+        comp = CompositeDistribution(
+            tuple(IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(2)))) for _ in range(8))
+        )
+        r = cumulative_probability(comp, [0] * 8, oversample=16)
+        self.assertIsInstance(r.index_truncated, bool)
 
 
 class CountDPTopPTestCase(unittest.TestCase):
