@@ -41,6 +41,7 @@ class SimplexCentroidTest(unittest.TestCase):
 
 class PseudocomponentTest(unittest.TestCase):
     def test_respects_lower_bounds_and_simplex(self):
+        # Golden path: must keep working exactly as before the MXR-080-0180 validation was added.
         base = simplex_lattice(3, 2)
         lower = [0.1, 0.2, 0.05]
         x = to_pseudocomponents(base, lower)
@@ -50,6 +51,44 @@ class PseudocomponentTest(unittest.TestCase):
     def test_rejects_infeasible_lower(self):
         with self.assertRaises(ValueError):
             to_pseudocomponents(simplex_lattice(3, 2), [0.5, 0.4, 0.3])  # sum >= 1
+
+    def test_rejects_non_simplex_blend_with_valid_lower(self):
+        # Regression test for MXR-080-0180: blend [2, -1] together with a finite, non-negative lower
+        # bound vector that itself sums to < 1 (so the pre-fix checks all passed) used to be silently
+        # accepted and mapped to [1.7, -0.7] -- a negative "proportion" that still (deceptively) summed
+        # to 1. This is not a valid canonical simplex point (component 2 is negative) and must now be
+        # rejected outright rather than silently produce an out-of-simplex result.
+        with self.assertRaises(ValueError):
+            to_pseudocomponents([[2, -1]], [0.1, 0.1])
+
+    def test_rejects_blend_not_summing_to_one(self):
+        # A blend that is itself non-negative but off the simplex (rows must sum to 1) must also be
+        # rejected -- not just blends with an outright negative component.
+        with self.assertRaises(ValueError):
+            to_pseudocomponents([[0.2, 0.2, 0.2]], [0.1, 0.1, 0.05])  # rows sum to 0.6, not 1
+
+    def test_rejects_nan_blend(self):
+        with self.assertRaises(ValueError):
+            to_pseudocomponents([[np.nan, 0.5, 0.5]], [0.1, 0.1, 0.05])
+
+    def test_rejects_infinite_lower(self):
+        with self.assertRaises(ValueError):
+            to_pseudocomponents(simplex_lattice(3, 2), [np.inf, 0.1, 0.1])
+
+    def test_rejects_nan_lower(self):
+        with self.assertRaises(ValueError):
+            to_pseudocomponents(simplex_lattice(3, 2), [np.nan, 0.1, 0.1])
+
+    def test_rejects_wrong_length_blend(self):
+        # blend has 2 components but lower specifies 3.
+        with self.assertRaises(ValueError):
+            to_pseudocomponents([[0.5, 0.5]], [0.1, 0.1, 0.05])
+
+    def test_rejects_wrong_rank_blend(self):
+        # A single blend passed as a 1-D vector (not wrapped as a (1, q) row) must raise a clear
+        # ValueError, not an uninformative IndexError from indexing a nonexistent second axis.
+        with self.assertRaises(ValueError):
+            to_pseudocomponents([0.6, 0.4], [0.1, 0.1])
 
 
 if __name__ == "__main__":

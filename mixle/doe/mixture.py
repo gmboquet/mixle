@@ -62,23 +62,55 @@ def simplex_centroid(q: int) -> np.ndarray:
     return np.array(rows, dtype=np.float64)
 
 
+_SIMPLEX_ATOL = 1e-9  # absolute tolerance for "non-negative" / "rows sum to one" checks (MXR-080-0180)
+
+
 def to_pseudocomponents(blends: np.ndarray, lower: Sequence[float]) -> np.ndarray:
     """Map canonical simplex blends onto pseudo-components with per-component lower bounds.
 
-    With lower bounds ``l_i`` (summing to ``< 1``), a constrained mixture's feasible region is itself a
-    smaller simplex; this maps a canonical blend ``x`` onto the real proportions
-    ``a_i = l_i + (1 - sum l) * x_i`` (the standard L-pseudocomponent transform), so any simplex design
-    above can be run inside the constrained region. Rows still sum to 1.
+    With lower bounds ``l_i`` (finite, non-negative, summing to ``< 1``), a constrained mixture's
+    feasible region is itself a smaller simplex; this maps a canonical blend ``x`` -- itself a finite
+    ``(n, q)`` array of genuine simplex points (non-negative, rows summing to 1) -- onto the real
+    proportions ``a_i = l_i + (1 - sum l) * x_i`` (the standard L-pseudocomponent transform), so any
+    simplex design above can be run inside the constrained region. Rows still sum to 1.
+
+    Raises:
+        ValueError: ``lower`` is not a finite, non-negative, 1-D vector summing to less than 1 (i.e. one
+            that itself admits at least one feasible simplex point), or ``blends`` is not a finite 2-D
+            array of shape ``(n, len(lower))`` whose rows are genuine canonical simplex points
+            (non-negative, summing to 1). Invalid input is rejected outright instead of silently mapped
+            to an out-of-simplex result (MXR-080-0180): e.g. blend ``[2, -1]`` with lower bounds
+            ``[0.1, 0.1]`` used to silently return ``[1.7, -0.7]``, a negative "proportion".
     """
-    x = np.asarray(blends, dtype=np.float64)
     low = np.asarray(lower, dtype=np.float64)
-    if low.ndim != 1 or low.shape[0] != x.shape[1]:
-        raise ValueError("lower must have one entry per component.")
+    if low.ndim != 1:
+        raise ValueError(f"lower must be one-dimensional, got {low.ndim} dimensions.")
+    if not np.all(np.isfinite(low)):
+        raise ValueError(f"lower bounds must be finite, got {lower!r}.")
     if np.any(low < 0.0):
-        raise ValueError("lower bounds must be non-negative.")
+        raise ValueError(f"lower bounds must be non-negative, got {lower!r}.")
     total = float(low.sum())
     if total >= 1.0:
-        raise ValueError("lower bounds must sum to less than 1.")
+        raise ValueError(f"lower bounds must sum to less than 1, got sum={total!r}.")
+
+    x = np.asarray(blends, dtype=np.float64)
+    if x.ndim != 2 or x.shape[1] != low.shape[0]:
+        raise ValueError(
+            f"blends must be a 2-D (n, q) array with q == len(lower) ({low.shape[0]}); got shape {x.shape}."
+        )
+    if not np.all(np.isfinite(x)):
+        raise ValueError("blends must be finite (no inf or nan).")
+    if np.any(x < -_SIMPLEX_ATOL):
+        raise ValueError(
+            f"blends must be non-negative (canonical simplex points), got a minimum of {float(x.min())!r}."
+        )
+    row_sums = x.sum(axis=1)
+    if not np.allclose(row_sums, 1.0, atol=_SIMPLEX_ATOL):
+        bad_rows = np.flatnonzero(~np.isclose(row_sums, 1.0, atol=_SIMPLEX_ATOL))
+        raise ValueError(
+            "blends must be canonical simplex points (each row summing to 1); row(s) "
+            f"{bad_rows.tolist()} sum to {row_sums[bad_rows].tolist()}."
+        )
     return low + (1.0 - total) * x
 
 
