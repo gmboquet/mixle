@@ -45,14 +45,38 @@ class SpatialMixture:
         emission: a mixle ``ParameterEstimator`` for the per-component family, e.g.
             ``MultivariateGaussianEstimator()`` -- this is what makes the class domain-agnostic.
         beta: Potts coupling (``>= 0``); larger smooths the labels more. ``0`` is an ordinary mixture.
+
+    Raises:
+        ValueError: if any ``shape`` dimension is not positive, if ``n_components`` is not in
+            ``[1, prod(shape)]`` (MXR-080-0115: more components than grid cells guarantees at least
+            one permanently empty component by pigeonhole -- rejected here rather than left to fail
+            unpredictably during fitting), or if ``beta`` is not finite and non-negative.
     """
 
     def __init__(self, shape, n_components: int, emission, beta: float = 1.0):
-        self.shape = tuple(int(s) for s in np.atleast_1d(shape))
-        self.k = int(n_components)
+        shape = tuple(int(s) for s in np.atleast_1d(shape))
+        if len(shape) == 0 or any(s <= 0 for s in shape):
+            raise ValueError(f"shape must be one or more positive grid dimensions, got {shape}")
+        n = int(np.prod(shape))
+        k = int(n_components)
+        if not (1 <= k <= n):
+            reason = (
+                "n_components > n_cells guarantees at least one permanently empty component by pigeonhole"
+                if k > n
+                else "n_components must be at least 1"
+            )
+            raise ValueError(
+                f"n_components must satisfy 1 <= n_components <= prod(shape); shape {shape} has {n} "
+                f"cells, got n_components={k} ({reason})"
+            )
+        beta = float(beta)
+        if not np.isfinite(beta) or beta < 0.0:
+            raise ValueError(f"beta must be finite and non-negative, got {beta!r}")
+        self.shape = shape
+        self.k = k
         self.emission = emission
-        self.beta = float(beta)
-        self.n = int(np.prod(self.shape))
+        self.beta = beta
+        self.n = n
         self._neighbors = _grid_neighbors(self.shape)
 
     def _emission_loglik(self, data_enc) -> np.ndarray:
@@ -70,26 +94,67 @@ class SpatialMixture:
             out.append(self.emission.estimate(None, acc.value()))
         return out
 
+    def _repair_empty_components(self, lab: np.ndarray) -> np.ndarray:
+        """Return a copy of ``lab`` with every component assigned at least one cell.
+
+        MXR-080-0115: called before every re-estimate -- both on the initial random partition and on
+        every hard-EM refinement -- so an empty component is never re-estimated as-is (that silently
+        produces an invalid/degenerate placeholder, e.g. a Gaussian stuck at its zero-accumulator
+        fallback, instead of an error).
+
+        One cell is donated to each empty component from the currently largest component (ties broken
+        by lowest component id, then lowest cell index): fully deterministic, so the same ``lab``
+        always repairs the same way, regardless of incidental array/iteration order. Counts are updated
+        after each donation, so a later donation within the same call always sees the up-to-date state
+        -- it can never re-empty a component this call just fixed, nor steal the sole cell of a
+        pre-existing one-cell component, because a donor must have at least 2 cells before it can give
+        one up. ``1 <= k <= n`` (enforced at construction) guarantees a >=2-cell donor always exists
+        whenever an empty component does, however many components are empty at once.
+        """
+        lab = np.asarray(lab).copy()
+        counts = np.bincount(lab, minlength=self.k)
+        for j in np.where(counts == 0)[0]:
+            donors = np.where(counts >= 2)[0]
+            if donors.size == 0:  # pragma: no cover -- unreachable given 1 <= k <= n at construction
+                raise RuntimeError("no donor component available to repair an empty component")
+            donor = donors[np.argmax(counts[donors])]
+            donor_cell = np.where(lab == donor)[0][0]
+            lab[donor_cell] = j
+            counts[donor] -= 1
+            counts[j] += 1
+        return lab
+
     def fit(self, observations, *, max_iter: int = 40, mf_iter: int = 3, seed: int = 0) -> SpatialMixture:
         """Fit by mean-field variational EM. ``observations`` is a length-``prod(shape)`` sequence of
         per-cell observations (row order matches ``shape.ravel()``); each is a single emission datum.
 
         Robustness: components are initialized by a short hard-assignment pass and the Potts coupling is
         annealed from 0 to ``beta`` over the first iterations, so components form before the smoothness
-        prior is applied (a strong prior on a degenerate init otherwise collapses every cell into one)."""
+        prior is applied (a strong prior on a degenerate init otherwise collapses every cell into one).
+        Every partition is repaired to be nonempty (see :meth:`_repair_empty_components`) BEFORE it is
+        re-estimated (MXR-080-0115).
+
+        Raises:
+            ValueError: if ``max_iter`` or ``mf_iter`` is not a positive integer.
+        """
+        max_iter = int(max_iter)
+        if max_iter < 1:
+            raise ValueError(f"max_iter must be a positive integer, got {max_iter!r}")
+        mf_iter = int(mf_iter)
+        if mf_iter < 1:
+            raise ValueError(f"mf_iter must be a positive integer, got {mf_iter!r}")
+
         data = list(observations)
         rng = np.random.RandomState(seed)
         acc_enc = self.emission.accumulator_factory().make().acc_to_encoder().seq_encode(data)
 
-        # init: random partition -> estimate each component -> a few hard-EM steps to separate them
-        lab = rng.randint(self.k, size=self.n)
+        # init: random partition -> repair -> estimate each component -> a few hard-EM steps to
+        # separate them, repairing before every re-estimate (never after).
+        lab = self._repair_empty_components(rng.randint(self.k, size=self.n))
         self.components = self._reestimate(acc_enc, np.eye(self.k)[lab], current=None)
         for _ in range(5):
             lab = self._emission_loglik(self.components[0].dist_to_encoder().seq_encode(data)).argmax(axis=1)
-            counts = np.bincount(lab, minlength=self.k)
-            if (counts == 0).any():  # reseed any empty component at a random cell
-                for j in np.where(counts == 0)[0]:
-                    lab[rng.randint(self.n)] = j
+            lab = self._repair_empty_components(lab)
             self.components = self._reestimate(acc_enc, np.eye(self.k)[lab], current=self.components)
 
         q = np.eye(self.k)[lab]
