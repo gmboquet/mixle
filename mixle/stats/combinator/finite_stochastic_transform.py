@@ -66,7 +66,8 @@ class FiniteStochasticTransformDistribution(SequenceEncodableProbabilityDistribu
         """Create a finite stochastic-transform distribution.
 
         Args:
-            dist: Source distribution over the integer states ``{0, ..., m-1}`` (``m = kernel.shape[0]``).
+            dist: Source distribution over the integer states ``{0, ..., m-1}`` (``m = kernel.shape[0]``,
+                which must equal ``dist.support_size()``).
             kernel: ``m x n`` row-stochastic matrix; ``kernel[x, y] = P(Y = y | X = x)``.
             name: Optional name for the instance.
             keys: Optional parameter key for shared estimation.
@@ -74,6 +75,12 @@ class FiniteStochasticTransformDistribution(SequenceEncodableProbabilityDistribu
         self.dist = dist
         self.kernel = _row_stochastic(kernel)
         self.num_source, self.num_output = self.kernel.shape
+        dist_num_states = dist.support_size()
+        if dist_num_states is not None and dist_num_states != self.num_source:
+            raise ValueError(
+                "kernel has %d source row(s) but the source distribution has %d state(s); "
+                "kernel.shape[0] must equal dist.support_size()." % (self.num_source, dist_num_states)
+            )
         self.name = name
         self.keys = keys
         with np.errstate(divide="ignore"):
@@ -298,8 +305,17 @@ class FiniteStochasticTransformDataEncoder(DataSequenceEncoder):
         return isinstance(other, FiniteStochasticTransformDataEncoder) and other.num_output == self.num_output
 
     def seq_encode(self, x: Sequence[Any]) -> tuple[np.ndarray, np.ndarray]:
-        """Encode integer outputs with a validity mask for the finite output range."""
-        y = np.asarray(x).astype(np.int64, copy=False)
-        valid = (y >= 0) & (y < self.num_output)
+        """Encode integer outputs with a validity mask for the finite output range.
+
+        Values are checked for integer-valuedness in float before ever being cast to ``int64``:
+        casting first (as ``np.asarray(x).astype(np.int64)`` did previously) silently truncates a
+        fractional entry like ``0.5`` to ``0`` and truncates ``NaN`` to an implementation-defined
+        integer, so either would be scored as a valid, in-range observation instead of being
+        rejected the way the scalar ``log_density`` path already rejects them.
+        """
+        xf = np.asarray(x, dtype=np.float64)
+        is_int = xf == np.round(xf)  # elementwise; NaN != NaN, so NaN is excluded here too
+        y = np.where(is_int, xf, 0.0).astype(np.int64)
+        valid = is_int & (y >= 0) & (y < self.num_output)
         safe = np.where(valid, y, 0)
         return safe, valid

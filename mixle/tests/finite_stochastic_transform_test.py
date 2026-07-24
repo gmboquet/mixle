@@ -12,6 +12,7 @@ import numpy as np
 
 from mixle.enumeration.algorithms import freeze
 from mixle.stats.combinator.finite_stochastic_transform import FiniteStochasticTransformDistribution as FST
+from mixle.stats.univariate.discrete.bernoulli import BernoulliDistribution
 from mixle.stats.univariate.discrete.binomial import BinomialDistribution
 from mixle.stats.univariate.discrete.integer_categorical import IntegerCategoricalDistribution as IC
 
@@ -112,6 +113,47 @@ class FiniteStochasticTransformTestCase(unittest.TestCase):
             FST(IC(0, [0.5, 0.5]), np.array([[0.5, 0.5], [0.0, 0.0]]))  # zero row
         with self.assertRaises(ValueError):
             FST(IC(0, [1.0]), np.array([0.5, 0.5]))  # not 2-D
+
+    def test_kernel_row_count_must_match_source_state_count(self):
+        # A Bernoulli source has 2 states (0 and 1); a 1-row kernel is structurally incompatible
+        # even though `_row_stochastic` itself has nothing to object to (each of its 1 row is a
+        # valid distribution over outputs). Without the shape check, this used to construct
+        # successfully with an output marginal that silently summed to 0.5 instead of 1.0, and
+        # crashed on sampling whenever the source's latent state 1 was drawn (out of bounds for a
+        # 1-row kernel).
+        with self.assertRaises(ValueError):
+            FST(BernoulliDistribution(0.5), np.array([[0.9, 0.1]]))
+        with self.assertRaises(ValueError):
+            # Too many rows is just as structurally wrong as too few.
+            FST(BernoulliDistribution(0.5), np.array([[0.9, 0.1], [0.2, 0.8], [0.5, 0.5]]))
+        # Negative control: a 2-row kernel matches the Bernoulli source's 2 states and must still
+        # construct normally, with the output marginal correctly summing to 1 and sampling never
+        # crashing regardless of which latent source state is drawn.
+        dist = FST(BernoulliDistribution(0.5), np.array([[0.9, 0.1], [0.2, 0.8]]))
+        total = sum(np.exp(dist.log_density(y)) for y in range(dist.num_output))
+        self.assertAlmostEqual(total, 1.0, delta=TOL)
+        s = dist.sampler(0)
+        for _ in range(200):
+            s.sample()
+
+    def test_seq_encode_rejects_fractional_and_nan_observations(self):
+        # The batch/vectorized encoding path must reject the same malformed observations the
+        # scalar log_density path already rejects -- 0.5 is not a valid integer output state --
+        # instead of silently truncating a fractional or NaN entry to a valid-looking integer
+        # before the validity mask is ever computed.
+        enc = self.dist.dist_to_encoder().seq_encode([0.5, 1.5, float("nan"), 2])
+        y, valid = enc
+        np.testing.assert_array_equal(valid, [False, False, False, True])
+        got = self.dist.seq_log_density(enc)
+        self.assertEqual(got[0], -np.inf)
+        self.assertEqual(got[1], -np.inf)
+        self.assertEqual(got[2], -np.inf)
+        # Negative control: a genuinely valid integer entry in the same batch is unaffected and
+        # matches the scalar path exactly (the fix must not reject valid observations too).
+        self.assertAlmostEqual(got[3], self.dist.log_density(2), delta=TOL)
+        # And the scalar path already rejects the same fractional value (this is the behavior the
+        # batch path must now match).
+        self.assertEqual(self.dist.log_density(0.5), -np.inf)
 
 
 if __name__ == "__main__":
