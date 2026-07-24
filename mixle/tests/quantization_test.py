@@ -854,5 +854,51 @@ class CountHistogramValidationTestCase(unittest.TestCase):
         self.assertEqual(_norm(got), _norm(truth))
 
 
+class LeafCountIndexCapTestCase(unittest.TestCase):
+    """MXR-080-0205: leaf_count_index must validate max_items and check it BEFORE pulling."""
+
+    def setUp(self):
+        self.q = Quantizer(bin_width_bits=1.0, oversample=8)
+        self.items = [("a", math.log(0.5)), ("b", math.log(0.3)), ("c", math.log(0.2))]
+
+    def test_max_items_zero_returns_no_items(self):
+        # The original bug: the loop appended the first pulled item BEFORE checking the cap, so
+        # max_items=0 still indexed exactly one item.
+        idx, truncated = leaf_count_index(iter(self.items), self.q, 10**6, max_items=0)
+        self.assertEqual(idx.total(), 0)
+        self.assertTrue(truncated)
+
+    def test_max_items_negative_is_rejected(self):
+        with self.assertRaises(ValueError):
+            leaf_count_index(iter(self.items), self.q, 10**6, max_items=-1)
+
+    def test_max_items_fractional_is_rejected(self):
+        with self.assertRaises(ValueError):
+            leaf_count_index(iter(self.items), self.q, 10**6, max_items=1.5)
+
+    def test_max_items_bool_is_rejected(self):
+        with self.assertRaises(ValueError):
+            leaf_count_index(iter(self.items), self.q, 10**6, max_items=True)
+
+    def test_max_items_positive_caps_correctly(self):
+        # Negative control: a normal positive cap still indexes up to that many items.
+        idx, truncated = leaf_count_index(iter(self.items), self.q, 10**6, max_items=2)
+        self.assertEqual(idx.total(), 2)
+        self.assertTrue(truncated)
+
+    def test_max_items_none_is_uncapped(self):
+        # Negative control: no cap at all still indexes everything in bounds.
+        idx, truncated = leaf_count_index(iter(self.items), self.q, 10**6, max_items=None)
+        self.assertEqual(idx.total(), 3)
+        self.assertFalse(truncated)
+
+    def test_hist_is_tagged_exact(self):
+        # leaf_count_index builds genuine structural counts (len(items) per bucket): the resulting
+        # histogram must be tagged exact=True, consistent with CountHistogram's exact/approximate
+        # carrier distinction (MXR-080-0204) and usable as a rank-certificate basis.
+        idx, _ = leaf_count_index(iter(self.items), self.q, 10**6)
+        self.assertTrue(idx.hist.exact)
+
+
 if __name__ == "__main__":
     unittest.main()
