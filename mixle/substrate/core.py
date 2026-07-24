@@ -23,6 +23,8 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from mixle.substrate.security import SECRET_POLICIES, SecretPolicy, enforce_secret_policy
+
 # The modality types a substrate item (and a ProbabilisticModule interface) can carry. Kept as plain
 # strings so items serialize trivially and new modalities need no code change here.
 MODALITIES = (
@@ -93,9 +95,23 @@ class Substrate:
     scope you cannot pass never leaks through a scope you can. ``scope=None`` (the default) is the one
     deliberate exception: it asks for every item across every scope, so its index is fit over
     everything, same as asking for all of it directly through ``all()``/``get()`` would show you.
+
+    Secret-handling contract (MXR-080-0262): every write -- :meth:`put`, and :meth:`update`, which
+    routes through it -- scans ``item.text``, ``item.payload`` (recursively), and ``item.tags`` for
+    known secret shapes (:mod:`mixle.substrate.security`) using exactly the surface
+    :func:`_lexical_score` serializes for search, BEFORE anything reaches ``self._items`` or either
+    index. This is unconditional: there is no path into the store that skips it, so the
+    redact-before-store guard :func:`~mixle.substrate.security.safe_text` always offered is no longer
+    opt-in. ``secret_policy`` (set at construction, or overridden per call) picks what happens when a
+    secret is found: ``"redact"`` (the default) masks it in place so only the masked form is ever
+    stored, embedded, or served; ``"reject"`` raises
+    :class:`~mixle.substrate.security.SecretPolicyError` and stores nothing.
     """
 
-    def __init__(self, root: str | None = None) -> None:
+    def __init__(self, root: str | None = None, *, secret_policy: SecretPolicy = "redact") -> None:
+        if secret_policy not in SECRET_POLICIES:
+            raise ValueError(f"unknown secret_policy {secret_policy!r}; expected one of {SECRET_POLICIES}")
+        self.secret_policy = secret_policy
         self._items: dict[str, SubstrateItem] = {}
         self.root = Path(root) if root is not None else None
         # One embedder PER visibility domain (see reindex()): _embedders[scope] / _embed_ids[scope] is
@@ -109,7 +125,22 @@ class Substrate:
             self.load()
 
     # -- CRUD --------------------------------------------------------------------------------------
-    def put(self, item: SubstrateItem) -> str:
+    def _store(self, item: SubstrateItem, *, secret_policy: SecretPolicy | None = None) -> SubstrateItem:
+        """Sanitize ``item`` per the active secret policy, deep-copy it into the store, and return the
+        stored (already-deep-copied) item. The one place an item crosses into ``self._items`` --
+        :meth:`put` and :meth:`update` (via :meth:`put`) both route through this, so every write gets
+        the same secret guard and the same dirty/index-invalidation bookkeeping unconditionally.
+        """
+        policy = secret_policy if secret_policy is not None else self.secret_policy
+        sanitized, _scan = enforce_secret_policy(item, policy=policy)
+        previous = self._items.get(sanitized.id)
+        stored = copy.deepcopy(sanitized)
+        self._items[stored.id] = stored
+        if stored.text or (previous is not None and previous.text):
+            self._dirty = True
+        return stored
+
+    def put(self, item: SubstrateItem, *, secret_policy: SecretPolicy | None = None) -> str:
         """Add or replace an item; returns its id and schedules semantic-index rebuilds for text items.
 
         Stores a defensive copy of ``item`` (see the class docstring's immutability contract) -- the
@@ -120,13 +151,16 @@ class Substrate:
         matters as much as the first -- clearing an existing item's text (or replacing it with a
         no-text item) shrinks the indexed corpus exactly as much as adding text grows it, and without
         it the stale embedding for the old text would keep matching queries after the text is gone.
+
+        Secret-handling (MXR-080-0262, see the class docstring's secret-handling contract): before
+        anything is stored or indexed, this scans ``item.text``, ``item.payload`` (recursively), and
+        ``item.tags`` -- the same surface :func:`_lexical_score` serializes for search -- for known
+        secret shapes, and acts per ``secret_policy`` (this call's override, else ``self.secret_policy``,
+        default ``"redact"``): ``"redact"`` masks detected secrets in place before storing;
+        ``"reject"`` raises :class:`~mixle.substrate.security.SecretPolicyError` and stores nothing.
+        This is unconditional -- there is no way to reach ``self._items`` that skips it.
         """
-        previous = self._items.get(item.id)
-        stored = copy.deepcopy(item)
-        self._items[stored.id] = stored
-        if stored.text or (previous is not None and previous.text):
-            self._dirty = True
-        return stored.id
+        return self._store(item, secret_policy=secret_policy).id
 
     def add(self, kind: str, text: str = "", **kw: Any) -> str:
         """Convenience: build a :class:`SubstrateItem` and :meth:`put` it."""
@@ -160,7 +194,7 @@ class Substrate:
             out = [i for i in out if i.scope == scope]
         return [copy.deepcopy(i) for i in out]
 
-    def update(self, item_id: str, **fields: Any) -> SubstrateItem:
+    def update(self, item_id: str, *, secret_policy: SecretPolicy | None = None, **fields: Any) -> SubstrateItem:
         """Change named fields on the stored item ``item_id``, the supported way to edit in place.
 
         Mutating an object returned by :meth:`get`/:meth:`all` never reaches the store -- both return
@@ -168,17 +202,23 @@ class Substrate:
         index) is untouched by that. ``update`` is how a change actually lands: it rebuilds the stored
         item with ``fields`` applied, re-runs :class:`SubstrateItem`'s own validation
         (``__post_init__``, e.g. rejecting an unknown ``kind``) via :func:`dataclasses.replace`, and
-        routes the result back through :meth:`put` so the same dirty/index-invalidation bookkeeping
-        fires as it would for any other write -- a change that affects what :meth:`_text_items` covers
-        (new text, cleared text, a different scope for a text item) correctly schedules a reindex
-        instead of leaving the semantic index silently stale.
+        routes the result back through :meth:`put`'s storage path so the same dirty/index-invalidation
+        bookkeeping AND the same secret-handling guard (see the class docstring's secret-handling
+        contract; ``secret_policy`` here overrides ``self.secret_policy`` for this call only) fire as
+        they would for any other write -- a change that affects what :meth:`_text_items` covers (new
+        text, cleared text, a different scope for a text item) correctly schedules a reindex instead of
+        leaving the semantic index silently stale, and a change that introduces a secret into any field
+        is masked (or rejected) exactly like a fresh :meth:`put` would.
 
-        Returns a defensive copy of the updated item (consistent with :meth:`get`/:meth:`all`).
+        Returns a defensive copy of the item as actually stored (post-redaction, consistent with
+        :meth:`get`/:meth:`all` -- NOT the raw pre-policy ``fields``-applied object).
 
         Raises:
             KeyError: ``item_id`` is not stored.
             ValueError: ``fields`` tries to change ``id`` -- update changes an item's content, not its
                 identity; ``put`` a new item and ``remove`` the old one for that.
+            SecretPolicyError: ``secret_policy="reject"`` (or ``self.secret_policy`` is) and the update
+                introduces a secret anywhere in the surface -- nothing is changed.
         """
         current = self._items.get(item_id)
         if current is None:
@@ -189,8 +229,8 @@ class Substrate:
                 "put() a new item and remove() the old one instead"
             )
         updated = replace(current, **fields)
-        self.put(updated)
-        return copy.deepcopy(updated)
+        stored = self._store(updated, secret_policy=secret_policy)
+        return copy.deepcopy(stored)
 
     def __len__(self) -> int:
         return len(self._items)

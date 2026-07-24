@@ -15,6 +15,7 @@ from mixle.substrate import (
     ingest_documents,
     ingest_traces,
 )
+from mixle.substrate.security import SecretPolicyError
 
 try:
     import torch  # noqa: F401
@@ -147,6 +148,115 @@ class ImmutabilityContractTest(unittest.TestCase):
 
         s.update(iid, text="")  # clearing text shrinks the indexed corpus, same as put() would
         self.assertTrue(s._dirty)
+
+
+class SecretHandlingBoundaryTest(unittest.TestCase):
+    """MXR-080-0262 (Critical, security): the redact-before-store guard must be unconditional at the
+    store boundary (put()/update()), and scanning/redaction must cover the full text+payload+tags
+    surface -- a secret in `payload` was previously invisible to scan_substrate() AND reachable through
+    lexical retrieval's own json.dumps(payload) serialization (see core._lexical_score)."""
+
+    SECRET = "sk-abcdefghij1234567890XYZ"
+
+    def test_put_redacts_a_secret_embedded_in_payload_not_text(self):
+        """The audit's concrete adversarial case."""
+        s = Substrate()
+        iid = s.put(SubstrateItem(kind="trace", text="a clean tool-call summary", payload={"api_key": self.SECRET}))
+        stored = s.get(iid)
+        self.assertNotIn(self.SECRET, json.dumps(stored.payload))
+        self.assertIn("REDACTED", json.dumps(stored.payload))
+
+    def test_put_redacts_plain_text_without_a_manual_safe_text_call(self):
+        s = Substrate()
+        iid = s.put(SubstrateItem(kind="text", text=f"use {self.SECRET} now"))
+        self.assertNotIn(self.SECRET, s.get(iid).text)
+
+    def test_put_redacts_tags(self):
+        s = Substrate()
+        iid = s.put(SubstrateItem(kind="text", text="clean", tags=["AKIA1234567890ABCDEF"]))
+        self.assertNotIn("AKIA1234567890ABCDEF", " ".join(s.get(iid).tags))
+
+    def test_add_convenience_wrapper_also_redacts(self):
+        s = Substrate()
+        iid = s.add("trace", "clean", payload={"token": "Bearer abcdef1234567890ABCDEF"})
+        self.assertNotIn("abcdef1234567890ABCDEF", json.dumps(s.get(iid).payload))
+
+    def test_redacted_payload_secret_does_not_reach_search_or_lexical_serialization(self):
+        """The audit's own phrasing: confirm the secret does not reach reindex()/lexical serialization
+        in raw form -- search() the item back out (forcing the lexical path on a small corpus) and
+        inspect what a caller (a reasoner, an embedder) downstream of retrieval actually receives."""
+        s = Substrate()
+        iid = s.put(SubstrateItem(kind="trace", text="tool call about a refund", payload={"api_key": self.SECRET}))
+        s.add("trace", "an unrelated filler trace")
+        s.add("trace", "another unrelated filler trace")
+        hits = s.search("tool call refund", k=3)
+        found = next(item for item, _ in hits if item.id == iid)
+        self.assertNotIn(self.SECRET, json.dumps(found.payload))
+        self.assertNotIn(self.SECRET, found.text)
+
+    def test_update_redacts_a_newly_introduced_secret(self):
+        s = Substrate()
+        iid = s.add("text", "original clean text")
+        updated = s.update(iid, text=f"now leaking {self.SECRET}")
+        self.assertNotIn(self.SECRET, updated.text)  # the RETURNED copy is post-redaction, not raw
+        self.assertNotIn(self.SECRET, s.get(iid).text)
+
+    def test_update_redacts_a_secret_introduced_via_payload(self):
+        s = Substrate()
+        iid = s.add("trace", "clean", payload={"note": "fine"})
+        updated = s.update(iid, payload={"api_key": self.SECRET})
+        self.assertNotIn(self.SECRET, json.dumps(updated.payload))
+        self.assertNotIn(self.SECRET, json.dumps(s.get(iid).payload))
+
+    def test_clean_writes_are_completely_unaffected(self):
+        s = Substrate()
+        iid = s.add("text", "nothing sensitive here", tags=["ok"])
+        self.assertEqual(s.get(iid).text, "nothing sensitive here")
+        self.assertEqual(s.get(iid).tags, ["ok"])
+
+    def test_reject_policy_at_construction_blocks_a_dirty_put_entirely(self):
+        s = Substrate(secret_policy="reject")
+        with self.assertRaises(SecretPolicyError):
+            s.put(SubstrateItem(kind="text", text=self.SECRET))
+        self.assertEqual(len(s), 0)  # nothing was written
+
+    def test_reject_policy_can_be_overridden_per_call(self):
+        s = Substrate()  # default policy is "redact"
+        with self.assertRaises(SecretPolicyError):
+            s.put(SubstrateItem(kind="text", text=self.SECRET), secret_policy="reject")
+        self.assertEqual(len(s), 0)
+
+    def test_redact_policy_can_be_overridden_per_call_on_a_reject_default_store(self):
+        s = Substrate(secret_policy="reject")
+        iid = s.put(SubstrateItem(kind="text", text=self.SECRET), secret_policy="redact")
+        self.assertNotIn(self.SECRET, s.get(iid).text)
+
+    def test_reject_policy_on_update_leaves_the_prior_stored_value_untouched(self):
+        s = Substrate(secret_policy="reject")
+        iid = s.add("text", "original clean text")
+        with self.assertRaises(SecretPolicyError):
+            s.update(iid, text=self.SECRET)
+        self.assertEqual(s.get(iid).text, "original clean text")
+
+    def test_invalid_secret_policy_at_construction_raises(self):
+        with self.assertRaises(ValueError):
+            Substrate(secret_policy="not-a-real-policy")
+
+    def test_ingest_traces_redacts_a_secret_inside_a_harvested_row_regardless_of_entry_path(self):
+        """Confirms put()-level scanning is exercised regardless of entry path: ingest_traces sets
+        payload=row directly from parsed JSON -- exactly the kind of untrusted structured content a
+        harvested trace could carry a leaked credential in -- with zero changes needed in ingest.py
+        itself, since it already funnels through Substrate.put()."""
+        s = Substrate()
+        with tempfile.TemporaryDirectory() as d:
+            tf = os.path.join(d, "harvested.jsonl")
+            with open(tf, "w") as f:
+                f.write(json.dumps({"input": {"kind": "debug"}, "answer": self.SECRET, "extra": "note"}) + "\n")
+            ids = ingest_traces(s, tf)
+            self.assertEqual(len(ids), 1)
+            stored = s.get(ids[0])
+            self.assertNotIn(self.SECRET, json.dumps(stored.payload))
+            self.assertNotIn(self.SECRET, stored.text)
 
 
 class IndexDirtyTrackingTest(unittest.TestCase):
