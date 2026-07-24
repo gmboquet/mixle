@@ -128,19 +128,80 @@ def merge_enumerators(
 
     Stream k's log probs are shifted by offsets[k]. Correct only when the streams
     have pairwise disjoint supports (no de-duplication or re-scoring is performed).
+
+    Validated eagerly at call time, before any stream is touched: ``offsets`` must have
+    exactly one entry per stream, and every offset must be finite or exactly ``-inf`` --
+    the sentinel for "this stream contributes nothing" (e.g. a zero-weight mixture
+    component), which excludes that stream entirely without ever opening its iterator.
+    NaN and ``+inf`` offsets are rejected outright, since neither has a sensible reading
+    as a log-probability shift. This function is a thin eager-validation wrapper; the
+    actual merge runs in the generator it returns, so a malformed call raises immediately
+    instead of on first iteration.
+
+    Each stream's own items are validated lazily -- one pull at a time, as they are
+    actually consumed, so this is safe for infinite streams and never reads ahead: a
+    non-finite log_prob (including ``-inf`` -- a properly-formed descending stream should
+    already exclude impossible/zero-probability items, matching the convention used
+    elsewhere in this package, e.g. best_first.py's ``if lp > -np.inf`` guards) raises
+    immediately, and so does a log_prob that exceeds the previous log_prob pulled from
+    that SAME stream -- i.e. the stream failing the k-way merge's fundamental
+    precondition of actually being sorted descending.
+    """
+    n = len(streams)
+    if len(offsets) != n:
+        raise ValueError(
+            "offsets must have exactly one entry per stream (got %d offsets for %d streams)" % (len(offsets), n)
+        )
+    checked_offsets: list[float] = []
+    for k, o in enumerate(offsets):
+        try:
+            of = float(o)
+        except (TypeError, ValueError):
+            raise ValueError("offsets[%d] must be a real number, got %r" % (k, o))
+        if math.isnan(of) or of == math.inf:
+            raise ValueError("offsets[%d] must be finite or -inf (the exclude-this-stream sentinel), got %r" % (k, o))
+        checked_offsets.append(of)
+    return _merge_enumerators_body(streams, checked_offsets)
+
+
+def _merge_enumerators_body(
+    streams: Sequence[Iterator[tuple[Any, float]]], offsets: Sequence[float]
+) -> Iterator[tuple[Any, float]]:
+    """Generator body for :func:`merge_enumerators`.
+
+    Trusts that its only caller already validated arity (``len(offsets) == len(streams)``)
+    and that every offset is finite or ``-inf``. Still validates every per-item score as
+    it is pulled -- lazily, one item at a time -- since sortedness and score finiteness can
+    only be checked against the stream's actual contents, not the call-time arguments.
     """
     counter = itertools.count()
     heap = []
     its = [iter(s) for s in streams]
-    for k, it in enumerate(its):
+    last_lp: dict[int, float] = {}
+
+    def _next_checked(k: int) -> tuple[Any, float] | None:
+        for v, lp in its[k]:
+            lpf = float(lp)
+            if not math.isfinite(lpf):
+                raise ValueError("stream %d yielded a non-finite log_prob (%r); scores must be finite" % (k, lp))
+            prev = last_lp.get(k)
+            if prev is not None and lpf > prev:
+                raise ValueError("stream %d is not sorted descending: log_prob %r followed %r" % (k, lp, prev))
+            last_lp[k] = lpf
+            return v, lpf
+        return None
+
+    for k in range(len(its)):
         if offsets[k] == -np.inf:
             continue
-        for v, lp in it:
+        item = _next_checked(k)
+        if item is not None:
+            v, lp = item
             heapq.heappush(heap, (-(lp + offsets[k]), next(counter), v, k))
-            break
     while heap:
         neg_lp, _, v, k = heapq.heappop(heap)
         yield (v, -neg_lp)
-        for v2, lp2 in its[k]:
+        item = _next_checked(k)
+        if item is not None:
+            v2, lp2 = item
             heapq.heappush(heap, (-(lp2 + offsets[k]), next(counter), v2, k))
-            break
