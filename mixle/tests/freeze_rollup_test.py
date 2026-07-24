@@ -56,7 +56,12 @@ def _make_problem(seed=42, nobs=400):
         GaussianDistribution(-70.0, 3.0),
         GaussianDistribution(70.0, 3.0),
     ]
-    start = MixtureDistribution(start_components, [0.4, 0.4] + [0.025] * 6)
+    # [0.4, 0.4] + [0.025] * 6 sums to 0.95, not 1.0 -- MixtureDistribution.__init__ now rejects
+    # that at construction (simplex-weight check), so normalize while preserving the exact
+    # relative dominant/decoy ratio: a uniform rescale leaves every EM responsibility computation
+    # bit-for-bit unchanged, since posterior weights are invariant to a common scale factor.
+    start_w = np.array([0.4, 0.4] + [0.025] * 6)
+    start = MixtureDistribution(start_components, start_w / start_w.sum())
     estimator = MixtureEstimator([GaussianEstimator() for _ in range(8)])
     enc = seq_encode(data, model=start)
     return start, estimator, enc
