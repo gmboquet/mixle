@@ -139,6 +139,37 @@ class QuantizeTest(unittest.TestCase):
         self.assertIsNotNone(vecs.grad)  # gradient flows through the discrete bottleneck
         self.assertTrue(torch.allclose(vecs.grad, torch.ones_like(vecs)))  # identity backward
 
+    def test_fit_with_fewer_samples_than_codes_shrinks_num_codes(self):
+        # 2 vectors can't support 5 centers -> fit can only produce one center per sample, and
+        # num_codes must report that ACTUAL count instead of silently overstating capacity as 5
+        vq = VectorQuantizer(num_codes=5, dim=2, seed=0)
+        vq.fit(np.array([[0.0, 0.0], [10.0, 10.0]]))
+        self.assertEqual(vq.num_codes, 2)  # downgraded from the declared 5, not left stale
+        self.assertEqual(vq.codebook.shape, (2, 2))
+
+    def test_dequantize_rejects_id_beyond_actual_codebook_after_downgrade(self):
+        # id 4 is "nominally valid" against the originally-requested 5 codes, but the codebook
+        # actually only has 2 rows after the downgrade -- must be rejected with a clear error
+        vq = VectorQuantizer(num_codes=5, dim=2, seed=0).fit(np.array([[0.0, 0.0], [10.0, 10.0]]))
+        with self.assertRaises(IndexError) as ctx:
+            vq.dequantize(4)
+        message = str(ctx.exception)
+        # our own validation message, not numpy's incidental "index 4 is out of bounds for axis 0
+        # with size 2" -- which would (confusingly) also contain "4" and "2" as raw digits
+        self.assertIn("codebook", message)
+        self.assertIn("4", message)
+        self.assertIn("2", message)  # names the actual codebook size, not just "out of bounds"
+        self.assertEqual(vq.dequantize(1).shape, (2,))  # a genuinely in-range id still works
+
+    def test_fit_with_enough_samples_keeps_declared_num_codes(self):
+        # guard against over-correcting: the common case (enough data for the full request) must
+        # keep reporting the declared count unchanged
+        rng = np.random.RandomState(0)
+        vecs = np.vstack([rng.randn(60, DIM) + c for c in ([0] * DIM, [6] * DIM, [-6] * DIM)])
+        vq = VectorQuantizer(num_codes=3, dim=DIM, seed=0).fit(vecs)
+        self.assertEqual(vq.num_codes, 3)
+        self.assertEqual(vq.codebook.shape, (3, DIM))
+
 
 if __name__ == "__main__":
     unittest.main()
