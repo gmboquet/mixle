@@ -25,6 +25,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from scipy import special
+
 from mixle.substrate.core import Substrate, SubstrateItem
 
 # The weakest evidence tier: a model asserting something about itself, with no
@@ -52,6 +54,11 @@ MODEL_ASSERTION_CAP = 0.5
 # one real_measurement entry lands "high" and one model_assertion entry lands at the cap.
 _K = 3.0
 
+# The closed set of valid evidence directions (MXR-080-0242): "+" supports the claim, "-" contradicts
+# it. Before this was validated, ANY other string (a typo, "positive", "up") silently fell through to
+# "-" in the credence math -- contradicting evidence nobody actually submitted.
+_DIRECTIONS = frozenset({"+", "-"})
+
 _BELIEF_TAG = "belief"
 
 
@@ -73,6 +80,21 @@ class EvidenceEntry:
     direction: str = "+"  # "+" supports the claim, "-" contradicts it
     weight: float = 1.0
     time: float = field(default_factory=time.time)
+
+    def __post_init__(self) -> None:
+        # MXR-080-0242: a closed direction enum, and finite/non-negative weight and time -- validated
+        # here so EVERY construction path (assimilate's append, a test building one directly, or
+        # _from_item deserializing a stored entry) gets the same guarantee; nothing downstream (the
+        # logistic update, a ranking sort) can ever see a NaN/inf value or a direction that silently
+        # meant "contradicts" without anyone asking for that.
+        if self.direction not in _DIRECTIONS:
+            raise ValueError(
+                f"unknown evidence direction {self.direction!r}; expected '+' (supports) or '-' (contradicts)"
+            )
+        if not math.isfinite(self.weight) or self.weight < 0:
+            raise ValueError(f"evidence weight must be a finite, non-negative number, got {self.weight!r}")
+        if not math.isfinite(self.time):
+            raise ValueError(f"evidence time must be a finite number, got {self.time!r}")
 
 
 @dataclass
@@ -116,7 +138,10 @@ def credence_from_history(evidence_history: Sequence[EvidenceEntry]) -> float:
         logit += sign * strength * _K
         if e.tier != MODEL_ASSERTION:
             has_real_support = True
-    credence = 1.0 / (1.0 + math.exp(-logit))
+    # MXR-080-0242: scipy's expit is a numerically stable logistic -- unlike 1/(1+exp(-x)), it never
+    # overflows math.exp for a large-magnitude logit (a big weight, or many entries), instead saturating
+    # cleanly to 0.0 or 1.0 at the extremes.
+    credence = float(special.expit(logit))
     if not has_real_support:
         credence = min(credence, MODEL_ASSERTION_CAP)
     return credence
@@ -133,7 +158,8 @@ def assimilate(
 
     Finds or creates the belief item (keyed on normalized claim text) and appends each evidence entry
     (``{"source_id", "tier", "direction": "+"/"-", "weight"}``); ``tier`` must be one of
-    :data:`_TIER_STRENGTH` (``"model_assertion"`` plus :data:`mixle.doe.oracle.VERIFIABILITY_TIERS`).
+    :data:`_TIER_STRENGTH` (``"model_assertion"`` plus :data:`mixle.doe.oracle.VERIFIABILITY_TIERS`),
+    and ``direction``, when given, must be ``"+"`` or ``"-"`` (MXR-080-0242).
 
     Anti-laundering: an entry whose ``source_id`` resolves back to THIS belief (a cycle) or to another
     belief item with no independent (non-model-assertion) support of its own is stored with an
@@ -151,17 +177,27 @@ def assimilate(
     for raw in entries:
         tier = raw["tier"]
         _tier_strength(tier)  # validates; raises on an unrecognized tier rather than silently accepting one
-        source_id = str(raw.get("source_id", ""))
+        direction = raw.get("direction", "+")
+        if direction not in _DIRECTIONS:
+            raise ValueError(f"unknown evidence direction {direction!r}; expected '+' (supports) or '-' (contradicts)")
         weight = float(raw.get("weight", 1.0))
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError(f"evidence weight must be a finite, non-negative number, got {weight!r}")
+        entry_time = float(raw["time"]) if "time" in raw else time.time()
+        if not math.isfinite(entry_time):
+            raise ValueError(f"evidence time must be a finite number, got {entry_time!r}")
+        source_id = str(raw.get("source_id", ""))
+
         if _launders(sub, source_id, belief.id, scope):
             weight = 0.0
+
         belief.evidence_history.append(
             EvidenceEntry(
                 source_id=source_id,
                 tier=tier,
-                direction=raw.get("direction", "+"),
+                direction=direction,
                 weight=weight,
-                time=float(raw["time"]) if "time" in raw else time.time(),
+                time=entry_time,
             )
         )
 

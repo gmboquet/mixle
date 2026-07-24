@@ -1,5 +1,6 @@
 """KNOW-a: harvest -> assimilate calibrated belief, anti-laundering, revision/retract, replay."""
 
+import math
 import random
 import unittest
 
@@ -218,6 +219,100 @@ class CalibrationTest(unittest.TestCase):
         for name, truths in results.items():
             rate = sum(truths) / len(truths)
             self.assertLess(abs(rate - target[name]), 0.15, msg=f"{name}: rate={rate} target={target[name]}")
+
+
+class DirectionValidationTest(unittest.TestCase):
+    """MXR-080-0242: direction is a closed enum ('+'/'-'). Before this was validated, any other string
+    silently fell through the `direction == "+"` check as if it were "-", corrupting the credence math
+    with contradicting evidence nobody actually submitted."""
+
+    def test_unrecognized_direction_string_is_rejected_by_assimilate(self):
+        sub = Substrate()
+        claim = Claim(text="The bridge is closed.", produced_by={"model": "m"})
+        with self.assertRaises(ValueError):
+            assimilate(
+                sub,
+                claim,
+                {"source_id": "self-assert", "tier": "model_assertion", "direction": "positive", "weight": 1.0},
+            )
+
+    def test_direct_construction_rejects_bad_direction(self):
+        with self.assertRaises(ValueError):
+            EvidenceEntry(source_id="x", tier="model_assertion", direction="up")
+
+    def test_both_valid_directions_are_still_accepted(self):
+        EvidenceEntry(source_id="x", tier="model_assertion", direction="+")
+        EvidenceEntry(source_id="x", tier="model_assertion", direction="-")
+
+
+class EvidenceNumericValidationTest(unittest.TestCase):
+    """MXR-080-0242: weight and time must be finite (weight also non-negative) -- a NaN weight used to
+    silently produce a NaN credence that would then be persisted and used for ranking."""
+
+    def test_nan_weight_is_rejected_by_assimilate(self):
+        sub = Substrate()
+        claim = Claim(text="The reservoir is full.", produced_by={"model": "m"})
+        with self.assertRaises(ValueError):
+            assimilate(sub, claim, {"source_id": "self-assert", "tier": "model_assertion", "weight": float("nan")})
+
+    def test_infinite_weight_is_rejected_by_assimilate(self):
+        sub = Substrate()
+        claim = Claim(text="The reservoir is full.", produced_by={"model": "m"})
+        with self.assertRaises(ValueError):
+            assimilate(sub, claim, {"source_id": "self-assert", "tier": "model_assertion", "weight": float("inf")})
+
+    def test_negative_weight_is_rejected_by_assimilate(self):
+        sub = Substrate()
+        claim = Claim(text="The reservoir is full.", produced_by={"model": "m"})
+        with self.assertRaises(ValueError):
+            assimilate(sub, claim, {"source_id": "self-assert", "tier": "model_assertion", "weight": -1.0})
+
+    def test_nan_time_is_rejected_by_assimilate(self):
+        sub = Substrate()
+        claim = Claim(text="The reservoir is full.", produced_by={"model": "m"})
+        with self.assertRaises(ValueError):
+            assimilate(sub, claim, {"source_id": "self-assert", "tier": "model_assertion", "time": float("nan")})
+
+    def test_direct_construction_also_rejects_nan_weight(self):
+        # __post_init__ guards EVERY construction path, not just assimilate's -- a directly-built
+        # entry (a test, or _from_item deserializing a stored one) gets the same guarantee.
+        with self.assertRaises(ValueError):
+            EvidenceEntry(source_id="x", tier="model_assertion", weight=float("nan"))
+
+    def test_direct_construction_also_rejects_infinite_time(self):
+        with self.assertRaises(ValueError):
+            EvidenceEntry(source_id="x", tier="model_assertion", time=float("inf"))
+
+
+class NumericallyStableLogisticTest(unittest.TestCase):
+    """MXR-080-0242: a very large but FINITE weight must not overflow the naive 1/(1+exp(-x)) logistic
+    -- finiteness validation alone does not catch this (1e300 is finite); only a numerically stable
+    sigmoid does."""
+
+    def test_large_negative_evidence_does_not_crash_and_saturates_toward_zero(self):
+        sub = Substrate()
+        claim = Claim(text="The volcano is dormant.", produced_by={"model": "m"})
+        b = assimilate(
+            sub, claim, {"source_id": "self-assert", "tier": "model_assertion", "direction": "-", "weight": 1e300}
+        )
+        self.assertTrue(math.isfinite(b.credence))
+        self.assertAlmostEqual(b.credence, 0.0, places=9)
+
+    def test_large_positive_evidence_does_not_crash_and_saturates_toward_one(self):
+        sub = Substrate()
+        claim = Claim(text="The comet will return.", produced_by={"model": "m"})
+        b = assimilate(
+            sub, claim, {"source_id": "doc-huge", "tier": "real_measurement", "direction": "+", "weight": 1e300}
+        )
+        self.assertTrue(math.isfinite(b.credence))
+        self.assertAlmostEqual(b.credence, 1.0, places=9)
+
+    def test_replay_of_a_large_weight_history_is_also_stable(self):
+        # credence_from_history is the pure replay path -- must be equally stable independent of assimilate.
+        history = [EvidenceEntry(source_id="s", tier="real_measurement", direction="-", weight=1e250)]
+        credence = credence_from_history(history)
+        self.assertTrue(math.isfinite(credence))
+        self.assertAlmostEqual(credence, 0.0, places=9)
 
 
 if __name__ == "__main__":
