@@ -122,9 +122,15 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
         return math.exp(self.log_density(x))
 
     def log_density(self, x: Any) -> float:
-        """Exact log-likelihood of one realization (a sorted event-time sequence in ``[0, window]``)."""
+        """Exact log-likelihood of one realization (a strictly increasing event-time sequence in ``[0, window]``).
+
+        The conditional intensity is defined over the strict history ``t_j < t`` (see the class docstring),
+        so a realization with a tied timestamp pair (``t_j == t_i`` for ``j != i``) is not a valid ``t_1 <
+        ... < t_n`` history -- like any other malformed ordering, it scores ``-inf`` rather than silently
+        letting one of the tied events excite the other.
+        """
         t = np.asarray(x, dtype=np.float64).reshape(-1)
-        if t.size and (np.any(~np.isfinite(t)) or t[0] < 0.0 or t[-1] > self.window or np.any(np.diff(t) < 0.0)):
+        if t.size and (np.any(~np.isfinite(t)) or t[0] < 0.0 or t[-1] > self.window or np.any(np.diff(t) <= 0.0)):
             return -np.inf
         mu, alpha, beta, w = self.mu, self.alpha, self.beta, self.window
         loglam = 0.0
@@ -415,12 +421,18 @@ class HawkesProcessDataEncoder(DataSequenceEncoder):
         return isinstance(other, HawkesProcessDataEncoder) and self.window == other.window
 
     def seq_encode(self, x: Sequence[Any]) -> tuple[np.ndarray, np.ndarray, float]:
-        """Encode event-time realizations as padded times, lengths, and window."""
+        """Encode event-time realizations as padded times, lengths, and window.
+
+        Raises:
+            ValueError: If any realization has a non-finite, out-of-window, or non-strictly-increasing
+                time (including a tied timestamp pair) -- the conditional intensity is only defined over
+                the strict history ``t_j < t``, so ``t_j == t_i`` is not a valid history.
+        """
         seqs = []
         for events in x:
             t = np.asarray(events, dtype=np.float64).reshape(-1)
-            if t.size and (np.any(~np.isfinite(t)) or t[0] < 0.0 or t[-1] > self.window or np.any(np.diff(t) < 0.0)):
-                raise ValueError("event times must be finite, sorted, and within [0, window].")
+            if t.size and (np.any(~np.isfinite(t)) or t[0] < 0.0 or t[-1] > self.window or np.any(np.diff(t) <= 0.0)):
+                raise ValueError("event times must be finite, strictly increasing (no ties), and within [0, window].")
             seqs.append(t)
         lengths = np.asarray([s.size for s in seqs], dtype=np.int64)
         max_len = int(lengths.max()) if lengths.size and lengths.max() > 0 else 0
