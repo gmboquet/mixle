@@ -13,7 +13,8 @@
     * ``method='bandit'``      -- delegate the *which-operator* decision to the
       :class:`~mixle.evolve.population.OperatorBandit` via a :class:`~mixle.evolve.population.Population`.
 
-  ``build_fn(config) -> fitted model`` is caller-supplied, so ``search`` is family-agnostic.
+  ``build_fn(config, train_data) -> fitted model`` is caller-supplied and given ONLY the training
+  split (never ``val``), so ``search`` is family-agnostic.
 """
 
 from __future__ import annotations
@@ -153,36 +154,50 @@ def auto_select(
 
 @dataclass(frozen=True)
 class SearchResult:
-    """The outcome of a :func:`search` (or :meth:`Population.run`) run."""
+    """The outcome of a :func:`search` (or :meth:`Population.run`) run.
+
+    ``search_failed`` / ``n_evaluations`` / ``n_successes`` distinguish "we searched and found a real
+    (if mediocre) model" from "every configuration failed and best_model is a hollow placeholder" --
+    without them, a totally failed search (``best_model=None``, ``best_score`` at the internal penalty
+    sentinel) is shaped identically to a real result. Populated by the ``bo`` / ``evolutionary``
+    backends; the ``bandit`` backend (built on :class:`~mixle.evolve.population.Population`, which owns
+    its own success/failure bookkeeping) leaves them at their defaults.
+    """
 
     best_config: dict[str, Any]
     best_model: Any
     best_score: float  # in the objective's native orientation (lower- or higher-is-better)
     history: list[dict[str, Any]] = field(default_factory=list)
+    search_failed: bool = False  # True iff NO configuration was ever successfully built/scored
+    n_evaluations: int = 0  # total build/score attempts (successes + failures)
+    n_successes: int = 0  # of those, how many actually succeeded
 
 
 def _held_out_score(
     config: dict[str, Any],
-    build_fn: Callable[[dict[str, Any]], Any],
+    build_fn: Callable[[dict[str, Any], list[Any]], Any],
     train: list[Any],
     val: list[Any],
     objective: Objective,
-) -> tuple[float, Any]:
-    """Build a model from ``config`` on ``train`` and score it on ``val``; smaller is always better.
+) -> tuple[float, Any, str | None]:
+    """Build a model from ``config`` on ``train`` (and ONLY ``train``) and score it on ``val``.
 
-    Returns ``(canonical_score, model)`` where ``canonical_score`` is normalized to lower-is-better
+    Returns ``(canonical_score, model, error)``. ``canonical_score`` is normalized to lower-is-better
     (the BO/evolutionary loops minimize it). A build/score failure is a large finite penalty, not an
-    exception, so one bad config cannot abort the whole search.
+    exception, so one bad config cannot abort the whole search -- but it is never silent: ``model`` is
+    ``None`` and ``error`` carries a short, human-readable reason (the per-attempt receipt), so a
+    caller can always tell a real success (``error is None``) from a config that merely scored at the
+    penalty sentinel by coincidence.
     """
     try:
-        model = build_fn(config)
+        model = build_fn(config, train)
         s = float(objective.scalar(model, val))
         canonical = s if objective.lower_is_better else -s
         if not np.isfinite(canonical):
-            return 1.0e18, None
-        return canonical, model
-    except Exception:  # noqa: BLE001
-        return 1.0e18, None
+            return 1.0e18, None, f"non-finite score: {s!r}"
+        return canonical, model, None
+    except Exception as exc:  # noqa: BLE001
+        return 1.0e18, None, f"{type(exc).__name__}: {exc}"
 
 
 def search(
@@ -190,7 +205,7 @@ def search(
     data: Sequence[Any],
     *,
     objective: Objective,
-    build_fn: Callable[[dict[str, Any]], Any],
+    build_fn: Callable[[dict[str, Any], list[Any]], Any],
     method: str = "bo",
     n_iter: int = 25,
     holdout: float = 0.25,
@@ -203,11 +218,16 @@ def search(
         space: the typed :class:`~mixle.evolve.space.Space` to search.
         data: the raw dataset (split once into train/val here for the inner objective).
         objective: the held-out :class:`~mixle.evolve.objective.Objective` (lower-is-better aware).
-        build_fn: caller-supplied ``config -> fitted model`` (the search is family-agnostic).
+        build_fn: caller-supplied ``(config, train_data) -> fitted model`` (the search is
+            family-agnostic). ``train_data`` is ALWAYS the train split ``search`` computed -- never
+            ``val`` -- so a config can actually be fit to real data without risking a held-out leak.
         method: ``'bo'`` (Bayesian optimization over the numeric box), ``'evolutionary'``
             (a (mu + lambda) loop over ``sample`` / ``neighbors``), or ``'bandit'`` (delegate the
             operator policy to an :class:`~mixle.evolve.population.OperatorBandit`).
-        n_iter: search budget (BO acquisition steps / evolutionary generations / bandit generations).
+        n_iter: the TOTAL evaluation budget (build/score attempts), consistently for ``bo`` and
+            ``evolutionary``. Both backends need at least one evaluation to produce any result, so
+            ``n_iter<=0`` is rejected with a clear error instead of silently spending an evaluation
+            anyway. (``bandit`` interprets ``n_iter`` as a generation count, unchanged.)
         holdout: held-out fraction for the inner objective.
         seed: RNG seed.
         method_kwargs: backend-specific knobs (e.g. ``mu`` / ``lam`` for the evolutionary loop,
@@ -215,7 +235,8 @@ def search(
 
     Returns:
         A :class:`SearchResult` with ``best_config`` / ``best_model`` / ``best_score`` (native
-        orientation) / ``history``.
+        orientation) / ``history``, plus ``search_failed`` / ``n_evaluations`` / ``n_successes`` for
+        ``bo`` / ``evolutionary`` (see :class:`SearchResult`).
     """
     rows = list(data)
     train, val = _split(rows, holdout, seed)
@@ -233,7 +254,17 @@ def search(
         raise ValueError(f"method must be 'bo' | 'evolutionary' | 'bandit' (got {method!r}).")
 
     best_config, best_model, best_canonical, history = result
-    return SearchResult(best_config, best_model, native(best_canonical), history)
+    n_evaluations = len(history)
+    n_successes = sum(1 for row in history if not row.get("failed", False))
+    return SearchResult(
+        best_config,
+        best_model,
+        native(best_canonical),
+        history,
+        search_failed=(n_successes == 0),
+        n_evaluations=n_evaluations,
+        n_successes=n_successes,
+    )
 
 
 def _search_bo(
@@ -241,14 +272,27 @@ def _search_bo(
     train: list[Any],
     val: list[Any],
     objective: Objective,
-    build_fn: Callable[[dict[str, Any]], Any],
+    build_fn: Callable[[dict[str, Any], list[Any]], Any],
     *,
     n_iter: int,
     seed: int,
     n_init: int | None = None,
 ) -> tuple[dict[str, Any], Any, float, list[dict[str, Any]]]:
-    """Drive :func:`mixle.doe.minimize` over the space's numeric box (categoricals as integer indices)."""
+    """Drive :func:`mixle.doe.minimize` over the space's numeric box (categoricals as integer indices).
+
+    ``n_iter`` is the TOTAL evaluation budget (initial design + acquisition steps): for ``n_iter >= 1``
+    exactly ``n_iter`` configs are built/scored. BO cannot fit a surrogate -- let alone propose an
+    acquisition step -- from zero observed points, so ``n_iter <= 0`` is rejected outright rather than
+    silently spending an evaluation anyway (the previous behavior for ``n_iter=0``).
+    """
     from mixle.doe import minimize
+
+    n_iter = int(n_iter)
+    if n_iter <= 0:
+        raise ValueError(
+            "search(method='bo'): n_iter must be >= 1 -- Bayesian optimization needs at least one "
+            f"initial evaluation to fit its surrogate and produce a result; got n_iter={n_iter}."
+        )
 
     bounds = space.to_bounds()
     history: list[dict[str, Any]] = []
@@ -257,15 +301,15 @@ def _search_bo(
 
     def numeric_objective(x: np.ndarray) -> float:
         config = space.decode(x)
-        canonical, model = _held_out_score(config, build_fn, train, val, objective)
-        history.append({"config": config, "score": float(canonical)})
+        canonical, model, error = _held_out_score(config, build_fn, train, val, objective)
+        history.append({"config": config, "score": float(canonical), "failed": error is not None, "error": error})
         if canonical < best["score"]:
             best.update({"score": float(canonical), "config": config, "model": model})
         return float(canonical)
 
     n_init = max(2 * space.ndim + 1, 3) if n_init is None else int(n_init)
-    n_init = min(n_init, max(1, n_iter))
-    n_acq = max(0, int(n_iter) - n_init)
+    n_init = min(n_init, n_iter)
+    n_acq = max(0, n_iter - n_init)
     minimize(numeric_objective, bounds, n_init=n_init, n_iter=n_acq, seed=seed, maximize=False)
     return best["config"], best["model"], float(best["score"]), history
 
@@ -275,7 +319,7 @@ def _search_evolutionary(
     train: list[Any],
     val: list[Any],
     objective: Objective,
-    build_fn: Callable[[dict[str, Any]], Any],
+    build_fn: Callable[[dict[str, Any], list[Any]], Any],
     *,
     n_iter: int,
     seed: int,
@@ -287,13 +331,25 @@ def _search_evolutionary(
     Maintains ``mu`` parents; each generation spawns ``lam`` offspring (a random neighbor of a random
     parent), evaluates them, and keeps the best ``mu`` of (parents + offspring). Categoricals are handled
     natively (no numeric rounding), so this is the backend for spaces BO encodes lossily.
+
+    ``n_iter`` is the generation count, but the loop cannot seed a population -- let alone rank one --
+    without evaluating at least its ``mu`` initial parents, so ``n_iter <= 0`` is rejected outright
+    rather than silently spending ``mu`` evaluations anyway (the previous behavior for ``n_iter=0``).
     """
+    n_iter = int(n_iter)
+    if n_iter <= 0:
+        raise ValueError(
+            "search(method='evolutionary'): n_iter must be >= 1 -- the loop needs at least "
+            f"mu={mu} initial-parent evaluations to seed a population before any generation can "
+            f"run; got n_iter={n_iter}."
+        )
+
     rng = np.random.RandomState(seed)
     history: list[dict[str, Any]] = []
 
     def evaluate(config: dict[str, Any]) -> tuple[float, Any]:
-        canonical, model = _held_out_score(config, build_fn, train, val, objective)
-        history.append({"config": config, "score": float(canonical)})
+        canonical, model, error = _held_out_score(config, build_fn, train, val, objective)
+        history.append({"config": config, "score": float(canonical), "failed": error is not None, "error": error})
         return canonical, model
 
     # initial parents: random samples.
@@ -304,7 +360,7 @@ def _search_evolutionary(
         population.append((score, cfg, model))
     population.sort(key=lambda t: t[0])
 
-    for _ in range(int(n_iter)):
+    for _ in range(n_iter):
         offspring: list[tuple[float, dict[str, Any], Any]] = []
         for _ in range(lam):
             parent = population[int(rng.randint(0, len(population)))][1]
@@ -323,7 +379,7 @@ def _search_bandit(
     train: list[Any],
     val: list[Any],
     objective: Objective,
-    build_fn: Callable[[dict[str, Any]], Any],
+    build_fn: Callable[[dict[str, Any], list[Any]], Any],
     *,
     n_iter: int,
     seed: int,
@@ -334,12 +390,12 @@ def _search_bandit(
     """Delegate to an :class:`~mixle.evolve.population.OperatorBandit` via a :class:`Population`.
 
     The "space" here is *which operator to apply*, not a parameter box: ``build_fn`` instantiates a few
-    seed structures (from random configs), and the bandit-driven :class:`Population` evolves them,
-    learning which operators pay off. Matching the ``bo`` / ``evolutionary`` backends, every generation
-    fits challengers on ``train`` and gates + scores them on the disjoint ``val`` split
-    (:meth:`~mixle.evolve.population.Population.step`'s ``verify_data``) -- a challenger is never
-    verified against the same data it was just fit on. The returned :class:`SearchResult` carries the
-    population champion.
+    seed structures from random configs (given ``train`` -- never ``val``, matching the ``bo`` /
+    ``evolutionary`` backends), and the bandit-driven :class:`Population` evolves them, learning which
+    operators pay off. Every generation fits challengers on ``train`` and gates + scores them on the
+    disjoint ``val`` split (:meth:`~mixle.evolve.population.Population.step`'s ``verify_data``) -- a
+    challenger is never verified against the same data it was just fit on. The returned
+    :class:`SearchResult` carries the population champion.
     """
     from mixle.evolve.population import OperatorBandit, Population
 
@@ -348,7 +404,7 @@ def _search_bandit(
     for _ in range(max(1, n_seeds)):
         cfg = space.sample(rng)
         try:
-            seeds.append(build_fn(cfg))
+            seeds.append(build_fn(cfg, train))
         except Exception:  # noqa: BLE001
             continue
     if not seeds:

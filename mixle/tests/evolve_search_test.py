@@ -78,7 +78,7 @@ def test_search_evolutionary_finds_variance():
         sp,
         data,
         objective=nll_objective(),
-        build_fn=lambda cfg: GaussianDistribution(mu, float(cfg["sigma2"])),
+        build_fn=lambda cfg, train_data: GaussianDistribution(mu, float(cfg["sigma2"])),
         method="evolutionary",
         n_iter=40,
         seed=2,
@@ -135,6 +135,160 @@ def test_auto_select_verify_gate_negative_control_normal_data():
     assert res.model is not None
     assert "family" in res.evidence
     assert isinstance(res.verified, bool)
+
+
+def test_search_build_fn_receives_train_data_only_never_val():
+    # Finding-2 regression: build_fn used to be called with ONLY `config` -- `_held_out_score` accepted
+    # a `train` parameter but never actually passed it through, so a build_fn had no way to fit itself
+    # to real training data. build_fn must now receive (config, train_data), and train_data must be
+    # exactly the train split search() computed (never val, never the unsplit data) -- checked here for
+    # all three backends (bo kept at n_iter=1 so it never needs the torch-only GP acquisition step).
+    from mixle.evolve.improve import _split
+
+    data = list(np.random.RandomState(5).normal(3.0, 1.0, 100))
+    holdout, seed = 0.3, 1
+    expected_train, _ = _split(data, holdout, seed)
+    expected_train_sorted = sorted(expected_train)
+
+    seen_train_data = []
+
+    def build_fn(cfg, train_data):
+        seen_train_data.append(sorted(train_data))
+        return GaussianDistribution(float(cfg["mu"]), 1.0)
+
+    sp = Space({"mu": Real(-2.0, 8.0)})
+
+    for method, kwargs in (("bo", {}), ("evolutionary", {"mu": 2, "lam": 2}), ("bandit", {})):
+        seen_train_data.clear()
+        res = search(
+            sp,
+            data,
+            objective=nll_objective(),
+            build_fn=build_fn,
+            method=method,
+            n_iter=1,
+            seed=seed,
+            holdout=holdout,
+            **kwargs,
+        )
+        assert isinstance(res, SearchResult)
+        assert seen_train_data, f"method={method!r}: build_fn was never called"
+        for got in seen_train_data:
+            assert got == expected_train_sorted, f"method={method!r}: build_fn did not receive the train split"
+
+
+def test_search_build_fn_ignoring_train_data_still_works():
+    # negative control for Finding 2: a build_fn that doesn't need train_data (the shape of every
+    # existing caller in this file) must keep working exactly as before -- the extra parameter is
+    # purely additive, not a breaking requirement to actually use it.
+    data = list(np.random.RandomState(1).normal(0.0, 2.0, 300))
+    mu = float(np.mean(data))
+    sp = Space({"sigma2": Real(0.5, 12.0)})
+    res = search(
+        sp,
+        data,
+        objective=nll_objective(),
+        build_fn=lambda cfg, train_data: GaussianDistribution(mu, float(cfg["sigma2"])),
+        method="evolutionary",
+        n_iter=40,
+        seed=2,
+    )
+    assert isinstance(res, SearchResult)
+    assert 2.5 < res.best_config["sigma2"] < 6.0
+
+
+def test_search_reports_search_failed_when_every_config_fails():
+    # Finding-3 regression: when EVERY build/score attempt fails, search() used to return a
+    # plausible-looking SearchResult (a real sampled best_config, best_model=None, best_score at the
+    # internal 1e18 penalty sentinel) with nothing distinguishing it from a real search that merely
+    # found a mediocre model. It must now say so explicitly. bo's n_iter=3 stays within its default
+    # n_init (no acquisition steps), so this does not require the torch-only GP surrogate.
+    def always_raises(cfg, train_data):
+        raise RuntimeError("simulated: every config is unbuildable")
+
+    sp = Space({"mu": Real(-1.0, 1.0)})
+    data = list(range(20))
+    obj = nll_objective()
+
+    for method, n_iter in (("bo", 3), ("evolutionary", 2)):
+        res = search(sp, data, objective=obj, build_fn=always_raises, method=method, n_iter=n_iter, seed=0)
+        assert isinstance(res, SearchResult)
+        assert res.best_model is None, f"method={method!r}"
+        assert res.best_config is not None and len(res.best_config) > 0  # still a real sampled config
+        assert res.search_failed is True, f"method={method!r}: search_failed must be True"
+        assert res.n_evaluations > 0, f"method={method!r}: evaluations were attempted"
+        assert res.n_successes == 0, f"method={method!r}: none of them succeeded"
+
+
+def test_search_does_not_report_search_failed_on_a_normal_run():
+    # negative control for Finding 3: an ordinary, fully-successful search must NOT be flagged failed.
+    data = list(np.random.RandomState(1).normal(0.0, 2.0, 300))
+    mu = float(np.mean(data))
+    sp = Space({"sigma2": Real(0.5, 12.0)})
+    res = search(
+        sp,
+        data,
+        objective=nll_objective(),
+        build_fn=lambda cfg, train_data: GaussianDistribution(mu, float(cfg["sigma2"])),
+        method="evolutionary",
+        n_iter=5,
+        seed=2,
+    )
+    assert res.search_failed is False
+    assert res.best_model is not None
+    assert res.n_successes > 0
+    assert res.n_successes == res.n_evaluations  # every attempt succeeded -- no exceptions in this build_fn
+
+
+def test_search_n_iter_zero_rejected_not_silently_run():
+    # Finding-4 regression: n_iter=0 used to still spend a real evaluation in both backends (bo forced
+    # >=1 initial point via max(1, n_iter); evolutionary always evaluated its `mu` initial parents
+    # regardless of n_iter). Zero budget must now be refused explicitly, before any evaluation, rather
+    # than silently doing more work than requested.
+    sp = Space({"mu": Real(-1.0, 1.0)})
+    data = list(range(20))
+    obj = nll_objective()
+    calls = []
+
+    def counting_build_fn(cfg, train_data):
+        calls.append(cfg)
+        return GaussianDistribution(float(cfg["mu"]), 1.0)
+
+    for method in ("bo", "evolutionary"):
+        calls.clear()
+        with pytest.raises(ValueError, match="n_iter"):
+            search(sp, data, objective=obj, build_fn=counting_build_fn, method=method, n_iter=0, seed=0)
+        assert not calls, f"method={method!r}: n_iter=0 must not spend any evaluation"
+
+
+def test_search_n_iter_positive_negative_control_exact_evaluation_count():
+    # negative control for Finding 4: n_iter>=1 must still run (not over-rejected), spending EXACTLY
+    # the documented number of evaluations -- proving the fix is a true zero-budget-only rejection.
+    sp = Space({"mu": Real(-1.0, 1.0)})
+    data = list(range(20))
+    obj = nll_objective()
+
+    calls_bo = []
+
+    def build_fn_bo(cfg, train_data):
+        calls_bo.append(cfg)
+        return GaussianDistribution(float(cfg["mu"]), 1.0)
+
+    res_bo = search(sp, data, objective=obj, build_fn=build_fn_bo, method="bo", n_iter=1, seed=0)
+    assert len(calls_bo) == 1
+    assert res_bo.n_evaluations == 1
+
+    calls_evo = []
+
+    def build_fn_evo(cfg, train_data):
+        calls_evo.append(cfg)
+        return GaussianDistribution(float(cfg["mu"]), 1.0)
+
+    res_evo = search(
+        sp, data, objective=obj, build_fn=build_fn_evo, method="evolutionary", n_iter=1, seed=0, mu=2, lam=2
+    )
+    assert len(calls_evo) == 2 + 2  # mu initial parents + 1 generation * lam offspring
+    assert res_evo.n_evaluations == 4
 
 
 def test_operator_bandit_concentrates_on_winner():
@@ -227,7 +381,7 @@ def test_search_bandit_scores_on_held_out_split():
         sp,
         data,
         objective=_SpyObjective(),
-        build_fn=lambda cfg: GaussianDistribution(float(cfg["mu"]), 1.0),
+        build_fn=lambda cfg, train_data: GaussianDistribution(float(cfg["mu"]), 1.0),
         method="bandit",
         n_iter=2,
         seed=seed,
@@ -293,7 +447,7 @@ def test_search_bandit_method_runs():
         sp,
         data,
         objective=obj,
-        build_fn=lambda cfg: GaussianDistribution(float(cfg["mu"]), 1.0),
+        build_fn=lambda cfg, train_data: GaussianDistribution(float(cfg["mu"]), 1.0),
         method="bandit",
         n_iter=2,
         seed=0,
