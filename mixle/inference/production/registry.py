@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -99,6 +100,20 @@ class Registry:
         ``O_CREAT | O_EXCL`` as an independent, belt-and-suspenders guard: if a file for that version
         exists anyway (e.g. flock is a no-op on the underlying filesystem), it raises instead of
         silently overwriting the earlier registration.
+
+        The version file is also published atomically: the payload is written to a private temp file
+        in the model's directory and fsynced *before* it is ever linked to the final ``<version>.json``
+        path (via ``os.link``, after which the temp name is dropped). A failure anywhere in between --
+        serialization raising partway through ``json.dump``, the disk filling up, the process crashing
+        -- therefore never leaves a truncated or corrupt version file on disk: the file only ever exists
+        fully-formed or not at all. This mirrors the temp-file-plus-atomic-publish idiom used by
+        :func:`mixle.task.artifact._atomic_json_dump` and ``mixle.system.registry``'s ``_write_index``,
+        except the publish step uses ``os.link`` rather than ``os.replace``: this write must still refuse
+        to clobber an existing (or concurrently-claimed) version file, and ``os.replace`` would silently
+        overwrite one -- reopening the bug the ``O_CREAT | O_EXCL`` guard above fixes. Unlike writing
+        directly into the ``O_CREAT | O_EXCL``-opened file, a failed attempt here also leaves nothing
+        behind at ``path``, so the same version number stays cleanly retriable instead of being
+        permanently stuck behind a corrupt file that neither parses nor can be overwritten.
         """
         d = self._dir(name)
         attached = getattr(model, "header", None)
@@ -134,15 +149,31 @@ class Registry:
                     "metadata": metadata or {},
                 }
                 path = os.path.join(d, ver + ".json")
+                # Write fully to a private temp file (fsynced) before it ever touches `path`, so a
+                # failure mid-write -- serialization raising partway through json.dump, disk full, a
+                # crash -- leaves `path` completely untouched instead of a truncated/corrupt version
+                # file. os.link (not os.replace) publishes it: link atomically creates `path` only if
+                # it does not already exist, raising FileExistsError otherwise, which preserves the
+                # O_CREAT | O_EXCL conflict-detection this write has always needed (os.replace would
+                # silently overwrite an existing or concurrently-claimed version file instead).
+                fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{ver}.", suffix=".json.tmp")
                 try:
-                    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                except FileExistsError:
-                    raise RuntimeError(
-                        f"registry conflict: {name!r} version {ver!r} already exists -- another writer "
-                        "claimed it concurrently; retry register()"
-                    ) from None
-                with os.fdopen(fd, "w") as f:
-                    json.dump(payload, f)
+                    with os.fdopen(fd, "w") as f:
+                        json.dump(payload, f)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    try:
+                        os.link(tmp, path)
+                    except FileExistsError:
+                        raise RuntimeError(
+                            f"registry conflict: {name!r} version {ver!r} already exists -- another writer "
+                            "claimed it concurrently; retry register()"
+                        ) from None
+                finally:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
             finally:
                 fcntl.flock(lock_f, fcntl.LOCK_UN)
         return ver
