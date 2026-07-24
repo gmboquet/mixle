@@ -65,6 +65,37 @@ class InvariantTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             HypothesisPortfolio(hyps, np.array([0.2, 0.3, 0.5]), w_open=0.0)
 
+    def test_constructor_rejects_nan_weight(self):
+        # `nan < -1e-9` is always False, and the sum-to-1 check (`abs(total - 1.0) > 1e-6`) is also
+        # always False once a NaN reaches it, so a NaN weight used to construct silently.
+        hyps = [Hypothesis("a", 1)]
+        with self.assertRaises(ValueError):
+            HypothesisPortfolio(hyps, np.array([float("nan")]), w_open=0.0)
+
+    def test_constructor_rejects_nan_w_open(self):
+        # Same blind spot as the weight case, on the w_open range check instead.
+        hyps = [Hypothesis("a", 1)]
+        with self.assertRaises(ValueError):
+            HypothesisPortfolio(hyps, np.array([0.5]), w_open=float("nan"))
+
+    def test_constructor_rejects_infinite_weight(self):
+        hyps = [Hypothesis("a", 1)]
+        with self.assertRaises(ValueError):
+            HypothesisPortfolio(hyps, np.array([float("inf")]), w_open=0.0)
+
+    def test_constructor_rejects_infinite_w_open(self):
+        hyps = [Hypothesis("a", 1)]
+        with self.assertRaises(ValueError):
+            HypothesisPortfolio(hyps, np.array([0.5]), w_open=float("inf"))
+
+    def test_reweight_rejects_a_nan_producing_likelihood_fn(self):
+        # reweight() has no validation of its own -- it always returns HypothesisPortfolio(...), so a
+        # buggy likelihood_fn that returns NaN must be caught by the constructor it delegates to,
+        # same as every other mutating method (resample/prune/resurrect).
+        portfolio = _toy_portfolio()
+        with self.assertRaises(ValueError):
+            portfolio.reweight(0.0, lambda h, o: float("nan"))
+
 
 class PruneResurrectRoundTripTest(unittest.TestCase):
     def test_pruned_mass_folds_into_open_world_and_resurrect_reverses_it(self):
