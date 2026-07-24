@@ -323,7 +323,12 @@ class GenealogyLedger:
 # ---------------------------------------------------------------------------
 @dataclass
 class LoopStepResult:
-    """One :meth:`ClosedLoopSelfEvolution.step` outcome."""
+    """One :meth:`ClosedLoopSelfEvolution.step` outcome.
+
+    ``cost`` is what this step actually charges against a :meth:`ClosedLoopSelfEvolution.run` budget:
+    the selected operator's ``cost_hint`` iff the attempt was genuinely applicable and completed without
+    raising, ``0.0`` otherwise -- skipped-by-budget, inapplicable, and failed attempts are all free.
+    """
 
     context: str
     operator: str
@@ -331,6 +336,7 @@ class LoopStepResult:
     delta: float
     champion_score: float
     champion: Any
+    cost: float = 0.0
 
 
 class ClosedLoopSelfEvolution:
@@ -384,13 +390,14 @@ class ClosedLoopSelfEvolution:
         *,
         verify: Sequence[Any] | None = None,
         context: str | None = None,
+        budget_remaining: float | None = None,
     ) -> LoopStepResult:
         """One cycle of the loop on one arriving ``batch`` of held-out-shaped observations.
 
         1. harvest failures under the CURRENT champion,
         2. rank them with A5's ``acquire``,
         3. pick a challenger-production operator via the per-context bandit,
-        4. propose + gate the challenger,
+        4. propose + gate the challenger (skipped if ``budget_remaining`` can't afford it),
         5. reward the bandit with the verified (anti-regression) delta,
         6. deploy + record a genealogy receipt iff the gate promotes.
 
@@ -400,6 +407,13 @@ class ClosedLoopSelfEvolution:
         just fit on, weaker evidence than a disjoint split. Callers that want a clean held-out gate
         should pass an explicit ``verify`` batch of observations not also handed to this step's
         ``train_data``.
+
+        Note on ``budget_remaining``: when given, the bandit-selected operator's own ``cost_hint`` is
+        checked against it BEFORE the operator runs -- an operator whose cost exceeds what remains is
+        skipped exactly like an inapplicable one (no ``propose``/gate attempted, nothing charged).
+        ``result.cost`` reports what this step actually charges: the operator's ``cost_hint`` iff the
+        attempt was genuinely applicable and completed without raising, ``0.0`` otherwise -- see
+        :meth:`run`, which sums ``result.cost`` to track total spend.
         """
         self._n_steps += 1
         batch = list(batch)
@@ -415,11 +429,14 @@ class ClosedLoopSelfEvolution:
         op_name = self.bandit.select(ctx)
         operator = self.operators[op_name]
         op_ctx = {"parent_hash": None, "seed": self.seed + self._n_steps, "objective": self.objective}
+        cost = float(getattr(operator, "cost_hint", 1.0))
+        fits_budget = budget_remaining is None or cost <= budget_remaining
 
         promoted = False
         delta = 0.0
+        charged = 0.0
         try:
-            if operator.applicable(self.champion, train_data, ctx=op_ctx):
+            if fits_budget and operator.applicable(self.champion, train_data, ctx=op_ctx):
                 candidate = operator.propose(self.champion, train_data, ctx=op_ctx)
                 nonnested = type(candidate.model).__name__ != type(self.champion).__name__
                 verdict = challenger_beats_champion(
@@ -430,6 +447,8 @@ class ClosedLoopSelfEvolution:
                     nonnested=nonnested,
                     seed=self.seed + self._n_steps,
                 )
+                # a genuinely applicable, completed attempt -- charged regardless of promotion.
+                charged = cost
                 delta = float(verdict.delta) if verdict.promote else 0.0
                 if verdict.promote:
                     self.genealogy.record_adoption(
@@ -443,10 +462,19 @@ class ClosedLoopSelfEvolution:
                     promoted = True
         except Exception:  # noqa: BLE001
             delta = 0.0
+            charged = 0.0  # a raised attempt is free too, same as skipped-by-budget/inapplicable
 
         self.bandit.reward(ctx, op_name, delta)
         score = self._score(self.champion, verify_data)
-        result = LoopStepResult(ctx, op_name, promoted, delta, score, self.champion)
+        result = LoopStepResult(
+            context=ctx,
+            operator=op_name,
+            promoted=promoted,
+            delta=delta,
+            champion_score=score,
+            champion=self.champion,
+            cost=charged,
+        )
         self.history.append(result)
         return result
 
@@ -459,9 +487,13 @@ class ClosedLoopSelfEvolution:
         budget: float | None = None,
     ) -> list[LoopStepResult]:
         """Run the loop over a SEQUENCE of batches (a stream) -- the budgeted background loop's outer
-        iteration. ``budget`` (if given) is a ceiling on the total ``cost_hint`` of operators actually
-        applied (proposal attempts that were skipped as inapplicable don't spend budget); the loop stops
-        early once it is exhausted, leaving the champion at whatever it last became.
+        iteration. ``budget`` (if given) is a ceiling on total spend: each step's operator cost is
+        checked against the REMAINING budget and must fit BEFORE that operator runs (see
+        :meth:`step`'s ``budget_remaining``), and only ``result.cost`` -- what the step actually
+        charged -- accumulates ``spent``, so a skipped-by-budget, inapplicable, or failed attempt is
+        genuinely free, exactly as documented; only a genuinely-applicable, genuinely-completed attempt
+        is charged its ``cost_hint``. The loop stops early once the budget is fully spent, leaving the
+        champion at whatever it last became.
         """
         results: list[LoopStepResult] = []
         spent = 0.0
@@ -470,7 +502,8 @@ class ClosedLoopSelfEvolution:
                 break
             verify = verify_batches[i] if verify_batches is not None else None
             ctx = contexts[i] if contexts is not None else None
-            result = self.step(batch, verify=verify, context=ctx)
-            spent += float(getattr(self.operators[result.operator], "cost_hint", 1.0))
+            remaining = None if budget is None else budget - spent
+            result = self.step(batch, verify=verify, context=ctx, budget_remaining=remaining)
+            spent += result.cost
             results.append(result)
         return results
