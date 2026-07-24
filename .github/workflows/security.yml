@@ -43,3 +43,17 @@ jobs:
           IGNORES=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' .github/pip-audit-ignore.txt | awk '{printf " --ignore-vuln %s", $1}')
           echo "waived vulns:${IGNORES:- (none)}"
           pip-audit $IGNORES
+      # Software bill of materials: the resolved base-install dependency set, in CycloneDX JSON, from
+      # the same pip-audit invocation already used for vulnerability scanning above (no new tool).
+      # Best-effort and non-blocking for now -- SBOM generation failing should not fail the vulnerability
+      # gate above, which is the part this job actually exists to enforce.
+      - name: Generate SBOM (CycloneDX JSON)
+        if: always()
+        continue-on-error: true
+        run: pip-audit --format cyclonedx-json -o sbom.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sbom
+          path: sbom.json
+          if-no-files-found: warn
