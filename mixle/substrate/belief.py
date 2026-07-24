@@ -11,6 +11,21 @@ Anti-laundering is the load-bearing property: evidence that resolves back to the
 another belief that has no independent (non-model-assertion) support of its own, contributes ZERO --
 a claim cannot bootstrap high credence by citing itself or an equally ungrounded peer.
 
+A claimed tier is not itself evidence (MXR-080-0243): a strong tier only earns its full claimed
+strength when ``source_id`` actually resolves to something real -- a document, an artifact, another
+belief, any genuine substrate item -- checked once, at assimilation time, and recorded on the entry
+(:attr:`EvidenceEntry.verified`) so replay never needs the substrate again. An unresolved or fabricated
+``source_id`` (missing, made up, or naming nothing in the store) is represented as unverified and earns
+only :data:`MODEL_ASSERTION`-strength credence, no matter what tier it claims: a bare string is never,
+by itself, a receipt.
+
+Resolution is scope-respecting, all the way down (MXR-080-0244): ``source_id`` is looked up through an
+:class:`~mixle.substrate.spaces.AccessPolicy`-authorized view of the caller's own ``scope``, never a raw
+global lookup, and every transitive hop of a multi-belief proof chain is resolved through that SAME
+authorized view -- a caller can neither borrow another scope's private grounding to inflate its own
+credence nor learn, by probing, whether some other scope's belief happens to be grounded. An id that
+exists but is not visible to the caller is indistinguishable from one that does not exist at all.
+
 This is the write side of the knowledge substrate: harvest, credence
 assimilation, and traceable history. The retrieval side is
 :mod:`mixle.substrate.retrieve`.
@@ -28,6 +43,7 @@ from typing import Any
 from scipy import special
 
 from mixle.substrate.core import Substrate, SubstrateItem
+from mixle.substrate.spaces import AccessPolicy
 
 # The weakest evidence tier: a model asserting something about itself, with no
 # external check. This is intentionally kept outside
@@ -73,13 +89,23 @@ class Claim:
 
 @dataclass
 class EvidenceEntry:
-    """One piece of evidence that moved a belief's credence, in the order it was applied."""
+    """One piece of evidence that moved a belief's credence, in the order it was applied.
+
+    ``verified`` records whether ``source_id`` resolved to something real, through an authorized scoped
+    view, at the moment this entry was assimilated (MXR-080-0243/0244) -- computed once, by
+    :func:`assimilate`, and carried on the entry itself so :func:`credence_from_history` can replay it
+    without ever touching the substrate again. Direct construction (tests, deserializing an
+    already-decided entry) defaults to ``True``, matching ``direction``/``weight``/``time``'s own
+    "already-legitimate input" defaults; :func:`assimilate` is the untrusted-input boundary and always
+    computes and passes this explicitly rather than relying on the default.
+    """
 
     source_id: str
     tier: str
     direction: str = "+"  # "+" supports the claim, "-" contradicts it
     weight: float = 1.0
     time: float = field(default_factory=time.time)
+    verified: bool = True
 
     def __post_init__(self) -> None:
         # MXR-080-0242: a closed direction enum, and finite/non-negative weight and time -- validated
@@ -125,7 +151,14 @@ def harvest_knowledge(
 
 def credence_from_history(evidence_history: Sequence[EvidenceEntry]) -> float:
     """The credence implied by an evidence history alone -- a pure function, so replaying a belief's
-    stored ``evidence_history`` through this always reproduces its current ``credence`` exactly."""
+    stored ``evidence_history`` through this always reproduces its current ``credence`` exactly.
+
+    An entry's claimed ``tier`` only counts at its claimed strength when :attr:`EvidenceEntry.verified`
+    is True (MXR-080-0243); an unverified claim of a strong tier contributes at
+    :data:`MODEL_ASSERTION`-strength instead, and does not count toward ``has_real_support`` (so it
+    cannot, by itself, lift a belief past :data:`MODEL_ASSERTION_CAP`) -- otherwise merely CLAIMING a
+    strong tier would escape the cap even though its actual numeric contribution never did.
+    """
     if not evidence_history:
         return 0.5  # neutral: no evidence yet
     logit = 0.0
@@ -133,10 +166,11 @@ def credence_from_history(evidence_history: Sequence[EvidenceEntry]) -> float:
     for e in evidence_history:
         if e.weight <= 0:
             continue
-        strength = _tier_strength(e.tier) * e.weight
+        grounding = _is_grounding(e)
+        strength = (_tier_strength(e.tier) if grounding else _TIER_STRENGTH[MODEL_ASSERTION]) * e.weight
         sign = 1.0 if e.direction == "+" else -1.0
         logit += sign * strength * _K
-        if e.tier != MODEL_ASSERTION:
+        if grounding:
             has_real_support = True
     # MXR-080-0242: scipy's expit is a numerically stable logistic -- unlike 1/(1+exp(-x)), it never
     # overflows math.exp for a large-magnitude logit (a big weight, or many entries), instead saturating
@@ -153,6 +187,7 @@ def assimilate(
     evidence: dict[str, Any] | Sequence[dict[str, Any]],
     *,
     scope: str = "local",
+    policy: AccessPolicy | None = None,
 ) -> BeliefItem:
     """Bayesian-ish update of the belief in ``claim`` from ``evidence`` -- never a binary write.
 
@@ -161,9 +196,19 @@ def assimilate(
     :data:`_TIER_STRENGTH` (``"model_assertion"`` plus :data:`mixle.doe.oracle.VERIFIABILITY_TIERS`),
     and ``direction``, when given, must be ``"+"`` or ``"-"`` (MXR-080-0242).
 
-    Anti-laundering: an entry whose ``source_id`` resolves back to THIS belief (a cycle) or to another
-    belief item with no independent (non-model-assertion) support of its own is stored with an
-    effective weight of zero -- it cannot move the credence, though it stays in the trail for audit.
+    Verification (MXR-080-0243): a tier above :data:`MODEL_ASSERTION` only earns its claimed strength
+    when ``source_id`` resolves to a real substrate item through an authorized view of ``scope`` (see
+    :func:`_resolve`); an unresolved, fabricated, or omitted ``source_id`` is recorded as unverified and
+    contributes at :data:`MODEL_ASSERTION`-strength regardless of what it claims.
+
+    Anti-laundering (MXR-080-0244): an entry whose ``source_id`` resolves back to THIS belief (a cycle)
+    or to another belief item with no independent (non-model-assertion, verified) support of its own is
+    stored with an effective weight of zero -- it cannot move the credence, though it stays in the trail
+    for audit. Resolution -- both the verification check above and the laundering check -- goes through
+    ``policy`` (a fresh, home-scope-plus-PUBLIC-only :class:`~mixle.substrate.spaces.AccessPolicy` when
+    omitted), never a raw global lookup, so citing another scope's private belief is indistinguishable
+    from citing something that does not exist at all: neither the credence it produces nor anything else
+    observable here can be used to learn whether that other scope's belief exists or is grounded.
     """
     entries = [evidence] if isinstance(evidence, dict) else list(evidence)
     key = _claim_key(claim.text)
@@ -173,6 +218,7 @@ def assimilate(
         if existing is not None
         else BeliefItem(id=uuid.uuid4().hex[:16], claim=claim, credence=0.5, evidence_history=[], scope=scope)
     )
+    policy = policy if policy is not None else AccessPolicy()
 
     for raw in entries:
         tier = raw["tier"]
@@ -188,7 +234,12 @@ def assimilate(
             raise ValueError(f"evidence time must be a finite number, got {entry_time!r}")
         source_id = str(raw.get("source_id", ""))
 
-        if _launders(sub, source_id, belief.id, scope):
+        # MXR-080-0243: does source_id resolve to something real, through OUR authorized view? A
+        # model_assertion entry needs no receipt -- it is always weak regardless, so short-circuit
+        # before ever resolving it.
+        verified = tier == MODEL_ASSERTION or _resolve(sub, source_id, scope, policy) is not None
+        # MXR-080-0244: same authorized view, recursively, at every hop of the citation -- see _launders.
+        if _launders(sub, source_id, belief.id, scope, policy):
             weight = 0.0
 
         belief.evidence_history.append(
@@ -198,6 +249,7 @@ def assimilate(
                 direction=direction,
                 weight=weight,
                 time=entry_time,
+                verified=verified,
             )
         )
 
@@ -263,8 +315,20 @@ def _tier_strength(tier: str) -> float:
     return _TIER_STRENGTH[tier]
 
 
+def _is_grounding(e: EvidenceEntry) -> bool:
+    """Whether one evidence entry counts as independent, non-model-assertion support (MXR-080-0243):
+    a claimed tier above the model's-own-say-so floor that ALSO checked out as verified when it was
+    assimilated, and still carries positive weight. A claimed strong tier that never resolved to
+    anything real does not count, no matter what its ``tier`` string says -- otherwise merely claiming
+    a strong tier would let a belief escape :data:`MODEL_ASSERTION_CAP` even though its actual numeric
+    contribution was clamped to model-assertion strength. The single source of truth for "does this
+    entry count as real support", shared by :func:`credence_from_history`, :func:`_has_real_support`,
+    and :func:`_launders`."""
+    return e.tier != MODEL_ASSERTION and e.verified and e.weight > 0
+
+
 def _has_real_support(belief: BeliefItem) -> bool:
-    return any(e.tier != MODEL_ASSERTION and e.weight > 0 for e in belief.evidence_history)
+    return any(_is_grounding(e) for e in belief.evidence_history)
 
 
 def _claim_key(text: str) -> str:
@@ -278,28 +342,65 @@ def _find(sub: Substrate, key: str, scope: str) -> SubstrateItem | None:
     return None
 
 
-def _launders(sub: Substrate, source_id: str, belief_id: str, scope: str, _seen: set[str] | None = None) -> bool:
+def _resolve(sub: Substrate, source_id: str, scope: str, policy: AccessPolicy) -> SubstrateItem | None:
+    """The item ``source_id`` names, iff it exists AND ``scope`` is authorized (by ``policy``) to read
+    the scope it is actually stored in (MXR-080-0244) -- never a raw, scope-blind ``sub.get``.
+
+    ``scope`` doubles as the authorization principal here, the same way
+    :class:`~mixle.substrate.spaces.Space` uses its ``team`` as its own principal id: belief.py has no
+    separate identity concept, so the operating scope IS the caller's identity for this check. An id
+    that does not exist and one that exists but is private to a scope the caller cannot read both
+    resolve to ``None`` -- indistinguishable to every caller of this function, so neither can be used to
+    probe whether some other scope's item exists or what it contains.
+    """
+    if not source_id:
+        return None
+    item = sub.get(source_id)
+    if item is None:
+        return None
+    if not policy.can_read(scope, item.scope):
+        return None
+    return item
+
+
+def _launders(
+    sub: Substrate,
+    source_id: str,
+    belief_id: str,
+    scope: str,
+    policy: AccessPolicy,
+    _seen: set[str] | None = None,
+) -> bool:
     """True iff citing ``source_id`` as evidence for ``belief_id`` would launder unearned credence:
     a direct or indirect cycle back to ``belief_id``, or a reference to another belief item that has
     no independent support of its own -- walked ALL THE WAY DOWN, not just one hop: ``source_id`` is
-    laundering unless it resolves to something with at least one non-model-assertion entry that is
-    ITSELF not laundering (recursively). A ``source_id`` that is not itself a belief item in the
+    laundering unless it resolves to something with at least one non-model-assertion, verified entry
+    that is ITSELF not laundering (recursively). A ``source_id`` that is not itself a belief item in the
     substrate (a document, an oracle receipt, any genuine external reference) is never laundering --
-    that is the recursion's base case."""
+    that is the recursion's base case.
+
+    MXR-080-0244: every resolution -- this hop and every recursive one -- goes through :func:`_resolve`,
+    i.e. through ``policy``'s view of ``scope``, never a raw global lookup. A belief in a scope the
+    caller cannot read resolves to ``None`` here exactly like a nonexistent id would, so it can neither
+    be used to ground the caller's belief nor, through the credence that results, disclose whether it
+    exists or is itself grounded. The SAME ``scope``/``policy`` -- the ORIGINAL caller's, not whatever
+    scope a cited belief happens to live in -- is threaded through every recursive call, so a private
+    belief three hops down a proof chain is exactly as inaccessible as one cited directly.
+    """
     if source_id == belief_id:
         return True
     seen = _seen or set()
     if source_id in seen:
         return True  # a cycle among referenced claims that never reaches belief_id directly
-    ref_item = sub.get(source_id)
+    ref_item = _resolve(sub, source_id, scope, policy)
     if ref_item is None or _BELIEF_TAG not in ref_item.tags:
         return False
     ref = _from_item(ref_item)
     next_seen = seen | {source_id}
     for e in ref.evidence_history:
-        if e.tier != MODEL_ASSERTION and e.weight > 0 and not _launders(sub, e.source_id, belief_id, scope, next_seen):
-            return False  # ref has at least one genuinely independent, non-circular real support
-    return True  # every one of ref's entries is model-assertion-only or itself laundering
+        if _is_grounding(e) and not _launders(sub, e.source_id, belief_id, scope, policy, next_seen):
+            return False  # ref has at least one genuinely independent, non-circular, verified support
+    return True  # every one of ref's entries is model-assertion-only, unverified, or itself laundering
 
 
 def _to_item(belief: BeliefItem) -> SubstrateItem:
