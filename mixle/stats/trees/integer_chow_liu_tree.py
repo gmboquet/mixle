@@ -30,6 +30,88 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 
+# Tolerance for the "does this table exponentiate to a valid probability distribution" check -- numpy's
+# own np.isclose default (rtol=1e-05, atol=1e-08), matching the simplex-sum tolerance used elsewhere for
+# this same kind of check (MixtureDistribution.w, SymmetricDirichletDistribution, DictDirichletDistribution
+# all use this exact rtol/atol pair). Tight enough to catch a genuinely wrong table (e.g. raw un-normalized
+# counts or weights passed in place of a proper conditional) while tolerating ordinary float rounding in a
+# fitted table.
+_SIMPLEX_SUM_RTOL = 1.0e-5
+_SIMPLEX_SUM_ATOL = 1.0e-8
+
+
+def _validate_conditional_log_density_table(table: np.ndarray, feature: int, parent: int | None) -> None:
+    """Validate one feature's log-probability table against the tree's factorization semantics.
+
+    ``table`` is read the same way log_density()/seq_log_density()/the sampler read it: a 1-d root
+    marginal (log P(x_feature)) when ``parent`` is None, or a 2-d conditional table indexed
+    ``table[parent_val, child_val]`` (log P(x_feature | x_parent = parent_val)) otherwise. Nothing about
+    the constructor's signature guarantees ``table`` is an actual probability table -- e.g. raw
+    (non-normalized) counts or weights can be passed in its place, in which case log_density() and
+    seq_log_density() still return finite (just meaningless) scores, while the sampler crashes far from
+    the actual mistake, deep inside np.random.choice, with "probabilities do not sum to 1". Catch that
+    here instead, at construction.
+
+    A row (or the whole root vector) summing to ~0 once exponentiated (every entry -inf) is accepted
+    alongside one summing to ~1: an all -inf row represents a parent state that never occurs, which is
+    exactly what IntegerChowLiuTreeEstimator.estimate() emits for a feature whose realized value range is
+    narrower than the tree's shared num_states (see the estimator's `tmat_sum[tmat_sum == 0] = 1.0`
+    guard). That row is harmless -- the sampler can only reach it by first drawing that same parent state
+    from an upstream table, and that upstream entry is -inf too -- so it must not be rejected here.
+
+    Args:
+        table (np.ndarray): The feature's conditional_log_densities entry.
+        feature (int): Feature id the table belongs to (used only for the error message).
+        parent (Optional[int]): Parent feature id, or None if ``feature`` is the tree root.
+
+    Raises:
+        ValueError: If ``table`` has the wrong number of dimensions, contains NaN or +inf entries, or
+            (once exponentiated) does not sum to ~1 (or ~0, for a conditional row) along the axis its
+            semantics require.
+
+    """
+    finite_or_neg_inf = np.isfinite(table) | np.isneginf(table)
+    if parent is None:
+        if table.ndim != 1:
+            raise ValueError(
+                "IntegerChowLiuTreeDistribution requires the root table for feature %d to be 1-d, got "
+                "shape %r." % (feature, table.shape)
+            )
+        if not np.all(finite_or_neg_inf):
+            raise ValueError(
+                "IntegerChowLiuTreeDistribution requires finite log-density entries (NaN/+inf not "
+                "allowed) in the root table for feature %d." % feature
+            )
+        total = float(np.exp(table).sum())
+        if not np.isclose(total, 1.0, rtol=_SIMPLEX_SUM_RTOL, atol=_SIMPLEX_SUM_ATOL):
+            raise ValueError(
+                "IntegerChowLiuTreeDistribution requires the root table for feature %d to sum to 1.0 "
+                "once exponentiated (a valid marginal distribution), got sum=%r." % (feature, total)
+            )
+    else:
+        if table.ndim != 2:
+            raise ValueError(
+                "IntegerChowLiuTreeDistribution requires the conditional table for feature %d given "
+                "parent %d to be 2-d, got shape %r." % (feature, parent, table.shape)
+            )
+        if not np.all(finite_or_neg_inf):
+            raise ValueError(
+                "IntegerChowLiuTreeDistribution requires finite log-density entries (NaN/+inf not "
+                "allowed) in the conditional table for feature %d given parent %d." % (feature, parent)
+            )
+        row_sums = np.exp(table).sum(axis=1)
+        valid_row = np.isclose(row_sums, 1.0, rtol=_SIMPLEX_SUM_RTOL, atol=_SIMPLEX_SUM_ATOL) | np.isclose(
+            row_sums, 0.0, rtol=_SIMPLEX_SUM_RTOL, atol=_SIMPLEX_SUM_ATOL
+        )
+        if not np.all(valid_row):
+            bad_rows = np.nonzero(~valid_row)[0]
+            raise ValueError(
+                "IntegerChowLiuTreeDistribution requires each row of the conditional table for feature "
+                "%d given parent %d to sum to 1.0 once exponentiated (a valid P(feature | parent) row; "
+                "0.0 is also accepted for a parent state that never occurs); row(s) %s sum to %s."
+                % (feature, parent, bad_rows.tolist(), row_sums[bad_rows].tolist())
+            )
+
 
 class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
     """Integer Chow-Liu tree distribution factorizing a joint over fixed-length integer vectors along a tree.
@@ -100,6 +182,14 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
         # log_density/seq_log_density index these with `table[parent_val, child_val]`, which raises "list
         # indices must be integers or slices, not tuple" on a plain (unconverted) nested list.
         self.conditional_log_densities = [np.asarray(u) for u in conditional_log_densities]
+        # Reject tables that cannot possibly be a valid marginal/conditional distribution up front --
+        # see _validate_conditional_log_density_table for why this must happen here rather than being
+        # left to log_density (which would keep scoring a bad table as if it were fine) or the sampler
+        # (which is where an unnormalized table currently first surfaces, as an opaque numpy error out
+        # of np.random.choice). Indexed positionally by i, exactly like log_density/seq_log_density/the
+        # sampler/IntegerChowLiuTreeEnumerator index conditional_log_densities -- not by feature id.
+        for i, (feature, parent) in enumerate(self.dependency_list):
+            _validate_conditional_log_density_table(self.conditional_log_densities[i], feature, parent)
         self.conditional_densities = [np.exp(u) for u in conditional_log_densities]
         self.num_features = len(dependency_list)
         self.name = name
