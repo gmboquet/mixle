@@ -10,7 +10,7 @@ import unittest
 
 import numpy as np
 
-from mixle.enumeration.streams import BufferedStream, freeze
+from mixle.enumeration.streams import BufferedStream, freeze, merge_enumerators
 
 
 class FreezeDedupKeyTestCase(unittest.TestCase):
@@ -152,6 +152,89 @@ class BufferedStreamRankValidationTestCase(unittest.TestCase):
     def test_numpy_integer_rank_accepted(self):
         buf = BufferedStream(self._stream())
         self.assertEqual(buf.get(np.int64(1)), ("b", -0.5))
+
+
+class MergeEnumeratorsTestCase(unittest.TestCase):
+    """MXR-080-0200: merge_enumerators() must validate its ordering inputs."""
+
+    def test_arity_mismatch_too_few_offsets_rejected(self):
+        streams = [iter([("a", -0.1)]), iter([("b", -0.2)])]
+        with self.assertRaises(ValueError):
+            merge_enumerators(streams, [0.0])  # one offset for two streams
+
+    def test_arity_mismatch_too_many_offsets_rejected_eagerly(self):
+        # merge_enumerators() is not itself a generator: a malformed call must raise at
+        # call time, not only once the caller starts pulling from the returned iterator
+        # (this is what makes the eager offsets[k] IndexError pre-fix possible at all).
+        streams = [iter([("a", -0.1)]), iter([("b", -0.2)])]
+        with self.assertRaises(ValueError):
+            merge_enumerators(streams, [0.0, 0.0, 0.0])  # three offsets for two streams
+
+    def test_nan_offset_rejected(self):
+        streams = [iter([("a", -0.1)]), iter([("b", -0.2)])]
+        with self.assertRaises(ValueError):
+            merge_enumerators(streams, [0.0, float("nan")])
+
+    def test_positive_infinite_offset_rejected(self):
+        streams = [iter([("a", -0.1)]), iter([("b", -0.2)])]
+        with self.assertRaises(ValueError):
+            merge_enumerators(streams, [0.0, math.inf])
+
+    def test_negative_infinite_offset_is_the_documented_exclude_stream_sentinel(self):
+        # Negative control: -inf is NOT rejected -- it deliberately means "this stream
+        # contributes nothing," and that stream's iterator must never even be opened.
+        def _poison():
+            raise AssertionError("excluded stream must never be iterated")
+            yield  # pragma: no cover - unreachable; only here to make this a generator fn
+
+        streams = [iter([("a", -0.1), ("b", -0.3)]), _poison()]
+        out = list(merge_enumerators(streams, [0.0, -math.inf]))
+        self.assertEqual([v for v, _ in out], ["a", "b"])
+
+    def test_non_finite_score_rejected_nan(self):
+        with self.assertRaises(ValueError):
+            list(merge_enumerators([iter([("a", float("nan"))])], [0.0]))
+
+    def test_non_finite_score_rejected_positive_infinity(self):
+        with self.assertRaises(ValueError):
+            list(merge_enumerators([iter([("a", math.inf)])], [0.0]))
+
+    def test_non_finite_score_rejected_negative_infinity(self):
+        # A properly-formed stream should already exclude impossible (-inf) items --
+        # matching the convention used elsewhere in this package -- so one leaking
+        # through here is treated as malformed, the same as NaN or +inf.
+        with self.assertRaises(ValueError):
+            list(merge_enumerators([iter([("a", -math.inf)])], [0.0]))
+
+    def test_non_descending_stream_is_detected(self):
+        # Deliberately increasing (wrong-order) scores within a single stream: a k-way
+        # merge's correctness depends entirely on each input already being sorted
+        # descending, so this must be caught rather than silently producing a
+        # wrong-order output.
+        bad_stream = iter([("a", -3.0), ("b", -1.0)])  # -1.0 > -3.0: not descending
+        with self.assertRaises(ValueError):
+            list(merge_enumerators([bad_stream], [0.0]))
+
+    def test_well_formed_descending_streams_merge_into_correct_global_order(self):
+        # Negative control: verify the actual output ordering, not just that it runs.
+        s1 = iter([("a", -0.1), ("c", -0.5), ("e", -2.0)])
+        s2 = iter([("b", -0.2), ("d", -1.0)])
+        out = list(merge_enumerators([s1, s2], [0.0, 0.0]))
+        values = [v for v, _ in out]
+        lps = [lp for _, lp in out]
+        self.assertEqual(values, ["a", "b", "c", "d", "e"])
+        for i in range(len(lps) - 1):
+            self.assertGreaterEqual(lps[i], lps[i + 1])
+
+    def test_offsets_are_correctly_folded_into_the_merged_order(self):
+        s1 = iter([("a", -0.1), ("c", -0.5)])
+        s2 = iter([("b", -0.2)])
+        out = list(merge_enumerators([s1, s2], [0.0, 1.0]))  # shift stream 2 so it dominates
+        self.assertEqual([v for v, _ in out], ["b", "a", "c"])
+        self.assertAlmostEqual(out[0][1], 0.8)  # -0.2 + 1.0
+
+    def test_empty_streams_and_offsets_yield_nothing(self):
+        self.assertEqual(list(merge_enumerators([], [])), [])
 
 
 if __name__ == "__main__":
