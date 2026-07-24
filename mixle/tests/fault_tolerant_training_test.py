@@ -323,5 +323,102 @@ class AsyncCheckpointAtomicCaptureTest(unittest.TestCase):
         self.assertFalse(torch.equal(loaded_param, post_mutation_param))
 
 
+class ElasticTrainingJobSingleDriverTest(unittest.TestCase):
+    """``ElasticTrainingJob.run_step()`` advances the canonical model's weights (``canonical_optimizer
+    .step()``) several lines before it advances ``loader_states`` -- so a ``checkpoint()`` racing a
+    concurrent ``run_step()`` from a different thread could capture a model state newer than the loader
+    state written alongside it, with no error either side. There is no internal locking to prevent this
+    (a real lock spanning both methods would reintroduce the "checkpoint blocks training" cost
+    ``save_checkpoint_async`` exists to avoid); instead the class enforces its documented single-driver
+    contract at the API boundary: any of the three state-touching methods called from a thread other
+    than the one that constructed the job raises immediately, rather than racing silently."""
+
+    def _job(self, d: str, world_size: int = 2) -> ElasticTrainingJob:
+        return ElasticTrainingJob(_tiny_model, world_size=world_size, batch_fn_for_rank=_batch_fn, checkpoint_dir=d)
+
+    def _call_from_another_thread(self, fn) -> BaseException | None:
+        captured: list[BaseException] = []
+
+        def _target() -> None:
+            try:
+                fn()
+            except BaseException as exc:  # noqa: BLE001 -- captured to inspect on the calling thread
+                captured.append(exc)
+
+        t = threading.Thread(target=_target)
+        t.start()
+        t.join(timeout=10)
+        self.assertFalse(t.is_alive(), "cross-thread call did not return within the timeout")
+        return captured[0] if captured else None
+
+    def test_run_step_from_another_thread_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = self._job(d)
+            exc = self._call_from_another_thread(lambda: job.run_step(0))
+            self.assertIsInstance(exc, RuntimeError)
+            # The prefix names which method was actually called, not just the disclaimer text that
+            # always lists all three methods -- this is what distinguishes the three tests below from
+            # a copy-pasted assertion that would pass no matter which method the guard actually fired on.
+            self.assertIn("ElasticTrainingJob.run_step() called from thread", str(exc))
+
+    def test_checkpoint_from_another_thread_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = self._job(d)
+            job.run_step(0)
+            exc = self._call_from_another_thread(lambda: job.checkpoint())
+            self.assertIsInstance(exc, RuntimeError)
+            self.assertIn("ElasticTrainingJob.checkpoint() called from thread", str(exc))
+
+    def test_respawn_rank_from_another_thread_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = self._job(d)
+            job.run_step(0)
+            handle = job.checkpoint()
+            handle.wait(timeout=10)
+            exc = self._call_from_another_thread(lambda: job.respawn_rank(0))
+            self.assertIsInstance(exc, RuntimeError)
+            self.assertIn("ElasticTrainingJob.respawn_rank() called from thread", str(exc))
+
+    def test_same_thread_usage_is_unaffected(self):
+        # The guard must not reject the job's own (single-threaded) usage -- confirms this isn't a
+        # blanket lock, just a same-thread requirement.
+        with tempfile.TemporaryDirectory() as d:
+            job = self._job(d)
+            job.run_step(0)
+            handle = job.checkpoint()
+            handle.wait(timeout=10)
+            job.run_step(1)
+            restored = job.respawn_rank(0)
+            self.assertIsInstance(restored, LoaderState)
+
+    def test_respawn_rank_waits_for_an_in_flight_checkpoint_before_reading_it(self):
+        # Deliberately do NOT wait on the checkpoint handle before respawning -- respawn_rank() itself
+        # must wait internally, or this could read a partially-written checkpoint directory. Slow-disk
+        # patch matches AsyncSnapshotStallBudgetTest's exact target (save_checkpoint_async's background
+        # thread calls torch.distributed.checkpoint.save directly, not save_sharded) to widen the window
+        # a bug would need to land in.
+        import torch.distributed.checkpoint as dcp
+
+        real_save = dcp.save
+
+        def _slow_save(*args, **kwargs):
+            time.sleep(0.3)
+            return real_save(*args, **kwargs)
+
+        with (
+            tempfile.TemporaryDirectory() as d,
+            mock.patch("torch.distributed.checkpoint.save", side_effect=_slow_save),
+        ):
+            job = self._job(d)
+            job.run_step(0)
+
+            handle = job.checkpoint()
+            self.assertFalse(handle.done)  # the write is still in flight when respawn_rank() is called
+            restored = job.respawn_rank(0)  # no manual .wait() here -- this call must do it internally
+
+            self.assertTrue(handle.done)
+            self.assertIsInstance(restored, LoaderState)
+
+
 if __name__ == "__main__":
     unittest.main()
