@@ -48,7 +48,15 @@ from mixle.substrate.core import MODALITIES, Substrate, SubstrateItem
 from mixle.substrate.eig_retrieve import eig_retrieve
 from mixle.substrate.factuality import ClaimVerdict, FactualityReceipt, check_factuality
 from mixle.substrate.freshness import Freshness, check_freshness, content_hash, freshness_report
-from mixle.substrate.governance import Governance, approve, authorization_decision, pending, propose, reject
+from mixle.substrate.governance import (
+    Governance,
+    GovernanceAuthorizationError,
+    approve,
+    authorization_decision,
+    pending,
+    propose,
+    reject,
+)
 from mixle.substrate.harness import (
     Harness,
     HarnessResult,
@@ -78,7 +86,17 @@ from mixle.substrate.security import (
     scan_item,
     scan_substrate,
 )
-from mixle.substrate.spaces import PUBLIC, Space, history, merge_versions, publish, version_of, visible_scopes
+from mixle.substrate.spaces import (
+    PUBLIC,
+    AccessDeniedError,
+    AccessPolicy,
+    Space,
+    history,
+    merge_versions,
+    publish,
+    version_of,
+    visible_scopes,
+)
 from mixle.substrate.trust import LineageReport, audit_substrate, verify_lineage
 
 __all__ = [
@@ -131,10 +149,13 @@ __all__ = [
     "history",
     "version_of",
     "PUBLIC",
+    "AccessPolicy",
+    "AccessDeniedError",
     "verify_lineage",
     "audit_substrate",
     "LineageReport",
     "Governance",
+    "GovernanceAuthorizationError",
     "propose",
     "approve",
     "authorization_decision",
