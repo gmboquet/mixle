@@ -346,8 +346,21 @@ class GeneralizedMallowsDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def distance(self, x: Sequence[int]) -> int:
-        """Distance between ordering ``x`` and the central permutation under this metric."""
-        return int(seq_distance_to_center(np.asarray(x, dtype=np.int64)[None, :], self.rank0, self.metric)[0])
+        """Distance between ordering ``x`` and the central permutation under this metric.
+
+        Raises:
+            ValueError: If x is not a permutation of 0,...,n-1 (wrong length, a repeated
+                element, or an element outside that range). A malformed x is not merely an
+                unlikely ordering -- it isn't an ordering at all, so it is rejected here rather
+                than silently scored (e.g. a repeated index would otherwise still produce a
+                finite, meaningless distance, and an out-of-range index can alias a valid rank
+                via numpy's negative-index wraparound instead of failing loudly).
+
+        """
+        xa = np.asarray(x, dtype=np.int64)
+        if xa.ndim != 1 or not np.array_equal(np.sort(xa), np.arange(self.dim)):
+            raise ValueError("GeneralizedMallowsDistribution requires x to be a permutation of 0,...,n-1.")
+        return int(seq_distance_to_center(xa[None, :], self.rank0, self.metric)[0])
 
     def density(self, x: Sequence[int]) -> float:
         """Return the probability of one ordering under the Mallows model."""
