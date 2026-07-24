@@ -168,12 +168,45 @@ def return_level(fit: GPDFit, period: float) -> float:
 
     ``x_m = u + (beta/xi) [ (m zeta_u)^xi - 1 ]`` with ``zeta_u = n_exceed/n_total`` the exceedance
     rate (``period = m``). For ``xi = 0`` it reduces to ``u + beta log(m zeta_u)``.
+
+    Raises:
+        ValueError: ``period`` is not positive (a non-positive return period is not meaningful --
+            ``m = 0`` sends the level to +/-infinity and negative ``m`` is undefined for non-integer
+            ``xi``).
     """
+    if not period > 0:
+        raise ValueError(f"period must be positive, got {period}.")
     zeta = fit.n_exceedances / fit.n_total
     m = period * zeta
     if abs(fit.shape) < 1e-8:
         return float(fit.threshold + fit.scale * np.log(m))
     return float(fit.threshold + (fit.scale / fit.shape) * (m**fit.shape - 1.0))
+
+
+def _top_order_stats(x_sorted: np.ndarray, k: int, *, min_k: int = 1) -> tuple[np.ndarray, float]:
+    """Validate ``k`` against ``x_sorted`` (ascending) and return the top-``k`` slice with ``X_(n-k)``.
+
+    Shared range/finiteness check for the order-statistic tail estimators. ``numpy.sort`` places NaN at
+    the very end of the array regardless of magnitude (+/-inf sort normally, by size, ahead of any
+    NaN) -- so a NaN anywhere in ``data`` lands inside ``top`` no matter how small it "should" be. A
+    boundary check of the form ``x[n-k-1] <= 0`` alone does not catch this: a single NaN elsewhere in
+    ``data`` can silently poison ``top`` while the finite boundary value still passes. So this checks
+    finiteness of both explicitly.
+
+    Raises:
+        ValueError: ``k`` is outside ``[min_k, n-1]``, or the boundary value / top-``k`` slice contains
+            a non-finite entry.
+    """
+    n = x_sorted.shape[0]
+    if not min_k <= k < n:
+        raise ValueError(f"k must be in [{min_k}, {n - 1}].")
+    top = x_sorted[n - k :]
+    xnk = x_sorted[n - k - 1]
+    if not np.isfinite(xnk) or not np.all(np.isfinite(top)):
+        raise ValueError(
+            "upper order statistics must be finite (NaN/inf sorts to the top and would silently corrupt the estimate)."
+        )
+    return top, xnk
 
 
 def hill_estimator(data: np.ndarray, k: int) -> float:
@@ -183,32 +216,34 @@ def hill_estimator(data: np.ndarray, k: int) -> float:
     ``xi > 0``) tails. For a Pareto tail with exponent ``alpha`` this estimates ``1/alpha``.
     """
     x = np.sort(np.asarray(data, dtype=float).ravel())
-    n = x.shape[0]
-    if not 1 <= k < n:
-        raise ValueError("k must be in [1, n-1].")
-    if x[n - k - 1] <= 0:
+    top, xnk = _top_order_stats(x, k)
+    if xnk <= 0:
         raise ValueError("Hill estimator needs positive upper order statistics.")
-    top = x[n - k :]
-    return float(np.mean(np.log(top) - np.log(x[n - k - 1])))
+    return float(np.mean(np.log(top) - np.log(xnk)))
 
 
 def moment_estimator(data: np.ndarray, k: int) -> float:
     """Dekkers--Einmahl--de Haan moment estimator of the extreme-value index (any tail sign).
 
     Generalises Hill to ``xi`` of either sign by combining the first two log-moments of the top ``k``
-    exceedances; works for heavy, light, and bounded (``xi < 0``) tails.
+    exceedances; works for heavy, light, and bounded (``xi < 0``) tails. Needs ``k >= 2``: with a single
+    log-spacing the second moment is identically the square of the first (zero variance), which sends
+    the estimator's denominator to zero.
     """
     x = np.sort(np.asarray(data, dtype=float).ravel())
-    n = x.shape[0]
-    if not 1 <= k < n:
-        raise ValueError("k must be in [1, n-1].")
-    xnk = x[n - k - 1]
+    top, xnk = _top_order_stats(x, k, min_k=2)
     if xnk <= 0:
         raise ValueError("moment estimator needs positive upper order statistics.")
-    logs = np.log(x[n - k :]) - np.log(xnk)
+    logs = np.log(top) - np.log(xnk)
     m1 = float(np.mean(logs))
     m2 = float(np.mean(logs**2))
-    return float(m1 + 1.0 - 0.5 / (1.0 - m1**2 / m2))
+    denom = 1.0 - m1**2 / m2 if m2 > 0 else 0.0
+    if denom <= 0:
+        raise ValueError(
+            "moment estimator is undefined for this k: the top-k log-spacings have zero variance "
+            "(tied upper order statistics); choose a different k."
+        )
+    return float(m1 + 1.0 - 0.5 / denom)
 
 
 def mean_residual_life(data: np.ndarray, thresholds: np.ndarray) -> dict[str, np.ndarray]:
@@ -243,23 +278,32 @@ def endpoint_estimator(data: np.ndarray, k: int, *, method: str = "gpd") -> floa
     Args:
         data: the sample.
         k: number of upper order statistics (exceedances) used.
-        method: ``"gpd"`` -- GPD-MLE endpoint.
+        method: ``"gpd"`` -- GPD-MLE endpoint. No other method is implemented.
 
     Returns:
         The estimated right endpoint (``inf`` if unbounded).
+
+    Raises:
+        ValueError: ``method`` is not ``"gpd"``, ``k`` is out of range, or the upper order statistics
+            used are non-finite.
     """
+    if method != "gpd":
+        raise ValueError(f"method must be 'gpd' (no other endpoint method is implemented), got {method!r}.")
     x = np.sort(np.asarray(data, dtype=float).ravel())
-    n = x.shape[0]
-    if not 1 <= k < n:
-        raise ValueError("k must be in [1, n-1].")
-    u = x[n - k - 1]
-    fit = gpd_fit(x[n - k :] - u, threshold=u, method="mle", n_total=n)
+    top, u = _top_order_stats(x, k)
+    fit = gpd_fit(top - u, threshold=u, method="mle", n_total=x.shape[0])
     return fit.endpoint
 
 
 def record_times(data: np.ndarray) -> np.ndarray:
-    """Indices at which a new running maximum (upper record) occurs, including the first observation."""
+    """Indices at which a new running maximum (upper record) occurs, including the first observation.
+
+    An empty ``data`` has no observations and so, vacuously, no records: returns an empty index array
+    rather than raising.
+    """
     x = np.asarray(data, dtype=float).ravel()
+    if x.shape[0] == 0:
+        return np.nonzero(np.array([], dtype=bool))[0]
     running = np.maximum.accumulate(x)
     is_record = np.empty(x.shape[0], dtype=bool)
     is_record[0] = True
