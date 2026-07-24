@@ -473,7 +473,23 @@ class Mutate:
             weights = np.asarray(model.w, dtype=float)
             drop = int(np.argmin(weights))
             keep = [i for i in range(len(components)) if i != drop]
-            proto = mixture([components[i] for i in keep], [float(weights[i]) for i in keep])
+            # proto is just an EM init for the re-fit below, so a common-scale rescale here changes
+            # nothing about the optimization outcome (posterior responsibilities are scale-invariant)
+            # -- but MixtureDistribution requires a simplex, and the surviving weights alone (having
+            # lost the dropped component's share of the mass) usually don't sum to 1 on their own.
+            w = np.asarray([weights[i] for i in keep], dtype=float)
+            residual = float(w.sum())
+            if not np.isfinite(w).all() or not np.isfinite(residual) or residual <= 0.0:
+                # Degenerate residual mass: e.g. every surviving component happened to carry zero
+                # weight, or a non-finite weight reached this operator from an unvalidated duck-typed
+                # `model` (this operator only requires `.components`/`.w`, not a validated
+                # MixtureDistribution). Dividing by a zero or non-finite sum would silently manufacture
+                # a NaN/inf weight vector instead of a clear failure, so refuse outright instead.
+                raise ValueError(
+                    "Mutate 'shrink' move cannot renormalize surviving component weights to a "
+                    f"simplex: residual mass sum={residual!r} (need finite, strictly positive mass)."
+                )
+            proto = mixture([components[i] for i in keep], (w / residual).tolist())
         elif move == "grow":
             leaf = components[0] if is_mixture else model
             extra = optimize(_bootstrap(), leaf.estimator(), max_its=12, prev_estimate=leaf, out=None)
