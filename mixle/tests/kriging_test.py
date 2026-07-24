@@ -44,6 +44,58 @@ class VariogramTest(unittest.TestCase):
         self.assertGreater(vg.rng, 0)
         self.assertLess(vg.nugget, vg.psill)  # correlated structure dominates the nugget
 
+    def test_empirical_variogram_retains_pairs_at_the_default_max_dist_boundary(self):
+        # MXR-080-0101 exact repro: 3 collinear, equally spaced points have pairwise distances
+        # 1, 1, 2. The default max_dist is half the largest distance (1.0), so both distance-1 pairs
+        # sit exactly on the outer bin edge. np.digitize's half-open-right bins used to classify them
+        # as "beyond the last bin" and silently discard every pair -- fit_variogram then crashed on
+        # an empty lag array. Both distance-1 pairs must now be retained in the last bin.
+        coords = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+        values = np.array([1.0, 2.0, 1.5])
+        ev = empirical_variogram(coords, values)
+        self.assertFalse(bool(ev["insufficient_evidence"]))
+        self.assertEqual(ev["reason"], "")
+        self.assertEqual(int(ev["count"].sum()), 2)  # both distance-1 pairs retained, not discarded
+        # mean(0.5*(1.0-2.0)**2, 0.5*(2.0-1.5)**2) = mean(0.5, 0.125) = 0.3125, hand-computed exactly
+        np.testing.assert_allclose(ev["semivariance"], [0.3125])
+
+    def test_empirical_variogram_single_point_is_insufficient_evidence(self):
+        # A single point has no pairs at all -- a more extreme case of "every pair discarded" than
+        # the boundary bug above (dist.max() on an empty array used to crash immediately). Must now
+        # return a typed insufficient-evidence result instead of crashing or fabricating a bin.
+        ev = empirical_variogram(np.array([[0.0, 0.0]]), np.array([1.0]))
+        self.assertTrue(bool(ev["insufficient_evidence"]))
+        self.assertNotEqual(ev["reason"], "")
+        self.assertEqual(ev["lag"].size, 0)
+        self.assertEqual(ev["semivariance"].size, 0)
+        self.assertEqual(ev["count"].size, 0)
+
+    def test_fit_variogram_raises_clearly_on_the_boundary_repro(self):
+        # Same audit repro as above, through fit_variogram: after the binning fix there is exactly 1
+        # populated bin, still too few to identify a 3-parameter model (nugget, partial sill, range).
+        # Must fail with a clear, typed ValueError instead of the pre-fix bare crash on an empty lag
+        # array (`ValueError: zero-size array to reduction operation maximum which has no identity`).
+        coords = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+        values = np.array([1.0, 2.0, 1.5])
+        with self.assertRaisesRegex(ValueError, "populated lag bin"):
+            fit_variogram(coords, values)
+
+    def test_fit_variogram_raises_clearly_on_a_single_point(self):
+        with self.assertRaisesRegex(ValueError, "cannot fit a variogram"):
+            fit_variogram(np.array([[0.0, 0.0]]), np.array([1.0]))
+
+    def test_fit_variogram_still_fits_a_well_populated_point_set(self):
+        # Negative control: a normal, well-populated point set is unaffected by the binning fix and
+        # the new minimum-populated-bins check.
+        rng = np.random.RandomState(5)
+        X = rng.uniform(0, 20, (200, 2))
+        D = cdist(X, X)
+        C = np.exp(-D / 4.0)
+        field = np.linalg.cholesky(C + 1e-8 * np.eye(200)) @ rng.normal(0, 1, 200)
+        vg = fit_variogram(X, field, model="exponential")
+        self.assertGreater(vg.psill, 0)
+        self.assertGreater(vg.rng, 0)
+
     def test_squared_exponential_is_gaussian_with_rbf_covariance(self):
         # 'squared_exponential' / 'rbf' are aliases of the Gaussian model; covariance is exp(-(h/rng)^2)
         h = np.array([0.0, 1.0, 2.0, 4.0])
