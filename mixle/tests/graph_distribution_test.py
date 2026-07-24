@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 import mixle.stats as stats
+from mixle.engines import NUMPY_ENGINE
 from mixle.models import ErdosRenyiGraphModel, StochasticBlockGraphModel
 
 
@@ -219,6 +220,78 @@ class GraphDistributionTestCase(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             stats.ErdosRenyiGraphDistribution(0.5).log_density({"edges": [(0, 3)], "num_nodes": 3})
+
+    def test_erdos_renyi_rejects_asymmetric_adjacency_when_undirected(self):
+        # External review: directed=False declares the adjacency must be symmetric, but the scoring
+        # path only ever read the entries _edge_counts/_edge_indices count (the strict upper
+        # triangle) and silently ignored the rest -- an asymmetric adjacency used to score as a
+        # normal, finite observation instead of being rejected.
+        dist = stats.ErdosRenyiGraphDistribution(0.3, directed=False, self_loops=False)
+        asym = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]])
+        with self.assertRaises(ValueError):
+            dist.log_density(asym)
+        with self.assertRaises(ValueError):
+            dist.seq_log_density([asym])
+        with self.assertRaises(ValueError):
+            dist.backend_seq_log_density([asym], NUMPY_ENGINE)
+        with self.assertRaises(ValueError):
+            dist.posterior(asym)
+
+    def test_erdos_renyi_rejects_self_loop_when_disallowed(self):
+        # Same gap, other flag: self_loops=False declares a zero diagonal, but a nonzero diagonal
+        # entry falls outside the strict-upper-triangle read set and was silently ignored too.
+        dist = stats.ErdosRenyiGraphDistribution(0.3, directed=False, self_loops=False)
+        looped = np.array([[1, 1, 0], [1, 0, 1], [0, 1, 0]])
+        with self.assertRaises(ValueError):
+            dist.log_density(looped)
+        with self.assertRaises(ValueError):
+            dist.seq_log_density([looped])
+        with self.assertRaises(ValueError):
+            dist.posterior(looped)
+
+    def test_erdos_renyi_still_scores_graphs_consistent_with_directed_and_self_loops(self):
+        # Sanity check alongside the two rejection tests above: graphs that ARE consistent with the
+        # declared directed/self_loops flags must keep scoring normally (not over-reject).
+        asym = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]])
+        directed_dist = stats.ErdosRenyiGraphDistribution(0.3, directed=True, self_loops=False)
+        self.assertTrue(np.isfinite(directed_dist.log_density(asym)))
+
+        looped = np.array([[1, 1, 0], [1, 0, 1], [0, 1, 1]])
+        self_loop_dist = stats.ErdosRenyiGraphDistribution(0.3, directed=False, self_loops=True)
+        self.assertTrue(np.isfinite(self_loop_dist.log_density(looped)))
+
+    def test_stochastic_block_rejects_asymmetric_adjacency_and_self_loop_when_disallowed(self):
+        # Same class of gap as Erdos-Renyi: log_density/backend_seq_log_density/posterior all funnel
+        # through _obs_with_assignments, which only validated block indices, not the adjacency's
+        # consistency with the declared directed/self_loops flags.
+        bp = np.array([[0.7, 0.2], [0.2, 0.5]])
+        dist = stats.StochasticBlockGraphDistribution(bp, block_assignments=[0, 0, 1], directed=False, self_loops=False)
+        asym = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]])
+        looped = np.array([[1, 1, 0], [1, 0, 1], [0, 1, 0]])
+        with self.assertRaises(ValueError):
+            dist.log_density(asym)
+        with self.assertRaises(ValueError):
+            dist.log_density(looped)
+        with self.assertRaises(ValueError):
+            dist.seq_log_density([asym])
+        with self.assertRaises(ValueError):
+            dist.backend_seq_log_density([looped], NUMPY_ENGINE)
+        with self.assertRaises(ValueError):
+            dist.posterior(looped)
+
+    def test_stochastic_block_still_scores_graphs_consistent_with_directed_and_self_loops(self):
+        bp = np.array([[0.7, 0.2], [0.2, 0.5]])
+        asym = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]])
+        directed_dist = stats.StochasticBlockGraphDistribution(
+            bp, block_assignments=[0, 0, 1], directed=True, self_loops=False
+        )
+        self.assertTrue(np.isfinite(directed_dist.log_density(asym)))
+
+        looped = np.array([[1, 1, 0], [1, 0, 1], [0, 1, 1]])
+        self_loop_dist = stats.StochasticBlockGraphDistribution(
+            bp, block_assignments=[0, 0, 1], directed=False, self_loops=True
+        )
+        self.assertTrue(np.isfinite(self_loop_dist.log_density(looped)))
 
 
 if __name__ == "__main__":

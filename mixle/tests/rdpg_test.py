@@ -4,6 +4,7 @@ import unittest
 
 import numpy as np
 
+from mixle.engines import NUMPY_ENGINE
 from mixle.inference.estimation import fit
 from mixle.stats import RandomDotProductGraphDistribution
 
@@ -56,6 +57,31 @@ class RandomDotProductGraphTestCase(unittest.TestCase):
     def test_invalid_positions_raise(self):
         with self.assertRaises(ValueError):
             RandomDotProductGraphDistribution(np.array([1.0, 2.0]))  # not 2-D
+
+    def test_log_density_rejects_asymmetric_or_self_looped_adjacency(self):
+        # External review: RDPG is always undirected with no self-loops (implicit -- there is no
+        # directed/self_loops constructor flag), but _graph_log_density's mask only ever reads the
+        # strict upper triangle. An asymmetric entry or a nonzero diagonal falls outside that read
+        # set and used to be silently ignored, scoring as a normal, finite observation instead of
+        # being rejected.
+        dist = RandomDotProductGraphDistribution(_X[:3])
+        asym = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]])
+        looped = np.array([[1, 1, 0], [1, 0, 1], [0, 1, 0]])
+        with self.assertRaises(ValueError):
+            dist.log_density(asym)
+        with self.assertRaises(ValueError):
+            dist.log_density(looped)
+        with self.assertRaises(ValueError):
+            dist.seq_log_density([asym])
+        with self.assertRaises(ValueError):
+            dist.backend_seq_log_density([looped], NUMPY_ENGINE)
+
+    def test_log_density_still_scores_symmetric_no_self_loop_adjacency(self):
+        # Sanity check alongside the rejection test above: a graph that IS symmetric with a zero
+        # diagonal must keep scoring normally (not over-reject).
+        dist = RandomDotProductGraphDistribution(_X[:3])
+        valid = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]])
+        self.assertTrue(np.isfinite(dist.log_density(valid)))
 
 
 if __name__ == "__main__":

@@ -120,9 +120,15 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: Any) -> float:
         """Return the Bernoulli edge log probability of one graph."""
-        from mixle.data.sources.graph_source import _bernoulli_log_likelihood, _edge_counts, _extract_observation
+        from mixle.data.sources.graph_source import (
+            _bernoulli_log_likelihood,
+            _edge_counts,
+            _extract_observation,
+            _validate_graph_constraints,
+        )
 
         obs = _extract_observation(x, directed=self.directed)
+        _validate_graph_constraints(obs.adjacency, self.directed, self.self_loops)
         total, successes = _edge_counts(obs.adjacency, self.directed, self.self_loops)
         return _bernoulli_log_likelihood(successes, total, self.p)
 
@@ -131,17 +137,16 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         # Extract (opportunities, successes) per graph once (ragged adjacency forces the per-graph
         # extraction), then score the whole batch with one vectorized Bernoulli log-likelihood instead
         # of a Python log_density call per graph.
-        from mixle.data.sources.graph_source import _edge_counts, _extract_observation
+        from mixle.data.sources.graph_source import _edge_counts, _extract_observation, _validate_graph_constraints
 
         if len(x) == 0:
             return np.zeros(0, dtype=np.float64)
-        counts = np.asarray(
-            [
-                _edge_counts(_extract_observation(o, directed=self.directed).adjacency, self.directed, self.self_loops)
-                for o in x
-            ],
-            dtype=np.float64,
-        ).reshape(-1, 2)
+        counts = []
+        for o in x:
+            adj = _extract_observation(o, directed=self.directed).adjacency
+            _validate_graph_constraints(adj, self.directed, self.self_loops)
+            counts.append(_edge_counts(adj, self.directed, self.self_loops))
+        counts = np.asarray(counts, dtype=np.float64).reshape(-1, 2)
         total, successes = counts[:, 0], counts[:, 1]
         return successes * self.log_p + (total - successes) * self.log_1p
 
@@ -152,16 +157,20 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         object data), but the Bernoulli reduction runs on the active engine, so the model's scoring
         math is engine-native (and differentiable in ``p`` on torch).
         """
-        from mixle.data.sources.graph_source import _clip_prob, _edge_counts, _extract_observation
+        from mixle.data.sources.graph_source import (
+            _clip_prob,
+            _edge_counts,
+            _extract_observation,
+            _validate_graph_constraints,
+        )
 
         p = _clip_prob(self.p)
-        counts = np.asarray(
-            [
-                _edge_counts(_extract_observation(o, directed=self.directed).adjacency, self.directed, self.self_loops)
-                for o in x
-            ],
-            dtype=np.float64,
-        ).reshape(-1, 2)
+        counts = []
+        for o in x:
+            adj = _extract_observation(o, directed=self.directed).adjacency
+            _validate_graph_constraints(adj, self.directed, self.self_loops)
+            counts.append(_edge_counts(adj, self.directed, self.self_loops))
+        counts = np.asarray(counts, dtype=np.float64).reshape(-1, 2)
         total = engine.asarray(counts[:, 0])
         successes = engine.asarray(counts[:, 1])
         return successes * engine.asarray(math.log(p)) + (total - successes) * engine.asarray(math.log1p(-p))
@@ -182,11 +191,11 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
 
     def posterior(self, x: Any) -> dict[str, float]:
         """Return edge opportunities, observed edge count, and fitted probability for ``x``."""
-        from mixle.data.sources.graph_source import _edge_counts, _extract_observation
+        from mixle.data.sources.graph_source import _edge_counts, _extract_observation, _validate_graph_constraints
 
-        total, successes = _edge_counts(
-            _extract_observation(x, directed=self.directed).adjacency, self.directed, self.self_loops
-        )
+        adj = _extract_observation(x, directed=self.directed).adjacency
+        _validate_graph_constraints(adj, self.directed, self.self_loops)
+        total, successes = _edge_counts(adj, self.directed, self.self_loops)
         return {"edge_opportunities": total, "edge_count": successes, "p": self.p}
 
     def sampler(self, seed: int | None = None) -> ErdosRenyiGraphSampler:

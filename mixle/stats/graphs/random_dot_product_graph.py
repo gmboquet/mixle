@@ -109,9 +109,15 @@ class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution
         return self.probs
 
     def _graph_log_density(self, adjacency: np.ndarray) -> float:
+        from mixle.data.sources.graph_source import _validate_graph_constraints
+
         a = np.asarray(adjacency, dtype=float)
         if a.shape != (self.num_nodes, self.num_nodes):
             raise ValueError("RandomDotProductGraphDistribution observation size does not match the positions.")
+        # RDPG is always undirected with no self-loops (no directed/self_loops constructor flags), and
+        # the mask below only ever reads the strict upper triangle -- an asymmetric entry or a
+        # nonzero diagonal in `a` would otherwise be silently ignored rather than rejected.
+        _validate_graph_constraints(a, directed=False, self_loops=False)
         mask = np.triu(np.ones_like(a, dtype=bool), 1)  # undirected, no self-loops
         return float(np.sum(a[mask] * self._log_p[mask] + (1.0 - a[mask]) * self._log_1mp[mask]))
 
@@ -133,15 +139,17 @@ class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution
 
     def backend_seq_log_density(self, x: Sequence[GraphObservation], engine: Any) -> Any:
         """Engine-routed RDPG edge log-likelihood (reduction runs on the active engine)."""
-        from mixle.data.sources.graph_source import _extract_observation
+        from mixle.data.sources.graph_source import _extract_observation, _validate_graph_constraints
 
         mask = np.triu(np.ones((self.num_nodes, self.num_nodes), dtype=bool), 1)
         log_p = engine.asarray(self._log_p[mask])
         log_1mp = engine.asarray(self._log_1mp[mask])
-        rows = np.asarray(
-            [_extract_observation(o).adjacency[mask] for o in x],
-            dtype=np.float64,
-        )
+        adjacencies = []
+        for o in x:
+            adj = _extract_observation(o).adjacency
+            _validate_graph_constraints(adj, directed=False, self_loops=False)
+            adjacencies.append(adj[mask])
+        rows = np.asarray(adjacencies, dtype=np.float64)
         a = engine.asarray(rows)
         return engine.sum(a * log_p[None, :] + (engine.asarray(1.0) - a) * log_1mp[None, :], axis=1)
 

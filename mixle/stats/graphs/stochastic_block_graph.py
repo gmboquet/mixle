@@ -127,12 +127,22 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         )
 
     def _obs_with_assignments(self, x: Any) -> GraphObservation:
-        from mixle.data.sources.graph_source import _extract_observation, _validate_block_indices
+        from mixle.data.sources.graph_source import (
+            _extract_observation,
+            _validate_block_indices,
+            _validate_graph_constraints,
+        )
 
         obs = _extract_observation(x, directed=self.directed, fallback_assignments=self.block_assignments)
         if obs.block_assignments is None:
             raise ValueError("block assignments are required for SBM log-density.")
         _validate_block_indices(obs.block_assignments, self.num_blocks)
+        # log_density/backend_seq_log_density (and posterior/block_marginals, which share this same
+        # observation-consuming choke point) only ever read the edge positions _edge_indices yields for
+        # (self.directed, self.self_loops) -- e.g. the strict upper triangle when undirected with no
+        # self-loops -- so a self-loop or asymmetric entry outside that read set would otherwise be
+        # silently ignored instead of rejected.
+        _validate_graph_constraints(obs.adjacency, self.directed, self.self_loops)
         return obs
 
     def density(self, x: Any) -> float:

@@ -242,6 +242,22 @@ def _edge_counts(adj: np.ndarray, directed: bool, self_loops: bool) -> tuple[flo
     return total, successes
 
 
+def _validate_graph_constraints(adj: np.ndarray, directed: bool, self_loops: bool) -> None:
+    """Raise if ``adj`` violates the ``directed``/``self_loops`` constraints declared by the caller.
+
+    ``_edge_counts`` and ``_edge_indices`` only ever read the matrix entries implied by
+    ``(directed, self_loops)`` -- e.g. the strict upper triangle for an undirected, no-self-loop
+    graph -- so a self-loop or an asymmetric entry that falls outside that read set would otherwise
+    be silently ignored (never counted, never scored) instead of rejected. ``adj`` is already
+    constrained to exact 0.0/1.0 entries by ``_as_adjacency``, so plain equality is used below (no
+    float tolerance needed).
+    """
+    if not self_loops and np.any(np.diagonal(adj) != 0.0):
+        raise ValueError("graph adjacency must have a zero diagonal when self_loops=False.")
+    if not directed and not np.array_equal(adj, adj.T):
+        raise ValueError("undirected graph adjacency (directed=False) must be symmetric.")
+
+
 def _validate_block_probs(block_probs: Any) -> np.ndarray:
     probs = np.asarray(block_probs, dtype=np.float64)
     if probs.ndim != 2 or probs.shape[0] != probs.shape[1]:
