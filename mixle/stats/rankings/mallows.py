@@ -152,8 +152,21 @@ class MallowsDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def kendall_distance(self, x: Sequence[int]) -> int:
-        """Return the Kendall tau distance between ordering x and the central permutation."""
-        y = self.rank0[np.asarray(x, dtype=int)]
+        """Return the Kendall tau distance between ordering x and the central permutation.
+
+        Raises:
+            ValueError: If x is not a permutation of 0,...,n-1 (wrong length, a repeated
+                element, or an element outside that range). A malformed x is not merely an
+                unlikely ordering -- it isn't an ordering at all, so it is rejected here rather
+                than silently scored (e.g. a repeated index would otherwise still produce a
+                finite, meaningless distance, and an out-of-range index can alias a valid rank
+                via numpy's negative-index wraparound instead of failing loudly).
+
+        """
+        xa = np.asarray(x, dtype=int)
+        if xa.ndim != 1 or not np.array_equal(np.sort(xa), np.arange(self.dim)):
+            raise ValueError("MallowsDistribution requires x to be a permutation of 0,...,n-1.")
+        y = self.rank0[xa]
         return int(np.sum(y[:, None] > y[None, :], where=np.triu(np.ones((self.dim, self.dim), dtype=bool), 1)))
 
     def density(self, x: Sequence[int]) -> float:
