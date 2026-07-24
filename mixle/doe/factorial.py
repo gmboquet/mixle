@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from mixle.doe.designs import Bounds, _as_bounds
+from mixle.doe.designs import Bounds, _as_bounds, _require_exact_positive_int
 
 # Standard cyclic generating rows for the non-power-of-two Plackett-Burman designs (length N-1).
 _PB_GEN: dict[int, str] = {
@@ -147,7 +147,7 @@ def central_composite(
     d = b.shape[0]
     fact = _two_level_full(d)
     nf = fact.shape[0]
-    nc = int(center)
+    nc = _require_exact_positive_int(center, "center", minimum=0)
     if isinstance(alpha, str):
         if alpha == "rotatable":
             a = nf**0.25
@@ -192,6 +192,6 @@ def box_behnken(bounds: Bounds, *, center: int | None = None, coded: bool = Fals
         block = np.zeros((4, d))
         block[:, [i, j]] = quad
         blocks.append(block)
-    nc = _BB_CENTERS.get(d, 3) if center is None else int(center)
+    nc = _BB_CENTERS.get(d, 3) if center is None else _require_exact_positive_int(center, "center", minimum=0)
     coded_design = np.vstack([*blocks, np.zeros((nc, d))])
     return coded_design if coded else _coded_to_bounds(coded_design, b)

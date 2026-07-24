@@ -61,6 +61,22 @@ class CentralCompositeTest(unittest.TestCase):
         np.testing.assert_allclose(cross, 0.0, atol=1e-9)
 
 
+class CentralCompositeValidationTest(unittest.TestCase):
+    """MXR-080-0174: central_composite's center-count control, shared with designs.py's helper."""
+
+    bounds = [(-1.0, 1.0)] * 3
+
+    def test_center_rejects_fractional_and_negative(self):
+        with self.assertRaises(ValueError):
+            central_composite(self.bounds, center=2.5)
+        with self.assertRaises(ValueError):
+            central_composite(self.bounds, center=-1)
+
+    def test_center_zero_is_legitimate(self):
+        x = central_composite(self.bounds, center=0, coded=True)
+        self.assertEqual(x.shape, (8 + 6 + 0, 3))
+
+
 class BoxBehnkenTest(unittest.TestCase):
     def test_structure(self):
         x = box_behnken([(-1, 1)] * 3, coded=True)
@@ -72,6 +88,38 @@ class BoxBehnkenTest(unittest.TestCase):
     def test_requires_three_factors(self):
         with self.assertRaises(ValueError):
             box_behnken([(-1, 1)] * 2)
+
+    def test_center_rejects_fractional_and_negative(self):
+        with self.assertRaises(ValueError):
+            box_behnken([(-1, 1)] * 3, center=2.5)
+        with self.assertRaises(ValueError):
+            box_behnken([(-1, 1)] * 3, center=-1)
+
+    def test_center_zero_is_legitimate(self):
+        x = box_behnken([(-1, 1)] * 3, center=0, coded=True)
+        self.assertEqual(x.shape, (4 * 3 + 0, 3))
+
+    def test_explicit_center_overrides_default_table(self):
+        # Negative control: a valid explicit integer center still works exactly as before.
+        x = box_behnken([(-1, 1)] * 3, center=7, coded=True)
+        self.assertEqual(x.shape, (4 * 3 + 7, 3))
+
+
+class SharedBoundsValidationTest(unittest.TestCase):
+    """MXR-080-0174: every generator in this module shares designs._as_bounds."""
+
+    def test_infinite_or_nan_bounds_rejected_everywhere(self):
+        bad_bounds_cases = ([(-1.0, np.inf)] * 3, [(np.nan, 1.0)] * 3, [(-np.inf, 1.0)] * 3)
+        for bad_bounds in bad_bounds_cases:
+            with self.subTest(bounds=bad_bounds, fn="central_composite"):
+                with self.assertRaises(ValueError):
+                    central_composite(bad_bounds)
+            with self.subTest(bounds=bad_bounds, fn="box_behnken"):
+                with self.assertRaises(ValueError):
+                    box_behnken(bad_bounds)
+            with self.subTest(bounds=bad_bounds, fn="plackett_burman"):
+                with self.assertRaises(ValueError):
+                    plackett_burman(bad_bounds)
 
 
 if __name__ == "__main__":
