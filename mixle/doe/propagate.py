@@ -8,6 +8,7 @@ useful low-cost approximation for mild nonlinearity). The back half of the UQ lo
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -15,30 +16,93 @@ import numpy as np
 
 __all__ = ["propagate", "register_propagator", "unscented_transform"]
 
+_PSD_EIGENVALUE_RATIO = 1e-9
+"""Relative-tolerance bound (matching ``mixle.inference.belief.GaussianBelief``'s PSD gate, and
+mirrored from ``mixle.doe.batch._safe_cholesky``'s MXR-080-0166 fix) on how negative a covariance's
+worst eigenvalue may be -- relative to its own eigenvalue scale -- before it is refused outright as not
+a valid covariance at all, rather than treated as merely numerically singular."""
+
+
+def _validate_covariance(cov: np.ndarray) -> tuple[np.ndarray, float]:
+    """Reject a non-finite or non-PSD covariance; return ``(symmetrized_cov, eigenvalue_scale)``.
+
+    Shared by both propagation methods (and by :func:`_safe_cholesky`) so an invalid covariance is
+    refused identically regardless of which is requested. Without this, ``'unscented'`` would eventually
+    be caught by ``_safe_cholesky``'s Cholesky attempt, but ``'montecarlo'`` would sail straight through
+    numpy's own ``multivariate_normal(..., check_valid='warn')`` -- which, by default, only warns (easy
+    to miss, and silenced by any ambient warnings filter) and then samples anyway from a matrix that was
+    never a covariance in the first place.
+    """
+    cov = np.asarray(cov, dtype=np.float64)
+    if not np.all(np.isfinite(cov)):
+        raise ValueError("covariance is not finite (contains NaN/Inf).")
+    sym = 0.5 * (cov + cov.T)  # symmetrize first: an asymmetric-but-PD input would otherwise "succeed"
+    # against a matrix that silently differs from what was passed.
+    evals = np.linalg.eigvalsh(sym)
+    scale = float(np.abs(evals).max()) if evals.size else 0.0
+    if evals.min() < -_PSD_EIGENVALUE_RATIO * max(scale, 1e-12):
+        raise ValueError(
+            "covariance is not positive semi-definite (worst eigenvalue "
+            f"{evals.min():.6g} vs eigenvalue scale {scale:.6g}); refusing to silently substitute an "
+            "independent (diagonal-only) approximation -- or silently sample from an invalid matrix -- "
+            "for a fundamentally invalid covariance."
+        )
+    return sym, scale
+
 
 def _safe_cholesky(sigma: np.ndarray) -> np.ndarray:
-    """Cholesky of a covariance, falling back to escalating jitter only if the plain decomposition
-    fails; diagonal fallback if jitter alone can't rescue it.
+    """Cholesky of a covariance, for deriving the unscented transform's sigma points.
 
-    Tries the UNPERTURBED matrix first: this callsite's covariance can be at any scale (the unscented
-    transform's own `(d + lambda) * cov` factor can shrink it to ~1e-6 for small `alpha`), so an
-    always-on jitter sized relative to a `max(1.0, ...)` floor would be a large RELATIVE perturbation
-    on a small-scale matrix -- degrading precision on the common (already positive-definite) case
-    instead of only kicking in for the genuinely singular/near-singular case (a fixed/zero-variance
-    input dimension, perfectly correlated inputs) this exists to rescue.
+    Mirrors ``mixle.doe.batch._safe_cholesky``'s validate-before-heal policy (MXR-080-0166): a caller's
+    requested covariance structure must never be silently swapped out for an independent approximation.
+
+    * ``sigma`` finite and PSD within ``_PSD_EIGENVALUE_RATIO`` of its own eigenvalue scale, but merely
+      numerically singular (e.g. a fixed/zero-variance input dimension, or perfectly correlated inputs):
+      recoverable. Escalating diagonal jitter, starting at ``1e-10`` of the matrix's eigenvalue scale and
+      backing off by 10x for up to 7 attempts, nudges it just inside the numerically-decomposable PD
+      cone -- the SAME dependence structure, only its conditioning changes. The first attempt is always
+      unperturbed: this callsite's covariance can be at any scale (the unscented transform's own
+      ``(d + lambda) * cov`` factor can shrink it to ~1e-6 for small ``alpha``), so an always-on jitter
+      sized relative to a fixed floor would be a large RELATIVE perturbation on a small-scale matrix.
+      Whenever jitter *is* needed, a ``RuntimeWarning`` reports the exact amount, so it is quantified and
+      visible rather than invisible.
+    * ``sigma`` not finite, or indefinite well beyond float noise (e.g. ``[[1, 2], [2, 1]]``, whose
+      eigenvalues are ``3`` and ``-1``: no jitter this small makes that PD): not a valid covariance at
+      all. Raises ``ValueError`` immediately, via :func:`_validate_covariance` -- this never falls
+      through to a diagonal-only fallback, which would silently discard both the off-diagonal dependence
+      structure AND the fact the input wasn't PSD to begin with, while still returning a plausible-
+      looking sigma-point spread.
+
+    Raises:
+        ValueError: if ``sigma`` is non-finite, fails the PSD check, or (in a pathological case that
+            should not occur for anything that passed the PSD check) still fails to factor after the
+            full jitter budget is exhausted.
     """
-    try:
-        return np.linalg.cholesky(sigma)
-    except np.linalg.LinAlgError:
-        pass
-    d = sigma.shape[0]
-    jit = 1e-10 * max(1e-12, float(np.trace(sigma)) / d)
-    for _ in range(7):
+    sym, scale = _validate_covariance(sigma)
+    d = sym.shape[0]
+    base = 1e-10 * max(scale, 1e-12)
+    jitters = [0.0] + [base * (10.0**i) for i in range(7)]  # attempt 0 unperturbed, then 7 escalating
+    eye = np.eye(d)
+    for attempt, jit in enumerate(jitters):
         try:
-            return np.linalg.cholesky(sigma + jit * np.eye(d))
+            chol = np.linalg.cholesky(sym + jit * eye)
         except np.linalg.LinAlgError:
-            jit *= 10.0
-    return np.diag(np.sqrt(np.maximum(np.diag(sigma), 0.0)))
+            continue
+        if jit > 0.0:
+            warnings.warn(
+                "input covariance was numerically singular under a direct Cholesky factorization; "
+                f"healed with diagonal jitter={jit:.3g} ({jit / max(scale, 1e-300):.3g} of the "
+                f"eigenvalue scale {scale:.3g}) after {attempt} failed attempt(s). The dependence "
+                "structure is unchanged -- only the numerical conditioning was adjusted.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return chol
+    raise ValueError(
+        f"covariance passed the positive-semidefinite check (eigenvalue scale {scale:.6g}) but Cholesky "
+        f"still failed after escalating jitter up to {jitters[-1]:.3g}; refusing to silently substitute "
+        "a diagonal (independent) approximation."
+    )
 
 
 #: Registry of forward-propagation methods, keyed by ``method`` name. Each entry is a callable
@@ -88,6 +152,7 @@ def propagate(
     mean = np.atleast_1d(np.asarray(mean, dtype=float))
     d = len(mean)
     cov = np.eye(d) if cov is None else np.atleast_2d(np.asarray(cov, dtype=float))
+    _validate_covariance(cov)  # raises on non-finite/non-PSD covariance -- see _safe_cholesky (MXR-080-0190)
     try:
         propagator = _PROPAGATORS[method]
     except KeyError:
