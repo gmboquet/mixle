@@ -48,6 +48,56 @@ def _plan_get(plan: Any, key: str) -> Any:
     return getattr(plan, key)
 
 
+# ---------------------------------------------------------------------------
+# Input validation (MXR-080-0106). Every economic quantity assembled into the objective is validated for
+# finiteness and economic sign before it can be netted into a liability or a hard constraint, rather than
+# silently converted (``np.asarray``/``float``) and trusted: a negative "cost" would net out of revenue as
+# a profit increase instead of a liability, a NaN would propagate unguarded into the MILP objective, and
+# ``np.asarray(..., dtype=bool)`` on non-boolean data coerces via nonzero-ness -- ``bool(float("nan"))``
+# is ``True`` -- turning malformed mask data into a hard exclusion the caller never intended.
+# ---------------------------------------------------------------------------
+def _require_finite(value: np.ndarray | float, name: str) -> np.ndarray:
+    """Raise unless every entry of ``value`` is finite (no NaN/+-inf)."""
+    arr = np.asarray(value, dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    return arr
+
+
+def _require_finite_nonnegative(value: np.ndarray | float, name: str) -> np.ndarray:
+    """Raise unless every entry of ``value`` is finite and ``>= 0`` -- the sign convention every priced
+    liability (a cost or a price) in this module must hold, since a negative "cost" nets out of revenue
+    as a profit increase rather than a liability."""
+    arr = _require_finite(value, name)
+    if np.any(arr < 0.0):
+        raise ValueError(f"{name} must be non-negative, got {value!r}")
+    return arr
+
+
+def _require_bool_mask(value: Any, name: str) -> np.ndarray:
+    """Raise unless ``value`` is a genuinely boolean array (dtype ``bool``), rather than data that is
+    merely "truthy" under an implicit ``dtype=bool`` cast -- which maps any nonzero value, including
+    ``NaN`` (``bool(float("nan"))`` is ``True``: NaN is only falsy under ``==`` comparisons, never under
+    general truthiness), silently to a hard ``True`` exclusion."""
+    arr = np.asarray(value)
+    if arr.dtype != np.bool_:
+        raise ValueError(f"{name} must be an actual boolean array (dtype bool), got dtype {arr.dtype} ({value!r})")
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be a 1-D boolean array, got shape {arr.shape}")
+    return arr
+
+
+def _require_finite_1d(value: Any, name: str) -> np.ndarray:
+    """Raise unless ``value`` converts to a finite, genuinely one-dimensional float array -- rejects
+    NaN/+-inf entries plus higher-dimensional or ragged input."""
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be a 1-D array, got shape {arr.shape}")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    return arr
+
+
 def priced_liabilities(
     plan: Any,
     *,
@@ -72,7 +122,17 @@ def priced_liabilities(
     sum ``"total"`` (the single per-block liability :func:`mixle.stochastic_opt.risk_adjusted_plan`
     nets out of revenue), and the scalar roll-ups ``"remediation_total"``/``"health_total"``/
     ``"carbon_total"``/``"grand_total"`` for reporting.
+
+    Raises:
+        ValueError: if ``carbon_price``, ``plan``'s ``emissions``, or either cost callable's return value
+            is non-finite or negative -- a negative liability would net out of revenue as a profit
+            increase rather than a cost, and a NaN would propagate unguarded into the objective -- or if
+            any of ``plan``'s ``grade``/``exposure``/``emissions`` or a cost callable's return value has
+            the wrong shape.
     """
+    carbon_price = float(carbon_price)
+    _require_finite_nonnegative(carbon_price, "priced_liabilities: carbon_price")
+
     grade = np.asarray(_plan_get(plan, "grade"), dtype=np.float64)
     exposure = np.asarray(_plan_get(plan, "exposure"), dtype=np.float64)
     emissions = np.asarray(_plan_get(plan, "emissions"), dtype=np.float64)
@@ -83,14 +143,18 @@ def priced_liabilities(
             "priced_liabilities: plan's grade/exposure/emissions must all be length-n_blocks 1-D arrays; "
             f"got grade {grade.shape}, exposure {exposure.shape}, emissions {emissions.shape}"
         )
+    _require_finite_nonnegative(emissions, "priced_liabilities: plan's emissions")
 
     remediation = np.asarray(remediation_cost(grade), dtype=np.float64)
     health = np.asarray(health_cost(exposure), dtype=np.float64)
-    carbon = float(carbon_price) * emissions
+    carbon = carbon_price * emissions
 
     for name, arr in (("remediation_cost(grade)", remediation), ("health_cost(exposure)", health)):
         if arr.shape != (n_blocks,):
             raise ValueError(f"priced_liabilities: {name} must return a length-n_blocks array; got {arr.shape}")
+
+    remediation = _require_finite_nonnegative(remediation, "priced_liabilities: remediation_cost(grade)")
+    health = _require_finite_nonnegative(health, "priced_liabilities: health_cost(exposure)")
 
     total = remediation + health + carbon
     return {
@@ -121,15 +185,22 @@ def hard_constraints(*, no_mine_mask: Any | None = None, caps: list[dict] | None
 
     Returns a dict with whichever of ``"no_mine_mask"``/``"caps"`` were supplied (both are omitted, i.e.
     an empty dict, when neither argument is given -- meaning no hard constraint at all).
+
+    Raises:
+        ValueError: if ``no_mine_mask`` is not a genuine 1-D boolean array (data that is merely truthy
+            under an implicit bool cast, e.g. a float array or a NaN entry, is rejected rather than
+            silently coerced), if any cap's ``"coeffs"`` is not a finite 1-D array, if any cap's
+            ``"bound"`` is not finite, or if a cap's ``"sense"`` is not ``"<="``/``">="``.
     """
     constraints: dict[str, Any] = {}
     if no_mine_mask is not None:
-        constraints["no_mine_mask"] = np.asarray(no_mine_mask, dtype=bool)
+        constraints["no_mine_mask"] = _require_bool_mask(no_mine_mask, "hard_constraints: no_mine_mask")
     if caps:
         normalized: list[dict] = []
         for cap in caps:
-            coeffs = np.asarray(cap["coeffs"], dtype=np.float64)
+            coeffs = _require_finite_1d(cap["coeffs"], "hard_constraints: cap['coeffs']")
             bound = float(cap["bound"])
+            _require_finite(bound, "hard_constraints: cap['bound']")
             sense = cap.get("sense", "<=")
             if sense == ">=":
                 coeffs = -coeffs
