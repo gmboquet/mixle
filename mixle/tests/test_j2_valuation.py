@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from mixle.analysis.valuation import NPVDistribution, monte_carlo_npv
+from mixle.analysis.valuation import NPVDistribution, _sobol_first_order_share, monte_carlo_npv
 from mixle.reason.posterior_protocol import Posterior
 
 N = 20_000
@@ -154,7 +154,12 @@ def test_monte_carlo_npv_matches_hand_rolled_reference():
 
 def test_sensitivity_decomposes_variance_between_grade_and_price():
     posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
-    price_paths = np.random.default_rng(1).normal(PRICE_MEAN, PRICE_STD, size=(N, 1))
+    # Seeded independently of `rng` below (101, not 1): Generator.normal and Generator.lognormal, freshly
+    # seeded identically, consume the SAME underlying standard-normal stream (lognormal is exp(normal)
+    # internally) -- so a `price_paths` generator sharing `rng`'s own seed would make this test's grade
+    # and price accidentally perfectly (monotonically) correlated in the primary sample, instead of the
+    # independent uncertainty sources the assertions below assume. A different seed avoids that.
+    price_paths = np.random.default_rng(101).normal(PRICE_MEAN, PRICE_STD, size=(N, 1))
 
     result = monte_carlo_npv(
         posterior,
@@ -171,8 +176,9 @@ def test_sensitivity_decomposes_variance_between_grade_and_price():
     assert 0.0 <= sens["grade"] <= 1.0
     assert 0.0 <= sens["price"] <= 1.0
     assert sens["total_variance"] > 0.0
-    # Both grade and price are genuine uncertainty sources here, so each should explain a material
-    # share of the variance (loosely bounded -- this is not a precise ANOVA claim).
+    # Both grade and price are genuine (independent) uncertainty sources here, so each should explain a
+    # material share of the variance (loosely bounded -- this is not a precise ANOVA claim; see
+    # test_sensitivity_recovers_known_analytic_first_order_indices for a tight quantitative check).
     assert sens["grade"] > 0.05
     assert sens["price"] > 0.05
 
@@ -464,3 +470,186 @@ def test_monte_carlo_npv_negative_control_normal_call_still_works():
     assert result.samples.shape == (N,)
     assert np.all(np.isfinite(result.samples))
     assert result.p10 < result.p50 < result.p90
+
+
+class _DeterministicGradePosterior:
+    """An IC-1 `Posterior` stub that always returns the exact same ``k`` grade values, ignoring ``rng``
+    entirely -- lets a test pin an EXACT (grade, price) pairing, as MXR-080-0117's repro needs."""
+
+    def __init__(self, values: np.ndarray) -> None:
+        self._values = np.asarray(values, dtype=np.float64)
+
+    def samples(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        assert n == self._values.shape[0]
+        return self._values[:, None]
+
+    @property
+    def mean(self) -> np.ndarray:
+        return np.array([float(np.mean(self._values))])
+
+    @property
+    def cov(self) -> np.ndarray:
+        return np.array([[float(np.var(self._values))]])
+
+    def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
+        return np.array([float(np.min(self._values))]), np.array([float(np.max(self._values))])
+
+    def derived_quantity(self, fn, n, rng):
+        raise NotImplementedError("unused by this test")
+
+
+# --- MXR-080-0117: NPV sensitivity shares can exceed one by millions ------------------------------
+#
+# The previous sensitivity computation froze one factor at its mean, varied the other, and divided
+# that frozen-factor variance by the variance of the actual paired joint sample. With negatively paired
+# grade/price scenarios, the joint (paired) sample's variance can be driven nearly to zero by
+# cancellation while each frozen-factor variance stays large, sending the ratio into the millions --
+# despite the API documenting values in [0, 1]. Replaced with Sobol first-order variance-based
+# sensitivity indices, estimated via a second sample independent of the caller's own (possibly
+# adversarially paired) joint sample -- see _sobol_first_order_share. The tests below pin the fix.
+
+
+def test_sensitivity_negatively_paired_repro_no_longer_explodes():
+    # The audit's exact adversarial construction: two grade draws, two price scenarios, paired so that
+    # grade*price products are nearly IDENTICAL (near-zero joint variance) while grade alone and price
+    # alone (each frozen at the other's mean, under the old method) varied enormously. The old
+    # ratio-of-variances method returned shares in the millions (grade ~2,251,500; price ~2,254,502) on
+    # exactly this kind of input.
+    grade_vals = np.array([1.0, 100.0])
+    price_vals = np.array([100.0, 1.01])  # paired: grade[0]*price[0] = 100, grade[1]*price[1] = 101
+    posterior = _DeterministicGradePosterior(grade_vals)
+    price_paths = price_vals[:, None]
+
+    result = monte_carlo_npv(
+        posterior,
+        price_paths,
+        lambda t, tonnage_t: 0.0,
+        {"tonnage": np.array([1.0]), "capex": np.array([0.0])},
+        discount_rate=0.0,
+        n=2,
+        rng=np.random.default_rng(0),
+    )
+    assert 0.0 <= result.sensitivity["grade"] <= 1.0
+    assert 0.0 <= result.sensitivity["price"] <= 1.0
+    # The old method's failure mode was specifically shares in the *millions*; also pin a generous bound
+    # far below that as a belt-and-suspenders check against any regression back toward it.
+    assert result.sensitivity["grade"] < 10.0
+    assert result.sensitivity["price"] < 10.0
+
+
+def test_sensitivity_shares_always_bounded_in_unit_interval():
+    # Broader stress sweep across many small, awkward (grade, price) pairings -- including several more
+    # negatively-paired constructions in the spirit of the MXR-080-0117 repro, and some independent ones
+    # -- never produces a share outside [0, 1].
+    driver = np.random.default_rng(123)
+    for _ in range(25):
+        k = int(driver.integers(2, 12))
+        grade_vals = driver.uniform(0.1, 100.0, size=k)
+        if driver.uniform() < 0.5:
+            price_vals = 500.0 / grade_vals  # anti-correlated by construction, like the 0117 repro
+        else:
+            price_vals = driver.uniform(1.0, 100.0, size=k)  # unrelated to grade
+
+        posterior = _DeterministicGradePosterior(grade_vals)
+        result = monte_carlo_npv(
+            posterior,
+            price_vals[:, None],
+            lambda t, tonnage_t: 0.0,
+            {"tonnage": np.array([1.0])},
+            discount_rate=0.0,
+            n=k,
+            rng=np.random.default_rng(int(driver.integers(0, 2**31 - 1))),
+        )
+        assert 0.0 <= result.sensitivity["grade"] <= 1.0, (k, grade_vals, price_vals)
+        assert 0.0 <= result.sensitivity["price"] <= 1.0, (k, grade_vals, price_vals)
+
+
+def test_sobol_first_order_share_recovers_known_analytic_additive_case():
+    # Isolate the ESTIMATOR from this module's mine-valuation-specific plumbing: for a purely additive
+    # Y = a*X1 + b*X2 with independent X1, X2 ~ N(0, 1), the Sobol first-order index for each factor has
+    # a clean closed form -- S1 = a**2 / (a**2 + b**2), S2 = b**2 / (a**2 + b**2) -- and, being purely
+    # additive (no interaction term), S1 + S2 == 1 exactly in the population.
+    rng = np.random.default_rng(42)
+    n = 200_000
+    a, b = 3.0, 1.0
+
+    x1_a, x2_a = rng.normal(0.0, 1.0, size=n), rng.normal(0.0, 1.0, size=n)
+    x1_b, x2_b = rng.normal(0.0, 1.0, size=n), rng.normal(0.0, 1.0, size=n)
+    y_a = a * x1_a + b * x2_a
+    y_b = a * x1_b + b * x2_b
+    y_ab1 = a * x1_b + b * x2_a  # factor 1 (x1) swapped in from B, factor 2 stays A
+    y_ab2 = a * x1_a + b * x2_b  # factor 2 (x2) swapped in from B, factor 1 stays A
+
+    total_variance = float(np.var(y_a))
+    variance_1, s1 = _sobol_first_order_share(y_a, y_b, y_ab1, total_variance)
+    variance_2, s2 = _sobol_first_order_share(y_a, y_b, y_ab2, total_variance)
+
+    assert variance_1 >= 0.0
+    assert variance_2 >= 0.0
+    s1_true = a**2 / (a**2 + b**2)
+    s2_true = b**2 / (a**2 + b**2)
+    assert s1 == pytest.approx(s1_true, abs=0.02)
+    assert s2 == pytest.approx(s2_true, abs=0.02)
+    assert (s1 + s2) == pytest.approx(1.0, abs=0.02)
+
+
+def test_sensitivity_recovers_known_analytic_first_order_indices():
+    # For monte_carlo_npv's actual (multiplicative) cashflow structure -- a single period, deterministic
+    # tonnage/opex/capex, so NPV = tonnage*grade*price - opex - capex -- with independent grade ~
+    # Lognormal(mu, sigma) and price ~ Normal(mean, std), the first-order Sobol indices have a closed
+    # form via the variance of a product of independent random variables,
+    # Var(grade*price) = Var(g)*Var(p) + Var(g)*E[p]**2 + E[g]**2*Var(p):
+    #   S_grade = Var(g)*E[p]**2 / Var(g*p),  S_price = E[g]**2*Var(p) / Var(g*p).
+    # NPV's constant tonnage scale and opex/capex shift don't affect a variance-based index (grade and
+    # price are the only stochastic factors; see test_sobol_first_order_share_recovers_known_analytic_
+    # additive_case for the estimator validated on a purely additive, interaction-free model instead).
+    posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
+    # Seeded independently from `rng` (see test_sensitivity_decomposes_variance_between_grade_and_price
+    # for why reusing the same seed value would accidentally correlate grade and price here).
+    price_paths = np.random.default_rng(301).normal(PRICE_MEAN, PRICE_STD, size=(N, 1))
+
+    result = monte_carlo_npv(
+        posterior,
+        price_paths,
+        _cost_model,
+        _schedule(),
+        discount_rate=DISCOUNT_RATE,
+        n=N,
+        rng=np.random.default_rng(7),
+    )
+
+    e_g = np.exp(GRADE_MU + GRADE_SIGMA**2 / 2.0)
+    var_g = np.expm1(GRADE_SIGMA**2) * np.exp(2 * GRADE_MU + GRADE_SIGMA**2)
+    e_p, var_p = PRICE_MEAN, PRICE_STD**2
+    var_gp = var_g * var_p + var_g * e_p**2 + e_g**2 * var_p
+    s_grade_true = var_g * e_p**2 / var_gp
+    s_price_true = e_g**2 * var_p / var_gp
+
+    assert 0.0 <= result.sensitivity["grade"] <= 1.0
+    assert 0.0 <= result.sensitivity["price"] <= 1.0
+    assert result.sensitivity["grade"] == pytest.approx(s_grade_true, abs=0.08)
+    assert result.sensitivity["price"] == pytest.approx(s_price_true, abs=0.05)
+
+
+def test_sensitivity_independent_factors_negative_control():
+    # Negative control: with grade and price independently drawn (no adversarial or accidental
+    # pairing), both factors still decompose sensibly -- material, non-degenerate shares, comfortably
+    # inside [0, 1], roughly consistent with (not pinned as tightly as) the closed-form values in
+    # test_sensitivity_recovers_known_analytic_first_order_indices.
+    posterior = _LognormalGradePosterior(GRADE_MU, GRADE_SIGMA)
+    price_paths = np.random.default_rng(555).normal(PRICE_MEAN, PRICE_STD, size=(N, 1))
+
+    result = monte_carlo_npv(
+        posterior,
+        price_paths,
+        _cost_model,
+        _schedule(),
+        discount_rate=DISCOUNT_RATE,
+        n=N,
+        rng=np.random.default_rng(6),
+    )
+    sens = result.sensitivity
+    assert 0.0 <= sens["grade"] <= 1.0
+    assert 0.0 <= sens["price"] <= 1.0
+    assert sens["grade"] > 0.5  # grade dominates NPV variance for these constants (matches the
+    assert 0.05 < sens["price"] < 0.5  # closed-form ~0.81 / ~0.18 split, loosely bounded here)
