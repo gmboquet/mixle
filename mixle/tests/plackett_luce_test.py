@@ -86,6 +86,28 @@ class PlackettLuceTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             dist.log_density([0, 1, 5])  # out of range
 
+    def test_log_density_rejects_fractional_entries(self):
+        # A fractional entry must not silently truncate into a plausible-looking index instead of
+        # being rejected: np.asarray([0.5, 1.0, 2.0], dtype=int) truncates to [0, 1, 2], which is a
+        # legitimate permutation of 0,...,2 and would otherwise sail through the distinctness/range
+        # check below it. The cast must happen only after (or alongside) validating every entry is
+        # already integer-valued.
+        dist = PlackettLuceDistribution([1.5, 0.2, -0.8])
+        with self.assertRaises(ValueError):
+            dist.log_density([0.5, 1.0, 2.0])
+        # Sanity: a float array that just happens to hold integer values is still fine.
+        self.assertTrue(np.isfinite(dist.log_density([0.0, 1.0, 2.0])))
+
+    def test_encoder_rejects_fractional_entries(self):
+        # Same bug, vectorized path: PlackettLuceDataEncoder.seq_encode used to cast to int before
+        # checking the result was a permutation, so [[0.5, 1.0, 2.0]] silently encoded as [[0, 1, 2]].
+        dist = PlackettLuceDistribution([1.5, 0.2, -0.8])
+        with self.assertRaises(ValueError):
+            dist.dist_to_encoder().seq_encode([[0.5, 1.0, 2.0]])
+        # Sanity: integer-valued floats still encode fine.
+        enc = dist.dist_to_encoder().seq_encode([[0.0, 1.0, 2.0]])
+        np.testing.assert_array_equal(enc, [[0, 1, 2]])
+
     def test_invalid_parameters_raise(self):
         with self.assertRaises(ValueError):
             PlackettLuceDistribution([1.0])

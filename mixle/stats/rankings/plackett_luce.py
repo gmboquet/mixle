@@ -120,10 +120,19 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
         includes the unranked items:
         ``p(x) = prod_{s=0}^{m-1} w_{x[s]} / (sum_{t>=s} w_{x[t]} + sum_{u unranked} w_u)``,
         which reduces to the full-ranking density when ``m = K``.
+
+        Raises:
+            ValueError: If ``x`` is not 1-D, has a non-integer-valued entry (e.g. ``0.5``, which
+                would otherwise silently truncate to a plausible-looking index instead of being
+                rejected), or its (integer) entries are not distinct item indices in ``0,...,K-1``.
+
         """
-        idx = np.asarray(x, dtype=int)
-        if idx.ndim != 1 or (
-            idx.size and (np.any(idx < 0) or np.any(idx >= self.dim) or len(set(idx.tolist())) != idx.size)
+        raw = np.asarray(x, dtype=float)
+        idx = raw.astype(int)
+        if (
+            idx.ndim != 1
+            or not np.array_equal(raw, idx)
+            or (idx.size and (np.any(idx < 0) or np.any(idx >= self.dim) or len(set(idx.tolist())) != idx.size))
         ):
             raise ValueError("PlackettLuceDistribution ordering must be distinct item indices in 0,...,K-1.")
         g = self.log_w[idx]
@@ -161,7 +170,12 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
         return PlackettLuceEstimator(dim=self.dim, pseudo_count=pseudo_count, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> "PlackettLuceDataEncoder":
-        """Return the data encoder used by this distribution for vectorized methods."""
+        """Return the data encoder used by this distribution for vectorized methods.
+
+        The returned encoder handles both full rankings and partial/top-m rankings (see
+        :class:`PlackettLuceDataEncoder`), so this works regardless of whether ``self`` was
+        produced by :class:`PlackettLuceEstimator` or :class:`PlackettLucePartialEstimator`.
+        """
         return PlackettLuceDataEncoder(dim=self.dim)
 
 
@@ -351,7 +365,17 @@ class PlackettLuceEstimator(ParameterEstimator):
 
 
 class PlackettLuceDataEncoder(DataSequenceEncoder):
-    """Encode a sequence of orderings (permutations of 0,...,K-1) into an (N, K) integer array."""
+    """Encode a sequence of full or partial/top-m orderings over ``dim`` items.
+
+    A batch whose rows are all length ``dim`` (full rankings -- permutations of ``0,...,dim-1``) is
+    validated and encoded as a dense ``(N, dim)`` integer matrix, scored by
+    :meth:`PlackettLuceDistribution.seq_log_density`'s vectorized path. Any other batch (rows
+    shorter than ``dim``, or of mixed length -- top-m partial rankings) is validated and encoded the
+    same way :class:`PlackettLucePartialDataEncoder` does, as a ragged list of 1-D integer arrays,
+    scored by that method's per-row fallback (which calls :meth:`PlackettLuceDistribution.log_density`,
+    already correct for partial rankings). This dual behavior lets ``dist_to_encoder()`` return one
+    encoder that works regardless of whether the distribution was fit on full or partial rankings.
+    """
 
     def __init__(self, dim: int | None = None) -> None:
         self.dim = dim
@@ -362,11 +386,29 @@ class PlackettLuceDataEncoder(DataSequenceEncoder):
     def __eq__(self, other: object) -> bool:
         return isinstance(other, PlackettLuceDataEncoder)
 
-    def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray:
-        """Validate and encode full rankings as a dense integer matrix."""
-        rv = np.asarray([list(row) for row in x], dtype=int)
-        if rv.ndim != 2 or rv.shape[0] == 0:
+    def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray | list[np.ndarray]:
+        """Validate and encode a batch of full rankings (dense) or partial rankings (ragged).
+
+        Raises:
+            ValueError: If ``x`` is empty, a full-length row has a non-integer-valued entry (e.g.
+                ``0.5``, which would otherwise silently truncate to a plausible-looking index
+                instead of being rejected) or is not a permutation of ``0,...,dim-1``, or (via
+                :class:`PlackettLucePartialDataEncoder`) a short/ragged row is malformed.
+
+        """
+        rows = [list(row) for row in x]
+        if not rows:
             raise ValueError("PlackettLuceDistribution requires a non-empty sequence of orderings.")
+        if self.dim is not None and any(len(row) != self.dim for row in rows):
+            # Not every row claims to rank all dim items -- top-m partial rankings (or a mix of
+            # full and partial rows, which is legal: a full ranking is just the m == dim case).
+            return PlackettLucePartialDataEncoder(dim=self.dim).seq_encode(rows)
+        raw = np.asarray(rows, dtype=float)
+        if raw.ndim != 2:
+            raise ValueError("PlackettLuceDistribution requires a non-empty sequence of orderings.")
+        rv = raw.astype(int)
+        if not np.array_equal(raw, rv):
+            raise ValueError("PlackettLuceDistribution orderings must be integer-valued item indices.")
         k = rv.shape[1]
         expected = np.arange(k)
         for row in rv:
@@ -392,12 +434,22 @@ class PlackettLucePartialDataEncoder(DataSequenceEncoder):
         return isinstance(other, PlackettLucePartialDataEncoder) and other.dim == self.dim
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> list[np.ndarray]:
-        """Validate and encode variable-length top-m rankings as ragged arrays."""
+        """Validate and encode variable-length top-m rankings as ragged arrays.
+
+        Raises:
+            ValueError: If a row is not 1-D, has a non-integer-valued entry (e.g. ``0.5``, which
+                would otherwise silently truncate to a plausible-looking index instead of being
+                rejected), has more than ``dim`` entries, or its (integer) entries are not distinct
+                item indices in ``0,...,dim-1``.
+
+        """
         rows = []
         for row in x:
-            r = np.asarray(list(row), dtype=int)
+            raw = np.asarray(list(row), dtype=float)
+            r = raw.astype(int)
             if (
                 r.ndim != 1
+                or not np.array_equal(raw, r)
                 or r.size > self.dim
                 or (r.size and (r.min() < 0 or r.max() >= self.dim or len(set(r.tolist())) != r.size))
             ):

@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from mixle.stats.rankings.plackett_luce import PlackettLuceDistribution
+from mixle.stats.rankings.plackett_luce import PlackettLuceDistribution, PlackettLucePartialDataEncoder
 
 
 def _dist():
@@ -53,6 +53,22 @@ class PlackettLucePartialTest(unittest.TestCase):
             d.log_density([0, 0])  # repeated item
         with self.assertRaises(ValueError):
             d.log_density([0, 9])  # out of range
+
+    def test_log_density_rejects_fractional_entries(self):
+        # Same bug class as the repeated/out-of-range checks above: np.asarray(x, dtype=int) used
+        # to truncate a fractional entry (0.5 -> 0) before the distinctness/range check ran, so
+        # [0.5, 1] silently scored as the valid partial ranking [0, 1] instead of being rejected.
+        d = _dist()
+        with self.assertRaises(ValueError):
+            d.log_density([0.5, 1])
+
+    def test_partial_encoder_rejects_fractional_entries(self):
+        # PlackettLucePartialDataEncoder.seq_encode had the identical int-cast-before-check gap.
+        with self.assertRaises(ValueError):
+            PlackettLucePartialDataEncoder(dim=4).seq_encode([[0.5, 1.0]])
+        # Sanity: integer-valued floats still encode fine.
+        rows = PlackettLucePartialDataEncoder(dim=4).seq_encode([[0.0, 1.0]])
+        self.assertEqual([r.tolist() for r in rows], [[0, 1]])
 
 
 if __name__ == "__main__":
