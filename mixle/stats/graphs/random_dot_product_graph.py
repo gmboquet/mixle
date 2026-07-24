@@ -15,13 +15,14 @@ matrix ``X X^T``. Estimation uses Adjacency Spectral Embedding (ASE): the latent
 scaled eigenvectors of the mean adjacency matrix, the standard consistent RDPG estimator.
 """
 
+from __future__ import annotations
+
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.random import RandomState
 
-from mixle.data.sources.graph_source import GraphDataEncoder, GraphObservation, _extract_observation
 from mixle.stats.compute.pdist import (
     DistributionSampler,
     ParameterEstimator,
@@ -29,6 +30,21 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+
+if TYPE_CHECKING:
+    from mixle.data.sources.graph_source import GraphDataEncoder, GraphObservation
+
+# mixle.data.sources.graph_source's own top-level import of mixle.stats.compute.pdist.DataSequenceEncoder
+# forces mixle.stats's package __init__ to run first, which eagerly imports this very module -- so a
+# module-level `from mixle.data.sources.graph_source import ...` here is circular whenever
+# mixle.data.sources.graph_source is the entry point (e.g. `import mixle.data.sources.graph_source`
+# directly, before mixle.stats has been warmed by any other path): graph_source would still be
+# mid-import (paused inside its own DataSequenceEncoder import, above this module in the same chain),
+# so none of GraphDataEncoder/GraphObservation/_extract_observation would exist as attributes yet.
+# Every usage below is either purely a type annotation (deferred to a string by the `from __future__
+# import annotations` above) or a call inside a function/method body, so the imports are deferred to
+# call time, once every module in the cycle has finished loading normally -- mirroring the
+# erdos_renyi_graph.py fix for the same shape of cycle.
 
 _EPS = 1.0e-12
 
@@ -105,14 +121,20 @@ class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution
 
     def log_density(self, x: Any) -> float:
         """Return the log-probability of a binary undirected graph x."""
+        from mixle.data.sources.graph_source import _extract_observation
+
         return self._graph_log_density(_extract_observation(x).adjacency)
 
     def seq_log_density(self, x: Sequence[GraphObservation]) -> np.ndarray:
         """Return vectorized log-probabilities for a sequence of graph observations."""
+        from mixle.data.sources.graph_source import _extract_observation
+
         return np.asarray([self._graph_log_density(_extract_observation(o).adjacency) for o in x], dtype=np.float64)
 
     def backend_seq_log_density(self, x: Sequence[GraphObservation], engine: Any) -> Any:
         """Engine-routed RDPG edge log-likelihood (reduction runs on the active engine)."""
+        from mixle.data.sources.graph_source import _extract_observation
+
         mask = np.triu(np.ones((self.num_nodes, self.num_nodes), dtype=bool), 1)
         log_p = engine.asarray(self._log_p[mask])
         log_1mp = engine.asarray(self._log_1mp[mask])
@@ -123,16 +145,18 @@ class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution
         a = engine.asarray(rows)
         return engine.sum(a * log_p[None, :] + (engine.asarray(1.0) - a) * log_1mp[None, :], axis=1)
 
-    def sampler(self, seed: int | None = None) -> "RandomDotProductGraphSampler":
+    def sampler(self, seed: int | None = None) -> RandomDotProductGraphSampler:
         """Return a sampler for drawing graphs from this distribution."""
         return RandomDotProductGraphSampler(self, seed)
 
-    def estimator(self, pseudo_count: float | None = None) -> "RandomDotProductGraphEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> RandomDotProductGraphEstimator:
         """Return an ASE estimator that keeps the latent dimension fixed at this distribution's d."""
         return RandomDotProductGraphEstimator(dim=self.dim, name=self.name, keys=self.keys)
 
     def dist_to_encoder(self) -> GraphDataEncoder:
         """Return the shared graph data encoder."""
+        from mixle.data.sources.graph_source import GraphDataEncoder
+
         return GraphDataEncoder(directed=False)
 
 
@@ -174,6 +198,8 @@ class RandomDotProductGraphAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Any, weight: float, estimate: RandomDotProductGraphDistribution | None) -> None:
         """Accumulate the weighted adjacency matrix for one graph observation."""
+        from mixle.data.sources.graph_source import _extract_observation
+
         self._add(_extract_observation(x).adjacency, weight)
 
     def initialize(self, x: Any, weight: float, rng: RandomState | None) -> None:
@@ -184,6 +210,8 @@ class RandomDotProductGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self, x: Sequence[GraphObservation], weights: np.ndarray, estimate: RandomDotProductGraphDistribution | None
     ) -> None:
         """Accumulate weighted adjacency matrices for encoded graph observations."""
+        from mixle.data.sources.graph_source import _extract_observation
+
         for obs, w in zip(x, weights):
             self._add(_extract_observation(obs).adjacency, float(w))
 
@@ -191,7 +219,7 @@ class RandomDotProductGraphAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize the sufficient statistics from encoded graph observations."""
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: tuple[float, np.ndarray | None]) -> "RandomDotProductGraphAccumulator":
+    def combine(self, suff_stat: tuple[float, np.ndarray | None]) -> RandomDotProductGraphAccumulator:
         """Merge serialized adjacency-sum statistics into this accumulator."""
         count, adj_sum = suff_stat
         self.count += count
@@ -206,13 +234,15 @@ class RandomDotProductGraphAccumulator(SequenceEncodableStatisticAccumulator):
         """Return the total weight and weighted adjacency-matrix sum."""
         return self.count, self.adj_sum
 
-    def from_value(self, x: tuple[float, np.ndarray | None]) -> "RandomDotProductGraphAccumulator":
+    def from_value(self, x: tuple[float, np.ndarray | None]) -> RandomDotProductGraphAccumulator:
         """Restore the accumulator from serialized adjacency-sum statistics."""
         self.count, self.adj_sum = x[0], (None if x[1] is None else np.asarray(x[1], dtype=float))
         return self
 
     def acc_to_encoder(self) -> GraphDataEncoder:
         """Return the undirected graph encoder used by the accumulator."""
+        from mixle.data.sources.graph_source import GraphDataEncoder
+
         return GraphDataEncoder(directed=False)
 
 

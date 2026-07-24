@@ -4,25 +4,15 @@ This module handles Bernoulli edges conditional on observed or fixed node block
 assignments. It does not marginalize over unknown block assignments.
 """
 
+from __future__ import annotations
+
 import math
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.random import RandomState
 
-from mixle.data.sources.graph_source import (
-    _EPS,
-    GraphDataEncoder,
-    GraphObservation,
-    _as_assignments,
-    _bernoulli_log_likelihood,
-    _edge_indices,
-    _extract_observation,
-    _normalize_prior,
-    _validate_block_indices,
-    _validate_block_probs,
-)
 from mixle.enumeration.algorithms import BufferedStream, ProductEnumerator
 from mixle.stats.compute.pdist import (
     DistributionEnumerator,
@@ -33,6 +23,21 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+
+if TYPE_CHECKING:
+    from mixle.data.sources.graph_source import GraphDataEncoder, GraphObservation
+
+# mixle.data.sources.graph_source's own top-level import of mixle.stats.compute.pdist.DataSequenceEncoder
+# forces mixle.stats's package __init__ to run first, which eagerly imports this very module -- so a
+# module-level `from mixle.data.sources.graph_source import ...` here is circular whenever
+# mixle.data.sources.graph_source is the entry point (e.g. `import mixle.data.sources.graph_source`
+# directly, before mixle.stats has been warmed by any other path): graph_source would still be
+# mid-import (paused inside its own DataSequenceEncoder import, above this module in the same chain),
+# so none of GraphDataEncoder/GraphObservation/the coercion+validation helpers would exist as
+# attributes yet. Every usage below is either purely a type annotation (deferred to a string by the
+# `from __future__ import annotations` above) or a call inside a function/method body, so the imports
+# are deferred to call time, once every module in the cycle has finished loading normally -- mirroring
+# the erdos_renyi_graph.py fix for the same shape of cycle.
 
 
 class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution):
@@ -61,6 +66,14 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
+        from mixle.data.sources.graph_source import (
+            _EPS,
+            _as_assignments,
+            _normalize_prior,
+            _validate_block_indices,
+            _validate_block_probs,
+        )
+
         probs = _validate_block_probs(block_probs)
         if not directed and not np.allclose(probs, probs.T):
             raise ValueError("undirected block_probs must be symmetric.")
@@ -91,7 +104,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
     @classmethod
     def from_model(
         cls, model: Any, block_prior: Any | None = None, include_assignment_prior: bool = False
-    ) -> "StochasticBlockGraphDistribution":
+    ) -> StochasticBlockGraphDistribution:
         """Create a distribution wrapper from a random-graph SBM model."""
         return cls(
             model.block_probs,
@@ -114,6 +127,8 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         )
 
     def _obs_with_assignments(self, x: Any) -> GraphObservation:
+        from mixle.data.sources.graph_source import _extract_observation, _validate_block_indices
+
         obs = _extract_observation(x, directed=self.directed, fallback_assignments=self.block_assignments)
         if obs.block_assignments is None:
             raise ValueError("block assignments are required for SBM log-density.")
@@ -126,6 +141,8 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
 
     def log_density(self, x: Any) -> float:
         """Return the conditional block-model log probability of one graph."""
+        from mixle.data.sources.graph_source import _bernoulli_log_likelihood, _edge_indices
+
         obs = self._obs_with_assignments(x)
         adj = obs.adjacency
         assignments = obs.block_assignments
@@ -149,6 +166,8 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         active engine (differentiable in ``block_probs`` on torch). The optional assignment prior is
         added per graph.
         """
+        from mixle.data.sources.graph_source import _EPS, _edge_indices
+
         n = len(x)
         seg, adj_vals, p_vals = [], [], []
         priors = np.zeros(n, dtype=np.float64)
@@ -180,6 +199,8 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
 
     def link_probability(self, i: int, j: int, block_assignments: Any | None = None) -> float:
         """Return the marginal or assignment-conditional edge probability for node pair ``(i, j)``."""
+        from mixle.data.sources.graph_source import _validate_block_indices
+
         if i == j and not self.self_loops:
             return 0.0
         assignments = (
@@ -192,6 +213,8 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
 
     def edge_marginals(self, block_assignments: Any | None = None, num_nodes: int | None = None) -> np.ndarray:
         """Return the matrix of edge probabilities under fixed or prior-predictive assignments."""
+        from mixle.data.sources.graph_source import _validate_block_indices
+
         if block_assignments is None:
             if self.block_assignments is None:
                 if num_nodes is None:
@@ -236,7 +259,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
             "edge_marginals": self.edge_marginals(obs.block_assignments),
         }
 
-    def sampler(self, seed: int | None = None) -> "StochasticBlockGraphSampler":
+    def sampler(self, seed: int | None = None) -> StochasticBlockGraphSampler:
         """Return a sampler for SBM graph observations."""
         return StochasticBlockGraphSampler(self, seed)
 
@@ -261,7 +284,7 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
             )
         return StochasticBlockGraphEnumerator(self)
 
-    def estimator(self, pseudo_count: float | None = None) -> "StochasticBlockGraphEstimator":
+    def estimator(self, pseudo_count: float | None = None) -> StochasticBlockGraphEstimator:
         """Return an estimator for observed-assignment SBM fitting."""
         return StochasticBlockGraphEstimator(
             num_blocks=self.num_blocks,
@@ -278,6 +301,8 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
 
     def dist_to_encoder(self) -> GraphDataEncoder:
         """Return the graph encoder used by vectorized scoring and fitting."""
+        from mixle.data.sources.graph_source import GraphDataEncoder
+
         return GraphDataEncoder(directed=self.directed, fallback_assignments=self.block_assignments)
 
 
@@ -291,6 +316,8 @@ class StochasticBlockGraphEnumerator(DistributionEnumerator):
             dist (StochasticBlockGraphDistribution): Distribution whose graphs are enumerated (its
                 ``block_assignments`` must be fixed).
         """
+        from mixle.data.sources.graph_source import _EPS, _edge_indices
+
         super().__init__(dist)
         assignments = np.asarray(dist.block_assignments)
         n = len(assignments)
@@ -339,6 +366,8 @@ class StochasticBlockGraphSampler(DistributionSampler):
         self, num_nodes: int | None = None, block_assignments: Any | None = None, return_assignments: bool = False
     ) -> Any:
         """Draw one graph, optionally returning the assignments used."""
+        from mixle.data.sources.graph_source import _edge_indices, _validate_block_indices
+
         if block_assignments is None:
             if self.dist.block_assignments is not None and num_nodes is None:
                 assignments = self.dist.block_assignments
@@ -429,6 +458,8 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Any, weight: float, estimate: StochasticBlockGraphDistribution | None) -> None:
         """Accumulate weighted block-pair edge counts from one graph."""
+        from mixle.data.sources.graph_source import _edge_indices, _extract_observation
+
         fallback = self.block_assignments
         if fallback is None and estimate is not None:
             fallback = estimate.block_assignments
@@ -468,7 +499,7 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(
         self, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]
-    ) -> "StochasticBlockGraphAccumulator":
+    ) -> StochasticBlockGraphAccumulator:
         """Merge serialized SBM sufficient statistics."""
         successes, totals, block_counts, total_nodes, num_graphs = suff_stat
         self._ensure_capacity(successes.shape[0])
@@ -484,9 +515,7 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
         """Return serialized SBM sufficient statistics."""
         return (self.successes.copy(), self.totals.copy(), self.block_counts.copy(), self.total_nodes, self.num_graphs)
 
-    def from_value(
-        self, x: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]
-    ) -> "StochasticBlockGraphAccumulator":
+    def from_value(self, x: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]) -> StochasticBlockGraphAccumulator:
         """Restore accumulator state from serialized SBM sufficient statistics."""
         successes, totals, block_counts, total_nodes, num_graphs = x
         self.successes = np.asarray(successes, dtype=np.float64).copy()
@@ -499,6 +528,8 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
 
     def acc_to_encoder(self) -> GraphDataEncoder:
         """Return the encoder associated with this accumulator."""
+        from mixle.data.sources.graph_source import GraphDataEncoder
+
         return GraphDataEncoder(directed=self.directed, fallback_assignments=self.block_assignments)
 
 
@@ -550,6 +581,8 @@ class StochasticBlockGraphEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
+        from mixle.data.sources.graph_source import _normalize_prior
+
         self.num_blocks = None if num_blocks is None else int(num_blocks)
         self.block_assignments = None if block_assignments is None else np.asarray(block_assignments, dtype=np.int64)
         if self.num_blocks is None and self.block_assignments is not None and self.block_assignments.size:
@@ -581,6 +614,8 @@ class StochasticBlockGraphEstimator(ParameterEstimator):
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, np.ndarray, float, float]
     ) -> StochasticBlockGraphDistribution:
         """Estimate block probabilities and the block prior from sufficient statistics."""
+        from mixle.data.sources.graph_source import _EPS
+
         successes, totals, block_counts, total_nodes, num_graphs = suff_stat
         successes = np.asarray(successes, dtype=np.float64).copy()
         totals = np.asarray(totals, dtype=np.float64).copy()
