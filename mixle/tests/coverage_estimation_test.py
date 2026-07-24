@@ -265,5 +265,45 @@ class IncidenceValidationTest(unittest.TestCase):
         self.assertEqual(r["observed"], 2.0)
 
 
+class RarefactionSizeValidationTest(unittest.TestCase):
+    """MXR-080-0080: subsample sizes were cast with a bare ``dtype=int``. A fractional size (``1.9``)
+    silently truncated instead of raising, a negative size (``-1``) silently returned a "plausible"
+    richness via negative array indexing instead of raising, and an oversized request raised an
+    internal ``IndexError`` instead of a clear domain error naming the valid range."""
+
+    def setUp(self):
+        self.c = np.array([10, 5, 3, 1, 1])
+        self.n = int(self.c.sum())
+
+    def test_fractional_size_rejected(self):
+        with self.assertRaises(ValueError):
+            rarefaction_curve(self.c, sizes=[1.9])
+
+    def test_negative_size_rejected(self):
+        # used to return a "plausible" richness via arr[-1] negative indexing instead of raising.
+        with self.assertRaises(ValueError):
+            rarefaction_curve(self.c, sizes=[-1])
+
+    def test_oversized_size_rejected_with_clear_error(self):
+        # used to raise a bare, internal IndexError instead of a domain error naming the valid range.
+        with self.assertRaises(ValueError):
+            rarefaction_curve(self.c, sizes=[self.n + 5])
+
+    def test_boundary_sizes_zero_and_n_are_valid(self):
+        rc = rarefaction_curve(self.c, sizes=[0, self.n])
+        self.assertAlmostEqual(rc["expected_richness"][0], 0.0)
+        self.assertAlmostEqual(rc["expected_richness"][1], float(self.c.size))
+
+    def test_caller_order_and_duplicates_are_preserved(self):
+        rc = rarefaction_curve(self.c, sizes=[3, 1, 3, 2])
+        np.testing.assert_array_equal(rc["sizes"], [3, 1, 3, 2])
+
+    def test_valid_integer_sizes_still_work(self):
+        # negative control: in-range integer sizes work exactly as before.
+        rc = rarefaction_curve(self.c, sizes=[1, self.n])
+        self.assertAlmostEqual(rc["expected_richness"][0], 1.0)
+        self.assertAlmostEqual(rc["expected_richness"][1], float(self.c.size))
+
+
 if __name__ == "__main__":
     unittest.main()
