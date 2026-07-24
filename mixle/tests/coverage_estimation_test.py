@@ -182,5 +182,53 @@ class AbundanceValidationTest(unittest.TestCase):
         self.assertEqual(rarefaction_curve(c)["expected_richness"].shape, (int(c.sum()),))
 
 
+class GoodTuringSmallSupportTest(unittest.TestCase):
+    """MXR-080-0078: the log-linear frequency-of-frequencies fit needs at least two distinct
+    abundance classes to determine a slope. An empty sample used to raise a bare ``TypeError`` out of
+    ``np.polyfit``, and an all-singleton sample -- a completely ordinary Good-Turing input, not an
+    exotic one -- used to raise ``numpy.linalg.LinAlgError``. Empty samples must now report a typed
+    insufficient-evidence result, and small-support samples must fall back to an unsmoothed
+    (raw-frequency) estimate instead of crashing."""
+
+    def test_empty_sample_is_insufficient_evidence_not_a_crash(self):
+        r = good_turing(np.array([]))
+        self.assertTrue(r["insufficient_evidence"])
+        self.assertTrue(r["reason"])
+        self.assertEqual(r["proba"].size, 0)
+        self.assertTrue(np.isnan(r["p0"]))
+
+    def test_all_singleton_sample_falls_back_instead_of_crashing(self):
+        # [1, 1, 1]: three species each observed exactly once -- the audit's own reproduction. Only
+        # one distinct frequency-of-frequency class (r=1), so the log-linear regression is
+        # underdetermined; this used to raise numpy.linalg.LinAlgError out of np.polyfit.
+        r = good_turing(np.array([1, 1, 1]))
+        self.assertFalse(r["insufficient_evidence"])
+        self.assertAlmostEqual(r["p0"] + r["proba"].sum(), 1.0, places=9)
+
+    def test_single_frequency_class_reallocates_seen_mass_by_raw_frequency(self):
+        # [2, 2, 2]: three equally-abundant doubleton species, still only one frequency class (r=2).
+        # No singletons at all, so p0 (=f1/n) is exactly 0, and the fallback (r* = r) must split the
+        # entire seen mass equally across the three equally-abundant species.
+        r = good_turing(np.array([2, 2, 2]))
+        self.assertFalse(r["insufficient_evidence"])
+        self.assertAlmostEqual(r["p0"], 0.0)
+        np.testing.assert_allclose(r["proba"], [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0])
+
+    def test_two_frequency_classes_still_uses_the_smoothed_fit(self):
+        # negative control: a sample with >= 2 distinct frequency classes is unaffected by the
+        # small-support fallback and still goes through the ordinary log-linear smoothing path.
+        r = good_turing(np.array([1, 1, 2]))
+        self.assertFalse(r["insufficient_evidence"])
+        self.assertEqual(r["r"].size, 2)
+        self.assertAlmostEqual(r["p0"] + r["proba"].sum(), 1.0, places=9)
+
+    def test_rich_sample_still_fits_normally(self):
+        # negative control: a genuinely diverse sparse sample (many frequency classes) fits
+        # Good-Turing exactly as before, unaffected by the empty/small-support special cases.
+        gt = good_turing(_zipf_counts(5))
+        self.assertFalse(gt["insufficient_evidence"])
+        self.assertAlmostEqual(gt["p0"] + gt["proba"].sum(), 1.0, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()
