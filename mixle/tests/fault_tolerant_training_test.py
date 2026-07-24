@@ -10,6 +10,7 @@ sharding and a real multi-node all-reduce (out of scope on a laptop, called out 
 from __future__ import annotations
 
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -267,6 +268,59 @@ class AsyncSnapshotStallBudgetTest(unittest.TestCase):
             save_sharded(model, opt, d)
             elapsed = time.perf_counter() - t0
             self.assertGreaterEqual(elapsed, self.SLOW_DISK_S)
+
+
+class AsyncCheckpointAtomicCaptureTest(unittest.TestCase):
+    """Regression guard for a reviewed-and-confirmed-absent hazard: an async checkpoint combining NEW model
+    state with STALE data-loader state (or vice versa) because the two halves were captured at different
+    points in time relative to when the background write started.
+
+    ``save_checkpoint_async`` must fully freeze BOTH halves -- ``get_state_dict`` + ``_clone_state_tree``
+    for the model/optimizer, ``loader_state.to_dict()`` for the loader position -- synchronously, before
+    ``thread.start()``. This is a plain (non-flaky) correctness property, not a timing race to win: by the
+    time ``save_checkpoint_async`` returns a handle to its caller, the write is already operating on frozen,
+    decoupled copies, so training that continues (on any thread) immediately afterward -- however
+    aggressively -- must be invisible to the checkpoint already in flight."""
+
+    def test_live_model_mutation_after_the_call_returns_is_not_visible_in_the_written_checkpoint(self):
+        model = _tiny_model()
+        opt = torch.optim.SGD(model.parameters(), lr=1e9)  # huge lr -> any leaked mutation is unmistakable
+        pre_call_param = next(model.parameters()).detach().clone()
+        loader_state = LoaderState(seed=0, epoch=0, rank=0, world_size=1, batch_idx=7)
+
+        with tempfile.TemporaryDirectory() as d:
+            handle = save_checkpoint_async(model, opt, d, loader_state)
+
+            # Simulate "training advances on another thread while the checkpoint write is in flight" as
+            # aggressively as possible, immediately after the call returns.
+            def _hammer() -> None:
+                for _ in range(200):
+                    with torch.no_grad():
+                        for p in model.parameters():
+                            p.add_(1000.0)
+
+            hammer_thread = threading.Thread(target=_hammer)
+            hammer_thread.start()
+            hammer_thread.join()
+
+            post_mutation_param = next(model.parameters()).detach().clone()
+            # Sanity check: the mutation actually landed on the live model (otherwise this test would pass
+            # vacuously no matter what save_checkpoint_async does).
+            self.assertFalse(torch.equal(pre_call_param, post_mutation_param))
+
+            handle.wait(timeout=10)
+            self.assertTrue(handle.done)
+
+            fresh_model = _tiny_model()
+            fresh_opt = torch.optim.SGD(fresh_model.parameters(), lr=1e-2)
+            loaded_loader_state = load_checkpoint(fresh_model, fresh_opt, d)
+            loaded_param = next(fresh_model.parameters()).detach().clone()
+
+        # The checkpoint must reflect the SAME instant on both halves: the loader_state as passed in, and
+        # model weights as of the call -- never the post-call mutation on either side.
+        self.assertEqual(loaded_loader_state, loader_state)
+        self.assertTrue(torch.equal(loaded_param, pre_call_param))
+        self.assertFalse(torch.equal(loaded_param, post_mutation_param))
 
 
 if __name__ == "__main__":
