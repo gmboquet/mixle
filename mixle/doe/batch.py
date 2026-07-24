@@ -20,6 +20,7 @@ the BO layer), so they require PyTorch.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -28,18 +29,77 @@ from numpy.random import RandomState
 from mixle.doe.bayesopt import _fit_surrogate, _validate_xy
 from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
 
+_PSD_EIGENVALUE_RATIO = 1e-9
+"""Relative-tolerance bound (matching ``mixle.inference.belief.GaussianBelief``'s PSD gate) on how
+negative ``_safe_cholesky``'s worst eigenvalue may be before a covariance is refused outright rather
+than jitter-healed. A genuine posterior covariance is PSD in exact arithmetic; float roundoff can only
+push it a few ULPs south of zero, so a worst eigenvalue this far below zero (relative to the matrix's
+own eigenvalue scale) means the input is not a covariance at all -- no amount of principled jitter makes
+that the RIGHT fix, only a plausible-looking wrong one."""
+
 
 def _safe_cholesky(sigma: np.ndarray) -> np.ndarray:
-    """Cholesky of a posterior covariance, adding escalating jitter; diagonal fallback if all fails."""
+    """Cholesky of a posterior covariance, for sampling the ``q`` batch points' TRUE JOINT distribution.
+
+    This is the mechanism that makes q-EI/Thompson batches genuinely joint (as opposed to the cheaper
+    independent approximation): a caller's requested dependence structure must never be silently swapped
+    out, so this validates before it heals and heals before it gives up.
+
+    * ``sigma`` finite and PSD within ``_PSD_EIGENVALUE_RATIO`` of its own eigenvalue scale, but merely
+      numerically singular (e.g. a duplicate/near-duplicate candidate pair shares an almost-perfectly-
+      correlated row/column): recoverable. An escalating diagonal jitter, starting at ``1e-10`` of the
+      matrix's eigenvalue scale and backing off by 10x for up to 7 attempts, nudges it just inside the
+      numerically-decomposable PD cone -- the SAME dependence structure, only its conditioning changes.
+      A ``RuntimeWarning`` reports exactly how much jitter was needed, so this is never invisible.
+    * ``sigma`` not finite, or indefinite well beyond float noise (e.g. ``[[1, 2], [2, 1]]``, whose
+      eigenvalues are ``3`` and ``-1``: no jitter this small makes that PD): not a valid covariance at
+      all. Raises ``ValueError`` immediately -- this never falls through to a diagonal-only fallback,
+      which would silently swap the caller's TRUE JOINT request for an INDEPENDENT approximation while
+      still returning a plausible-looking number.
+
+    Raises:
+        ValueError: if ``sigma`` is non-finite, fails the PSD check, or (in a pathological case that
+            should not occur for anything that passed the PSD check) still fails to factor after the
+            full jitter budget is exhausted.
+    """
+    sigma = np.asarray(sigma, dtype=np.float64)
+    if not np.all(np.isfinite(sigma)):
+        raise ValueError("covariance is not finite (contains NaN/Inf); cannot sample the joint posterior.")
     q = sigma.shape[0]
-    base = 1e-10 * max(1.0, float(np.trace(sigma)) / q)
-    jit = base
-    for _ in range(7):
+    sym = 0.5 * (sigma + sigma.T)  # symmetrize first: cholesky only reads one triangle, so an asymmetric-
+    # but-PD input would otherwise "succeed" against a matrix that silently differs from what was passed.
+    evals = np.linalg.eigvalsh(sym)
+    scale = float(np.abs(evals).max())
+    if evals.min() < -_PSD_EIGENVALUE_RATIO * scale:
+        raise ValueError(
+            "covariance is not positive semi-definite (worst eigenvalue "
+            f"{evals.min():.6g} vs eigenvalue scale {scale:.6g}); refusing to silently substitute an "
+            "independent (diagonal-only) approximation for a fundamentally invalid joint covariance."
+        )
+    base = 1e-10 * max(scale, 1e-12)
+    jitters = [0.0] + [base * (10.0**i) for i in range(7)]  # attempt 0 unperturbed, then 7 escalating retries
+    eye = np.eye(q)
+    for attempt, jit in enumerate(jitters):
         try:
-            return np.linalg.cholesky(sigma + jit * np.eye(q))
+            chol = np.linalg.cholesky(sym + jit * eye)
         except np.linalg.LinAlgError:
-            jit *= 10.0
-    return np.diag(np.sqrt(np.maximum(np.diag(sigma), 0.0)))
+            continue
+        if jit > 0.0:
+            warnings.warn(
+                "joint posterior covariance was numerically singular under a direct Cholesky "
+                f"factorization; healed with diagonal jitter={jit:.3g} ({jit / scale:.3g} of the "
+                f"eigenvalue scale {scale:.3g}) after {attempt} failed attempt(s). The dependence "
+                "structure is unchanged -- only the numerical conditioning was adjusted.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return chol
+    raise ValueError(
+        "covariance passed the positive-semidefinite check (worst eigenvalue "
+        f"{evals.min():.6g} vs eigenvalue scale {scale:.6g}) but Cholesky still failed after escalating "
+        f"jitter up to {jitters[-1]:.3g}; refusing to silently substitute a diagonal (independent) "
+        "approximation."
+    )
 
 
 def monte_carlo_qei(
