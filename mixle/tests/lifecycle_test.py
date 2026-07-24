@@ -86,15 +86,17 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(names.count("independent"), 0)
         self.assertEqual(names.count("recommended"), 1)
 
-    def test_propose_frontier_does_not_reach_the_copula_dependence_upgrade(self):
-        # propose()'s candidates (the heuristic recommendation, the independence baseline, and an
-        # optional LLM design) each build a concrete estimator before fitting -- none of them go
-        # through optimize()'s own no-estimator auto-structure-search path, so none reach its
-        # copula/Bayesian-network upgrade (see docs/automatic-modeling-contract.rst's "Dependence
-        # between fields"). Pin that asymmetry directly: the SAME strongly-dependent, heterogeneous
-        # data that optimize() correctly upgrades to a CopulaDistribution never produces one via
-        # propose(), so a future change wiring the two together (a real, larger feature, not
-        # something to happen by accident) shows up here rather than silently drifting the docs stale.
+    def test_propose_frontier_reaches_the_copula_dependence_upgrade(self):
+        # propose()'s candidates include "structured" -- optimize() called with estimator=None, i.e.
+        # its own no-estimator auto-structure-search, the only route to a copula/Bayesian-network
+        # dependence upgrade (see docs/automatic-modeling-contract.rst's "Dependence between fields").
+        # Pin this directly: the SAME strongly-dependent, heterogeneous data that optimize() alone
+        # upgrades to a CopulaDistribution also produces one via propose(), scored on held-out data
+        # and able to win the frontier on its own out-of-sample merit -- not just present as an
+        # unused option. (History: this candidate was deliberately absent for one release-prep pass,
+        # docs narrowed to match -- D-0016 -- then added after an external review scored the gap as
+        # the most serious release blocker, quantified on examples/quickstart_example.py's own
+        # dependent dataset; see D-0017.)
         import mixle
         from mixle.inference import optimize
         from mixle.stats.combinator.copula import CopulaDistribution
@@ -115,11 +117,8 @@ class LifecycleTest(unittest.TestCase):
         self.assertIsInstance(direct, CopulaDistribution)  # optimize() alone correctly detects the dependence
 
         m = mixle.propose(data, fit=True)
-        estimator_types = {type(f["estimator"]).__name__ for f in m.frontier if "estimator" in f}
-        # An exact-set check, not just "no copula" -- so a future change adding ANY dependence-capturing
-        # candidate here (copula-shaped or otherwise) fails this test and forces a conscious update,
-        # rather than silently drifting the docs claim stale under a differently-named addition.
-        self.assertEqual(estimator_types, {"CompositeEstimator"})
+        self.assertIn("structured", [f["name"] for f in m.frontier])
+        self.assertIsInstance(m.fitted, CopulaDistribution)  # the structured candidate wins on held-out score
 
     def test_fit_with_explicit_spec_and_enumerate(self):
         import mixle

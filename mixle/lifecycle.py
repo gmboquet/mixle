@@ -377,17 +377,17 @@ def propose(
     """Propose a model for ``data`` from a *verified frontier* of candidates and return the winner.
 
     Candidates come from every proposer the library has — the heuristic recommendation
-    (:func:`mixle.task.recommend.recommend_model`, dependency-aware only in the narrow sense of a joint
-    multivariate-Gaussian candidate for fully-observed numeric vector rows, not the fuller copula/learned
-    Bayesian-network structure search :func:`mixle.inference.optimize` reaches when called directly with
-    no pre-built estimator — see :doc:`/automatic-modeling-contract`'s "Dependence between fields"), the
-    plain independence baseline (:func:`mixle.utils.automatic.get_estimator`), and, when an ``llm`` handle
-    is given, an LLM-designed structure (:func:`mixle.task.design.design_model`, allowlisted-spec,
-    fit-validated). Each candidate is **fitted on a train split and scored on held-out data**, so the
-    ranking is out-of-sample, not a guess. The winner becomes the returned :class:`Model`; the full ranking
-    lands in ``Model.frontier`` and the per-field confidence / dependency / candidate notes in
-    ``Model.notes`` (shown by ``explain()``). Pass ``fit=True`` to also fit the winner to all of ``data``
-    before returning.
+    (:func:`mixle.task.recommend.recommend_model`, dependency-aware in the narrow sense of a joint
+    multivariate-Gaussian candidate for fully-observed numeric vector rows), a structured-search candidate
+    (:func:`mixle.inference.optimize` called with no pre-built estimator — its own no-estimator
+    auto-structure-search, the fuller copula/learned-Bayesian-network dependence upgrade described in
+    :doc:`/automatic-modeling-contract`'s "Dependence between fields"), the plain independence baseline
+    (:func:`mixle.utils.automatic.get_estimator`), and, when an ``llm`` handle is given, an LLM-designed
+    structure (:func:`mixle.task.design.design_model`, allowlisted-spec, fit-validated). Each candidate is
+    **fitted on a train split and scored on held-out data**, so the ranking is out-of-sample, not a guess.
+    The winner becomes the returned :class:`Model`; the full ranking lands in ``Model.frontier`` and the
+    per-field confidence / dependency / candidate notes in ``Model.notes`` (shown by ``explain()``). Pass
+    ``fit=True`` to also fit the winner to all of ``data`` before returning.
 
     The frontier search is bounded by ``max_candidates`` (evaluate at most this many candidates, in
     proposer order — the heuristic recommendation is always first) and ``timeout`` (stop starting new
@@ -398,9 +398,34 @@ def propose(
     from mixle.inference import optimize
     from mixle.task import recommend_model
 
+    # Negative values here have no reasonable interpretation (verify with a negative amount of time,
+    # hold out a negative fraction) and must not silently fail open. max_candidates=0 / timeout=0.0 are
+    # different: an intentional, already-tested "skip verification, return the fast heuristic" escape
+    # hatch (see propose_budget_test.py's test_zero_timeout_skips_and_falls_back_to_recommendation) --
+    # every skipped candidate is still recorded in notes/frontier ("search budget reached"), so this
+    # stays honest about what it did not evaluate rather than needing to be disallowed outright.
+    if max_candidates is not None and max_candidates < 0:
+        raise ValueError(f"max_candidates must be a non-negative integer or None, got {max_candidates}")
+    if timeout is not None and timeout < 0:
+        raise ValueError(f"timeout must be a non-negative number of seconds or None, got {timeout}")
+    if not 0.0 < holdout < 1.0:
+        raise ValueError(f"holdout must be in (0, 1), got {holdout}")
+
     rows = list(data)
     rec = recommend_model(rows, **recommend_kw)
     candidates: list[tuple[str, Any]] = [("recommended", rec.estimator)]
+    # optimize()'s own no-estimator auto-structure-search (structure="auto", the default, reached by
+    # passing estimator=None) is the only route to a copula or learned-Bayesian-network dependence
+    # upgrade -- see docs/automatic-modeling-contract.rst's "Dependence between fields". Model already
+    # treats spec=None as a first-class state ("the estimator is inferred at fit time" -- see Model's
+    # own docstring/__repr__), and Model.fit()'s optimize(fit_data, self.spec, ...) already re-runs
+    # structure search correctly on a later re-fit, so this candidate needs no special-casing in the
+    # scoring loop below or in what "winner" becomes: it participates in max_candidates/timeout exactly
+    # like every other candidate, one slot each, regardless of how many structures it tries internally.
+    # Safe unconditionally: non-tuple (fixed-length numeric-vector) rows fall through to a plain fit
+    # rather than erroring, and a failure either way is caught and reported by this loop's own
+    # try/except below, never silently dropped.
+    candidates.append(("structured", None))
     try:  # the independence baseline the frontier has to beat (skip when identical to the recommendation)
         from mixle.utils.automatic import get_estimator
 

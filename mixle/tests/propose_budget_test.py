@@ -61,6 +61,21 @@ class ProposeBudgetTest(unittest.TestCase):
         self.assertTrue(all("heldout_mean_log_density" not in f for f in m.frontier))  # nothing scored
         self.assertIsNotNone(m.spec)  # still returns the heuristic recommendation as the winner
 
+    def test_negative_max_candidates_is_rejected(self):
+        # Unlike 0 (an intentional "skip verification" escape hatch, see above), a negative budget has
+        # no reasonable interpretation and must not silently fail open into an unverified-looking result.
+        with self.assertRaises(ValueError):
+            mixle.propose(_records(), max_candidates=-1)
+
+    def test_negative_timeout_is_rejected(self):
+        with self.assertRaises(ValueError):
+            mixle.propose(_records(), timeout=-1.0)
+
+    def test_out_of_range_holdout_is_rejected(self):
+        for bad in (-0.5, 0.0, 1.0, 1.5):
+            with self.assertRaises(ValueError):
+                mixle.propose(_records(), holdout=bad)
+
 
 if __name__ == "__main__":
     unittest.main()
