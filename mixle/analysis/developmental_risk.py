@@ -50,6 +50,10 @@ class BMDResult:
       other placeholder dressed up as a real dose.
     * ``"bmdl_unavailable"``: the BMD itself was identified (``bmd`` is real), but the BMDL
       computation did not converge to a valid bound. ``bmdl`` is ``nan``.
+
+    ``bmd_se`` is the delta-method standard error of the BMD (``nan`` unless ``status ==
+    "ok"``); ``bmdl = bmd - z * bmd_se`` clipped at 0, ``z`` the one-sided normal quantile for
+    the requested confidence level.
     """
 
     bmd: float
@@ -58,6 +62,7 @@ class BMDResult:
     model: str
     dof: int
     status: str = "ok"
+    bmd_se: float = float("nan")
     _coef: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(2))
 
     @property
@@ -206,6 +211,101 @@ def _validate_cohort(
     return dose, n_affected, n_total
 
 
+def _bmd_gradient(
+    model: str, coef: np.ndarray, dose_min_eff: float, bmr: float, risk: str, bmd: float
+) -> np.ndarray | None:
+    """``(d(BMD)/db, d(BMD)/dc)`` by implicit differentiation of the BMD-defining equation.
+
+    The BMD solves ``F(d, b, c) = p(d; b, c) - target(b, c) = 0``, where ``target`` is itself a
+    function of ``(b, c)`` through the fitted background rate ``p(dose_min_eff; b, c)``. By the
+    implicit function theorem, ``d(BMD)/dtheta = -(dF/dtheta) / (dF/dd)`` for each parameter
+    ``theta``. Every partial is a central finite difference of the same ``F`` -- this needs no
+    per-model closed-form derivative, so it applies unchanged to both loglogistic and hill.
+
+    Returns ``None`` (gradient unavailable) if any partial is non-finite, or the curve is locally
+    flat in dose at the BMD (``dF/dd ~ 0``): dividing by a near-zero slope is ill-conditioned and
+    would manufacture an arbitrarily large, meaningless gradient.
+    """
+
+    def target_of(b: float, c: float) -> float:
+        bg = _quantal_p(model, np.array([dose_min_eff]), np.array([b, c]))[0]
+        t = bg + bmr * (1.0 - bg) if risk == "extra" else bg + bmr
+        return min(t, 1.0 - 1e-9)
+
+    def big_f(d: float, b: float, c: float) -> float:
+        p_d = _quantal_p(model, np.array([d]), np.array([b, c]))[0]
+        return float(p_d - target_of(b, c))
+
+    b0, c0 = float(coef[0]), float(coef[1])
+    h_d = max(abs(bmd) * 1e-4, 1e-9)
+    h_b = max(abs(b0) * 1e-4, 1e-6)
+    h_c = max(abs(c0) * 1e-4, 1e-6)
+
+    dF_dd = (big_f(bmd + h_d, b0, c0) - big_f(bmd - h_d, b0, c0)) / (2.0 * h_d)
+    dF_db = (big_f(bmd, b0 + h_b, c0) - big_f(bmd, b0 - h_b, c0)) / (2.0 * h_b)
+    dF_dc = (big_f(bmd, b0, c0 + h_c) - big_f(bmd, b0, c0 - h_c)) / (2.0 * h_c)
+
+    if not (np.isfinite(dF_dd) and np.isfinite(dF_db) and np.isfinite(dF_dc)):
+        return None
+    if abs(dF_dd) < 1e-10:
+        return None
+
+    grad = np.array([-dF_db / dF_dd, -dF_dc / dF_dd])
+    return grad if np.all(np.isfinite(grad)) else None
+
+
+def _observed_information_cov(
+    model: str, coef: np.ndarray, dose: np.ndarray, n_affected: np.ndarray, n_total: np.ndarray
+) -> np.ndarray | None:
+    """Asymptotic covariance of the MLE via the inverse observed Fisher information.
+
+    The Hessian of the negative log-likelihood at ``coef`` is estimated by central finite
+    differences (Nelder-Mead, used to fit ``coef``, provides no Hessian of its own). Returns
+    ``None`` if the Hessian is non-finite, singular, or not positive-semidefinite once inverted --
+    the last case means the fit sits at a saddle rather than a genuine likelihood maximum, so the
+    normal approximation the delta method relies on does not hold.
+    """
+
+    def nll(x: np.ndarray) -> float:
+        return _neg_log_likelihood(x, model, dose, n_affected, n_total)
+
+    n = len(coef)
+    h = np.maximum(np.abs(coef) * 1e-4, 1e-5)
+    f0 = nll(coef)
+    if not np.isfinite(f0):
+        return None
+
+    hess = np.zeros((n, n))
+    for i in range(n):
+        step_i = np.zeros(n)
+        step_i[i] = h[i]
+        hess[i, i] = (nll(coef + step_i) - 2.0 * f0 + nll(coef - step_i)) / h[i] ** 2
+        for j in range(i + 1, n):
+            step_j = np.zeros(n)
+            step_j[j] = h[j]
+            cross = (
+                nll(coef + step_i + step_j)
+                - nll(coef + step_i - step_j)
+                - nll(coef - step_i + step_j)
+                + nll(coef - step_i - step_j)
+            ) / (4.0 * h[i] * h[j])
+            hess[i, j] = hess[j, i] = cross
+
+    if not np.all(np.isfinite(hess)):
+        return None
+    try:
+        cov = np.linalg.inv(hess)
+    except np.linalg.LinAlgError:
+        return None
+    if not np.all(np.isfinite(cov)):
+        return None
+
+    eigvals = np.linalg.eigvalsh(cov)
+    if np.min(eigvals) < -1e-8 * max(1.0, float(np.max(np.abs(eigvals)))):
+        return None
+    return cov
+
+
 def benchmark_dose(
     dose: np.ndarray,
     n_affected: np.ndarray,
@@ -220,9 +320,14 @@ def benchmark_dose(
 
     ``dose``/``n_affected``/``n_total`` are per-dose-group arrays (``n_affected <= n_total``).
     The curve is fit by maximum likelihood (DR-ALG K8); the BMD solves for the dose giving
-    ``bmr`` extra (or added) risk over the fitted background rate; the BMDL is the one-sided
-    ``ci_level`` lower confidence bound on the BMD by profile likelihood, falling back to the
-    delta method if the profile search fails to bracket a root.
+    ``bmr`` extra (or added) risk over the fitted background rate. The BMDL is the one-sided
+    ``ci_level`` lower confidence bound on the BMD by the delta method: the gradient of the BMD
+    with respect to the fitted coefficients is obtained by implicit differentiation of the
+    BMD-defining equation, the coefficient covariance by inverting the observed Fisher
+    information at the MLE, and ``Var(BMD)`` by propagating one through the other
+    (``grad @ Cov @ grad``); ``BMDL = BMD - z * SE(BMD)`` with ``z`` the one-sided normal
+    quantile for ``ci_level``, clipped at 0 (dose cannot be negative). See ``BMDResult.status``
+    for what happens when any step of that chain fails to converge.
     """
     if model not in _MODELS:
         raise ValueError(f"unknown model {model!r}; expected one of {_MODELS}")
@@ -250,7 +355,8 @@ def benchmark_dose(
             bmd=float("nan"), bmdl=float("nan"), bmr=bmr, model=model, dof=dof, status="unidentifiable", _coef=coef
         )
 
-    background = float(_quantal_p(model, np.array([dose.min() if dose.min() > 0 else 1e-9]), coef)[0])
+    dose_min_eff = dose.min() if dose.min() > 0 else 1e-9
+    background = float(_quantal_p(model, np.array([dose_min_eff]), coef)[0])
     dose_hi = float(dose.max()) * 10.0
     bmd, bmd_converged = _solve_bmd(model, coef, background, bmr, risk, dose_hi)
 
@@ -259,40 +365,27 @@ def benchmark_dose(
             bmd=float("nan"), bmdl=float("nan"), bmr=bmr, model=model, dof=dof, status="unidentifiable", _coef=coef
         )
 
-    nll_min = float(result.fun)
-    chi2_1 = stats.chi2.ppf(2 * ci_level - 1, df=1)
+    grad = _bmd_gradient(model, coef, dose_min_eff, bmr, risk, bmd)
+    cov = _observed_information_cov(model, coef, dose, n_affected, n_total)
 
-    def nll_at_bmd(d: float) -> float:
-        def obj(free_coef: np.ndarray) -> float:
-            b_bg = float(_quantal_p(model, np.array([dose.min() if dose.min() > 0 else 1e-9]), free_coef)[0])
-            implied, ok = _solve_bmd(model, free_coef, b_bg, bmr, risk, dose_hi)
-            if not ok:
-                return 1e12
-            penalty = 1e6 * (implied - d) ** 2
-            return _neg_log_likelihood(free_coef, model, dose, n_affected, n_total) + penalty
+    bmd_se = float("nan")
+    if grad is not None and cov is not None:
+        var_bmd = float(grad @ cov @ grad)
+        if np.isfinite(var_bmd) and var_bmd >= 0.0:
+            bmd_se = float(np.sqrt(var_bmd))
 
-        r = optimize.minimize(obj, coef, method="Nelder-Mead", options={"maxiter": 2000})
-        return float(r.fun) - nll_min
+    if np.isfinite(bmd_se):
+        z = float(stats.norm.ppf(ci_level))
+        # A one-sided normal-approximation bound against the natural dose >= 0 boundary: when
+        # the delta-method interval would dip below 0, clipping at the boundary is the standard
+        # treatment (not a fabricated number -- 0 is itself a valid, if uninformative, lower
+        # bound whenever the data cannot statistically rule out a BMD near the origin).
+        bmdl = max(bmd - z * bmd_se, 0.0)
+        return BMDResult(bmd=bmd, bmdl=bmdl, bmr=bmr, model=model, dof=dof, status="ok", bmd_se=bmd_se, _coef=coef)
 
-    try:
-        lo_search, hi_search = 1e-9, bmd
-        f_lo = nll_at_bmd(lo_search) - chi2_1 / 2.0
-        f_hi = nll_at_bmd(hi_search) - chi2_1 / 2.0
-        if f_lo * f_hi > 0:
-            raise ValueError("no bracket")
-        bmdl = float(optimize.brentq(lambda d: nll_at_bmd(d) - chi2_1 / 2.0, lo_search, hi_search, xtol=1e-6))
-    except (FloatingPointError, OverflowError, RuntimeError, ValueError):
-        eps = max(bmd * 1e-3, 1e-9)
-        implied, ok = _solve_bmd(model, coef, background, bmr + eps, risk, dose_hi)
-        if ok:
-            se_proxy = abs(implied - bmd) / eps
-            z = stats.norm.ppf(ci_level)
-            bmdl = max(bmd - z * se_proxy * bmd, bmd * 0.01)
-        else:
-            bmdl = bmd * 0.01
-
-    bmdl = min(bmdl, bmd)
-    return BMDResult(bmd=bmd, bmdl=bmdl, bmr=bmr, model=model, dof=dof, status="ok", _coef=coef)
+    return BMDResult(
+        bmd=bmd, bmdl=float("nan"), bmr=bmr, model=model, dof=dof, status="bmdl_unavailable", bmd_se=bmd_se, _coef=coef
+    )
 
 
 def _as_dose_samples(exposure: Any, n: int, rng: np.random.Generator) -> np.ndarray:
