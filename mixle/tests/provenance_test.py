@@ -284,6 +284,31 @@ class CheckDatasetTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             check_dataset(GaussianDistribution(0.0, 1.0), ["nope"], raise_on_error=True)
 
+    def test_zero_and_negative_sample_rejected(self):
+        # MXR-080-0069: sample=0 used to check nothing and still return
+        # DataReport(ok=True, n_checked=0) -- a false certification for data nobody looked at -- and a
+        # negative (or fractional) sample used to fail deep inside itertools.islice with an error that
+        # never mentions `sample` at all (e.g. "Stop argument for islice() must be ..."). All three must
+        # now be rejected clearly and immediately, before any record is read: assert on the message, not
+        # just the exception type, since islice's own opaque error is also (incidentally) a ValueError
+        # and a message-blind assertRaises(ValueError) would not distinguish the fix from the old bug.
+        for sample in (0, -5, 2.5):
+            with self.subTest(sample=sample):
+                with self.assertRaisesRegex(ValueError, "sample"):
+                    check_dataset(GaussianDistribution(0.0, 1.0), [1.0, 2.0, 3.0], sample=sample)
+
+    def test_positive_sample_negative_control(self):
+        # Negative control: a normal positive sample on real data still produces a genuine certifying
+        # report -- both the passing and the legitimately-failing case -- and still only inspects
+        # exactly `sample` records, not the whole dataset.
+        rep_ok = check_dataset(GaussianDistribution(0.0, 1.0), [1.0, 2.0, 3.0], sample=2)
+        self.assertTrue(rep_ok.ok)
+        self.assertEqual(rep_ok.n_checked, 2)  # only the first `sample` records were inspected
+
+        rep_bad = check_dataset(GaussianDistribution(0.0, 1.0), [1.0, 2.0, "oops", 4.0], sample=10)
+        self.assertFalse(rep_bad.ok)
+        self.assertEqual(rep_bad.n_checked, 4)  # sample beyond dataset size just caps at what exists
+
     def test_multivariate_list_data_passes_the_same_as_ndarray_data(self):
         # Bug-2 regression: a dataset of plain Python lists (the natural shape for a multivariate
         # observation) must be accepted exactly like the same data expressed as a list of np.ndarray --
