@@ -38,6 +38,22 @@ own eigenvalue scale) means the input is not a covariance at all -- no amount of
 that the RIGHT fix, only a plausible-looking wrong one."""
 
 
+def _require_positive_int(value: Any, name: str) -> int:
+    """Validate ``value`` is an exact positive integer, rejecting nonpositive and fractional counts.
+
+    ``int(value)`` alone silently truncates (``2.7`` becomes ``2``, no error); this instead requires the
+    float and int forms to agree, so a fractional count is named as invalid rather than quietly rounded.
+    """
+    try:
+        as_float = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.") from exc
+    as_int = int(as_float)
+    if as_int <= 0 or as_float != as_int:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+    return as_int
+
+
 def _safe_cholesky(sigma: np.ndarray) -> np.ndarray:
     """Cholesky of a posterior covariance, for sampling the ``q`` batch points' TRUE JOINT distribution.
 
@@ -110,13 +126,27 @@ def monte_carlo_qei(
     Draws ``samples`` joint posterior realizations of the ``q`` batch points and averages the batch
     improvement over the incumbent ``best`` -- ``max(best - min_i f_i, 0)`` for minimization, or
     ``max(max_i f_i - best, 0)`` for maximization. For ``q = 1`` this reduces to ordinary EI.
+
+    Raises:
+        ValueError: if ``mean`` is empty, ``cov``'s shape does not match ``mean``, either contains a
+            non-finite value, ``cov`` is not a valid (finite, PSD-within-tolerance) covariance, or
+            ``samples`` is not a positive integer. See :func:`_safe_cholesky` for the covariance
+            validation/healing policy -- it never silently downgrades a true joint request to an
+            independent one.
     """
     mu = np.asarray(mean, dtype=np.float64).ravel()
-    sigma = np.atleast_2d(np.asarray(cov, dtype=np.float64))
     q = mu.size
+    if q == 0:
+        raise ValueError("mean must have at least one element (q >= 1).")
+    sigma = np.atleast_2d(np.asarray(cov, dtype=np.float64))
+    if sigma.shape != (q, q):
+        raise ValueError(f"cov must be a ({q}, {q}) matrix matching mean's length {q}; got shape {sigma.shape}.")
+    if not np.all(np.isfinite(mu)):
+        raise ValueError("mean contains non-finite values (NaN/Inf); cannot compute q-EI.")
+    n_samples = _require_positive_int(samples, "samples")
     rng = seed if isinstance(seed, RandomState) else RandomState(seed)
     chol = _safe_cholesky(sigma)
-    draws = mu[None, :] + rng.standard_normal((int(samples), q)) @ chol.T
+    draws = mu[None, :] + rng.standard_normal((n_samples, q)) @ chol.T
     if maximize:
         improvement = np.maximum(draws.max(axis=1) - best, 0.0)
     else:
@@ -144,9 +174,15 @@ def propose_qei_batch(
     *common random numbers* so the greedy comparison is fair). Because the joint posterior is used, an
     already-chosen point lowers the marginal value of nearby candidates, so the batch self-diversifies
     without any fantasized observations. Returns a ``(q, d)`` array.
+
+    Raises:
+        ValueError: if ``q``, ``n_candidates``, or ``mc_samples`` is not a positive integer, if there are
+            zero observations, or if every candidate scores a non-finite q-EI merit at some batch step
+            (rather than silently leaving that step's pick undefined).
     """
-    if int(q) <= 0:
-        raise ValueError("q must be positive.")
+    q = _require_positive_int(q, "q")
+    n_candidates = _require_positive_int(n_candidates, "n_candidates")
+    mc_samples = _require_positive_int(mc_samples, "mc_samples")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     xs, ys = _validate_xy(x, y)
@@ -158,17 +194,28 @@ def propose_qei_batch(
         raise ValueError("cannot propose a q-EI batch with zero observations; call tell() first.")
     gp = _fit_surrogate(xs, ys, gp, fit_kwargs)
     best = float(ys.max() if maximize else ys.min())
-    candidates = latin_hypercube(b, int(n_candidates), rng)
+    candidates = latin_hypercube(b, n_candidates, rng)
+    if candidates.shape[0] != n_candidates:
+        raise ValueError(f"latin_hypercube returned {candidates.shape[0]} candidates, expected {n_candidates}.")
     mc_seed = int(rng.randint(2**31))  # common random numbers across candidates and steps
     batch: list[np.ndarray] = []
-    for _ in range(int(q)):
+    for step in range(q):
         best_c, best_val = None, -np.inf
         for c in candidates:
             pts = np.vstack([*batch, c]) if batch else c[None, :]
             mean, cov = gp.predict(xs, ys, pts, return_cov=True)
             val = monte_carlo_qei(mean, cov, best, maximize=maximize, samples=mc_samples, seed=mc_seed)
-            if val > best_val:
+            if val > best_val:  # NaN val never wins: comparisons against NaN are always False
                 best_val, best_c = val, c
+        if best_c is None:
+            # every candidate's q-EI merit was non-finite (NaN) -- e.g. a NaN incumbent from a NaN in y,
+            # or a degenerate GP posterior. Silently falling through would append None -> np.asarray(None,
+            # dtype=float64) is a 0-d NaN array, corrupting every subsequent step's np.vstack. Name it.
+            raise ValueError(
+                f"no candidate produced a finite q-EI merit at batch step {step + 1}/{q}; all "
+                f"{n_candidates} candidates scored non-finite (NaN) -- check the GP posterior mean/"
+                "covariance and the observed y for non-finite values."
+            )
         batch.append(np.asarray(best_c, dtype=np.float64))
     return np.asarray(batch)
 
@@ -192,14 +239,19 @@ def propose_local_penalization(
     set from a Lipschitz estimate ``L`` of the objective (the largest posterior-mean gradient over the
     candidates) and the gap to the incumbent, so the penalty is principled rather than a fixed distance.
     Cheaper than q-EI for large ``q`` (one GP fit, closed-form penalties). Returns a ``(q, d)`` array.
+
+    Raises:
+        ValueError: if ``q`` or ``n_candidates`` is not a positive integer, if ``q > n_candidates``, if
+            there are zero observations, or if every candidate scores a non-finite acquisition merit
+            (rather than letting ``argmax`` -- which treats NaN as the maximum -- silently select one).
     """
     from scipy.stats import norm
 
-    if int(q) <= 0:
-        raise ValueError("q must be positive.")
-    if int(q) > int(n_candidates):
-        # once every candidate's merit is set to -inf (line 174), np.argmax deterministically returns
-        # index 0 again (ties broken by first occurrence) -- the batch would silently contain
+    q = _require_positive_int(q, "q")
+    n_candidates = _require_positive_int(n_candidates, "n_candidates")
+    if q > n_candidates:
+        # once every candidate's merit is set to -inf (below, after each pick), np.argmax deterministically
+        # returns index 0 again (ties broken by first occurrence) -- the batch would silently contain
         # duplicate points instead of raising. Name the actual constraint instead.
         raise ValueError(f"propose_local_penalization requires q <= n_candidates (q={q}, n_candidates={n_candidates}).")
     b = _as_bounds(bounds)
@@ -211,7 +263,9 @@ def propose_local_penalization(
         raise ValueError("cannot propose a local-penalization batch with zero observations; call tell() first.")
     gp = _fit_surrogate(xs, ys, gp, fit_kwargs)
     best = float(ys.max() if maximize else ys.min())
-    cand = latin_hypercube(b, int(n_candidates), rng)
+    cand = latin_hypercube(b, n_candidates, rng)
+    if cand.shape[0] != n_candidates:
+        raise ValueError(f"latin_hypercube returned {cand.shape[0]} candidates, expected {n_candidates}.")
     mean, std = _posterior_mean_std(gp, xs, ys, cand)
 
     # Lipschitz estimate of the (minimization-oriented) objective: the largest posterior-mean slope
@@ -234,10 +288,21 @@ def propose_local_penalization(
     z = signed / np.maximum(std, 1e-12)
     ei = np.maximum(signed, 0.0) * norm.cdf(z) + std * norm.pdf(z)
     merit = np.log(np.maximum(ei, 1e-300))  # log-acquisition so penalties multiply as sums
+    # np.argmax treats NaN as the maximum -- np.argmax([1, nan, 5]) returns 1, not 2 -- so a single
+    # non-finite merit would otherwise silently outrank every genuinely-scored candidate. Mask any
+    # non-finite entry to -inf first so it can never win selection over a finite one, then require at
+    # least one candidate to still be admissible; -inf is unambiguous here since a legitimately-computed
+    # merit is floored at log(1e-300) (~-691), never -inf.
+    merit = np.where(np.isfinite(merit), merit, -np.inf)
+    if not np.any(np.isfinite(merit)):
+        raise ValueError(
+            f"no candidate produced a finite acquisition merit; all {n_candidates} candidates scored "
+            "non-finite (NaN) -- check the GP posterior mean/std and the observed y for non-finite values."
+        )
 
     diag = float(np.linalg.norm(b[:, 1] - b[:, 0]))
     batch: list[np.ndarray] = []
-    for _ in range(int(q)):
+    for _ in range(q):
         k = int(np.argmax(merit))
         batch.append(cand[k].copy())
         # Exclude a ball around the new pick whose radius is the Lipschitz reach toward the (optimistic)
