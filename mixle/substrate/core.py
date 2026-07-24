@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import tempfile
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
@@ -234,29 +236,69 @@ class Substrate:
 
     # -- persistence -------------------------------------------------------------------------------
     def save(self, root: str | None = None) -> str:
-        """Persist the shard to ``{root}/items.jsonl`` (one item per line)."""
+        """Persist the shard to ``{root}/items.jsonl`` (one item per line), atomically.
+
+        The full snapshot is written to a sibling temp file in ``target`` first, fsynced, then
+        published with a single ``os.replace`` -- mirrors :func:`mixle.task.artifact._atomic_json_dump`
+        and :meth:`mixle.system.registry.Registry._write_index`'s temp-file-plus-``os.replace``
+        convention. A plain ``open(path, "w")`` truncates ``items.jsonl`` BEFORE the new content is
+        written, so any failure partway through this method (a crash, a disk-full write, a
+        non-serializable item further down the store) would destroy the last good shard instead of
+        just failing the save; staging the new snapshot off to the side first means the write is
+        all-or-nothing and the previous ``items.jsonl`` is untouched by a failed attempt.
+        """
         target = Path(root) if root is not None else self.root
         if target is None:
             raise ValueError("Substrate.save needs a root (none was set at construction)")
         target.mkdir(parents=True, exist_ok=True)
-        with open(target / "items.jsonl", "w") as f:
-            for item in self._items.values():
-                f.write(json.dumps(item.to_json()) + "\n")
+        dst = target / "items.jsonl"
+        fd, tmp = tempfile.mkstemp(dir=str(target), prefix=".tmp-substrate-", suffix=".jsonl")
+        try:
+            with os.fdopen(fd, "w") as f:
+                for item in self._items.values():
+                    f.write(json.dumps(item.to_json()) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, dst)
+        except BaseException:
+            # Serialization or the write failed partway through: drop the temp snapshot, leave the
+            # previously-published items.jsonl (if any) exactly as it was.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         self.root = target
         return str(target)
 
     def load(self, root: str | None = None) -> None:
-        """Load items from ``{root}/items.jsonl`` into this shard."""
+        """Load items from ``{root}/items.jsonl`` into this shard, all-or-nothing.
+
+        Every row is parsed into a private, freshly-built dict first; only once the ENTIRE file has
+        parsed and validated cleanly does that dict become ``self._items``. A malformed or invalid row
+        anywhere in the file raises -- naming the file, the 1-based line number, and a preview of the
+        offending row -- and leaves whatever this shard held before the call completely untouched:
+        never a partial store holding only the rows that happened to precede the bad one.
+        """
         target = Path(root) if root is not None else self.root
         if target is None:
             raise ValueError("Substrate.load needs a root")
-        self._items.clear()
-        with open(target / "items.jsonl") as f:
-            for line in f:
-                line = line.strip()
-                if line:
+        path = target / "items.jsonl"
+        loaded: dict[str, SubstrateItem] = {}
+        with open(path) as f:
+            for lineno, raw_line in enumerate(f, start=1):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
                     item = SubstrateItem.from_json(json.loads(line))
-                    self._items[item.id] = item
+                except Exception as e:
+                    raise ValueError(
+                        f"Substrate.load: malformed row at {path}:{lineno}: {e} (row starts: {line[:80]!r})"
+                    ) from e
+                loaded[item.id] = item
+        # Only now, with the whole file known-good, does it replace the live store.
+        self._items = loaded
         self.root, self._dirty = target, True
 
 
