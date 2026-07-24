@@ -48,6 +48,57 @@ class KBestAssignmentTestCase(unittest.TestCase):
         for _, rows, cols in k_best_assignments(cost, k=6):
             self.assertFalse(any(r == 0 and c == 0 for r, c in zip(rows, cols)))
 
+    def test_forbidden_negative_inf_edge_still_finds_finite_assignment(self):
+        # MXR-080-0201: a -inf edge used to be passed straight to scipy, which raises on raw -inf/nan: that
+        # raise was caught and misreported as infeasible even though a perfectly good finite assignment exists
+        # using the other edges. -inf must normalize to the same "forbidden" sentinel as +inf.
+        cost = np.array([[-np.inf, 2.0], [3.0, 1.0]])
+        results = list(k_best_assignments(cost, k=5))
+        self.assertEqual(len(results), 1)  # only one feasible complete assignment avoids the forbidden edge
+        total, rows, cols = results[0]
+        self.assertEqual(total, 5.0)
+        self.assertFalse(any(r == 0 and c == 0 for r, c in zip(rows, cols)))
+
+    def test_forbidden_inf_edge_before_maximize_flip_still_finds_finite_assignment(self):
+        # A +inf edge negated by the internal maximize sign flip becomes -inf, hitting the same scipy failure
+        # mode as a raw -inf input unless normalized before the flip.
+        cost = np.array([[np.inf, 2.0], [3.0, 1.0]])
+        results = list(k_best_assignments(cost, k=5, maximize=True))
+        self.assertEqual(len(results), 1)
+        total, rows, cols = results[0]
+        self.assertEqual(total, 5.0)
+        self.assertFalse(any(r == 0 and c == 0 for r, c in zip(rows, cols)))
+
+    def test_forbidden_nan_edge_still_finds_finite_assignment(self):
+        cost = np.array([[np.nan, 2.0], [3.0, 1.0]])
+        results = list(k_best_assignments(cost, k=5))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], 5.0)
+
+    def test_genuinely_infeasible_problem_still_reports_no_assignments(self):
+        # Every complete assignment of this 2x2 matrix must use at least one forbidden edge -- this must stay
+        # infeasible (empty), not be conflated with the invalid-numeric-input case fixed above.
+        cost = np.array([[-np.inf, np.inf], [np.inf, -np.inf]])
+        self.assertEqual(list(k_best_assignments(cost, k=5)), [])
+
+    def test_negative_control_all_finite_matrix_unaffected(self):
+        # Ordinary all-finite problems (no forbidden edges at all) must be untouched by the normalization.
+        rng = np.random.RandomState(6)
+        cost = rng.rand(5, 5)
+        results = list(k_best_assignments(cost, k=5))
+        opt_cost, _, _ = best_assignment(cost)
+        self.assertAlmostEqual(results[0][0], opt_cost, places=9)
+        self.assertTrue(all(results[i][0] <= results[i + 1][0] + 1e-12 for i in range(4)))
+
+    def test_best_assignment_normalizes_negative_inf_forbidden_edge(self):
+        total, rows, cols = best_assignment(np.array([[-np.inf, 2.0], [3.0, 1.0]]))
+        self.assertEqual(total, 5.0)
+        self.assertFalse(any(r == 0 and c == 0 for r, c in zip(rows, cols)))
+
+    def test_best_assignment_genuinely_infeasible_raises(self):
+        with self.assertRaises(ValueError):
+            best_assignment(np.array([[-np.inf, np.inf], [np.inf, -np.inf]]))
+
     def test_maximize(self):
         rng = np.random.RandomState(4)
         w = rng.rand(5, 5)
