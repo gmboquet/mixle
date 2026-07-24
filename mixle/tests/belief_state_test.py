@@ -100,6 +100,18 @@ class GaussianBeliefBasicsTest(unittest.TestCase):
         self.assertTrue(np.isfinite(b.interval()).all())
         self.assertEqual(float(b.var()[1]), 0.0)
 
+    def test_rejects_nan_covariance(self):
+        # NaN does not reliably surface as a NaN eigenvalue (eigvalsh can return finite, even zero,
+        # eigenvalues for a NaN-containing matrix), and "nan < threshold" is always False regardless
+        # -- so the PSD check alone cannot be trusted to catch it; NaN must be rejected explicitly.
+        nan_cov = np.array([[np.nan, 0.0], [0.0, 1.0]])
+        with self.assertRaises(ValueError):
+            GaussianBelief([0.0, 0.0], nan_cov)
+
+    def test_rejects_nan_covariance_scalar(self):
+        with self.assertRaises(ValueError):
+            GaussianBelief([0.0], [[np.nan]])
+
 
 class KalmanUpdateTest(unittest.TestCase):
     def test_scalar_update_matches_closed_form(self):
@@ -157,6 +169,37 @@ class KalmanUpdateTest(unittest.TestCase):
         P = b.cov()
         np.testing.assert_allclose(P, P.T, atol=1e-12)
         self.assertGreaterEqual(np.linalg.eigvalsh(P).min(), -1e-10)
+
+    def test_rejects_nan_observation_noise_covariance(self):
+        # Same NaN-defeats-the-eigenvalue-check hazard as __init__'s cov (see GaussianBeliefBasicsTest.
+        # test_rejects_nan_covariance): R has no other check standing in for this, since it is used
+        # directly in the Joseph-form computation before ever reaching a constructor.
+        b = GaussianBelief([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]])
+        with self.assertRaises(ValueError):
+            b.update([1.0, 0.0], [0.5], np.nan)
+        with self.assertRaises(ValueError):
+            b.update([1.0, 0.0], [0.5], [np.nan])
+
+    def test_rejects_negative_observation_noise_covariance(self):
+        # A negative R is not reliably caught downstream by the returned belief's own PSD check on
+        # P_new: the Joseph form's K @ R @ K.T term can still land P_new inside the PSD cone for a
+        # substantially negative R, depending on how H relates to P (e.g. R=-10 with H=[1,0] against
+        # P=I leaves P_new's eigenvalues both positive) -- so R itself must be checked directly.
+        b = GaussianBelief([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]])
+        with self.assertRaises(ValueError):
+            b.update([1.0, 0.0], [0.5], -10.0)
+        with self.assertRaises(ValueError):
+            b.update([1.0, 0.0], [0.5], [-10.0])
+        with self.assertRaises(ValueError):
+            b.update(np.eye(2), [0.5, 0.5], np.diag([-1.0, -1.0]))
+
+    def test_allows_zero_observation_noise_covariance(self):
+        # R=0 (a noiseless observation) is the documented R -> 0 limit and must still be allowed --
+        # the new PSD check on R must not overreach into rejecting this legitimate boundary.
+        b = GaussianBelief([0.0, 0.0], [[1.0, 0.0], [0.0, 1.0]])
+        post = b.update([1.0, 0.0], [0.5], 0.0)
+        self.assertAlmostEqual(float(post.mean()[0]), 0.5, places=10)
+        self.assertAlmostEqual(float(post.var()[0]), 0.0, places=10)
 
 
 class FusionAndConditioningTest(unittest.TestCase):

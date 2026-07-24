@@ -156,6 +156,12 @@ class GaussianBelief(BeliefState):
         P = np.atleast_2d(np.asarray(cov, dtype=float))
         if P.shape != (m.size, m.size):
             raise ValueError(f"cov shape {P.shape} must be ({m.size}, {m.size}) to match mean of size {m.size}")
+        # NaN must be rejected explicitly, before the eigenvalue check below: a NaN entry does not
+        # reliably surface as a NaN eigenvalue (eigvalsh can silently return finite, even zero,
+        # eigenvalues for a NaN-containing matrix), and even where it does, "nan < threshold" is
+        # always False -- so a NaN covariance can silently defeat the PSD check either way.
+        if not np.isfinite(P).all():
+            raise ValueError("cov must be finite (no NaN or inf)")
         P = 0.5 * (P + P.T)  # symmetrize defensively
         # positive *semi*-definite, not strictly definite: a noiseless update or condition() can
         # legitimately collapse a coordinate to exactly zero variance. The tolerance is relative to
@@ -223,6 +229,18 @@ class GaussianBelief(BeliefState):
             Rm = Rm * np.eye(k)
         elif Rm.ndim == 1:
             Rm = np.diag(Rm)
+        # Same validation as the constructor's cov, and for the same reason (see __init__): NaN must
+        # be rejected explicitly rather than trusted to surface via the eigenvalue check, and a
+        # negative-eigenvalue R is not a valid noise covariance. This cannot be left to the returned
+        # GaussianBelief's own PSD check on P_new below: the Joseph form's second term (K @ Rm @ K.T)
+        # can still land P_new inside the PSD cone even for a substantially negative R, depending on
+        # how H relates to P -- verified empirically (e.g. R=-10 with a unit H/P can leave P_new's
+        # eigenvalues both positive), so an invalid R is not reliably caught downstream.
+        if not np.isfinite(Rm).all():
+            raise ValueError("R must be finite (no NaN or inf)")
+        evals = np.linalg.eigvalsh(Rm)
+        if evals.min() < -1e-9 * np.abs(evals).max():
+            raise ValueError("R must be positive semi-definite")
 
         P = self._cov
         S = Hm @ P @ Hm.T + Rm  # innovation covariance
