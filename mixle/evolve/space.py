@@ -26,12 +26,20 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Real:
-    """A continuous dimension over ``[lo, hi]``."""
+    """A continuous dimension over ``[lo, hi]``.
+
+    Both bounds must be finite. An infinite (or NaN) bound would construct fine but then silently
+    poison downstream ``sample`` / ``neighbors`` draws with ``inf`` / ``nan`` (or crash deep inside
+    NumPy's RNG with an opaque ``OverflowError``), far from this actual root cause -- so it is
+    rejected here instead.
+    """
 
     lo: float
     hi: float
 
     def __post_init__(self) -> None:
+        if not (np.isfinite(self.lo) and np.isfinite(self.hi)):
+            raise ValueError(f"Real bounds must be finite (got lo={self.lo}, hi={self.hi}).")
         if not self.lo < self.hi:
             raise ValueError(f"Real bounds must satisfy lo < hi (got {self.lo}, {self.hi}).")
 
@@ -100,7 +108,14 @@ class Integer:
 
 @dataclass(frozen=True)
 class Categorical:
-    """An unordered categorical dimension over a finite list of ``choices``."""
+    """An unordered categorical dimension over a finite list of ``choices``.
+
+    ``choices`` must be unique under ``==`` (the same equality :meth:`_index_of` uses to look a value
+    up) -- a duplicate raises ``ValueError`` at construction. Without this check, ``encode`` would
+    silently collapse a duplicate to its first occurrence's index while ``sample`` / ``bounds`` / the
+    dimension's own length would still count it as a distinct, independently-selectable level, so the
+    dimension's notion of "how many choices" would disagree with itself depending which path asked.
+    """
 
     choices: tuple[Any, ...]
 
@@ -108,6 +123,14 @@ class Categorical:
         choices = tuple(choices)
         if len(choices) == 0:
             raise ValueError("Categorical needs at least one choice.")
+        dupes: list[Any] = []
+        for i, c in enumerate(choices):
+            if c in choices[:i] and c not in dupes:
+                dupes.append(c)
+        if dupes:
+            raise ValueError(
+                f"Categorical choices must be unique under `==` (got duplicate(s) {dupes!r} in {choices!r})."
+            )
         object.__setattr__(self, "choices", choices)
 
     def bounds(self) -> tuple[float, float]:

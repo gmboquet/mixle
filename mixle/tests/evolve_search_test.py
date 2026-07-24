@@ -1,6 +1,7 @@
 """mixle.evolve Phase 2-3: typed-space search + the meta-search that learns which operators help."""
 
 import numpy as np
+import pytest
 
 from mixle.evolve import (
     Categorical,
@@ -28,6 +29,44 @@ def test_space_sample_and_neighbors():
     assert 0.0 <= cfg["a"] <= 1.0 and 1 <= cfg["k"] <= 5 and cfg["c"] in ("x", "y", "z")
     neighbors = sp.neighbors(cfg)
     assert neighbors and all(set(n) == set(cfg) for n in neighbors)
+
+
+def test_real_rejects_infinite_bounds():
+    # Bug regression: Real.__post_init__ only checked lo < hi, not finiteness, so an infinite (or
+    # NaN) bound constructed fine and then poisoned sample()/neighbors() with inf/nan -- or crashed
+    # deep inside NumPy's RNG with an opaque OverflowError, far from this actual root cause.
+    with pytest.raises(ValueError, match="finite"):
+        Real(-np.inf, np.inf)
+    with pytest.raises(ValueError, match="finite"):
+        Real(0.0, np.inf)
+    with pytest.raises(ValueError, match="finite"):
+        Real(-np.inf, 1.0)
+    with pytest.raises(ValueError, match="finite"):
+        Real(np.nan, 1.0)
+    # negative control: finite bounds must keep working exactly as before
+    r = Real(-5.0, 5.0)
+    rng = np.random.RandomState(0)
+    assert all(-5.0 <= r.sample(rng) <= 5.0 for _ in range(20))
+    assert all(np.isfinite(n) and -5.0 <= n <= 5.0 for n in r.neighbors(0.0))
+
+
+def test_categorical_rejects_duplicate_choices():
+    # Bug regression: Categorical didn't reject duplicate choices, and its own notion of cardinality
+    # disagreed depending which path asked -- encode() collapsed a duplicate to its first occurrence's
+    # index (only `len(set)` distinct codes reachable) while sample()/bounds()/len() still treated the
+    # un-deduplicated list length as the true choice count (e.g. biased sampling toward the repeated
+    # value, and neighbors() could hand back the input value as its own "neighbor").
+    with pytest.raises(ValueError, match="unique"):
+        Categorical(["a", "b", "a"])
+    with pytest.raises(ValueError, match="unique"):
+        Categorical([1, 2, 3, 2])
+    # negative control: unique choices must keep working exactly as before
+    c = Categorical(["a", "b", "c"])
+    assert len(c.choices) == 3
+    assert {c.encode(v) for v in c.choices} == {0.0, 1.0, 2.0}  # every choice gets its own code
+    rng = np.random.RandomState(0)
+    assert all(c.sample(rng) in ("a", "b", "c") for _ in range(20))
+    assert set(c.neighbors("a")) == {"b", "c"}  # excludes exactly the queried value, nothing else
 
 
 def test_search_evolutionary_finds_variance():
