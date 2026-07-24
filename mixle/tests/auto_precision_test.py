@@ -130,6 +130,38 @@ class AutoPrecisionTestCase(unittest.TestCase):
         s = _numeric_data_sample(well_conditioned + extreme_tail, sample_size=512)
         self.assertTrue(np.any(np.abs(s) > 1.0e6))  # the tail must show up in the sample
 
+    def test_numeric_sample_generator_is_bounded_not_fully_consumed(self):
+        # Regression (MXR-080-0145): _numeric_data_sample used to call list(data) unconditionally,
+        # consuming an ENTIRE one-shot generator regardless of sample_size -- exhausting/materializing
+        # a potentially huge or unbounded iterable before sample_size was ever applied, and leaving
+        # any other reference to the SAME generator silently empty afterward. Must take at most
+        # sample_size items and leave the rest of the generator untouched.
+        total = 10_000
+        consumed = []
+
+        def gen():
+            for i in range(total):
+                consumed.append(i)
+                yield float(i)
+
+        g = gen()
+        s = _numeric_data_sample(g, sample_size=5)
+        self.assertEqual(s.size, 5)
+        self.assertEqual(len(consumed), 5)  # only sample_size items pulled from the generator
+        self.assertEqual(next(g), 5.0)  # the generator resumes right where sampling left off
+
+    def test_numeric_sample_rejects_nonpositive_sample_size(self):
+        for bad in (0, -1, -3):
+            with self.assertRaises(ValueError):
+                _numeric_data_sample([1.0, 2.0, 3.0], sample_size=bad)
+
+    def test_numeric_sample_normal_sample_size_still_works(self):
+        # Negative control: a normal, reasonably-sized sample_size against a normal iterable still
+        # samples correctly (both the count and the bounded-sampling fix leave this path intact).
+        data = list(np.random.RandomState(10).randn(300))
+        s = _numeric_data_sample(data, sample_size=100)
+        self.assertEqual(s.size, 100)
+
 
 class PrecisionNameHygieneTestCase(unittest.TestCase):
     """Sub-byte / FP8 / microscaling / codebook names are rejected with an actionable error rather
