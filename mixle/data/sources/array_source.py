@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.data.partition import encode_partitions
+from mixle.data.partition import num_chunks_for
 from mixle.data.schema import Schema
 from mixle.data.structure import EXCHANGEABLE, SampleStructure
 from mixle.utils.optional_deps import HAS_H5PY, HAS_ZARR, require
@@ -40,6 +40,106 @@ __all__ = [
     "read_hdf5",
     "read_memmap",
 ]
+
+
+# Bounds how many records `.encode()` buffers per partition before flushing them through the schema
+# and encoder. The memory ceiling for the incremental encode path below is `num_partitions *
+# _ENCODE_BATCH_ROWS` records, never the source's total length -- callers that need a different bound
+# (larger records want a smaller batch; tests want a tiny one to make bounded reads observable) can
+# pass `batch_size` to `encode()` directly.
+_ENCODE_BATCH_ROWS = 1024
+
+
+def _encode_indexable(
+    obj: Any,
+    encoder: Any,
+    structure: SampleStructure,
+    schema: Schema | None,
+    num_chunks: int,
+    chunk_size: int | None,
+    batch_size: int,
+) -> list[tuple[int, Any]]:
+    """Partition and ``encoder.seq_encode`` an ``obj`` supporting ``len``/``__getitem__(i)``, incrementally.
+
+    Shared by :meth:`_ArrayVolumeSource.encode` and :meth:`PatchSampler.encode` (MXR-080-0056,
+    MXR-080-0057). Never builds ``list(obj[i] for i in range(len(obj)))``: records are read one at a
+    time, off disk/memmap, into small per-partition buffers that are schema-conformed
+    (:meth:`~mixle.data.schema.Schema.conform`, applied per bounded batch rather than once over the
+    whole source) and handed to ``encoder.seq_encode`` as soon as a buffer reaches ``batch_size``
+    records -- so resident memory is bounded by ``num_partitions * batch_size`` records, independent
+    of ``len(obj)``. The returned list is consumed exactly like ``encode_partitions``'s
+    ``[(count, payload)]`` output by every existing caller (``seq_log_density_sum``, ``seq_estimate``,
+    ``seq_log_density`` + ``np.concatenate`` for order-preserving ``num_chunks=1`` reads, ...), all of
+    which sum/iterate/concatenate over however many entries the list contains rather than assuming
+    exactly ``num_chunks`` of them -- so a partition legitimately arriving as several flushed batches
+    (in read order) instead of one big list is not a behavior change from their point of view.
+
+    Strideable structures (``structure.strides_records`` -- everything except partially-exchangeable)
+    bucket record ``i`` into partition ``i % num_partitions`` as it is read, matching the
+    ``records[k::n]`` striding :func:`~mixle.data.partition.partition_records` uses, computed without
+    ever holding ``records`` itself.
+
+    Partially-exchangeable (grouped) structures need a whole group in one partition, which needs every
+    record's group key before any partition assignment is final. Rather than holding the group-keyed
+    records in memory (the original whole-volume-materializing bug), this makes one pass to build an
+    index of ``group key -> [row index, ...]`` -- integers only, negligible next to the row data --
+    assigns whole groups to partitions round-robin exactly as ``partition_records`` does, then makes a
+    second pass that re-reads each partition's rows by index, off disk, in the same bounded batches.
+    This is the explicit spill/index strategy MXR-080-0056 calls for: row data is spilled (never
+    retained) between the two passes and only the lightweight index survives between them, at the cost
+    of reading each grouped record twice instead of holding all of them at once.
+    """
+    if isinstance(batch_size, bool) or not isinstance(batch_size, (int, np.integer)) or batch_size < 1:
+        raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")
+    n_total = len(obj)
+    n_parts = num_chunks_for(n_total, num_chunks, chunk_size)
+    results: list[tuple[int, Any]] = []
+
+    def flush(buf: list[Any]) -> None:
+        if not buf:
+            return
+        conformed = schema.conform(buf) if schema is not None else list(buf)
+        results.append((len(conformed), encoder.seq_encode(conformed)))
+
+    if structure.strides_records:
+        buffers: list[list[Any]] = [[] for _ in range(n_parts)]
+        for i in range(n_total):
+            part = i % n_parts
+            buffers[part].append(obj[i])
+            if len(buffers[part]) >= batch_size:
+                flush(buffers[part])
+                buffers[part] = []
+        for buf in buffers:
+            flush(buf)
+        return results
+
+    # Grouped: pass 1 builds a row-index (not row-data) per group key, reading each row exactly once
+    # and discarding it immediately after computing its key.
+    index: dict[Any, list[int]] = {}
+    order: list[Any] = []
+    for i in range(n_total):
+        key = structure.group_key(obj[i])
+        bucket = index.get(key)
+        if bucket is None:
+            index[key] = bucket = []
+            order.append(key)
+        bucket.append(i)
+
+    # Pass 2: assign whole groups to partitions round-robin (mirrors partition_records exactly).
+    part_row_indices: list[list[int]] = [[] for _ in range(n_parts)]
+    for g, key in enumerate(order):
+        part_row_indices[g % n_parts].extend(index[key])
+
+    # Pass 3: re-read each partition's rows by index, off disk, in bounded batches.
+    for row_indices in part_row_indices:
+        buf: list[Any] = []
+        for i in row_indices:
+            buf.append(obj[i])
+            if len(buf) >= batch_size:
+                flush(buf)
+                buf = []
+        flush(buf)
+    return results
 
 
 class _ArrayVolumeSource:
@@ -74,8 +174,19 @@ class _ArrayVolumeSource:
     def records(self) -> Iterable[Any]:
         return (self[i] for i in range(len(self)))
 
-    def encode(self, encoder: Any, num_chunks: int = 1, chunk_size: int | None = None) -> list[tuple[int, Any]]:
-        return encode_partitions(list(self.records()), encoder, self.structure, num_chunks, chunk_size)
+    def encode(
+        self,
+        encoder: Any,
+        num_chunks: int = 1,
+        chunk_size: int | None = None,
+        batch_size: int = _ENCODE_BATCH_ROWS,
+    ) -> list[tuple[int, Any]]:
+        """Partition and encode in bounded batches -- never reads the full volume into memory.
+
+        See :func:`_encode_indexable` (MXR-080-0056, MXR-080-0057): rows are read off disk and
+        schema-conformed ``batch_size`` at a time, not all up front via ``list(self.records())``.
+        """
+        return _encode_indexable(self, encoder, self.structure, self.schema, num_chunks, chunk_size, batch_size)
 
 
 class ZarrArraySource(_ArrayVolumeSource):
@@ -242,9 +353,21 @@ class PatchSampler:
         for s, p in zip(self.shape, self.patch_size):
             if p <= 0 or p > s:
                 raise ValueError("patch_size %r does not fit within array shape %r" % (self.patch_size, self.shape))
+        # Require exact nonnegative cardinality and exact positive stride at construction (MXR-080-0058):
+        # a blind int(num_patches) truncated fractional input and let negatives through to make __len__
+        # return a negative number (a Python contract violation), and a blind stride reached a
+        # ZeroDivisionError for 0 or silently produced out-of-range corners for negative values instead
+        # of a clear error here. isinstance(..., bool) is excluded explicitly since bool is an int
+        # subclass in Python (True/False are not meaningful cardinalities or strides).
+        if isinstance(num_patches, bool) or not isinstance(num_patches, (int, np.integer)) or num_patches < 0:
+            raise ValueError(f"num_patches must be a non-negative integer, got {num_patches!r}")
+        if stride is not None and (
+            isinstance(stride, bool) or not isinstance(stride, (int, np.integer)) or stride <= 0
+        ):
+            raise ValueError(f"stride must be a positive integer or None, got {stride!r}")
         self.num_patches = int(num_patches)
         self.seed = seed
-        self.stride = stride
+        self.stride = None if stride is None else int(stride)
         self.structure = structure
         self.schema = schema
         self._coords = self._sample_coords()
@@ -276,5 +399,16 @@ class PatchSampler:
     def records(self) -> Iterable[tuple[np.ndarray, tuple[int, ...]]]:
         return (self[i] for i in range(len(self)))
 
-    def encode(self, encoder: Any, num_chunks: int = 1, chunk_size: int | None = None) -> list[tuple[int, Any]]:
-        return encode_partitions(list(self.records()), encoder, self.structure, num_chunks, chunk_size)
+    def encode(
+        self,
+        encoder: Any,
+        num_chunks: int = 1,
+        chunk_size: int | None = None,
+        batch_size: int = _ENCODE_BATCH_ROWS,
+    ) -> list[tuple[int, Any]]:
+        """Partition and encode in bounded batches -- never materializes every sampled patch at once.
+
+        See :func:`_encode_indexable` (MXR-080-0056, MXR-080-0057): patches are read off disk and
+        schema-conformed ``batch_size`` at a time, not all up front via ``list(self.records())``.
+        """
+        return _encode_indexable(self, encoder, self.structure, self.schema, num_chunks, chunk_size, batch_size)
