@@ -37,6 +37,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.multivariate._copula_common import (
     BufferedUScoreAccumulatorFactory,
     UScoreEncoder,
+    reject_out_of_unit_cube,
     weighted_kendall_tau,
 )
 from mixle.stats.multivariate.vine_copula import (
@@ -206,6 +207,7 @@ class RVineCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.seq_log_density(np.atleast_2d(np.asarray(u, dtype=np.float64)))[0])
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
+        reject_out_of_unit_cube(u)
         if not self.trees or not self.trees[0]:  # unfitted / independence
             return np.zeros(np.atleast_2d(u).shape[0])
         return _forward_vals(self.trees, u)[0]
@@ -292,5 +294,6 @@ class RVineCopulaEstimator(ParameterEstimator):
         u, w = suff_stat
         if len(u) < 2:
             return RVineCopulaDistribution(self.dim, [], candidates=self.candidates, name=self.name, keys=self.keys)
+        reject_out_of_unit_cube(u)
         trees = _select_and_fit(_clip01(u), np.asarray(w, dtype=np.float64), self.candidates)
         return RVineCopulaDistribution(self.dim, trees, candidates=self.candidates, name=self.name, keys=self.keys)

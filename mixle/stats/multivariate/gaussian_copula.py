@@ -31,6 +31,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.multivariate._copula_common import reject_out_of_unit_cube
 from mixle.utils.vector import cholesky_logdet
 
 _CLIP = 1.0e-12  # keep Phi^{-1}(u) finite at the open-interval boundary
@@ -70,7 +71,9 @@ class GaussianCopulaDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: np.ndarray) -> float:
         """Return the log copula density at a single point ``u`` in ``(0,1)^d``."""
-        z = norm.ppf(np.clip(np.asarray(x, dtype=np.float64), _CLIP, 1.0 - _CLIP))
+        x = np.asarray(x, dtype=np.float64)
+        reject_out_of_unit_cube(x)
+        z = norm.ppf(np.clip(x, _CLIP, 1.0 - _CLIP))
         return -0.5 * self._logdet - 0.5 * float(z @ self._inv_minus_i @ z)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
@@ -120,7 +123,9 @@ class GaussianCopulaAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: np.ndarray, weight: float, estimate: GaussianCopulaDistribution | None) -> None:
         """Accumulate weighted normal-score moments for one copula observation."""
-        z = norm.ppf(np.clip(np.asarray(x, dtype=np.float64), _CLIP, 1.0 - _CLIP))
+        x = np.asarray(x, dtype=np.float64)
+        reject_out_of_unit_cube(x)
+        z = norm.ppf(np.clip(x, _CLIP, 1.0 - _CLIP))
         self.sum_z += weight * z
         self.sum_zz += weight * np.outer(z, z)
         self.count += weight
@@ -226,4 +231,5 @@ class GaussianCopulaDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[np.ndarray]) -> np.ndarray:
         """Encode copula observations by clipping and applying the normal quantile."""
         u = np.asarray(x, dtype=np.float64)
+        reject_out_of_unit_cube(u)
         return norm.ppf(np.clip(u, _CLIP, 1.0 - _CLIP))

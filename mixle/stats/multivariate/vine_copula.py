@@ -40,6 +40,7 @@ from mixle.stats.multivariate._copula_common import (
     BufferedUScoreAccumulatorFactory,
     UScoreEncoder,
     maximize_1d,
+    reject_out_of_unit_cube,
     weighted_kendall_tau,
 )
 
@@ -352,6 +353,7 @@ class CVineCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.seq_log_density(np.atleast_2d(np.asarray(u, dtype=np.float64)))[0])
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
+        reject_out_of_unit_cube(u)
         u = _clip01(u)
         n, d = u.shape
         loglik = np.zeros(n)
@@ -431,6 +433,7 @@ class CVineCopulaEstimator(ParameterEstimator):
         u, w = suff_stat
         if len(u) < 2:
             return self._independence_vine()
+        reject_out_of_unit_cube(u)
         u = _clip01(u)
         w = np.asarray(w, dtype=np.float64)
         d = self.dim
@@ -531,6 +534,7 @@ class DVineCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.seq_log_density(np.atleast_2d(np.asarray(u, dtype=np.float64)))[0])
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
+        reject_out_of_unit_cube(u)
         return _dvine_walk(_clip01(u), None, self.pairs, self.candidates)[0]
 
     def sampler(self, seed: int | None = None) -> DVineCopulaSampler:
@@ -604,5 +608,6 @@ class DVineCopulaEstimator(ParameterEstimator):
         u, w = suff_stat
         if len(u) < 2:
             return DVineCopulaDistribution(self.dim, {}, name=self.name, keys=self.keys)
+        reject_out_of_unit_cube(u)
         _, pairs = _dvine_walk(_clip01(u), np.asarray(w, dtype=np.float64), None, self.candidates)
         return DVineCopulaDistribution(self.dim, pairs, name=self.name, keys=self.keys)

@@ -94,6 +94,19 @@ class DVineCopulaTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             DVineCopulaDistribution(1, {})
 
+    def test_rejects_out_of_range_pseudo_observations(self):
+        v = DVineCopulaDistribution(2, {})
+        for bad in (np.array([[-0.3, 0.4]]), np.array([[0.5, 1.7]]), np.array([[np.nan, 0.4]])):
+            with self.assertRaises(ValueError):
+                v.seq_log_density(bad)
+        # the legitimate open-interval boundary (u exactly 0 or 1) must still score finite, not raise
+        self.assertTrue(np.all(np.isfinite(v.seq_log_density(np.array([[0.0, 1.0], [1.0, 0.0]])))))
+
+    def test_rejects_out_of_range_pseudo_observations_when_fitting(self):
+        bad = np.array([[0.3, 0.4], [1.7, 0.2], [0.5, 0.5]])
+        with self.assertRaises(ValueError):
+            DVineCopulaDistribution(2, {}).estimator().estimate(None, (bad, np.ones(len(bad))))
+
     def test_plugs_into_copula_distribution(self):
         true = DVineCopulaDistribution(
             3, {(1, 1): GumbelPairCopula(3.0), (1, 2): ClaytonPairCopula(3.0), (2, 1): FrankPairCopula(3.0)}

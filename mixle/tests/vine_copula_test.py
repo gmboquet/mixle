@@ -89,6 +89,21 @@ class CVineCopulaTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             CVineCopulaDistribution(1, {})
 
+    def test_rejects_out_of_range_pseudo_observations(self):
+        v = CVineCopulaDistribution(2, {(1, 1): GaussianPairCopula(0.5)})
+        for bad in (np.array([[-0.3, 0.4]]), np.array([[0.5, 1.7]]), np.array([[np.nan, 0.4]])):
+            with self.assertRaises(ValueError):
+                v.seq_log_density(bad)
+        # the legitimate open-interval boundary (u exactly 0 or 1) must still score finite, not raise
+        self.assertTrue(np.all(np.isfinite(v.seq_log_density(np.array([[0.0, 1.0], [1.0, 0.0]])))))
+
+    def test_rejects_out_of_range_pseudo_observations_when_fitting(self):
+        # a broken marginal CDF (or a caller passing raw data instead of PIT scores) must fail the fit
+        # loudly, not silently clip onto a boundary and fit as though the data were legitimate.
+        bad = np.array([[0.3, 0.4], [1.7, 0.2], [0.5, 0.5]])
+        with self.assertRaises(ValueError):
+            CVineCopulaDistribution(2, {}).estimator().estimate(None, (bad, np.ones(len(bad))))
+
     def test_plugs_into_copula_distribution_with_heterogeneous_marginals(self):
         true = CVineCopulaDistribution(
             3, {(1, 1): ClaytonPairCopula(4.0), (1, 2): GaussianPairCopula(0.3), (2, 1): GaussianPairCopula(0.2)}
