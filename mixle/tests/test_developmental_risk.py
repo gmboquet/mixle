@@ -279,3 +279,69 @@ def test_rfd_exceedance_monotone_in_uf():
     dq_strict = rfd_exceedance(exposure, result, uf=10.0, n=2000, rng=rng)
     dq_lenient = rfd_exceedance(exposure, result, uf=1000.0, n=2000, rng=rng)
     assert float(np.mean(dq_strict.samples)) <= float(np.mean(dq_lenient.samples))
+
+
+# MXR-080-0084: rfd_exceedance must validate its control domains (uf, n, exposure draws) before
+# any division or resampling, instead of letting bad input reach an opaque division/RNG error.
+
+
+def _valid_bmd_result():
+    doses = np.array([0.5, 1.0, 2.0, 4.0, 8.0])
+    n_total = np.full(doses.shape, 100.0)
+    n_affected = np.array([5.0, 10.0, 25.0, 60.0, 90.0])
+    return benchmark_dose(doses, n_affected, n_total, bmr=0.10)
+
+
+@pytest.mark.parametrize("uf", [0.0, -5.0, float("nan"), float("inf")])
+def test_rejects_bad_uncertainty_factor(uf):
+    result = _valid_bmd_result()
+    with pytest.raises(ValueError, match="uf"):
+        rfd_exceedance(np.array([1.0, 2.0, 3.0]), result, uf=uf, n=3, rng=np.random.default_rng(0))
+
+
+@pytest.mark.parametrize("n", [0, -3, 2.5, float("nan")])
+def test_rejects_bad_sample_count(n):
+    result = _valid_bmd_result()
+    with pytest.raises(ValueError, match="n must be"):
+        rfd_exceedance(np.array([1.0, 2.0, 3.0]), result, uf=100.0, n=n, rng=np.random.default_rng(0))
+
+
+def test_rejects_empty_exposure_array():
+    result = _valid_bmd_result()
+    with pytest.raises(ValueError, match="empty"):
+        rfd_exceedance(np.array([]), result, uf=100.0, n=5, rng=np.random.default_rng(0))
+
+
+def test_rejects_non_finite_and_negative_exposure_draws():
+    result = _valid_bmd_result()
+    with pytest.raises(ValueError, match="finite"):
+        rfd_exceedance(np.array([1.0, np.nan, 3.0]), result, uf=100.0, n=5, rng=np.random.default_rng(0))
+    with pytest.raises(ValueError, match="nonnegative"):
+        rfd_exceedance(np.array([1.0, -2.0, 3.0]), result, uf=100.0, n=5, rng=np.random.default_rng(0))
+    with pytest.raises(ValueError, match="nonnegative"):
+        rfd_exceedance(-1.0, result, uf=100.0, n=5, rng=np.random.default_rng(0))
+
+
+def test_rejects_non_finite_bmdl():
+    # A consequence of MXR-080-0082/0083: bmd.bmdl can now legitimately be nan (unidentifiable or
+    # bmdl_unavailable). rfd_exceedance must refuse to divide by it rather than silently produce
+    # rfd=nan and have `draws > nan` quietly evaluate to all-False.
+    doses = np.array([1.0, 2.0, 4.0, 8.0])
+    n_total = np.full(4, 100.0)
+    n_affected = np.array([10.0, 11.0, 9.0, 10.0])  # flat curve -> unidentifiable
+    flat_result = benchmark_dose(doses, n_affected, n_total, bmr=0.10)
+    assert flat_result.status == "unidentifiable"
+    with pytest.raises(ValueError, match="not finite"):
+        rfd_exceedance(np.array([1.0, 2.0, 3.0]), flat_result, uf=100.0, n=3, rng=np.random.default_rng(0))
+
+
+def test_valid_rfd_exceedance_call_still_works():
+    # Negative control: well-formed inputs must still work exactly as before.
+    result = _valid_bmd_result()
+    rng = np.random.default_rng(2)
+    dq = rfd_exceedance(np.array([1.0, 2.0, 3.0, 100.0]), result, uf=100.0, n=4, rng=rng)
+    assert dq.samples.shape == (4,)
+    assert set(np.unique(dq.samples)).issubset({0.0, 1.0})
+
+    dq_scalar = rfd_exceedance(5.0, result, uf=100.0, n=10, rng=rng)
+    assert dq_scalar.samples.shape == (10,)

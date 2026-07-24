@@ -391,7 +391,15 @@ def benchmark_dose(
 def _as_dose_samples(exposure: Any, n: int, rng: np.random.Generator) -> np.ndarray:
     arr = np.asarray(exposure, dtype=float)
     if arr.ndim == 0:
+        if not np.isfinite(arr) or arr < 0:
+            raise ValueError(f"exposure scalar must be finite and nonnegative, got {float(arr)!r}")
         return np.full(int(n), float(arr))
+    if arr.size == 0:
+        raise ValueError("exposure array must not be empty")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("exposure draws must all be finite")
+    if np.any(arr < 0):
+        raise ValueError("exposure draws must all be nonnegative")
     if len(arr) == n:
         return arr
     idx = rng.integers(0, len(arr), size=n)
@@ -411,8 +419,26 @@ def rfd_exceedance(
     ``exposure`` may be an IC-1 `Posterior` (the pushforward runs through its own
     ``derived_quantity`` so `prior_dominated` propagates), an array of exposure draws (resampled
     to ``n`` if its length differs), or a bare scalar (a degenerate point mass).
+
+    ``uf`` must be finite and strictly positive, ``n`` a positive exact sample count, and
+    ``exposure`` draws finite and nonnegative -- all rejected up front, before any division or
+    resampling. ``bmd.bmdl`` must also be finite: a ``BMDResult`` with ``status != "ok"`` (see
+    :class:`BMDResult`) has no real BMDL to divide by an uncertainty factor, and a NaN silently
+    compared with ``draws > nan`` would quietly evaluate to all-``False`` -- a fabricated-looking
+    "0% exceedance" result -- rather than surfacing the underlying unidentifiability.
     """
     from mixle.reason.posterior_protocol import Posterior
+
+    if not isinstance(uf, (int, float, np.integer, np.floating)) or not np.isfinite(uf) or uf <= 0:
+        raise ValueError(f"uf must be a finite positive uncertainty factor, got {uf!r}")
+    if not isinstance(n, (int, float, np.integer, np.floating)) or not np.isfinite(n) or n <= 0 or float(n) != int(n):
+        raise ValueError(f"n must be a positive integer sample count, got {n!r}")
+    n = int(n)
+    if not np.isfinite(bmd.bmdl):
+        raise ValueError(
+            f"bmd.bmdl is not finite (status={bmd.status!r}); cannot compute an RfD from a BMDResult "
+            "that was not identified -- check bmd.status/bmd.converged before calling rfd_exceedance"
+        )
 
     rng = rng if rng is not None else np.random.default_rng()
     rfd = bmd.bmdl / uf
