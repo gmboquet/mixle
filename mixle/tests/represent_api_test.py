@@ -62,6 +62,40 @@ class EmbedderTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class EmbedderRetrieveKValidationTest(unittest.TestCase):
+    """retrieve(k=...) must reject a k that can't mean "top k": negative or fractional."""
+
+    def setUp(self):
+        from mixle.represent import fit_embedder
+
+        self.data = _records(12)
+        self.emb = fit_embedder(self.data, dim=4, epochs=5, seed=0)
+
+    def test_negative_k_raises(self):
+        # Python's [:k] slicing treats a negative k as "all but the last |k| items", not
+        # empty/error -- a negative retrieval count has no sensible meaning and must be
+        # rejected rather than silently returning the wrong-sized result.
+        with self.assertRaises(ValueError):
+            self.emb.retrieve(self.data[0], k=-1)
+
+    def test_non_integer_k_raises(self):
+        # A fractional k (e.g. 2.7) must not be silently truncated by an int() cast.
+        with self.assertRaises(ValueError):
+            self.emb.retrieve(self.data[0], k=2.7)
+
+    def test_zero_k_returns_empty(self):
+        self.assertEqual(self.emb.retrieve(self.data[0], k=0), [])
+
+    def test_k_larger_than_corpus_returns_everything(self):
+        hits = self.emb.retrieve(self.data[0], k=10_000)
+        self.assertEqual(len(hits), len(self.data))
+
+    def test_exact_integer_float_k_still_works(self):
+        hits = self.emb.retrieve(self.data[0], k=3.0)
+        self.assertEqual(len(hits), 3)
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class EmbedderLoadTrustGateTest(unittest.TestCase):
     """Embedder.load unpickles a live torch module -- it must refuse without explicit trust."""
 

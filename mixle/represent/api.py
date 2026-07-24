@@ -69,10 +69,20 @@ class Embedder:
         return vec[0] if one else vec
 
     def retrieve(self, query: Any, k: int = 5) -> list[tuple[int, float]]:
-        """Top-``k`` fitted-corpus neighbours of ``query`` as ``(corpus index, cosine similarity)``."""
+        """Top-``k`` fitted-corpus neighbours of ``query`` as ``(corpus index, cosine similarity)``.
+
+        Raises:
+            ValueError: If ``k`` is negative or not an integer value. A negative ``k`` is never
+                silently accepted here: Python's ``[:k]`` slicing treats a negative ``k`` as "all
+                but the last ``|k|`` items", not empty/error, which is never what a caller passing
+                a negative retrieval count intended.
+        """
+        kf = float(k)
+        if kf < 0 or kf != round(kf):
+            raise ValueError(f"k must be a non-negative integer, got {k!r}")
         q = self.transform(query)
         sims = self.corpus_vectors @ q
-        order = np.argsort(-sims)[: int(k)]
+        order = np.argsort(-sims)[: int(kf)]
         return [(int(i), float(sims[i])) for i in order]
 
     def save(self, path: str) -> str:

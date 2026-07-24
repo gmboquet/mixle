@@ -63,13 +63,23 @@ class PosteriorRetriever:
         return self.retrieve_batch([query], k=k)[0]
 
     def retrieve_batch(self, queries: Any, k: int = 5) -> list[list[tuple[int, float]]]:
-        """Top-``k`` per query, computed in one joint pass over ``corpus + queries``."""
+        """Top-``k`` per query, computed in one joint pass over ``corpus + queries``.
+
+        Raises:
+            ValueError: If ``k`` is negative or not an integer value. A negative ``k`` is never
+                silently accepted here: Python's ``[:k]`` slicing treats a negative ``k`` as "all
+                but the last ``|k|`` items", not empty/error, which is never what a caller passing
+                a negative retrieval count intended.
+        """
+        kf = float(k)
+        if kf < 0 or kf != round(kf):
+            raise ValueError(f"k must be a non-negative integer, got {k!r}")
         qs = list(queries)
         n = len(self.corpus)
         log_aff = self._log_affinity([*self.corpus, *qs])
         out: list[list[tuple[int, float]]] = []
         for j in range(len(qs)):
             row = log_aff[n + j, :n]  # query row against corpus columns only
-            top = np.argsort(-row)[: int(k)]
+            top = np.argsort(-row)[: int(kf)]
             out.append([(int(i), float(row[i])) for i in top])
         return out
