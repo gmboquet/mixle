@@ -102,11 +102,25 @@ class WindowSegmenter(Segmenter):
         self.hop = int(hop) if hop is not None else int(window)
 
     def segment(self, raw: Any) -> np.ndarray:
-        """Split a one-dimensional signal into fixed windows."""
+        """Split a one-dimensional signal into fixed windows.
+
+        A signal shorter than ``window`` still yields exactly one window (WindowSegmenter's
+        contract is to always return at least one unit, unlike PatchSegmenter which has no such
+        contract and rejects a too-small image outright): the real samples fill ``[:len(x)]`` and
+        only the remaining slots are zero-padded, so the padding never overwrites real data.
+        """
         x = np.asarray(raw, dtype=np.float32).ravel()
-        n = max(0, (len(x) - self.window) // self.hop + 1)
-        if n == 0:
-            return np.zeros((1, self.window), dtype=np.float32)
+        if len(x) < self.window:
+            # (len(x) - window) // hop + 1 is <= 0 here, so this used to be treated as "zero
+            # windows" and silently answered with one fabricated ALL-zero window instead --
+            # discarding the real (if short) signal entirely. [1, 2] and [9, 8] under window=4 both
+            # produced the identical all-zero output. Keep the "always >= 1 window" contract, but
+            # honor it honestly: zero-pad only the slots beyond the real samples, instead of
+            # overwriting the real samples themselves along with everything else.
+            padded = np.zeros(self.window, dtype=np.float32)
+            padded[: len(x)] = x
+            return padded[None, :]
+        n = (len(x) - self.window) // self.hop + 1
         return np.stack([x[i * self.hop : i * self.hop + self.window] for i in range(n)]).astype(np.float32)
 
 
