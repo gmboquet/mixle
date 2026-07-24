@@ -128,6 +128,67 @@ class OperatorCreditBanditTest(unittest.TestCase):
         self.assertGreater(report[context]["distill"]["mean_reward"], report[context]["evolve"]["mean_reward"])
 
 
+class BudgetAccountingTest(unittest.TestCase):
+    """Regression coverage (audit MXR-080-0046): ``run()`` must check a step's operator cost against
+    the REMAINING budget before running it, and settle the charge from what actually happened --
+    skipped-by-budget, inapplicable, and failed attempts must all be free, never charged unconditionally
+    after the fact."""
+
+    def test_budget_below_every_operator_cost_never_executes_or_charges(self):
+        rng = np.random.RandomState(4)
+        objective = accuracy_objective()
+        champion = _fit_categorical(_gen_batch([0.7, 0.2, 0.1], 300, rng))
+        loop = ClosedLoopSelfEvolution(champion, objective=objective, seed=4, acquire_k=40)
+
+        min_cost = min(float(getattr(op, "cost_hint", 1.0)) for op in loop.operators.values())
+        budget = min_cost / 10.0  # strictly below EVERY operator's cost -- nothing can ever be afforded.
+        self.assertLess(budget, min_cost, "test setup: budget must be below every operator's cost")
+
+        stream = [_gen_batch([0.2, 0.7, 0.1], 60, rng) for _ in range(24)]
+        results = loop.run(stream, budget=budget)
+
+        # an unaffordable budget affords exactly zero operator attempts -- the loop burns through the
+        # WHOLE stream doing free harvest/acquire-only work rather than letting one paid attempt slip
+        # through under the ceiling (the pre-fix bug: exactly one attempt always got through and was
+        # charged, regardless of the budget).
+        self.assertEqual(len(results), len(stream), "an unaffordable budget must never let a single attempt through")
+        self.assertEqual(sum(r.cost for r in results), 0.0, "nothing may be charged when no operator fits the budget")
+        self.assertTrue(all(not r.promoted for r in results), "no operator should ever have run, let alone promoted")
+        self.assertTrue(all(r.delta == 0.0 for r in results))
+
+        print(
+            f"\n[budget accounting] unaffordable budget={budget:.4f} < min_cost={min_cost:.4f}: "
+            f"{len(results)}/{len(stream)} steps ran, total charged={sum(r.cost for r in results):.4f}"
+        )
+
+    def test_budget_that_fits_still_spends_and_never_exceeds_the_ceiling(self):
+        # negative control for the test above: a real, affordable budget must still let operators run
+        # and spend -- the fix must not degenerate into "a budget always charges nothing."
+        rng = np.random.RandomState(5)
+        objective = accuracy_objective()
+        champion = _fit_categorical(_gen_batch([0.7, 0.2, 0.1], 300, rng))
+        loop = ClosedLoopSelfEvolution(champion, objective=objective, seed=5, acquire_k=40)
+
+        max_cost = max(float(getattr(op, "cost_hint", 1.0)) for op in loop.operators.values())
+        budget = max_cost * 6.0  # generous: affords several attempts even of the priciest operator.
+
+        stream = [_gen_batch([0.2, 0.7, 0.1], 60, rng) for _ in range(24)]
+        results = loop.run(stream, budget=budget)
+        total_spent = sum(r.cost for r in results)
+
+        self.assertGreater(total_spent, 0.0, "a generous budget should let at least one operator genuinely run")
+        self.assertLessEqual(total_spent, budget, "spend must never exceed the ceiling")
+        # every charged step ran a genuine, complete attempt: its charge is exactly that operator's cost_hint.
+        for r in results:
+            if r.cost > 0.0:
+                self.assertEqual(r.cost, float(getattr(loop.operators[r.operator], "cost_hint", 1.0)))
+
+        print(
+            f"\n[budget accounting] affordable budget={budget:.2f}: total charged={total_spent:.2f} "
+            f"over {len(results)} steps"
+        )
+
+
 class GenealogyReconstructionTest(unittest.TestCase):
     """Acceptance criterion 3: every champion's lineage is reconstructible."""
 
