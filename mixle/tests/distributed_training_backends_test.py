@@ -19,7 +19,11 @@ from mixle.experimental.typed_runtime.contracts import (
 from mixle.experimental.typed_runtime.distributed import plan_distributed_updates
 from mixle.experimental.typed_runtime.graph import UpdateGraph, UpdateNode
 from mixle.models.transformer import build_causal_lm
-from mixle.utils.parallel.dcp_checkpoint import load_training_state, save_training_state
+from mixle.utils.parallel.dcp_checkpoint import (
+    async_save_training_state,
+    load_training_state,
+    save_training_state,
+)
 from mixle.utils.parallel.megatron_training import MegatronBridgeBackend
 from mixle.utils.parallel.torch_training import TorchDistributedBackend
 from mixle.utils.parallel.training_contracts import (
@@ -149,6 +153,94 @@ def test_incomplete_checkpoint_is_never_loaded(tmp_path):
 
     with pytest.raises(RuntimeError, match="incomplete"):
         load_training_state(model, optimizer, str(tmp_path))
+
+
+def test_failed_replacement_save_leaves_the_old_checkpoint_fully_loadable(tmp_path, monkeypatch):
+    """Regression: replacing an already-valid checkpoint at the same path must never remove its
+    _SUCCESS marker before the new write has fully succeeded. Before the fix, save_training_state
+    unlinked the OLD marker immediately (before calling dcp.save at all); if the new write then
+    failed partway through, neither the old checkpoint (marker gone) nor the new one (write
+    incomplete) was loadable -- even though the OLD checkpoint's data was still completely intact
+    on disk.
+    """
+    import torch.distributed.checkpoint as dcp
+
+    torch.manual_seed(3)
+    model = build_causal_lm(11, d_model=16, n_layer=1, n_head=2, block=4)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    expected = [parameter.detach().clone() for parameter in model.parameters()]
+    save_training_state(model, optimizer, str(tmp_path), step=1, loader_state={"epoch": 0})
+    assert (tmp_path / "_SUCCESS").is_file()
+    old_manifest = (tmp_path / "manifest.json").read_text()
+
+    real_save = dcp.save
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated mid-write failure")
+
+    monkeypatch.setattr(dcp, "save", _boom)
+    try:
+        with pytest.raises(RuntimeError, match="simulated mid-write failure"):
+            save_training_state(model, optimizer, str(tmp_path), step=2, loader_state={"epoch": 99})
+    finally:
+        monkeypatch.setattr(dcp, "save", real_save)
+
+    # The old checkpoint must remain exactly as valid as before the failed replacement attempt --
+    # never a state where neither checkpoint is marked loadable despite good data on disk.
+    assert (tmp_path / "_SUCCESS").is_file(), "old _SUCCESS marker must survive a failed replacement write"
+    assert (tmp_path / "manifest.json").read_text() == old_manifest
+
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+    payload = load_training_state(model, optimizer, str(tmp_path))
+
+    assert payload["step"] == 1
+    assert payload["loader_state"] == {"epoch": 0}
+    for restored, target in zip(model.parameters(), expected):
+        torch.testing.assert_close(restored, target, rtol=0.0, atol=0.0)
+
+
+def test_failed_async_replacement_save_leaves_the_old_checkpoint_fully_loadable(tmp_path, monkeypatch):
+    """Same regression as above, for the async save path. async_save_training_state used to unlink
+    the OLD _SUCCESS marker synchronously before even starting dcp.async_save -- so the old
+    checkpoint was invalidated the instant a replacement save was kicked off, independent of
+    whether the (possibly still in-flight) new write ever succeeded.
+    """
+    import torch.distributed.checkpoint as dcp
+
+    torch.manual_seed(5)
+    model = build_causal_lm(11, d_model=16, n_layer=1, n_head=2, block=4)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    expected = [parameter.detach().clone() for parameter in model.parameters()]
+    save_training_state(model, optimizer, str(tmp_path), step=1, loader_state={"epoch": 0})
+    assert (tmp_path / "_SUCCESS").is_file()
+
+    class _FailingFuture:
+        def wait(self):
+            raise RuntimeError("simulated async write failure")
+
+    monkeypatch.setattr(dcp, "async_save", lambda *args, **kwargs: _FailingFuture())
+
+    handle = async_save_training_state(model, optimizer, str(tmp_path), step=2, loader_state={"epoch": 99})
+    # Merely kicking off a (here: still in-flight / doomed) replacement save must not invalidate
+    # the old, already-valid checkpoint.
+    assert (tmp_path / "_SUCCESS").is_file()
+
+    with pytest.raises(RuntimeError, match="simulated async write failure"):
+        handle.wait()
+
+    assert (tmp_path / "_SUCCESS").is_file(), "old _SUCCESS marker must survive a failed async replacement"
+
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+    payload = load_training_state(model, optimizer, str(tmp_path))
+
+    assert payload["step"] == 1
+    assert payload["loader_state"] == {"epoch": 0}
+    for restored, target in zip(model.parameters(), expected):
+        torch.testing.assert_close(restored, target, rtol=0.0, atol=0.0)
 
 
 def test_megatron_provider_receives_every_parallel_dimension(monkeypatch):
