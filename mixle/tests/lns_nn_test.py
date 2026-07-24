@@ -32,6 +32,18 @@ class SoftmaxCrossEntropyTest(unittest.TestCase):
         self.assertTrue(np.allclose(p.sum(axis=1), 1.0, atol=1e-2))
         self.assertTrue(np.all(p >= 0))
 
+    def test_softmax_of_equal_logits_sums_to_exactly_one(self):
+        # MXR-080-0141: exponentiating the LNS-approximate log-softmax without renormalizing let 100
+        # equal logits sum to 1.00518 pre-fix -- a real violation of the probability-simplex contract a
+        # function named "softmax" must satisfy. Post-fix this must be exact to float64 precision, not
+        # merely "close" under a loose tolerance (test_softmax_is_a_distribution above already covers
+        # the loose-tolerance case; this is the audit's own exact scenario).
+        lns = LogNumberSystem(step=0.005)
+        p = softmax(np.zeros(100), lns, axis=-1)
+        self.assertAlmostEqual(float(p.sum()), 1.0, places=12)
+        # and it must still be the (renormalized) uniform distribution, not just "sums to 1 somehow"
+        self.assertTrue(np.allclose(p, 1.0 / 100))
+
     def test_cross_entropy_matches_float64(self):
         lns = LogNumberSystem(step=0.005)
         rng = np.random.RandomState(2)
