@@ -378,7 +378,12 @@ def health_liability(risk: DerivedQuantity, *, cost_per_case: float, discount: f
     return _SampleDerivedQuantity(samples=samples * factor, prior_dominated=prior_dominated)
 
 
-def exposure_constraints(options: list[dict], limits: dict[str, float]) -> list[dict]:
+def exposure_constraints(
+    options: list[dict],
+    limits: dict[str, float],
+    *,
+    treat_unmodeled_as_safe: bool = False,
+) -> list[dict]:
     """Screen candidate operating ``options`` against named exposure/exceedance ``limits`` (K6).
 
     ``limits`` maps an occupational/community exposure metric name (e.g. ``"silica_pm4"``, an
@@ -390,22 +395,73 @@ def exposure_constraints(options: list[dict], limits: dict[str, float]) -> list[
     Returns a *new* list (the input dicts are never mutated), one entry per option, each the
     original option's key/value pairs plus:
 
-    - ``"feasible"``: ``True`` iff the option breaches none of its limited metrics.
-    - ``"binding"``: the sorted list of limit names actually breached (empty when feasible) --
-      naming exactly which limit made the option infeasible.
+    - ``"status"``: one of ``"safe"``, ``"violating"``, or ``"unknown"``. ``"violating"`` means at
+      least one limited metric the option DOES carry a finite value for breaches its (finite) limit.
+      ``"unknown"`` means no limit was confirmed breached, but at least one limited metric could not
+      be evaluated for this option -- missing from the option entirely, a non-finite (NaN/Inf)
+      measurement, or a non-finite/missing limit -- "not modeled" and "safe" are never the same
+      outcome here, because this is a hard occupational/community exposure screen, not a soft
+      optimization preference (MXR-080-0095). A confirmed violation always dominates an unknown: one
+      metric's missing data never erases a different metric's real breach.
+    - ``"feasible"``: ``True`` iff ``status == "safe"`` -- unless ``treat_unmodeled_as_safe=True``, in
+      which case ``status == "unknown"`` also counts as feasible (see below). Kept as a plain boolean
+      for the existing contract H4's ``two_stage_stochastic_plan`` filtering relies on.
+    - ``"binding"``: the sorted list of limit names actually confirmed breached (empty unless
+      ``status == "violating"``) -- naming exactly which limit made the option infeasible.
+    - ``"unmodeled"``: the sorted list of limited metric names that could not be evaluated for this
+      option (empty unless ``status == "unknown"``) -- naming exactly which evidence was missing.
 
-    An option with no entry for a given limit key is not evaluated against that key (the metric was
-    simply not modeled for that option), not treated as a violation. A caller filters the returned
-    list down to the feasible options *before* handing the survivors' blocks to H4's
-    ``two_stage_stochastic_plan`` (``stochastic_opt.py``) -- an infeasible option is dropped from the
-    candidate set entirely, so the optimizer never has the chance to select it (see the K6 DoD).
+    This is a HARD safety screen, so it FAILS CLOSED by default: an option that breaches no limit it
+    was evaluated against, but leaves one or more limits unevaluated, is ``"unknown"`` and therefore
+    ``feasible=False`` -- unmodeled evidence is never silently treated as compliant, and a NaN
+    measurement (which would otherwise compare False, and so silently pass, against ``> limit``) is
+    treated the same as a missing one. Pass ``treat_unmodeled_as_safe=True`` to explicitly opt into
+    the old permissive behavior; this is a deliberate policy override the caller must request, and it
+    defaults to off. A caller filters the returned list down to the feasible options *before* handing
+    the survivors' blocks to H4's ``two_stage_stochastic_plan`` (``stochastic_opt.py``) -- an
+    infeasible (violating OR, by default, unknown) option is dropped from the candidate set entirely,
+    so the optimizer never has the chance to select it (see the K6 DoD).
     """
     annotated: list[dict] = []
     for option in options:
-        binding = sorted(name for name, limit in limits.items() if name in option and option[name] > limit)
+        binding: list[str] = []
+        unmodeled: list[str] = []
+        for name, limit in limits.items():
+            limit_val = float(limit)
+            if not np.isfinite(limit_val):
+                unmodeled.append(name)
+                continue
+            if name not in option:
+                unmodeled.append(name)
+                continue
+            value = float(option[name])
+            if not np.isfinite(value):
+                unmodeled.append(name)
+                continue
+            if value > limit_val:
+                binding.append(name)
+        binding.sort()
+        unmodeled.sort()
+
+        if binding:
+            status = "violating"
+        elif unmodeled:
+            status = "unknown"
+        else:
+            status = "safe"
+
+        if status == "violating":
+            feasible = False
+        elif status == "unknown":
+            feasible = bool(treat_unmodeled_as_safe)
+        else:
+            feasible = True
+
         out = dict(option)
-        out["feasible"] = len(binding) == 0
+        out["status"] = status
+        out["feasible"] = feasible
         out["binding"] = binding
+        out["unmodeled"] = unmodeled
         annotated.append(out)
     return annotated
 
