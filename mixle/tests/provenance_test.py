@@ -355,6 +355,62 @@ class EncodedIoTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_encoded(path)
 
+    def test_composite_field_count_mismatch_rejected(self):
+        # Regression: a dataset encoded with a one-field CompositeDataEncoder must not be accepted
+        # as compatible with a two-field CompositeDataEncoder request. Both encoders share the same
+        # class name ("CompositeDataEncoder"), so a compatibility check that only compared
+        # type(encoder).__name__ silently missed this -- the shape mismatch would then surface as a
+        # crash or silently wrong results wherever the mis-shapen loaded data was actually used.
+        one_field_encoder = CompositeDistribution([GaussianDistribution(0.0, 1.0)]).dist_to_encoder()
+        two_field_encoder = CompositeDistribution(
+            [GaussianDistribution(0.0, 1.0), GaussianDistribution(0.0, 1.0)]
+        ).dist_to_encoder()
+        # Same class name, but structurally different -- this is exactly the gap a class-name-only
+        # check misses.
+        self.assertEqual(type(one_field_encoder).__name__, type(two_field_encoder).__name__)
+        self.assertNotEqual(one_field_encoder, two_field_encoder)
+
+        enc = one_field_encoder.seq_encode([(1.0,), (2.0,), (3.0,)])
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "enc.pspenc")
+            save_encoded(enc, path, encoder=one_field_encoder)
+            with self.assertRaises(ValueError):
+                load_encoded(path, encoder=two_field_encoder)
+
+    def test_composite_matching_shape_round_trips(self):
+        # Negative control for the regression above: two separately-constructed but structurally
+        # equal composite encoders (same field count, same component encoder types) must still be
+        # accepted -- the stricter shape check must not false-reject genuinely compatible encoders.
+        encoder_a = CompositeDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(0.0, 1.0)])
+        encoder_b = CompositeDistribution([GaussianDistribution(1.0, 2.0), GaussianDistribution(3.0, 4.0)])
+        encoder_a = encoder_a.dist_to_encoder()
+        encoder_b = encoder_b.dist_to_encoder()
+        self.assertEqual(encoder_a, encoder_b)
+
+        enc = encoder_a.seq_encode([(1.0, 2.0), (3.0, 4.0)])
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "enc.pspenc")
+            save_encoded(enc, path, encoder=encoder_a)
+            loaded = load_encoded(path, encoder=encoder_b)
+            np.testing.assert_allclose(loaded[0], enc[0])
+            np.testing.assert_allclose(loaded[1], enc[1])
+
+    def test_same_class_different_dim_leaf_encoder_rejected(self):
+        # Broader coverage: the fix is a general structural check (str(encoder)), not special-cased
+        # to CompositeDataEncoder -- a same-class leaf encoder with a different structural shape
+        # (dimension) must also be rejected.
+        enc_2d = DiagonalGaussianDistribution([0.0, 0.0], [1.0, 1.0]).dist_to_encoder()
+        enc_3d = DiagonalGaussianDistribution([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]).dist_to_encoder()
+        self.assertEqual(type(enc_2d).__name__, type(enc_3d).__name__)
+        self.assertNotEqual(enc_2d, enc_3d)
+
+        enc = enc_2d.seq_encode([[1.0, 2.0], [3.0, 4.0]])
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "enc.pspenc")
+            save_encoded(enc, path, encoder=enc_2d)
+            with self.assertRaises(ValueError):
+                load_encoded(path, encoder=enc_3d)
+
 
 if __name__ == "__main__":
     unittest.main()
