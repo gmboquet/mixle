@@ -81,24 +81,46 @@ def brier_score(prob: np.ndarray, outcome: np.ndarray, *, mean: bool = True) -> 
     the squared error across classes, so it ranges in ``[0, 2]``.
 
     Args:
-        prob: ``(n,)`` positive-class probabilities, or ``(n, K)`` class probabilities.
-        outcome: ``(n,)`` 0/1 or integer labels, or ``(n, K)`` one-hot.
+        prob: ``(n,)`` positive-class probabilities, or ``(n, K)`` class probabilities. Must be
+            finite and lie in ``[0, 1]`` -- these are genuine probabilities, not densities.
+        outcome: ``(n,)`` 0/1 or integer labels, or ``(n, K)`` one-hot. Must be finite, and each
+            entry a legitimate label for ``prob``'s shape: 0/1 against a 1-D binary ``prob``, an
+            integer class index in ``[0, K)`` against an ``(n, K)`` ``prob``, or 0/1 against an
+            ``(n, K)`` one-hot matrix.
         mean: if True return the mean; otherwise the per-observation vector.
 
     Returns:
         Mean Brier score (float) or the per-observation array.
+
+    Raises:
+        ValueError: if ``prob`` is not finite or has entries outside ``[0, 1]``, or if ``outcome``
+            is not finite or has entries outside its valid domain. Without these checks an invalid
+            ``prob``/``outcome`` pair can cancel out into a deceptively "perfect" score of ``0.0``
+            (e.g. ``brier_score([-1, 2], [-1, 2])``), and an out-of-range integer label silently
+            corrupts an unrelated one-hot slot instead of raising.
     """
     p = np.asarray(prob, dtype=float)
-    y = np.asarray(outcome)
+    if not np.isfinite(p).all():
+        raise ValueError("brier_score requires prob to be finite (no NaN/Inf).")
+    if np.any((p < 0.0) | (p > 1.0)):
+        raise ValueError("brier_score requires prob entries to be probabilities in [0, 1].")
+    y = np.asarray(outcome, dtype=float)
+    if not np.isfinite(y).all():
+        raise ValueError("brier_score requires outcome to be finite (no NaN/Inf).")
     if p.ndim == 1:
-        yb = y.astype(float)
-        return _reduce((p - yb) ** 2, mean)
+        if np.any((y != 0.0) & (y != 1.0)):
+            raise ValueError("brier_score requires a binary 0/1 outcome to match a 1-D prob.")
+        return _reduce((p - y) ** 2, mean)
     n, k = p.shape
     if y.ndim == 1:
+        if np.any((y != np.round(y)) | (y < 0) | (y >= k)):
+            raise ValueError(f"brier_score requires integer outcome labels in [0, {k}).")
         onehot = np.zeros((n, k), dtype=float)
         onehot[np.arange(n), y.astype(int)] = 1.0
     else:
-        onehot = y.astype(float)
+        if np.any((y != 0.0) & (y != 1.0)):
+            raise ValueError("brier_score requires a 0/1 one-hot outcome matrix.")
+        onehot = y
     return _reduce(np.sum((p - onehot) ** 2, axis=1), mean)
 
 
@@ -115,17 +137,32 @@ def brier_decomposition(prob: np.ndarray, outcome: np.ndarray, *, bins: int = 10
     of the data, not the forecaster).
 
     Args:
-        prob: ``(n,)`` predicted probabilities of the positive class.
-        outcome: ``(n,)`` 0/1 outcomes.
+        prob: ``(n,)`` predicted probabilities of the positive class. Must be finite and lie in
+            ``[0, 1]``.
+        outcome: ``(n,)`` 0/1 outcomes. Must be finite and each entry exactly 0 or 1.
         bins: number of equal-width probability bins.
 
     Returns:
         ``{'reliability', 'resolution', 'uncertainty', 'brier'}``. The identity
         ``reliability - resolution + uncertainty == brier`` holds up to binning of the score's
         in-bin variance term.
+
+    Raises:
+        ValueError: if ``prob`` is not finite or has entries outside ``[0, 1]``, or if ``outcome``
+            is not finite or has entries outside ``{0, 1}``. Without these checks an invalid input
+            pair can silently produce a mathematically impossible negative "brier" value instead of
+            raising (e.g. ``brier_decomposition([-1, 2], [-1, 2])`` returns ``brier == -2.0``).
     """
     p = np.asarray(prob, dtype=float)
     y = np.asarray(outcome, dtype=float)
+    if not np.isfinite(p).all():
+        raise ValueError("brier_decomposition requires prob to be finite (no NaN/Inf).")
+    if np.any((p < 0.0) | (p > 1.0)):
+        raise ValueError("brier_decomposition requires prob entries to be probabilities in [0, 1].")
+    if not np.isfinite(y).all():
+        raise ValueError("brier_decomposition requires outcome to be finite (no NaN/Inf).")
+    if np.any((y != 0.0) & (y != 1.0)):
+        raise ValueError("brier_decomposition requires a binary 0/1 outcome.")
     n = p.shape[0]
     p_bar = float(y.mean())
     edges = np.linspace(0.0, 1.0, bins + 1)
