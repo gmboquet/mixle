@@ -15,13 +15,24 @@ from typing import Any
 from mixle.data.structure import EXCHANGEABLE, SampleStructure
 
 
+def _positive_int(name: str, value: Any) -> int:
+    """Validate that ``value`` is an exact positive ``int`` (rejects ``bool``, other types, and
+    nonpositive/fractional values) and return it. Used to fail partition controls clearly at entry
+    rather than letting them silently collapse to one chunk or blow up deep inside arithmetic."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return value
+
+
 def partition_records(records: Sequence[Any], structure: SampleStructure, n: int) -> list[list[Any]]:
     """Split ``records`` into ``n`` partitions respecting ``structure``.
 
     Strideable structures give ``records[k::n]`` (identical to the historical chunking); a
     partially-exchangeable structure groups by its key and round-robins whole groups across partitions.
+    ``n`` must be a positive integer -- a nonpositive or fractional ``n`` used to silently collapse to
+    a single partition instead of failing.
     """
-    n = max(1, int(n))
+    n = _positive_int("n", n)
     if structure.strides_records:
         return [list(records[k::n]) for k in range(n)]
     groups: dict[Any, list[Any]] = {}
@@ -39,12 +50,27 @@ def partition_records(records: Sequence[Any], structure: SampleStructure, n: int
 
 
 def num_chunks_for(size: int, num_chunks: int = 1, chunk_size: int | None = None) -> int:
-    """Resolve the chunk count from an explicit ``num_chunks`` or a target ``chunk_size`` (as seq_encode does)."""
+    """Resolve the chunk count from an explicit ``num_chunks`` or a target ``chunk_size`` (as seq_encode does).
+
+    Both controls are validated as exact positive integers before any arithmetic: ``chunk_size=0``
+    used to raise a bare ``ZeroDivisionError``, and a negative/fractional ``chunk_size`` or a
+    nonpositive/fractional ``num_chunks`` used to silently collapse to one chunk instead of failing --
+    these bound memory, so silently weakening them can materially change an execution plan. A
+    non-default ``num_chunks`` supplied together with ``chunk_size`` is rejected as conflicting rather
+    than silently letting ``chunk_size`` win.
+    """
+    _positive_int("num_chunks", num_chunks)
     if chunk_size is not None:
+        _positive_int("chunk_size", chunk_size)
+        if num_chunks != 1:
+            raise ValueError(
+                f"num_chunks={num_chunks!r} and chunk_size={chunk_size!r} were both given explicitly; "
+                "pass only one (chunk_size derives the chunk count from size)."
+            )
         import math
 
         return max(1, int(math.ceil(float(size) / float(chunk_size))))
-    return max(1, int(num_chunks))
+    return num_chunks
 
 
 def encode_partitions(
