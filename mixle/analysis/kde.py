@@ -21,10 +21,50 @@ import numpy as np
 from numpy.random import RandomState
 from scipy import stats
 
+_BANDWIDTH_METHODS = ("silverman", "scott")
+
+
+def _require_variation(x: np.ndarray, method: str) -> None:
+    """Guard for automatic bandwidth selectors (Silverman/Scott), which divide by the sample spread
+    (standard deviation or IQR). That spread is exactly zero for a constant sample and undefined
+    (``ddof=1`` divides by zero) for a sample with fewer than 2 points, so an empty, singleton, or
+    constant sample previously produced a silent zero or NaN bandwidth -- and every subsequent kernel
+    evaluation divides by that bandwidth, turning the whole density into NaN (MXR-080-0100).
+
+    Reject those cases explicitly instead. A caller with a genuinely degenerate sample can still build a
+    :class:`KDE` by supplying an explicit positive numeric ``bandwidth`` (bypassing automatic selection
+    entirely -- a single fixed-bandwidth Gaussian bump is still a well-defined density even at one point
+    or a repeated constant).
+
+    Raises:
+        ValueError: ``x`` has fewer than 2 observations, contains a non-finite entry, or is constant.
+    """
+    n = x.shape[0]
+    if n < 2:
+        raise ValueError(
+            f"{method} needs at least 2 observations to estimate a spread for an automatic bandwidth, "
+            f"got {n}. Pass an explicit positive numeric `bandwidth` instead."
+        )
+    if not np.all(np.isfinite(x)):
+        n_bad = int(np.sum(~np.isfinite(x)))
+        raise ValueError(f"{method} requires finite data, got {n_bad} of {n} non-finite entries")
+    if not np.ptp(x) > 0:
+        raise ValueError(
+            f"{method} needs nonzero variation to estimate a spread for an automatic bandwidth, got a "
+            f"constant sample (all values equal to {float(x[0]):g}). Pass an explicit positive numeric "
+            "`bandwidth` instead."
+        )
+
 
 def silverman_bandwidth(data: np.ndarray) -> float:
-    """Silverman's rule-of-thumb bandwidth ``0.9 min(sd, IQR/1.34) n^{-1/5}`` (1-D)."""
+    """Silverman's rule-of-thumb bandwidth ``0.9 min(sd, IQR/1.34) n^{-1/5}`` (1-D).
+
+    Raises:
+        ValueError: ``data`` has fewer than 2 observations, non-finite entries, or zero variation (see
+            :func:`_require_variation`; MXR-080-0100).
+    """
     x = np.asarray(data, dtype=float).ravel()
+    _require_variation(x, "silverman_bandwidth")
     n = x.shape[0]
     sd = np.std(x, ddof=1)
     iqr = np.subtract(*np.percentile(x, [75, 25]))
@@ -33,18 +73,82 @@ def silverman_bandwidth(data: np.ndarray) -> float:
 
 
 def scott_bandwidth(data: np.ndarray) -> float:
-    """Scott's rule-of-thumb bandwidth ``sd * n^{-1/(d+4)}``."""
+    """Scott's rule-of-thumb bandwidth ``sd * n^{-1/(d+4)}``.
+
+    Raises:
+        ValueError: ``data`` has fewer than 2 observations, non-finite entries, or zero variation in
+            every marginal (MXR-080-0100).
+    """
     x = np.atleast_2d(np.asarray(data, dtype=float))
     if x.shape[0] == 1:
         x = x.T
     n, d = x.shape
-    return float(np.mean(np.std(x, axis=0, ddof=1)) * n ** (-1.0 / (d + 4)))
+    if n < 2:
+        raise ValueError(
+            "scott_bandwidth needs at least 2 observations to estimate a spread for an automatic "
+            f"bandwidth, got {n}. Pass an explicit positive numeric `bandwidth` instead."
+        )
+    if not np.all(np.isfinite(x)):
+        n_bad = int(np.sum(~np.isfinite(x)))
+        raise ValueError(f"scott_bandwidth requires finite data, got {n_bad} of {x.size} non-finite entries")
+    sd = np.std(x, axis=0, ddof=1)
+    if not np.all(sd > 0):
+        raise ValueError(
+            "scott_bandwidth needs nonzero variation in every dimension to estimate a spread for an "
+            "automatic bandwidth, got a constant sample. Pass an explicit positive numeric `bandwidth` "
+            "instead."
+        )
+    return float(np.mean(sd) * n ** (-1.0 / (d + 4)))
 
 
 def _resolve_bw(data: np.ndarray, bandwidth) -> float:
+    """Resolve a bandwidth spec to a strictly positive, finite scalar bandwidth.
+
+    Raises:
+        ValueError: ``bandwidth`` is a string other than ``"silverman"``/``"scott"``, or a number that
+            is not strictly positive and finite (MXR-080-0100 -- previously an unrecognized method name
+            silently fell through to Scott's rule, and a non-positive/non-finite number was accepted
+            without complaint).
+    """
     if isinstance(bandwidth, str):
+        if bandwidth not in _BANDWIDTH_METHODS:
+            raise ValueError(
+                f"unsupported bandwidth method {bandwidth!r}; expected one of {_BANDWIDTH_METHODS} or "
+                "a positive finite numeric bandwidth"
+            )
         return silverman_bandwidth(data) if bandwidth == "silverman" else scott_bandwidth(data)
-    return float(bandwidth)
+    bw = float(bandwidth)
+    if not np.isfinite(bw) or bw <= 0.0:
+        raise ValueError(f"bandwidth must be strictly positive and finite, got {bandwidth!r}")
+    return bw
+
+
+def _validate_bounds(
+    bounds: tuple[float | None, float | None] | None,
+) -> tuple[float | None, float | None] | None:
+    """Validate a ``(lo, hi)`` bounds pair for reflection boundary correction (MXR-080-0100): either
+    side may be ``None`` (unbounded), but a given side must be finite, and if both are given, ``lo``
+    must be strictly less than ``hi``.
+
+    Raises:
+        ValueError: ``bounds`` is not a 2-element pair, a given side is non-finite, or ``lo >= hi``.
+    """
+    if bounds is None:
+        return None
+    if not (isinstance(bounds, (tuple, list)) and len(bounds) == 2):
+        raise ValueError(f"bounds must be a (lo, hi) pair, got {bounds!r}")
+    lo, hi = bounds
+    if lo is not None:
+        lo = float(lo)
+        if not np.isfinite(lo):
+            raise ValueError(f"bounds lo must be finite or None, got {lo!r}")
+    if hi is not None:
+        hi = float(hi)
+        if not np.isfinite(hi):
+            raise ValueError(f"bounds hi must be finite or None, got {hi!r}")
+    if lo is not None and hi is not None and not lo < hi:
+        raise ValueError(f"bounds lo must be strictly less than hi, got bounds=({lo!r}, {hi!r})")
+    return (lo, hi)
 
 
 class KDE:
@@ -62,10 +166,16 @@ class KDE:
         bounds: tuple[float | None, float | None] | None = None,
         adaptive: bool = False,
     ) -> None:
-        self.data = np.asarray(data, dtype=float).ravel()
+        x = np.asarray(data, dtype=float).ravel()
+        if x.shape[0] == 0:
+            raise ValueError("KDE requires at least one observation, got an empty sample")
+        if not np.all(np.isfinite(x)):
+            n_bad = int(np.sum(~np.isfinite(x)))
+            raise ValueError(f"KDE data must be finite, got {n_bad} of {x.shape[0]} non-finite entries")
+        self.data = x
         self.n = self.data.shape[0]
         self.bandwidth = _resolve_bw(self.data, bandwidth)
-        self.bounds = bounds
+        self.bounds = _validate_bounds(bounds)
         self.adaptive = adaptive
         self._local_bw = np.full(self.n, self.bandwidth)
         if adaptive:
@@ -112,6 +222,12 @@ def kde(data: np.ndarray, *, bandwidth="silverman", bounds=None, adaptive: bool 
 
     Returns:
         A :class:`KDE`.
+
+    Raises:
+        ValueError: ``data`` is empty or non-finite; ``bandwidth`` is an unrecognized method name or a
+            non-positive/non-finite number; automatic bandwidth selection (``"silverman"``/``"scott"``)
+            is requested on fewer than 2 observations or a constant sample; or ``bounds`` is out of
+            order or non-finite (MXR-080-0100).
     """
     return KDE(data, bandwidth=bandwidth, bounds=bounds, adaptive=adaptive)
 
@@ -138,8 +254,22 @@ def kde_mode(
 
     Returns:
         The mode (float), or ``{'mode', 'ci_low', 'ci_high'}`` when ``ci`` is True.
+
+    Raises:
+        ValueError: ``data`` is empty; or, when ``ci`` is True, ``n_boot`` is not a positive integer or
+            ``ci_level`` is not in the open interval ``(0, 1)`` (MXR-080-0100). Also propagates any
+            :class:`KDE` construction error from :func:`kde` (e.g. automatic bandwidth selection on a
+            constant sample).
     """
     x = np.asarray(data, dtype=float).ravel()
+    if x.shape[0] == 0:
+        raise ValueError("kde_mode requires at least one observation, got an empty sample")
+    if ci:
+        if isinstance(n_boot, bool) or not isinstance(n_boot, (int, np.integer)) or n_boot < 1:
+            raise ValueError(f"n_boot must be a positive integer, got {n_boot!r}")
+        lvl = float(ci_level)
+        if not np.isfinite(lvl) or not (0.0 < lvl < 1.0):
+            raise ValueError(f"ci_level must be in the open interval (0, 1), got {ci_level!r}")
     if grid is None:
         pad = 0.1 * (x.max() - x.min() + 1e-12)
         grid = np.linspace(x.min() - pad, x.max() + pad, 512)
@@ -178,14 +308,32 @@ def intensity(
 
     Returns:
         The intensity evaluated on ``grid``.
+
+    Raises:
+        ValueError: ``events`` is empty or non-finite; ``bandwidth`` is an unrecognized method name or a
+            non-positive/non-finite number; automatic bandwidth selection is requested on fewer than 2
+            events or constant events; or (when ``edge_correct`` is True) the effective ``domain`` --
+            explicitly passed, or defaulted to the event range -- is non-finite or has ``lo >= hi``
+            (MXR-080-0100; a collapsed-to-a-point domain, e.g. from constant events with an explicit
+            numeric bandwidth, previously produced a silent divide-by-near-zero blowup).
     """
     e = np.asarray(events, dtype=float).ravel()
+    if e.shape[0] == 0:
+        raise ValueError("intensity requires at least one event, got an empty sample")
+    if not np.all(np.isfinite(e)):
+        n_bad = int(np.sum(~np.isfinite(e)))
+        raise ValueError(f"event locations must be finite, got {n_bad} of {e.shape[0]} non-finite entries")
     grid = np.asarray(grid, dtype=float)
     h = _resolve_bw(e, bandwidth)
     u = (grid[:, None] - e[None, :]) / h
     lam = np.sum(stats.norm.pdf(u) / h, axis=1)
     if edge_correct:
-        lo, hi = domain if domain is not None else (e.min(), e.max())
+        lo, hi = domain if domain is not None else (float(e.min()), float(e.max()))
+        lo, hi = float(lo), float(hi)
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            raise ValueError(f"domain must be finite, got domain=({lo!r}, {hi!r})")
+        if not lo < hi:
+            raise ValueError(f"domain lo must be strictly less than hi, got domain=({lo!r}, {hi!r})")
         q = stats.norm.cdf((hi - grid) / h) - stats.norm.cdf((lo - grid) / h)
         lam = lam / np.clip(q, 1e-6, None)
     return lam
