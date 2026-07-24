@@ -18,12 +18,25 @@ is the only way to build one -- used directly by ``build_budget_index``, ``compo
 ``heterogeneous_pcfg.py``), its constructor is also hardened here against the MXR-080-0207
 invariants (finite bounds, certified/unique bin ids, callable getter) that a checked factory
 would otherwise enforce -- there is nowhere else for that validation to live.
+
+MXR-080-0207 (High): the direct constructors of ``QuantizedEnumerationIndex`` and
+``QuantizedCrossIndex`` (which DO have separate checked factory methods -- ``from_enumerator``/
+``from_items``) must enforce the same invariants those factories already enforce: finite bounds,
+ordered/unique bins (duplicate or unsorted bins corrupt the bisect rank table), component arity,
+and per-row score length (``QuantizedCrossIndex`` could otherwise build joint bin-id keys whose
+dimensionality silently differs from ``max_bits``).
 """
 
+import math
 import unittest
 
 from mixle.enumeration.quantization.core import Quantizer, build_budget_index
-from mixle.enumeration.quantization.seek import AmbiguousCountError, LazyQuantizedEnumerationIndex
+from mixle.enumeration.quantization.seek import (
+    AmbiguousCountError,
+    LazyQuantizedEnumerationIndex,
+    QuantizedCrossIndex,
+    QuantizedEnumerationIndex,
+)
 
 
 class _FakeHist:
@@ -194,6 +207,111 @@ class LazyQuantizedEnumerationIndexDirectConstructorTestCase(unittest.TestCase):
         )
         self.assertEqual(idx.total_count, 5)
         self.assertIsInstance(idx.counts[0], int)
+
+
+class QuantizedEnumerationIndexDirectConstructorTestCase(unittest.TestCase):
+    """MXR-080-0207: the direct constructor must enforce the same invariants the checked
+    factory methods (from_enumerator/from_items) already enforce."""
+
+    def test_rejects_non_finite_max_bits(self):
+        with self.assertRaises(ValueError):
+            QuantizedEnumerationIndex([(0, [("a", 0.0)])], bin_width_bits=1.0, max_bits=float("nan"), truncated=False)
+        with self.assertRaises(ValueError):
+            QuantizedEnumerationIndex([(0, [("a", 0.0)])], bin_width_bits=1.0, max_bits=float("inf"), truncated=False)
+        with self.assertRaises(ValueError):
+            QuantizedEnumerationIndex([(0, [("a", 0.0)])], bin_width_bits=1.0, max_bits=-1.0, truncated=False)
+
+    def test_rejects_non_finite_bin_width_bits(self):
+        with self.assertRaises(ValueError):
+            QuantizedEnumerationIndex([(0, [("a", 0.0)])], bin_width_bits=float("nan"), max_bits=4.0, truncated=False)
+
+    def test_rejects_nonpositive_bin_width_bits(self):
+        with self.assertRaises(ValueError):
+            QuantizedEnumerationIndex([(0, [("a", 0.0)])], bin_width_bits=0.0, max_bits=4.0, truncated=False)
+
+    def test_rejects_duplicate_bin_ids(self):
+        # Pre-fix, this would silently corrupt _cum_starts/_cum_bins/_bin_lookup (the last
+        # occurrence's items overwrite the first's in the lookup dict while the position table
+        # still reserves ranks for both) -- exactly the "duplicate bins corrupt the bisect table"
+        # failure mode the finding describes.
+        with self.assertRaises(ValueError):
+            QuantizedEnumerationIndex(
+                [(0, [("a", 0.0)]), (1, [("b", -1.0)]), (0, [("c", -2.0)])],
+                bin_width_bits=1.0,
+                max_bits=4.0,
+                truncated=False,
+            )
+
+    def test_rejects_unsorted_bins(self):
+        with self.assertRaises(ValueError):
+            QuantizedEnumerationIndex(
+                [(1, [("a", -1.0)]), (0, [("b", 0.0)])], bin_width_bits=1.0, max_bits=4.0, truncated=False
+            )
+
+    def test_rejects_fractional_bin_id(self):
+        with self.assertRaises(ValueError):
+            QuantizedEnumerationIndex([(0.5, [("a", 0.0)])], bin_width_bits=1.0, max_bits=4.0, truncated=False)
+
+    def test_rejects_bool_bin_id(self):
+        with self.assertRaises(TypeError):
+            QuantizedEnumerationIndex([(True, [("a", 0.0)])], bin_width_bits=1.0, max_bits=4.0, truncated=False)
+
+    def test_well_formed_direct_construction_still_works(self):
+        # Negative control: sorted, unique, finite-bounded input still builds correctly -- exactly
+        # what the factory methods themselves always pass through.
+        idx = QuantizedEnumerationIndex(
+            [(0, [("a", 0.0)]), (1, [("b", -1.0), ("c", -1.0)])], bin_width_bits=1.0, max_bits=4.0, truncated=False
+        )
+        self.assertEqual(idx.total_count, 3)
+        self.assertEqual(idx.counts, {0: 1, 1: 2})
+        self.assertEqual(idx.get(0), ("a", 0.0))
+        self.assertEqual(idx.get(1), ("b", -1.0))
+        self.assertEqual(idx.get(2), ("c", -1.0))
+
+    def test_factories_still_work(self):
+        # Negative control: the checked factory methods (which always pass sorted/unique bins
+        # derived from a dict) are unaffected by the new direct-constructor validation.
+        items = [("a", math.log(0.5)), ("b", math.log(0.3)), ("c", math.log(0.2))]
+        idx = QuantizedEnumerationIndex.from_items(items, max_bits=8.0)
+        self.assertEqual(idx.total_count, 3)
+
+
+class QuantizedCrossIndexDirectConstructorTestCase(unittest.TestCase):
+    """MXR-080-0207: QuantizedCrossIndex's direct constructor must reject rows whose score-vector
+    length does not match max_bits's declared dimensionality, instead of silently building joint
+    bin-id keys whose arity differs from num_components."""
+
+    def test_rejects_dimensionality_mismatch(self):
+        # Pre-fix, this would build successfully: num_components == 2 (from max_bits) but the
+        # joint bin-id key stored in self.counts would have length 3 (from log_probs) -- an
+        # internal consistency violation between the declared bit-width and the actual key shape.
+        with self.assertRaises(ValueError):
+            QuantizedCrossIndex([("v", [0.0, -1.0, -2.0])], max_bits=[4.0, 4.0], bin_width_bits=1.0)
+
+    def test_rejects_non_finite_max_bits(self):
+        with self.assertRaises(ValueError):
+            QuantizedCrossIndex([("v", [0.0, -1.0])], max_bits=[4.0, float("inf")], bin_width_bits=1.0)
+
+    def test_rejects_non_finite_bin_width_bits(self):
+        with self.assertRaises(ValueError):
+            QuantizedCrossIndex([("v", [0.0, -1.0])], max_bits=[4.0, 4.0], bin_width_bits=float("nan"))
+
+    def test_rejects_nonpositive_bin_width_bits(self):
+        with self.assertRaises(ValueError):
+            QuantizedCrossIndex([("v", [0.0, -1.0])], max_bits=[4.0, 4.0], bin_width_bits=0.0)
+
+    def test_well_formed_direct_construction_still_works(self):
+        idx = QuantizedCrossIndex([("v1", [0.0, -1.0]), ("v2", [-2.0, -3.0])], max_bits=[4.0, 4.0], bin_width_bits=1.0)
+        self.assertEqual(idx.num_components, 2)
+        self.assertEqual(idx.total_count, 2)
+        self.assertTrue(all(len(key) == 2 for key in idx.counts))  # every joint bin key has arity 2
+
+    def test_from_items_factory_still_works(self):
+        idx = QuantizedCrossIndex.from_items(
+            [("v1", [0.0, -1.0]), ("v2", [-2.0, -3.0])], max_bits=[4.0, 4.0], bin_width_bits=1.0
+        )
+        self.assertEqual(idx.num_components, 2)
+        self.assertTrue(all(len(key) == 2 for key in idx.counts))
 
 
 if __name__ == "__main__":

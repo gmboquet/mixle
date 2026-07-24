@@ -92,7 +92,20 @@ class QuantizedEnumerationIndex:
         max_bits: float,
         truncated: bool,
     ) -> None:
-        self._bins = [(int(b), list(items)) for b, items in bins]
+        if not math.isfinite(max_bits) or max_bits < 0:
+            raise ValueError(f"max_bits must be finite and non-negative, got {max_bits!r}")
+        if not math.isfinite(bin_width_bits) or bin_width_bits <= 0:
+            raise ValueError(f"bin_width_bits must be finite and positive, got {bin_width_bits!r}")
+
+        self._bins = [(_certified_integer(b, label="bin id", allow_negative=True), list(items)) for b, items in bins]
+        prev: int | None = None
+        for b, _items in self._bins:
+            if prev is not None and b <= prev:
+                raise ValueError(
+                    f"bins must be strictly increasing and unique by bin id (got {b} after {prev}); "
+                    "duplicate or unsorted bins corrupt the bisect rank table -- see MXR-080-0207."
+                )
+            prev = b
         self.bin_width_bits = float(bin_width_bits)
         self.max_bits = float(max_bits)
         self.truncated = bool(truncated)
@@ -382,10 +395,27 @@ class QuantizedCrossIndex:
         bin_width_bits: float,
         truncated: bool = False,
     ) -> None:
-        if bin_width_bits <= 0:
-            raise ValueError("bin_width_bits must be positive.")
-        self.items = [(v, tuple(float(lp) for lp in lps)) for v, lps in items]
-        self.max_bits = tuple(float(b) for b in max_bits)
+        if not math.isfinite(bin_width_bits) or bin_width_bits <= 0:
+            raise ValueError(f"bin_width_bits must be finite and positive, got {bin_width_bits!r}")
+        max_bits_tuple = tuple(float(b) for b in max_bits)
+        for b in max_bits_tuple:
+            if not math.isfinite(b):
+                raise ValueError(f"max_bits entries must be finite, got {b!r}")
+
+        self.items = []
+        for v, lps in items:
+            lps_t = tuple(float(lp) for lp in lps)
+            # Every row's score vector must match max_bits's dimensionality; otherwise the joint
+            # bin-id tuples built below have a component count that disagrees with num_components,
+            # a dimensionality inconsistency between the declared bit-width and the actual key
+            # structure (MXR-080-0207).
+            if len(lps_t) != len(max_bits_tuple):
+                raise ValueError(
+                    f"log_probs length {len(lps_t)} does not match max_bits length "
+                    f"{len(max_bits_tuple)} for value {v!r}."
+                )
+            self.items.append((v, lps_t))
+        self.max_bits = max_bits_tuple
         self.bin_width_bits = float(bin_width_bits)
         self.truncated = bool(truncated)
         self.num_components = len(self.max_bits)
