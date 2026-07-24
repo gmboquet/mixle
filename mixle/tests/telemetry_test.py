@@ -39,6 +39,40 @@ class RecorderTest(unittest.TestCase):
         ev.outcome["correct"] = True
         self.assertEqual(t.training_rows("escalation")[0][2], {"correct": True})
 
+    def test_outcome_mutation_after_record_is_persisted_on_explicit_flush(self):
+        # Reproduces the reported bug: a record initially logged with a placeholder outcome (e.g.
+        # "pending") is mutated in place afterward -- the documented "close the loop later"
+        # pattern exercised by test_outcome_can_be_closed_later above. Before the fix, `record()`
+        # flushed (and forgot) each event immediately (default flush_every=1), so a later
+        # `flush()` was a no-op for it and a fresh reader of the JSONL log saw the stale
+        # pre-mutation value forever. Flushing now rewrites the whole buffer, so the mutation
+        # reaches disk.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "events.jsonl")
+            t = Telemetry(path)
+            ev = t.record("escalation", features={"conf": 0.6}, choice="escalate", outcome={"status": "pending"})
+            ev.outcome["status"] = "success"
+            ev.outcome["correct"] = True
+            t.flush()
+
+            reloaded = list(Telemetry(path).events(kind="escalation"))
+            self.assertEqual(len(reloaded), 1)
+            self.assertEqual(reloaded[0].outcome, {"status": "success", "correct": True})
+
+    def test_outcome_mutation_is_swept_up_by_a_later_auto_flush_too(self):
+        # No explicit flush() needed: recording a subsequent event triggers the default
+        # flush_every=1 auto-flush, which (since it rewrites the full buffer) also persists the
+        # earlier event's mutated outcome.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "events.jsonl")
+            t = Telemetry(path)
+            ev = t.record("escalation", features={"conf": 0.6}, choice="escalate")
+            ev.outcome["correct"] = True
+            t.record("escalation", features={"conf": 0.9}, choice="answer")
+
+            reloaded = list(Telemetry(path).events(kind="escalation"))
+            self.assertEqual(reloaded[0].outcome, {"correct": True})
+
     def test_persistence_round_trip(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "events.jsonl")

@@ -39,7 +39,7 @@ class Event:
     kind: str
     features: dict[str, Any] = field(default_factory=dict)  # what the decision was made from
     choice: Any = None  # what was decided (a method name, a placement, a route, an action)
-    outcome: dict[str, Any] = field(default_factory=dict)  # how it turned out (filled now or later)
+    outcome: dict[str, Any] = field(default_factory=dict)  # how it turned out (filled now or later; see record())
     tags: dict[str, str] = field(default_factory=dict)  # scope/task/version labels for filtering
     ts: float = 0.0  # wall time; set by the recorder
 
@@ -80,7 +80,14 @@ class Telemetry:
         tags: dict[str, str] | None = None,
         when: float | None = None,
     ) -> Event:
-        """Record one decision event; returns it (mutate ``.outcome`` later to close the loop)."""
+        """Record one decision event; returns it (mutate ``.outcome`` later to close the loop).
+
+        The mutation updates this recorder's in-memory buffer immediately and is captured by the
+        next flush -- an explicit :meth:`flush` call, or the next automatic flush once
+        ``flush_every`` more events have been recorded -- because every flush rewrites the full
+        buffered log rather than only appending whatever is new. Until that next flush, the JSONL
+        file on disk (and any other reader with it open) still shows the pre-mutation value.
+        """
         with self._lock:
             self._clock += 1.0
             ev = Event(
@@ -116,12 +123,19 @@ class Telemetry:
             self._flush_locked()
 
     def _flush_locked(self) -> None:
-        if self.path is None or not self._unflushed:
+        if self.path is None:
             return
+        # Rewrite the *entire* buffer, not just the newly-appended events: a caller may have
+        # mutated an already-flushed Event's `.outcome` in place (the documented "close the loop
+        # later" pattern) since the last flush, and an append-only write would never pick that up
+        # -- the on-disk log would silently keep showing the stale (e.g. "pending") value forever.
+        # Write to a temp file and swap it in so a crash mid-flush can't leave a truncated log.
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a") as f:
-            for ev in self._unflushed:
+        tmp_path = self.path.parent / (self.path.name + ".tmp")
+        with open(tmp_path, "w") as f:
+            for ev in self._buffer:
                 f.write(json.dumps(ev.as_row()) + "\n")
+        tmp_path.replace(self.path)
         self._unflushed.clear()
 
     def _load(self) -> None:
