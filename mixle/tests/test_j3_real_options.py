@@ -23,7 +23,14 @@ from typing import NamedTuple
 import numpy as np
 import pytest
 
-from mixle.analysis.real_options import OptionValue, real_option_value, voi_dollars, voi_stopping_decision
+from mixle.analysis.real_options import (
+    OptionValue,
+    VoiEstimate,
+    real_option_value,
+    voi_dollars,
+    voi_estimate,
+    voi_stopping_decision,
+)
 
 
 class _FakeNPVDistribution(NamedTuple):
@@ -166,6 +173,68 @@ def test_voi_dollars_grows_with_variance_reduction():
     voi_small = voi_dollars(posterior, _decision_value, {"variance_reduction": 0.1}, rng=np.random.default_rng(1))
     voi_large = voi_dollars(posterior, _decision_value, {"variance_reduction": 0.9}, rng=np.random.default_rng(1))
     assert voi_large >= voi_small
+
+
+def test_zero_information_voi_is_exactly_zero_across_seeds():
+    """MXR-080-0108's exact repro: a standard-normal fake posterior and a go/no-go decision at
+    ``variance_reduction=0``. Before the common-random-numbers fix, the no-info and with-info sides were
+    estimated from INDEPENDENT Monte Carlo draws even though they should coincide exactly at zero
+    information, so their noisy difference -- floored at zero -- spuriously reported a positive VOI for
+    most seeds (including 0.118). With a shared base draw per replicate, the two sides are bit-for-bit
+    identical at r=0, so this must hold EXACTLY (not just "close to zero") for every seed tried."""
+    posterior = _ToyPosterior(mean=0.0, std=1.0)
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        voi = voi_dollars(posterior, _decision_value, {"variance_reduction": 0.0}, rng=rng)
+        assert voi == 0.0, f"seed={seed}: expected exactly 0.0 at zero information, got {voi!r}"
+
+
+def test_voi_dollars_is_no_longer_upward_biased_near_zero_information():
+    """Negative control proving the zero floor is really gone, not just short-circuited exactly at
+    r=0: with a tiny (but nonzero) variance reduction, the true VOI signal is small relative to Monte
+    Carlo noise, so an HONEST (unfloored) estimator should land on both sides of zero across seeds. If
+    every seed still came back >= 0.0, that would mean some upward bias is still silently in effect."""
+    posterior = _ToyPosterior(mean=0.0, std=1.0)
+    values = [
+        voi_dollars(posterior, _decision_value, {"variance_reduction": 1e-6}, rng=np.random.default_rng(seed))
+        for seed in range(40)
+    ]
+    assert any(v < 0.0 for v in values), f"expected at least one negative estimate, got {values!r}"
+    assert any(v > 0.0 for v in values), f"expected at least one positive estimate, got {values!r}"
+
+
+def test_voi_estimate_at_zero_information_has_zero_uncertainty_too():
+    posterior = _ToyPosterior(mean=0.0, std=1.0)
+    rng = np.random.default_rng(0)
+    est = voi_estimate(posterior, _decision_value, {"variance_reduction": 0.0}, rng=rng)
+    assert isinstance(est, VoiEstimate)
+    assert (est.value, est.standard_error, est.ci_low, est.ci_high) == (0.0, 0.0, 0.0, 0.0)
+    assert est.method == "variance_rescaling_heuristic"
+
+
+def test_voi_estimate_reports_monte_carlo_uncertainty_away_from_zero_information():
+    """Away from zero information, the estimate comes with a nonzero standard error and a CI that -- for
+    a clearly-informative reduction on a wide, mean-away-from-zero posterior -- excludes zero. This is
+    the honest replacement for the old zero floor: a caller can tell a real effect apart from noise
+    instead of trusting a single (previously upward-biased) number."""
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    rng = np.random.default_rng(0)
+    est = voi_estimate(posterior, _decision_value, {"variance_reduction": 0.7}, rng=rng)
+    assert est.standard_error > 0.0
+    assert est.ci_low == pytest.approx(est.value - 1.959963984540054 * est.standard_error)
+    assert est.ci_high == pytest.approx(est.value + 1.959963984540054 * est.standard_error)
+    assert est.ci_low < est.value < est.ci_high
+    assert 0.0 < est.ci_low, "expected a clearly-informative reduction to exclude zero from the CI"
+    assert est.method == "variance_rescaling_heuristic"
+
+
+def test_voi_dollars_matches_voi_estimate_value():
+    """voi_dollars must not silently compute something different from voi_estimate's point estimate."""
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    drill_info = {"variance_reduction": 0.4}
+    direct = voi_dollars(posterior, _decision_value, drill_info, rng=np.random.default_rng(3))
+    est = voi_estimate(posterior, _decision_value, drill_info, rng=np.random.default_rng(3))
+    assert direct == est.value
 
 
 def test_real_option_value_type_hints_are_resolvable():
