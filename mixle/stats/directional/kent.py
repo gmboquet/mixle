@@ -74,6 +74,12 @@ class KentDistribution(SequenceEncodableProbabilityDistribution):
             raise ValueError("KentDistribution gamma must be a 3x3 orthonormal matrix (columns g1, g2, g3).")
         if kappa <= 0.0 or not np.isfinite(kappa):
             raise ValueError("KentDistribution requires finite kappa > 0.")
+        if not np.isfinite(beta):
+            # NaN beta satisfies neither `beta < 0.0` nor `2.0 * beta >= kappa` below (every comparison
+            # against NaN is False), so it would otherwise pass straight through as if valid -- and then
+            # KentSampler._batch's rejection loop computes an all-NaN, therefore always-False accept
+            # mask every iteration and spins forever, since beta never changes between iterations.
+            raise ValueError("KentDistribution requires beta to be finite.")
         if beta < 0.0 or 2.0 * beta >= kappa:
             raise ValueError("KentDistribution requires 0 <= 2*beta < kappa.")
         self.gamma = g

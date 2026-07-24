@@ -119,5 +119,34 @@ class EstimatorTestCase(unittest.TestCase):
         self.assertGreater(f.kappa, 100.0)
 
 
+class InvalidParameterTestCase(unittest.TestCase):
+    """kappa <= 0 comparisons are False for NaN too, so a bare `if kappa > 0: ... else: uniform` treats
+    a NaN (or negative) kappa as if it were the legitimate kappa=0 uniform limit unless checked directly.
+    """
+
+    def test_nan_kappa_raises(self):
+        with self.assertRaises(ValueError):
+            VonMisesFisherDistribution([1.0, 0.0], float("nan"))
+
+    def test_negative_kappa_raises(self):
+        with self.assertRaises(ValueError):
+            VonMisesFisherDistribution([1.0, 0.0], -1.0)
+
+    def test_infinite_kappa_raises(self):
+        with self.assertRaises(ValueError):
+            VonMisesFisherDistribution([1.0, 0.0], float("inf"))
+
+    def test_kappa_zero_still_valid(self):
+        VonMisesFisherDistribution([1.0, 0.0], 0.0)  # must not raise: the genuine uniform limit
+
+    def test_non_unit_norm_mu_raises(self):
+        with self.assertRaises(ValueError):
+            VonMisesFisherDistribution([1.0, 1.0], 2.0)  # norm sqrt(2), not 1
+
+    def test_non_finite_mu_raises(self):
+        with self.assertRaises(ValueError):
+            VonMisesFisherDistribution([float("nan"), 0.0], 2.0)
+
+
 if __name__ == "__main__":
     unittest.main()

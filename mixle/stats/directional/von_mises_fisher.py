@@ -182,6 +182,19 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         dim = len(mu)
         mu = np.asarray(mu).copy()
 
+        if not np.isfinite(mu).all():
+            raise ValueError("VonMisesFisherDistribution requires mu to be finite, got %r." % (mu.tolist(),))
+        mu_norm = float(np.linalg.norm(mu))
+        if abs(mu_norm - 1.0) > 1.0e-6:
+            raise ValueError("VonMisesFisherDistribution requires mu to have unit norm, got ||mu||=%r." % (mu_norm,))
+        if not np.isfinite(kappa) or kappa < 0:
+            # kappa == 0 is the legitimate uniform-density limit (handled below); only reject what a
+            # bare `kappa > 0` comparison silently lets through the "else: uniform" branch as if it were
+            # that limit -- most importantly NaN, since `nan > 0` is False just like a genuine 0 is.
+            raise ValueError(
+                "VonMisesFisherDistribution requires kappa to be finite and non-negative, got %r." % (kappa,)
+            )
+
         if kappa > 0:
             # log c_p(kappa) = (p/2 - 1) log kappa - (p/2) log(2 pi) - log I_{p/2-1}(kappa)
             v = (dim / 2.0) - 1.0

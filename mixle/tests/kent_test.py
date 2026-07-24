@@ -78,6 +78,16 @@ class KentTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             Kent(np.eye(3), 4.0, 2.0)  # 2*beta >= kappa
 
+    def test_non_finite_beta_raises(self):
+        # `nan < 0.0` and `2.0 * nan >= kappa` are both False (every NaN comparison is False), so a NaN
+        # beta used to pass construction validation silently and then made KentSampler._batch's
+        # rejection loop spin forever: an all-NaN, therefore always-False, accept mask every iteration,
+        # with nothing that would ever change between iterations.
+        for bad_beta in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(beta=bad_beta):
+                with self.assertRaises(ValueError):
+                    Kent(np.eye(3), 5.0, bad_beta)
+
     def test_capabilities(self):
         self.assertTrue(mixle.supports(Kent(np.eye(3), 5.0, 1.0), Fittable))
 
