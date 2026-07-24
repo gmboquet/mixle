@@ -272,6 +272,33 @@ class EngineTestCase(unittest.TestCase):
             engine_of(payload)
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_mixed_device_torch_payload_fails(self):
+        # Regression (MXR-080-0121): mixed-engine detection used to compare only the Python
+        # class, so two Torch tensors on different devices passed as "homogeneous" and would
+        # dispatch through whichever was encountered first. "meta" is a real, always-available
+        # torch device (no GPU/MPS hardware required) that differs from the default "cpu".
+        payload = (torch.tensor([1.0]), torch.tensor([1.0], device="meta"))
+        with self.assertRaises(TypeError):
+            engine_of(payload)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_mixed_precision_policy_torch_payload_fails(self):
+        # Regression (MXR-080-0121): two Torch tensors with explicitly different floating
+        # dtypes used to pass the homogeneity check (same TorchEngine class, precision ignored).
+        payload = (torch.tensor([1.0], dtype=torch.float32), torch.tensor([1.0], dtype=torch.float64))
+        with self.assertRaises(TypeError):
+            engine_of(payload)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_homogeneous_torch_payload_still_resolves(self):
+        # Negative control: matching device + dtype across a nested payload must still resolve
+        # cleanly -- the stricter check must not false-positive on genuinely homogeneous data.
+        payload = (torch.tensor([1.0], dtype=torch.float64), {"x": torch.tensor([2.0, 3.0], dtype=torch.float64)})
+        eng = engine_of(payload)
+        self.assertIsInstance(eng, TorchEngine)
+        self.assertEqual(str(eng.device), "cpu")
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_torch_engine_mesh_replicates_and_component_shards(self):
         from torch.distributed.tensor import DTensor, Replicate, Shard
 
