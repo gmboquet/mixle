@@ -626,6 +626,74 @@ class NormalWishartTestCase(unittest.TestCase):
         self.assertGreater(np.linalg.det(neg_i), 0.0)
         self.assertEqual(nw.log_density((np.zeros(2), neg_i)), -np.inf)
 
+    def test_non_finite_mu_raises(self):
+        # mu was never checked for finiteness: a NaN/inf mean silently constructed and then
+        # produced a nan log_density instead of raising anywhere.
+        # (subTest is keyed on the list form, not the ndarray: xdist can't serialize an ndarray
+        # subtest report from worker to controller.)
+        for bad_mu in ([np.nan, 0.0], [np.inf, 0.0], [0.0, -np.inf]):
+            with self.subTest(mu=bad_mu):
+                with self.assertRaises(ValueError):
+                    NormalWishartDistribution(np.array(bad_mu), 1.0, np.eye(2), 4.0)
+
+    def test_nonpositive_kappa_raises(self):
+        # kappa had no validation at all: kappa <= 0 constructed successfully and produced a nan
+        # (or, for kappa < 0, a silently "successful" but statistically meaningless) sample, since
+        # sampler() inverts kappa*Lambda and numpy's multivariate_normal does not hard-fail on a
+        # non-PSD covariance.
+        for bad_kappa in (-1.0, 0.0):
+            with self.subTest(kappa=bad_kappa):
+                with self.assertRaises(ValueError):
+                    NormalWishartDistribution(np.zeros(2), bad_kappa, np.eye(2), 4.0)
+
+    def test_non_finite_kappa_raises(self):
+        # nan/inf kappa satisfy neither a bare `kappa > 0` nor `kappa <= 0` comparison meaningfully
+        # (every comparison against NaN is False; inf > 0 is True), so kappa must be checked with
+        # np.isfinite directly, matching the idiom used for other positive scalar concentration
+        # parameters in this codebase (e.g. KentDistribution's / LKJDistribution's kappa/eta).
+        for bad_kappa in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(kappa=bad_kappa):
+                with self.assertRaises(ValueError):
+                    NormalWishartDistribution(np.zeros(2), bad_kappa, np.eye(2), 4.0)
+
+    def test_nu_pos_inf_raises(self):
+        # nu=+inf passes the existing `nu > dim - 1` bound check (inf > anything finite is True)
+        # the same way df=+inf slipped past Wishart/InverseWishart's bound checks before those were
+        # fixed to also require np.isfinite(df) -- log_z (built from nu * log(2) and
+        # multigammaln(nu/2, d)) comes out nan, and every log_density call silently returns nan.
+        with self.assertRaises(ValueError):
+            NormalWishartDistribution(np.zeros(2), 1.0, np.eye(2), np.inf)
+
+    def test_nu_neg_inf_still_raises(self):
+        # nu=-inf was never actually broken (-inf > a finite dim-1 bound is already False), included
+        # for completeness so this case is documented as checked, not assumed.
+        with self.assertRaises(ValueError):
+            NormalWishartDistribution(np.zeros(2), 1.0, np.eye(2), -np.inf)
+
+    def test_asymmetric_scale_matrix_raises(self):
+        # w_mat was only checked for positive-definiteness via cholesky_logdet, which (like
+        # np.linalg.cholesky) reads only one triangle and never verifies the other. This asymmetric
+        # matrix has a positive determinant and a cholesky-factorizable lower triangle, so it was
+        # silently accepted -- but log_det_w (from the lower triangle alone) and w_inv (from
+        # np.linalg.inv on the full, asymmetric matrix) were then computed from two different
+        # effective matrices, so log_density silently returned a finite but self-inconsistent value
+        # instead of raising or matching either the raw or the symmetrized interpretation.
+        asym = np.array([[2.0, 1.0], [0.0, 1.0]])
+        self.assertGreater(np.linalg.det(asym), 0.0)
+        with self.assertRaises(ValueError):
+            NormalWishartDistribution(np.zeros(2), 1.0, asym, 4.0)
+
+    def test_non_finite_scale_matrix_raises(self):
+        # subTest is keyed on the list form, not the ndarray: xdist can't serialize an ndarray
+        # subtest report from worker to controller.
+        for bad_w in (
+            [[np.nan, 0.0], [0.0, 1.0]],
+            [[np.inf, 0.0], [0.0, 1.0]],
+        ):
+            with self.subTest(w_mat=bad_w):
+                with self.assertRaises(ValueError):
+                    NormalWishartDistribution(np.zeros(2), 1.0, np.array(bad_w), 4.0)
+
 
 class MultivariateGaussianTestCase(unittest.TestCase):
     def make_dist(self):

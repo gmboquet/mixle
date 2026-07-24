@@ -96,8 +96,18 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
         self.dim = len(self.mu)
 
         d = self.dim
-        if not self.nu > d - 1:
-            raise ValueError("NormalWishartDistribution requires nu > dim - 1 (got nu=%s, dim=%d)." % (self.nu, d))
+        if not np.isfinite(self.mu).all():
+            raise ValueError("NormalWishartDistribution requires mu to be finite, got %r." % (self.mu.tolist(),))
+        if self.kappa <= 0.0 or not np.isfinite(self.kappa):
+            raise ValueError("NormalWishartDistribution requires finite kappa > 0.")
+        if not self.nu > d - 1 or not np.isfinite(self.nu):
+            raise ValueError(
+                "NormalWishartDistribution requires a finite nu > dim - 1 (got nu=%s, dim=%d)." % (self.nu, d)
+            )
+        if not np.isfinite(self.w_mat).all():
+            raise ValueError("NormalWishartDistribution requires a finite scale matrix w_mat.")
+        if not np.allclose(self.w_mat, self.w_mat.T):
+            raise ValueError("NormalWishartDistribution requires a symmetric scale matrix w_mat.")
 
         log_det_w = cholesky_logdet(self.w_mat)
         if log_det_w is None:
