@@ -66,8 +66,8 @@
       "status": "Unclassified (provisional by default)"
     },
     "mixle.inference": {
-      "maturity": "stable",
-      "status": "Stable core (optimize + direct estimation)"
+      "maturity": "provisional",
+      "status": "Applied inference & analysis helpers, evolving surface"
     },
     "mixle.lifecycle": {
       "maturity": "provisional",

@@ -10,7 +10,9 @@ the maturity tier of any dotted module name. The three tiers match the deprecati
 * ``EXPERIMENTAL`` -- no compatibility guarantee (only ``mixle.experimental``).
 
 :func:`maturity_of` resolves a dotted name by longest matching prefix, so ``mixle.stats.latent.hidden_markov``
-inherits ``mixle.stats``'s tier while ``mixle.inference.production`` overrides the ``mixle.inference`` tier.
+inherits ``mixle.stats``'s tier while ``mixle.inference.estimation`` overrides the ``mixle.inference`` tier
+(provisional) to stable, and ``mixle.inference.production`` overrides it to stay at the provisional default
+under its own, more specific label.
 Surfaces not listed default to :data:`DEFAULT_MATURITY` (``PROVISIONAL``) -- the conservative choice: a
 surface makes no stability promise until it is explicitly recorded as stable.
 """
@@ -33,8 +35,23 @@ class Maturity(StrEnum):
 # module prefix -> (tier, human status label mirrored from docs/maturity.rst). More specific prefixes win.
 MATURITY_REGISTRY: dict[str, tuple[Maturity, str]] = {
     "mixle.stats": (Maturity.STABLE, "Stable core"),
-    "mixle.inference": (Maturity.STABLE, "Stable core (optimize + direct estimation)"),
+    # mixle.inference as a whole is NOT documented stable in docs/maturity.rst -- only the single narrow
+    # row "mixle.inference.optimize and direct estimation helpers" (MLE/EM/conjugate fitting) is. The rest
+    # of the package (causal inference, scoring rules, resampling, uncertainty decomposition, forecasting,
+    # multiple-testing correction, model comparison, and dozens of other applied/evolving modules) is
+    # provisional and was never claimed otherwise; it must not inherit stability merely by sharing the
+    # mixle.inference prefix. The two real modules behind the documented "optimize + direct estimation"
+    # core -- estimation.py (optimize/fit/best_of) and em.py (the EM strategy machinery estimation.py
+    # itself imports: EMStrategy/MonteCarloEM/OnlineEM/CompiledEM -- and which imports back estimation.py's
+    # engine helpers, i.e. one tightly-coupled core) -- are carved out as stable below, alongside
+    # "mixle.inference.optimize" itself: not a real submodule, but the literal symbolic name
+    # docs/maturity.rst uses for that entry point, kept as its own key since it is a sibling of (not a
+    # prefix match for) "mixle.inference.estimation".
+    "mixle.inference": (Maturity.PROVISIONAL, "Applied inference & analysis helpers, evolving surface"),
     "mixle.semantics": (Maturity.STABLE, "Stable core shared quantitative semantics"),
+    "mixle.inference.optimize": (Maturity.STABLE, "Stable core (optimize + direct estimation)"),
+    "mixle.inference.estimation": (Maturity.STABLE, "Stable core (optimize + direct estimation)"),
+    "mixle.inference.em": (Maturity.STABLE, "Stable core (EM strategy machinery underlying optimize/fit)"),
     "mixle.inference.production": (Maturity.PROVISIONAL, "Practical helpers, not a platform"),
     "mixle.enumeration": (Maturity.PROVISIONAL, "Usable, evolving"),
     "mixle.ops": (Maturity.PROVISIONAL, "Usable, evolving"),

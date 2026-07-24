@@ -597,7 +597,7 @@
       ]
     },
     "mixle.inference": {
-      "maturity": "stable",
+      "maturity": "provisional",
       "names": [
         "AdviResult",
         "BayesianStreamingEstimator",
@@ -885,7 +885,7 @@
       ]
     },
     "mixle.inference.mcmc": {
-      "maturity": "stable",
+      "maturity": "provisional",
       "names": [
         "AdaptiveCovarianceProposal",
         "AdaptiveRandomWalkProposal",
