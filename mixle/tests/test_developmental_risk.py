@@ -176,6 +176,99 @@ def test_dose_responsive_curve_still_finds_a_real_bmd():
     assert 0 <= result.bmdl <= result.bmd
 
 
+# MXR-080-0083: the reported BMDL must be a genuine, dimensionally-consistent one-sided
+# confidence bound (delta method: implicit-differentiation gradient x observed-information
+# covariance), with convergence diagnostics, not an arbitrary penalty term or a fallback that
+# mixes dose-unit and bmr-unit quantities.
+
+
+def test_bmdl_is_dimensionally_consistent_under_dose_rescaling():
+    # A real confidence bound on a dose is the same physical quantity under any unit choice: BMD
+    # and BMDL must both scale by exactly the dose-unit factor. The pre-fix fallback failed this
+    # outright (see the audit): it multiplied a dose-unit-derived step by bmd a second time, so
+    # the same underlying curve gave wildly different relative BMDL widths at different scales.
+    doses = np.array([0.5, 1.0, 2.0, 4.0, 8.0])
+    n_total = np.full(5, 100.0)
+    n_affected = np.array([5.0, 10.0, 25.0, 60.0, 90.0])
+    r1 = benchmark_dose(doses, n_affected, n_total, bmr=0.10, model="loglogistic")
+    k = 1000.0
+    r2 = benchmark_dose(doses * k, n_affected, n_total, bmr=0.10, model="loglogistic")
+    assert r1.status == "ok" and r2.status == "ok"
+    assert abs(r2.bmd / r1.bmd - k) / k < 1e-3
+    assert abs(r2.bmdl / r1.bmdl - k) / k < 1e-3
+
+
+def test_bmd_gradient_reports_none_when_ill_conditioned():
+    # Convergence diagnostic: the gradient helper must refuse to divide by a near-zero dF/dd
+    # rather than manufacture an arbitrarily large, meaningless derivative.
+    from mixle.analysis.developmental_risk import _bmd_gradient
+
+    coef = np.array([-1.0, 50.0])  # saturates almost immediately -- flat in dose past that point
+    grad = _bmd_gradient("loglogistic", coef, dose_min_eff=1e-9, bmr=0.10, risk="extra", bmd=1e-9)
+    assert grad is None
+
+
+def test_bmd_identified_but_bmdl_unavailable_under_quasi_separation():
+    # A near-perfect step function pushes the MLE toward extreme coefficients; the BMD root can
+    # still be found and bracketed, but the delta-method covariance can fail to be well-posed --
+    # BMDResult must distinguish this ("bmd real, bmdl not") from full unidentifiability.
+    doses = np.array([1.0, 2.0, 3.0, 4.0])
+    n_total = np.full(4, 50.0)
+    n_affected = np.array([0.0, 0.0, 50.0, 50.0])
+    result = benchmark_dose(doses, n_affected, n_total, bmr=0.10)
+    assert result.status == "bmdl_unavailable"
+    assert result.converged is False
+    assert np.isfinite(result.bmd)
+    assert np.isnan(result.bmdl)
+    assert np.isnan(result.bmd_se)
+
+
+def test_bmdl_delta_method_achieves_nominal_coverage():
+    # The actual statistical validation the audit asked for: simulate from a KNOWN model with a
+    # KNOWN true BMD many times, refit, and confirm the true BMD falls above the reported BMDL
+    # roughly ci_level of the time. benchmark_dose's 2-parameter log-logistic has no free
+    # background parameter -- "background" is the fitted response rate at the lowest TESTED dose
+    # -- so the reference "true" BMD must be computed under that same convention (solving for the
+    # true coefficients' own root), not a from-scratch closed-form zero-dose asymptote that the
+    # code was never trying to estimate in the first place.
+    from mixle.analysis.developmental_risk import _quantal_p, _solve_bmd
+
+    b_true, c_true = -2.0, 1.5
+    coef_true = np.array([b_true, c_true])
+    doses = np.array([0.25, 0.5, 1.0, 2.0, 4.0])
+    n_group = 100
+    n_total = np.full(doses.shape, float(n_group))
+    dose_hi = float(doses.max()) * 10.0
+    dose_min_eff = doses.min()
+    background_true = float(_quantal_p("loglogistic", np.array([dose_min_eff]), coef_true)[0])
+    bmd_true, ok = _solve_bmd("loglogistic", coef_true, background_true, bmr=0.10, risk="extra", dose_hi=dose_hi)
+    assert ok
+
+    def p_true(d):
+        return 1.0 / (1.0 + np.exp(-(b_true + c_true * np.log(np.clip(d, 1e-9, None)))))
+
+    n_reps = 300
+    covered = 0
+    ok_count = 0
+    for seed in range(n_reps):
+        rng = np.random.default_rng(seed)
+        n_affected = rng.binomial(n_group, p_true(doses)).astype(float)
+        result = benchmark_dose(doses, n_affected, n_total, bmr=0.10, model="loglogistic", ci_level=0.95)
+        if result.status != "ok":
+            continue
+        ok_count += 1
+        if result.bmdl <= bmd_true:
+            covered += 1
+
+    assert ok_count >= 0.9 * n_reps  # this design should be well-identified almost every replication
+    coverage = covered / ok_count
+    # Nominal is 0.95; with n_reps=300 the Monte Carlo SE of the coverage estimate itself is
+    # ~1.3pp, so this wide-but-meaningful one-sided band catches a badly broken interval (e.g.
+    # ~50% coverage from a sign error or a mis-set confidence quantile) without flaking on
+    # ordinary simulation noise.
+    assert coverage >= 0.85, f"empirical coverage {coverage:.3f} over {ok_count} reps is far below the nominal 0.95"
+
+
 def test_rfd_exceedance_monotone_in_uf():
     doses = np.array([0.5, 1.0, 2.0, 4.0, 8.0])
     n_total = np.full(doses.shape, 100.0)
