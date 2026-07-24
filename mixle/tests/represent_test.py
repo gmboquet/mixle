@@ -59,6 +59,32 @@ class ShapeTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             enc.encode({"proteins": "MKV"})
 
+    def test_encode_order_follows_registration_not_record_key_order(self):
+        # regression: encode() used to concatenate in the INPUT record dict's own key order (record.items())
+        # instead of registration order, despite the docstring's promise of registration order -- so two
+        # dicts holding the same modality values but built with different key-insertion order produced
+        # different (even fully reversed) token streams for semantically-identical records.
+        enc = _hetero_encoder()  # registers text(id0), image(id1), seismic(id2), molecule(id3), in that order
+        record = _record()
+        reversed_record = dict(reversed(list(record.items())))  # same k/v pairs, opposite insertion order
+        self.assertNotEqual(list(record), list(reversed_record))  # sanity: the two dicts really do differ in order
+
+        stream, tags = enc.encode_numpy(record)
+        rev_stream, rev_tags = enc.encode_numpy(reversed_record)
+
+        # 5 bytes (text) + 4 patches (image) + 3 windows (seismic) + 6 atoms (molecule), in registration order
+        expected_tags = [0] * 5 + [1] * 4 + [2] * 3 + [3] * 6
+        self.assertEqual(tags.tolist(), expected_tags)
+        self.assertEqual(rev_tags.tolist(), expected_tags)  # record's own key order must not matter
+        np.testing.assert_array_equal(stream, rev_stream)
+
+    def test_record_missing_registered_modality_raises(self):
+        enc = _hetero_encoder()
+        record = _record()
+        del record["seismic"]  # drop one of the four registered modalities
+        with self.assertRaises(KeyError):
+            enc.encode(record)
+
     def test_patch_segmenter_rejects_image_smaller_than_patch(self):
         # regression: an image smaller than the patch size in either dimension used to silently
         # produce a (0, features) array (h // p == 0) instead of erroring -- no patches, no warning.
@@ -70,6 +96,30 @@ class ShapeTest(unittest.TestCase):
         # an image exactly the patch size is the boundary case and must still yield one patch.
         out = seg.segment(np.random.rand(8, 8))
         self.assertEqual(out.shape, (1, 8 * 8))
+
+    def test_window_segmenter_pads_short_signal_without_discarding_it(self):
+        # regression: a signal shorter than `window` used to be silently replaced by one
+        # fabricated all-zero window instead of keeping the real (if short) signal -- [1, 2] and
+        # [9, 8] under window=4 both produced the identical all-zero output, so genuinely different
+        # short signals became indistinguishable. WindowSegmenter's contract is to always return at
+        # least one window (unlike PatchSegmenter, which has no such contract and instead rejects a
+        # too-small image outright); the fix must honor that contract honestly, padding only the
+        # slots beyond the real samples rather than overwriting the real samples too.
+        seg = WindowSegmenter(window=4)
+        out_12 = seg.segment([1, 2])
+        out_98 = seg.segment([9, 8])
+        self.assertEqual(out_12.shape, (1, 4))
+        np.testing.assert_array_equal(out_12, [[1.0, 2.0, 0.0, 0.0]])  # real samples first, zero-padded after
+        np.testing.assert_array_equal(out_98, [[9.0, 8.0, 0.0, 0.0]])
+        self.assertFalse(np.array_equal(out_12, out_98))  # different inputs must not collapse to the same output
+        # the empty signal is the degenerate case: nothing real to place, so all-zero is honest here
+        # (nothing is being discarded, unlike the [1, 2] / [9, 8] cases above).
+        np.testing.assert_array_equal(seg.segment([]), [[0.0, 0.0, 0.0, 0.0]])
+        # a signal exactly `window` long is the boundary case and must still yield one real
+        # window -- containing the actual observed samples unchanged, no padding involved.
+        out_full = seg.segment([1, 2, 3, 4])
+        self.assertEqual(out_full.shape, (1, 4))
+        np.testing.assert_array_equal(out_full, [[1.0, 2.0, 3.0, 4.0]])
 
     def test_dim_mismatch_rejected(self):
         enc = HeterogeneousEncoder(dim=DIM)
@@ -110,6 +160,56 @@ class TrainabilityTest(unittest.TestCase):
         w1 = enc.encoders["seismic"].embedding.module()[0].weight
         w2 = enc.encoders["audio"].embedding.module()[0].weight
         self.assertIs(w1, w2)
+
+
+class ModalityEmbeddingRegistrationTest(unittest.TestCase):
+    def test_reregistering_existing_modality_preserves_learned_tag_embedding(self):
+        # regression: register_encoder() used to unconditionally reset _modality_embedding to None on every
+        # call, even when re-registering an ALREADY-registered modality (the modality set/count unchanged) --
+        # so any already-learned tag-embedding weights were silently discarded for what is otherwise a no-op.
+        enc = HeterogeneousEncoder(dim=DIM)
+        enc.register("text", ByteSegmenter(), CategoricalEmbedding(256, DIM))
+        enc.register("image", PatchSegmenter(patch=4), FeatureEmbedding(3 * 4 * 4, DIM))
+
+        tag_module = enc._modality_embed().module()  # force-build, standing in for "has been used"
+        with torch.no_grad():
+            tag_module.weight.fill_(1.0)  # obviously non-random stand-in for "learned" state
+        embedding_obj = enc._modality_embedding
+        learned_weight = tag_module.weight.clone()
+
+        enc.register("text", ByteSegmenter(), CategoricalEmbedding(256, DIM))  # re-register, same modality set
+
+        self.assertIs(enc._modality_embedding, embedding_obj)  # not rebuilt
+        self.assertTrue(torch.allclose(enc._modality_embedding.module().weight, learned_weight))  # not reset
+
+    def test_registering_new_modality_grows_tag_embedding_preserving_old_rows(self):
+        # negative control / contrast: a genuine modality-SET change (a real new modality) must still be
+        # reflected in the tag embedding -- it just has to preserve, not discard, the already-learned rows.
+        enc = HeterogeneousEncoder(dim=DIM)
+        enc.register("text", ByteSegmenter(), CategoricalEmbedding(256, DIM))
+        enc.register("image", PatchSegmenter(patch=4), FeatureEmbedding(3 * 4 * 4, DIM))
+
+        tag_module = enc._modality_embed().module()
+        with torch.no_grad():
+            tag_module.weight.fill_(1.0)
+        learned_weight = tag_module.weight.clone()
+        old_num_categories = enc._modality_embedding.num_categories
+
+        enc.register("seismic", WindowSegmenter(window=8, hop=8), FeatureEmbedding(8, DIM))  # brand new modality
+
+        self.assertEqual(enc._modality_embedding.num_categories, old_num_categories + 1)
+        grown_weight = enc._modality_embedding.module().weight
+        self.assertEqual(tuple(grown_weight.shape), (old_num_categories + 1, DIM))
+        self.assertTrue(torch.allclose(grown_weight[:old_num_categories], learned_weight))  # old rows preserved
+
+    def test_registering_before_any_use_stays_lazily_unbuilt(self):
+        # sanity: registration alone (no training/no encode call) must not force-build the tag embedding --
+        # the lazy-build contract for a never-yet-used encoder is untouched by the fix.
+        enc = HeterogeneousEncoder(dim=DIM)
+        enc.register("text", ByteSegmenter(), CategoricalEmbedding(256, DIM))
+        self.assertIsNone(enc._modality_embedding)
+        enc.register("image", PatchSegmenter(patch=4), FeatureEmbedding(3 * 4 * 4, DIM))
+        self.assertIsNone(enc._modality_embedding)
 
 
 class QuantizeTest(unittest.TestCase):
