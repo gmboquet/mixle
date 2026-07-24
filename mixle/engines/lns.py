@@ -53,10 +53,36 @@ class LogNumberSystem:
         """Build a system whose stored values are accurate to ~``rel`` relative (``step = ln(1+rel)``)."""
         return cls(step=math.log1p(rel))
 
-    @property
-    def max_logsumexp_error(self) -> float:
-        """Bound on the absolute log-sum-exp error from quantization + LUT rounding (~one step per fold)."""
-        return 1.5 * self.step
+    def max_logsumexp_error(self, n: int) -> float:
+        """Certified bound on the absolute log-sum-exp error for reducing ``n`` quantized terms.
+
+        Two error sources compound over the pairwise reduction tree (see :meth:`logsumexp`):
+
+        * input quantization -- each leaf starts up to ``step/2`` away from its true log-value.
+        * LUT rounding -- each :meth:`logadd` looks up ``round(log1p(exp(-d*step)) / step)``, itself
+          within ``step/2`` of the true correction (by construction: the table's last entry is exactly
+          0, and ``dmax`` is sized so the true correction is already ``< step/2`` there, so clipping a
+          larger gap to ``dmax`` costs less error than the in-table rounding it stands in for).
+
+        ``logsumexp(a, b) = log(exp(a) + exp(b))`` is monotonic and shift-equivariant in each argument
+        (``logsumexp(a+c, b+c) = logsumexp(a, b) + c``), which gives an EXACT bound -- not a first-order
+        approximation -- on how far a :meth:`logadd` of already-approximate operands can land from the
+        true value of the pair they represent: at most the WORSE of the two operands' existing error.
+        Errors don't add across siblings, only the fresh per-node LUT rounding does. So after ``d`` tree
+        levels the worst-case error is ``step/2`` (leaf quantization) plus ``d`` more halves of ``step``
+        (one fresh LUT rounding per level on the critical path): ``(d + 1) * step / 2``.
+
+        Both reduction trees here (the numpy fallback and the compiled kernel) combine adjacent pairs
+        and carry any odd leftover forward unchanged, so they are always balanced: the deepest element
+        crosses exactly ``d = ceil(log2(n))`` levels regardless of how ``n`` factors, and this bound is
+        a valid certificate for any ``n`` -- not just the 2-term case the previous constant ``1.5 *
+        step`` bound was actually sized for (equivalent to this formula at ``n`` in ``{3, 4}``; already
+        violated by measured error at, e.g., ``n=8`` -- see MXR-080-0139 and the regression tests).
+        """
+        if n < 1:
+            raise ValueError(f"max_logsumexp_error: n must be >= 1, got {n}")
+        depth = math.ceil(math.log2(n)) if n > 1 else 0
+        return (depth + 1) * self.step / 2.0
 
     def quantize(self, log_values: Any) -> np.ndarray:
         """Round log-space values to integer multiples of ``step`` (the stored representation)."""
