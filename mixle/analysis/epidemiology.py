@@ -99,6 +99,93 @@ def _fit_lagged(x: np.ndarray, time: np.ndarray, event: np.ndarray, latency: flo
     return cox_ph(x, time, event, start=start, ties="efron"), time.shape[0]
 
 
+_NON_COMPETING_EVENT_CODES = (0.0, 1.0)
+"""The only valid ``event`` labels when ``competing=False``: ``0`` = censored, ``1`` = the outcome of
+interest (see :func:`cohort_attribution`'s ``event`` parameter). ``competing=True`` widens this to any
+non-negative integer (``2..K`` are competing causes), checked separately in :func:`_validate_cohort`
+since ``K`` is open-ended rather than a fixed set."""
+
+
+def _validate_cohort(
+    x: np.ndarray,
+    t: np.ndarray,
+    e: np.ndarray,
+    *,
+    exposure_col: int,
+    latency: float,
+    competing: bool,
+) -> None:
+    """Validate one cohort design -- shapes, finiteness, time, event codes, latency -- in a single pass
+    before any Cox fit or bootstrap resample sees the data (MXR-080-0088).
+
+    Every defect caught here used to either crash deep inside ``cox_ph`` with an error that pointed
+    nowhere near the actual bad input (a length mismatch surfacing as a boolean-index-shape error three
+    calls away), or worse, was silently absorbed: a fractional event code (e.g. ``1.5``) cast straight to
+    ``int`` truncates toward whichever cause the fractional part happened to land on -- silently
+    relabelling *which outcome a subject is recorded as having* -- and negative latency failed
+    ``_fit_lagged``'s ``latency > 0`` check and fell through to "no latency" instead of being rejected.
+    Bundling every check here and running it once, before fitting or the bootstrap loop starts, means a
+    malformed cohort fails fast with one clear reason instead of corrupting a fit silently or crashing
+    somewhere unrelated after some number of the ``n_boot`` resamples have already run.
+
+    Args:
+        x: ``(n, p)`` covariates, already reshaped to 2-D.
+        t: ``(n,)`` event/censoring times.
+        e: ``(n,)`` event codes, still ``float`` (not yet cast to ``int`` -- casting before this check is
+            exactly the bug being closed).
+        exposure_col: the column of ``x`` this call intends to treat as the exposure.
+        latency: the requested left-truncation lag.
+        competing: whether multi-cause event labels (``>1``) are in play.
+
+    Raises:
+        ValueError: on the first defect found (see the module-level docstring on validation ordering).
+    """
+    if x.ndim != 2:
+        raise ValueError(f"covariates must be 1-D or 2-D, got {x.ndim}-D (shape {x.shape})")
+    n = x.shape[0]
+    if t.shape != (n,):
+        raise ValueError(f"time must have shape ({n},) to match covariates' {n} row(s), got {t.shape}")
+    if e.shape != (n,):
+        raise ValueError(f"event must have shape ({n},) to match covariates' {n} row(s), got {e.shape}")
+    if not 0 <= exposure_col < x.shape[1]:
+        raise ValueError(f"exposure_col={exposure_col} is out of bounds for covariates with {x.shape[1]} column(s)")
+
+    # Finiteness must be checked before any numeric comparison below: a NaN fails every ordering
+    # comparison (`NaN >= 0` is False, `NaN != trunc(NaN)` is True), so a finiteness check placed after
+    # a domain check would let NaN slip through some branches and get a misleading message from others.
+    if not np.all(np.isfinite(x)):
+        raise ValueError("covariates must be finite (no NaN or Inf).")
+    if not np.all(np.isfinite(t)):
+        raise ValueError("time must be finite (no NaN or Inf).")
+    if not np.all(np.isfinite(e)):
+        raise ValueError("event must be finite (no NaN or Inf).")
+
+    if np.any(t < 0):
+        raise ValueError("time must be non-negative.")
+
+    if np.any(e != np.trunc(e)):
+        raise ValueError(
+            "event must be exact integer cause labels (fractional event codes are not supported); "
+            "casting a fractional code to int would silently relabel it as a different cause."
+        )
+    if np.any(e < 0):
+        raise ValueError("event codes must be non-negative (0 = censored, 1.. = event / competing causes).")
+    if not competing and np.any(~np.isin(e, _NON_COMPETING_EVENT_CODES)):
+        bad = sorted({float(v) for v in e[~np.isin(e, _NON_COMPETING_EVENT_CODES)]})
+        raise ValueError(
+            f"event must be binary {_NON_COMPETING_EVENT_CODES} when competing=False, got code(s) {bad}; "
+            "pass competing=True for multi-cause event labels."
+        )
+
+    if not np.isfinite(latency):
+        raise ValueError("latency must be finite.")
+    if latency < 0:
+        raise ValueError(
+            f"latency must be non-negative, got {latency!r} (negative latency is not a valid exposure "
+            "lag; it used to be silently treated as latency=0)."
+        )
+
+
 def cohort_attribution(
     covariates: np.ndarray,
     time: np.ndarray,
@@ -113,26 +200,36 @@ def cohort_attribution(
     """Attribute a cohort's hazard to one exposure via Cox PH, with an Aalen-Johansen competing-risks CIF.
 
     Args:
-        covariates: ``(n, p)`` covariates; column ``exposure_col`` is the exposure of interest.
-        time: ``(n,)`` event/censoring times.
+        covariates: ``(n, p)`` covariates (finite); column ``exposure_col`` is the exposure of interest.
+        time: ``(n,)`` event/censoring times (finite, non-negative).
         event: ``(n,)`` event indicator. Binary (``0``/``1``) when ``competing=False``; an integer cause
             label (``0`` = censored, ``1`` = the outcome of interest, ``2..K`` = competing causes) when
             ``competing=True``. Either way, the Cox fit is cause-specific for cause ``1``: competing-cause
             events are censored at their time for the hazard-ratio fit (only the CIF, when requested,
-            reports the competing causes' own cumulative incidence).
-        exposure_col: column of ``covariates`` treated as the exposure.
+            reports the competing causes' own cumulative incidence). Values must be exact integers --
+            fractional codes are rejected outright, not truncated (a truncated ``1.5`` would silently
+            relabel a subject from "the event of interest" to "censored").
+        exposure_col: column of ``covariates`` treated as the exposure (must be a valid column index).
         competing: if True, also run `aalen_johansen` for cause-specific cumulative incidence.
         latency: exposure-to-effect lag (left-truncation, via `cox_ph`'s `start`); ``0`` disables it.
+            Must be non-negative -- negative latency is rejected, not silently treated as ``0``.
         n_boot: cohort-resample bootstrap draws for the attributable-fraction interval.
         rng: seed, `numpy.random.Generator`, or None.
 
     Returns:
         A :class:`CohortAttribution`.
+
+    Raises:
+        ValueError: if the cohort is malformed -- see :func:`_validate_cohort` for the exact checks
+            (mismatched array shapes, non-finite values, negative time, an out-of-vocabulary or
+            fractional event code, negative latency, or an out-of-bounds ``exposure_col``).
     """
     cov_arr = np.asarray(covariates, dtype=float)
     x = cov_arr.reshape(-1, 1) if cov_arr.ndim == 1 else cov_arr
     t = np.asarray(time, dtype=float)
-    e_raw = np.asarray(event, dtype=int)
+    e_float = np.asarray(event, dtype=float)
+    _validate_cohort(x, t, e_float, exposure_col=exposure_col, latency=latency, competing=competing)
+    e_raw = e_float.astype(np.int64)
     n = x.shape[0]
     rng = np.random.default_rng(rng)
 
