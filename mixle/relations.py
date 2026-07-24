@@ -733,7 +733,11 @@ def network_design(nodes: Sequence[int], arcs: Sequence[tuple[int, int]], fixed_
     x = sol[:n_arcs]
     flow_matrix = np.zeros((n, n))
     for a, (u, v) in enumerate(arc_list):
-        flow_matrix[index[u], index[v]] = x[a]
+        # `arcs` may list more than one candidate for the same (u, v) pair (e.g. comparing a cheap vs.
+        # premium design for the same physical link); each gets its own decision variable, but they all
+        # accumulate into the same aggregate matrix cell rather than the last one clobbering the rest --
+        # two candidates on one node pair are parallel capacity, not alternatives that overwrite in-place.
+        flow_matrix[index[u], index[v]] += x[a]
     return Design(cost=float(value), open=opened, flow=flow_matrix)
 
 
