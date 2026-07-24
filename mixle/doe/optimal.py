@@ -258,6 +258,10 @@ register_criterion("g", g_criterion, aliases=("g_optimal", "g-optimal", "minimax
 register_criterion("e", e_criterion, aliases=("e_optimal", "e-optimal", "eigen"))
 
 
+class InfeasibleDesignError(ValueError):
+    """Raised when no finite-merit design exists for a candidate pool and model (rank-deficient)."""
+
+
 def _exchange(
     fmat: np.ndarray,
     n: int,
@@ -319,7 +323,12 @@ def optimal_design(
     returned as an ``(n, d)`` array. For ``"I"`` optimality, prediction variance is averaged over
     ``ref`` (a model matrix) when given, else over the candidate pool.
 
-    Raises if ``n`` is below the number of model parameters (the information matrix would be singular).
+    Raises ``ValueError`` if ``n`` is below the number of model parameters (the information matrix
+    would be singular), and :class:`InfeasibleDesignError` (a ``ValueError`` subclass) if ``n`` is
+    otherwise sufficient by count but the candidate pool's model matrix is rank-deficient -- e.g. a
+    constant or otherwise degenerate pool, where ``n >= p`` rows can never make up for the pool
+    itself spanning fewer than ``p`` independent directions -- or if, defensively, every exchange
+    restart still fails to find a finite-merit design.
     """
     if n <= 0:
         raise ValueError("n must be positive.")
@@ -342,6 +351,17 @@ def optimal_design(
     p = fmat.shape[1]
     if n < p:
         raise ValueError(f"n={n} is below the {p} model parameters; the information matrix is singular.")
+    # n >= p (row count) is necessary but not sufficient: a rank-deficient pool (e.g. constant or
+    # otherwise degenerate candidates) cannot support a full-rank n-point design no matter how large
+    # n is, since the rank of any row subset is bounded by the rank of the full pool. Catch that
+    # up front rather than discovering it only after every restart returns -inf.
+    pool_rank = int(np.linalg.matrix_rank(fmat))
+    if pool_rank < p:
+        raise InfeasibleDesignError(
+            f"the candidate pool's model matrix has rank {pool_rank} < {p} model parameters; no "
+            f"{n}-point subset of it can be estimable regardless of n. Supply a richer/less-"
+            "degenerate candidate pool or a lower-degree model."
+        )
 
     ref_mat = np.asarray(ref, dtype=np.float64) if ref is not None else fmat
     crit = _get_criterion(criterion)
@@ -353,12 +373,21 @@ def optimal_design(
         if val > best_val:
             best_val = val
             best_sel = sel
-    assert best_sel is not None
+    if best_sel is None:
+        # Defense in depth: the upfront rank check catches the common case, but stays a stable,
+        # never-optimized-away error (unlike a bare `assert`, which `python -O` strips entirely)
+        # for any other way every restart could fail to find a finite-merit design.
+        raise InfeasibleDesignError(
+            f"no restart of the exchange search found a finite-merit {n}-point design under "
+            f"criterion {criterion!r} over {pool.shape[0]} candidates; the candidate pool may be "
+            "degenerate for this model."
+        )
     return pool[best_sel]
 
 
 __all__: Sequence[str] = [
     "Criterion",
+    "InfeasibleDesignError",
     "polynomial_features",
     "d_criterion",
     "a_criterion",

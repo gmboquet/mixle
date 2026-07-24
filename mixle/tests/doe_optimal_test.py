@@ -10,7 +10,15 @@ from mixle.doe import (
     polynomial_features,
     register_criterion,
 )
-from mixle.doe.optimal import _get_criterion, a_criterion, c_criterion, d_criterion, g_criterion, i_criterion
+from mixle.doe.optimal import (
+    InfeasibleDesignError,
+    _get_criterion,
+    a_criterion,
+    c_criterion,
+    d_criterion,
+    g_criterion,
+    i_criterion,
+)
 
 
 class PolynomialFeaturesTest(unittest.TestCase):
@@ -198,6 +206,52 @@ class OptimalDesignTest(unittest.TestCase):
 
             _CRITERIA.pop("const-test-crit", None)
             _CRITERIA.pop("ctc", None)
+
+
+class RankDeficientDesignTest(unittest.TestCase):
+    """MXR-080-0186: n >= p (row count) is not sufficient; the model matrix must have rank >= p."""
+
+    def test_constant_rank_one_pool_raises_infeasible_not_assertion(self):
+        # Every candidate point identical -> the linear model matrix (bias + 2 zero columns) has
+        # rank 1 regardless of pool size. n=3 satisfies n >= p=3 by row count, so only a real rank
+        # check (not n >= p) catches this; previously every restart returned -inf, best_sel stayed
+        # None, and the sole guard was a bare `assert` -> a raw, uninformative AssertionError.
+        pool = np.zeros((10, 2))
+        with self.assertRaises(InfeasibleDesignError):
+            optimal_design(None, n=3, candidates=pool, criterion="D", seed=0)
+
+    def test_infeasible_error_is_a_value_error(self):
+        # Catchable as a plain ValueError for callers that don't know the specific subclass.
+        pool = np.zeros((10, 2))
+        with self.assertRaises(ValueError):
+            optimal_design(None, n=3, candidates=pool, criterion="D", seed=0)
+
+    def test_rank_deficient_pool_message_names_the_rank_and_parameter_count(self):
+        pool = np.zeros((10, 2))
+        with self.assertRaises(InfeasibleDesignError) as ctx:
+            optimal_design(None, n=3, candidates=pool, criterion="D", seed=0)
+        msg = str(ctx.exception)
+        self.assertIn("rank 1", msg)
+        self.assertIn("3 model parameters", msg)
+
+    def test_duplicated_two_point_pool_is_also_rank_deficient(self):
+        # Less trivially degenerate than an all-identical pool: 10 rows but only 2 distinct
+        # points, so the 2-D linear model matrix (bias + 2 vars, p=3) has rank <= 2 < p no matter
+        # how the exchange search subsets it.
+        pool = np.tile(np.array([[0.0, 0.0], [1.0, 1.0]]), (5, 1))
+        with self.assertRaises(InfeasibleDesignError):
+            optimal_design(None, n=3, candidates=pool, criterion="D", seed=0)
+
+    def test_well_posed_pool_still_succeeds(self):
+        # Negative control: a normal, rank-sufficient candidate pool still runs the exchange
+        # search successfully and returns a real, valid optimal design.
+        design = optimal_design([(-1.0, 1.0), (-1.0, 1.0)], n=6, criterion="D", n_candidates=64, seed=3)
+        self.assertEqual(design.shape, (6, 2))
+
+    def test_well_posed_explicit_candidates_still_succeeds(self):
+        pool = np.array([[0.0], [0.25], [0.5], [0.75], [1.0]])
+        design = optimal_design(None, n=2, candidates=pool, criterion="D", seed=0)
+        self.assertEqual(design.shape, (2, 1))
 
 
 if __name__ == "__main__":
