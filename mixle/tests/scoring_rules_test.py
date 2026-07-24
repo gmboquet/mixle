@@ -88,6 +88,60 @@ class BrierScoreTest(unittest.TestCase):
         # a calibrated forecaster has near-zero reliability
         self.assertLess(d["reliability"], 0.01)
 
+    def test_invalid_prob_and_outcome_raises_instead_of_looking_perfect(self):
+        # both prob and outcome have entries outside [0, 1]/{0, 1}; the errors used to cancel out
+        # ((p - y) ** 2 == 0 for both entries) and return a deceptively "perfect" score of 0.0
+        # instead of being rejected as nonsense.
+        with self.assertRaises(ValueError):
+            brier_score(np.array([-1.0, 2.0]), np.array([-1.0, 2.0]))
+
+    def test_out_of_range_prob_raises(self):
+        with self.assertRaises(ValueError):
+            brier_score(np.array([2.0]), np.array([1]))
+        with self.assertRaises(ValueError):
+            brier_score(np.array([-0.5]), np.array([0]))
+
+    def test_nan_or_infinite_prob_raises(self):
+        with self.assertRaises(ValueError):
+            brier_score(np.array([np.nan]), np.array([1]))
+        with self.assertRaises(ValueError):
+            brier_score(np.array([np.inf]), np.array([1]))
+
+    def test_binary_outcome_outside_zero_one_raises(self):
+        with self.assertRaises(ValueError):
+            brier_score(np.array([0.5]), np.array([2]))
+        with self.assertRaises(ValueError):
+            brier_score(np.array([0.5]), np.array([-1]))
+        with self.assertRaises(ValueError):
+            brier_score(np.array([0.5]), np.array([0.3]))
+        with self.assertRaises(ValueError):
+            brier_score(np.array([0.9]), np.array([np.nan]))
+
+    def test_out_of_range_integer_label_raises_instead_of_indexerror_or_wraparound(self):
+        # a label >= K used to raise an opaque IndexError from the one-hot scatter, and a negative
+        # label wrapped around via NumPy fancy indexing to silently corrupt an unrelated class slot
+        # instead of being rejected as an invalid class index.
+        p = np.array([[0.2, 0.3, 0.5]])
+        with self.assertRaises(ValueError):
+            brier_score(p, np.array([5]))
+        with self.assertRaises(ValueError):
+            brier_score(p, np.array([-1]))
+
+    def test_onehot_outcome_outside_zero_one_raises(self):
+        p = np.array([[0.2, 0.3, 0.5]])
+        with self.assertRaises(ValueError):
+            brier_score(p, np.array([[0, 0, 2]]))
+        with self.assertRaises(ValueError):
+            brier_score(p, np.array([[0.5, 0.5, 0]]))
+
+    def test_decomposition_rejects_invalid_prob_and_outcome(self):
+        # mirrors brier_score's gap: an invalid prob/outcome pair used to silently produce a
+        # mathematically impossible negative "brier" value instead of raising.
+        with self.assertRaises(ValueError):
+            brier_decomposition(np.array([-1.0, 2.0]), np.array([-1.0, 2.0]))
+        with self.assertRaises(ValueError):
+            brier_decomposition(np.array([0.5, 0.5]), np.array([np.nan, 0.0]))
+
 
 class CRPSTest(unittest.TestCase):
     def test_point_forecast_reduces_to_absolute_error(self):
