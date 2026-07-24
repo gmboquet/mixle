@@ -38,6 +38,48 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 
+def _validate_step_logprob(log_prob: float) -> float:
+    """Reject a continuation log-probability that would break best-first's exactness proof.
+
+    ``best_first_decode`` (and the pruning inside ``quantized_best_first_decode``) is sound only
+    because every step's log-probability is <= 0, so a prefix's running score never increases as it is
+    extended -- the property that makes "everything still in the frontier bounds everything not yet
+    generated" hold, which is what makes "already-popped is the true top-k" a valid conclusion. A
+    positive increment breaks that bound silently (results stay labeled exact while actually being
+    wrong); NaN breaks every downstream comparison the same increment feeds (heap order, top-p
+    cumulative mass) the same way. ``-inf`` is accepted: it is the standard zero-probability
+    ("impossible token") sentinel used throughout this codebase (see e.g.
+    ``quantization.core.Quantizer.bits``) and does not threaten monotonicity -- extending with a -inf
+    step only explains why a branch is deprioritized, never why one should be promoted above an
+    already-returned result.
+    """
+    lp = float(log_prob)
+    if math.isnan(lp):
+        raise ValueError(f"continuation log-probability must not be NaN, got {log_prob!r}.")
+    if lp > 0.0:
+        raise ValueError(f"continuation log-probability must be <= 0 (a probability > 1 is invalid), got {log_prob!r}.")
+    return lp
+
+
+def _positive_int(value: Any, name: str) -> int:
+    """Coerce ``value`` to a positive ``int``, raising a clear ``ValueError`` if it is not one."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.") from exc
+    if n < 1 or n != value:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+    return n
+
+
+def _validate_pruning_bounds(top_k: int | None, top_p: float | None) -> None:
+    """Reject a nonsensical top-k / top-p (nucleus) pruning bound before it can silently mis-prune a step."""
+    if top_k is not None:
+        _positive_int(top_k, "top_k")
+    if top_p is not None and not (0.0 < float(top_p) <= 1.0):
+        raise ValueError(f"top_p must be a value in (0, 1], got {top_p!r}.")
+
+
 def best_first(
     start: Any,
     successors: Callable[[Any], Iterable[Any]],
@@ -52,6 +94,18 @@ def best_first(
     ``f(state) = score(state) + heuristic(state)`` is an admissible upper bound on the score of every goal
     reachable from ``state`` -- in particular when ``heuristic`` is omitted (treated as 0) and ``score`` never
     increases along a path (the usual case for cumulative log-probabilities, which add terms <= 0).
+
+    CALLER-CERTIFIED primitive: this is the fully generic engine, so ``score``/``heuristic`` are not
+    validated here. Whether ``f = score + heuristic`` is a genuine admissible bound is not something
+    this function can check generically -- verifying it would mean solving the search first -- so an
+    unsound pair silently yields results in the wrong order with no error, exactly like a caller-bug in
+    ``successors``/``is_goal`` would. Positive per-step score increases are NOT rejected here (unlike
+    :func:`best_first_decode`'s narrower h=0 contract) because they are sometimes legitimate: e.g.
+    ``hmm_paths.hmm_best_paths`` calls this with a possibly-positive continuous-density emission score,
+    made exact by a backward-Viterbi ``heuristic`` that bounds it, not by the score alone being
+    non-increasing. Callers that only have a plain non-increasing log-probability score (the common
+    case) should prefer :func:`best_first_decode`, which DOES validate that contract because it is
+    actually checkable there.
 
     Args:
         start: the initial (typically partial) state.
@@ -90,7 +144,8 @@ def best_first_decode(
 
     Args:
         next_logprobs: ``next_logprobs(prefix)`` returns an iterable of ``(token, log_prob)`` continuations of
-            ``prefix`` (e.g. the log-softmax of a transformer's next-token logits). Log-probs must be <= 0.
+            ``prefix`` (e.g. the log-softmax of a transformer's next-token logits). Log-probs must be <= 0
+            (NaN or positive values are rejected with ``ValueError`` -- see below).
         eos: end-of-sequence token; a prefix whose last token is ``eos`` is complete (and not extended).
         max_len: maximum sequence length; a prefix of this length is complete. At least one of ``eos`` /
             ``max_len`` should be given or enumeration may not terminate.
@@ -101,6 +156,14 @@ def best_first_decode(
 
     Yields:
         ``(sequence_tuple, total_log_prob)`` in nonincreasing total log-probability.
+
+    Raises:
+        ValueError: if ``next_logprobs`` returns a NaN or positive log-probability. Unlike the fully
+            generic :func:`best_first`, this function's whole exactness claim rests on every step's
+            log-prob being <= 0 (see the module docstring), so that contract IS validated here, at the
+            point each continuation is consumed -- a caller's scoring bug (e.g. passing raw logits
+            instead of a log-softmax) fails loudly instead of silently shipping results that are
+            labeled exact but are not.
     """
     if eos is None and max_len is None:
         raise ValueError("best_first_decode needs eos and/or max_len to know when a sequence is complete.")
@@ -114,7 +177,7 @@ def best_first_decode(
     def successors(state: tuple) -> Iterator[tuple[tuple, float]]:
         prefix, lp = state
         for token, token_lp in next_logprobs(prefix):
-            yield (prefix + (token,), lp + token_lp)
+            yield (prefix + (token,), lp + _validate_step_logprob(token_lp))
 
     h = None if heuristic is None else (lambda state: heuristic(state[0]))
     for (prefix, lp), _score in best_first(
@@ -190,7 +253,9 @@ def top_k_scored(
     Args:
         candidates: a finite iterable of candidate outputs.
         score: the (log-)score of a candidate.
-        k: keep only the top ``k`` (uses a bounded heap); ``None`` returns all, sorted.
+        k: keep only the top ``k`` (uses a bounded heap); ``None`` returns all, sorted. Must be a
+            positive integer when given -- ``heapq.nlargest`` silently returns ``[]`` for ``k <= 0``,
+            which reads as "no candidates qualify" rather than the caller-bound error it actually is.
 
     Returns:
         A list of ``(candidate, score)`` in nonincreasing score.
@@ -198,6 +263,7 @@ def top_k_scored(
     scored = ((c, float(score(c))) for c in candidates)
     if k is None:
         return sorted(scored, key=lambda u: -u[1])
+    k = _positive_int(k, "k")
     return heapq.nlargest(k, scored, key=lambda u: u[1])
 
 
@@ -205,8 +271,17 @@ def _prune_step(items: Iterable[tuple[Any, float]], top_k: int | None, top_p: fl
     """Restrict a step's (token, log_prob) continuations to the top-k / top-p (nucleus).
 
     This structural pruning keeps peaked neural distributions tractable to enumerate.
+
+    ``top_k``/``top_p`` are validated (see :func:`_validate_pruning_bounds`) and every ``(token,
+    log_prob)`` pair is validated (see :func:`_validate_step_logprob`) before ranking. Both matter for
+    the same reason: an out-of-range ``top_p`` or a NaN log-prob silently corrupts the cumulative-mass
+    nucleus loop below (``cum >= top_p`` compares False against NaN either way, so the loop never stops
+    early -- it just keeps whatever is left), and an unvalidated positive log-prob breaks the same
+    non-increasing-score monotonicity :func:`best_first_decode` depends on, since every value pruned
+    here is what :func:`quantized_best_first_decode` pushes back onto its frontier.
     """
-    ranked = sorted(items, key=lambda u: -u[1])
+    _validate_pruning_bounds(top_k, top_p)
+    ranked = sorted(((token, _validate_step_logprob(lp)) for token, lp in items), key=lambda u: -u[1])
     if top_k is not None:
         ranked = ranked[:top_k]
     if top_p is not None and ranked:
