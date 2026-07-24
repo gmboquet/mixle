@@ -1,9 +1,18 @@
 """Capture an amplified teacher with collapse monitoring.
 
-The "amplified teacher" here is :func:`~mixle.doe.oracle.optimize_under_oracle`'s search itself: round
-1 spends an oracle-call budget searching, and is verified stronger than a single ungrounded guess before
-anything else happens. If the search does not beat its best single input, there is nothing to capture,
-and this function stops with an explicit reason rather than distilling nothing.
+The "amplified teacher" here is :func:`~mixle.doe.oracle.optimize_under_oracle`'s search itself: round 1
+spends an ``n_init + n_iter`` oracle-call budget searching, and must be verified stronger than a
+*budget-matched* random baseline of the same size before anything else happens. A search's best-of-N
+compared against a single extra random draw is a multiple-comparisons trap, not a fair test: for N+1
+values drawn i.i.d. from the same distribution, exchangeability alone gives P(max of the first N > the
+last one) = N / (N+1), so passage becomes increasingly automatic as the budget N grows even when the
+search adds no real capability, and the one extra draw was never counted against the stated budget
+either. Matching the baseline's budget to the search's and testing "is round 1's best score bigger than
+the baseline's best score by more than a fair reshuffling of the same ``2N`` scores would typically
+produce" with a one-sided permutation test (rather than a bare, un-tested "is my number bigger" check on
+two single points) is what keeps the gate a calibrated statistical claim instead of a counter that trends
+toward "always passes". If the search does not clear the gate at the ``significance`` level, there is
+nothing to capture, and this function stops with an explicit reason rather than distilling nothing.
 
 The student captured from round 1 is a low-cost regression surrogate of the oracle's score landscape, fit
 only from round 1's oracle-verified ``(x, score)`` pairs. It never grades a candidate itself; it only
@@ -22,6 +31,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
+from scipy.stats import permutation_test
 
 from mixle.doe.designs import Bounds, random_design
 from mixle.doe.oracle import DesignCandidate, DesignRun, VerifiableOracle, optimize_under_oracle
@@ -44,6 +54,11 @@ def _design_matrix(xs: np.ndarray, degree: int) -> np.ndarray:
     for d in range(1, degree + 1):
         cols.append(xs**d)
     return np.concatenate([c.reshape(xs.shape[0], -1) if c.ndim > 1 else c[:, None] for c in cols], axis=1)
+
+
+def _best_score_gap(x: np.ndarray, y: np.ndarray) -> float:
+    """Permutation-test statistic: how much ``x``'s best score exceeds ``y``'s (see ``amplify_and_capture``)."""
+    return float(np.max(x) - np.max(y))
 
 
 @dataclass
@@ -86,16 +101,22 @@ class AmplificationRound:
 class AmplifyReport:
     """Receipt for a two-round amplify-and-capture run.
 
-    ``round1`` is the initial oracle-driven search. ``round2`` is present only
-    when round 1 beats the single-input baseline and a captured student is used
-    to propose the matched-budget follow-up batch. ``collapse`` records the
+    ``round1`` is the initial oracle-driven search. ``baseline`` is a random draw matched to round 1's
+    exact oracle-call budget (not a single draw -- see ``amplify_and_capture``), so every oracle call
+    either side spent is accounted for in its own receipted :class:`AmplificationRound`.
+    ``baseline_p_value`` is the one-sided permutation-test p-value for "round 1's best score exceeds the
+    baseline's best score by more than chance", tested against the prespecified ``significance`` level to
+    produce ``beats_baseline``. ``round2`` is present only when round 1 clears that gate, and a captured
+    student is used to propose the matched-budget follow-up batch. ``collapse`` records the
     trajectory-level collapse verdict when both rounds run.
     """
 
     round1: AmplificationRound
     round2: AmplificationRound | None
-    baseline_single_input_score: float
-    beats_single_input: bool
+    baseline: AmplificationRound
+    baseline_p_value: float
+    significance: float
+    beats_baseline: bool
     round2_beats_round1: bool
     collapse: CollapseVerdict | None
     student: StudentTeacher | None
@@ -111,38 +132,88 @@ def amplify_and_capture(
     n_iter: int = 10,
     candidate_pool_size: int = 200,
     degree: int = 2,
+    significance: float = 0.05,
     seed: int | None = None,
 ) -> AmplifyReport:
     """Round 1: search the oracle for a budget of ``n_init + n_iter`` calls (the amplified teacher).
-    The search must beat a single ungrounded guess, or this returns the explicit ``stopped_early=True``
-    result with nothing distilled. Otherwise: fit :class:`StudentTeacher` from
-    round 1's history; round 2 uses the student to rank a large candidate pool efficiently and spends the
-    same oracle-call budget verifying only the top-ranked candidates -- student-guided, not blind, but
-    every accepted score is still oracle-verified. Runs :func:`mixle.task.collapse.collapse_monitor`
-    over the two rounds.
+
+    The search must beat a *budget-matched* random baseline -- also ``n_init + n_iter`` oracle-verified
+    draws, not one -- on a one-sided permutation test of "round 1's best score exceeds the baseline's best
+    score by more than a fair reshuffling of the pooled ``2 * budget`` scores would typically produce", at
+    the prespecified ``significance`` level. A single best-of-N-vs-one-draw comparison is a
+    multiple-comparisons trap (see the module docstring): matching the baseline's budget to the search's,
+    and testing the two best-of-budget scores against the null distribution obtained by repeatedly
+    reshuffling which of the ``2 * budget`` oracle-verified scores "belong" to round 1 versus the baseline
+    (rather than a bare, un-tested "is my number bigger" check), is what makes ``beats_baseline`` a
+    calibrated claim instead of a counter that trends toward "always passes" as the budget grows. If the
+    search does not clear the gate, this returns the explicit ``stopped_early=True`` result with nothing
+    distilled.
+
+    Otherwise: fit :class:`StudentTeacher` from round 1's history; round 2 uses the student to rank a
+    large candidate pool efficiently and spends the same oracle-call budget verifying only the top-ranked
+    candidates -- student-guided, not blind, but every accepted score is still oracle-verified. Runs
+    :func:`mixle.task.collapse.collapse_monitor` over the two rounds.
     """
     run1 = optimize_under_oracle(oracle, bounds, n_init=n_init, n_iter=n_iter, seed=seed)
     round1 = AmplificationRound(run=run1, best_score=float(run1.best.result.score), xs=[c.x for c in run1.history])
 
-    baseline_x = random_design(bounds, 1, seed=seed)[0]
-    baseline_score = float(oracle(baseline_x).score)
-    beats_single_input = round1.best_score > baseline_score
-    if not beats_single_input:
+    budget = int(n_init) + int(n_iter)
+
+    # Budget-matched baseline (MXR-080-0161): the same number of oracle-verified draws as round 1 spent,
+    # every one of them receipted in its own DesignRun -- not one extra, uncounted draw. Reuses round 1's
+    # own `seed` (a different RandomState-consuming call than `optimize_under_oracle`'s BayesianOptimizer,
+    # so this does not replay round 1's sequence); `fresh_pool` below deliberately uses `seed + 1` so the
+    # round-2 candidate pool's draw never repeats this baseline's draw.
+    baseline_xs = random_design(bounds, budget, seed=seed)
+    baseline_run = DesignRun(oracle_name=oracle.name, oracle_tier=oracle.tier, oracle_fidelity=oracle.fidelity)
+    for x in baseline_xs:
+        baseline_run.history.append(DesignCandidate(x=x, result=oracle(x)))
+    baseline = AmplificationRound(
+        run=baseline_run, best_score=float(baseline_run.best.result.score), xs=[c.x for c in baseline_run.history]
+    )
+
+    # Statistical improvement test, not a point comparison: is round 1's best score bigger than the
+    # baseline's best score by more than a fair reshuffling of the pooled `2 * budget` scores would
+    # typically produce? A permutation test answers exactly this without needing to actually re-run the
+    # search: it repeatedly re-splits the `2 * budget` already-collected scores (every oracle call from
+    # both sides) into two same-sized groups uniformly at random and asks how often a random split's
+    # "max(group A) - max(group B)" is at least as large as what was actually observed. Under a genuinely
+    # zero-skill search (its proposals no better than random), round 1's and the baseline's scores are
+    # exchangeable and this p-value is ~Uniform(0, 1), so `beats_baseline` fires at the nominal
+    # `significance` rate rather than approaching certainty as `budget` grows -- unlike a bare
+    # `round1.best_score > baseline.best_score` check, which is exactly the old, unmatched-budget bug's
+    # comparison with none of its calibration.
+    permutation = permutation_test(
+        (run1.scores(), baseline_run.scores()),
+        _best_score_gap,
+        permutation_type="independent",
+        alternative="greater",
+        n_resamples=9999,
+        rng=seed,
+    )
+    baseline_p_value = float(permutation.pvalue)
+    beats_baseline = bool(baseline_p_value < significance)
+    if not beats_baseline:
         return AmplifyReport(
             round1=round1,
             round2=None,
-            baseline_single_input_score=baseline_score,
-            beats_single_input=False,
+            baseline=baseline,
+            baseline_p_value=baseline_p_value,
+            significance=significance,
+            beats_baseline=False,
             round2_beats_round1=False,
             collapse=None,
             student=None,
             stopped_early=True,
-            reason="the amplified teacher (round 1 search) did not beat its best single input; nothing to capture",
+            reason=(
+                "the amplified teacher (round 1 search) did not beat a budget-matched random baseline "
+                f"(one-sided permutation test p={baseline_p_value:.4g}, significance={significance}); "
+                "nothing to capture"
+            ),
         )
 
     student = fit_student(run1, degree=degree)
 
-    budget = int(n_init) + int(n_iter)
     fresh_pool = random_design(bounds, int(candidate_pool_size), seed=None if seed is None else seed + 1)
     # warm-start the candidate pool with round 1's own verified points -- standard practice for an
     # amplification round building on prior verified data. It makes "round 2 at matched budget beats or
@@ -172,8 +243,10 @@ def amplify_and_capture(
     return AmplifyReport(
         round1=round1,
         round2=round2,
-        baseline_single_input_score=baseline_score,
-        beats_single_input=True,
+        baseline=baseline,
+        baseline_p_value=baseline_p_value,
+        significance=significance,
+        beats_baseline=True,
         round2_beats_round1=round2.best_score >= round1.best_score,
         collapse=collapse,
         student=student,
