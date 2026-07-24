@@ -80,6 +80,8 @@ def sobol_indices(
     *,
     seed: int = 0,
     names: Sequence[str] | None = None,
+    n_bootstrap: int = 200,
+    confidence: float = 0.95,
 ) -> dict[str, Any]:
     """First- and total-order Sobol sensitivity indices (Saltelli sampling, Jansen estimators).
 
@@ -87,38 +89,111 @@ def sobol_indices(
         func: a *vectorized* model ``f(X) -> y`` mapping an ``(m, d)`` array of inputs to an ``(m,)``
             array of scalar outputs.
         bounds: ``[(lo, hi), ...]`` per input -- the input is taken uniform on the box.
-        n: base sample size; the total number of model evaluations is ``n * (d + 2)``.
+        n: base sample size; the total number of model evaluations is ``n * (d + 2)`` (bootstrap
+            resampling below is free of additional ``func`` calls, so this count is exact).
         seed: RNG seed for the (Sobol) base samples.
         names: optional input names for the returned dict.
+        n_bootstrap: number of bootstrap resamples used for the standard error / confidence interval
+            of each index (see "Returns" below).
+        confidence: confidence level for the bootstrap interval, in ``(0, 1)`` -- e.g. ``0.95`` for a
+            two-sided 95% interval.
 
     Returns:
-        ``{'S1': (d,), 'ST': (d,), 'names': [...], 'var': float}`` -- first-order ``S1[i]`` is the
-        fraction of output variance from input ``i`` alone; total-order ``ST[i]`` includes all
-        interactions involving ``i`` (so ``ST[i] - S1[i]`` measures ``i``'s interaction strength, and
-        ``ST[i] ~ 0`` means input ``i`` can be fixed).
+        A dict with, for both first- and total-order:
+
+        - ``'S1'`` / ``'ST'``: the **raw, unclipped** point estimate. A finite-sample Sobol estimator
+          can legitimately land slightly negative, or (for ``S1``) slightly above 1, purely from Monte
+          Carlo noise -- most often when the true index is near 0 or 1. That is not a bug in the
+          estimate; it is the honest signal that sampling noise is comparable to the index's true
+          magnitude, and this raw value is always what is returned here (never silently clamped).
+        - ``'S1_clipped'`` / ``'ST_clipped'``: the same estimate clipped into its theoretically valid
+          range (``S1`` into ``[0, 1]``, ``ST`` below at ``0``) -- a separate, explicitly-named
+          convenience for e.g. plotting or reporting a single non-negative "share of variance"; never
+          the only value returned, and never used in place of the raw estimate above.
+        - ``'S1_standard_error'`` / ``'ST_standard_error'``: a bootstrap standard error, from
+          ``n_bootstrap`` resamples (with replacement) of the already-evaluated ``A``/``B``/``AB_i``
+          rows, each re-run through the same S1/ST formula -- the standard uncertainty-quantification
+          approach for Sobol' estimators (Archer, Saltelli & Sobol' 1997), since no exact closed-form
+          sampling distribution exists for them in general.
+        - ``'S1_ci_low'`` / ``'S1_ci_high'`` and ``'ST_ci_low'`` / ``'ST_ci_high'``: the corresponding
+          percentile bootstrap confidence interval at the ``confidence`` level.
+
+        Plus ``'names'`` and ``'var'`` (the total output variance). ``S1[i]`` is the fraction of
+        output variance from input ``i`` alone; ``ST[i]`` includes all interactions involving ``i``
+        (so ``ST[i] - S1[i]`` measures ``i``'s interaction strength, and ``ST[i] ~ 0`` -- relative to
+        its standard error, not just numerically close -- means input ``i`` can be fixed).
     """
     bounds = _as_bounds(bounds)
     d = bounds.shape[0]
     n = _require_exact_positive_int(n, "n")
+    n_bootstrap = _require_exact_positive_int(n_bootstrap, "n_bootstrap")
+    if not np.isfinite(confidence) or not (0.0 < confidence < 1.0):
+        raise ValueError(f"confidence must be in (0, 1), got {confidence!r}.")
     names_out = _validate_names(names, d)
     a_unit = _sobol_unit(n, 2 * d, seed)  # split one 2d-dimensional Sobol block into A and B (independence)
     a, b = a_unit[:, :d], a_unit[:, d:]
     ya = _eval_model(func, _scale(a, bounds), label="sobol_indices's func")
     yb = _eval_model(func, _scale(b, bounds), label="sobol_indices's func")
     var = np.var(np.concatenate([ya, yb]))
+    if var <= 0:  # constant output: every index is exactly (not just clipped-to-) zero, with no
+        zero = np.zeros(d)  # sampling uncertainty to quantify -- there is nothing left to estimate.
+        return {
+            "S1": zero,
+            "ST": zero.copy(),
+            "S1_clipped": zero.copy(),
+            "ST_clipped": zero.copy(),
+            "S1_standard_error": zero.copy(),
+            "ST_standard_error": zero.copy(),
+            "S1_ci_low": zero.copy(),
+            "S1_ci_high": zero.copy(),
+            "ST_ci_low": zero.copy(),
+            "ST_ci_high": zero.copy(),
+            "names": names_out,
+            "var": 0.0,
+        }
     s1 = np.zeros(d)
     st = np.zeros(d)
-    if var <= 0:  # constant output: every index is zero
-        return {"S1": s1, "ST": st, "names": names_out, "var": 0.0}
+    yab_all = np.empty((d, n))  # stashed for the bootstrap pass below -- no extra `func` calls needed
     for i in range(d):
         ab = a.copy()
         ab[:, i] = b[:, i]  # A with column i taken from B
         yab = _eval_model(func, _scale(ab, bounds), label="sobol_indices's func")
+        yab_all[i] = yab
         s1[i] = np.mean(yb * (yab - ya)) / var  # Saltelli 2010 first-order estimator
         st[i] = 0.5 * np.mean((ya - yab) ** 2) / var  # Jansen total-order estimator
+
+    # Bootstrap standard errors and confidence intervals: resample the *already-evaluated* rows with
+    # replacement and recompute S1/ST on each resample, entirely in numpy (no additional model
+    # evaluations). The resampling RNG is derived from `seed` via a SeedSequence so it is reproducible
+    # but statistically independent of the RandomState `_sobol_unit` seeded directly from `seed` above.
+    boot_seed = int(np.random.SeedSequence(seed).generate_state(1)[0])
+    boot_rng = np.random.RandomState(boot_seed)
+    idx = boot_rng.randint(0, n, size=(n_bootstrap, n))
+    ya_boot, yb_boot = ya[idx], yb[idx]  # each (n_bootstrap, n)
+    var_boot = np.var(np.concatenate([ya_boot, yb_boot], axis=1), axis=1)  # (n_bootstrap,)
+    safe_var_boot = np.where(var_boot > 0, var_boot, np.nan)  # a degenerate all-tied resample -> NaN,
+    s1_boot = np.empty((n_bootstrap, d))  # excluded below by the nan-aware reductions, not divided by 0
+    st_boot = np.empty((n_bootstrap, d))
+    for i in range(d):
+        yab_boot = yab_all[i][idx]
+        s1_boot[:, i] = np.mean(yb_boot * (yab_boot - ya_boot), axis=1) / safe_var_boot
+        st_boot[:, i] = 0.5 * np.mean((ya_boot - yab_boot) ** 2, axis=1) / safe_var_boot
+    alpha = 1.0 - confidence
+    lo_q, hi_q = 100.0 * alpha / 2.0, 100.0 * (1.0 - alpha / 2.0)
+    s1_ci = np.nanpercentile(s1_boot, [lo_q, hi_q], axis=0)  # (2, d)
+    st_ci = np.nanpercentile(st_boot, [lo_q, hi_q], axis=0)
+
     return {
-        "S1": np.clip(s1, 0.0, 1.0),
-        "ST": np.clip(st, 0.0, None),
+        "S1": s1,
+        "ST": st,
+        "S1_clipped": np.clip(s1, 0.0, 1.0),
+        "ST_clipped": np.clip(st, 0.0, None),
+        "S1_standard_error": np.nanstd(s1_boot, axis=0, ddof=1),
+        "ST_standard_error": np.nanstd(st_boot, axis=0, ddof=1),
+        "S1_ci_low": s1_ci[0],
+        "S1_ci_high": s1_ci[1],
+        "ST_ci_low": st_ci[0],
+        "ST_ci_high": st_ci[1],
         "names": names_out,
         "var": float(var),
     }

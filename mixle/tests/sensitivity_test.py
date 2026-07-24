@@ -1,7 +1,7 @@
 """Global sensitivity analysis: Sobol indices vs the Ishigami analytic values, Morris screening (Phase 4).
 
-MXR-080-0192 (shared bounds/count/name/model-output validation contract) is covered below the
-original Phase 4 coverage.
+MXR-080-0192 (shared bounds/count/name/model-output validation contract) and MXR-080-0193 (raw Sobol
+estimates plus bootstrap uncertainty) are covered below the original Phase 4 coverage.
 """
 
 import unittest
@@ -43,6 +43,117 @@ class SobolTest(unittest.TestCase):
         res = sobol_indices(lambda x: np.ones(len(x)), [(0, 1)] * 2, n=512)
         np.testing.assert_array_equal(res["S1"], [0.0, 0.0])
         np.testing.assert_array_equal(res["ST"], [0.0, 0.0])
+
+
+class _NoisyNull:
+    """Output is independent noise: true S1=ST=0 for every input, exactly. The RNG stream persists
+    across calls (not reseeded per call), so ``ya``/``yb``/``yab`` still differ from one another --
+    unlike a literally constant-output model, this is *not* the ``var <= 0`` special case, so the
+    finite-sample estimate has genuine, reproducible Monte Carlo noise around 0.
+    """
+
+    def __init__(self, seed):
+        self._rng = np.random.RandomState(seed)
+
+    def __call__(self, x):
+        return self._rng.standard_normal(x.shape[0])
+
+
+class SobolUncertaintyTest(unittest.TestCase):
+    """MXR-080-0193: sobol_indices must always return the raw (unclipped) estimate plus a bootstrap
+    standard error and confidence interval, with any clipped convenience value kept separate.
+    """
+
+    def test_raw_estimate_is_not_clamped_to_the_boundary(self):
+        # Small n against a genuinely null (noise-only) model makes MC noise dominate: some raw S1
+        # values must land below 0 (ST's Jansen form is a mean of squares and can't itself go
+        # negative, so S1 is where clipping-to-false-certainty would show up). If this ever regressed
+        # to clipping S1 in place, this loop would never find one.
+        saw_negative_raw = any(
+            np.any(sobol_indices(_NoisyNull(seed), [(0, 1)] * 3, n=32, seed=seed)["S1"] < 0.0) for seed in range(30)
+        )
+        self.assertTrue(saw_negative_raw, "raw S1 should sometimes be negative under pure MC noise")
+
+    def test_clipped_field_is_separate_and_is_a_real_clip_of_the_raw_field(self):
+        res = sobol_indices(_NoisyNull(0), [(0, 1)] * 3, n=32, seed=0)
+        np.testing.assert_allclose(res["S1_clipped"], np.clip(res["S1"], 0.0, 1.0))
+        np.testing.assert_allclose(res["ST_clipped"], np.clip(res["ST"], 0.0, None))
+        # this specific (seeded, reproducible) fixture has a genuinely negative raw S1 entry -- confirm
+        # it survives un-clamped under "S1" and only "S1_clipped" zeroes it out.
+        self.assertLess(res["S1"][1], 0.0)
+        self.assertEqual(res["S1_clipped"][1], 0.0)
+
+    def test_standard_error_and_confidence_interval_fields_are_well_formed(self):
+        res = sobol_indices(ishigami, BOUNDS, n=4096, seed=0)
+        for key in ("S1_standard_error", "ST_standard_error"):
+            self.assertTrue(np.all(np.isfinite(res[key])))
+            self.assertTrue(np.all(res[key] > 0))
+        self.assertTrue(np.all(res["S1_ci_low"] <= res["S1_ci_high"]))
+        self.assertTrue(np.all(res["ST_ci_low"] <= res["ST_ci_high"]))
+        # The point estimate should typically fall within its own bootstrap interval for a smooth,
+        # well-resolved statistic like this one -- checked across a few seeds with a loose floor since
+        # a percentile bootstrap gives no strict per-seed guarantee, unlike the ordering checks above.
+        contained = sum(
+            np.all(r["S1_ci_low"] <= r["S1"]) and np.all(r["S1"] <= r["S1_ci_high"])
+            for r in (sobol_indices(ishigami, BOUNDS, n=4096, seed=s) for s in range(5))
+        )
+        self.assertGreaterEqual(contained, 4)
+
+    def test_confidence_intervals_are_calibrated(self):
+        # Coverage check (mirrors calibrate_test.py's KOCalibrationTest.test_theta_confidence_
+        # intervals_are_calibrated): an additive linear model on [0, 1]^3 has an exactly known
+        # analytic first-order index, S1 = coef_i^2 / sum(coef_j^2) (uniform Var(x_i) cancels
+        # identically): [1, 4, 9] / 14.
+        true_s1 = np.array([1.0, 4.0, 9.0]) / 14.0
+        trials = 20
+        covered = np.zeros(3)
+        for seed in range(trials):
+            res = sobol_indices(
+                lambda x: x[:, 0] + 2 * x[:, 1] + 3 * x[:, 2],
+                [(0, 1)] * 3,
+                n=1024,
+                seed=seed + 500,
+                n_bootstrap=150,
+            )
+            covered += (res["S1_ci_low"] <= true_s1) & (true_s1 <= res["S1_ci_high"])
+        # Loose floor (nominal ~95% * 20 trials ~= 19): keeps this non-flaky while still catching a
+        # badly miscalibrated interval (e.g. one that collapses to a point, or is centered elsewhere).
+        self.assertTrue(np.all(covered >= trials * 0.5), f"coverage too low: {covered}/{trials}")
+
+    def test_n_bootstrap_and_confidence_are_validated(self):
+        with self.assertRaises(ValueError):
+            sobol_indices(_linear, [(0, 1), (0, 1)], n=32, n_bootstrap=0)
+        with self.assertRaises(ValueError):
+            sobol_indices(_linear, [(0, 1), (0, 1)], n=32, confidence=1.5)
+        with self.assertRaises(ValueError):
+            sobol_indices(_linear, [(0, 1), (0, 1)], n=32, confidence=0.0)
+
+    def test_constant_output_reports_exact_zero_with_zero_uncertainty(self):
+        # Negative control for the var<=0 special case: no sampling noise to quantify, so every new
+        # field must still be present with a sensible degenerate value, not missing or NaN.
+        res = sobol_indices(lambda x: np.ones(len(x)), [(0, 1)] * 2, n=512)
+        for key in (
+            "S1",
+            "ST",
+            "S1_clipped",
+            "ST_clipped",
+            "S1_standard_error",
+            "ST_standard_error",
+            "S1_ci_low",
+            "S1_ci_high",
+            "ST_ci_low",
+            "ST_ci_high",
+        ):
+            np.testing.assert_array_equal(res[key], [0.0, 0.0])
+
+    def test_well_resolved_estimate_still_reports_sensible_values(self):
+        # Negative control: a clearly-in-bounds, well-estimated index (large n) must not be disturbed
+        # by the new machinery -- raw ~= clipped, tight standard error, matches the known analytic
+        # value, same as the pre-existing SobolTest assertions.
+        res = sobol_indices(ishigami, BOUNDS, n=16384, seed=0, names=["x1", "x2", "x3"])
+        np.testing.assert_allclose(res["S1"][:2], res["S1_clipped"][:2], atol=1e-9)  # far from [0,1]'s edges
+        np.testing.assert_allclose(res["S1"][:2], [0.314, 0.442], atol=0.03)
+        self.assertTrue(np.all(res["S1_standard_error"][:2] < 0.02))  # n=16384 is well-resolved
 
 
 class MorrisTest(unittest.TestCase):
