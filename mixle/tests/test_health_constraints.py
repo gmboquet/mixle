@@ -17,6 +17,7 @@ convention -- see ``pyproject.toml``) because this exact path + node id is the f
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from mixle.analysis.health_risk import DoseResponse, exposure_constraints, health_liability, population_risk
 from mixle.reason.posterior_protocol import Posterior
@@ -162,6 +163,39 @@ def test_exposure_constraints_policy_override_defaults_off():
     )
     assert still_violating["status"] == "violating"
     assert still_violating["feasible"] is False
+
+
+def test_health_liability_rejects_invalid_discount_and_cost():
+    """MXR-080-0098: discount == -1 divided by zero (1/(1+discount)); anything below -1 silently
+    flipped the liability's sign. cost_per_case must also be finite and non-negative."""
+    risk = population_risk(
+        np.array([0.02, 0.03]),
+        DoseResponse(model="loglinear", params={"beta": 0.01}),
+        n=10,
+        rng=np.random.default_rng(0),
+    )
+    for bad_discount in (-1.0, -1.5, -2.0, float("nan"), float("-inf")):
+        with pytest.raises(ValueError):
+            health_liability(risk, cost_per_case=1_000_000.0, discount=bad_discount)
+    for bad_cost in (-1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            health_liability(risk, cost_per_case=bad_cost)
+
+
+def test_health_liability_valid_discount_still_prices_correctly():
+    """Negative control for MXR-080-0098: legitimate discounts (including a large but valid one) keep
+    producing a correctly-scaled, non-negative liability."""
+    risk = population_risk(
+        np.array([0.02, 0.03]),
+        DoseResponse(model="loglinear", params={"beta": 0.01}),
+        n=10,
+        rng=np.random.default_rng(0),
+    )
+    for discount in (0.0, 0.05, 1.0, 10.0):
+        liability = health_liability(risk, cost_per_case=1_000_000.0, discount=discount)
+        assert np.isfinite(liability.samples).all()
+        assert (liability.samples >= 0.0).all()
+        assert np.allclose(liability.samples, risk.samples * 1_000_000.0 / (1.0 + discount))
 
 
 def test_exposure_constraints_genuine_safe_and_violating_unchanged():

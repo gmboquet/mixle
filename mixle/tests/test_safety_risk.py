@@ -142,3 +142,70 @@ def test_incident_probability_shape_mismatch_raises():
 def test_incident_probability_unknown_model_raises():
     with pytest.raises(ValueError):
         incident_probability(np.zeros((2, 2)), np.zeros((2, 2)), model="bogus")
+
+
+def test_incident_probability_rejects_out_of_range_or_non_finite_hazard():
+    """MXR-080-0098: an out-of-[0,1] or non-finite hazard is REJECTED, not silently clipped into a
+    falsely-confident boundary probability (the pre-fix "logit" path clipped 5.0/-3.0 straight into
+    [eps, 1-eps] without ever checking they were valid probabilities)."""
+    exposure = np.zeros((2, 2))
+    for bad_hazard in (
+        np.array([[5.0, 0.5], [0.5, 0.5]]),
+        np.array([[-3.0, 0.5], [0.5, 0.5]]),
+        np.array([[float("nan"), 0.5], [0.5, 0.5]]),
+        np.array([[float("inf"), 0.5], [0.5, 0.5]]),
+    ):
+        with pytest.raises(ValueError):
+            incident_probability(bad_hazard, exposure)
+        with pytest.raises(ValueError):
+            incident_probability(bad_hazard, exposure, model="linear")
+
+
+def test_incident_probability_rejects_non_finite_exposure_map():
+    hazard = np.full((2, 2), 0.5)
+    with pytest.raises(ValueError):
+        incident_probability(hazard, np.array([[float("nan"), 0.0], [0.0, 0.0]]))
+    with pytest.raises(ValueError):
+        incident_probability(hazard, np.array([[float("inf"), 0.0], [0.0, 0.0]]))
+
+
+def test_incident_probability_valid_boundary_hazard_unchanged():
+    """Negative control for MXR-080-0098: legitimate hazard values (including the exact 0/1 boundary,
+    which the eps-clip still numerically stabilizes) keep working."""
+    hazard = np.array([[0.0, 1.0], [0.25, 0.75]])
+    p = incident_probability(hazard, np.zeros((2, 2)))
+    assert np.all(np.isfinite(p))
+    assert np.all((p >= 0.0) & (p <= 1.0))
+
+
+def test_safety_risk_surface_rejects_invalid_gradient_limit_slope_and_deformation():
+    """MXR-080-0098: gradient_limit must be finite and non-negative; slope and an ndarray deformation
+    must be finite (a NaN either way would silently compare False against "> gradient_limit")."""
+    grid = np.zeros((4, 4))
+    for bad_limit in (-1.0, float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            safety_risk_surface(grid, gradient_limit=bad_limit)
+
+    bad_slope = np.full((4, 4), float("nan"))
+    with pytest.raises(ValueError):
+        safety_risk_surface(grid, gradient_limit=1.0, slope=bad_slope)
+
+    bad_grid = np.zeros((4, 4))
+    bad_grid[1, 1] = float("nan")
+    with pytest.raises(ValueError):
+        safety_risk_surface(bad_grid, gradient_limit=1.0)
+
+    posterior = _DeformationPosterior(np.zeros((3, 3)))
+    with pytest.raises(ValueError):
+        safety_risk_surface(posterior, gradient_limit=-1.0)
+    with pytest.raises(ValueError):
+        safety_risk_surface(posterior, gradient_limit=1.0, slope=np.full((3, 3), float("nan")))
+
+
+def test_safety_risk_surface_valid_gradient_limit_unchanged():
+    """Negative control for MXR-080-0098: a legitimate (including exactly zero) gradient_limit still
+    produces the expected deterministic exceedance surface."""
+    rows, cols = 6, 6
+    flat = np.zeros((rows, cols))
+    dq_zero_limit = safety_risk_surface(flat, gradient_limit=0.0)
+    assert np.asarray(dq_zero_limit.samples).sum() == 0.0  # a flat field has zero gradient everywhere
