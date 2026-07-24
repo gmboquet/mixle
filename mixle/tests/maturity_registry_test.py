@@ -58,9 +58,38 @@ class MaturityResolutionTest(unittest.TestCase):
         self.assertEqual(maturity_of("mixle.inference.optimize"), Maturity.STABLE)
 
     def test_more_specific_prefix_overrides(self):
-        # mixle.inference is stable, but mixle.inference.production is only practical-helper provisional.
-        self.assertEqual(maturity_of("mixle.inference"), Maturity.STABLE)
+        # mixle.inference itself is only provisional (docs/maturity.rst documents just the narrow
+        # "optimize and direct estimation helpers" slice as stable, not the whole package); the
+        # direct-estimation core carves itself out as stable, while mixle.inference.production stays at
+        # the provisional default under its own, more specific label. Both are more-specific prefixes
+        # overriding the general one -- in opposite directions.
+        self.assertEqual(maturity_of("mixle.inference"), Maturity.PROVISIONAL)
+        self.assertEqual(maturity_of("mixle.inference.estimation"), Maturity.STABLE)
         self.assertEqual(maturity_of("mixle.inference.production.registry"), Maturity.PROVISIONAL)
+
+    def test_direct_estimation_core_is_stable(self):
+        # The narrow set of names docs/maturity.rst documents as the stable core: the literal symbolic
+        # name the doc's table row uses ("mixle.inference.optimize"), the real module that name refers to
+        # (estimation.py: optimize()/fit()/best_of()), and the EM strategy machinery estimation.py itself
+        # builds on (em.py: EMStrategy/MonteCarloEM/OnlineEM/CompiledEM, imported back into estimation.py).
+        for name in ("mixle.inference.optimize", "mixle.inference.estimation", "mixle.inference.em"):
+            self.assertEqual(maturity_of(name), Maturity.STABLE, name)
+
+    def test_inference_submodules_default_to_provisional(self):
+        # Regression test for an over-broad blanket "mixle.inference" STABLE entry (fixed in this change):
+        # only the direct-estimation core is documented stable in docs/maturity.rst. Every other
+        # mixle.inference submodule -- applied/evolving surfaces such as causal inference, scoring rules,
+        # resampling, uncertainty decomposition, multiple-testing correction, and model comparison -- was
+        # never claimed stable and must not inherit it just by sharing the mixle.inference prefix.
+        for name in (
+            "mixle.inference.causal",
+            "mixle.inference.scoring",
+            "mixle.inference.resampling",
+            "mixle.inference.uncertainty",
+            "mixle.inference.multiple_testing",
+            "mixle.inference.model_comparison",
+        ):
+            self.assertEqual(maturity_of(name), Maturity.PROVISIONAL, name)
 
     def test_experimental_namespace(self):
         self.assertEqual(maturity_of("mixle.experimental"), Maturity.EXPERIMENTAL)
@@ -79,7 +108,16 @@ class MaturityPolicyConsistencyTest(unittest.TestCase):
 
     def test_stable_surfaces_are_the_documented_core(self):
         stable = {k for k, (tier, _) in MATURITY_REGISTRY.items() if tier is Maturity.STABLE}
-        self.assertEqual(stable, {"mixle.stats", "mixle.inference", "mixle.semantics"})
+        self.assertEqual(
+            stable,
+            {
+                "mixle.stats",
+                "mixle.semantics",
+                "mixle.inference.optimize",
+                "mixle.inference.estimation",
+                "mixle.inference.em",
+            },
+        )
 
 
 if __name__ == "__main__":
