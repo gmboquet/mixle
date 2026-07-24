@@ -49,6 +49,19 @@ class ProposeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             propose(s, [item], to="org", by="")
 
+    def test_propose_preserves_derived_from(self):
+        """Regression test: _restamp() rebuilds the item field-by-field to attach the proposal record
+        and, added after MXR-080-0261 introduced SubstrateItem.derived_from, silently dropped it --
+        so a proposed item's real ancestry disappeared the moment it entered the review workflow, even
+        though tags/links/payload all survived the same restamp."""
+        s = Substrate()
+        parent = s.add(kind="text", text="source measurement", scope="teamA")
+        item = s.add(kind="artifact", text="derived term", scope="teamA", derived_from=[parent])
+
+        propose(s, [item], to="org", by="alice")
+
+        self.assertEqual(s.get(item).derived_from, [parent])
+
     def test_repropose_while_pending_is_skipped_not_overwritten(self):
         """A second propose() while the first is still pending must not silently replace it."""
         s, item, _ = _setup()

@@ -266,6 +266,7 @@ def publish(
                 provenance=prov,
                 tags=list(item.tags),
                 links=list(item.links),
+                derived_from=list(item.derived_from),
                 scope=to,
                 created_at=item.created_at,
             )
@@ -395,6 +396,7 @@ def merge_versions(
             provenance=prov,
             tags=sorted(set(keep.tags) | set(other.tags)),
             links=sorted(set(keep.links) | set(other.links)),
+            derived_from=sorted(set(keep.derived_from) | set(other.derived_from)),
             scope=keep.scope,
             created_at=keep.created_at,
         )

@@ -106,6 +106,7 @@ def _restamp(substrate: Substrate, item: SubstrateItem, prov: dict[str, Any], *,
             provenance=prov,
             tags=list(item.tags),
             links=list(item.links),
+            derived_from=list(item.derived_from),
             scope=scope if scope is not None else item.scope,
             created_at=item.created_at,
         )
