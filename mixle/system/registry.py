@@ -29,6 +29,34 @@ from mixle.task.model import TaskModel
 _INDEX_NAME = "index.json"
 
 
+def _safe_entry_id(entry_id: str) -> str:
+    """Reject an ``entry_id`` that is not a single, safe path component; return it unchanged otherwise.
+
+    ``register`` joins ``entry_id`` onto :attr:`Registry.dir` to build the artifact path it writes to and
+    later reads back from (``os.path.join(self.dir, entry_id)``). An unvalidated caller-supplied id
+    containing path separators or a ``..`` component -- ``"../escaped"``, ``"../../etc/cron.d/x"``, an
+    absolute path -- would write OUTSIDE the registry root instead of inside it: a path-traversal write,
+    not merely a naming quirk. Blocking only the literal substring ``".."`` is not enough (a bare
+    OS-specific separator, or an id that is already an absolute path, escapes without ever containing
+    that substring), so this instead requires the id to equal its own ``os.path.basename`` -- true only
+    for a plain single path component -- mirroring
+    :func:`mixle.inference.production.registry._safe_segment`, the same guard that sibling registry uses
+    for its ``name``/``version``/``alias`` segments.
+    """
+    if (
+        not isinstance(entry_id, str)
+        or not entry_id
+        or entry_id in (os.curdir, os.pardir)
+        or os.sep in entry_id
+        or (os.altsep and os.altsep in entry_id)
+        or "\x00" in entry_id
+        or os.path.isabs(entry_id)
+        or os.path.basename(entry_id) != entry_id
+    ):
+        raise ValueError(f"unsafe entry_id {entry_id!r}: must be a single path component (no separators or '..')")
+    return entry_id
+
+
 def _is_field_posterior(model: Any) -> bool:
     """True when ``model`` is a ``mixle_pde`` field posterior (the "field_posterior" `Registry` kind, IC-2).
 
@@ -155,6 +183,9 @@ class Registry:
         cost used to order :meth:`tier_stack`. An explicit ``entry_id`` that already exists (in the index
         or as an artifact directory) raises rather than duplicating the index row and silently
         overwriting the artifact; auto-generated ids scan past taken ones.
+
+        ``entry_id`` must be a single safe path component (:func:`_safe_entry_id`): an unvalidated value
+        such as ``"../escaped"`` would otherwise write the artifact outside ``dir`` instead of inside it.
         """
         if isinstance(model, CalibratedTaskModel):
             kind = "calibrated"
@@ -166,6 +197,8 @@ class Registry:
             raise TypeError(
                 f"Registry only stores TaskModel/CalibratedTaskModel/field-posterior artifacts, got {type(model)!r}"
             )
+        if entry_id is not None:
+            _safe_entry_id(entry_id)
         taken = {e.entry_id for e in self._entries}
         if entry_id is not None:
             if entry_id in taken or os.path.exists(os.path.join(self.dir, entry_id)):
@@ -178,6 +211,10 @@ class Registry:
                 i += 1
             entry_id = f"entry_{i:04d}"
         path = os.path.join(self.dir, entry_id)
+        root_real = os.path.realpath(self.dir)
+        path_real = os.path.realpath(path)
+        if path_real != root_real and not path_real.startswith(root_real + os.sep):
+            raise ValueError(f"unsafe entry_id {entry_id!r}: resolves outside the registry root")
         if kind == "field_posterior":
             _save_field_posterior(model, path)
         else:
