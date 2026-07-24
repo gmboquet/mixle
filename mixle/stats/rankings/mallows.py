@@ -156,16 +156,19 @@ class MallowsDistribution(SequenceEncodableProbabilityDistribution):
 
         Raises:
             ValueError: If x is not a permutation of 0,...,n-1 (wrong length, a repeated
-                element, or an element outside that range). A malformed x is not merely an
-                unlikely ordering -- it isn't an ordering at all, so it is rejected here rather
-                than silently scored (e.g. a repeated index would otherwise still produce a
-                finite, meaningless distance, and an out-of-range index can alias a valid rank
-                via numpy's negative-index wraparound instead of failing loudly).
+                element, a non-integer entry, or an element outside that range). A malformed x
+                is not merely an unlikely ordering -- it isn't an ordering at all, so it is
+                rejected here rather than silently scored (e.g. a repeated index would otherwise
+                still produce a finite, meaningless distance, an out-of-range index can alias a
+                valid rank via numpy's negative-index wraparound instead of failing loudly, and
+                a fractional entry like 0.5 would otherwise be silently truncated to 0 by the
+                int cast before this check ever saw it).
 
         """
-        xa = np.asarray(x, dtype=int)
-        if xa.ndim != 1 or not np.array_equal(np.sort(xa), np.arange(self.dim)):
+        xa = np.asarray(x, dtype=float)
+        if xa.ndim != 1 or not np.array_equal(xa, np.round(xa)) or not np.array_equal(np.sort(xa), np.arange(self.dim)):
             raise ValueError("MallowsDistribution requires x to be a permutation of 0,...,n-1.")
+        xa = xa.astype(int)
         y = self.rank0[xa]
         return int(np.sum(y[:, None] > y[None, :], where=np.triu(np.ones((self.dim, self.dim), dtype=bool), 1)))
 
@@ -388,11 +391,11 @@ class MallowsDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray:
         """Validate and encode orderings as a two-dimensional integer array."""
-        rv = np.asarray([list(row) for row in x], dtype=int)
+        rv = np.asarray([list(row) for row in x], dtype=float)
         if rv.ndim != 2 or rv.shape[0] == 0:
             raise ValueError("MallowsDistribution requires a non-empty sequence of orderings.")
         expected = np.arange(rv.shape[1])
         for row in rv:
-            if not np.array_equal(np.sort(row), expected):
+            if not np.array_equal(row, np.round(row)) or not np.array_equal(np.sort(row), expected):
                 raise ValueError("MallowsDistribution orderings must be permutations of 0,...,n-1.")
-        return rv
+        return rv.astype(int)

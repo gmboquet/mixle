@@ -95,6 +95,10 @@ class MallowsTestCase(unittest.TestCase):
     def test_encoder_rejects_non_permutations(self):
         with self.assertRaises(ValueError):
             MallowsDistribution([0, 1, 2]).dist_to_encoder().seq_encode([[0, 1, 1]])
+        with self.assertRaises(ValueError):
+            # A fractional entry must not be silently truncated to an in-range integer by the
+            # encoder's int cast before the permutation check ever sees it.
+            MallowsDistribution([0, 1, 2]).dist_to_encoder().seq_encode([[0.5, 1.0, 2.0]])
 
     def test_log_density_rejects_non_permutations(self):
         # A malformed x isn't just an unlikely ordering, it isn't an ordering at all: log_density
@@ -109,6 +113,8 @@ class MallowsTestCase(unittest.TestCase):
             dist.log_density([0, 1])  # wrong length
         with self.assertRaises(ValueError):
             dist.log_density([-1, 1, 2])  # negative index would otherwise alias a valid rank
+        with self.assertRaises(ValueError):
+            dist.log_density([0.5, 1.0, 2.0])  # fractional entry would otherwise truncate to 0
 
     def test_density_and_kendall_distance_reject_non_permutations(self):
         dist = MallowsDistribution([0, 1, 2], theta=1.0)
