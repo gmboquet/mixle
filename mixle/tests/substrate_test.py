@@ -1,9 +1,11 @@
 """The knowledge substrate: typed provenanced items, cross-modal retrieval, scope, persistence."""
 
+import glob
 import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from mixle.substrate import (
     MODALITIES,
@@ -239,6 +241,104 @@ class SemanticRetrievalTest(unittest.TestCase):
         hits2 = s.search(query, k=1, kind="text")
         self.assertNotEqual(hits2[0][0].id, target_id)  # the stale embedding must no longer win
         self.assertEqual(s.get(target_id).text, "")  # the item itself really is empty now
+
+
+_TMP_GLOB = ".tmp-substrate-*"
+
+
+class PersistenceAtomicityTest(unittest.TestCase):
+    """MXR-080-0235: save() must be all-or-nothing (temp file + fsync + os.replace, matching
+    mixle.task.artifact._atomic_json_dump / mixle.system.registry.Registry._write_index), and load()
+    must not commit a partially-parsed file over whatever this shard held before the call."""
+
+    def test_save_round_trips_and_leaves_no_temp_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, "shard")
+            s = Substrate()
+            s.add("text", "alpha")
+            s.add("record", payload={"n": 1})
+            s.save(root)
+
+            s2 = Substrate()
+            s2.load(root)
+            self.assertEqual(len(s2), 2)
+            self.assertEqual(sorted(i.text for i in s2.all() if i.kind == "text"), ["alpha"])
+            self.assertEqual(glob.glob(os.path.join(root, _TMP_GLOB)), [])
+
+    def test_mid_write_failure_preserves_the_previous_shard_and_leaves_no_temp(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, "shard")
+            s = Substrate()
+            s.add("text", "keep me")
+            s.add("text", "keep me too")
+            s.add("text", "and me")
+            s.save(root)  # a good, durable v1 shard
+            with open(os.path.join(root, "items.jsonl")) as f:
+                original = f.read()
+
+            # Simulate a crash partway through a re-save (disk full / killed process / a bad field on
+            # a LATER item): json.dumps blows up on its 2nd call, i.e. after the temp file already has
+            # some -- but not all -- of the new generation written to it.
+            real_dumps = json.dumps
+            calls = {"n": 0}
+
+            def flaky_dumps(*a, **kw):
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise RuntimeError("simulated crash mid-write")
+                return real_dumps(*a, **kw)
+
+            with mock.patch("json.dumps", side_effect=flaky_dumps):
+                with self.assertRaises(RuntimeError):
+                    s.save(root)  # a routine re-save of the same 3 items
+
+            with open(os.path.join(root, "items.jsonl")) as f:
+                self.assertEqual(f.read(), original)  # untouched by the failed write
+            self.assertEqual(glob.glob(os.path.join(root, _TMP_GLOB)), [])  # temp cleaned up
+
+            s2 = Substrate()
+            s2.load(root)
+            self.assertEqual(len(s2), 3)  # the durable v1 shard is still fully recoverable
+
+    def test_load_malformed_row_raises_and_preserves_prior_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, "shard")
+            os.makedirs(root)
+            good = [
+                SubstrateItem(kind="text", text="alpha").to_json(),
+                SubstrateItem(kind="text", text="beta").to_json(),
+            ]
+            trailing = SubstrateItem(kind="text", text="gamma").to_json()
+            with open(os.path.join(root, "items.jsonl"), "w") as f:
+                for d_ in good:
+                    f.write(json.dumps(d_) + "\n")
+                f.write("{not valid json at all\n")  # line 3: malformed
+                f.write(json.dumps(trailing) + "\n")  # line 4: valid, but after the break
+
+            s = Substrate()
+            prior_id = s.add("text", "pre-existing item, predates this load() call")
+
+            with self.assertRaises(ValueError) as ctx:
+                s.load(root)
+            self.assertIn("items.jsonl:3", str(ctx.exception))  # names the exact malformed row
+
+            # the failed load must not have touched the shard at all: same single prior item, same id.
+            self.assertEqual(len(s), 1)
+            self.assertEqual(s.get(prior_id).text, "pre-existing item, predates this load() call")
+
+    def test_load_malformed_row_on_a_fresh_shard_leaves_it_empty_not_partial(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, "shard")
+            os.makedirs(root)
+            with open(os.path.join(root, "items.jsonl"), "w") as f:
+                f.write(json.dumps(SubstrateItem(kind="text", text="alpha").to_json()) + "\n")
+                f.write(json.dumps(SubstrateItem(kind="text", text="beta").to_json()) + "\n")
+                f.write("{not valid json at all\n")
+
+            s = Substrate()  # no prior state
+            with self.assertRaises(ValueError):
+                s.load(root)
+            self.assertEqual(len(s), 0)  # not 2 -- a failed load must not half-apply the new file either
 
 
 class IngestTest(unittest.TestCase):
