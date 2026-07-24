@@ -9,9 +9,13 @@ misrepresent the process.
 permutation test for rank correlation between value and row position, plus a
 first-half/second-half location-shift test. The aggregate label is one of:
 
-* ``exchangeable``: no order signal found at the tested level;
+* ``exchangeable``: the probes ran and found no order signal at the tested level;
 * ``trend``: value co-moves with position;
-* ``shift``: the halves differ in location.
+* ``shift``: the halves differ in location;
+* ``inconclusive``: no probe could run at all -- too few rows, no numeric field in the
+  record shape, or every numeric field was non-finite (NaN/Inf). This is deliberately
+  distinct from ``exchangeable``: it means the assumption was never tested, not that it
+  was tested and held.
 
 :func:`mixle.inference.create` and :func:`mixle.inference.synthesize` record
 the verdict in provenance so downstream consumers can see when pooling deserves
@@ -30,12 +34,17 @@ import numpy as np
 class ExchangeabilityReport:
     """The verdict per numeric field, plus the aggregate label the preconditions record."""
 
-    label: str  # 'exchangeable' | 'trend' | 'shift'
+    label: str  # 'exchangeable' | 'trend' | 'shift' | 'inconclusive'
     fields: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def exchangeable(self) -> bool:
-        """Return ``True`` when no tested order signal was detected."""
+        """Return ``True`` only when the probes actually ran and found no order signal.
+
+        ``False`` both for a detected ``trend``/``shift`` AND for ``inconclusive`` (nothing could be
+        tested) -- a caller that only inspects this boolean can never mistake "we could not check"
+        for "we checked and the assumption held".
+        """
         return self.label == "exchangeable"
 
     def as_dict(self) -> dict[str, Any]:
@@ -44,7 +53,8 @@ class ExchangeabilityReport:
 
 
 def _numeric_columns(rows: list[Any]) -> dict[str, np.ndarray]:
-    """Extract the numeric field(s): scalars -> one column; tuples/lists -> each numeric position."""
+    """Extract the numeric field(s): scalars -> one column; tuples/lists -> each numeric position;
+    dict/mapping rows -> each numeric-valued key (mirrors the tuple/list extraction below)."""
     first = rows[0]
     if isinstance(first, (int, float, np.integer, np.floating)):
         return {"value": np.asarray([float(r) for r in rows], dtype=float)}
@@ -55,6 +65,13 @@ def _numeric_columns(rows: list[Any]) -> dict[str, np.ndarray]:
                 try:
                     cols[f"field[{j}]"] = np.asarray([float(r[j]) for r in rows], dtype=float)
                 except (TypeError, ValueError, IndexError):
+                    continue
+    elif isinstance(first, dict):
+        for k, v in first.items():
+            if isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool):
+                try:
+                    cols[str(k)] = np.asarray([float(r[k]) for r in rows], dtype=float)
+                except (TypeError, ValueError, KeyError):
                     continue
     return cols
 
@@ -95,20 +112,38 @@ def _halves_shift_pvalue(x: np.ndarray, *, n_perm: int, seed: int) -> tuple[floa
 
 
 def exchangeability_check(data: Any, *, alpha: float = 0.01, n_perm: int = 200, seed: int = 0) -> ExchangeabilityReport:
-    """Test whether row ORDER carries information (see module docstring). Small n -> exchangeable (no power).
+    """Test whether row ORDER carries information (see module docstring).
 
     ``alpha`` is deliberately strict (0.01): the check should flag clear violations, not manufacture
-    warnings from noise. Non-numeric-only data passes vacuously (order tests need a numeric surface)."""
+    warnings from noise. A dataset too small to have testing power (n < 20), with no numeric field in
+    its record shape (dict/tuple/list/scalar rows are all supported), or whose only numeric field(s)
+    are entirely non-finite (NaN/Inf) is reported ``inconclusive`` -- untested, never a silent,
+    vacuous "exchangeable". A field containing SOME non-finite values is reported ``invalid`` and
+    excluded from testing; any other, clean numeric field in the same record shape is still tested
+    normally and can still produce a real verdict."""
     rows = list(data)
     if len(rows) < 20:
-        return ExchangeabilityReport(label="exchangeable", fields=[{"note": "n < 20: no power to test"}])
+        return ExchangeabilityReport(label="inconclusive", fields=[{"note": "n < 20: no power to test"}])
     cols = _numeric_columns(rows)
     if not cols:
-        return ExchangeabilityReport(label="exchangeable", fields=[{"note": "no numeric fields to test"}])
+        return ExchangeabilityReport(label="inconclusive", fields=[{"note": "no numeric fields to test"}])
 
     fields: list[dict[str, Any]] = []
     worst = "exchangeable"
+    tested_any = False
     for name, x in cols.items():
+        finite = np.isfinite(x)
+        if not finite.all():
+            n_bad = int((~finite).sum())
+            fields.append(
+                {
+                    "field": name,
+                    "verdict": "invalid",
+                    "note": "%d of %d value(s) are non-finite (NaN/Inf): cannot test" % (n_bad, len(x)),
+                }
+            )
+            continue
+        tested_any = True
         tr_stat, tr_p = _perm_pvalue(x, n_perm=n_perm, seed=seed)
         sh_stat, sh_p = _halves_shift_pvalue(x, n_perm=n_perm, seed=seed + 1)
         verdict = "exchangeable"
@@ -130,4 +165,4 @@ def exchangeability_check(data: Any, *, alpha: float = 0.01, n_perm: int = 200, 
         )
         if verdict == "trend" or (verdict == "shift" and worst == "exchangeable"):
             worst = verdict
-    return ExchangeabilityReport(label=worst, fields=fields)
+    return ExchangeabilityReport(label=worst if tested_any else "inconclusive", fields=fields)
