@@ -39,6 +39,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.multivariate._copula_common import reject_out_of_unit_cube
 
 _CLIP = 1.0e-12  # keep PIT scores strictly inside (0,1) so the copula's Phi^{-1} stays finite
 
@@ -73,6 +74,7 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
     def _pit_row(self, x: Sequence[float]) -> np.ndarray:
         """Probability-integral transform of one observation: ``u_i = clip(F_i(x_i))`` in ``(0,1)``."""
         u = np.array([float(self.marginals[i].cdf(x[i])) for i in range(self.dim)], dtype=np.float64)
+        reject_out_of_unit_cube(u)
         return np.clip(u, _CLIP, 1.0 - _CLIP)
 
     def _pit_columns(self, cols: np.ndarray) -> np.ndarray:
@@ -81,6 +83,7 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
         u = np.empty_like(cols)
         for i in range(self.dim):
             u[:, i] = [float(self.marginals[i].cdf(v)) for v in cols[:, i]]
+        reject_out_of_unit_cube(u)
         return np.clip(u, _CLIP, 1.0 - _CLIP)
 
     def density(self, x: Sequence[float]) -> float:
