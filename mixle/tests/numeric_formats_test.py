@@ -40,6 +40,64 @@ class FloatFormatTest(unittest.TestCase):
         for n in (1, 2, 3, 4):
             FloatFormat.fp(n).round_trip(x)  # extreme quantization, must not raise
 
+    # -- MXR-080-0126: exp_bits used to only change the NAME/advertised bit count while quantize
+    # rounded the mantissa with a completely unbounded exponent -- no overflow, underflow, subnormal,
+    # or special-value handling. The nominal fp8 codec round-tripped 1e100 to ~9.84e99, which no real
+    # fp8 format can represent. Chose the documented-fallback fix here rather than implementing bounded
+    # exponent semantics: this module's own error_tracing_test.py::test_from_quantized_encloses_original
+    # calls Interval.from_quantized(randn(3000, seed=2), FloatFormat.fp(8)/.fp(16)) and trusts
+    # max_rel_error as a universal analytic bound to build a *sound* enclosure. Measured directly: with
+    # that exact seed, 40/3000 values have |x| below a real fp8's smallest normal magnitude (2**-6) and
+    # 2/3000 fall below fp16's (2**-14) -- so adding real underflow-flush-to-zero would make quantize
+    # return exactly 0 for a nonzero original, and Interval.from_quantized's analytic-bound path would
+    # then produce a zero-width [0, 0] enclosure that provably does NOT contain the true value,
+    # deterministically breaking that test's soundness assertion (a file this session must not edit).
+    # Real bounded-exponent saturation has the same defect in the overflow direction (not exercised by
+    # that test's data, but the identical class of unsoundness). Rather than silently trade "claims fpN
+    # semantics it doesn't implement" for "claims a sound error bound it can no longer guarantee",
+    # this keeps quantize's numeric behavior byte-identical (a universal, always-true relative bound)
+    # and instead makes the NAME and docstrings honest about what it actually does: mantissa-only
+    # rounding with a nominal, non-enforced exponent width.
+    def test_mantissa_only_naming_does_not_claim_bounded_fpn(self):
+        fmt = FloatFormat.fp(8)
+        self.assertNotRegex(fmt.name, r"^fp\d+$")  # no longer an unqualified "fp8"-style label
+        self.assertEqual(fmt.mantissa_bits, 3)  # the e4m3-style split is still computed and exposed
+        self.assertEqual(fmt.exp_bits, 4)
+
+    def test_extreme_magnitude_rounds_mantissa_without_saturating_or_crashing(self):
+        # The audit's exact repro. Since exp_bits is documented as non-enforced (mantissa-only
+        # rounding), the correct current contract is: no crash, no silent collapse to a small/zero/inf
+        # value, and the RELATIVE error still respects max_rel_error at this magnitude.
+        fmt = FloatFormat.fp(8)
+        rt = fmt.round_trip(np.array([1e100]))
+        self.assertTrue(np.all(np.isfinite(rt)))
+        self.assertGreater(float(rt[0]), 1e99)  # same astronomical magnitude, not collapsed
+        rel_err = abs(float(rt[0]) - 1e100) / 1e100
+        self.assertLessEqual(rel_err, fmt.max_rel_error * 1.01)
+
+    def test_round_trip_relative_error_holds_across_full_magnitude_sweep(self):
+        # The honest contract (class docstring): max_rel_error is a UNIVERSAL bound, true at every
+        # finite magnitude -- not an "in representable range" bound the way a real bounded fpN would
+        # need. Sweep tiny, small, unit, large, and astronomical magnitudes, both signs.
+        rng = np.random.RandomState(9)
+        magnitudes = (1e-300, 1e-30, 1e-3, 1.0, 1e3, 1e30, 1e100, 1e300)
+        for nbits in (8, 16, 32):
+            fmt = FloatFormat.fp(nbits)
+            x = np.array(magnitudes) * rng.choice([-1.0, 1.0], size=len(magnitudes))
+            rt = fmt.round_trip(x)
+            rel = np.abs(rt - x) / np.abs(x)
+            self.assertLessEqual(float(rel.max()), fmt.max_rel_error * 1.01, "nbits=%d" % nbits)
+
+    def test_negative_control_small_value_matches_hand_computed_mantissa_rounding(self):
+        # Negative control: confirm rounding actually happens as documented (not a no-op) by
+        # hand-computing the expected mantissa-rounded value for a simple input at low precision.
+        fmt = FloatFormat(mantissa_bits=2)  # 2 explicit mantissa bits -> scale = 2**3 = 8
+        m, e = math.frexp(1.3)  # 1.3 == 0.65 * 2**1
+        expected = math.ldexp(round(m * 8) / 8, e)
+        got = float(fmt.round_trip(np.array([1.3]))[0])
+        self.assertEqual(got, expected)
+        self.assertNotEqual(got, 1.3)  # genuinely lossy at this precision, not silently exact
+
 
 class FixedPointFormatTest(unittest.TestCase):
     def test_round_trip_within_absolute_bound_and_compresses(self):
