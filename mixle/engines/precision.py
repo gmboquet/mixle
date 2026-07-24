@@ -6,6 +6,7 @@ reject storage-only quantization formats that are not valid compute precisions.
 
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
 import numpy as np
@@ -123,32 +124,65 @@ def _is_gpu_engine(engine: Any) -> bool:
 
 
 def _numeric_data_sample(data: Any, sample_size: int = 512) -> np.ndarray | None:
-    """Flatten an evenly-spaced sample of ``sample_size`` observations to a float array, or None if
-    not numeric.
+    """Flatten a sample of up to ``sample_size`` observations to a float array, or None if not
+    numeric.
 
     Handles scalars, sequences/arrays of scalars, and (nested) tuples of those -- enough to read the
     magnitude/dynamic-range of continuous data. Structured/categorical/None observations yield None,
-    in which case the caller stays at the safe default precision.
+    in which case the caller stays at the safe default precision. Non-finite (NaN/Inf) observations
+    are NOT filtered out here -- they are returned as part of the sample, since it is the CALLER's
+    risk logic that must decide what a non-finite observation implies (see ``auto_precision``); this
+    function only flattens, it does not judge.
 
-    Strided across the full dataset rather than the leading ``sample_size`` rows: naturally-ordered
-    data (sorted, appended-to over time, grouped by source) can concentrate extreme-magnitude values
-    later in the sequence, which a plain prefix would never see -- silently recommending float32 for
-    data that is not actually well-conditioned for it. ``list(data)`` already materializes every row
-    to index into, so striding costs nothing extra over slicing a prefix.
+    Iterable ownership contract:
+        - Sized, indexable ``data`` (anything with both ``__len__`` and ``__getitem__`` -- e.g. list,
+          tuple, ``np.ndarray``) is read strictly by position and is left untouched: safe for the
+          caller to reuse afterward. When it holds more than ``sample_size`` rows, the sample is
+          STRIDED evenly across the *entire* collection rather than taken as a leading prefix, so
+          naturally-ordered data (sorted, appended-to over time, grouped by source) that concentrates
+          extreme-magnitude values later in the sequence is still visible to risk checks over the
+          result. This never materializes the collection -- it indexes directly.
+        - Any other iterable (a generator, file object, database cursor, or plain iterator -- no
+          ``__len__``/``__getitem__``) is treated as ONE-SHOT and POTENTIALLY UNBOUNDED: this function
+          consumes AT MOST ``sample_size`` items from it (a bounded prefix, via ``itertools.islice``)
+          and never materializes or exhausts the rest. The caller must NOT assume the same iterable
+          still has those items available afterward -- re-create it if the full stream is needed
+          again. A bounded prefix cannot see a tail-concentrated extreme value the way the strided
+          sample above can; that coverage gap is the necessary price of never fully consuming an
+          iterable that might be unbounded.
+
+    Args:
+        data: A representative sample of the raw observations (or an iterable of them).
+        sample_size: The maximum number of observations to inspect. Must be a positive integer.
+
+    Raises:
+        ValueError: if ``sample_size`` is not a positive integer.
     """
+    if isinstance(sample_size, bool) or not isinstance(sample_size, (int, np.integer)) or sample_size < 1:
+        raise ValueError("sample_size must be a positive integer, got %r." % (sample_size,))
     if data is None:
         return None
-    try:
-        rows = list(data)
-    except TypeError:
-        return None
-    if not rows:
-        return None
-    if len(rows) > sample_size:
-        step = len(rows) / sample_size
-        head = [rows[int(i * step)] for i in range(sample_size)]
+    if hasattr(data, "__len__") and hasattr(data, "__getitem__"):
+        n = len(data)
+        if n == 0:
+            return None
+        try:
+            if n > sample_size:
+                step = n / sample_size
+                head = [data[int(i * step)] for i in range(sample_size)]
+            else:
+                head = [data[i] for i in range(n)]
+        except (KeyError, IndexError):
+            # Has the sequence protocol's attributes but is not actually positionally indexable
+            # (e.g. a dict, keyed by non-integer keys) -- not a supported data shape.
+            return None
     else:
-        head = rows
+        try:
+            head = list(itertools.islice(data, sample_size))
+        except TypeError:
+            return None
+        if not head:
+            return None
     out: list[float] = []
 
     def _collect(obj: Any) -> bool:
@@ -190,7 +224,7 @@ def auto_precision(data: Any = None, *, engine: Any = None, sample_size: int = 5
     Args:
         data: A representative sample of the raw observations (or an iterable of them).
         engine: The target compute engine; float32 is only recommended for a GPU Torch engine.
-        sample_size: How many leading observations to inspect.
+        sample_size: How many observations to inspect, at most. Must be a positive integer.
 
     Returns:
         ``'float32'`` or ``'float64'``.
