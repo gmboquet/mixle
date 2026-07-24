@@ -80,6 +80,15 @@ class MultivariateStudentTTestCase(unittest.TestCase):
             MultivariateStudentTDistribution(5.0, [0.0, 0.0], [[-1.0, 0.0], [0.0, -1.0]])
         with self.assertRaises(ValueError):  # asymmetric
             MultivariateStudentTDistribution(5.0, [0.0, 0.0], [[2.0, 1.0], [0.0, 1.0]])
+        # exactly singular (positive SEMI-definite, eigenvalues [1, 0], not positive DEFINITE): a
+        # follow-up gap in the fix above -- _safe_inverse_and_logdet's tiny-ridge retry silently
+        # healed exactly this case (indistinguishable from float rounding by eigenvalue alone),
+        # so density/log_density scored a finite value while the sampler still crashed on the raw,
+        # unhealed self.shape. Student-t's density requires strict positive-definiteness (log|Sigma|
+        # and Sigma^{-1} are undefined at a genuine zero eigenvalue), unlike e.g. a Gaussian
+        # covariance which can legitimately be merely positive semi-definite.
+        with self.assertRaises(ValueError):
+            MultivariateStudentTDistribution(5.0, [0.0, 0.0], [[1.0, 0.0], [0.0, 0.0]])
 
     def test_pseudo_count_raises_rather_than_silently_ignored(self):
         # The EM/IRLS fit reweights the sufficient statistic by a latent factor with no simple
