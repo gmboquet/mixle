@@ -51,6 +51,22 @@ class TorchEngine(ComputeEngine):
         # MPS (Apple-silicon GPU) has no float64 — fall back to its highest supported precision (float32),
         # both for the default dtype and for an explicit float64 request (which would otherwise crash on MPS).
         self._no_f64 = self.device.type == "mps"
+        if isinstance(dtype, torch.dtype) and not dtype.is_floating_point:
+            # A concrete non-floating torch dtype (e.g. torch.int64/torch.bool, as surfaced
+            # by engine discovery reading an integer/Boolean tensor's own storage dtype) is
+            # not a meaningful floating-point policy value -- treat it like "no override" so
+            # engine construction/discovery succeeds instead of raising (this used to make
+            # engine_of() raise ValueError for ordinary integer and Boolean tensors, breaking
+            # indexing, masks, and categorical payload dispatch). A *named* precision that
+            # resolves to non-floating (e.g. dtype="int64") is a genuine caller mistake and
+            # still raises below, inside normalize_torch_dtype.
+            dtype = None
+        # Whether the floating-point policy below is a real, caller-requested opinion (True)
+        # or just an implicit default because no floating dtype was given/applicable (False).
+        # mixle.engines.engine_of's mixed-engine check reads this so an engine discovered from
+        # a non-floating leaf (an integer index or Boolean mask tensor) never conflicts with a
+        # genuinely floating sibling leaf purely because of this filled-in default.
+        self.dtype_explicit = dtype is not None
         if dtype is not None:
             self.dtype = normalize_torch_dtype(dtype, torch)
             if self._no_f64 and self.dtype == torch.float64:
