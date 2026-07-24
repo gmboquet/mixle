@@ -82,6 +82,98 @@ class ExpectedInformationGainTest(unittest.TestCase):
         self.assertAlmostEqual(nmc, analytic, delta=0.05)
 
 
+class LinearEigValidationTest(unittest.TestCase):
+    """MXR-080-0159: noise and prior_cov validation for the closed-form linear-Gaussian EIG."""
+
+    def setUp(self):
+        self.f = np.array([[1.0, -1.0], [1.0, 0.0], [1.0, 1.0]])  # a simple (3, 2) design matrix
+
+    def test_rejects_zero_noise(self):
+        with self.assertRaises(ValueError):
+            expected_information_gain_linear(self.f, noise=0.0)
+
+    def test_rejects_negative_noise(self):
+        with self.assertRaises(ValueError):
+            expected_information_gain_linear(self.f, noise=-1.0)
+
+    def test_rejects_nan_noise(self):
+        with self.assertRaises(ValueError):
+            expected_information_gain_linear(self.f, noise=float("nan"))
+
+    def test_rejects_infinite_noise(self):
+        with self.assertRaises(ValueError):
+            expected_information_gain_linear(self.f, noise=float("inf"))
+
+    def test_rejects_non_square_prior_cov(self):
+        with self.assertRaises(ValueError):
+            expected_information_gain_linear(self.f, noise=1.0, prior_cov=np.ones((2, 3)))
+
+    def test_rejects_wrong_size_prior_cov(self):
+        with self.assertRaises(ValueError):  # model_matrix has p=2 columns, not 3
+            expected_information_gain_linear(self.f, noise=1.0, prior_cov=np.eye(3))
+
+    def test_rejects_asymmetric_prior_cov(self):
+        bad = np.array([[1.0, 0.5], [0.9, 1.0]])
+        with self.assertRaises(ValueError):
+            expected_information_gain_linear(self.f, noise=1.0, prior_cov=bad)
+
+    def test_rejects_non_finite_prior_cov(self):
+        bad = np.array([[1.0, 0.0], [0.0, np.nan]])
+        with self.assertRaises(ValueError):
+            expected_information_gain_linear(self.f, noise=1.0, prior_cov=bad)
+
+    def test_rejects_indefinite_prior_cov(self):
+        bad = np.array([[1.0, 2.0], [2.0, 1.0]])  # symmetric, eigenvalues [-1, 3]: not PSD
+        with self.assertRaises(ValueError):
+            expected_information_gain_linear(self.f, noise=1.0, prior_cov=bad)
+
+    def test_accepts_positive_semidefinite_boundary_prior_cov(self):
+        # rank-deficient (singular) but genuinely PSD: a legitimate degenerate prior (a hard
+        # zero-variance direction) must not be rejected merely for being singular.
+        v = np.array([1.0, 1.0]) / np.sqrt(2.0)
+        rank1 = np.outer(v, v)  # eigenvalues [1, 0]
+        value = expected_information_gain_linear(self.f, noise=1.0, prior_cov=rank1)
+        self.assertTrue(np.isfinite(value))
+        self.assertGreaterEqual(value, 0.0)
+
+    def test_hand_computed_1d_case(self):
+        # y = theta + eps, theta ~ N(0, tau^2), eps ~ N(0, sigma^2): EIG = 0.5*log(1 + tau^2/sigma^2).
+        f = np.array([[1.0]])
+        tau2, sigma = 2.0, 1.5
+        value = expected_information_gain_linear(f, noise=sigma, prior_cov=np.array([[tau2]]))
+        analytic = 0.5 * np.log(1.0 + tau2 / sigma**2)
+        self.assertAlmostEqual(value, analytic, places=10)
+
+    def test_default_prior_cov_is_identity(self):
+        f = np.array([[1.0]])
+        value = expected_information_gain_linear(f, noise=1.0)
+        self.assertAlmostEqual(value, 0.5 * np.log(2.0), places=10)
+
+    def test_negative_control_information_gain_is_non_negative_and_finite(self):
+        rng = np.random.RandomState(0)
+        f = rng.normal(size=(5, 3))
+        value = expected_information_gain_linear(f, noise=0.7, prior_cov=np.eye(3) * 2.0)
+        self.assertTrue(np.isfinite(value))
+        self.assertGreaterEqual(value, 0.0)
+
+    def test_small_p_large_n_matches_manual_computation_with_a_non_diagonal_prior_cov(self):
+        # Regression guard for the fix itself: Sigma0 @ (F^T F) is not symmetric in general (unlike
+        # F Sigma0 F^T is), so naively Cholesky-factoring it would silently read only one triangle and
+        # could be wrong. A non-diagonal, non-commuting prior_cov is required to actually exercise
+        # this -- a scalar multiple of the identity (as used elsewhere in this file) commutes with
+        # everything and would not have caught the bug.
+        rng = np.random.RandomState(2)
+        p, n = 3, 10
+        f = rng.normal(size=(n, p))
+        a = rng.normal(size=(p, p))
+        prior_cov = a @ a.T + np.eye(p)  # genuine, non-diagonal PD covariance
+        noise = 0.8
+        value = expected_information_gain_linear(f, noise=noise, prior_cov=prior_cov)
+        m_pxp = np.eye(p) + (prior_cov @ (f.T @ f)) / (noise**2)
+        _, logdet_pxp = np.linalg.slogdet(m_pxp)
+        self.assertAlmostEqual(value, 0.5 * logdet_pxp, places=8)
+
+
 @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")
 class ActiveLearningTest(unittest.TestCase):
     def test_alm_proposes_into_the_data_gap(self):
