@@ -26,6 +26,40 @@ from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
 _C25, _C50, _C75 = float(np.log(-np.log(0.25))), float(np.log(-np.log(0.5))), float(np.log(-np.log(0.75)))
 
 
+def _gumbel_quantile(loc: float, scale: float, r: Any) -> np.ndarray:
+    """Quantile function of a Gumbel(``loc``, ``scale``): ``y_r = loc - scale * log(-log(r))``.
+
+    The standard Gumbel (maxima convention) has CDF ``F(z) = exp(-exp(-z))``; solving ``r = F(z)`` for
+    ``z`` gives ``z = -log(-log(r))``. A general Gumbel(loc, scale) draw is ``Y = loc + scale*Z`` for
+    standard Gumbel ``Z``, so its quantile function is
+    ``y_r = loc + scale*(-log(-log(r))) = loc - scale*log(-log(r)) = loc - scale*C_r``, with
+    ``C_r := log(-log(r))`` (the module-level ``_C25``/``_C50``/``_C75`` constants).
+    """
+    return loc - scale * np.log(-np.log(np.asarray(r, dtype=np.float64)))
+
+
+def _fit_gumbel(y25: float, y50: float, y75: float) -> tuple[float, float]:
+    """Fit Gumbel(loc, scale) to target 25/50/75 percentiles by quantile matching.
+
+    From ``y_r = loc - scale*C_r`` (:func:`_gumbel_quantile`):
+
+    * ``scale`` from the IQR: ``y75 - y25 = -scale*C75 - (-scale*C25) = scale*(C25 - C75)``, so
+      ``scale = (y75 - y25) / (C25 - C75)`` (``C25 > C75``, so this is positive; floored at ``1e-6``).
+    * ``loc`` from the median: ``y50 = loc - scale*C50`` solves to ``loc = y50 + scale*C50``.
+
+    MXR-080-0177: this previously SUBTRACTED here (``loc = y50 - scale*C50``). Plugging the wrong
+    ``loc`` back into the quantile function at ``r=0.5`` gives a fitted Gumbel whose own median is
+    ``loc - scale*C50 = y50 - 2*scale*C50``, not ``y50`` -- off by ``-2*scale*C50``. For one
+    standard-normal candidate (``y50 = 0``), that is about ``+0.63`` (``C50 = log(-log(0.5)) ~= -0.3665``
+    and the fitted ``scale ~= 0.858`` there), matching the audit's reproduction. The inverse-CDF test
+    for this function fits against known quantiles of a reference Gumbel and confirms both parameters
+    -- and the recovered median specifically -- come back exact.
+    """
+    scale = max((y75 - y25) / (_C25 - _C75), 1e-6)  # b from the IQR
+    loc = y50 + scale * _C50  # a from the median
+    return loc, scale
+
+
 def sample_max_values(mean: Any, std: Any, n_samples: int = 64, *, seed: int | RandomState = 0) -> np.ndarray:
     """Sample plausible global-max values ``y*`` via the Gumbel approximation (Wang & Jegelka 2017).
 
@@ -54,10 +88,9 @@ def sample_max_values(mean: Any, std: Any, n_samples: int = 64, *, seed: int | R
         return 0.5 * (a + b)
 
     y25, y50, y75 = quantile(0.25), quantile(0.5), quantile(0.75)
-    scale = max((y75 - y25) / (_C25 - _C75), 1e-6)  # b from the IQR
-    loc = y50 - scale * _C50  # a from the median
+    loc, scale = _fit_gumbel(y25, y50, y75)
     u = rng.uniform(1e-6, 1.0 - 1e-6, int(n_samples))
-    ystar = loc - scale * np.log(-np.log(u))
+    ystar = _gumbel_quantile(loc, scale, u)
     return np.maximum(ystar, mu.max())
 
 
