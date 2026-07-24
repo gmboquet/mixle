@@ -10,10 +10,12 @@ collected here so the distributions package stays focused on distribution famili
 from __future__ import annotations
 
 from mixle.analysis.biodiversity import (
+    effective_conductance,
     fragmentation_impact,
     habitat_connectivity,
     habitat_offset_liability,
     least_cost_corridor,
+    max_flow_connectivity,
     no_net_loss_constraint,
     resistance_raster,
 )
@@ -23,7 +25,7 @@ from mixle.analysis.carcinogenic_risk import (
     excess_lifetime_cancer_risk,
     radon_wlm_risk,
 )
-from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator
+from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator, LedoitWolfInsufficientData
 from mixle.analysis.coverage import (
     ace,
     chao1,
@@ -169,6 +171,7 @@ __all__ = [
     "SmithMaxStableSampler",
     "fit_smith_maxstable",
     "LedoitWolfEstimator",
+    "LedoitWolfInsufficientData",
     # mine economics: cost curves, capex/opex roll-up, and Monte-Carlo DCF valuation
     "cost_curve",
     "capex_opex",
@@ -184,7 +187,9 @@ __all__ = [
     # habitat connectivity (graph resistance on a habitat-cost raster; N4)
     "resistance_raster",
     "least_cost_corridor",
+    "effective_conductance",
     "habitat_connectivity",
+    "max_flow_connectivity",
     "fragmentation_impact",
     # reclamation ecology / biodiversity offsets (priced habitat-offset liability + no-net-loss constraint)
     "habitat_offset_liability",
