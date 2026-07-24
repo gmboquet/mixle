@@ -20,8 +20,8 @@ import numpy as np
 from numpy.random import RandomState
 
 from mixle.doe.batch import _safe_cholesky
-from mixle.doe.bayesopt import _fit_surrogate
-from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
+from mixle.doe.bayesopt import _fit_surrogate, _require_finite_scalar
+from mixle.doe.designs import Bounds, _as_bounds, _as_rng, _require_exact_positive_int, latin_hypercube
 
 
 @dataclass
@@ -31,6 +31,16 @@ class TrustRegion:
     The length doubles after ``success_tol`` consecutive improving batches and halves after
     ``failure_tol`` consecutive non-improving ones; ``collapsed`` is True once it drops below
     ``length_min`` and the caller should restart. ``failure_tol`` defaults to the dimension (Eriksson 2019).
+
+    ``__post_init__`` validates the complete region invariant (MXR-080-0196): ``dim`` is an exact
+    positive integer; ``length``, ``length_min``, and ``length_max`` are finite with
+    ``0 < length_min <= length <= length_max`` (so the region can never start collapsed, inverted, or
+    unboundedly sized); ``success_tol`` is an exact positive integer and ``failure_tol`` an exact
+    non-negative one (``0`` is the "default to ``dim``" sentinel resolved right below). Anything outside
+    that invariant raises immediately instead of accepting geometry with no sensible search meaning --
+    e.g. a ``length_max < length_min`` would let a "successful" expansion (``min(length * 2, length_max)``)
+    silently shrink the region, and a non-finite/non-positive ``length`` would make every candidate box
+    :func:`_tr_candidates` draws undefined or empty.
     """
 
     dim: int
@@ -43,8 +53,25 @@ class TrustRegion:
     _failure: int = 0
 
     def __post_init__(self) -> None:
+        self.dim = _require_exact_positive_int(self.dim, "dim")
+        self.success_tol = _require_exact_positive_int(self.success_tol, "success_tol")
+        self.failure_tol = _require_exact_positive_int(self.failure_tol, "failure_tol", minimum=0)
         if self.failure_tol <= 0:
             self.failure_tol = max(4, self.dim)
+        self.length_min = _require_finite_scalar(self.length_min, "length_min")
+        if self.length_min <= 0.0:
+            raise ValueError(f"length_min must be positive, got {self.length_min!r}.")
+        self.length_max = _require_finite_scalar(self.length_max, "length_max")
+        if self.length_max < self.length_min:
+            raise ValueError(
+                f"length_max must be >= length_min, got length_max={self.length_max!r}, length_min={self.length_min!r}."
+            )
+        self.length = _require_finite_scalar(self.length, "length")
+        if not (self.length_min <= self.length <= self.length_max):
+            raise ValueError(
+                f"length must satisfy length_min <= length <= length_max, got length={self.length!r}, "
+                f"length_min={self.length_min!r}, length_max={self.length_max!r}."
+            )
 
     @property
     def collapsed(self) -> bool:
@@ -124,21 +151,48 @@ def turbo_minimize(
     Starts from a Latin-hypercube design of ``n_init`` points (default ``2*d``), then repeatedly fits a
     GP on the normalized data, draws Thompson candidates inside the current trust region, evaluates the
     best ``batch_size`` of them, and resizes the region by success/failure. On collapse it restarts from
-    a new design. Runs until ``max_evals`` objective calls. Returns ``{'x', 'y', 'X', 'Y', 'n_restarts'}``
-    with the best point/value and the full history.
+    a new design. Runs until ``max_evals`` objective calls.
+
+    ``n_init`` (default ``2*d``), ``max_evals``, ``batch_size``, and ``n_candidates`` (default
+    ``min(2000, 100*d)``) must each be exact positive integers -- none is silently truncated or coerced.
+    ``max_evals >= n_init`` and ``1 <= batch_size <= n_candidates`` are both required up front: the first
+    because the initial design alone spends ``n_init`` real evaluations before any GP step can begin, the
+    second because a batch can never select more distinct candidates than the trust region generates for
+    it, no matter how many times it retries (MXR-080-0196).
+
+    Returns ``{'x', 'y', 'X', 'Y', 'n_restarts'}`` with the best point/value and the full history.
     """
     b = _as_bounds(bounds)
     d = b.shape[0]
     rng = _as_rng(seed)
     span = b[:, 1] - b[:, 0]
-    n_init = int(n_init) if n_init else 2 * d
+    # MXR-080-0196: every count/budget control below is an exact, validated positive integer -- none of
+    # them silently truncates a fractional value or lets a negative one slip through. `n_init` and
+    # `n_candidates` use `is not None` (not truthiness) for their "auto" sentinel, so an explicit 0 is
+    # rejected rather than quietly reinterpreted as "use the default".
+    n_init = _require_exact_positive_int(n_init, "n_init") if n_init is not None else 2 * d
+    max_evals = _require_exact_positive_int(max_evals, "max_evals")
     if max_evals < n_init:
         # the initial Latin-hypercube design alone needs n_init real objective calls before any
         # GP-based step can even begin -- max_evals < n_init can't be honored (the function's own
         # contract is "runs until max_evals objective calls"), and evaluating the design anyway
         # would silently overshoot the caller's budget rather than raise.
         raise ValueError(f"turbo_minimize requires max_evals >= n_init (n_init={n_init}, max_evals={max_evals}).")
-    n_cand = int(n_candidates) if n_candidates else min(2000, 100 * d)
+    n_cand = (
+        _require_exact_positive_int(n_candidates, "n_candidates") if n_candidates is not None else min(2000, 100 * d)
+    )
+    batch_size = _require_exact_positive_int(batch_size, "batch_size")
+    if batch_size > n_cand:
+        # a batch selects `batch_size` DISTINCT candidates out of the `n_cand` generated per iteration
+        # (_thompson_batch's own contract, checked every iteration) -- asking for more than that can
+        # never be satisfied by any number of retries, shrinks, or restarts (n_cand is fixed for the
+        # whole run), so this is a caller configuration error, not a model failure. Reject it here once,
+        # up front, instead of letting it repeatedly raise inside the loop where it would be caught and
+        # misattributed as "the model failed" (MXR-080-0196/0197).
+        raise ValueError(
+            f"turbo_minimize requires batch_size <= n_candidates (batch_size={batch_size}, "
+            f"n_candidates={n_cand}); increase n_candidates or lower batch_size."
+        )
     sign = -1.0 if maximize else 1.0  # always minimize sign*objective
 
     def to_unit(x):
@@ -183,7 +237,7 @@ def turbo_minimize(
         ymean, ystd = float(yloc.mean()), float(yloc.std() or 1.0)
         yz = (yloc - ymean) / ystd
         cand = _tr_candidates(center, tr.length, n_cand, rng)
-        q = min(int(batch_size), max(1, max_evals - y_all.shape[0]))
+        q = min(batch_size, max(1, max_evals - y_all.shape[0]))
         try:
             gp = _fit_surrogate(xu, yz, None, fit_kwargs)
             picks_u = _thompson_batch(gp, xu, yz, cand, q, rng)
