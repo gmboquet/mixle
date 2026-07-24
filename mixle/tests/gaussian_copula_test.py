@@ -57,6 +57,22 @@ class GaussianCopulaTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             GaussianCopulaDistribution(np.array([[2.0, 0.5], [0.5, 2.0]]))  # a covariance, not a correlation
 
+    def test_rejects_out_of_range_pseudo_observations(self):
+        for bad in (np.array([-0.3, 0.4, 0.5]), np.array([0.5, 1.7, 0.2]), np.array([np.nan, 0.4, 0.5])):
+            with self.assertRaises(ValueError):
+                self.d.log_density(bad)
+        # the legitimate open-interval boundary (u exactly 0 or 1) must still score finite, not raise
+        self.assertTrue(np.isfinite(self.d.log_density(np.array([0.0, 1.0, 0.5]))))
+
+    def test_rejects_out_of_range_pseudo_observations_when_fitting(self):
+        # a broken marginal CDF (or a caller passing raw data instead of PIT scores) must fail the fit
+        # loudly, not silently clip onto a boundary and fit as though the data were legitimate.
+        acc = self.d.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.update(np.array([1.7, 0.4, 0.5]), 1.0, None)
+        with self.assertRaises(ValueError):
+            self.d.dist_to_encoder().seq_encode(np.array([[0.3, 0.4, 0.5], [1.7, 0.2, 0.1]]))
+
 
 if __name__ == "__main__":
     unittest.main()

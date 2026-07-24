@@ -51,6 +51,14 @@ class GumbelCopulaTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             GumbelCopulaDistribution(3, 2.0)
 
+    def test_rejects_out_of_range_pseudo_observations(self):
+        c = GumbelCopulaDistribution(2, 2.0)
+        for bad in (np.array([[-0.3, 0.4]]), np.array([[0.5, 1.7]]), np.array([[np.nan, 0.4]])):
+            with self.assertRaises(ValueError):
+                c.seq_log_density(bad)
+        # the legitimate open-interval boundary (u exactly 0 or 1) must still score finite, not raise
+        self.assertTrue(np.all(np.isfinite(c.seq_log_density(np.array([[0.0, 1.0], [1.0, 0.0]])))))
+
     def test_plugs_into_copula_distribution_and_beats_clayton_on_upper_tail_data(self):
         # Gumbel-generated (upper-tail) data with heterogeneous marginals
         u = GumbelCopulaDistribution(2, 2.5).sampler(0).sample(1000)

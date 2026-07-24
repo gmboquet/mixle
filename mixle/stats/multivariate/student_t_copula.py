@@ -31,6 +31,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.multivariate._copula_common import (
     BufferedUScoreAccumulatorFactory,
     UScoreEncoder,
+    reject_out_of_unit_cube,
 )
 from mixle.utils.vector import cholesky_logdet
 
@@ -69,7 +70,9 @@ class StudentTCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.seq_log_density(np.atleast_2d(np.asarray(u, dtype=np.float64)))[0])
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
-        u = np.clip(np.asarray(u, dtype=np.float64), _CLIP, 1.0 - _CLIP)
+        u = np.asarray(u, dtype=np.float64)
+        reject_out_of_unit_cube(u)
+        u = np.clip(u, _CLIP, 1.0 - _CLIP)
         nu, d = self.df, self.dim
         z = _t.ppf(u, nu)  # t-scores (n, d)
         quad = np.einsum("ni,ij,nj->n", z, self._inv, z)  # z^T R^{-1} z
@@ -139,7 +142,9 @@ class StudentTCopulaEstimator(ParameterEstimator):
         u, w = suff_stat
         if len(u) < 2:
             return StudentTCopulaDistribution(np.eye(self.dim), _NU_GRID[2], name=self.name, keys=self.keys)
-        u = np.clip(np.asarray(u, dtype=np.float64), _CLIP, 1.0 - _CLIP)
+        u = np.asarray(u, dtype=np.float64)
+        reject_out_of_unit_cube(u)
+        u = np.clip(u, _CLIP, 1.0 - _CLIP)
         w = np.asarray(w, dtype=np.float64)
         best = None
         for nu in _NU_GRID:  # profile nu: refit R at each nu (t-scores depend on nu), keep the best likelihood

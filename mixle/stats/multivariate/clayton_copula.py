@@ -29,6 +29,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.multivariate._copula_common import (
     BufferedUScoreAccumulatorFactory,
     UScoreEncoder,
+    reject_out_of_unit_cube,
     weighted_kendall_tau,
 )
 
@@ -53,7 +54,9 @@ class ClaytonCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.seq_log_density(np.atleast_2d(np.asarray(u, dtype=np.float64)))[0])
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
-        u = np.clip(np.asarray(u, dtype=np.float64), _CLIP, 1.0 - _CLIP)
+        u = np.asarray(u, dtype=np.float64)
+        reject_out_of_unit_cube(u)
+        u = np.clip(u, _CLIP, 1.0 - _CLIP)
         th = self.theta
         const = float(np.sum(np.log1p(np.arange(1, self.dim) * th)))  # sum_{k=1}^{d-1} log(1 + k theta)
         log_prod = -(1.0 + th) * np.sum(np.log(u), axis=1)

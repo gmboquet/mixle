@@ -92,6 +92,41 @@ class BufferedUScoreAccumulatorFactory(StatisticAccumulatorFactory):
         return BufferedUScoreAccumulator(self.dim, keys=self.keys)
 
 
+def out_of_unit_cube(u: np.ndarray, tol: float = 1.0e-9) -> np.ndarray:
+    """Per-row mask: True where any coordinate of ``u`` is not in ``[0, 1]`` (beyond a small float tolerance).
+
+    A copula's density/log-density is defined only on the unit cube ``[0, 1]^d`` (uniform marginals);
+    coordinates further outside than ``tol`` are not a valid observation for ANY copula core, no matter how
+    the boundary itself is handled numerically. Reduces over the last axis, so a single ``(d,)`` row gives a
+    0-d (scalar) result and a batch ``(n, d)`` gives an ``(n,)`` mask -- callers use this to force out-of-range
+    rows to score ``-inf`` instead of being silently ``np.clip``-ed onto a boundary corner and scored as if
+    that clipped substitute were the real (impossible) observation.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    bad = (u < -tol) | (u > 1.0 + tol) | np.isnan(u)
+    return np.any(bad, axis=-1)
+
+
+def reject_out_of_unit_cube(u: np.ndarray, tol: float = 1.0e-9) -> None:
+    """Raise ``ValueError`` if any row of ``u`` has a coordinate outside ``[0, 1]``.
+
+    For data about to be FIT: a copula's input must already be legitimate uniform-score/PIT data, so
+    (matching how :class:`~mixle.stats.univariate.continuous.beta.BetaAccumulator` and
+    :class:`~mixle.stats.univariate.continuous.beta.BetaDataEncoder` treat observations outside Beta's own
+    ``(0, 1)`` support) out-of-range fitting data is a hard error rather than something to silently clip onto
+    the boundary and fit as though it were legitimate.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    if u.size and np.any(out_of_unit_cube(u, tol)):
+        finite = u[np.isfinite(u)]
+        lo = float(finite.min()) if finite.size else float("nan")
+        hi = float(finite.max()) if finite.size else float("nan")
+        raise ValueError(
+            "copula observations must lie in [0, 1] (uniform-score/PIT domain); got value(s) outside that "
+            "range (observed min=%r, max=%r)" % (lo, hi)
+        )
+
+
 def weighted_kendall_tau(a: np.ndarray, b: np.ndarray, w: np.ndarray) -> float:
     """Weighted Kendall's tau between two score vectors: (concordant - discordant) / total, pair weight w_i w_j.
 

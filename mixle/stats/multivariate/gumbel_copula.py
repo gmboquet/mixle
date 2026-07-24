@@ -30,6 +30,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.multivariate._copula_common import (
     BufferedUScoreAccumulatorFactory,
     UScoreEncoder,
+    reject_out_of_unit_cube,
     weighted_kendall_tau,
 )
 
@@ -54,7 +55,9 @@ class GumbelCopulaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.seq_log_density(np.atleast_2d(np.asarray(u, dtype=np.float64)))[0])
 
     def seq_log_density(self, u: np.ndarray) -> np.ndarray:
-        u = np.clip(np.asarray(u, dtype=np.float64), _CLIP, 1.0 - _CLIP)
+        u = np.asarray(u, dtype=np.float64)
+        reject_out_of_unit_cube(u)
+        u = np.clip(u, _CLIP, 1.0 - _CLIP)
         th = self.theta
         if th <= 1.0 + 1.0e-12:
             return np.zeros(u.shape[0])  # independence copula

@@ -52,6 +52,14 @@ class ClaytonCopulaTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ClaytonCopulaDistribution(1, 2.0)
 
+    def test_rejects_out_of_range_pseudo_observations(self):
+        c = ClaytonCopulaDistribution(2, 2.0)
+        for bad in (np.array([[-0.3, 0.4]]), np.array([[0.5, 1.7]]), np.array([[np.nan, 0.4]])):
+            with self.assertRaises(ValueError):
+                c.seq_log_density(bad)
+        # the legitimate open-interval boundary (u exactly 0 or 1) must still score finite, not raise
+        self.assertTrue(np.all(np.isfinite(c.seq_log_density(np.array([[0.0, 1.0], [1.0, 0.0]])))))
+
 
 class FrankCopulaTest(unittest.TestCase):
     def test_density_integrates_to_one_both_signs(self):
@@ -74,6 +82,13 @@ class FrankCopulaTest(unittest.TestCase):
     def test_is_bivariate_only(self):
         with self.assertRaises(ValueError):
             FrankCopulaDistribution(3, 5.0)
+
+    def test_rejects_out_of_range_pseudo_observations(self):
+        c = FrankCopulaDistribution(2, 5.0)
+        for bad in (np.array([[-0.3, 0.4]]), np.array([[0.5, 1.7]]), np.array([[np.nan, 0.4]])):
+            with self.assertRaises(ValueError):
+                c.seq_log_density(bad)
+        self.assertTrue(np.all(np.isfinite(c.seq_log_density(np.array([[0.0, 1.0], [1.0, 0.0]])))))
 
 
 class StudentTCopulaTest(unittest.TestCase):
@@ -121,6 +136,21 @@ class StudentTCopulaTest(unittest.TestCase):
         for bad_df in (0.0, -3.0):
             with self.subTest(df=bad_df), self.assertRaises(ValueError):
                 StudentTCopulaDistribution(corr, bad_df)
+
+    def test_rejects_out_of_range_pseudo_observations(self):
+        c = StudentTCopulaDistribution(np.array([[1.0, 0.6], [0.6, 1.0]]), 4.0)
+        for bad in (np.array([[-0.3, 0.4]]), np.array([[0.5, 1.7]]), np.array([[np.nan, 0.4]])):
+            with self.assertRaises(ValueError):
+                c.seq_log_density(bad)
+        self.assertTrue(np.all(np.isfinite(c.seq_log_density(np.array([[0.0, 1.0], [1.0, 0.0]])))))
+
+    def test_rejects_out_of_range_pseudo_observations_when_fitting(self):
+        # a broken marginal CDF (or a caller passing raw data instead of PIT scores) must fail the fit
+        # loudly, not silently clip onto a boundary and fit as though the data were legitimate.
+        c = StudentTCopulaDistribution(np.array([[1.0, 0.6], [0.6, 1.0]]), 4.0)
+        bad = np.array([[0.3, 0.4], [1.7, 0.2], [0.5, 0.5]])
+        with self.assertRaises(ValueError):
+            c.estimator().estimate(None, (bad, np.ones(len(bad))))
 
 
 class CopulaCoreIntegrationTest(unittest.TestCase):
