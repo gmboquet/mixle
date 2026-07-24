@@ -187,8 +187,17 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         support and ``-inf`` log-density for unknown labels.
 
         Args:
-            pmap: Mapping from labels to probabilities.
-            default_value: Probability assigned to labels outside ``pmap``.
+            pmap: Mapping from labels to probabilities. Values must be finite and non-negative.
+                ``density()``/``log_density()`` assume ``sum(pmap.values()) == 1`` for the
+                result to be a properly-normalized probability (labels with p = 0 may be
+                included or omitted interchangeably), but the constructor does not check or
+                enforce that sum: several existing call sites intentionally build a pmap with
+                an arbitrary, non-1-summing total -- e.g. as a cheap fixture for exercising
+                dispatch logic that never inspects the values, or to make ``default_value``
+                dominate every in-pmap probability by construction. Pass a normalized map when
+                you need ``density()`` to be meaningful.
+            default_value: Probability assigned to labels outside ``pmap``. Must be finite and
+                within ``[0, 1]``.
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
             prob_map: Alias for ``pmap``.
@@ -200,23 +209,51 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         Attributes:
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
-            pmap: Mapping from labels to probabilities.
+            pmap: Mapping from labels to probabilities, stored as given (not renormalized or
+                sum-checked by the constructor).
             default_value: Probability assigned to labels outside ``pmap``.
             no_default: ``True`` when outside-support labels have nonzero mass.
             log_default_value: Log of ``default_value``.
             log1p_default_value: Log normalizer for ``1 + default_value``.
 
+        Raises:
+            ValueError: If ``pmap`` contains a non-finite or negative value, or if
+                ``default_value`` is non-finite or outside ``[0, 1]``.
+
         """
         pmap = coalesce_alias("pmap", pmap, "prob_map", prob_map, default=MISSING)
-        if any(v < 0.0 for v in pmap.values()):
-            # A negative "probability" silently propagates into density()/log_density() answers,
-            # so reject it at the constructor like the scalar families do.
-            raise ValueError("CategoricalDistribution requires non-negative probabilities.")
+        probs = np.asarray(list(pmap.values()), dtype=np.float64)
+        if not np.isfinite(probs).all() or np.any(probs < 0.0):
+            # A NaN or negative "probability" silently propagates into density()/log_density()
+            # answers (and a NaN surfaces again, far from the mistake, as an opaque error out of
+            # the sampler's RandomState.choice), so reject it at the constructor like the scalar
+            # families do.
+            #
+            # Deliberately NOT also enforced here: sum(pmap.values()) == 1. density()'s docstring
+            # assumes that sum, but several existing, intentional call sites construct a pmap that
+            # doesn't hold it -- e.g. mixle/tests/quantized_index_test.py and
+            # fused_em_mixtures_test.py build a partial pmap (such as ``{2: 0.5}``) purely as a
+            # cheap object to call .estimator()/.quantized_index() on, never inspecting the
+            # values; mixle/tests/sparse_mixture_test.py builds pmap={"a": 0.005, "b": 0.005} with
+            # default_value=0.99 specifically so default_value dominates every in-pmap
+            # probability, which a sum-to-1 rejection (or a silent renormalization, which would
+            # rescale "a"/"b" up and defeat that domination) would break. A finite/non-negative
+            # check has no such legitimate counterexample: no call site anywhere in the codebase
+            # relies on constructing a NaN or negative "probability".
+            raise ValueError("CategoricalDistribution requires finite non-negative probabilities.")
+        if not np.isfinite(default_value) or default_value < 0.0 or default_value > 1.0:
+            # default_value used to be silently clamped into [0, 1] for self.default_value while
+            # log_default_value/log1p_default_value were computed from the raw, unclamped input --
+            # so an out-of-range value desynced the two: density() (which uses self.default_value)
+            # and log_density() (which uses log1p_default_value) would disagree, and a NaN
+            # default_value made log_density() return nan for every in-pmap label. Reject it here
+            # instead, like pmap above.
+            raise ValueError("CategoricalDistribution requires default_value in [0, 1], not %s." % repr(default_value))
         self.name = name
         self.keys = keys
         self.pmap = pmap
         self.no_default = default_value != 0.0
-        self.default_value = max(0.0, min(default_value, 1.0))
+        self.default_value = default_value
         self.log_default_value = float(-np.inf if default_value == 0 else math.log(default_value))
         self.log1p_default_value = float(math.log1p(default_value))
         self.set_prior(prior)
