@@ -459,3 +459,200 @@ def test_fit_beta_still_converges_and_fits_normally():
     assert np.all(np.isfinite(beta_cov))
     assert rates_hat.shape == (60,)
     assert np.all(rates_hat > 0.0)
+
+
+# -- MXR-080-0114: SDM physical inputs and posterior invariants must be validated, not accepted or
+# silently clipped --
+
+
+def test_fit_sdm_rejects_invalid_ridge():
+    num_cells = 20
+    env = np.zeros(num_cells)
+    area = np.ones(num_cells)
+    occurrences = [SpeciesObservation(species_id="x", detection=True, location=np.array([2.0]))]
+    with pytest.raises(ValueError, match=r"ridge"):
+        fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=-1.0)
+    with pytest.raises(ValueError, match=r"ridge"):
+        fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=float("nan"))
+
+
+def test_fit_sdm_rejects_non_finite_covariates():
+    num_cells = 20
+    env = np.zeros((num_cells, 1))
+    env[5, 0] = np.inf
+    area = np.ones(num_cells)
+    occurrences = [SpeciesObservation(species_id="x", detection=True, location=np.array([2.0]))]
+    with pytest.raises(ValueError, match=r"covariates"):
+        fit_sdm(occurrences, env, area)
+
+
+def test_fit_sdm_rejects_invalid_area_instead_of_using_a_pseudo_area():
+    """MXR-080-0114: a zero/negative cell_area entry must be rejected, not silently turned into a tiny
+    positive pseudo-area (previously np.clip(effective_area, 1e-12, None))."""
+    num_cells = 20
+    env = np.zeros(num_cells)
+    occurrences = [SpeciesObservation(species_id="x", detection=True, location=np.array([2.0]))]
+
+    zero_area = np.ones(num_cells)
+    zero_area[0] = 0.0
+    with pytest.raises(ValueError, match=r"cell_area"):
+        fit_sdm(occurrences, env.reshape(-1, 1), zero_area)
+
+    negative_area = np.ones(num_cells)
+    negative_area[1] = -5.0
+    with pytest.raises(ValueError, match=r"cell_area"):
+        fit_sdm(occurrences, env.reshape(-1, 1), negative_area)
+
+    nan_area = np.ones(num_cells)
+    nan_area[2] = np.nan
+    with pytest.raises(ValueError, match=r"cell_area"):
+        fit_sdm(occurrences, env.reshape(-1, 1), nan_area)
+
+
+def _valid_habitat_model_kwargs(p: int = 2, num_cells: int = 1) -> dict:
+    return {
+        "beta": np.zeros(p),
+        "beta_cov": np.eye(p) * 1e-3,
+        "design": np.ones((num_cells, p)),
+        "cell_area": np.ones(num_cells),
+    }
+
+
+def test_habitat_model_rejects_non_finite_beta():
+    kwargs = _valid_habitat_model_kwargs()
+    kwargs["beta"] = np.array([0.0, np.inf])
+    with pytest.raises(ValueError, match=r"beta"):
+        HabitatModel(**kwargs)
+
+
+def test_habitat_model_rejects_mismatched_design_shape():
+    kwargs = _valid_habitat_model_kwargs(p=2)
+    kwargs["design"] = np.ones((1, 3))  # p=3 columns, but beta implies p=2
+    with pytest.raises(ValueError, match=r"design"):
+        HabitatModel(**kwargs)
+
+
+def test_habitat_model_rejects_mismatched_cell_area_shape():
+    kwargs = _valid_habitat_model_kwargs(p=2, num_cells=3)
+    kwargs["cell_area"] = np.ones(5)  # design has 3 rows, cell_area has 5
+    with pytest.raises(ValueError, match=r"cell_area"):
+        HabitatModel(**kwargs)
+
+
+def test_habitat_model_rejects_non_positive_or_non_finite_cell_area():
+    kwargs = _valid_habitat_model_kwargs(num_cells=2, p=2)
+    kwargs["design"] = np.ones((2, 2))
+    bad = kwargs.copy()
+    bad["cell_area"] = np.array([1.0, 0.0])
+    with pytest.raises(ValueError, match=r"cell_area"):
+        HabitatModel(**bad)
+    bad2 = kwargs.copy()
+    bad2["cell_area"] = np.array([1.0, -2.0])
+    with pytest.raises(ValueError, match=r"cell_area"):
+        HabitatModel(**bad2)
+    bad3 = kwargs.copy()
+    bad3["cell_area"] = np.array([1.0, np.nan])
+    with pytest.raises(ValueError, match=r"cell_area"):
+        HabitatModel(**bad3)
+
+
+def test_habitat_model_rejects_non_psd_covariance():
+    """MXR-080-0114: a symmetric-but-not-positive-semidefinite beta_cov must be rejected."""
+    kwargs = _valid_habitat_model_kwargs()
+    kwargs["beta_cov"] = np.array([[1.0, 0.0], [0.0, -1.0]])  # symmetric, eigenvalues {1, -1}
+    with pytest.raises(ValueError, match=r"positive-semidefinite"):
+        HabitatModel(**kwargs)
+
+
+def test_habitat_model_rejects_asymmetric_covariance():
+    kwargs = _valid_habitat_model_kwargs()
+    kwargs["beta_cov"] = np.array([[1.0, 0.5], [0.0, 1.0]])
+    with pytest.raises(ValueError, match=r"symmetric"):
+        HabitatModel(**kwargs)
+
+
+def test_habitat_model_accepts_exactly_singular_psd_covariance():
+    """Positive-SEMI-definite means the closed boundary (an exactly-zero eigenvalue) is legitimate, not
+    just strictly positive-definite -- unlike a Wishart's own density, a Laplace covariance may be
+    degenerate."""
+    kwargs = _valid_habitat_model_kwargs()
+    kwargs["beta_cov"] = np.array([[1.0, 0.0], [0.0, 0.0]])  # eigenvalues {1, 0}
+    model = HabitatModel(**kwargs)
+    assert model.beta_cov.shape == (2, 2)
+
+
+def test_habitat_model_rejects_non_finite_or_non_positive_var_scale():
+    kwargs = _valid_habitat_model_kwargs()
+    with pytest.raises(ValueError, match=r"var_scale"):
+        HabitatModel(**kwargs, var_scale=0.0)
+    with pytest.raises(ValueError, match=r"var_scale"):
+        HabitatModel(**kwargs, var_scale=-1.0)
+    with pytest.raises(ValueError, match=r"var_scale"):
+        HabitatModel(**kwargs, var_scale=float("nan"))
+
+
+def test_habitat_model_mean_and_credible_interval_stay_finite_under_extreme_beta():
+    """MXR-080-0114: a linear predictor that would overflow plain exp() must stay finite at prediction
+    time too, using the same clip fitting already relies on."""
+    model = HabitatModel(
+        beta=np.array([0.0, 1000.0]),
+        beta_cov=np.eye(2) * 1e-6,
+        design=np.array([[1.0, 1.0]]),
+        cell_area=np.array([1.0]),
+    )
+    assert np.all(np.isfinite(model.mean))
+    lo, hi = model.credible_interval(0.9)
+    assert np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))
+    draws = model.samples(10, np.random.default_rng(0))
+    assert np.all(np.isfinite(draws))
+
+
+def test_habitat_model_samples_rejects_invalid_draw_count():
+    model = HabitatModel(**_valid_habitat_model_kwargs())
+    rng = np.random.default_rng(0)
+    with pytest.raises(ValueError, match=r"positive exact integer"):
+        model.samples(2.7, rng)
+    with pytest.raises(ValueError, match=r"positive exact integer"):
+        model.samples(0, rng)
+    with pytest.raises(ValueError, match=r"positive exact integer"):
+        model.samples(-3, rng)
+
+
+def test_habitat_model_credible_interval_rejects_invalid_level():
+    model = HabitatModel(**_valid_habitat_model_kwargs())
+    with pytest.raises(ValueError, match=r"\(0, 1\)"):
+        model.credible_interval(-0.5)
+    with pytest.raises(ValueError, match=r"\(0, 1\)"):
+        model.credible_interval(1.0)
+    with pytest.raises(ValueError, match=r"\(0, 1\)"):
+        model.credible_interval(float("nan"))
+
+
+def test_pushforward_quantity_credible_interval_rejects_invalid_level():
+    model = HabitatModel(**_valid_habitat_model_kwargs())
+    dq = model.derived_quantity(lambda d: d.sum(axis=1), 32, np.random.default_rng(0))
+    with pytest.raises(ValueError, match=r"\(0, 1\)"):
+        dq.credible_interval(0.0)
+
+
+def test_fit_sdm_negative_control_normal_fit_is_valid_finite_and_psd():
+    """Negative control: an ordinary, adequately-regularized fit still produces a valid, correctly-shaped,
+    finite, positive-semidefinite posterior after all of the 0114 validation."""
+    rng = np.random.default_rng(123)
+    num_cells = 50
+    env = rng.uniform(-1.0, 1.0, size=num_cells)
+    lambda_true = np.exp(0.2 + 0.9 * env)
+    area = np.ones(num_cells)
+    occurrences, _ = _synthetic_presences(lambda_true, area, rng)
+
+    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2)
+
+    assert np.all(np.isfinite(model.mean))
+    assert model.beta_cov.shape == (2, 2)
+    eigvals = np.linalg.eigvalsh(model.beta_cov)
+    assert np.all(eigvals >= -1e-8 * max(float(np.max(np.abs(eigvals))), 1.0))
+    lo, hi = model.credible_interval(0.9)
+    assert np.all(lo <= hi)
+    draws = model.samples(100, np.random.default_rng(1))
+    assert draws.shape == (100, num_cells)
+    assert np.all(np.isfinite(draws))

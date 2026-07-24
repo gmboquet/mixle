@@ -42,6 +42,68 @@ _MIN_TRAIN_CELLS = 8
 _RATE_CLIP = 700.0  # exp() overflow guard on the log-intensity + offset
 
 
+def _safe_exp(x: np.ndarray) -> np.ndarray:
+    """``exp`` with the same overflow guard used during fitting (MXR-080-0114).
+
+    A beta fit under the training-time clip can still imply a linear predictor that overflows plain
+    ``exp()`` when evaluated elsewhere -- a different design row (e.g. an extrapolated covariate), a wide
+    posterior draw, or a directly-constructed :class:`HabitatModel` -- even though fitting itself never
+    produced an overflow, because fitting always went through this same clip. Applying it at every public
+    prediction site too keeps ``HabitatModel``'s outputs finite by construction rather than relying on
+    callers to only ever ask for "reasonable" predictions.
+    """
+    return np.exp(np.clip(x, -_RATE_CLIP, _RATE_CLIP))
+
+
+def _validate_level(level: float) -> float:
+    """Validate a credible-interval level is finite and strictly in ``(0, 1)`` (MXR-080-0114).
+
+    Mirrors :func:`mixle.analysis.kriging.calibrate_variance`'s own ``target`` validation: a level
+    ``<= 0``, ``>= 1``, or NaN has no meaning as a central-interval mass and previously produced a
+    silently nonsensical (even inverted-bounds, when negative) interval instead of raising.
+    """
+    lvl = float(level)
+    if not (np.isfinite(lvl) and 0.0 < lvl < 1.0):
+        raise ValueError(f"level must be finite and strictly in (0, 1), got {level!r}.")
+    return lvl
+
+
+def _validate_draw_count(n: int) -> int:
+    """Validate a posterior draw count is a positive exact integer (MXR-080-0114).
+
+    ``rng.multivariate_normal(..., size=int(n))`` previously truncated any non-integral ``n`` silently
+    (e.g. ``2.7`` became ``2`` with no warning); a non-positive ``n`` is not a meaningful draw count.
+    """
+    n_int = int(n)
+    if n != n_int or n_int <= 0:
+        raise ValueError(f"n must be a positive exact integer, got {n!r}.")
+    return n_int
+
+
+def _validate_covariance(cov: np.ndarray, p: int, *, name: str) -> np.ndarray:
+    """Validate ``cov`` is a finite, symmetric, ``(p, p)`` positive-semidefinite matrix (MXR-080-0114).
+
+    Eigenvalue-based, consistent with the positive-(semi)definite check used elsewhere in this codebase
+    (:func:`mixle.utils.vector.batched_pd_logdet`) rather than a determinant-sign test, which is not
+    sufficient on its own (a matrix can have positive determinant while indefinite). Unlike that helper --
+    written for distributions whose density requires strict positive-*definite*ness -- a Laplace
+    covariance is a legitimate (if degenerate) covariance at exactly zero eigenvalue, so this allows the
+    closed boundary (semidefinite) rather than rejecting it.
+    """
+    c = np.asarray(cov, dtype=np.float64)
+    if c.shape != (p, p):
+        raise ValueError(f"{name} must have shape ({p}, {p}) matching beta, got {c.shape}.")
+    if not np.all(np.isfinite(c)):
+        raise ValueError(f"{name} must be finite.")
+    if not np.allclose(c, c.T, atol=1e-8):
+        raise ValueError(f"{name} must be symmetric.")
+    eigvals = np.linalg.eigvalsh(c)
+    tol = 1e-8 * max(float(np.max(np.abs(eigvals))), 1.0)
+    if np.any(eigvals < -tol):
+        raise ValueError(f"{name} must be positive-semidefinite; smallest eigenvalue is {float(eigvals.min())!r}.")
+    return c
+
+
 @dataclass
 class SpeciesObservation:
     """One presence/absence record for a species (an IC-4 ``Observation`` specialisation).
@@ -69,8 +131,13 @@ class _PushforwardQuantity:
         self.prior_dominated = prior_dominated
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
-        """Central ``level`` interval of the pushed-forward samples (empirical quantiles)."""
-        alpha = (1.0 - level) / 2.0
+        """Central ``level`` interval of the pushed-forward samples (empirical quantiles).
+
+        Raises:
+            ValueError: ``level`` is not finite and strictly in ``(0, 1)`` (MXR-080-0114).
+        """
+        lvl = _validate_level(level)
+        alpha = (1.0 - lvl) / 2.0
         return np.quantile(self.samples, alpha, axis=0), np.quantile(self.samples, 1.0 - alpha, axis=0)
 
 
@@ -97,11 +164,48 @@ class HabitatModel:
         var_scale: float = 1.0,
         prior_dominated: bool = False,
     ) -> None:
-        self.beta = np.asarray(beta, dtype=np.float64)
-        self.beta_cov = np.asarray(beta_cov, dtype=np.float64)
-        self.design = np.asarray(design, dtype=np.float64)
-        self.cell_area = np.asarray(cell_area, dtype=np.float64)
-        self._var_scale = float(var_scale)
+        """Construct a fitted habitat-suitability posterior.
+
+        Raises:
+            ValueError: ``beta`` is not a non-empty finite 1-D array; ``design``/``cell_area`` are not
+                finite with the shape ``beta`` implies (``design`` is ``(K, p)``, ``cell_area`` is
+                ``(K,)``), or ``cell_area`` is not strictly positive; ``beta_cov`` is not a finite,
+                symmetric, ``(p, p)`` positive-semidefinite matrix; or ``var_scale`` is not finite and
+                strictly positive (MXR-080-0114: posterior construction must enforce a finite,
+                shape-compatible, genuinely positive-semidefinite state rather than accept -- or silently
+                clip -- an invalid one).
+        """
+        beta_arr = np.asarray(beta, dtype=np.float64).reshape(-1)
+        if beta_arr.size == 0:
+            raise ValueError("beta must be a non-empty 1-D array.")
+        if not np.all(np.isfinite(beta_arr)):
+            raise ValueError("beta must be finite.")
+        p = beta_arr.shape[0]
+
+        design_arr = np.asarray(design, dtype=np.float64)
+        if design_arr.ndim != 2 or design_arr.shape[1] != p:
+            raise ValueError(f"design must have shape (K, {p}) matching beta, got {design_arr.shape}.")
+        if not np.all(np.isfinite(design_arr)):
+            raise ValueError("design must be finite.")
+        num_cells = design_arr.shape[0]
+
+        cell_area_arr = np.asarray(cell_area, dtype=np.float64).reshape(-1)
+        if cell_area_arr.shape != (num_cells,):
+            raise ValueError(f"cell_area must have shape ({num_cells},) matching design, got {cell_area_arr.shape}.")
+        if not np.all(np.isfinite(cell_area_arr)) or not np.all(cell_area_arr > 0.0):
+            raise ValueError("cell_area must be finite and strictly positive.")
+
+        beta_cov_arr = _validate_covariance(beta_cov, p, name="beta_cov")
+
+        var_scale_f = float(var_scale)
+        if not (np.isfinite(var_scale_f) and var_scale_f > 0.0):
+            raise ValueError(f"var_scale must be finite and strictly positive, got {var_scale!r}.")
+
+        self.beta = beta_arr
+        self.beta_cov = beta_cov_arr
+        self.design = design_arr
+        self.cell_area = cell_area_arr
+        self._var_scale = var_scale_f
         self._prior_dominated = bool(prior_dominated)
 
     def _log_lambda_moments(self) -> tuple[np.ndarray, np.ndarray]:
@@ -115,14 +219,23 @@ class HabitatModel:
 
         Returns:
             ``(n, K)`` array of intensity-field draws.
+
+        Raises:
+            ValueError: ``n`` is not a positive exact integer (MXR-080-0114).
         """
-        beta_draws = rng.multivariate_normal(self.beta, self._var_scale * self.beta_cov, size=int(n))
-        return np.exp(beta_draws @ self.design.T)
+        n_valid = _validate_draw_count(n)
+        beta_draws = rng.multivariate_normal(self.beta, self._var_scale * self.beta_cov, size=n_valid)
+        return _safe_exp(beta_draws @ self.design.T)
 
     @property
     def mean(self) -> np.ndarray:
-        """Fitted intensity field ``lambda_c = exp(design_c @ beta)`` -- the suitability surface."""
-        return np.exp(self.design @ self.beta)
+        """Fitted intensity field ``lambda_c = exp(design_c @ beta)`` -- the suitability surface.
+
+        Uses the same overflow-safe ``exp`` as fitting (MXR-080-0114): a linear predictor that never
+        overflowed under the training-time clip can still overflow plain ``exp()`` at a different design
+        row (e.g. an extrapolated covariate) or for a directly-constructed model.
+        """
+        return _safe_exp(self.design @ self.beta)
 
     @property
     def cov(self) -> np.ndarray:
@@ -131,11 +244,16 @@ class HabitatModel:
         return self._var_scale * (jac @ self.beta_cov @ jac.T)
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
-        """Per-cell central credible interval of the suitability field (lognormal delta-method)."""
+        """Per-cell central credible interval of the suitability field (lognormal delta-method).
+
+        Raises:
+            ValueError: ``level`` is not finite and strictly in ``(0, 1)`` (MXR-080-0114).
+        """
+        lvl = _validate_level(level)
         mu, var = self._log_lambda_moments()
-        z = float(norm.ppf(0.5 + level / 2.0))
+        z = float(norm.ppf(0.5 + lvl / 2.0))
         sd = np.sqrt(var)
-        return np.exp(mu - z * sd), np.exp(mu + z * sd)
+        return _safe_exp(mu - z * sd), _safe_exp(mu + z * sd)
 
     def derived_quantity(
         self, fn: Callable[[np.ndarray], np.ndarray], n: int, rng: np.random.Generator
@@ -229,7 +347,7 @@ def _clipped_rates_and_mask(
     """
     eta = design @ beta + log_offset
     mask = (eta > -_RATE_CLIP) & (eta < _RATE_CLIP)
-    return np.exp(np.clip(eta, -_RATE_CLIP, _RATE_CLIP)), mask.astype(np.float64)
+    return _safe_exp(eta), mask.astype(np.float64)
 
 
 def _nll_and_grad(
@@ -346,12 +464,24 @@ def fit_sdm(
 
     Returns:
         A fitted :class:`HabitatModel`.
+
+    Raises:
+        ValueError: ``ridge`` is not finite and non-negative; ``covariates`` is not finite; ``cell_area``
+            does not have exactly one finite, strictly positive entry per covariate row; any presence or
+            background location is non-finite or outside the cell-index domain ``[0, K)`` (MXR-080-0111);
+            or the internal beta fit does not converge to finite coefficients (MXR-080-0113).
     """
+    if not (np.isfinite(ridge) and ridge >= 0.0):
+        raise ValueError(f"ridge must be finite and non-negative, got {ridge!r}.")
     cov = np.atleast_2d(np.asarray(covariates, dtype=np.float64))
+    if not np.all(np.isfinite(cov)):
+        raise ValueError("covariates must be finite.")
     num_cells = cov.shape[0]
     area = np.asarray(cell_area, dtype=np.float64).reshape(-1)
     if area.shape[0] != num_cells:
         raise ValueError("cell_area must have exactly one entry per covariate row (K cells).")
+    if not np.all(np.isfinite(area)) or not np.all(area > 0.0):
+        raise ValueError("cell_area must be finite and strictly positive.")
     design = np.column_stack([np.ones(num_cells), cov])
     p = design.shape[1]
 
@@ -372,7 +502,11 @@ def fit_sdm(
         effective_area = area + thinning_weight * bg_counts
     else:
         effective_area = area
-    log_offset = np.log(np.clip(effective_area, 1e-12, None))
+    # effective_area is always finite and strictly positive here: `area` is validated strictly positive
+    # above, and adding a finite non-negative background-count term to it can only increase it -- no
+    # pseudo-area clip is needed (MXR-080-0114: invalid area was previously silently turned into a tiny
+    # positive pseudo-area, e.g. 1e-12, instead of being rejected).
+    log_offset = np.log(effective_area)
 
     beta_hat, beta_cov, rates_hat = _fit_beta(design, counts, log_offset, ridge)
 
