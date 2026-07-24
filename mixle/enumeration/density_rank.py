@@ -1199,14 +1199,21 @@ def count_dp_top_p(
     )
 
 
-def _joint_bucket_histogram(components, quantizer, max_fine_bucket):
+def _joint_bucket_histogram(components, quantizer, max_fine_bucket, max_leaf_support):
     """Joint K-dim count histogram of (bucket(log p_1(y)), ..., bucket(log p_K(y))) over the support.
 
-    Built structurally for homogeneous (same-structure) components, with NO enumeration of the joint
-    support: composites convolve the per-field joint histograms (bucket tuples add, counts multiply);
-    leaves enumerate their own (small) support and key by the K-tuple of per-component buckets.
-    Returns ``{(b_1, ..., b_K): count}``. Raises EnumerationError for component structures not
-    handled here (only Composite and atomic/enumerable leaves are supported).
+    Built structurally for homogeneous (same-structure) components, with NO enumeration of the JOINT
+    (cross-component) support -- that union would be exponential in K. Composites instead convolve the
+    per-field joint histograms (bucket tuples add, counts multiply); leaves enumerate their OWN support
+    (the union of what each component individually assigns positive probability to) and key by the
+    K-tuple of per-component buckets. That per-leaf enumeration is real, though, so a leaf's support
+    must be finite and no larger than ``max_leaf_support`` -- see the ``EnumerationError`` raised below,
+    which is exactly what stands between this function and hanging forever on an infinite-support leaf
+    (e.g. a Poisson/geometric component) or burning unbounded time on a merely huge one.
+
+    Returns ``{(b_1, ..., b_K): count}``. Raises EnumerationError for component structures not handled
+    here (only Composite and atomic/enumerable leaves are supported), for a leaf with unknown/infinite
+    support (``support_size()`` is ``None``), or for a leaf whose support exceeds ``max_leaf_support``.
     """
     from mixle.enumeration.streams import freeze
     from mixle.stats.combinator.composite import CompositeDistribution
@@ -1217,7 +1224,9 @@ def _joint_bucket_histogram(components, quantizer, max_fine_bucket):
         arity = head.count
         joint = {(0,) * len(components): 1}
         for f in range(arity):
-            field = _joint_bucket_histogram([c.dists[f] for c in components], quantizer, max_fine_bucket)
+            field = _joint_bucket_histogram(
+                [c.dists[f] for c in components], quantizer, max_fine_bucket, max_leaf_support
+            )
             nxt: dict[tuple[int, ...], int] = {}
             for ka, ca in joint.items():
                 for kb, cb in field.items():
@@ -1226,7 +1235,31 @@ def _joint_bucket_histogram(components, quantizer, max_fine_bucket):
                         nxt[key] = nxt.get(key, 0) + ca * cb
             joint = nxt
         return joint
-    # Leaf: enumerate the union of component supports, key by the per-component bucket tuple.
+    # Leaf: enumerate the union of component supports, key by the per-component bucket tuple. Each
+    # component's support must be finite and bounded BEFORE enumerating it -- support_size() is the
+    # cheap, non-enumerating cardinality primitive this module already uses for the same purpose in
+    # truncated_sum_bound (see mixle.stats.compute.pdist.ProbabilityDistribution.support_size).
+    for comp in components:
+        size = comp.support_size()
+        if size is None:
+            raise EnumerationError(
+                comp,
+                reason=(
+                    "mixture_cross_rank requires every component to have a finite, bounded support; "
+                    "support_size() is None (infinite or unknown) -- this component would be enumerated "
+                    "without ever terminating"
+                ),
+            )
+        if size > max_leaf_support:
+            raise EnumerationError(
+                comp,
+                reason=(
+                    "component support_size()=%d exceeds max_leaf_support=%d -- raise max_leaf_support "
+                    "if this is really intended, or restrict to smaller leaf families; mixture_cross_rank's "
+                    "K-dimensional joint histogram is for SMALL, bounded leaf supports, not a substitute "
+                    "for enumerating a large one" % (size, max_leaf_support)
+                ),
+            )
     values: dict[Any, Any] = {}
     for comp in components:
         try:
@@ -1243,22 +1276,37 @@ def _joint_bucket_histogram(components, quantizer, max_fine_bucket):
     return hist
 
 
-def mixture_cross_rank(mixture, value, oversample: int = 64, bin_width_bits: float = 1.0, depth_bits: float = 64.0):
+def mixture_cross_rank(
+    mixture,
+    value,
+    oversample: int = 64,
+    bin_width_bits: float = 1.0,
+    depth_bits: float = 64.0,
+    max_leaf_support: int = 100_000,
+):
     """True-marginal rank of ``value`` under a homogeneous mixture, at arbitrary depth.
 
     ``count_dp_rank`` on a mixture gives only the TROPICAL (dominant-component) rank -- it bins by the
     best single component, so a value built from several components is badly mis-ranked. This computes
     the true rank against the actual marginal ``p = sum_k w_k p_k`` by building the JOINT K-dimensional
-    count histogram of the per-component log-prob buckets (structurally, no enumeration of the joint
-    support -- see :func:`_joint_bucket_histogram`) and counting joint bins whose representative
-    marginal probability exceeds ``p(value)``.
+    count histogram of the per-component log-prob buckets (structurally, with no enumeration of the
+    JOINT/cross-component support -- see :func:`_joint_bucket_histogram`) and counting joint bins whose
+    representative marginal probability exceeds ``p(value)``.
 
     Quantization-approximate: a joint bin's marginal probability is evaluated at the bucket midpoints,
-    so bins straddling the threshold may be mis-counted; the error shrinks as ``oversample`` grows.
+    so bins straddling the threshold may be mis-counted; the error shrinks as ``oversample`` grows. The
+    returned rank carries no explicit quantization-error or truncation metadata beyond that -- treat it
+    as an approximate count, tightened by raising ``oversample``, not as a certified bound.
+
     Cost is EXPONENTIAL in the number of components K (the histogram is K-dimensional), so this is for
-    SMALL-K mixtures (a few components) of same-structured decomposable components; it needs no
-    enumeration, so it scales to deep ranks. For non-mixtures use :func:`count_dp_rank`; for the head
-    of any model use :func:`density_rank`.
+    SMALL-K mixtures (a few components); it needs no enumeration of the joint support, so it scales to
+    deep ranks along that axis. It is NOT free along every axis, though: each LEAF component's OWN
+    support (e.g. one field of a composite, or an atomic leaf) IS enumerated once (the union of what
+    every component assigns positive probability to), so every leaf must have a finite support of at
+    most ``max_leaf_support`` -- an infinite-support leaf (Poisson, geometric, an unbounded sequence, ...)
+    or a merely huge finite one raises ``EnumerationError`` rather than hanging or silently defeating the
+    advertised scaling. For non-mixtures use :func:`count_dp_rank`; for the head of any model use
+    :func:`density_rank`.
     """
     from mixle.enumeration.quantization.core import Quantizer
 
@@ -1266,7 +1314,7 @@ def mixture_cross_rank(mixture, value, oversample: int = 64, bin_width_bits: flo
     log_w = [float(lw) for lw, w in zip(mixture.log_w, mixture.w, strict=False) if w > 0.0]
     q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample)
     max_fb = int(math.ceil(depth_bits * oversample / bin_width_bits))
-    joint = _joint_bucket_histogram(comps, q, max_fb)
+    joint = _joint_bucket_histogram(comps, q, max_fb, max_leaf_support)
 
     t = float(mixture.log_density(value))
     px = math.exp(t)
