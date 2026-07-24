@@ -389,6 +389,43 @@ class MixtureCrossRankTestCase(unittest.TestCase):
         errs = [abs(mixture_cross_rank(mix, y, oversample=128) - brute(y)) for y in range(12)]
         self.assertLessEqual(max(errs), 2)
 
+    def test_infinite_support_leaf_raises_instead_of_hanging(self):
+        # MXR-080-0219: the docstring used to claim "no enumeration", but every leaf enumerator was
+        # exhausted into a dictionary -- an infinite-support leaf (Poisson, geometric, ...) would never
+        # terminate. It must now be rejected up front via support_size().
+        from mixle.enumeration.density_rank import mixture_cross_rank
+        from mixle.stats.compute.pdist import EnumerationError
+
+        mix = MixtureDistribution([PoissonDistribution(3.0), PoissonDistribution(5.0)], [0.5, 0.5])
+        with self.assertRaises(EnumerationError):
+            mixture_cross_rank(mix, 2, oversample=8)
+
+    def test_oversized_finite_leaf_raises(self):
+        # MXR-080-0219: a merely huge (but finite) leaf defeats the advertised small-K scaling just as
+        # badly as an infinite one -- also rejected, with a clear budget in the error.
+        from mixle.enumeration.density_rank import mixture_cross_rank
+        from mixle.stats.compute.pdist import EnumerationError
+
+        rng = np.random.RandomState(0)
+        big = IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(500_000))))
+        mix = MixtureDistribution([big, big], [0.5, 0.5])
+        with self.assertRaises(EnumerationError):
+            mixture_cross_rank(mix, 0, oversample=8, max_leaf_support=100_000)
+        # raising the budget explicitly is still allowed for a caller who really means it (not run here
+        # to keep the test fast -- the point is the rejection above is a budget, not a hard wall).
+
+    def test_small_finite_leaves_are_unaffected(self):
+        # the restriction must not disturb the ordinary, intended small-leaf case.
+        from mixle.enumeration.density_rank import mixture_cross_rank
+
+        rng = np.random.RandomState(1)
+        mix = MixtureDistribution(
+            [IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(12)))) for _ in range(2)], [0.6, 0.4]
+        )
+        r = mixture_cross_rank(mix, 0, oversample=64, max_leaf_support=100)
+        self.assertIsInstance(r, int)
+        self.assertGreaterEqual(r, 0)
+
 
 class CumulativeProbabilityTestCase(unittest.TestCase):
     """The unbiased mass-histogram DP gives EXACT cumulative probability for decomposable families."""
