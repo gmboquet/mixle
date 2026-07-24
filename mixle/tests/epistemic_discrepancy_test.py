@@ -94,6 +94,45 @@ class WassersteinDistanceTest(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             wasserstein_distance(TwoD(), TwoD(), n=10)
 
+    def test_column_vector_samples_are_sorted_before_matching(self):
+        # np.sort defaults to the last axis; on a (n, 1) column vector -- what a distribution's
+        # .sample(n) returns when each draw is its own length-1 row -- that axis has one element,
+        # so sorting it in place is a silent no-op and the draws stay in their original order.
+        # p=[100, 0] vs q=[49, 51]: the correct order statistics are p=[0, 100], q=[49, 51], giving
+        # mean(|0-49|, |100-51|) = 49.0. Pairing the *unsorted* draws instead gives the wrong 51.0.
+        class ColumnVectorDist:
+            def __init__(self, values):
+                self._values = np.asarray(values, dtype=np.float64).reshape(-1, 1)
+
+            def sample(self, n):
+                return self._values
+
+        p = ColumnVectorDist([100.0, 0.0])
+        q = ColumnVectorDist([49.0, 51.0])
+        self.assertAlmostEqual(wasserstein_distance(p, q, n=2), 49.0, places=8)
+
+    def test_column_vector_and_flat_samples_agree(self):
+        # Negative control: a (n, 1) column vector and its (n,) flattened equivalent must give the
+        # identical answer -- the extra trailing length-1 axis alone must not change the result now
+        # that both shapes are squeezed to 1D before sorting.
+        class FlatDist:
+            def __init__(self, values):
+                self._values = np.asarray(values, dtype=np.float64)
+
+            def sample(self, n):
+                return self._values
+
+        class ColumnVectorDist:
+            def __init__(self, values):
+                self._values = np.asarray(values, dtype=np.float64).reshape(-1, 1)
+
+            def sample(self, n):
+                return self._values
+
+        flat = wasserstein_distance(FlatDist([100.0, 0.0, 37.5]), FlatDist([49.0, 51.0, 2.5]), n=3)
+        column = wasserstein_distance(ColumnVectorDist([100.0, 0.0, 37.5]), ColumnVectorDist([49.0, 51.0, 2.5]), n=3)
+        self.assertAlmostEqual(flat, column, places=8)
+
 
 class MMDTest(unittest.TestCase):
     def test_same_distribution_is_near_zero(self):
