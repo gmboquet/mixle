@@ -16,6 +16,57 @@ from typing import Any
 import numpy as np
 
 
+class AmbiguousCountError(ValueError):
+    """A histogram/bucket count cannot be certified as a single exact integer.
+
+    Raised instead of silently truncating an approximate (e.g. ``count_mode='float'``) count via
+    ``int()``: a bucket count that is off by even a fraction shifts every later cumulative rank
+    boundary, so unranking through the truncated table can omit, duplicate, or misroute values
+    into the wrong bucket entirely (MXR-080-0206) -- not just return a slightly-wrong answer
+    within the same bucket. Subclasses ``ValueError`` so existing ``except ValueError`` call
+    sites still catch it.
+    """
+
+
+def _certified_integer(
+    n: Any, *, label: str, allow_negative: bool = False, error_cls: type[Exception] = ValueError
+) -> int:
+    """Certify ``n`` is an exact integer, never silently coercing a non-integral value via ``int()``.
+
+    Python/numpy integers pass straight through (no float round-trip, so arbitrary-precision
+    exact-mode counts past float64's 2**53 range are unaffected). A float is certified only when
+    it is EXACTLY integer-valued: this package's own float64 count arithmetic (pure addition and
+    multiplication -- see ``CountHistogram.convolve_float``) always lands exactly on an integer
+    when the inputs are exact integers, so a genuinely fractional value here is never rounding
+    noise -- it means the data is not a certified exact count (e.g. a mean-field/expected-count
+    approximation) and cannot be trusted as one exact structural offset. ``error_cls`` lets count
+    call sites raise the more specific :class:`AmbiguousCountError` while other integer-shaped
+    fields (bin ids, etc.) raise plain ``ValueError``.
+    """
+    if isinstance(n, (bool, np.bool_)):
+        raise TypeError(f"{label} must be an integer, not bool: {n!r}")
+    if isinstance(n, (int, np.integer)):
+        value = int(n)
+    else:
+        try:
+            f = float(n)
+        except (TypeError, ValueError) as e:
+            raise TypeError(f"{label} must be a real number, got {n!r}") from e
+        if not math.isfinite(f):
+            raise ValueError(f"{label} must be finite, got {f!r}")
+        if f != math.floor(f):
+            raise error_cls(
+                f"{label}={f!r} is not certifiably a single exact integer (nearest integer "
+                f"{int(math.floor(f + 0.5))} is {abs(f - round(f)):.3g} away); refusing to "
+                "silently truncate via int() into a structurally different index -- see "
+                "MXR-080-0206."
+            )
+        value = int(f)
+    if not allow_negative and value < 0:
+        raise ValueError(f"{label} must be non-negative, got {value}")
+    return value
+
+
 class QuantizedEnumerationIndex:
     """Bounded, indexable view of an exact probability-ordered enumeration.
 
@@ -237,15 +288,34 @@ class LazyQuantizedEnumerationIndex(QuantizedEnumerationIndex):
         truncated: bool,
         getter: Callable[[int, int], tuple[Any, float]],
     ) -> None:
-        if max_bits < 0:
-            raise ValueError("max_bits must be non-negative.")
-        if bin_width_bits <= 0:
-            raise ValueError("bin_width_bits must be positive.")
+        if not math.isfinite(max_bits) or max_bits < 0:
+            raise ValueError(f"max_bits must be finite and non-negative, got {max_bits!r}")
+        if not math.isfinite(bin_width_bits) or bin_width_bits <= 0:
+            raise ValueError(f"bin_width_bits must be finite and positive, got {bin_width_bits!r}")
+        if not callable(getter):
+            raise TypeError(f"getter must be callable, got {getter!r}")
 
         self.bin_width_bits = float(bin_width_bits)
         self.max_bits = float(max_bits)
         self.truncated = bool(truncated)
-        self.counts: dict[int, int] = {int(b): int(n) for b, n in sorted(counts.items()) if int(n) > 0}
+        # Certify each bin's count is an exact non-negative integer instead of truncating it with
+        # int(): a float-count-mode (or otherwise approximate) count that is not EXACTLY integral
+        # cannot be trusted as one exact structural offset -- int(2.9) == 2 would silently shift
+        # every later cumulative rank boundary, omitting, duplicating, or misrouting unranked
+        # values (MXR-080-0206). Bin ids are certified the same way (MXR-080-0207): there is no
+        # separate checked factory for this class -- this constructor IS the only way to build
+        # one -- so it alone must enforce every invariant a factory would. A fractional or
+        # duplicate-after-certification bin id would corrupt the bisect rank table below.
+        certified: dict[int, int] = {}
+        for b, n in counts.items():
+            bin_id = _certified_integer(b, label=f"bin id {b!r}", allow_negative=True)
+            if bin_id in certified:
+                raise ValueError(
+                    f"duplicate bin id {bin_id} after certification (from input key {b!r}); "
+                    "duplicate bins corrupt the bisect rank table -- see MXR-080-0207."
+                )
+            certified[bin_id] = _certified_integer(n, label=f"count for bin {bin_id}", error_cls=AmbiguousCountError)
+        self.counts: dict[int, int] = {b: n for b, n in sorted(certified.items()) if n > 0}
         self._getter = getter
         self._bins = [(b, self.counts[b]) for b in sorted(self.counts)]
         self._starts: dict[int, int] = {}
