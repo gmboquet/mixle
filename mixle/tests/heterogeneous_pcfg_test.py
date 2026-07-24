@@ -235,5 +235,79 @@ class HeterogeneousPCFGTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(model.seq_log_density(enc[0][1]))))
 
 
+class HeterogeneousPCFGValidationTestCase(unittest.TestCase):
+    """Regression coverage for HeterogeneousPCFGDistribution.__init__ rule-probability validation.
+
+    An external review flagged this constructor for the same NaN blind spot already fixed in
+    CategoricalDistribution.pmap / IntegerCategoricalDistribution.p_vec / MixtureDistribution.w:
+    `prob < 0.0` is always False for `prob = nan`, so a NaN rule probability used to pass straight
+    through, poison the per-parent `totals` accumulator (nan is contagious under `+=`), and
+    propagate through the `q = prob / totals[p]` normalization into log_binary_probs /
+    log_terminal_probs and log_density() as nan -- all without raising anywhere.
+    """
+
+    def test_nan_terminal_rule_probability_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            HeterogeneousPCFGDistribution(
+                binary_rules=None,
+                terminal_rules=[("S", GaussianDistribution(0.0, 1.0), float("nan"))],
+            )
+
+    def test_nan_terminal_rule_probability_rejected_alongside_a_valid_sibling(self):
+        # A second, valid rule for the same parent doesn't save it: totals[parent] accumulates to
+        # nan (0.5 + nan = nan), so the old `total <= 0.0` empty-parent guard didn't catch this
+        # either (`nan <= 0.0` is also always False).
+        with self.assertRaises(ValueError):
+            HeterogeneousPCFGDistribution(
+                binary_rules=None,
+                terminal_rules=[
+                    ("S", GaussianDistribution(0.0, 1.0), 0.5),
+                    ("S", GaussianDistribution(5.0, 1.0), float("nan")),
+                ],
+            )
+
+    def test_nan_binary_rule_probability_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            HeterogeneousPCFGDistribution(
+                binary_rules=[("S", "A", "B", float("nan"))],
+                terminal_rules=[
+                    ("A", GaussianDistribution(0.0, 1.0), 1.0),
+                    ("B", GaussianDistribution(0.0, 1.0), 1.0),
+                    ("S", GaussianDistribution(0.0, 1.0), 1.0),
+                ],
+            )
+
+    def test_infinite_rule_probability_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            HeterogeneousPCFGDistribution(
+                binary_rules=None,
+                terminal_rules=[("S", GaussianDistribution(0.0, 1.0), float("inf"))],
+            )
+
+    def test_negative_rule_probability_still_rejected_at_construction(self):
+        # Pre-existing behavior, unaffected by the finite check above; pinned here since it had no
+        # direct regression test of its own.
+        with self.assertRaises(ValueError):
+            HeterogeneousPCFGDistribution(
+                binary_rules=None,
+                terminal_rules=[("S", GaussianDistribution(0.0, 1.0), -0.5)],
+            )
+
+    def test_unnormalized_rule_probabilities_still_construct(self):
+        # Rule sets are NOT required to sum to 1 -- this class's documented, intentional contract
+        # ("Rule probabilities are normalized over all rules sharing a parent") normalizes whatever
+        # raw, possibly-unnormalized values are given. Pinned so a future change doesn't turn the
+        # finite/non-negative fix above into an accidental sum-to-1 rejection.
+        model = HeterogeneousPCFGDistribution(
+            binary_rules=[("S", "A", "B", 2.0)],
+            terminal_rules=[
+                ("A", GaussianDistribution(0.0, 1.0), 3.0),
+                ("B", GaussianDistribution(0.0, 1.0), 1.0),
+                ("S", GaussianDistribution(0.0, 1.0), 5.0),
+            ],
+        )
+        self.assertTrue(np.isfinite(model.log_density([0.1, 0.2])))
+
+
 if __name__ == "__main__":
     unittest.main()

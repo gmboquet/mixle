@@ -16,6 +16,7 @@ import scipy.stats
 
 from mixle.inference import estimate, initialize
 from mixle.stats import (
+    BernoulliDistribution,
     BetaDistribution,
     BinomialDistribution,
     CategoricalDistribution,
@@ -259,10 +260,42 @@ class ReferenceLogDensityTestCase(unittest.TestCase):
             (GeometricDistribution, (0.0,)),
             (BinomialDistribution, (0.4, 1.5)),
             (BetaDistribution, (0.0, 1.0)),
+            # `nan <= 0.0` and `nan >= 1.0` are both False, so a NaN p used to pass the open-interval
+            # check straight through and reach log_density()/sampling as nan instead of raising here.
+            (BernoulliDistribution, (np.nan,)),
+            (BinomialDistribution, (np.nan, 5)),
+            # OptionalDistribution.p had no validation at all: negative, >1, and NaN all used to
+            # construct silently and propagate a mathematically-invalid "probability" downstream.
+            (OptionalDistribution, (GaussianDistribution(0.0, 1.0), np.nan)),
+            (OptionalDistribution, (GaussianDistribution(0.0, 1.0), -0.5)),
+            (OptionalDistribution, (GaussianDistribution(0.0, 1.0), 1.5)),
         ]
         for cls, args in invalid:
             with self.assertRaises(ValueError, msg="%s%r" % (cls.__name__, args)):
                 cls(*args)
+
+    def test_binomial_nan_n_raises_domain_error_not_int_conversion_error(self):
+        # int(float('nan')) itself raises "cannot convert float NaN to integer" -- a ValueError, but
+        # an opaque one that never names n as the culprit. np.isnan(n) must be checked before int(n)
+        # so the raised message comes from the actual domain validation, not that incidental crash.
+        with self.assertRaisesRegex(ValueError, "non-negative integer n"):
+            BinomialDistribution(0.4, np.nan)
+
+    def test_optional_distribution_p_boundary_values_still_construct(self):
+        # Unlike Bernoulli/Binomial's strict open-interval p, OptionalDistribution's p=0.0 ("never
+        # missing") and p=1.0 ("always missing") are legal boundary values: log_p/log_pn special-case
+        # p==0/p==1 to avoid log(0)/log1p(-1) domain errors, and OptionalEnumerator has dedicated
+        # p<=0.0 / p>=1.0 branches treating them as ordinary (not degenerate) configurations. The
+        # empirical estimator (OptionalEstimator.estimate with est_prob=True) also routinely produces
+        # exactly p=0.0 or p=1.0 for an all-observed or all-missing component, so rejecting these
+        # boundaries would break ordinary EM fitting, not just a synthetic edge case.
+        base = GaussianDistribution(0.0, 1.0)
+        never_missing = OptionalDistribution(base, p=0.0)
+        always_missing = OptionalDistribution(base, p=1.0)
+        self.assertTrue(np.isfinite(never_missing.log_density(0.3)))
+        self.assertEqual(never_missing.log_density(None), -np.inf)
+        self.assertTrue(np.isfinite(always_missing.log_density(None)))
+        self.assertEqual(always_missing.log_density(0.3), -np.inf)
 
     def test_count_encoders_reject_fractional_counts(self):
         for dist in [PoissonDistribution(2.0), GeometricDistribution(0.4), BinomialDistribution(0.3, 5)]:

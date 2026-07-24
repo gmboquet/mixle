@@ -161,12 +161,19 @@ class HeterogeneousPCFGDistribution(SequenceEncodableProbabilityDistribution):
 
         totals = np.zeros(self.num_nonterminals, dtype=np.float64)
         for parent, _, _, prob in raw_binary:
-            if prob < 0.0:
-                raise ValueError("binary rule probabilities must be non-negative.")
+            if not np.isfinite(prob) or prob < 0.0:
+                # `nan < 0.0` is always False, so a NaN rule probability used to pass this check
+                # straight through, poison `totals` via `+=`, and propagate through the per-parent
+                # normalization (`q = prob / totals[p]`) into log_binary_probs and log_density() as
+                # nan. Reject non-finite the same way as negative, matching CategoricalDistribution.
+                # pmap / MixtureDistribution.w. Rule sets are NOT required to sum to 1 here -- that
+                # is this class's documented, intentional contract ("Rule probabilities are
+                # normalized over all rules sharing a parent"), unlike MixtureDistribution.w.
+                raise ValueError("binary rule probabilities must be finite and non-negative.")
             totals[self.nt_to_idx[parent]] += prob
         for parent, _, prob in raw_terminal:
-            if prob < 0.0:
-                raise ValueError("terminal rule probabilities must be non-negative.")
+            if not np.isfinite(prob) or prob < 0.0:
+                raise ValueError("terminal rule probabilities must be finite and non-negative.")
             totals[self.nt_to_idx[parent]] += prob
 
         for i, total in enumerate(totals):
