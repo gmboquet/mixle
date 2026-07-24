@@ -245,10 +245,18 @@ class ResponseSurface:
         terms: matching term names.
         b: linear coefficient vector ``(d,)``.
         B: symmetric ``(d, d)`` matrix of quadratic coefficients (cross terms split onto both halves).
-        stationary_point: ``x*`` solving ``grad = b + 2 B x = 0`` (least-squares if ``B`` is singular).
-        eigenvalues: eigenvalues of ``B`` -- all negative => the stationary point is a maximum, all
-            positive => a minimum, mixed signs => a saddle (a *ridge* if some are ~0).
-        kind: ``"maximum"`` / ``"minimum"`` / ``"saddle"``.
+        stationary_point: ``x*`` solving the stationarity equation ``B x* = -b/2``, or ``None`` when no
+            such point exists -- i.e. the gradient ``b + 2 B x`` is never zero anywhere, which can only
+            happen when ``B`` is singular (``kind == "no_stationary_point"``; see below).
+        eigenvalues: eigenvalues of ``B`` -- all negative => a maximum, all positive => a minimum,
+            mixed signs => a saddle; any eigenvalue ~0 (*with* a genuine stationary point) => a
+            *ridge*, a whole line/subspace of equally-stationary points, of which
+            ``stationary_point`` is one representative (the minimum-norm) point.
+        kind: ``"maximum"`` / ``"minimum"`` / ``"saddle"`` / ``"ridge"`` / ``"no_stationary_point"``.
+            The last case is distinct from a ridge: a ridge is a genuine (degenerate) stationary
+            subspace, while ``"no_stationary_point"`` means the stationarity equation has no solution
+            at all (e.g. the exact surface ``y = x0**2 + x1``, whose gradient's second component is
+            always exactly ``1``).
         residual_std: residual standard deviation when the design has spare runs (else ``None``).
     """
 
@@ -256,7 +264,7 @@ class ResponseSurface:
     terms: list[str]
     b: np.ndarray
     B: np.ndarray
-    stationary_point: np.ndarray
+    stationary_point: np.ndarray | None
     eigenvalues: np.ndarray
     kind: str
     residual_std: float | None
@@ -277,9 +285,13 @@ def response_surface(x, y) -> ResponseSurface:
     """Fit a full second-order (quadratic) response surface and analyse its stationary point.
 
     Least-squares-fits ``y = b0 + sum b_i x_i + sum_{i<=j} b_{ij} x_i x_j`` to the design runs ``x``
-    ``(n, d)`` and responses ``y``, then solves for the stationary point ``x* = -1/2 B^{-1} b`` and
-    classifies it from the eigenvalues of the quadratic matrix ``B``. Fit on the *coded* design for a
-    well-conditioned model (the classic central-composite / Box-Behnken workflow).
+    ``(n, d)`` and responses ``y``, then solves the stationarity equation ``B x* = -b/2`` for the
+    stationary point and classifies it from the eigenvalues of the quadratic matrix ``B``. When ``B``
+    is singular a solution only exists if ``-b/2`` lies in its range, which is checked explicitly via
+    the residual of the stationarity equation -- a least-squares "solution" that does not actually zero
+    the gradient is reported as ``kind="no_stationary_point"`` rather than a fake stationary point (see
+    :class:`ResponseSurface`). Fit on the *coded* design for a well-conditioned model (the classic
+    central-composite / Box-Behnken workflow).
     """
     x = np.atleast_2d(np.asarray(x, dtype=np.float64))
     y = np.asarray(y, dtype=np.float64).ravel()
@@ -312,19 +324,49 @@ def response_surface(x, y) -> ResponseSurface:
         bmat[j, j] = coef[k]
         k += 1
 
-    if abs(np.linalg.det(bmat)) > 1e-12:
-        xs = np.linalg.solve(bmat, -0.5 * b)
-    else:  # a ridge system: least-squares stationary point
-        xs = np.linalg.lstsq(2.0 * bmat, -b, rcond=None)[0]
+    # Solve the stationarity equation B x* = -b/2 by least squares unconditionally -- this gives the
+    # exact solution when B is full rank and the minimum-norm least-squares "candidate" when B is
+    # singular. A candidate is only a genuine stationary point if it actually zeros the residual of
+    # that equation; lstsq happily returns a best-fit point even when -b/2 is not in B's range (no
+    # exact solution exists at all), so the residual must be checked explicitly rather than trusted.
+    rhs = -0.5 * b
+    xs_candidate, _, _, sv = np.linalg.lstsq(bmat, rhs, rcond=None)
+    resid_norm = float(np.linalg.norm(bmat @ xs_candidate - rhs))
+    scale = max(1.0, float(np.linalg.norm(rhs)), float(sv[0]) if sv.size else 0.0)
+    has_stationary_point = resid_norm <= 1e-7 * scale
+
     eig = np.linalg.eigvalsh(bmat)
     tol = 1e-9 * max(1.0, float(np.max(np.abs(eig))))
-    if np.all(eig < -tol):
+    is_ridge = bool(np.any(np.abs(eig) <= tol))
+
+    if not has_stationary_point:
+        # e.g. the exact surface y = x0**2 + x1: B = [[2, 0], [0, 0]] is singular, but the gradient's
+        # x1-component is the constant 1 and can never be cancelled -- there is no stationary point,
+        # not even a ridge, and reporting one (with a nonzero gradient) would be silently wrong.
+        kind = "no_stationary_point"
+        xs = None
+    elif is_ridge:
+        kind = "ridge"
+        xs = xs_candidate
+    elif np.all(eig < -tol):
         kind = "maximum"
+        xs = xs_candidate
     elif np.all(eig > tol):
         kind = "minimum"
+        xs = xs_candidate
     else:
         kind = "saddle"
-    return ResponseSurface(coef, names, b, bmat, xs, eig, kind, rstd)
+        xs = xs_candidate
+    return ResponseSurface(
+        coef=coef,
+        terms=names,
+        b=b,
+        B=bmat,
+        stationary_point=xs,
+        eigenvalues=eig,
+        kind=kind,
+        residual_std=rstd,
+    )
 
 
 def design_diagnostics(design, model, *, ref=None) -> dict:

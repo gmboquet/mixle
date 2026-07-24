@@ -145,6 +145,53 @@ class ResponseSurfaceTest(unittest.TestCase):
         self.assertEqual(response_surface(x, 5 + x[:, 0] ** 2 - x[:, 1] ** 2).kind, "saddle")
 
 
+class ResponseSurfaceStationarityTest(unittest.TestCase):
+    """MXR-080-0164: a singular B must not silently produce a fake "stationary point" whose gradient
+    is not actually zero, and a genuine degenerate (ridge) surface must classify as such."""
+
+    def _ccd(self):
+        return central_composite([(-2, 2)] * 2, center=5, alpha="rotatable", coded=True)
+
+    def test_no_exact_solution_is_reported_explicitly_not_as_a_fake_stationary_point(self):
+        # y = x0**2 + x1 has gradient [2*x0, 1] -- the x1 component is the constant 1 and can never be
+        # cancelled, so there is NO stationary point anywhere, not even a ridge. B = [[2, 0], [0, 0]] is
+        # singular, so an unguarded least-squares solve returns *some* point without checking that its
+        # gradient is actually zero.
+        x = self._ccd()
+        y = x[:, 0] ** 2 + x[:, 1]
+        rs = response_surface(x, y)
+        self.assertEqual(rs.kind, "no_stationary_point")
+        self.assertIsNone(rs.stationary_point)
+
+    def test_genuine_ridge_classifies_as_ridge_not_saddle(self):
+        # y = x0**2 is exactly flat along x1 (zero curvature, zero gradient in that direction
+        # everywhere): a genuine, exactly-solvable ridge -- the whole line x0=0 is stationary. This
+        # must be distinguished both from "no_stationary_point" (a real solution exists here) and from
+        # the previous always-falls-through-to-"saddle" bug.
+        x = self._ccd()
+        y = x[:, 0] ** 2
+        rs = response_surface(x, y)
+        self.assertEqual(rs.kind, "ridge")
+        self.assertIsNotNone(rs.stationary_point)
+        np.testing.assert_allclose(rs.gradient(rs.stationary_point), 0.0, atol=1e-6)
+        # a ridge has (at least) one near-zero eigenvalue alongside a clearly nonzero one
+        self.assertLess(np.min(np.abs(rs.eigenvalues)), 1e-6)
+        self.assertGreater(np.max(np.abs(rs.eigenvalues)), 0.5)
+
+    def test_well_conditioned_surfaces_are_unaffected(self):
+        # negative control: a real (non-singular) minimum/maximum/saddle must still classify and
+        # locate its stationary point exactly as before.
+        x = self._ccd()
+        y_max = 20 - 2 * (x[:, 0] - 0.5) ** 2 - 4 * (x[:, 1] + 0.25) ** 2
+        rs_max = response_surface(x, y_max)
+        self.assertEqual(rs_max.kind, "maximum")
+        self.assertIsNotNone(rs_max.stationary_point)
+        np.testing.assert_allclose(rs_max.stationary_point, [0.5, -0.25], atol=1e-6)
+        np.testing.assert_allclose(rs_max.gradient(rs_max.stationary_point), 0.0, atol=1e-8)
+        self.assertEqual(response_surface(x, 1 + x[:, 0] ** 2 + x[:, 1] ** 2).kind, "minimum")
+        self.assertEqual(response_surface(x, 5 + x[:, 0] ** 2 - x[:, 1] ** 2).kind, "saddle")
+
+
 class DesignDiagnosticsTest(unittest.TestCase):
     def test_orthogonal_factorial_is_perfectly_efficient(self):
         x = fractional_factorial([(-1, 1)] * 3, "a b c", coded=True)
