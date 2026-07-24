@@ -26,6 +26,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+_KINDS = frozenset({"iid", "exchangeable", "partially_exchangeable", "sequential"})
+
 
 @dataclass(frozen=True)
 class SampleStructure:
@@ -33,6 +35,21 @@ class SampleStructure:
 
     kind: str  # "iid" | "exchangeable" | "partially_exchangeable" | "sequential"
     by: str | Callable[[Any], Any] | None = None  # grouping key for partial exchangeability
+
+    def __post_init__(self) -> None:
+        """Validate ``kind``/``by`` at the declaration boundary, before either is used to drive a
+        partition policy. An unknown ``kind`` used to be silently treated as strideable (every kind
+        other than exactly ``"partially_exchangeable"`` strides), and a ``partially_exchangeable``
+        instance with no usable ``by`` used to silently group every record into a single bucket via
+        :meth:`group_key` -- an invalid scientific assumption quietly became an operational partition
+        policy instead of failing here."""
+        if self.kind not in _KINDS:
+            raise ValueError(f"kind must be one of {sorted(_KINDS)}, got {self.kind!r}")
+        if self.kind == "partially_exchangeable" and not (isinstance(self.by, str) or callable(self.by)):
+            raise ValueError(
+                "partially_exchangeable requires a string field name or a callable grouping key for "
+                f"`by`, got {self.by!r} -- an unusable key would silently group every record together."
+            )
 
     @property
     def strides_records(self) -> bool:

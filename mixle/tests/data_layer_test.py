@@ -143,6 +143,48 @@ class StructureCapabilityTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             check_model_structure(st.GaussianDistribution(0, 1).estimator(), SEQUENTIAL, strict=True)
 
+    def test_unknown_kind_rejected(self):
+        # MXR-080-0068: an unknown kind used to construct fine and be silently treated as strideable
+        # (every kind other than exactly "partially_exchangeable" strides) instead of being rejected at
+        # the declaration boundary.
+        from mixle.data.structure import SampleStructure
+
+        for kind in ("totally_bogus_kind", "", "IID", "Exchangeable"):  # closed vocabulary is case-sensitive
+            with self.subTest(kind=kind):
+                with self.assertRaises(ValueError):
+                    SampleStructure(kind=kind)
+
+    def test_partially_exchangeable_requires_a_usable_key(self):
+        # MXR-080-0068: partially_exchangeable with no usable `by` used to construct fine and silently
+        # group every record together (group_key returns None for every record, so partition_records
+        # puts everything in one bucket) instead of failing at construction.
+        from mixle.data.structure import SampleStructure
+
+        for by in (None, 123, [], {"a": 1}):
+            with self.subTest(by=by):
+                with self.assertRaises(ValueError):
+                    SampleStructure(kind="partially_exchangeable", by=by)
+        with self.assertRaises(ValueError):
+            partially_exchangeable(None)
+
+    def test_kind_and_by_negative_control(self):
+        # Negative control: every legitimate kind/by combination -- including both valid forms of `by`
+        # for partially_exchangeable -- must still construct and partition exactly as before.
+        from mixle.data.structure import SampleStructure
+
+        for kind in ("iid", "exchangeable", "sequential"):
+            with self.subTest(kind=kind):
+                self.assertTrue(SampleStructure(kind=kind).strides_records)
+
+        recs = [{"g": i % 4, "x": float(i)} for i in range(12)]
+        for label, by in (("string", "g"), ("callable", lambda r: r["g"])):
+            with self.subTest(by=label):
+                structure = SampleStructure(kind="partially_exchangeable", by=by)
+                self.assertFalse(structure.strides_records)
+                parts = partition_records(recs, structure, 4)
+                self.assertEqual(sum(len(p) for p in parts), 12)  # nothing lost
+                self.assertTrue(all(len({r["g"] for r in p}) <= 1 for p in parts))  # groups stay intact
+
 
 class ConnectorTest(unittest.TestCase):
     def test_open_csv_roundtrip_and_fit(self):
