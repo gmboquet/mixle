@@ -337,6 +337,13 @@ def _normalize_prior(block_prior: Any | None, num_blocks: int) -> np.ndarray:
 class GraphDataEncoder(DataSequenceEncoder):
     """Encode graph observations as canonical adjacency/assignment objects."""
 
+    #: Bumped whenever a field is added to or removed from :meth:`_signature`'s mapping, so an old
+    #: serialized signature string (e.g. one recorded by ``save_encoded``, see
+    #: ``mixle/data/encoded_io.py``) can never collide with a differently-shaped new one of the same
+    #: class name -- it would otherwise compare equal by string even though the fields it covers
+    #: changed underneath it.
+    _SIGNATURE_VERSION = 1
+
     def __init__(self, directed: bool = False, fallback_assignments: Any | None = None) -> None:
         self.directed = bool(directed)
         self.fallback_assignments = (
@@ -348,15 +355,30 @@ class GraphDataEncoder(DataSequenceEncoder):
             else tuple(int(u) for u in _require_exact_int_array(fallback_assignments, "fallback_assignments"))
         )
 
+    def _signature(self) -> dict[str, Any]:
+        """Canonical, versioned mapping of every field that participates in encoder identity.
+
+        ``__eq__`` and ``__str__`` both derive from this single mapping instead of each independently
+        listing the fields that matter, so they cannot silently disagree again about which ones do --
+        which is exactly how this bug happened: ``__eq__`` compared ``fallback_assignments`` while
+        ``__str__`` did not, so two encoders with fallback assignments ``[0, 1]`` and ``[1, 0]`` were
+        unequal yet produced an identical ``str()``. That matters beyond ``repr`` readability because
+        ``save_encoded``/``load_encoded`` key their compatibility check specifically on ``str(encoder)``
+        (see ``mixle/data/encoded_io.py``), so the divergence let an encoded payload be loaded under a
+        different block assignment policy without detection.
+        """
+        return {
+            "signature_version": self._SIGNATURE_VERSION,
+            "directed": self.directed,
+            "fallback_assignments": self.fallback_assignments,
+        }
+
     def __str__(self) -> str:
-        return "GraphDataEncoder(directed=%s)" % repr(self.directed)
+        fields = ", ".join("%s=%r" % (name, value) for name, value in self._signature().items())
+        return "GraphDataEncoder(%s)" % fields
 
     def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, GraphDataEncoder)
-            and self.directed == other.directed
-            and self.fallback_assignments == other.fallback_assignments
-        )
+        return isinstance(other, GraphDataEncoder) and self._signature() == other._signature()
 
     def seq_encode(self, x: Sequence[Any]) -> tuple[GraphObservation, ...]:
         """Encode graph-like observations into graph observation records."""
