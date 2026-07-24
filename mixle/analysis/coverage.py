@@ -18,8 +18,8 @@ missing.
     interpolation), the basis for coverage-standardised comparison.
 
 Counts must be finite non-negative integer abundances per species (validated by :func:`_abund`, which
-raises rather than silently coercing fractional/negative/non-finite input); incidence inputs are a
-``(species, sites)`` 0/1 matrix.
+raises rather than silently coercing fractional/negative/non-finite input); incidence inputs must be a
+finite binary ``(species, sites)`` 0/1 matrix with at least one site (validated by :func:`_incidence`).
 """
 
 from __future__ import annotations
@@ -55,6 +55,25 @@ def _freq_of_freq(counts: np.ndarray) -> dict[int, int]:
     c = _abund(counts)
     vals, cnts = np.unique(c, return_counts=True)
     return {int(v): int(n) for v, n in zip(vals, cnts)}
+
+
+def _incidence(matrix: np.ndarray) -> np.ndarray:
+    """Validate a finite binary presence/absence matrix and coerce it to ``(n_species, n_sites)`` int.
+
+    Every entry must be exactly ``0`` or ``1``. Fractional (``0.2``), out-of-range (``3``), negative
+    (``-1``), and non-finite (``NaN``) entries are all rejected rather than silently thresholded to
+    presence/absence -- any positive value used to become ``1`` and any negative/NaN value used to
+    become ``0``, so a matrix of continuous or malformed measurements was silently accepted as a valid
+    incidence design (MXR-080-0079). At least one site (column) is required.
+    """
+    inc = np.atleast_2d(np.asarray(matrix, dtype=float))
+    if inc.shape[1] == 0:
+        raise ValueError("incidence matrix must have at least one site.")
+    if not np.all(np.isfinite(inc)):
+        raise ValueError("incidence matrix must be finite (no NaN or Inf).")
+    if not np.all((inc == 0.0) | (inc == 1.0)):
+        raise ValueError("incidence matrix must be binary (every entry must be exactly 0 or 1).")
+    return inc.astype(np.int64)
 
 
 def turing_coverage(counts: np.ndarray) -> dict[str, float]:
@@ -212,16 +231,15 @@ def chao2(incidence: np.ndarray, *, ci_level: float = 0.95) -> dict[str, float]:
     """Chao2 richness estimator from replicated incidence (presence/absence) data.
 
     Args:
-        incidence: ``(n_species, n_sites)`` 0/1 matrix (or per-species counts of sites occupied,
-            passed as a 1-D array together with ``... `` -- a 2-D matrix is expected here).
+        incidence: finite binary ``(n_species, n_sites)`` 0/1 matrix (validated by :func:`_incidence`;
+            every entry must be exactly 0 or 1, and at least one site is required).
         ci_level: confidence level for the log-normal interval.
 
     Returns:
         ``{'estimate', 'observed', 'q1', 'q2', 'se', 'ci_low', 'ci_high', 'sites'}`` where ``q1``/``q2``
         are the numbers of species found in exactly one / two sites.
     """
-    inc = np.atleast_2d(np.asarray(incidence, dtype=float))
-    inc = (inc > 0).astype(int)
+    inc = _incidence(incidence)
     site_counts = inc.sum(axis=1)
     site_counts = site_counts[site_counts > 0]
     m = float(inc.shape[1])
@@ -284,13 +302,14 @@ def ice(incidence: np.ndarray, *, rare_threshold: int = 10) -> dict[str, float]:
     """ICE: Incidence-based Coverage Estimator of richness (the Chao--Lee estimator for incidence data).
 
     Args:
-        incidence: ``(n_species, n_sites)`` 0/1 matrix.
+        incidence: finite binary ``(n_species, n_sites)`` 0/1 matrix (validated by :func:`_incidence`;
+            every entry must be exactly 0 or 1, and at least one site is required).
         rare_threshold: species found in ``<= rare_threshold`` sites are treated as infrequent.
 
     Returns:
         ``{'estimate', 'observed', 's_infreq', 's_freq', 'c_ice'}``.
     """
-    inc = (np.atleast_2d(np.asarray(incidence, dtype=float)) > 0).astype(int)
+    inc = _incidence(incidence)
     site_counts = inc.sum(axis=1)
     site_counts = site_counts[site_counts > 0]
     s_obs = float(site_counts.size)
