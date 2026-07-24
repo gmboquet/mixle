@@ -99,7 +99,7 @@ from mixle.substrate.spaces import (
     version_of,
     visible_scopes,
 )
-from mixle.substrate.trust import LineageReport, audit_substrate, verify_lineage
+from mixle.substrate.trust import LineageReport, LineageState, audit_substrate, verify_lineage
 
 __all__ = [
     "MODALITIES",
@@ -158,6 +158,7 @@ __all__ = [
     "verify_lineage",
     "audit_substrate",
     "LineageReport",
+    "LineageState",
     "Governance",
     "GovernanceAuthorizationError",
     "propose",
