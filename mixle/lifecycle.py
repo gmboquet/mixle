@@ -107,8 +107,13 @@ class Model:
 
         escape_tested = False
         want = 4 if restarts == "auto" else restarts
-        if want and (restarts != "auto" or saddle_suspect(self.fitted, data)):
-            better, delta_ll, how = self._refit_symmetry_broken(data, int(want), optimize_kw)
+        # fit_data, never data: fit_data IS data when calibrate is off (or too little data to hold
+        # anything out) -- the assignment above only diverges when cal_holdout was actually carved out.
+        # A restart/saddle-check against the caller's original data would (a) let calibration rows sway
+        # the saddle-suspicion verdict and (b) let _refit_symmetry_broken refit on them outright; the
+        # replacement model would then get "evaluated held-out" against rows it was just trained on.
+        if want and (restarts != "auto" or saddle_suspect(self.fitted, fit_data)):
+            better, delta_ll, how = self._refit_symmetry_broken(fit_data, int(want), optimize_kw)
             if better is not None:
                 self.fitted = better
                 escape_tested = True
@@ -137,7 +142,12 @@ class Model:
         For a mixture estimator, each attempt fits every component on its OWN random disjoint shard of
         the data (a hard-partition init: components start different because they saw different data),
         then runs full EM from that start. Falls back to :func:`mixle.inference.best_of` when the
-        estimator's components are not accessible. Returns ``(better, ll_gain, description)``."""
+        estimator's components are not accessible. Returns ``(better, ll_gain, description)``.
+
+        ``data`` must be exactly what the initial fit trained on (:meth:`fit`'s ``fit_data`` --
+        the training-only partition when ``calibrate`` reserved a holdout), never the caller's original
+        full dataset: every row seen here can end up back in ``self.fitted`` when a candidate is kept,
+        so the caller's ``calibrate`` holdout would silently stop being held out."""
         from mixle.inference import best_of, optimize
 
         rng = optimize_kw.get("rng") or np.random.RandomState(1)
