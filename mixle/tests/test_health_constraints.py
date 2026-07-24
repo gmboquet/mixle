@@ -108,3 +108,75 @@ def test_exposure_limit_removes_option():
     # The plan is defined only over the feasible-option blocks -- pit_b's exposure-violating block cost
     # and grade were never assembled into `block_cost`/`posterior`, so it cannot appear in `extract`.
     assert plan.extract.shape == (len(feasible),)
+
+
+def test_exposure_constraints_missing_and_nan_metrics_fail_closed():
+    """MXR-080-0095: an option missing a regulated metric, or reporting it as NaN, is "unknown" and
+    therefore infeasible by default -- neither is silently treated as "safe", since this is a hard
+    exposure screen and NaN > limit is always False (the recurring NaN-comparison-is-False trap)."""
+    limits = {"silica_pm4": SILICA_LIMIT}
+
+    (missing,) = exposure_constraints([{"name": "no_data"}], limits)
+    assert missing["status"] == "unknown"
+    assert missing["feasible"] is False
+    assert missing["binding"] == []
+    assert missing["unmodeled"] == ["silica_pm4"]
+
+    (nan_reading,) = exposure_constraints([{"name": "nan_reading", "silica_pm4": float("nan")}], limits)
+    assert nan_reading["status"] == "unknown"
+    assert nan_reading["feasible"] is False
+    assert nan_reading["unmodeled"] == ["silica_pm4"]
+
+    # a non-finite LIMIT (not just a non-finite measurement) is equally unevaluable
+    (nan_limit,) = exposure_constraints([{"name": "ok", "silica_pm4": 0.02}], {"silica_pm4": float("nan")})
+    assert nan_limit["status"] == "unknown"
+    assert nan_limit["feasible"] is False
+
+
+def test_exposure_constraints_violation_dominates_unknown():
+    """A confirmed breach on one metric is never erased by a different metric's missing data."""
+    limits = {"silica_pm4": SILICA_LIMIT, "noise_db": 85.0}
+    # silica_pm4 breaches its limit; noise_db was never modeled for this option at all.
+    (option,) = exposure_constraints([{"name": "loud_and_dusty", "silica_pm4": 0.20}], limits)
+    assert option["status"] == "violating"
+    assert option["feasible"] is False
+    assert option["binding"] == ["silica_pm4"]
+    assert option["unmodeled"] == ["noise_db"]
+
+
+def test_exposure_constraints_policy_override_defaults_off():
+    """The unmodeled-as-safe override is opt-in and off by default (MXR-080-0095)."""
+    limits = {"silica_pm4": SILICA_LIMIT}
+    options = [{"name": "no_data"}]
+
+    (default_result,) = exposure_constraints(options, limits)
+    assert default_result["feasible"] is False
+
+    (overridden,) = exposure_constraints(options, limits, treat_unmodeled_as_safe=True)
+    assert overridden["status"] == "unknown"  # still honestly reported as unmodeled...
+    assert overridden["feasible"] is True  # ...but the caller explicitly chose to let it through
+
+    # the override never rescues a genuine, confirmed violation
+    (still_violating,) = exposure_constraints(
+        [{"name": "over", "silica_pm4": 0.20}], limits, treat_unmodeled_as_safe=True
+    )
+    assert still_violating["status"] == "violating"
+    assert still_violating["feasible"] is False
+
+
+def test_exposure_constraints_genuine_safe_and_violating_unchanged():
+    """Negative control for MXR-080-0095: fully-modeled, finite options behave exactly as before."""
+    limits = {"silica_pm4": SILICA_LIMIT}
+    safe, violating = exposure_constraints(
+        [
+            {"name": "ok", "silica_pm4": 0.02},
+            {"name": "over", "silica_pm4": 0.12},
+        ],
+        limits,
+    )
+    assert safe["status"] == "safe"
+    assert safe["feasible"] is True
+    assert safe["unmodeled"] == []
+    assert violating["status"] == "violating"
+    assert violating["feasible"] is False
+    assert violating["binding"] == ["silica_pm4"]
