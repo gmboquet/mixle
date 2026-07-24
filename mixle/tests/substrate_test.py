@@ -153,14 +153,17 @@ class IndexDirtyTrackingTest(unittest.TestCase):
     """put()'s dirty-tracking condition must match _text_items()'s real embedding-index inclusion
     rule -- ANY kind with a truthy .text, not a narrower kind whitelist -- on both halves: text
     arriving (a new or newly-text-bearing item) and text leaving (a clear or an overwrite to no
-    text). None of these need a real embedder fit, only correct _dirty/_embed_ids bookkeeping."""
+    text). None of these need a real embedder fit, only correct _dirty/_embed_ids bookkeeping.
+
+    _embed_ids is keyed by scope (MXR-080-0237: one index per visibility domain -- see
+    Substrate.reindex); s.search(..., scope=None) below builds/uses the None (unrestricted) bucket."""
 
     def test_clearing_an_items_text_marks_the_index_dirty(self):
         s = Substrate()
         tid = s.add("text", "original searchable content")
         s.search("original", k=1)  # force a reindex; _dirty is now False
         self.assertFalse(s._dirty)
-        self.assertIn(tid, s._embed_ids)
+        self.assertIn(tid, s._embed_ids[None])
 
         s.put(SubstrateItem(id=tid, kind="text", text=""))  # clear the text, same id
         self.assertTrue(s._dirty)  # the corpus just shrank -- must be scheduled for reindex
@@ -241,6 +244,115 @@ class SemanticRetrievalTest(unittest.TestCase):
         hits2 = s.search(query, k=1, kind="text")
         self.assertNotEqual(hits2[0][0].id, target_id)  # the stale embedding must no longer win
         self.assertEqual(s.get(target_id).text, "")  # the item itself really is empty now
+
+
+@unittest.skipUnless(_HAS_TORCH, "represent embedder needs torch")
+class CrossScopeIndexIsolationTest(unittest.TestCase):
+    """MXR-080-0237 (Critical, security): a scope's query results, and the embedding transform used to
+    produce them, must not depend on another (inaccessible) scope's content -- reindex() fitting ONE
+    embedder over every scope pooled together made a scoped query a membership side channel: whether
+    something like a given probe exists in a scope you can never read shifted YOUR OWN scoped query's
+    embedding and scores measurably. These are the adversarial two-scope regressions for that fix.
+    """
+
+    PUBLIC_DOCS = [
+        "sourdough bread needs a long cold ferment for the best crumb",
+        "the weekend forecast calls for scattered showers over the coast",
+        "the away team won on a last minute penalty kick",
+        "add two cups of flour and knead until the dough is smooth",
+        "the museum's new wing opens to the public next spring",
+        "commuter trains run on a reduced holiday schedule today",
+        "the marathon route was changed because of the bridge repairs",
+        "a light frost is expected overnight in the northern valleys",
+    ]
+    PRIVATE_FILLER = [
+        "the office plant needs watering twice a week",
+        "the printer on the third floor is out of toner again",
+        "lunch orders are due by eleven for the noon delivery",
+        "the parking garage repaves level two this weekend",
+        "the break room coffee machine was finally replaced",
+        "badge access resets automatically every ninety days",
+        "the elevator inspection is scheduled for next Tuesday",
+        "the mail room moved two doors down the hall",
+    ]
+    # Worded to overlap the secret item, not any PRIVATE_FILLER/PUBLIC_DOCS text -- an attacker probe.
+    PROBE_QUERY = "NIGHTHAWK acquisition budget review timeline"
+    SECRET_ITEM_TEXT = "project NIGHTHAWK acquisition budget review moves to Q3, timeline is confidential"
+
+    def _build(self, *, secret_present: bool) -> Substrate:
+        s = Substrate()
+        for i, doc in enumerate(self.PUBLIC_DOCS):
+            s.add("text", doc, scope="public", id=f"pub-{i}")
+        private_docs = list(self.PRIVATE_FILLER)
+        if secret_present:
+            private_docs[0] = self.SECRET_ITEM_TEXT  # same corpus SIZE, one item swapped
+        for i, doc in enumerate(private_docs):
+            s.add("text", doc, scope="private", id=f"priv-{i}")
+        return s
+
+    def test_reindex_builds_a_separate_index_per_scope_plus_the_unrestricted_one(self):
+        s = self._build(secret_present=True)
+        s.reindex()
+        self.assertEqual(set(s._embedders), {"public", "private", None})
+        # each scope's own index covers exactly that scope's ids -- never the other scope's.
+        self.assertEqual(set(s._embed_ids["public"]), {f"pub-{i}" for i in range(len(self.PUBLIC_DOCS))})
+        self.assertEqual(set(s._embed_ids["private"]), {f"priv-{i}" for i in range(len(self.PRIVATE_FILLER))})
+        self.assertEqual(set(s._embed_ids[None]), set(s._embed_ids["public"]) | set(s._embed_ids["private"]))
+
+    def test_a_scopes_embedded_query_vector_does_not_depend_on_another_scopes_content(self):
+        """The mechanism-level check: scope='public's fitted transform of the SAME probe query, with
+        the secret absent vs. present in scope='private', must be identical -- public's embedder never
+        saw a byte of private's text either way."""
+        s_without = self._build(secret_present=False)
+        s_with = self._build(secret_present=True)
+        s_without.reindex()
+        s_with.reindex()
+
+        qv_without = s_without._embedders["public"].transform(self.PROBE_QUERY)
+        qv_with = s_with._embedders["public"].transform(self.PROBE_QUERY)
+        l2_delta = float(((qv_without - qv_with) ** 2).sum() ** 0.5)
+        self.assertAlmostEqual(l2_delta, 0.0, places=6)
+
+    def test_scoped_search_results_do_not_shift_based_on_another_scopes_content(self):
+        """The black-box, user-facing check: the attacker only ever calls search(scope='public') --
+        never touching scope='private' -- yet without the fix, its ranking/scores still moved."""
+        s_without = self._build(secret_present=False)
+        s_with = self._build(secret_present=True)
+
+        hits_without = s_without.search(self.PROBE_QUERY, k=8, kind="text", scope="public")
+        hits_with = s_with.search(self.PROBE_QUERY, k=8, kind="text", scope="public")
+
+        order_without = [item.text for item, _ in hits_without]
+        order_with = [item.text for item, _ in hits_with]
+        self.assertEqual(order_without, order_with)  # same ranking regardless of the private secret
+
+        scores_without = {item.id: sc for item, sc in hits_without}
+        scores_with = {item.id: sc for item, sc in hits_with}
+        self.assertEqual(set(scores_without), set(scores_with))
+        for item_id in scores_without:
+            self.assertAlmostEqual(scores_without[item_id], scores_with[item_id], places=6)
+
+    def test_scope_none_query_still_pools_every_scope_by_design(self):
+        """scope=None is the one deliberate exception: a caller asking for everything gets an index
+        fit over everything, the same corpus all()/get() would already show them -- not a leak, since
+        no scope boundary was claimed. This pins that the fix doesn't over-isolate the default case."""
+        s = self._build(secret_present=True)
+        s.reindex()
+        self.assertIn("priv-0", s._embed_ids[None])  # the secret item IS covered by the unrestricted index
+        hits = s.search(self.SECRET_ITEM_TEXT, k=1, kind="text", scope=None)
+        self.assertEqual(hits[0][0].id, "priv-0")  # an unscoped query can and should find it
+
+    def test_small_per_scope_corpus_falls_back_to_lexical_even_if_pooled_total_clears_the_threshold(self):
+        """The <8-items lexical-fallback threshold (an embedder over-ranks an unsupported query on a
+        tiny corpus) now applies PER scope -- a scope can't borrow other scopes' items to clear it."""
+        s = Substrate()
+        for i, doc in enumerate(self.PUBLIC_DOCS):  # 8 items: clears the threshold alone
+            s.add("text", doc, scope="public", id=f"pub-{i}")
+        for i in range(3):  # 3 items: alone, under the threshold
+            s.add("text", f"small scope filler item number {i}", scope="tiny", id=f"tiny-{i}")
+        s.reindex()  # pooled total is 11 (>= 8), but scope="tiny" alone never clears it
+        self.assertIsNotNone(s._embedders["public"])
+        self.assertIsNone(s._embedders["tiny"])  # falls back to lexical -- not borrowing scope="public"
 
 
 _TMP_GLOB = ".tmp-substrate-*"
