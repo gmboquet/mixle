@@ -193,6 +193,91 @@ class GraphDistributionTestCase(unittest.TestCase):
         np.testing.assert_allclose(round_tripped.block_probs, fixed.block_probs)
         np.testing.assert_array_equal(round_tripped.block_assignments, fixed.block_assignments)
 
+    def test_stochastic_block_population_sampler_round_trips_through_log_density(self):
+        # External review: a "population" SBM -- block_assignments left unset, only a block_prior --
+        # models a distribution OVER per-node block assignments, not one fixed known partition.
+        # StochasticBlockGraphSampler.sample_graph/sample drew fresh assignments from block_prior
+        # internally to build the adjacency, but discarded them by default (return_assignments was
+        # False), returning only the bare adjacency. _obs_with_assignments has no fixed
+        # self.block_assignments to fall back on for such a distribution (dist.block_assignments is
+        # None), so log_density(dist.sampler(seed).sample(...)) raised "block assignments are
+        # required for SBM log-density" on the very sample the sampler had just produced -- violating
+        # the general mixle contract that a distribution's own sampler produces observations its own
+        # scorer accepts. By design (see the class/module docstrings: "does not marginalize over
+        # unknown block assignments") this family's log_density is conditional-only, so the fix
+        # belongs on the sampler side, not by teaching log_density to marginalize: return_assignments
+        # now defaults to None ("auto"), which packs the freshly-drawn assignments into an
+        # (adjacency, assignments) pair exactly when they have no other recorded home.
+        block_probs = np.asarray([[0.75, 0.15], [0.15, 0.55]])
+        block_prior = np.asarray([0.4, 0.6])
+        dist = stats.StochasticBlockGraphDistribution(block_probs, block_prior=block_prior, self_loops=False)
+        self.assertIsNone(dist.block_assignments)
+
+        sample = dist.sampler(seed=7).sample(num_nodes=7)
+        self.assertIsInstance(sample, tuple)
+        adj, assignments = sample
+        self.assertEqual(adj.shape, (7, 7))
+        self.assertEqual(assignments.shape, (7,))
+        self.assertTrue(np.all((assignments >= 0) & (assignments < 2)))
+
+        ld = dist.log_density(sample)
+        self.assertTrue(np.isfinite(ld))
+
+        seq_ld = dist.seq_log_density([sample])
+        self.assertEqual(seq_ld.shape, (1,))
+        self.assertAlmostEqual(seq_ld[0], ld, places=12)
+
+        backend_ld = np.asarray(dist.backend_seq_log_density([sample], NUMPY_ENGINE))
+        np.testing.assert_allclose(backend_ld, seq_ld, atol=1.0e-9)
+
+        # Batched draws (size=...) round-trip the same way: every item is individually scoreable.
+        batch = dist.sampler(seed=8).sample(size=5, num_nodes=6)
+        self.assertEqual(len(batch), 5)
+        self.assertTrue(all(isinstance(item, tuple) for item in batch))
+        batch_ld = dist.seq_log_density(batch)
+        self.assertEqual(batch_ld.shape, (5,))
+        self.assertTrue(np.all(np.isfinite(batch_ld)))
+
+        # Same underlying gap, different trigger: explicitly overriding num_nodes on a distribution
+        # that DOES have fixed block_assignments also forces a fresh prior draw (the fixed assignments
+        # don't match the requested size), so it must round-trip too.
+        also_fixed = stats.StochasticBlockGraphDistribution(block_probs, [0, 0, 1], block_prior=block_prior)
+        resized = also_fixed.sampler(seed=11).sample(num_nodes=5)
+        self.assertIsInstance(resized, tuple)
+        self.assertTrue(np.isfinite(also_fixed.log_density(resized)))
+
+    def test_stochastic_block_sampler_return_assignments_explicit_override_still_honored(self):
+        # Negative control for the population-sampler round-trip fix above: return_assignments=None
+        # only changes the DEFAULT. An explicit return_assignments=False must still be honored (a
+        # caller who deliberately wants just the adjacency still gets one, even though it can no
+        # longer be scored) -- the auto-include must not silently overrule an explicit opt-out.
+        # Symmetrically, return_assignments=True keeps returning the same (adjacency, assignments)
+        # pair shape as before this fix.
+        block_probs = np.asarray([[0.75, 0.15], [0.15, 0.55]])
+        block_prior = np.asarray([0.4, 0.6])
+        dist = stats.StochasticBlockGraphDistribution(block_probs, block_prior=block_prior)
+
+        bare = dist.sampler(seed=9).sample(num_nodes=6, return_assignments=False)
+        self.assertIsInstance(bare, np.ndarray)
+        with self.assertRaises(ValueError):
+            dist.log_density(bare)
+
+        paired = dist.sampler(seed=9).sample(num_nodes=6, return_assignments=True)
+        self.assertIsInstance(paired, tuple)
+        self.assertEqual(len(paired), 2)
+        self.assertTrue(np.isfinite(dist.log_density(paired)))
+
+        # Sanity check alongside: the FIXED-assignment case (assignments recoverable via the
+        # distribution's own block_assignments fallback) keeps its prior bare-ndarray default -- this
+        # fix must not force every SBM sample into a tuple, only the ones that need it.
+        fixed = stats.StochasticBlockGraphDistribution(block_probs, [0, 0, 1, 1, 0, 1])
+        fixed_sample = fixed.sampler(seed=10).sample()
+        self.assertIsInstance(fixed_sample, np.ndarray)
+        self.assertTrue(np.isfinite(fixed.log_density(fixed_sample)))
+
+        fixed_batch = fixed.sampler(seed=10).sample(4)
+        self.assertTrue(all(isinstance(item, np.ndarray) for item in fixed_batch))
+
     def test_stochastic_block_estimator_json_round_trip(self):
         estimator = stats.StochasticBlockGraphEstimator(
             num_blocks=2, pseudo_count=1.0, block_prior=[0.4, 0.6], include_assignment_prior=True
