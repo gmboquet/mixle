@@ -20,8 +20,14 @@ the calibration no-regression rule, multiplicity) and never edits the underlying
    computed -- e.g. the calibration objective is PIT-based and needs a continuous predictive
    distribution, so it does not apply to a categorical/discrete model -- since that is not itself
    evidence of a regression.
-7. **Multiplicity** -- when many challengers are tested at once, ``multiplicity`` adjusts ``alpha`` via
-   :func:`mixle.inference.multiple_testing.adjust_pvalues` before the gate.
+7. **Multiplicity** -- comparing one champion/challenger pair produces exactly one p-value, so this
+   function cannot correct it for multiplicity by itself: every method in
+   :mod:`mixle.inference.multiple_testing` is the identity transform at family size 1 (bonferroni
+   multiplies alpha by 1; BH ranks the one p-value against itself). A caller running many simultaneous
+   challengers at once (e.g. one population generation) must pool the RAW p-values from every comparison
+   and adjust them together, ONCE, via :func:`mixle.inference.multiple_testing.adjust_pvalues`, then
+   compare each candidate's own adjusted p-value to ``alpha`` itself -- see
+   :meth:`mixle.evolve.population.Population.step`, which does exactly this.
 """
 
 from __future__ import annotations
@@ -38,7 +44,6 @@ from mixle.inference.model_comparison import (
     paired_score_difference,
     vuong_test,
 )
-from mixle.inference.multiple_testing import adjust_pvalues
 
 
 @dataclass(frozen=True)
@@ -139,9 +144,13 @@ def challenger_beats_champion(
         min_effect: practical effect-size floor on ``|mean score difference|``.
         require_calibration: if True, run the calibration no-regression check.
         nonnested: if True (a family swap), additionally require Vuong + Clarke to favor the challenger.
-        multiplicity: ``None`` or a :func:`mixle.inference.multiple_testing.adjust_pvalues` method
-            (``'bonferroni'`` / ``'bh'`` / ...) when this is one of many simultaneous challengers --
-            adjusts the p-value before the gate.
+        multiplicity: must stay ``None``. A single champion/challenger comparison produces exactly one
+            p-value, so it can never be corrected for multiplicity in isolation -- passing a method name
+            here raises rather than silently no-op'ing (every :mod:`mixle.inference.multiple_testing`
+            method is the identity transform at family size 1). Kept as a parameter only to fail loudly
+            on the mistake instead of TypeError'ing on removal; pool the raw p-values from every
+            simultaneous comparison and call :func:`mixle.inference.multiple_testing.adjust_pvalues`
+            once yourself, then compare each adjusted p-value to ``alpha``.
         calib_tol: tolerance on the calibration-error increase the challenger may carry.
         seed: RNG seed for the (sampled) calibration scalars.
         elpd_pointwise: optional ``(pointwise_champion, pointwise_challenger)`` LOO/WAIC arrays; when
@@ -186,9 +195,18 @@ def challenger_beats_champion(
 
     p_value = float(paired["p_value"])
     if multiplicity is not None:
-        adj = adjust_pvalues(np.asarray([p_value]), method=multiplicity, alpha=alpha)
-        p_value = float(np.asarray(adj["pvals_adjusted"]).reshape(-1)[0])
-        evidence["multiplicity"] = {"method": multiplicity, "p_adjusted": p_value}
+        # a single champion/challenger pair is exactly one p-value: adjust_pvalues on a length-1 array
+        # is the identity transform for every method (bonferroni multiplies alpha by 1; BH ranks the
+        # value against itself), so "adjusting" it here would silently do nothing while looking like a
+        # real correction. Refuse instead -- see the module docstring's Multiplicity note and
+        # mixle.evolve.population.Population.step for the correct pooled-family pattern.
+        raise ValueError(
+            "challenger_beats_champion compares exactly one pair, so it has exactly one p-value -- "
+            "multiplicity correction is a no-op at family size 1 for every method in "
+            "mixle.inference.multiple_testing. Pool the raw p-values from every simultaneous comparison "
+            "and call adjust_pvalues(..., method=%r) ONCE across the whole family, then compare each "
+            "candidate's own adjusted p-value to alpha yourself (see Population.step)." % multiplicity
+        )
 
     # mean_diff = mean(champion - challenger). For lower-is-better the challenger is better when its
     # score is smaller, i.e. champion - challenger > 0, so delta = +mean_diff. For higher-is-better the
