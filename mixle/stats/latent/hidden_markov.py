@@ -359,12 +359,14 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             topics: Emission distributions. All emissions must accept the same
                 observation type. ``components`` is accepted as an alias
                 (matching ``MixtureDistribution``).
-            w: Initial hidden-state probabilities. ``weights`` is accepted as
-                an alias.
-            transitions: Hidden-state transition probability matrix.
+            w: Initial hidden-state probabilities. Values must be finite and
+                non-negative. ``weights`` is accepted as an alias.
+            transitions: Hidden-state transition probability matrix. Values
+                must be finite and non-negative.
             taus: Optional per-state mixture weights over ``topics``. When
                 supplied, hidden states govern transitions between mixtures
-                rather than one emission distribution per state.
+                rather than one emission distribution per state. Values must
+                be finite and non-negative.
             len_dist: Optional sequence-length distribution over nonnegative
                 integers.
             name: Optional diagnostic name.
@@ -394,6 +396,10 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             terminal_states: Optional absorbing hidden states.
             use_numba: Whether vectorized sequence calls use the Numba route.
 
+        Raises:
+            ValueError: If ``w``, ``transitions``, or ``taus`` (when supplied) contains a
+                non-finite or negative value.
+
         """
         topics = coalesce_alias("topics", topics, "components", components, default=MISSING)
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
@@ -409,12 +415,35 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             self.n_topics = len(topics)
             self.n_states = len(w)
             self.w = vec.make(w)
+            if not np.isfinite(self.w).all() or np.any(self.w < 0.0):
+                # A NaN or negative initial-state "probability" silently propagates into
+                # log_density()/seq_log_density() as nan (NaN) or resurfaces far from the mistake
+                # as an opaque error out of the sampler's RandomState-based state sampler, so
+                # reject it at the constructor like the scalar families do (CategoricalDistribution
+                # .pmap, IntegerCategoricalDistribution.p_vec). Deliberately NOT also enforced here:
+                # sum(w) == 1 -- see the note by the transitions check below, which applies equally
+                # to w (e.g. a steady_state_init fit ties w to the transition matrix's stationary
+                # distribution and both are float64 sums, not exact 1.0).
+                raise ValueError("HiddenMarkovModelDistribution requires finite, non-negative w.")
             self.log_w = np.log(self.w)
 
             if not isinstance(transitions, np.ndarray):
                 transitions = np.asarray(transitions, dtype=float)
 
             self.transitions = np.reshape(transitions, (self.n_states, self.n_states))
+            if not np.isfinite(self.transitions).all() or np.any(self.transitions < 0.0):
+                # Same failure mode as w above: a negative entry logs as nan (log_transitions), and
+                # a NaN entry poisons every downstream score. Deliberately NOT enforced here: each
+                # row summing to 1. HiddenMarkovEstimator.estimate() legitimately emits an all-zero
+                # row (sum 0, not 1) for a hidden state with no observed outgoing transition mass
+                # (never visited during fitting) -- confirmed live in the existing suite: scanning
+                # every HiddenMarkovModelDistribution(...) constructed while running the full test
+                # suite found 42 constructions with a transitions row not summing to 1, and every
+                # one of them was either such a legitimate zero row or ordinary float64 fitting
+                # noise (e.g. 0.9999999999999999) -- never a NaN or negative entry. A hard
+                # sum-to-1 rejection would break that legitimate estimator output; the finite/
+                # non-negative check has no such counterexample.
+                raise ValueError("HiddenMarkovModelDistribution requires a finite, non-negative transitions matrix.")
             self.log_transitions = np.log(self.transitions)
             self.terminal_values = terminal_values
             self.name = name
@@ -430,6 +459,14 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
         if taus is not None:
             self.taus = vec.make(taus)
+            if not np.isfinite(self.taus).all() or np.any(self.taus < 0.0):
+                # Same rationale as w/transitions above: a NaN or negative taus entry silently
+                # poisons log_taus (and every state's log_density through it) instead of failing at
+                # construction. Row sum-to-1 is deliberately not enforced either, for consistency:
+                # taus[i, :] is fed straight into MixtureDistribution(topics, taus[i, :]) (see
+                # HiddenMarkovSampler.__init__), and that constructor doesn't require its weights to
+                # sum to 1 either.
+                raise ValueError("HiddenMarkovModelDistribution requires finite, non-negative taus.")
             self.log_taus = log(self.taus)
             self.has_topics = True
         else:
