@@ -49,6 +49,45 @@ class BudgetRailTest(unittest.TestCase):
         res = submit(PoolJob(run=lambda: 1, est_cost=0.5, budget=1.0))
         self.assertTrue(res.ok)
 
+    def test_negative_est_cost_is_rejected(self):
+        # A negative cost would "recover" budget that was never actually spent.
+        ran = {"v": False}
+
+        def work():
+            ran["v"] = True
+            return 1
+
+        with self.assertRaises(ValueError):
+            submit(PoolJob(run=work, est_cost=-1_000_000.0, budget=1.0))
+        self.assertFalse(ran["v"])  # never executed
+
+    def test_nan_est_cost_is_rejected(self):
+        # NaN compares False against everything, so `est_cost > budget` would silently pass.
+        with self.assertRaises(ValueError):
+            submit(PoolJob(run=lambda: 1, est_cost=float("nan"), budget=0.0))
+
+    def test_infinite_est_cost_is_rejected(self):
+        # An infinite cost against the default infinite budget would otherwise slip through.
+        with self.assertRaises(ValueError):
+            submit(PoolJob(run=lambda: 1, est_cost=float("inf")))
+
+    def test_negative_infinite_est_cost_is_rejected(self):
+        with self.assertRaises(ValueError):
+            submit(PoolJob(run=lambda: 1, est_cost=float("-inf"), budget=0.0))
+
+    def test_nan_budget_is_rejected(self):
+        # A NaN budget breaks the comparison from the other side: any cost passes it.
+        with self.assertRaises(ValueError):
+            submit(PoolJob(run=lambda: 1, est_cost=1_000_000.0, budget=float("nan")))
+
+    def test_negative_budget_is_rejected(self):
+        with self.assertRaises(ValueError):
+            submit(PoolJob(run=lambda: 1, est_cost=0.0, budget=-5.0))
+
+    def test_infinite_budget_is_a_legitimate_no_ceiling(self):
+        res = submit(PoolJob(run=lambda: 1, est_cost=1_000_000.0, budget=float("inf")))
+        self.assertTrue(res.ok)
+
 
 class ConfirmRailTest(unittest.TestCase):
     class _FakeGPU:

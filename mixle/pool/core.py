@@ -13,6 +13,7 @@ before execution.
 
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -106,7 +107,19 @@ def submit(
     A job whose ``est_cost`` exceeds its ``budget`` is REJECTED before running. A BILLABLE backend
     (a real GPU pool) additionally requires ``confirm=True`` -- spend is never incurred implicitly.
     Every submission emits a ``pool_job`` telemetry event (features + realized outcome).
+
+    ``job.est_cost`` must be finite and non-negative and ``job.budget`` must be non-negative (``inf``
+    allowed, meaning "no ceiling") -- raises :class:`ValueError` otherwise. Costs are a dollar estimate,
+    never a credit: a NaN or negative value would defeat the comparison below rather than be caught by
+    it (NaN compares false against everything, so ``est_cost > budget`` silently passes; a negative
+    value can "refund" budget that was never spent), so both are rejected outright rather than routed
+    through the ordinary rejected-:class:`PoolResult` path.
     """
+    if not math.isfinite(job.est_cost) or job.est_cost < 0:
+        raise ValueError(f"est_cost must be finite and non-negative, got {job.est_cost!r}")
+    if math.isnan(job.budget) or job.budget < 0:
+        raise ValueError(f"budget must be non-negative (inf allowed for no ceiling), got {job.budget!r}")
+
     backend = backend or LocalBackend()
 
     if job.est_cost > job.budget:
