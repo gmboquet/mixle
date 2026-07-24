@@ -105,6 +105,19 @@ class QuantizedLogsumexpTest(unittest.TestCase):
             quantized_logsumexp([1.0, 2.0], weights=[1.0])
         with self.assertRaises(ValueError):
             quantized_logsumexp([1.0, 2.0], weights=[1.0, -1.0])
+        # MXR-080-0144: non-finite span/weights used to pass validation and silently turn the result
+        # into NaN/inf (NaN < 0 is False, so the old `(w < 0).any()` check never caught a NaN weight)
+        with self.assertRaises(ValueError):
+            quantized_logsumexp([1.0], span=np.nan)
+        with self.assertRaises(ValueError):
+            quantized_logsumexp([1.0], span=np.inf)
+        with self.assertRaises(ValueError):
+            quantized_logsumexp([1.0, 2.0], weights=[1.0, np.nan])
+        with self.assertRaises(ValueError):
+            quantized_logsumexp([1.0, 2.0], weights=[1.0, np.inf])
+        # negative control: a normal, well-formed call still works after the added validation (a lone
+        # score sits exactly on the top grid point, so this is exact, not just within the grid bound)
+        self.assertAlmostEqual(quantized_logsumexp([2.0], weights=[3.0]), float(np.log(3.0)) + 2.0, places=12)
 
 
 class HelpersTest(unittest.TestCase):
@@ -123,6 +136,49 @@ class HelpersTest(unittest.TestCase):
             QuantizedFunction(np.tanh, step=0.0, lo=-1, hi=1)
         with self.assertRaises(ValueError):
             QuantizedFunction(np.tanh, step=0.1, lo=1.0, hi=-1.0)
+
+    # -- MXR-080-0144 ------------------------------------------------------------------------------
+
+    def test_construction_rejects_a_grid_that_degenerates_to_a_single_code(self):
+        # lo < hi genuinely (0.4 > 0.0) so the basic ordering check passes, but at step=1.0 both round
+        # to code 0: exactly the "valid-looking lo < hi that rounds to a single code" case that used to
+        # reach the boundary-slope construction (self.table[1] on a length-1 table) instead of a clean
+        # error.
+        with self.assertRaises(ValueError):
+            QuantizedFunction(np.tanh, step=1.0, lo=0.0, hi=0.4)
+        # negative control: the same span at a fine-enough step still constructs and evaluates normally
+        q = QuantizedFunction(np.tanh, step=0.1, lo=0.0, hi=0.4)
+        self.assertGreaterEqual(len(q.table), 2)
+        self.assertAlmostEqual(float(q(0.2)), float(np.tanh(0.2)), places=2)
+
+    def test_construction_rejects_non_finite_step_lo_hi(self):
+        for kwargs in (
+            {"step": np.nan, "lo": -1.0, "hi": 1.0},
+            {"step": np.inf, "lo": -1.0, "hi": 1.0},
+            {"step": 0.1, "lo": np.nan, "hi": 1.0},
+            {"step": 0.1, "lo": -1.0, "hi": np.inf},
+        ):
+            with self.assertRaises(ValueError):
+                QuantizedFunction(np.tanh, **kwargs)
+
+    def test_construction_rejects_non_finite_function_output(self):
+        bad_func = lambda x: np.where(x == 0.0, np.nan, x)  # noqa: E731
+        with self.assertRaises(ValueError):
+            QuantizedFunction(bad_func, step=0.1, lo=-1.0, hi=1.0)
+
+    def test_error_bound_rejects_non_positive_or_non_finite_derivative(self):
+        for bad in (0.0, -1.0, np.nan, np.inf):
+            with self.assertRaises(ValueError):
+                error_bound(bad, 0.01)
+        with self.assertRaises(ValueError):
+            error_bound(0.25, 0.0)
+        self.assertGreater(error_bound(0.25, 0.01), 0.0)  # negative control
+
+    def test_step_for_tolerance_rejects_non_positive_or_non_finite_derivative(self):
+        for bad in (0.0, -1.0, np.nan, np.inf):
+            with self.assertRaises(ValueError):
+                step_for_tolerance(1e-3, bad)
+        self.assertGreater(step_for_tolerance(1e-3, 0.25), 0.0)  # negative control
 
 
 if __name__ == "__main__":
