@@ -79,24 +79,48 @@ class VerifiableOracle:
     def _call_with_timeout(self, candidate: Any) -> OracleResult:
         """FAULT-a ``oracle_timeout``: abstain (a maximally-uninformative, zero-cost, explicitly flagged
         result) rather than block the caller or guess a score, if a single scoring call runs over budget.
-        Uses a worker thread so a ``score_fn`` that never returns cannot hang the caller either."""
-        from concurrent.futures import ThreadPoolExecutor
-        from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+        Runs ``score_fn`` on a worker thread so a hang there cannot hang the caller either --
+        ``Thread.join(timeout=...)`` returns on schedule whether or not the thread actually finished, so
+        a genuinely hung ``score_fn`` leaves its thread running in the background indefinitely (Python has
+        no API to forcibly kill a thread). The worker is created with ``daemon=True`` so that leak cannot
+        also keep the whole *process* alive once everything else is done.
+
+        Deliberately a raw ``threading.Thread``, not a ``concurrent.futures.ThreadPoolExecutor``: routing
+        this through an executor looks like the safer, more "proper" choice, but it is not --
+        ``concurrent.futures.thread`` registers a process-exit hook (``_python_exit``, wired in via
+        ``threading._register_atexit``) that unconditionally runs an *untimed* ``Thread.join()`` on every
+        worker thread any executor ever created, daemon or not, before the interpreter is allowed to
+        exit. A single truly-hung oracle call would therefore still hang the whole process at exit even
+        behind ``pool.shutdown(wait=False)`` -- confirmed empirically: an executor-based version of this
+        method returns its timeout promptly, but the *process* never exits when ``score_fn`` never
+        returns. A raw, non-registered daemon thread has no such hook waiting on it.
+        """
+        import queue
+        import threading
+
+        result: queue.Queue = queue.Queue(maxsize=1)
+
+        def _target() -> None:
+            try:
+                result.put((True, self.score_fn(candidate)))
+            except BaseException as exc:  # noqa: BLE001 -- ferried to the caller's thread, re-raised there
+                result.put((False, exc))
 
         def _run() -> OracleResult:
-            pool = ThreadPoolExecutor(max_workers=1)
-            future = pool.submit(self.score_fn, candidate)
-            try:
-                return future.result(timeout=self.timeout)
-            finally:
-                # don't block __call__ waiting for a score_fn that already blew its budget -- let the
-                # worker thread finish (or leak, for a truly hung score_fn) on its own time, not ours.
-                pool.shutdown(wait=False)
+            worker = threading.Thread(target=_target, daemon=True)
+            worker.start()
+            worker.join(timeout=self.timeout)
+            if worker.is_alive():
+                # score_fn blew its budget (or is truly hung). Abandon it -- Python cannot forcibly kill
+                # a thread -- and let the caller move on now instead of waiting on it any further.
+                raise TimeoutError(f"oracle {self.name!r} exceeded its {self.timeout}s timeout")
+            ok, payload = result.get()
+            if not ok:
+                raise payload
+            return payload
 
-        # future.result() raises concurrent.futures.TimeoutError, which is a DISTINCT class from the
-        # builtin TimeoutError on Python 3.10 (only aliased to it in 3.11+) -- catch that exact type so
-        # oracle_timeout abstention works on every supported interpreter, not just 3.11+.
-        outcome = abstain_on_timeout(_run, timeout_error=FuturesTimeoutError)
+        outcome = abstain_on_timeout(_run)
         if outcome.degraded:
             return OracleResult(
                 score=float("-inf"),

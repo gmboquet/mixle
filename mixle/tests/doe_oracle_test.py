@@ -3,6 +3,8 @@ I1-I3). Proven here against a cheap closed-form oracle (a scored parameter vecto
 build order, before any domain oracle exists.
 """
 
+import threading
+import time
 import unittest
 
 import numpy as np
@@ -54,6 +56,76 @@ class NoOracleGuardTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             optimize_under_oracle(None, [(-1.0, 1.0)])
         self.assertIn("no verifiable objective", str(ctx.exception))
+
+
+class OracleTimeoutAbandonmentTest(unittest.TestCase):
+    """FAULT-a ``oracle_timeout``: a genuinely-hung ``score_fn`` must abstain promptly rather than block
+    the caller, and the worker thread abandoned to reach that abstention must be a daemon thread -- so
+    a hung oracle call cannot keep the whole *process* alive after everything else is done, even though
+    Python has no API to forcibly kill the thread itself. See ``VerifiableOracle._call_with_timeout``'s
+    docstring for why this must be a raw ``threading.Thread`` and not a
+    ``concurrent.futures.ThreadPoolExecutor`` (the latter's module-global exit hook joins its worker
+    threads, untimed, regardless of daemon status, which reintroduces the exact hang this guards
+    against).
+    """
+
+    def test_hung_score_fn_abstains_promptly_and_leaks_only_a_daemon_thread(self):
+        hang_forever = threading.Event()  # deliberately never .set() -- score_fn blocks on this forever
+
+        def never_returns(_candidate):
+            hang_forever.wait()
+            return OracleResult(score=999.0)  # unreachable
+
+        oracle = VerifiableOracle(name="hung", tier="executable", score_fn=never_returns, timeout=0.2)
+
+        threads_before = set(threading.enumerate())
+        t0 = time.monotonic()
+        result = oracle(np.array([1.0]))
+        elapsed = time.monotonic() - t0
+        threads_after = set(threading.enumerate())
+
+        # the call returns promptly (close to the timeout budget), not after blocking on the hang
+        self.assertLess(elapsed, 5.0)
+        self.assertEqual(result.score, float("-inf"))
+        self.assertEqual(result.cost, 0.0)
+        self.assertEqual(result.receipt.get("degraded_mode"), "oracle_timeout")
+        self.assertEqual(result.receipt.get("oracle_id"), "hung")
+
+        # exactly one worker thread was abandoned (score_fn is genuinely hung and never returns) --
+        # confirm it exists, and that it is a daemon thread so it cannot block process exit.
+        leaked = threads_after - threads_before
+        self.assertEqual(len(leaked), 1, f"expected exactly one leaked worker thread, got {leaked}")
+        leaked_thread = leaked.pop()
+        self.assertTrue(leaked_thread.is_alive())
+        self.assertTrue(
+            leaked_thread.daemon,
+            "the abandoned oracle worker thread must be a daemon thread, or a hung oracle call would "
+            "keep the whole process alive even after everything else has finished",
+        )
+        # not joined/waited on -- it is a daemon thread and the test process will exit past it fine.
+
+    def test_score_fn_that_finishes_within_budget_is_unaffected_and_leaves_no_thread(self):
+        def fast(x):
+            return OracleResult(score=float(x[0]), receipt={"ok": True})
+
+        oracle = VerifiableOracle(name="fast", tier="executable", score_fn=fast, timeout=5.0)
+        threads_before = set(threading.enumerate())
+        result = oracle(np.array([3.0]))
+        threads_after = set(threading.enumerate())
+
+        self.assertEqual(result.score, 3.0)
+        self.assertEqual(result.receipt, {"ok": True})
+        self.assertEqual(result.cost, 1.0)
+        self.assertEqual(threads_after, threads_before)  # nothing leaked on the happy path
+
+    def test_score_fn_exception_propagates_and_is_not_mistaken_for_a_timeout(self):
+        def boom(_candidate):
+            raise RuntimeError("score_fn blew up")
+
+        oracle = VerifiableOracle(name="boom", tier="executable", score_fn=boom, timeout=5.0)
+        with self.assertRaises(RuntimeError) as ctx:
+            oracle(np.array([1.0]))
+        self.assertIn("score_fn blew up", str(ctx.exception))
 
 
 @unittest.skipUnless(_HAS_TORCH, "the BO proposal model needs torch")
