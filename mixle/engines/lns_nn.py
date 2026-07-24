@@ -37,8 +37,16 @@ def log_softmax(logits: Any, lns: LogNumberSystem, axis: int = -1) -> np.ndarray
 
 
 def softmax(logits: Any, lns: LogNumberSystem, axis: int = -1) -> np.ndarray:
-    """Softmax with the normalizer computed in LNS; back-to-linear needs one ``exp`` (for attention.V etc.)."""
-    return np.exp(log_softmax(logits, lns, axis=axis))
+    """Softmax with the normalizer computed in LNS; back-to-linear needs one ``exp`` (for attention.V etc.).
+
+    Renormalized (MXR-080-0141): exponentiating the LNS-approximate log-softmax does not, by itself, sum
+    to exactly 1 -- each class's rounding error is independent of the others, so they do not cancel (100
+    equal logits summed to ``1.00518`` pre-fix), which breaks the basic probability-simplex contract a
+    function named ``softmax`` has to satisfy. Dividing by the actual computed sum costs one reduction
+    and trades a sliver of the raw approximation's "purity" for an exactly-normalized guarantee.
+    """
+    p = np.exp(log_softmax(logits, lns, axis=axis))
+    return p / np.sum(p, axis=axis, keepdims=True)
 
 
 def _validate_cross_entropy_targets(k: np.ndarray, targets: np.ndarray, axis: int) -> np.ndarray:
