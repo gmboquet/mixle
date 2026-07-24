@@ -52,7 +52,8 @@ class FreshnessTest(unittest.TestCase):
     def test_aged_out_is_a_review_trigger_not_proof(self):
         s = Substrate()
         i = s.add(kind="text", text="old")
-        s.get(i).created_at = time.time() - 10_000
+        # get()/all() return defensive copies (MXR-080-0234); update() is how a change actually lands.
+        s.update(i, created_at=time.time() - 10_000)
         f = check_freshness(s, i, max_age_s=3600)
         self.assertFalse(f.fresh)
         self.assertIn("review, not proof", f.signals[0])  # honest wording travels with the signal
@@ -60,7 +61,7 @@ class FreshnessTest(unittest.TestCase):
     def test_no_age_policy_means_no_age_signal(self):
         s = Substrate()
         i = s.add(kind="text", text="old")
-        s.get(i).created_at = time.time() - 10_000
+        s.update(i, created_at=time.time() - 10_000)
         self.assertTrue(check_freshness(s, i).fresh)  # age alone doesn't fire without a policy
 
     def test_report_sweeps_the_store(self):
