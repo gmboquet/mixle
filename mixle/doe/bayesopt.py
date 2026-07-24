@@ -35,7 +35,9 @@ def expected_improvement(
 
     For minimization the improvement over the incumbent ``best`` is ``best - mean - xi``; for
     maximization it is ``mean - best - xi``. ``xi >= 0`` trades exploration for exploitation.
-    Points with zero predictive ``std`` get zero EI. Higher is better (maximized over candidates).
+    Points with (near-)zero predictive ``std`` get the DETERMINISTIC LIMIT ``max(improve, 0)`` -- a
+    point-mass posterior has no uncertainty to average over, so the "expected" improvement is exactly
+    the guaranteed one, not 0. Higher is better (maximized over candidates).
     """
     mean = np.asarray(mean, dtype=np.float64)
     std = np.asarray(std, dtype=np.float64)
@@ -46,6 +48,11 @@ def expected_improvement(
     z[pos] = improve[pos] / std[pos]
     pdf = np.exp(-0.5 * z * z) / np.sqrt(2.0 * np.pi)
     ei[pos] = improve[pos] * ndtr(z[pos]) + std[pos] * pdf[pos]
+    # sigma -> 0 (including exactly 0): the standard sigma*(z*Phi(z) + phi(z)) formula's own limit,
+    # by the Mills-ratio tail expansion of Phi/phi as z -> +/-inf, is exactly max(improve, 0) -- the
+    # regression tests' continuity sweep confirms the formula above already converges smoothly to this
+    # as std shrinks toward the threshold, so this is a continuous extension, not a discontinuous patch.
+    ei[~pos] = np.maximum(improve[~pos], 0.0)
     return np.maximum(ei, 0.0)
 
 
@@ -57,7 +64,9 @@ def log_expected_improvement(
     Mathematically ``log(EI)``, but computed so it stays finite and informative deep in the
     no-improvement tail where ``EI`` itself underflows to 0 (and ``log EI`` to ``-inf``), keeping the
     optimizer's ordering and gradients usable. Same argmax as :func:`expected_improvement`; points with
-    zero predictive ``std`` get ``-inf``. Higher is better. The ``z >= 0`` branch is the direct
+    (near-)zero predictive ``std`` get the deterministic limit ``log(max(improve, 0))`` -- ``-inf`` when
+    the point-mass outcome does not improve on ``best``, and the log of the guaranteed improvement when
+    it does (see :func:`expected_improvement`). Higher is better. The ``z >= 0`` branch is the direct
     well-conditioned form; the ``z < 0`` tail uses the scaled complementary error function ``erfcx``
     (``Phi(z)/phi(z) = sqrt(pi/2) erfcx(-z/sqrt2)``), which is bounded there and so never under/overflows.
     """
@@ -75,6 +84,13 @@ def log_expected_improvement(
     mills = np.sqrt(np.pi / 2.0) * erfcx(-zn / np.sqrt(2.0))
     log_h[neg] = -0.5 * zn * zn - 0.5 * np.log(2.0 * np.pi) + np.log1p(zn * mills)
     out[pos] = np.log(std[pos]) + log_h
+    # sigma -> 0 deterministic limit (matching expected_improvement's max(improve, 0)): out is already
+    # -inf everywhere from the initialization above, which is already correct when improve <= 0 (no
+    # guaranteed improvement); only overwrite the entries that DO have a positive guaranteed improvement,
+    # computing log() only there so a non-improving point never triggers a log(0)/log(negative) warning.
+    det = ~pos
+    improving = det & (improve > 0.0)
+    out[improving] = np.log(improve[improving])
     return out
 
 
