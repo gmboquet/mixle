@@ -55,6 +55,52 @@ def test_average_causal_effect_matches_the_structural_slope():
     assert abs(ace - 2.0) < 0.06  # the structural coefficient
 
 
+# --- interventions dict key validation: a mistyped key must be REJECTED, never silently dropped -------
+# InterventionalNetwork.sample() looks fields up as `i in self.interventions` with a real int `i` taken
+# from net.order. A string key like "0" is never equal (nor hash-equal) to the int 0, so if the
+# constructor accepted it uncritically, the "intervention" would just never be consulted -- the run
+# would look exactly like an unconditioned baseline instead of failing loudly.
+#
+# These target `bn_do` (mixle.inference.causal.do / InterventionalNetwork) directly rather than the
+# package-level `do`: the latter is M0's generic condition()/do() engine (mixle.inference.condition),
+# which does its own key normalization ahead of dispatch and so wouldn't exercise causal.py's own
+# validation at all -- see test_package_level_do_reduces_to_bn_do_for_a_bayesian_network above for how
+# the two relate.
+
+
+def test_do_rejects_a_mistyped_string_key_instead_of_silently_dropping_it():
+    import pytest
+
+    from mixle.inference import bn_do
+
+    net = _chain()
+    with pytest.raises(ValueError, match="not a valid node id"):
+        bn_do(net, {"0": 2.0})  # "0" LOOKS like the valid int node id 0, but is not one
+
+
+def test_do_rejects_an_out_of_range_int_field():
+    import pytest
+
+    from mixle.inference import bn_do
+
+    net = _chain()
+    with pytest.raises(ValueError, match="not a valid node id"):
+        bn_do(net, {99: 1.0})  # correctly typed, but the network only has fields 0 and 1
+
+
+def test_do_with_a_valid_int_key_applies_exactly_the_intended_intervention():
+    """Regression guard: a correctly-typed int key is stored verbatim and still clamps the field --
+    unchanged behavior from before the stricter key validation was added."""
+    from mixle.inference import bn_do
+
+    net = _chain()
+    world = bn_do(net, {0: 2.0})
+    assert world.interventions == {0: 2.0}
+    xs = {row[0] for row in world.sample(50, seed=9)}
+    assert xs == {2.0}  # X is exactly clamped
+    assert abs(world.expectation(1, n=6000, seed=0) - 4.0) < 0.05  # E[Y | do(X=2)] = 2*2
+
+
 # --- counterfactuals: abduction-action-prediction with the honest discrete boundary ---------------------
 # The DAG is constructed EXPLICITLY (kind -> x0 -> x1): counterfactual() answers relative to the given
 # graph, and purely observational learning cannot orient Markov-equivalent edges — that caveat lives in

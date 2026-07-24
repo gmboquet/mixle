@@ -338,5 +338,169 @@ class ConjugateSamplerApiTest(unittest.TestCase):
         self.assertEqual(np.asarray(draws["mu"]).shape[0], 3)
 
 
+class ConjugateInputValidationTest(unittest.TestCase):
+    """An external review found conjugate_posterior accepted impossible/invalid observations instead
+    of rejecting them: Bernoulli data outside {0, 1}, Binomial successes outside [0, n], a fractional
+    or out-of-range IntegerCategorical observation, NaN/Inf observations, negative/NaN weights, and a
+    non-positive or non-finite Beta prior all silently built a garbage posterior. ``_as_weighted_array``
+    (data/weight finiteness) and ``_beta_prior`` (Beta hyperparameter validity) are the shared choke
+    points for every family routed through them; Bernoulli/Binomial/IntegerCategorical additionally
+    need their own domain checks since valid-observation constraints differ per family.
+    """
+
+    def test_bernoulli_rejects_value_outside_zero_one(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(BernoulliDistribution(0.5), [0, 1, 2])
+
+    def test_binomial_rejects_successes_exceeding_n(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(BinomialDistribution(0.5, 3), [4])
+
+    def test_binomial_rejects_negative_successes(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(BinomialDistribution(0.5, 3), [-1])
+
+    def test_binomial_rejects_fractional_successes(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(BinomialDistribution(0.5, 3), [1.5])
+
+    def test_binomial_boundary_successes_still_construct(self):
+        post = conjugate_posterior(BinomialDistribution(0.5, 3), [0, 3])
+        self.assertTrue(math.isfinite(post.a) and math.isfinite(post.b))
+
+    def test_integer_categorical_rejects_fractional_observation(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(IntegerCategoricalDistribution(0, [0.25] * 4), [1.9, 1.9, 1.9])
+
+    def test_integer_categorical_rejects_out_of_range_category(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(IntegerCategoricalDistribution(0, [0.25] * 4), [0, 1, 99])
+
+    def test_rejects_nan_observation(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(BernoulliDistribution(0.5), [0.0, 1.0, float("nan")])
+
+    def test_rejects_infinite_observation(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(GaussianDistribution(0.0, 1.0), [0.0, 1.0, float("inf")])
+
+    def test_rejects_negative_weights(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(BernoulliDistribution(0.5), [0, 1, 1], weights=np.array([1.0, -5.0, 1.0]))
+
+    def test_rejects_nan_weights(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(BernoulliDistribution(0.5), [0, 1, 1], weights=np.array([1.0, float("nan"), 1.0]))
+
+    def test_zero_weight_boundary_still_constructs(self):
+        post = conjugate_posterior(BernoulliDistribution(0.5), [0, 1, 1], weights=np.array([0.0, 1.0, 1.0]))
+        self.assertTrue(math.isfinite(post.a) and math.isfinite(post.b))
+
+    def test_rejects_non_positive_beta_prior_a(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(BernoulliDistribution(0.5), [0, 1, 1], prior={"a": -1.0, "b": 1.0})
+
+    def test_rejects_non_positive_beta_prior_b(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(BernoulliDistribution(0.5), [0, 1, 1], prior={"a": 1.0, "b": 0.0})
+
+    def test_rejects_zero_beta_prior_a(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(BernoulliDistribution(0.5), [0, 1, 1], prior={"a": 0.0, "b": 1.0})
+
+    def test_rejects_nan_beta_prior(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(BernoulliDistribution(0.5), [0, 1, 1], prior={"a": float("nan"), "b": 1.0})
+
+    def test_rejects_infinite_beta_prior(self):
+        with self.assertRaises(ValueError):
+            conjugate_posterior(BernoulliDistribution(0.5), [0, 1, 1], prior={"a": float("inf"), "b": 1.0})
+
+    def test_invalid_beta_prior_rejected_for_geometric_and_negative_binomial_too(self):
+        # _beta_prior is the shared choke point for every Beta-posterior family, not just Bernoulli.
+        from mixle.stats import NegativeBinomialDistribution
+
+        with self.assertRaises(ValueError):
+            conjugate_posterior(GeometricDistribution(0.5), [1, 2, 3], prior={"a": -1.0, "b": 1.0})
+        with self.assertRaises(ValueError):
+            conjugate_posterior(NegativeBinomialDistribution(3.0, 0.5), [1, 2, 3], prior={"a": -1.0, "b": 1.0})
+
+    def test_valid_bernoulli_data_still_constructs(self):
+        post = conjugate_posterior(BernoulliDistribution(0.5), [0, 1, 1, 0, 1])
+        self.assertAlmostEqual(post.a, 1.0 + 3.0)
+        self.assertAlmostEqual(post.b, 1.0 + 2.0)
+
+    def test_valid_bernoulli_bool_data_still_constructs(self):
+        post = conjugate_posterior(BernoulliDistribution(0.5), [True, False, True])
+        self.assertAlmostEqual(post.a, 1.0 + 2.0)
+        self.assertAlmostEqual(post.b, 1.0 + 1.0)
+
+    def test_valid_binomial_data_still_constructs(self):
+        post = conjugate_posterior(BinomialDistribution(0.5, 3), [0, 1, 2, 3])
+        self.assertAlmostEqual(post.a, 1.0 + 6.0)
+        self.assertAlmostEqual(post.b, 1.0 + 6.0)
+
+    def test_valid_integer_categorical_data_still_constructs(self):
+        post = conjugate_posterior(IntegerCategoricalDistribution(0, [0.25] * 4), [0, 1, 2, 3])
+        self.assertTrue(np.allclose(post.alpha, [2.0, 2.0, 2.0, 2.0]))
+
+
+class BetaBinomialExactPredictiveTest(unittest.TestCase):
+    """An external review found BetaPosterior.posterior_predictive() mislabels a plug-in-at-the-mean
+    approximation as the true Bayesian predictive for a Binomial likelihood with n > 1: the Beta-
+    Bernoulli identity (plug-in-at-mean == true predictive) only holds because the Bernoulli mass is
+    linear in p, but the Binomial mass is nonlinear in p for n > 1, so the plug-in is biased. Fixed by
+    returning the closed-form Beta-Binomial(n, a, b) predictive (mixle.stats.BetaBinomialDistribution,
+    matching the existing Poisson-Gamma -> NegativeBinomial closed-form predictive precedent) whenever
+    the posterior was built from a Binomial with n > 1, while leaving n == 1 (Bernoulli, and
+    Binomial(n=1)) on the still-exact plug-in path.
+    """
+
+    def test_binomial_predictive_matches_closed_form_beta_binomial(self):
+        # Uniform Beta(1,1) prior, no data -> posterior stays Beta(1,1); the true Beta-Binomial(n=2,
+        # a=1, b=1) predictive is uniform over {0,1,2} (each 1/3) -- NOT the plug-in Binomial(2, 0.5)
+        # value of 1/4 at k=0 that the old code returned.
+        from mixle.stats import BetaBinomialDistribution
+
+        post = conjugate_posterior(BinomialDistribution(0.5, 2), [], prior={"a": 1.0, "b": 1.0})
+        pred = post.posterior_predictive()
+        self.assertIsInstance(pred, BetaBinomialDistribution)
+        for k in range(3):
+            self.assertAlmostEqual(pred.density(k), 1.0 / 3.0, places=12)
+
+    def test_binomial_predictive_matches_scipy_betabinom(self):
+        from scipy.stats import betabinom
+
+        rng = np.random.RandomState(0)
+        x = rng.binomial(5, 0.3, size=200)
+        post = conjugate_posterior(BinomialDistribution(0.5, 5), x, prior={"a": 2.0, "b": 3.0})
+        pred = post.posterior_predictive()
+        for k in range(6):
+            self.assertAlmostEqual(pred.density(k), betabinom.pmf(k, 5, post.a, post.b), places=10)
+
+    def test_binomial_n1_predictive_unaffected_still_exact_plugin(self):
+        # n_trials == 1 is mathematically identical to Bernoulli: plug-in-at-mean IS the exact
+        # predictive there, so this path must stay untouched by the n > 1 fix.
+        post = conjugate_posterior(BinomialDistribution(0.5, 1), [1, 0, 1, 1])
+        pred = post.posterior_predictive()
+        self.assertIsInstance(pred, BinomialDistribution)
+        self.assertAlmostEqual(pred.p, post.mean()["p"], places=12)
+
+    def test_bernoulli_predictive_unaffected(self):
+        post = conjugate_posterior(BernoulliDistribution(0.5), [1, 0, 1, 1])
+        pred = post.posterior_predictive()
+        self.assertIsInstance(pred, BernoulliDistribution)
+        self.assertAlmostEqual(pred.p, post.mean()["p"], places=12)
+
+    def test_negative_binomial_predictive_unaffected(self):
+        # negative_binomial reuses BetaPosterior.n_trials to store the known r parameter (not a trial
+        # count) -- it must not be misread as a Binomial trial count by the new n > 1 branch.
+        from mixle.stats import NegativeBinomialDistribution
+
+        post = conjugate_posterior(NegativeBinomialDistribution(3.0, 0.5), [1, 2, 3, 0])
+        pred = post.posterior_predictive()
+        self.assertIsInstance(pred, NegativeBinomialDistribution)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -400,7 +400,11 @@ class Mutate:
             extra = optimize(_bootstrap(), leaf.estimator(), max_its=12, prev_estimate=leaf, out=None)
             base = list(components) if is_mixture else [model]
             base_w = list(np.asarray(model.w, dtype=float)) if is_mixture else [1.0]
-            proto = mixture(base + [extra], base_w + [0.5])
+            # proto is just an EM init for the re-fit below, so a common-scale rescale here changes
+            # nothing about the optimization outcome (posterior responsibilities are scale-invariant)
+            # -- but MixtureDistribution requires a simplex, and the raw base_w + [0.5] usually isn't one.
+            w = np.asarray(base_w + [0.5], dtype=float)
+            proto = mixture(base + [extra], (w / w.sum()).tolist())
         else:  # perturb
             proto = optimize(_bootstrap(), model.estimator(), max_its=12, prev_estimate=model, out=None)
 

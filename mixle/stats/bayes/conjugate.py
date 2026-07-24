@@ -56,12 +56,23 @@ def is_conjugate_family(dist: Any) -> bool:
 
 def _as_weighted_array(data: Any, weights: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
     x = np.asarray(list(data), dtype=np.float64) if not isinstance(data, np.ndarray) else data.astype(np.float64)
+    if not np.all(np.isfinite(x)):
+        # A NaN/Inf observation silently propagates into the posterior hyperparameters (and from
+        # there into every downstream mean/sample/predictive), so reject it here -- the single
+        # choke point almost every _build_* family routes through -- rather than in each builder.
+        raise ValueError("conjugate_posterior requires finite observations (no NaN/Inf).")
     if weights is None:
         w = np.ones(len(x), dtype=np.float64)
     else:
         w = np.asarray(weights, dtype=np.float64)
         if w.shape[0] != x.shape[0]:
             raise ValueError("weights length does not match data length")
+        if not np.all(np.isfinite(w)):
+            raise ValueError("conjugate_posterior requires finite weights (no NaN/Inf).")
+        if np.any(w < 0.0):
+            # A negative weight silently subtracts from the posterior counts (e.g. driving a Beta
+            # posterior's a/b negative), which is not a valid observation multiplicity.
+            raise ValueError("conjugate_posterior requires non-negative weights.")
     return x, w
 
 
@@ -187,8 +198,19 @@ class BetaPosterior(ConjugatePosterior):
         return BernoulliDistribution(p)
 
     def posterior_predictive(self):
-        """Return the plug-in predictive distribution at the posterior mean probability."""
-        # The plug-in predictive at the posterior mean (Beta-Bernoulli predictive prob == mean).
+        """Return the exact posterior predictive distribution for a new observation.
+
+        For a single Bernoulli trial (``n_trials == 1``, including every Bernoulli-kind posterior,
+        where ``n_trials`` is never set) the Bernoulli mass is linear in ``p``, so the plug-in
+        distribution at the posterior mean *is* already the exact predictive (Beta-Bernoulli
+        predictive prob == mean). For a Binomial with ``n_trials > 1`` the mass is nonlinear in
+        ``p``, so plugging in the posterior mean is only an approximation -- the exact predictive,
+        integrating ``p`` out of the Beta posterior, is the closed-form Beta-Binomial(n, a, b).
+        """
+        if self.kind == "binomial" and self.n_trials > 1:
+            from mixle.stats.univariate.discrete.beta_binomial import BetaBinomialDistribution
+
+            return BetaBinomialDistribution(self.n_trials, self.a, self.b)
         return self.point_estimate()
 
     def hyper(self) -> dict[str, Any]:
@@ -208,11 +230,28 @@ class BetaPosterior(ConjugatePosterior):
         return float(self.log_base + betaln(self.a, self.b) - betaln(self._a0, self._b0))
 
 
+def _beta_prior(prior: dict | None) -> tuple[float, float]:
+    # Shared hyperparameter parsing + validation for every Beta-posterior family (Bernoulli,
+    # Geometric, Binomial, NegativeBinomial): a non-positive or non-finite a/b is not a valid Beta
+    # density and previously passed straight through into the posterior's own a/b unchecked.
+    p = prior or {}
+    a0, b0 = float(p.get("a", 1.0)), float(p.get("b", 1.0))
+    if not (math.isfinite(a0) and math.isfinite(b0)) or a0 <= 0.0 or b0 <= 0.0:
+        raise ValueError(
+            "Beta prior requires finite positive hyperparameters a > 0 and b > 0 (got a=%r, b=%r)." % (a0, b0)
+        )
+    return a0, b0
+
+
 def _build_bernoulli(dist, data, weights, prior) -> BetaPosterior:
     x, w = _as_weighted_array(data, weights)
+    if not np.all((x == 0.0) | (x == 1.0)):
+        # A value outside {0, 1} is not a valid Bernoulli outcome; letting it through silently
+        # corrupts the sufficient statistics (e.g. x=2 is counted as two successes at once).
+        raise ValueError("Bernoulli conjugate update requires observations in {0, 1}.")
     n = float(w.sum())
     s = float(np.dot(w, x))
-    a0, b0 = (prior or {}).get("a", 1.0), (prior or {}).get("b", 1.0)
+    a0, b0 = _beta_prior(prior)
     post = BetaPosterior(a0 + s, b0 + n - s, kind="bernoulli")
     post._set_prior(a0, b0, n, s, n - s)
     return post
@@ -223,7 +262,7 @@ def _build_geometric(dist, data, weights, prior) -> BetaPosterior:
     x, w = _as_weighted_array(data, weights)
     n = float(w.sum())
     sx = float(np.dot(w, x))
-    a0, b0 = (prior or {}).get("a", 1.0), (prior or {}).get("b", 1.0)
+    a0, b0 = _beta_prior(prior)
     post = BetaPosterior(a0 + n, b0 + sx - n, kind="geometric")
     post._set_prior(a0, b0, n, n, sx - n)
     return post
@@ -232,9 +271,16 @@ def _build_geometric(dist, data, weights, prior) -> BetaPosterior:
 def _build_binomial(dist, data, weights, prior) -> BetaPosterior:
     n_trials = int(getattr(dist, "n", getattr(dist, "n_trials", 1)))
     x, w = _as_weighted_array(data, weights)
+    if np.any(x != np.floor(x)) or np.any(x < 0.0) or np.any(x > n_trials):
+        # More successes than trials (or a fractional/negative count) is not a valid Binomial(n)
+        # outcome; letting it through silently drives the posterior's failure count negative.
+        raise ValueError(
+            "Binomial conjugate update requires integer successes in [0, %d] (n_trials); got data "
+            "outside that range." % n_trials
+        )
     N = float(w.sum())
     s = float(np.dot(w, x))
-    a0, b0 = (prior or {}).get("a", 1.0), (prior or {}).get("b", 1.0)
+    a0, b0 = _beta_prior(prior)
     failures = n_trials * N - s
     post = BetaPosterior(a0 + s, b0 + failures, kind="binomial", n_trials=n_trials)
     post.log_base = float(np.dot(w, gammaln(n_trials + 1.0) - gammaln(x + 1.0) - gammaln(n_trials - x + 1.0)))
@@ -415,15 +461,31 @@ def _build_categorical(dist, data, weights, prior) -> DirichletPosterior:
 
 def _build_integer_categorical(dist, data, weights, prior) -> DirichletPosterior:
     x, w = _as_weighted_array(data, weights)
+    if np.any(x != np.floor(x)):
+        # A fractional observation is not a valid category index; truncating it (the old
+        # x.astype(int) below silently did exactly that) folds it into the next-lower category
+        # instead of rejecting the malformed observation.
+        raise ValueError("IntegerCategoricalDistribution conjugate update requires integer-valued observations.")
     min_val = int(getattr(dist, "min_val", int(x.min())))
     k = len(getattr(dist, "p_vec", getattr(dist, "prob_vec", [])))
     if k == 0:
         k = int(x.max()) - min_val + 1
     support = list(range(min_val, min_val + k))
     cvec = np.zeros(k, dtype=np.float64)
-    for xi, wi in zip(x.astype(int), w):
-        if 0 <= xi - min_val < k:
-            cvec[xi - min_val] += wi
+    xi_arr = x.astype(int)
+    offset = xi_arr - min_val
+    out_of_range = (offset < 0) | (offset >= k)
+    if np.any(out_of_range):
+        # An out-of-support category used to be silently dropped -- the old loop's
+        # ``if 0 <= xi - min_val < k`` guarded the accumulation but nothing else -- losing the
+        # observation instead of rejecting the malformed input.
+        bad = sorted({int(v) for v in xi_arr[out_of_range]})
+        raise ValueError(
+            "IntegerCategoricalDistribution conjugate update received category value(s) %r outside "
+            "the supported range [%d, %d]." % (bad, min_val, min_val + k - 1)
+        )
+    for xi, wi in zip(xi_arr, w):
+        cvec[xi - min_val] += wi
     a0_scalar = (prior or {}).get("alpha", 1.0)
     alpha0 = np.full(k, float(a0_scalar))
     post = DirichletPosterior(alpha0 + cvec, support, kind="integer_categorical", min_val=min_val)
@@ -863,7 +925,7 @@ def _build_negative_binomial(dist, data, weights, prior) -> BetaPosterior:
     r = float(dist.r)
     x, w = _as_weighted_array(data, weights)
     n, sx = float(w.sum()), float(np.dot(w, x))
-    a0, b0 = (prior or {}).get("a", 1.0), (prior or {}).get("b", 1.0)
+    a0, b0 = _beta_prior(prior)
     post = BetaPosterior(a0 + n * r, b0 + sx, kind="negative_binomial", n_trials=int(r))
     post.kind = "negative_binomial"
     post._nb_r = r
