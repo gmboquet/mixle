@@ -537,6 +537,10 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
             self.dist, "SequenceDistribution.dist", quantizer, max_fine_bucket
         )
         truncated = elem_truncated
+        # The single element's own top bucket -- used below to detect per-length capping that
+        # `power_prefix`'s incremental convolution chain and the final length-scale step can each
+        # silently apply without the result ever going fully empty (see the per-length loop).
+        elem_top = elem_index.hist.max_bucket()
 
         # Collect lengths (descending probability) whose length-term bucket is within the bound.
         lengths: list[tuple[int, float]] = []  # (L, lp_len)
@@ -570,6 +574,17 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
             if L > built:
                 truncated = True
                 continue
+            # The L-fold self-convolution's TRUE pre-cap top bucket is exactly L * elem_top (every
+            # histogram's deepest entry is nonzero post-normalize, so summing L copies' costs is exact,
+            # not just a bound) -- independent of whatever `power_prefix` internally capped along the
+            # way, since `quantizer.convolve` truncates its OWN output to `max_fine_bucket` at EVERY
+            # incremental step. That means `prefix[L].hist.max_bucket()` is USELESS for detecting
+            # truncation (it can never exceed max_fine_bucket by construction, capped or not) -- the
+            # comparison must use the independently-known single-element top instead. A True here means
+            # the true deepest length-L combination needs more depth than the bound allows, whether that
+            # loss happened inside power_prefix's incremental chain or in the scale() call right below.
+            if elem_top is not None and L * elem_top + quantizer.fine_bucket(lp_len) > max_fine_bucket:
+                truncated = True
             piece = sr.scale(prefix[L], lp_len, quantizer, max_fine_bucket)
             if piece.hist.is_empty():
                 continue

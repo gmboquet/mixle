@@ -571,6 +571,20 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             children.append(child_index)
             truncated = truncated or child_truncated
 
+        # Every child individually fitting under max_fine_bucket does NOT imply their SUM does: the
+        # joint cost is the sum of the per-field costs, so the product's true pre-cap top bucket is
+        # exactly sum(child.max_bucket()) (every histogram's deepest entry is nonzero post-normalize,
+        # so this is exact, not just a bound). Relying on child_truncated alone misses the case where
+        # each child is individually shallow enough but their SUM still exceeds max_fine_bucket --
+        # semiring.product's convolution then silently drops those deep combinations without reporting
+        # it (CountHistogram.convolve computes and discards exactly this comparison), so it must be
+        # checked here. Skipped when any child is empty (max_bucket() is None): a truly empty child
+        # already forces the whole product empty, and a child that lost all its own support to the
+        # depth bound already set child_truncated=True above.
+        child_tops = [c.hist.max_bucket() for c in children]
+        if all(top is not None for top in child_tops) and sum(child_tops) > max_fine_bucket:
+            truncated = True
+
         return semiring.product(children, quantizer, max_fine_bucket), truncated
 
     def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:

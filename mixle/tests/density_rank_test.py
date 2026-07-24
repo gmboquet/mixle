@@ -263,6 +263,87 @@ class CountDPSeekTestCase(unittest.TestCase):
             count_dp_seek(self.dist, -1)
 
 
+class CountDPSeekTruncationTestCase(unittest.TestCase):
+    """MXR-080-0216/0217: count_dp_seek's exhaustion certificate and incomplete-window honesty.
+
+    0216 (Critical): the seek loop used to stop deepening whenever the total count was unchanged at
+    two consecutive depths -- a plateau, not proof of exhaustion. A model with a wide probability GAP
+    (no support in a range of buckets, resuming below it) would plateau inside the gap and the loop
+    would falsely conclude the support was exhausted, raising IndexError for a valid deep index.
+
+    0217 (Critical): when the fine-bucket cap was reached, the old code proceeded to `_window_bracket`
+    even if the located value's smear window was not fully built, so a small visible fragment could be
+    marked `exact=True` -- a purported guaranteed bracket from an index that had not actually finished
+    building.
+    """
+
+    def _gap_mixture(self):
+        # component A: 10 values, weight ~1 (shallow buckets). Component B: 10 DISJOINT values, weight
+        # 1e-6 (buckets ~20 bits deeper). Nothing sits between A's tail and B's head -- a genuine gap.
+        A = IntegerCategoricalDistribution(0, [0.1] * 10)
+        B = IntegerCategoricalDistribution(100, [0.1] * 10)
+        return MixtureDistribution([A, B], [1 - 1e-6, 1e-6])
+
+    def test_probability_gap_does_not_trigger_false_exhaustion(self):
+        mix = self._gap_mixture()
+        # indices 0..9 are component A; 10..19 require crossing the gap into component B. A
+        # count-plateau heuristic stalls inside the gap and would raise IndexError here.
+        for i in range(10, 20):
+            r = count_dp_seek(mix, i, oversample=8)
+            self.assertGreaterEqual(r.value, 100)  # reached into component B, not falsely exhausted at 10
+            self.assertFalse(r.truncated)
+            self.assertTrue(r.exact)
+
+    def test_genuinely_out_of_range_index_still_raises_indexerror(self):
+        # the fix must not turn a REAL out-of-range index into an infinite search: once the real
+        # exhaustion certificate fires (the whole finite 20-value support is captured), a beyond-range
+        # index still raises IndexError, unchanged.
+        mix = self._gap_mixture()
+        with self.assertRaises(IndexError):
+            count_dp_seek(mix, 20, oversample=8, max_fine_bucket_cap=1 << 16)
+
+    def test_budget_exhausted_before_index_located_raises_enumerationerror_not_indexerror(self):
+        # if the cap is hit before the index is even located AND exhaustion isn't certified, that is a
+        # budget failure, not a proof the index is out of range -- EnumerationError, not IndexError.
+        from mixle.stats.compute.pdist import EnumerationError
+
+        mix = self._gap_mixture()
+        with self.assertRaises(EnumerationError):
+            count_dp_seek(mix, 15, oversample=8, max_fine_bucket_cap=64)
+
+    def test_incomplete_window_returns_truncated_not_falsely_exact(self):
+        # engineered so the search locates `value` at a depth where its smear window is NOT yet fully
+        # built, and the cap is hit right there: the result must come back truncated/uncertified, never
+        # a "small visible fragment" masquerading as a certified exact bracket.
+        seq = SequenceDistribution(
+            IntegerCategoricalDistribution(0, [0.4, 0.3, 0.2, 0.1]), len_dist=PoissonDistribution(8.0)
+        )
+        r = count_dp_seek(seq, 10_000_000, oversample=16, smear=400, max_fine_bucket_cap=800)
+        self.assertTrue(r.truncated)
+        self.assertFalse(r.exact)
+        # window_lower remains a SOUND proven bound regardless (see _window_bracket's docstring); only
+        # the upper edge is best-effort in the truncated state.
+        self.assertLessEqual(r.rank_lower, r.rank_upper)
+
+    def test_complete_window_at_the_cap_boundary_is_not_falsely_incomplete(self):
+        # regression for the OTHER half of the fix: `built_top` must be the REQUESTED depth, not the
+        # deepest OCCUPIED histogram bucket -- a trailing run of genuinely-empty buckets right below the
+        # cap must not make a truly-complete window read as unbuilt (this used to make count_dp_rank's
+        # `rank` fall back to an imprecise window-midpoint estimate on ordinary, shallow queries).
+        rng = np.random.RandomState(0)
+        sizes = (5, 4, 6)
+        dist = CompositeDistribution(
+            tuple(IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(s)))) for s in sizes)
+        )
+        support = [list(t) for t in itertools.product(*[range(s) for s in sizes])]
+        lp = {tuple(x): dist.log_density(x) for x in support}
+        for x in support:
+            t = lp[tuple(x)]
+            true_rank = sum(1 for y in support if lp[tuple(y)] > t + 1e-12)
+            r = count_dp_rank(dist, x, oversample=32)
+            self.assertEqual(r.rank, true_rank, "rank mismatch at %s" % x)
+
+
 class MixtureCrossRankTestCase(unittest.TestCase):
     """mixture_cross_rank gives the TRUE marginal rank (not the tropical/dominant-component rank)."""
 

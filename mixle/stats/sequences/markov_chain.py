@@ -815,24 +815,41 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         alpha.append(
             {s: sr.map_values(sr.leaf(s, init_lp[s], quantizer), lambda v: [v]) for s in state_order if s in init_lp}
         )
+        # Parallel max-plus (tropical) scalar recursion tracking the TRUE (uncapped) worst-case
+        # reachable bucket per (length, state), run in lockstep with `alpha`. Every `sr.scale` call in
+        # the real recursion below truncates its OWN output to max_fine_bucket at each step, so
+        # `alpha[t][s].hist.max_bucket()` can never exceed max_fine_bucket by construction -- it cannot
+        # reveal whether truncation actually happened. This shadow recursion applies the SAME
+        # predecessor structure with no capping at all, so its values expose exactly that.
+        true_top: list[dict[Any, int] | None] = [None, {s: quantizer.fine_bucket(init_lp[s]) for s in init_lp}]
         for t in range(2, max_len + 1):
             prev = alpha[t - 1]
+            prev_top = true_top[t - 1]
             cur: dict[Any, Any] = {}
+            cur_top: dict[Any, int] = {}
             for s_next in state_order:
                 acc = sr.zero()
                 built = False
+                best: int | None = None
                 for s_prev, lp_tr in into[s_next]:
                     ph = prev.get(s_prev)
-                    if ph is None or ph.hist.is_empty():
-                        continue
-                    step = sr.map_values(
-                        sr.scale(ph, lp_tr, quantizer, max_fine_bucket), lambda seq, s=s_next: seq + [s]
-                    )
-                    acc = step if not built else sr.plus(acc, step)
-                    built = True
+                    if ph is not None and not ph.hist.is_empty():
+                        step = sr.map_values(
+                            sr.scale(ph, lp_tr, quantizer, max_fine_bucket), lambda seq, s=s_next: seq + [s]
+                        )
+                        acc = step if not built else sr.plus(acc, step)
+                        built = True
+                    pv = prev_top.get(s_prev)
+                    if pv is not None:
+                        cand = pv + quantizer.fine_bucket(lp_tr)
+                        if best is None or cand > best:
+                            best = cand
                 if built and not acc.hist.is_empty():
                     cur[s_next] = acc
+                if best is not None:
+                    cur_top[s_next] = best
             alpha.append(cur)
+            true_top.append(cur_top)
             if not cur:
                 truncated = True
                 break
@@ -849,6 +866,12 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             if L > built_len or not alpha[L]:
                 truncated = True
                 continue
+            # The TRUE (uncapped) worst-case bucket among states reachable at length L, plus the
+            # length term's own bucket -- the exact pre-cap top of this length's contribution,
+            # independent of whatever alpha's real (self-capping) histograms can reveal on their own.
+            lt = true_top[L]
+            if lt and max(lt.values()) + quantizer.fine_bucket(lp_len) > max_fine_bucket:
+                truncated = True
             pooled = sr.zero()
             pooled_built = False
             for s in state_order:

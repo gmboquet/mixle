@@ -325,6 +325,15 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
             children.append(child_index)
             truncated = truncated or child_truncated
 
+        # Every field individually fitting under max_fine_bucket does NOT imply their SUM does -- see
+        # CompositeDistribution.quantized_count_index's identical check for the full derivation. The
+        # joint cost is the sum of the per-field costs, so the product's true pre-cap top bucket is
+        # exactly sum(child.max_bucket()); semiring.product's convolution silently drops combinations
+        # beyond max_fine_bucket without reporting it, so it must be checked here.
+        child_tops = [c.hist.max_bucket() for c in children]
+        if all(top is not None for top in child_tops) and sum(child_tops) > max_fine_bucket:
+            truncated = True
+
         joint = semiring.product(children, quantizer, max_fine_bucket)
         sources = self.sources
         relabelled = semiring.map_values(

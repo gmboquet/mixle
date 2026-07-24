@@ -1502,6 +1502,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 if lt > -np.inf:
                     into[sp].append((s, lt, quantizer.fine_bucket(lt)))
 
+        # Each state's own worst-case (deepest) emission bucket -- exact whenever that state's own
+        # emission index is itself untruncated (if it IS truncated, `truncated` is already True via
+        # the `tr` OR above, so any resulting imprecision here cannot affect the final answer).
+        emit_top = [ci.hist.max_bucket() for ci in emit]
+
         # alpha[t][s] = count histogram of (path, obs) prefixes of length t ending in state s;
         # pooled[t][s] = the pre-emission prefix histogram (sum over predecessors), kept for unranking.
         alpha: list[dict[int, CountHistogram]] = [None, {}]
@@ -1512,20 +1517,42 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             if not h.is_empty():
                 alpha[1][s] = h
         pooled: list[dict[int, CountHistogram]] = [None, {}]
+        # Parallel max-plus (tropical) scalar recursion tracking the TRUE (uncapped) worst-case
+        # reachable bucket per (length, end-state), run in lockstep with `alpha`/`pooled` and gated by
+        # NEITHER's is_empty()/any_pred short-circuits. Every `.truncate(max_fine_bucket)` and
+        # `quantizer.convolve(..., max_fine_bucket=...)` call below caps its OWN output, so
+        # `alpha[t][s].max_bucket()` can never exceed max_fine_bucket by construction -- it cannot
+        # reveal whether truncation actually occurred. This shadow recursion, built with no capping at
+        # all, exposes it instead (same technique as MarkovChainDistribution.quantized_count_index).
+        true_top: list[dict[int, int] | None] = [None, {}]
+        for s in range(n):
+            if init_shift[s] is None or emit_top[s] is None:
+                continue
+            true_top[1][s] = init_shift[s] + emit_top[s]
         for t in range(2, max_len + 1):
             prev = alpha[t - 1]
+            prev_top = true_top[t - 1]
             cur: dict[int, CountHistogram] = {}
             pcur: dict[int, CountHistogram] = {}
+            cur_top: dict[int, int] = {}
             for sp in range(n):
                 if emit[sp].hist.is_empty():
                     continue
                 pool = CountHistogram.empty()
                 any_pred = False
+                pool_top: int | None = None
                 for s, _lt, shift in into[sp]:
                     ph = prev.get(s)
                     if ph is not None and not ph.is_empty():
                         pool = pool.add(ph.shift(shift).truncate(max_fine_bucket))
                         any_pred = True
+                    pv = prev_top.get(s)
+                    if pv is not None:
+                        cand = pv + shift
+                        if pool_top is None or cand > pool_top:
+                            pool_top = cand
+                if pool_top is not None and emit_top[sp] is not None:
+                    cur_top[sp] = pool_top + emit_top[sp]
                 if not any_pred or pool.is_empty():
                     continue
                 ah = quantizer.convolve(pool, emit[sp].hist, max_fine_bucket=max_fine_bucket)
@@ -1535,6 +1562,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 cur[sp] = ah
             alpha.append(cur)
             pooled.append(pcur)
+            true_top.append(cur_top)
             if not cur:
                 truncated = True
                 break
@@ -1551,6 +1579,12 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             if L > built or not alpha[L]:
                 truncated = True
                 continue
+            # The TRUE (uncapped) worst-case bucket among end-states reachable at length L, plus the
+            # length term's own bucket -- the exact pre-cap top of this length's contribution,
+            # independent of whatever alpha's real (self-capping) histograms can reveal on their own.
+            lt_L = true_top[L]
+            if lt_L and max(lt_L.values()) + ls > max_fine_bucket:
+                truncated = True
             seqh = CountHistogram.empty()
             for s in range(n):
                 h = alpha[L].get(s)
@@ -1692,6 +1726,13 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 if lt > -np.inf:
                     into[sp].append((s, lt, quantizer.fine_bucket(lt)))
 
+        # Each state's own worst-case (deepest) non-terminal/terminal emission bucket -- exact whenever
+        # that state's own emission index is itself untruncated (see the identical note in the main
+        # quantized_count_index path above: if it IS truncated, `truncated` is already True via the t1/
+        # t2 OR above, so any resulting imprecision here cannot affect the final answer).
+        nt_top = [ci.hist.max_bucket() for ci in emit_nt]
+        t_top = [ci.hist.max_bucket() for ci in emit_t]
+
         # Non-terminal prefix DP: nt[t][s] counts length-t all-non-terminal prefixes ending in state s.
         nt: list[dict[int, CountHistogram]] = [None, {}]
         ntpool: list[dict[int, CountHistogram]] = [None, {}]
@@ -1701,22 +1742,40 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             h = emit_nt[s].hist.shift(init_shift[s]).truncate(mfb)
             if not h.is_empty():
                 nt[1][s] = h
+        # Parallel max-plus (tropical) scalar recursion tracking the TRUE (uncapped) worst-case
+        # reachable bucket per (length, end-state) -- see the identical technique (and its rationale)
+        # in the main quantized_count_index path above.
+        nt_true_top: list[dict[int, int] | None] = [None, {}]
+        for s in range(n):
+            if init_shift[s] is None or nt_top[s] is None:
+                continue
+            nt_true_top[1][s] = init_shift[s] + nt_top[s]
         max_t = 1 << 20
         t = 2
         while t <= max_t and nt[t - 1]:
             prev = nt[t - 1]
+            prev_top = nt_true_top[t - 1]
             cur: dict[int, CountHistogram] = {}
             pcur: dict[int, CountHistogram] = {}
+            cur_top: dict[int, int] = {}
             for sp in range(n):
                 if emit_nt[sp].hist.is_empty():
                     continue
                 pool = CountHistogram.empty()
                 any_pred = False
+                pool_top: int | None = None
                 for s, _lt, shift in into[sp]:
                     ph = prev.get(s)
                     if ph is not None and not ph.is_empty():
                         pool = pool.add(ph.shift(shift).truncate(mfb))
                         any_pred = True
+                    pv = prev_top.get(s)
+                    if pv is not None:
+                        cand = pv + shift
+                        if pool_top is None or cand > pool_top:
+                            pool_top = cand
+                if pool_top is not None and nt_top[sp] is not None:
+                    cur_top[sp] = pool_top + nt_top[sp]
                 if not any_pred or pool.is_empty():
                     continue
                 ah = quantizer.convolve(pool, emit_nt[sp].hist, max_fine_bucket=mfb)
@@ -1728,6 +1787,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 break
             nt.append(cur)
             ntpool.append(pcur)
+            nt_true_top.append(cur_top)
             t += 1
         if t > max_t:
             truncated = True
@@ -1739,6 +1799,8 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         for s in range(n):  # L == 1: [terminal] from the initial state
             if init_shift[s] is None or emit_t[s].hist.is_empty():
                 continue
+            if init_shift[s] is not None and t_top[s] is not None and init_shift[s] + t_top[s] > mfb:
+                truncated = True
             comp = emit_t[s].hist.shift(init_shift[s]).truncate(mfb)
             if not comp.is_empty():
                 total = total.add(comp)
@@ -1747,16 +1809,25 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             prevnt = nt[length - 1]
             if not prevnt:
                 continue
+            prevnt_top = nt_true_top[length - 1]
             for s in range(n):
                 if emit_t[s].hist.is_empty():
                     continue
                 pool = CountHistogram.empty()
                 any_pred = False
+                pool_top = None
                 for pred, _lt, shift in into[s]:
                     ph = prevnt.get(pred)
                     if ph is not None and not ph.is_empty():
                         pool = pool.add(ph.shift(shift).truncate(mfb))
                         any_pred = True
+                    pv = prevnt_top.get(pred)
+                    if pv is not None:
+                        cand = pv + shift
+                        if pool_top is None or cand > pool_top:
+                            pool_top = cand
+                if pool_top is not None and t_top[s] is not None and pool_top + t_top[s] > mfb:
+                    truncated = True
                 if not any_pred or pool.is_empty():
                     continue
                 comp = quantizer.convolve(pool, emit_t[s].hist, max_fine_bucket=mfb)

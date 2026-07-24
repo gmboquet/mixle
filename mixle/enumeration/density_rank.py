@@ -351,28 +351,50 @@ class CountDPRankResult:
     oversample: int
 
 
-def _window_bracket(index, fb, smear, t, resolve_max, tol):
+def _window_bracket(index, fb, smear, t, resolve_max, tol, built_top, exhaustive):
     """Smear-window rank bracket around fine bucket ``fb`` for log-prob ``t``.
 
-    Returns ``(window_lower, window_upper, exact_rank)``: the count safely below the smear window,
-    that plus the in-window count, and -- when the window holds at most ``resolve_max`` items -- the
-    exact count strictly more probable than ``t`` (else ``None``). Shared by rank and seek so the two
-    stay consistent.
+    Returns ``(window_lower, window_upper, exact_rank, complete)``. ``window_lower`` is the count in
+    buckets safely below the smear window; ``window_upper`` adds the in-window count; ``exact_rank`` is
+    the count strictly more probable than ``t``, computed only when the window is CERTIFIED complete
+    and holds at most ``resolve_max`` items (else ``None``).
+
+    ``complete`` says whether ``[fb - smear, fb + smear]`` is provably covered by ``index``: either
+    ``exhaustive`` is True (the distribution's OWN exhaustion certificate -- ``quantized_count_index``'s
+    ``truncated`` flag was False for the build that produced ``index``, so the histogram holds the
+    ENTIRE support, not just whatever fits below ``built_top``), or the window's upper edge ``fb +
+    smear`` does not exceed ``built_top``.
+
+    ``built_top`` MUST be the ``max_fine_bucket`` depth ``index`` was actually BUILT WITH (what the
+    caller passed to ``quantized_count_index``) -- NOT ``index.hist.base + len(index.hist.data) - 1``
+    (the deepest OCCUPIED bucket). Those differ whenever the true distribution has zero mass in a run
+    of buckets right below the depth cap: ``CountHistogram`` trims trailing zero entries, so the
+    occupied range can be strictly shallower than what was actually built and verified empty. The DP
+    contract guarantees every bucket ``<= max_fine_bucket`` is correctly represented, zero or not, so
+    using the occupied range there would misreport a genuinely-complete window as unbuilt.
+
+    When ``complete`` is False, ``window_upper`` (and any resolved ``exact_rank``) must NOT be treated
+    as a guaranteed bound: buckets beyond ``built_top`` are simply ABSENT from the histogram (not
+    confirmed empty), so the window may in truth hold more than reported. ``window_lower`` remains a
+    valid proven lower bound regardless -- every bucket it sums is strictly below the window's lower
+    edge, hence always within the built range whenever the query bucket ``fb`` itself was locatable in
+    ``index`` at all. Shared by rank and seek so the two stay consistent.
     """
     hist = index.hist
     lo_b, hi_b = fb - smear, fb + smear
     window_lower = sum(hist.count_at(b) for b in range(hist.base, lo_b))
     window_count = sum(hist.count_at(b) for b in range(lo_b, hi_b + 1))
     window_upper = window_lower + window_count
-    if window_count <= resolve_max:
+    complete = exhaustive or hi_b <= built_top
+    if complete and window_count <= resolve_max:
         strictly_more = sum(
             1
             for b in range(lo_b, hi_b + 1)
             for off in range(hist.count_at(b))
             if float(index.get_in_bucket(b, off)[1]) > t + tol
         )
-        return window_lower, window_upper, window_lower + strictly_more
-    return window_lower, window_upper, None
+        return window_lower, window_upper, window_lower + strictly_more, True
+    return window_lower, window_upper, None, complete
 
 
 def count_dp_rank(
@@ -406,13 +428,17 @@ def count_dp_rank(
     q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample)
     fb = q.fine_bucket(t)
     smear = oversample if smear is None else int(smear)  # ~one bit of boundary uncertainty
-    index, _truncated = dist.quantized_count_index(q, max_fine_bucket=fb + smear)
+    index, truncated = dist.quantized_count_index(q, max_fine_bucket=fb + smear)
     if index is None:
         raise EnumerationError(dist, reason="no structural count index for rank")
 
-    wl, wu, exact_rank = _window_bracket(index, fb, smear, t, resolve_max, tol)
+    # The REQUESTED depth, not the deepest occupied bucket: the DP contract guarantees every bucket
+    # <= max_fine_bucket is correctly represented (whether zero or nonzero), so a trailing run of
+    # genuinely-empty buckets right below the cap must not read as "incomplete" (see _window_bracket).
+    built_top = fb + smear
+    wl, wu, exact_rank, _complete = _window_bracket(index, fb, smear, t, resolve_max, tol, built_top, not truncated)
     rank = exact_rank if exact_rank is not None else (wl + wu) // 2
-    return CountDPRankResult(rank, wl, wu, t, oversample)
+    return CountDPRankResult(rank=rank, window_lower=wl, window_upper=wu, log_prob=t, oversample=oversample)
 
 
 def _locate_bucket(hist, target_index):
@@ -448,6 +474,13 @@ class CountDPSeekResult:
             bound only when ``smear`` covers the <= log2(K)-bit tropical displacement; otherwise it is
             the approximate tropical bracket (raise ``smear`` for rigor; see :func:`count_dp_rank`).
         oversample: the quantizer oversample used (higher -> finer buckets -> tighter bracket).
+        truncated: True when the search hit ``max_fine_bucket_cap`` before ``value``'s smear window
+            could be fully built AND before the distribution's own exhaustion certificate could rule
+            out more (deeper, possibly gapped) support -- then ``exact`` is always False, and only
+            ``rank_lower`` remains a PROVEN bound; ``rank_upper`` is a best-effort figure from a
+            partially-built window, not a guarantee (buckets beyond the built depth are simply absent
+            from the histogram, not confirmed empty). False (the normal case) means ``rank_lower``/
+            ``rank_upper`` are both certified, whether or not they collapsed to an exact point.
     """
 
     value: Any
@@ -457,6 +490,7 @@ class CountDPSeekResult:
     rank_upper: int
     exact: bool
     oversample: int
+    truncated: bool = False
 
 
 @dataclass
@@ -507,12 +541,26 @@ def count_dp_seek(
     Walks the structural count histogram in ascending-bucket (= descending-probability) order until
     the cumulative count passes ``index``, then unranks within that bucket. No prefix enumeration, so
     arbitrary *deep* indices are reachable directly. The depth bound is grown geometrically until the
-    index (plus a smear margin) is covered or the support is exhausted.
+    index (plus a smear margin) is covered or the distribution's own exhaustion certificate proves no
+    more support exists -- see :meth:`~mixle.stats.compute.pdist.ProbabilityDistribution.quantized_count_index`'s
+    ``truncated`` return value, which is False exactly when its histogram holds the ENTIRE support. A
+    plain "the cumulative count stopped growing between two depths" plateau is deliberately NOT used to
+    conclude exhaustion: a discrete model can have zero support across a wide run of probability buckets
+    and resume having support below it (e.g. disjoint support clusters, or a component reachable only
+    through a tiny-weight path), and a plateau there is indistinguishable from genuine exhaustion by
+    count alone.
 
     Returns the value together with a provable bracket ``[rank_lower, rank_upper]`` on its true rank
     (the smear window): a tight bracket certifies the seek is in the separated / near-exact regime.
     For decomposable families this is exact up to quantization; for mixtures/HMMs it seeks into the
     tropical (dominant-component/path) projection and the bracket is that projection's error envelope.
+    If the search reaches ``max_fine_bucket_cap`` before the window is fully built and before
+    exhaustion is certified, the result is returned with ``truncated=True`` (``exact=False``, and only
+    ``rank_lower`` remains a proven bound) rather than silently passed off as a certified bracket. If
+    ``index`` itself is never located within the cap and exhaustion is not certified either, raises
+    ``EnumerationError`` -- NOT ``IndexError``, since ``IndexError`` would falsely claim the index is
+    proven out of range, when in fact the search simply ran out of budget; a genuine out-of-range
+    ``index`` (proven via the exhaustion certificate) still raises ``IndexError``, unchanged.
     """
     from mixle.enumeration.quantization.core import Quantizer
     from mixle.stats.compute.pdist import EnumerationError
@@ -522,43 +570,88 @@ def count_dp_seek(
     q = Quantizer(bin_width_bits=bin_width_bits, oversample=oversample)
     smear = oversample if smear is None else int(smear)
 
-    # Deepen the depth bound until the located bucket's smear window is fully built, or the
-    # structural count stops growing (support exhausted). The per-family ``truncated`` flag is not
-    # reliable across all families, so drive the loop off coverage + total() growth instead.
+    # Deepen the depth bound until the located bucket's smear window is fully built, or
+    # `quantized_count_index`'s own `truncated` flag proves the ENTIRE support is already captured
+    # (not a count plateau -- see the docstring above for why a plateau alone is not proof).
     mfb = max(2 * smear, 64)
     idx = None
-    prev_total = -1
+    located = None
+    truncated = True
     while True:
-        idx, _truncated = dist.quantized_count_index(q, max_fine_bucket=mfb)
+        idx, truncated = dist.quantized_count_index(q, max_fine_bucket=mfb)
         if idx is None:
             raise EnumerationError(dist, reason="no structural count index for seek")
-        total = idx.total()
         located = _locate_bucket(idx.hist, index)
-        if located is not None:
-            built_top = idx.hist.base + len(idx.hist.data) - 1
-            if located[0] + smear <= built_top:
-                break  # value found and its smear window is fully built
-        if (total == prev_total and total > 0) or mfb >= max_fine_bucket_cap:
-            break  # deepening adds nothing further (support exhausted) or runaway guard hit
-        prev_total = total
+        # The REQUESTED depth (mfb), not the deepest occupied bucket: the DP contract guarantees every
+        # bucket <= mfb is correctly represented (whether zero or nonzero), so a trailing run of
+        # genuinely-empty buckets right below the cap must not read as "not yet built" (see
+        # _window_bracket's docstring for the full argument).
+        if located is not None and located[0] + smear <= mfb:
+            break  # value found and its smear window is fully built -- certified
+        if not truncated:
+            break  # exhaustion certificate: the histogram already holds the entire support
+        if mfb >= max_fine_bucket_cap:
+            break  # resource guard -- give up, but do NOT claim exhaustion (more support may be deeper)
         mfb *= 2
 
-    located = _locate_bucket(idx.hist, index)
+    built_top = mfb
     if located is None:
-        raise IndexError("index %d is beyond the structural support count %d" % (index, idx.total()))
+        if not truncated:
+            raise IndexError("index %d is beyond the structural support count %d" % (index, idx.total()))
+        raise EnumerationError(
+            dist,
+            reason=(
+                "descending-probability index %d was not reached within max_fine_bucket_cap=%d bits; "
+                "the support is not proven exhausted (more values may exist at lower probability) -- "
+                "raise max_fine_bucket_cap to search deeper" % (index, mfb)
+            ),
+        )
     b_star, offset = located
     value, lp = idx.get_in_bucket(b_star, offset)
     lp = float(lp)
     fb_v = q.fine_bucket(lp)
-    wl, wu, exact_rank = _window_bracket(idx, fb_v, smear, lp, resolve_max, tol)
+    wl, wu, exact_rank, complete = _window_bracket(idx, fb_v, smear, lp, resolve_max, tol, built_top, not truncated)
     # The bucket/bracket math above uses the structural cost ``lp`` the index is built on (the tropical
     # dominant-path/component cost for HMM/mixture). The reported ``log_prob`` must be the documented
     # ``log p(value)``: for decomposable families this equals ``lp``, but for the tropical projection the
     # true marginal is a logsumexp over paths/components, so recompute it from the value.
     log_prob = float(dist.log_density(value))
+    if not complete:
+        # The cap was hit before value's smear window was fully built, and exhaustion was never
+        # certified either: `wl` is still a sound proven lower bound (see _window_bracket), but `wu`
+        # is a best-effort figure from a partial window, not a guaranteed upper bound -- mark the
+        # whole bracket uncertified instead of letting a small visible fragment pass as a proof.
+        return CountDPSeekResult(
+            value=value,
+            log_prob=log_prob,
+            index=index,
+            rank_lower=wl,
+            rank_upper=wu,
+            exact=False,
+            oversample=oversample,
+            truncated=True,
+        )
     if exact_rank is not None:
-        return CountDPSeekResult(value, log_prob, index, exact_rank, exact_rank, True, oversample)
-    return CountDPSeekResult(value, log_prob, index, wl, wu, False, oversample)
+        return CountDPSeekResult(
+            value=value,
+            log_prob=log_prob,
+            index=index,
+            rank_lower=exact_rank,
+            rank_upper=exact_rank,
+            exact=True,
+            oversample=oversample,
+            truncated=False,
+        )
+    return CountDPSeekResult(
+        value=value,
+        log_prob=log_prob,
+        index=index,
+        rank_lower=wl,
+        rank_upper=wu,
+        exact=False,
+        oversample=oversample,
+        truncated=False,
+    )
 
 
 @dataclass
@@ -591,6 +684,12 @@ class MarginalSeekResult:
         true_rank_lower, true_rank_upper: guaranteed bracket on ``value``'s TRUE marginal rank.
         exact: the bracket collapsed to the exact true rank (then the two bounds are equal).
         oversample: the quantizer oversample used (higher -> finer buckets -> tighter bracket).
+        truncated: True when the search hit ``max_fine_bucket_cap`` before ``value``'s (displacement-
+            widened) rank window could be fully built AND before the distribution's own exhaustion
+            certificate ruled out more support -- then ``exact`` is always False, and only
+            ``true_rank_lower`` remains a PROVEN bound; ``true_rank_upper`` is a best-effort figure from
+            a partially-built window, not a guarantee. False (the normal case) means both bounds are
+            certified, whether or not they collapsed to an exact point.
     """
 
     value: Any
@@ -600,6 +699,7 @@ class MarginalSeekResult:
     true_rank_upper: int
     exact: bool
     oversample: int
+    truncated: bool = False
 
     @property
     def semantics(self):
@@ -629,13 +729,19 @@ def marginal_seek(
     the exact rank in ``O(window)`` rather than ``O(index)``.
 
     Raises ``EnumerationError`` when no structural count index exists (e.g. a continuous-component
-    mixture), and ``IndexError`` when ``index`` is beyond the reachable structural count -- both exactly
-    like :func:`count_dp_seek`, whose depth-deepening loop this shares. A large probability *gap* (a
-    value separated from the rest by many bits, e.g. an outcome that only a ~1e-6-weight component can
-    emit) can make that loop conclude the support is exhausted early, so such deep-gap indices are
-    unreachable; this never affects reachable indices, since every unreached value is strictly *less*
-    probable than everything reached. The returned ``value`` sits at the *tropical* index; for the value
-    at a true descending index use :func:`mixle.enumeration.best_first.sound_top_k`.
+    mixture) -- both exactly like :func:`count_dp_seek`, whose depth-deepening loop this shares, INCLUDING
+    its exhaustion certificate: deepening is driven by ``quantized_count_index``'s own ``truncated`` flag
+    (False exactly when the histogram already holds the ENTIRE support), never by a plateau in the total
+    count. A large probability *gap* (a value separated from the rest by many bits, e.g. an outcome that
+    only a ~1e-6-weight component can emit) no longer causes a false-exhaustion conclusion: the loop
+    deepens straight through the gap, since a plateau in that region is not by itself proof that nothing
+    lies beyond it. ``IndexError`` is raised only once exhaustion is actually certified and ``index`` is
+    still unreached -- a proof, not a guess. If the search instead gives up at ``max_fine_bucket_cap``
+    with ``index`` still unreached and exhaustion uncertified, it raises ``EnumerationError`` (budget
+    exhausted, existence unproven) rather than a falsely-certain ``IndexError``; if ``index`` WAS reached
+    but its rank window could not be fully verified within the cap, it returns a result with
+    ``truncated=True`` instead of a certified bracket. The returned ``value`` sits at the *tropical*
+    index; for the value at a true descending index use :func:`mixle.enumeration.best_first.sound_top_k`.
     """
     from mixle.enumeration.quantization.core import Quantizer
     from mixle.enumeration.streams import freeze
@@ -656,35 +762,44 @@ def marginal_seek(
     mult_cap = max(1, round(2.0**disp_bits))  # worst-case copies of a shared value (K)
     smear = oversample + math.ceil(disp_bits * oversample / bin_width_bits)
 
-    # Deepen the depth bound until the located bucket's widened window is fully built or the structural
-    # count stops growing -- the same coverage-driven loop as count_dp_seek. ``exhausted`` records that
-    # deepening stopped adding support (the histogram now holds every value), in which case the window
-    # is complete even when ``hi_b`` runs past the last non-empty bucket -- those buckets are just empty.
+    # Deepen the depth bound until the located bucket's widened window is fully built, or
+    # `quantized_count_index`'s own `truncated` flag proves the ENTIRE support is already captured --
+    # the identical exhaustion-certificate loop as count_dp_seek (see its docstring for why a count
+    # plateau is not proof: a discrete model can have zero support across a wide run of buckets and
+    # resume having support below it, so "the count stopped growing" is never by itself conclusive).
     mfb = max(2 * smear, 64)
     idx = None
-    prev_total = -1
-    exhausted = False
+    located = None
+    truncated = True
     while True:
-        idx, _truncated = dist.quantized_count_index(q, max_fine_bucket=mfb)
+        idx, truncated = dist.quantized_count_index(q, max_fine_bucket=mfb)
         if idx is None:
             raise EnumerationError(dist, reason="no structural count index for seek")
-        total = idx.total()
         located = _locate_bucket(idx.hist, index)
-        if located is not None:
-            built_top = idx.hist.base + len(idx.hist.data) - 1
-            if located[0] + smear <= built_top:
-                break
-        if total == prev_total and total > 0:
-            exhausted = True
-            break
+        # The REQUESTED depth (mfb), not the deepest occupied bucket -- see count_dp_seek's identical
+        # note: the DP contract guarantees every bucket <= mfb is correctly represented (whether zero
+        # or nonzero), so a trailing run of genuinely-empty buckets right below the cap must not read
+        # as "not yet built".
+        if located is not None and located[0] + smear <= mfb:
+            break  # value found and its displacement-widened window is fully built -- certified
+        if not truncated:
+            break  # exhaustion certificate: the histogram already holds the entire support
         if mfb >= max_fine_bucket_cap:
-            break
-        prev_total = total
+            break  # resource guard -- give up, but do NOT claim exhaustion (more support may be deeper)
         mfb *= 2
 
-    located = _locate_bucket(idx.hist, index)
+    built_top = mfb
     if located is None:
-        raise IndexError("index %d is beyond the structural support count %d" % (index, idx.total()))
+        if not truncated:
+            raise IndexError("index %d is beyond the structural support count %d" % (index, idx.total()))
+        raise EnumerationError(
+            dist,
+            reason=(
+                "descending-probability index %d was not reached within max_fine_bucket_cap=%d bits; "
+                "the support is not proven exhausted (more values may exist at lower probability) -- "
+                "raise max_fine_bucket_cap to search deeper" % (index, mfb)
+            ),
+        )
     b_star, offset = located
     value, _trop_lp = idx.get_in_bucket(b_star, offset)
     t = float(dist.log_density(value))  # TRUE marginal log-density of the located value
@@ -700,8 +815,32 @@ def marginal_seek(
     lo_b, hi_b = fb_t - smear, fb_t + smear
     raw_below = sum(hist.count_at(b) for b in range(hist.base, lo_b))
     raw_within = sum(hist.count_at(b) for b in range(lo_b, hi_b + 1))
-    built_top = hist.base + len(hist.data) - 1
-    window_built = hi_b <= built_top or exhausted
+    window_built = (not truncated) or hi_b <= built_top
+
+    if not window_built:
+        # The cap was hit before value's displacement-widened window could be fully built, and
+        # exhaustion was never certified either. ``raw_below`` remains a sound proven bound regardless
+        # -- the identical argument count_dp_seek's ``window_lower`` relies on (see its docstring and
+        # ``_window_bracket``'s): every bucket it sums is strictly below the window's lower edge, hence
+        # always <= built_top whenever ``b_star`` itself was locatable at all. Concretely here: b_star
+        # <= built_top by construction of ``_locate_bucket``, and fb_t <= b_star (the comment above),
+        # so lo_b - 1 <= b_star - smear <= built_top, and raw_below sums only buckets < lo_b. Dividing
+        # by ``mult_cap`` keeps that bound sound against the multiplicity over-count. ``raw_within`` is
+        # only a best-effort figure from a partial window -- buckets beyond ``built_top`` are simply
+        # ABSENT from the histogram (not confirmed empty) -- so it is NOT a guaranteed upper bound; the
+        # whole bracket is marked uncertified instead of letting an incomplete window pass as a proof.
+        lower = -(-raw_below // mult_cap)  # ceil division
+        upper = raw_below + raw_within
+        return MarginalSeekResult(
+            value=value,
+            log_prob=t,
+            index=index,
+            true_rank_lower=lower,
+            true_rank_upper=upper,
+            exact=False,
+            oversample=oversample,
+            truncated=True,
+        )
 
     # ``tol`` is the rank's TIE THRESHOLD: a window value counts as strictly more probable only when its
     # true log-density exceeds ``t`` by more than ``tol``. It must match the convention the true rank is
@@ -711,7 +850,8 @@ def marginal_seek(
     # Exact path 1 -- no displacement and no over-count (decomposable, or a provably-disjoint mixture
     # reporting disp_bits == 0): raw_below is already the exact distinct count strictly below the window
     # (all provably more probable), so resolving the window against the true log_density pins the rank.
-    if mult_cap == 1 and window_built and raw_within <= resolve_max:
+    # (window_built is guaranteed True here -- the incomplete case already returned above.)
+    if mult_cap == 1 and raw_within <= resolve_max:
         seen: set = set()
         strictly_more = 0
         for b in range(lo_b, hi_b + 1):
@@ -724,12 +864,21 @@ def marginal_seek(
                 if float(dist.log_density(u)) > t + tol:
                     strictly_more += 1
         rank = raw_below + strictly_more
-        return MarginalSeekResult(value, t, index, rank, rank, True, oversample)
+        return MarginalSeekResult(
+            value=value,
+            log_prob=t,
+            index=index,
+            true_rank_lower=rank,
+            true_rank_upper=rank,
+            exact=True,
+            oversample=oversample,
+            truncated=False,
+        )
 
     # Exact path 2 -- shallow index: the whole prefix up to the window is small, so unrank and
     # de-duplicate [base, hi_b] against the true log_density. Every value more probable than ``value``
     # has its dominant copy at a bucket <= b_star <= hi_b, so this distinct set is complete.
-    if window_built and (raw_below + raw_within) <= resolve_max:
+    if (raw_below + raw_within) <= resolve_max:
         seen = set()
         strictly_more = 0
         for b in range(hist.base, hi_b + 1):
@@ -741,14 +890,33 @@ def marginal_seek(
                 seen.add(key)
                 if float(dist.log_density(u)) > t + tol:
                     strictly_more += 1
-        return MarginalSeekResult(value, t, index, strictly_more, strictly_more, True, oversample)
+        return MarginalSeekResult(
+            value=value,
+            log_prob=t,
+            index=index,
+            true_rank_lower=strictly_more,
+            true_rank_upper=strictly_more,
+            exact=True,
+            oversample=oversample,
+            truncated=False,
+        )
 
-    # Bracket fallback -- the deep overlapping case. raw_below over-counts the distinct rank by at most
-    # mult_cap (each shared value appears once per component), so ceil(raw_below / mult_cap) is a sound
-    # floor; raw_below + raw_within is a sound ceiling (every more-probable value has a copy <= hi_b).
+    # Bracket fallback -- the deep overlapping case (window_built is True here, so both bounds are
+    # certified). raw_below over-counts the distinct rank by at most mult_cap (each shared value
+    # appears once per component), so ceil(raw_below / mult_cap) is a sound floor; raw_below +
+    # raw_within is a sound ceiling (every more-probable value has a copy <= hi_b).
     lower = -(-raw_below // mult_cap)  # ceil division
     upper = raw_below + raw_within
-    return MarginalSeekResult(value, t, index, lower, upper, lower == upper, oversample)
+    return MarginalSeekResult(
+        value=value,
+        log_prob=t,
+        index=index,
+        true_rank_lower=lower,
+        true_rank_upper=upper,
+        exact=(lower == upper),
+        oversample=oversample,
+        truncated=False,
+    )
 
 
 def _mass_histogram(dist, quantizer, max_fine_bucket):
