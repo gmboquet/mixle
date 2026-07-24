@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -212,6 +213,51 @@ def hmm_best_paths(
         yield state[2], g
 
 
+@dataclass
+class CertifiedCount:
+    """A path count from :class:`HMMPathIndex`, honest about whether it is the complete answer.
+
+    ``HMMPathIndex`` is built to a finite quantized-bucket budget; when a query needs to look beyond
+    that budget on a genuinely truncated index, the stored tables cannot answer it exactly -- paths
+    beyond the budget were never counted. Returning the in-budget count as a bare number would look
+    identical to a complete answer with no way to tell the two apart (MXR-080-0230); this return type
+    makes the distinction explicit instead.
+
+    Attributes:
+        value: the count of indexed (in-budget) paths satisfying the query. Always a sound LOWER
+            bound on the true count -- every path counted here genuinely qualifies, so this can only
+            under-, never over-, state the truth. Exact (up to the ordinary quantization smear
+            documented on :meth:`HMMPathIndex.count`, unrelated to truncation) when ``certified``.
+        certified: True when ``value`` is provably the complete answer -- no path beyond the built
+            budget could also qualify. False when the query reaches beyond the built budget on a
+            truncated index, so additional qualifying paths may exist beyond ``value``.
+    """
+
+    value: int
+    certified: bool
+
+
+@dataclass
+class CertifiedMassBound:
+    """A joint probability/density mass bracket from :meth:`HMMPathIndex.mass_above`.
+
+    Attributes:
+        lower: sound lower bound on the true mass above the threshold. Valid regardless of
+            ``certified`` -- paths beyond a truncated budget can only ADD mass, never invalidate a
+            lower bound derived purely from the paths this index actually has.
+        upper: sound upper bound when ``certified``; ``math.inf`` when not. A truncated index's
+            stored histogram cannot certify any FINITE upper bound on mass that might live beyond the
+            built budget without deepening it -- reporting the in-budget figure anyway would be an
+            unsound bound wearing a sound bound's shape (MXR-080-0230).
+        certified: True when both bounds are provably sound answers to the exact query; False when
+            the threshold reaches beyond the built budget on a truncated index.
+    """
+
+    lower: float
+    upper: float
+    certified: bool
+
+
 class HMMPathIndex:
     """Quantized random-access index over an HMM's state paths for one observation sequence.
 
@@ -222,19 +268,24 @@ class HMMPathIndex:
     without renormalizing -- are allowed; ``log_b`` is an emission LOG-LIKELIHOOD and may be
     positive/unnormalized -- see :func:`hmm_best_paths`). An all-impossible initial vector or a
     position with no finite score at all is not an error: it is represented explicitly via
-    ``empty_support`` (and ``total()`` reporting zero), rather than crashing.
+    ``empty_support`` (and ``total()`` reporting a certified zero), rather than crashing.
 
     **Precompute** (once, ``O(T * K^2 * W)``): quantize every step score -- ``log_pi[s] + log_b[0, s]``
     and ``log_A[s, s'] + log_b[t, s']``, one floor per step so the accumulated smear is at most ``T``
     fine buckets -- and run a forward count DP: ``C_t[s']`` is the histogram, over integer total-score
-    buckets, of the number of length-``t+1`` prefixes ending in state ``s'``. Counts are float64 (exact
-    below 2**53; the number of paths is ``K**T``, so deep problems carry the documented ~1e-16/op
-    relative error instead of overflowing).
+    buckets, of the number of length-``t+1`` prefixes ending in state ``s'``. Counts are EXACT Python
+    arbitrary-precision integers, never float64 (MXR-080-0229): the number of paths is ``K**T``, which
+    exceeds float64's 2**53 exact-integer range for even modest ``T``, and every operation this DP
+    performs on a count is addition -- no rounding is ever actually needed here.
 
     **Query** (each ``O(T * K)``): ``unrank(i)`` walks the stored tables backward -- pick the final
     state whose bucket count covers the offset, then repeatedly the predecessor whose shifted prefix
     bucket does -- returning the ``i``-th best path *by quantized score* and its exact joint
-    log-probability. ``count`` / ``threshold`` / ``mass_above`` read the pooled final histogram.
+    log-probability, exactly for any ``i`` within the built support. ``total`` / ``count`` /
+    ``mass_above`` read the pooled final histogram and report a :class:`CertifiedCount` /
+    :class:`CertifiedMassBound`: a query that reaches beyond a truncated index's built budget gets a
+    sound bound with ``certified=False`` rather than a bare number indistinguishable from a complete
+    answer (MXR-080-0230).
 
     Ordering contract: paths are ordered by their quantized bucket (width ``bin_width_bits/oversample``
     bits); within a bucket the order is deterministic but unspecified -- exactly the count-index
@@ -325,12 +376,20 @@ class HMMPathIndex:
             if self.T > 1
             else np.zeros((0, self.K, self.K), dtype=np.int64)
         )
-        # forward count DP over buckets; alpha[t][s] is a length-W float64 vector (bucket -> #prefixes)
-        alpha = np.zeros((self.T, self.K, W), dtype=np.float64)
+        # forward count DP over buckets; alpha[t][s] is a length-W vector of EXACT Python-int counts
+        # (arbitrary precision, never float64 -- MXR-080-0229). The number of paths is up to K**T:
+        # for K=2 that already exceeds float64's 2**53 exact-integer range past T=53, at which point
+        # adjacent integer ranks collapse onto the same float64 value -- total()/unrank() would then
+        # disagree about the support, and random access would misroute. Every operation this DP
+        # performs on a count -- seeding 0/1, elementwise +=, sum, cumsum -- is exact addition, never
+        # multiplication or rounding, so exactness costs only the constant factor of Python-int
+        # arithmetic (the same tradeoff CountHistogram's exact=True mode makes structurally elsewhere
+        # in this package; see quantization/core.py).
+        alpha = np.zeros((self.T, self.K, W), dtype=object)
         for s in range(self.K):
             fb = int(self._init_fb[s])
             if 0 <= fb <= self._budget_fb:
-                alpha[0, s, fb] = 1.0
+                alpha[0, s, fb] = 1
         self.truncated = bool((self._init_fb > self._budget_fb).any())
         for t in range(1, self.T):
             for sp in range(self.K):
@@ -350,62 +409,102 @@ class HMMPathIndex:
                     else:
                         acc += src
         self._alpha = alpha
-        self._final = alpha[self.T - 1].sum(axis=0)  # pooled bucket counts over final states
+        self._final = alpha[self.T - 1].sum(axis=0)  # pooled bucket counts over final states (exact ints)
         self._cum = np.cumsum(self._final)
 
     # -- whole-index reads ----------------------------------------------------------------------------------
 
-    def total(self) -> float:
-        """Number of state paths within the budget (== K**T when nothing truncated; float64 counts)."""
-        return float(self._final.sum())
+    def total(self) -> CertifiedCount:
+        """Number of state paths within the budget (== K**T when nothing truncated; exact integer count).
 
-    def count(self, min_log_joint: float) -> float:
+        ``certified`` is False when the index is truncated: ``value`` is then only a sound LOWER
+        bound on the true number of paths -- some paths exceed the built budget and were never
+        counted (MXR-080-0230). Deepen ``budget_bits`` (or omit it for the default, which is sized to
+        cover every finite-score path) to certify a larger/complete total.
+        """
+        return CertifiedCount(value=int(self._final.sum()), certified=not self.truncated)
+
+    def count(self, min_log_joint: float) -> CertifiedCount:
         """How many paths have quantized joint log-probability at least ``min_log_joint``.
 
         Counts every true qualifier (the structural bucket never over-states a path's bits) plus at
-        most the paths within the ``T``-floor smear band below the threshold.
-        """
-        fb = min(self.bucket_of(min_log_joint), self._budget_fb)
-        return float(self._cum[fb])
+        most the paths within the ``T``-floor smear band below the threshold -- this ordinary
+        quantization smear applies regardless of ``certified``.
 
-    def mass_above(self, min_log_joint: float) -> tuple[float, float]:
-        """A ``(lower, upper)`` bracket on the total joint probability/density of paths above the threshold.
+        ``certified`` is True whenever this query's own bucket stays within the built budget: bucket
+        costs only accumulate along a path (never decrease), so every bucket the index does hold is a
+        complete, exact count regardless of the index's global ``truncated`` flag. It is False only
+        when the query needs to look beyond the built budget on a genuinely truncated index
+        (MXR-080-0230): ``value`` is then a sound LOWER bound (every indexed path is a real
+        qualifier), not the complete answer -- more qualifying paths may live beyond the budget.
+        """
+        fb_raw = self.bucket_of(min_log_joint)
+        clamped = fb_raw > self._budget_fb
+        fb = min(fb_raw, self._budget_fb)
+        certified = (not clamped) or (not self.truncated)
+        return CertifiedCount(value=int(self._cum[fb]), certified=certified)
+
+    def mass_above(self, min_log_joint: float) -> CertifiedMassBound:
+        """A bracket on the total joint probability/density of paths above the threshold.
 
         Bucket arithmetic with the ``T``-floor smear: a path in bucket ``b`` carries between
         ``exp(total_offset) * 2**-((b + T) / fpb)`` and ``exp(total_offset) * 2**-(b / fpb)`` of joint
         mass (the offset restores the per-position shift, so unnormalized emission likelihoods work).
+
+        ``certified`` follows the same rule as :meth:`count`: True unless this query reaches beyond
+        the built budget on a truncated index. When not certified, ``lower`` remains a sound bound
+        (unindexed paths can only add mass) but ``upper`` is replaced with ``math.inf`` -- the
+        in-budget figure is not a valid upper bound once qualifying mass may exist beyond the budget,
+        so reporting it as one would be unsound, not just imprecise (MXR-080-0230).
         """
-        fb = min(self.bucket_of(min_log_joint), self._budget_fb)
+        fb_raw = self.bucket_of(min_log_joint)
+        clamped = fb_raw > self._budget_fb
+        fb = min(fb_raw, self._budget_fb)
+        certified = (not clamped) or (not self.truncated)
         per_bit = self.quantizer.fine_per_bit()
         buckets = np.arange(fb + 1, dtype=float)
-        c = self._final[: fb + 1]
+        c = np.array(self._final[: fb + 1], dtype=float)  # counts -> float64 for this inherently-approximate mass
         hi = float((c * np.exp(self.total_offset - buckets / per_bit * _LOG2)).sum())
         lo = float((c * np.exp(self.total_offset - (buckets + self.T) / per_bit * _LOG2)).sum())
-        return lo, hi
+        if not certified:
+            hi = math.inf
+        return CertifiedMassBound(lower=lo, upper=hi, certified=certified)
 
     # -- random access --------------------------------------------------------------------------------------
 
     def unrank(self, i: int) -> tuple[tuple[int, ...], float]:
         """The ``i``-th best state path by quantized score (0-based) and its exact joint log-probability.
 
-        One backward table walk -- ``O(T * K)`` -- regardless of how deep ``i`` is.
+        One backward table walk -- ``O(T * K)`` -- regardless of how deep ``i`` is. Every table read
+        along the walk is an exact Python int (MXR-080-0229), so ``i`` resolves exactly for supports
+        far beyond float64's 2**53 exact-integer range -- adjacent ranks never alias to the same
+        stored offset the way they would under float64 accumulation.
         """
         i = _require_index(i, label="rank")
         if i < 0:
             raise IndexError("rank must be >= 0")
         if i >= self._cum[-1]:
-            raise IndexError("rank %d beyond the indexed paths (total %.6g)" % (i, float(self._cum[-1])))
-        bucket = int(np.searchsorted(self._cum, float(i), side="right"))
-        offset = float(i) - (float(self._cum[bucket - 1]) if bucket else 0.0)
+            raise IndexError("rank %d beyond the indexed paths (total %d)" % (i, self._cum[-1]))
+        bucket = int(np.searchsorted(self._cum, i, side="right"))
+        offset = i - (self._cum[bucket - 1] if bucket else 0)
 
         # final state: walk states in index order inside this bucket
         state = -1
         for s in range(self.K):
-            c = float(self._alpha[self.T - 1, s, bucket])
+            c = self._alpha[self.T - 1, s, bucket]
             if offset < c:
                 state = s
                 break
             offset -= c
+        if state < 0:
+            # alpha[T-1, :, bucket].sum() == _final[bucket] exactly (both are exact-integer sums over
+            # the same terms), and `offset` was bounded by that very sum via the cumsum/searchsorted
+            # step above -- so exhausting every state without consuming `offset` means the
+            # exact-integer bookkeeping itself is inconsistent, not an expected rounding crumb.
+            raise RuntimeError(
+                f"internal invariant violated: rank {i} not resolved by any final state in bucket "
+                f"{bucket} (exact-integer counts should make this unreachable)"
+            )
         path = [state]
         remaining = bucket
         for t in range(self.T - 1, 0, -1):
@@ -414,17 +513,17 @@ class HMMPathIndex:
                 fb = int(self._step_fb[t - 1, s, state])
                 if fb < 0 or fb > remaining:
                     continue
-                c = float(self._alpha[t - 1, s, remaining - fb])
+                c = self._alpha[t - 1, s, remaining - fb]
                 if offset < c:
                     chosen = s
                     break
                 offset -= c
-            if chosen < 0:  # numerical crumbs from float counts: take the last viable predecessor
-                for s in range(self.K - 1, -1, -1):
-                    fb = int(self._step_fb[t - 1, s, state])
-                    if 0 <= fb <= remaining and self._alpha[t - 1, s, remaining - fb] > 0:
-                        chosen = s
-                        break
+            if chosen < 0:
+                # same exact-integer invariant as above, one position earlier in the walk -- see there.
+                raise RuntimeError(
+                    f"internal invariant violated: rank {i} not resolved by any predecessor at "
+                    f"position {t} (exact-integer counts should make this unreachable)"
+                )
             remaining -= int(self._step_fb[t - 1, chosen, state])
             path.append(chosen)
             state = chosen
