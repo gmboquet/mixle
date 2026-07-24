@@ -187,14 +187,52 @@ def mmd(samples_p: np.ndarray, samples_q: np.ndarray, *, kernel: str = "rbf", ba
 
 @dataclass(frozen=True)
 class DiscrepancyResult:
-    """One discrepancy evaluation: the value, which metric computed it, and whether it was exact."""
+    """One discrepancy evaluation: the value, which metric computed it, and whether it was exact.
+
+    ``seed`` and ``n_samples`` record what a Monte Carlo estimate needs for exact reproduction: pass
+    ``seed`` back into :func:`discrepancy_report` and the same ``value`` comes back out. Both are
+    ``None`` when nothing was sampled -- an exact closed form, or a metric applied directly to
+    caller-supplied arrays -- since recording a seed there would misleadingly imply randomness that
+    was never used. ``seed`` is also ``None`` when the caller passed their own
+    ``np.random.RandomState`` instance rather than an int: that object's reproducibility is already
+    the caller's to manage, and there is no single integer that reconstructs it.
+    """
 
     value: float
     metric: str
     degraded: bool
+    seed: int | None = None
+    n_samples: int | None = None
 
 
-def discrepancy_report(predicted: Any, observed: Any, *, metric: str = "auto") -> DiscrepancyResult:
+def _resolve_report_seed(seed: int | np.random.RandomState | None) -> tuple[np.random.RandomState, int | None]:
+    """Resolve ``discrepancy_report``'s ``seed`` argument to an RNG plus the integer to record.
+
+    An explicit int is used as-is and echoed back unchanged. ``None`` means the caller didn't ask for
+    a specific seed -- rather than seeding from OS entropy and leaving that draw forever
+    unrecoverable, a fresh integer is generated *first*, used to build the RNG, and handed back so it
+    can be recorded on the result: an unseeded call must still be reproducible afterwards by whoever
+    receives that result, even though they didn't pick the seed themselves. An explicit
+    ``RandomState`` instance is used as-is (mirroring :func:`_rng`); there is no single integer that
+    reconstructs it, so the recorded seed is ``None`` in that case -- the caller already owns that
+    object's reproducibility.
+    """
+    if isinstance(seed, np.random.RandomState):
+        return seed, None
+    if seed is None:
+        seed = int(np.random.SeedSequence().generate_state(1)[0])
+    return np.random.RandomState(seed), int(seed)
+
+
+# Sample budgets for discrepancy_report's own Monte Carlo paths, named so DiscrepancyResult.n_samples
+# has one source of truth instead of a literal repeated at every call site below.
+_MMD_PROXY_SAMPLES = 512  # predicted-vs-observed-array mmd path: samples drawn from `predicted`
+_DEFAULT_MC_N = 10_000  # mirrors kl_divergence/js_divergence/wasserstein_distance's own `n` default
+
+
+def discrepancy_report(
+    predicted: Any, observed: Any, *, metric: str = "auto", seed: int | np.random.RandomState | None = None
+) -> DiscrepancyResult:
     """The actual ``delta_m(o_hat, o)`` entry point: compare a predicted and an observed value/distribution.
 
     ``metric="auto"`` picks ``kl_divergence`` when both sides look like distributions (expose
@@ -203,28 +241,47 @@ def discrepancy_report(predicted: Any, observed: Any, *, metric: str = "auto") -
     ``predicted``). ``degraded=True`` whenever the underlying computation fell back to a Monte Carlo /
     sample-based estimate rather than an exact closed form -- callers that need to know whether a
     number is exact or estimated read this field rather than guessing from the metric name.
+
+    Every path that draws samples does so from a seeded RNG, never from unrecorded OS entropy: pass
+    ``seed`` for a run you choose to make reproducible, or leave it unset and read the seed this
+    function picked back off ``result.seed`` -- either way, calling again with that same ``seed``
+    reproduces the exact same ``value``. See :class:`DiscrepancyResult` for when ``seed`` /
+    ``n_samples`` come back ``None`` instead.
     """
     if metric == "auto":
         predicted_is_dist = callable(getattr(predicted, "log_density", None))
         observed_is_dist = callable(getattr(observed, "log_density", None))
         if predicted_is_dist and observed_is_dist:
             exact = _is_univariate_gaussian(predicted) and _is_univariate_gaussian(observed)
-            return DiscrepancyResult(kl_divergence(predicted, observed), "kl_divergence", degraded=not exact)
+            if exact:
+                return DiscrepancyResult(kl_divergence(predicted, observed), "kl_divergence", degraded=False)
+            rng, seed_used = _resolve_report_seed(seed)
+            value = kl_divergence(predicted, observed, seed=rng)
+            return DiscrepancyResult(value, "kl_divergence", degraded=True, seed=seed_used, n_samples=_DEFAULT_MC_N)
         if predicted_is_dist and not observed_is_dist:
-            rng = _rng(None)
-            pred_samples = _sample(predicted, 512, rng)
+            rng, seed_used = _resolve_report_seed(seed)
+            pred_samples = _sample(predicted, _MMD_PROXY_SAMPLES, rng)
             obs_samples = np.atleast_1d(np.asarray(observed, dtype=np.float64))
-            return DiscrepancyResult(mmd(pred_samples, obs_samples), "mmd", degraded=True)
+            value = mmd(pred_samples, obs_samples)
+            return DiscrepancyResult(value, "mmd", degraded=True, seed=seed_used, n_samples=_MMD_PROXY_SAMPLES)
         pred_arr = np.atleast_1d(np.asarray(predicted, dtype=np.float64))
         obs_arr = np.atleast_1d(np.asarray(observed, dtype=np.float64))
         return DiscrepancyResult(mmd(pred_arr, obs_arr), "mmd", degraded=True)
     if metric == "kl_divergence":
         exact = _is_univariate_gaussian(predicted) and _is_univariate_gaussian(observed)
-        return DiscrepancyResult(kl_divergence(predicted, observed), metric, degraded=not exact)
+        if exact:
+            return DiscrepancyResult(kl_divergence(predicted, observed), metric, degraded=False)
+        rng, seed_used = _resolve_report_seed(seed)
+        value = kl_divergence(predicted, observed, seed=rng)
+        return DiscrepancyResult(value, metric, degraded=True, seed=seed_used, n_samples=_DEFAULT_MC_N)
     if metric == "js_divergence":
-        return DiscrepancyResult(js_divergence(predicted, observed), metric, degraded=True)
+        rng, seed_used = _resolve_report_seed(seed)
+        value = js_divergence(predicted, observed, seed=rng)
+        return DiscrepancyResult(value, metric, degraded=True, seed=seed_used, n_samples=_DEFAULT_MC_N)
     if metric == "wasserstein_distance":
-        return DiscrepancyResult(wasserstein_distance(predicted, observed), metric, degraded=True)
+        rng, seed_used = _resolve_report_seed(seed)
+        value = wasserstein_distance(predicted, observed, seed=rng)
+        return DiscrepancyResult(value, metric, degraded=True, seed=seed_used, n_samples=_DEFAULT_MC_N)
     if metric == "mmd":
         return DiscrepancyResult(mmd(predicted, observed), metric, degraded=True)
     raise ValueError(f"unknown metric {metric!r}")
