@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.doe.designs import _qmc_unit
+from mixle.doe.designs import _as_bounds, _qmc_unit, _require_exact_positive_int
 
 __all__ = ["sobol_indices", "morris_screening", "fast_indices", "dgsm"]
 
@@ -36,6 +36,41 @@ def _sobol_unit(n: int, d: int, seed: int) -> np.ndarray:
         return _qmc_unit(qmc.Sobol, d, n, True, np.random.RandomState(seed))
     except Exception:  # pragma: no cover - qmc fallback  # noqa: BLE001
         return np.random.RandomState(seed).random((n, d))
+
+
+def _validate_names(names: Sequence[str] | None, d: int) -> list[str]:
+    """Validate optional per-input ``names``: exactly ``d`` entries when given, else ``x0..x{d-1}``.
+
+    Shared by every estimator in this module (MXR-080-0192): a caller-supplied name list whose
+    length does not match the model's dimensionality is rejected here, once, instead of being
+    silently accepted and then silently mis-zipped against the per-input results downstream.
+    """
+    if names is None:
+        return [f"x{i}" for i in range(d)]
+    names_list = list(names)
+    if len(names_list) != d:
+        raise ValueError(f"names must have exactly {d} entries (one per dimension), got {len(names_list)}.")
+    return names_list
+
+
+def _eval_model(func: Callable[[np.ndarray], np.ndarray], x: np.ndarray, *, label: str = "func") -> np.ndarray:
+    """Call the vectorized model ``func`` at the ``(m, d)`` points ``x`` and validate its output.
+
+    Every estimator in this module treats ``func`` as ``f(X) -> y`` mapping an ``(m, d)`` batch of
+    input rows to an ``(m,)`` array of scalar outputs, and this is the single place that call is
+    made (MXR-080-0192): a model that returns the wrong number of outputs or a non-finite value is
+    caught immediately at the call site instead of silently corrupting a downstream variance or
+    elementary-effect computation via a shape-broadcast or a propagated NaN/inf.
+    """
+    y = np.asarray(func(x), dtype=float).ravel()
+    if y.shape[0] != x.shape[0]:
+        raise ValueError(
+            f"{label} must return one output per input row: called with {x.shape[0]} row(s), got "
+            f"{y.shape[0]} output(s)."
+        )
+    if not np.all(np.isfinite(y)):
+        raise ValueError(f"{label} returned a non-finite value (inf or nan); every model output must be finite.")
+    return y
 
 
 def sobol_indices(
@@ -62,27 +97,29 @@ def sobol_indices(
         interactions involving ``i`` (so ``ST[i] - S1[i]`` measures ``i``'s interaction strength, and
         ``ST[i] ~ 0`` means input ``i`` can be fixed).
     """
-    bounds = np.asarray(bounds, dtype=float)
-    d = len(bounds)
+    bounds = _as_bounds(bounds)
+    d = bounds.shape[0]
+    n = _require_exact_positive_int(n, "n")
+    names_out = _validate_names(names, d)
     a_unit = _sobol_unit(n, 2 * d, seed)  # split one 2d-dimensional Sobol block into A and B (independence)
     a, b = a_unit[:, :d], a_unit[:, d:]
-    ya = np.asarray(func(_scale(a, bounds)), dtype=float).ravel()
-    yb = np.asarray(func(_scale(b, bounds)), dtype=float).ravel()
+    ya = _eval_model(func, _scale(a, bounds), label="sobol_indices's func")
+    yb = _eval_model(func, _scale(b, bounds), label="sobol_indices's func")
     var = np.var(np.concatenate([ya, yb]))
     s1 = np.zeros(d)
     st = np.zeros(d)
     if var <= 0:  # constant output: every index is zero
-        return {"S1": s1, "ST": st, "names": list(names) if names else [f"x{i}" for i in range(d)], "var": 0.0}
+        return {"S1": s1, "ST": st, "names": names_out, "var": 0.0}
     for i in range(d):
         ab = a.copy()
         ab[:, i] = b[:, i]  # A with column i taken from B
-        yab = np.asarray(func(_scale(ab, bounds)), dtype=float).ravel()
+        yab = _eval_model(func, _scale(ab, bounds), label="sobol_indices's func")
         s1[i] = np.mean(yb * (yab - ya)) / var  # Saltelli 2010 first-order estimator
         st[i] = 0.5 * np.mean((ya - yab) ** 2) / var  # Jansen total-order estimator
     return {
         "S1": np.clip(s1, 0.0, 1.0),
         "ST": np.clip(st, 0.0, None),
-        "names": list(names) if names else [f"x{i}" for i in range(d)],
+        "names": names_out,
         "var": float(var),
     }
 
@@ -102,10 +139,11 @@ def morris_screening(
     effect ``mu_star[i]`` ranks influence and the spread ``sigma[i]`` flags nonlinearity/interactions.
     Cost: ``trajectories * (d + 1)`` evaluations -- far fewer than Sobol, for an initial screen.
     """
-    if levels < 2:
-        raise ValueError(f"morris_screening requires levels >= 2 (a single-level grid has no step), got {levels}")
-    bounds = np.asarray(bounds, dtype=float)
-    d = len(bounds)
+    bounds = _as_bounds(bounds)
+    d = bounds.shape[0]
+    trajectories = _require_exact_positive_int(trajectories, "trajectories")
+    levels = _require_exact_positive_int(levels, "levels", minimum=2)
+    names_out = _validate_names(names, d)
     rng = np.random.RandomState(seed)
     delta = levels / (2.0 * (levels - 1))  # the standard Morris step on the unit grid
     grid = np.linspace(0.0, 1.0, levels)
@@ -114,11 +152,11 @@ def morris_screening(
         base = rng.choice(grid[: levels // 2 + 1] if levels > 1 else grid, size=d)  # room to step up by delta
         order = rng.permutation(d)
         x = base.copy()
-        y_prev = float(np.asarray(func(_scale(x[None, :], bounds))).ravel()[0])
+        y_prev = _eval_model(func, _scale(x[None, :], bounds), label="morris_screening's func")[0]
         for i in order:
             x_next = x.copy()
             x_next[i] = min(x_next[i] + delta, 1.0)
-            y_next = float(np.asarray(func(_scale(x_next[None, :], bounds))).ravel()[0])
+            y_next = _eval_model(func, _scale(x_next[None, :], bounds), label="morris_screening's func")[0]
             step = x_next[i] - x[i]
             if step != 0:
                 effects[i].append((y_next - y_prev) / step)
@@ -128,7 +166,7 @@ def morris_screening(
     return {
         "mu_star": mu_star,
         "sigma": sigma,
-        "names": list(names) if names else [f"x{i}" for i in range(d)],
+        "names": names_out,
     }
 
 
@@ -152,21 +190,22 @@ def fast_indices(
 
     Returns ``{'S1': (d,), 'names': [...], 'var': float}``.
     """
-    bounds = np.asarray(bounds, dtype=float)
-    d = len(bounds)
+    bounds = _as_bounds(bounds)
+    d = bounds.shape[0]
+    n = _require_exact_positive_int(n, "n")
+    m = _require_exact_positive_int(harmonics, "harmonics")
+    names_out = _validate_names(names, d)
     rng = np.random.RandomState(seed)
-    s = np.linspace(-np.pi, np.pi, int(n), endpoint=False)
+    s = np.linspace(-np.pi, np.pi, n, endpoint=False)
     base = 0.5 + np.arcsin(np.sin(s)) / np.pi  # triangle wave, uniform on [0, 1]
-    perms = [rng.permutation(int(n)) for _ in range(d)]
+    perms = [rng.permutation(n) for _ in range(d)]
     x = np.column_stack([base[perms[i]] for i in range(d)])
-    y = np.asarray(func(_scale(x, bounds)), dtype=float).ravel()
+    y = _eval_model(func, _scale(x, bounds), label="fast_indices's func")
     s1 = np.zeros(d)
     var = float(np.var(y))
-    out_names = list(names) if names else [f"x{i}" for i in range(d)]
     if var <= 0:
-        return {"S1": s1, "names": out_names, "var": 0.0}
-    m = int(harmonics)
-    if 2.0 * m >= int(n) - 1:
+        return {"S1": s1, "names": names_out, "var": 0.0}
+    if 2.0 * m >= n - 1:
         # the Tarantola correction's denominator (1 - 2m/(n-1)) must stay strictly positive; once
         # 2m/(n-1) reaches or exceeds 1, the correction denominator hits zero or goes negative,
         # flipping the sign of a subsequent nonsensical S1 rather than raising. clip(0, 1) at the
@@ -181,8 +220,8 @@ def fast_indices(
         total = float(spectrum[1:].sum())
         raw = float(spectrum[1 : m + 1].sum()) / total if total > 0 else 0.0
         # Tarantola (2006) bias correction: an uninformative input has expected raw ~ 2m/(n-1).
-        s1[i] = (raw - 2.0 * m / (int(n) - 1)) / (1.0 - 2.0 * m / (int(n) - 1))
-    return {"S1": np.clip(s1, 0.0, 1.0), "names": out_names, "var": var}
+        s1[i] = (raw - 2.0 * m / (n - 1)) / (1.0 - 2.0 * m / (n - 1))
+    return {"S1": np.clip(s1, 0.0, 1.0), "names": names_out, "var": var}
 
 
 def dgsm(
@@ -205,9 +244,11 @@ def dgsm(
 
     Returns ``{'nu': (d,), 'importance': (d,), 'names': [...]}``.
     """
-    bounds = np.asarray(bounds, dtype=float)
-    d = len(bounds)
-    x = _scale(_sobol_unit(int(n), d, seed), bounds)
+    bounds = _as_bounds(bounds)
+    d = bounds.shape[0]
+    n = _require_exact_positive_int(n, "n")
+    names_out = _validate_names(names, d)
+    x = _scale(_sobol_unit(n, d, seed), bounds)
     span = bounds[:, 1] - bounds[:, 0]
     nu = np.zeros(d)
     for i in range(d):
@@ -217,10 +258,10 @@ def dgsm(
         xp[:, i] = np.minimum(x[:, i] + h, bounds[i, 1])
         xm[:, i] = np.maximum(x[:, i] - h, bounds[i, 0])
         step = xp[:, i] - xm[:, i]
-        yp = np.asarray(func(xp), dtype=float).ravel()
-        ym = np.asarray(func(xm), dtype=float).ravel()
+        yp = _eval_model(func, xp, label="dgsm's func")
+        ym = _eval_model(func, xm, label="dgsm's func")
         nu[i] = float(np.mean(((yp - ym) / np.where(step > 0, step, 1.0)) ** 2))
     weighted = span**2 * nu
     total = float(weighted.sum())
     importance = weighted / total if total > 0 else np.zeros(d)
-    return {"nu": nu, "importance": importance, "names": list(names) if names else [f"x{i}" for i in range(d)]}
+    return {"nu": nu, "importance": importance, "names": names_out}
