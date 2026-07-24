@@ -65,6 +65,15 @@ class InverseWishartTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             InverseWishartDistribution(-np.inf, self.P)
 
+    def test_asymmetric_scale_raises(self):
+        # cholesky_logdet reads one triangle only, so an asymmetric matrix with a
+        # positive-definite-looking triangle would otherwise pass straight through.
+        with self.assertRaises(ValueError):
+            InverseWishartDistribution(self.df, np.array([[2.0, 1.0], [0.0, 1.0]]))
+
+    def test_symmetric_scale_still_valid(self):
+        InverseWishartDistribution(self.df, self.P)  # must not raise
+
 
 class InverseWishartScalarVectorizedAgreementTest(unittest.TestCase):
     """External review: log_density (scalar) and seq_log_density (vectorized) must agree on every

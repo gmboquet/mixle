@@ -135,6 +135,15 @@ class WishartValidationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             WishartDistribution(-np.inf, self.V)
 
+    def test_asymmetric_scale_raises(self):
+        # cholesky_logdet reads one triangle only, so an asymmetric matrix with a
+        # positive-definite-looking triangle would otherwise pass straight through.
+        with self.assertRaises(ValueError):
+            WishartDistribution(self.df, np.array([[2.0, 1.0], [0.0, 1.0]]))
+
+    def test_symmetric_scale_still_valid(self):
+        WishartDistribution(self.df, self.V)  # must not raise
+
 
 class WishartScalarVectorizedAgreementTest(unittest.TestCase):
     """External review: log_density (scalar) and seq_log_density (vectorized) must agree on every
