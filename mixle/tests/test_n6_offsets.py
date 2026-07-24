@@ -21,6 +21,8 @@ import pytest
 from mixle.analysis.biodiversity import habitat_offset_liability, no_net_loss_constraint
 from mixle.relations import branch_and_bound_milp
 
+_NON_FINITE = [float("nan"), float("inf"), float("-inf")]
+
 N_BLOCKS = 8
 # Blocks 0-3 sit on prime (high-suitability) habitat; blocks 4-7 are low-suitability. Prime blocks are
 # given a slightly higher baseline profit than non-prime blocks so that, with NO offset liability, the
@@ -129,3 +131,103 @@ def test_no_net_loss_constraint_zero_footprint_requires_nothing():
     payload = no_net_loss_constraint(np.zeros(N_BLOCKS, dtype=bool), habitat, offset_ratio=2.0)
     assert payload["lost_equivalents"] == 0.0
     assert payload["required_offset"] == 0.0
+
+
+# --------------------------------------------------------------------------------------------------
+# MXR-080-0073: suitability, area, offset ratio, and unit offset cost were not checked for finiteness or
+# physical sign. A negative offset ratio/cost could turn habitat damage into a "profit" (a negative
+# liability); a NaN/negative habitat field could propagate into the supposedly hard no-net-loss
+# requirement. Every quantity is now validated before it reaches a solver or accounting payload.
+# --------------------------------------------------------------------------------------------------
+def test_habitat_offset_liability_rejects_negative_offset_ratio_instead_of_turning_damage_into_profit():
+    # The audit's own concrete failure mode: a negative ratio previously produced a NEGATIVE liability
+    # (i.e. disturbing prime habitat looked like a "profit"), instead of raising.
+    habitat = _habitat(_SUITABILITY, _AREA)
+    footprint = np.array([True, False, True, False, False, False, False, False])
+    with pytest.raises(ValueError):
+        habitat_offset_liability(footprint, habitat, offset_ratio=-2.0, unit_offset_cost=5.0)
+
+
+def test_habitat_offset_liability_rejects_negative_unit_offset_cost():
+    habitat = _habitat(_SUITABILITY, _AREA)
+    footprint = np.array([True, False, True, False, False, False, False, False])
+    with pytest.raises(ValueError):
+        habitat_offset_liability(footprint, habitat, offset_ratio=2.0, unit_offset_cost=-5.0)
+
+
+@pytest.mark.parametrize("bad_value", _NON_FINITE)
+def test_habitat_offset_liability_rejects_non_finite_offset_ratio_and_unit_offset_cost(bad_value):
+    habitat = _habitat(_SUITABILITY, _AREA)
+    footprint = np.array([True, False, True, False, False, False, False, False])
+    with pytest.raises(ValueError):
+        habitat_offset_liability(footprint, habitat, offset_ratio=bad_value, unit_offset_cost=4.0)
+    with pytest.raises(ValueError):
+        habitat_offset_liability(footprint, habitat, offset_ratio=1.5, unit_offset_cost=bad_value)
+
+
+def test_habitat_offset_liability_still_accepts_zero_ratio_and_zero_cost():
+    # Regression guard: MXR-080-0073's fix must reject NEGATIVE ratios/costs without breaking the
+    # existing, legitimate "offset_ratio=0 or unit_offset_cost=0 means no offset requirement" semantics
+    # documented on habitat_offset_liability and already exercised above in
+    # test_habitat_offset_liability_matches_closed_form_and_scales.
+    habitat = _habitat(_SUITABILITY, _AREA)
+    footprint = np.array([True, False, True, False, False, False, False, False])
+    assert habitat_offset_liability(footprint, habitat, offset_ratio=0.0, unit_offset_cost=4.0) == 0.0
+    assert habitat_offset_liability(footprint, habitat, offset_ratio=1.5, unit_offset_cost=0.0) == 0.0
+
+
+def test_habitat_offset_liability_rejects_negative_and_non_finite_suitability():
+    footprint = np.array([True, False, True, False, False, False, False, False])
+    negative_suitability = _habitat(np.array([0.9, 0.85, -0.1, 0.75, 0.1, 0.12, 0.08, 0.15]), _AREA)
+    with pytest.raises(ValueError):
+        habitat_offset_liability(footprint, negative_suitability, offset_ratio=1.0, unit_offset_cost=1.0)
+    nan_suitability = _habitat(np.array([0.9, 0.85, float("nan"), 0.75, 0.1, 0.12, 0.08, 0.15]), _AREA)
+    with pytest.raises(ValueError):
+        habitat_offset_liability(footprint, nan_suitability, offset_ratio=1.0, unit_offset_cost=1.0)
+
+
+@pytest.mark.parametrize("bad_area", [0.0, -1.0, float("nan"), float("inf")])
+def test_habitat_offset_liability_rejects_invalid_cell_area(bad_area):
+    footprint = np.array([True, False, True, False, False, False, False, False])
+    area = _AREA.copy()
+    area[0] = bad_area
+    habitat = _habitat(_SUITABILITY, area)
+    with pytest.raises(ValueError):
+        habitat_offset_liability(footprint, habitat, offset_ratio=1.0, unit_offset_cost=1.0)
+
+
+def test_no_net_loss_constraint_rejects_negative_offset_ratio():
+    habitat = _habitat(_SUITABILITY, _AREA)
+    footprint = np.array([True, True, False, False, False, False, False, False])
+    with pytest.raises(ValueError):
+        no_net_loss_constraint(footprint, habitat, offset_ratio=-1.0)
+
+
+def test_no_net_loss_constraint_rejects_nan_habitat_field_instead_of_letting_it_reach_the_hard_constraint():
+    # MXR-080-0073's other concrete failure mode: a NaN habitat cell used to propagate straight through
+    # into `required_offset` -- the value a downstream MILP treats as a HARD floor -- silently making the
+    # constraint meaningless (NaN comparisons are always False) instead of raising up front.
+    footprint = np.array([True, True, False, False, False, False, False, False])
+    nan_habitat = _habitat(np.array([0.9, float("nan"), 0.8, 0.75, 0.1, 0.12, 0.08, 0.15]), _AREA)
+    with pytest.raises(ValueError):
+        no_net_loss_constraint(footprint, nan_habitat, offset_ratio=2.0)
+
+
+def test_no_net_loss_constraint_rejects_negative_habitat_field():
+    footprint = np.array([True, True, False, False, False, False, False, False])
+    negative_habitat = _habitat(np.array([0.9, -0.2, 0.8, 0.75, 0.1, 0.12, 0.08, 0.15]), _AREA)
+    with pytest.raises(ValueError):
+        no_net_loss_constraint(footprint, negative_habitat, offset_ratio=2.0)
+
+
+def test_no_net_loss_constraint_negative_control_valid_positive_inputs_still_produce_a_sensible_payload():
+    # Negative control for the validation added above: an all-legitimate, positive/finite set of inputs
+    # must still sail through and produce the same well-defined payload as before -- the new validation
+    # must reject only genuinely invalid domains, not correct data.
+    habitat = _habitat(_SUITABILITY, _AREA)
+    footprint = np.array([True, True, False, False, False, False, False, False])
+    payload = no_net_loss_constraint(footprint, habitat, offset_ratio=2.0)
+    assert np.isfinite(payload["lost_equivalents"])
+    assert payload["lost_equivalents"] > 0.0
+    assert np.isfinite(payload["required_offset"])
+    assert payload["required_offset"] == pytest.approx(2.0 * payload["lost_equivalents"])
