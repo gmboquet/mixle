@@ -118,6 +118,18 @@ class _SampleDerivedQuantity:
     samples: np.ndarray
     prior_dominated: bool = False
 
+    def __post_init__(self) -> None:
+        # Generic defense-in-depth (MXR-080-0094/0098): this container is shared across semantically
+        # different quantities (dose-response probabilities, expected case counts, dollar
+        # liabilities), so only a finite/non-empty check is universal here -- the probability-specific
+        # [0, 1] range gate lives at the dose-response pushforward itself (`_validated_response_fn`),
+        # where the samples' meaning as a probability is actually known.
+        arr = np.asarray(self.samples, dtype=float)
+        if arr.size == 0:
+            raise ValueError("_SampleDerivedQuantity.samples must be non-empty.")
+        if not np.isfinite(arr).all():
+            raise ValueError("_SampleDerivedQuantity.samples must be finite (no NaN/Inf).")
+
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         a = (1.0 - level) / 2.0
         return np.quantile(self.samples, a, axis=0), np.quantile(self.samples, 1.0 - a, axis=0)
@@ -144,18 +156,49 @@ class _DeterministicRisk:
 
 
 def _dose_response_fn(model: str, params: dict[str, Any]) -> Callable[[np.ndarray], np.ndarray]:
-    """Return the elementwise dose -> outcome-probability map for the named ``model``."""
+    """Return the elementwise dose -> outcome-probability map for the named ``model``.
+
+    Every model's coefficients are validated against their own mathematically-required domain before
+    the closure is built (MXR-080-0094): finite, plus whatever range keeps the model's output a valid
+    probability for any non-negative dose. This is the first of two independent defenses against a
+    non-probability output; the second is the finite-``[0, 1]`` gate `_validated_response_fn` wraps
+    around the returned closure (see `DoseResponse.response_fn`), which also catches a bad *dose*
+    value (e.g. non-finite input) that no amount of parameter validation alone can rule out.
+    """
     if model == "loglinear":
         beta = float(params["beta"])
+        # P = 1 - exp(-beta*dose): finite and in [0, 1] for any dose >= 0 iff beta is finite and >= 0
+        # (beta < 0 makes the exponent positive, driving P negative for any dose > 0).
+        if not np.isfinite(beta) or beta < 0.0:
+            raise ValueError(f"loglinear dose-response requires a finite, non-negative 'beta'; got {beta!r}")
         return lambda d: 1.0 - np.exp(-beta * np.clip(np.asarray(d, dtype=float), 0.0, None))
     if model == "logit":
         a = float(params.get("a", 1.0))
         b = float(params.get("b", 0.0))
+        # sigmoid(a*dose + b) is mathematically in (0, 1) for any finite logit, but a non-finite a/b
+        # poisons the whole array with NaN (a finite dose times a NaN/inf coefficient is never finite).
+        if not np.isfinite(a):
+            raise ValueError(f"logit dose-response requires a finite 'a'; got {a!r}")
+        if not np.isfinite(b):
+            raise ValueError(f"logit dose-response requires a finite 'b'; got {b!r}")
         return lambda d: 1.0 / (1.0 + np.exp(-(a * np.asarray(d, dtype=float) + b)))
     if model == "hill":
         emax = float(params.get("emax", 1.0))
         ec50 = float(params["ec50"])
         hill_n = float(params.get("n", 1.0))
+        # ec50 <= 0 makes the denominator ill-defined at dose == 0 (0/0) and, for non-integer hill_n,
+        # a negative ec50 raised to a fractional power is complex, not a non-finite real -- silently
+        # corrupting the output dtype rather than merely its range.
+        if not np.isfinite(ec50) or ec50 <= 0.0:
+            raise ValueError(f"hill dose-response requires a finite, positive 'ec50'; got {ec50!r}")
+        # hill_n <= 0 makes dose**hill_n divide by zero at dose == 0 (hill_n < 0) or collapses the
+        # curve to a dose-independent constant (hill_n == 0) -- neither is a valid Hill exponent.
+        if not np.isfinite(hill_n) or hill_n <= 0.0:
+            raise ValueError(f"hill dose-response requires a finite, positive 'n' (Hill exponent); got {hill_n!r}")
+        # emax is the response ceiling as dose -> infinity; it must itself be a valid probability or
+        # the curve exceeds [0, 1] (emax > 1) or goes negative (emax < 0) well before infinite dose.
+        if not np.isfinite(emax) or emax < 0.0 or emax > 1.0:
+            raise ValueError(f"hill dose-response requires 'emax' finite and in [0, 1]; got {emax!r}")
 
         def _hill(d: np.ndarray) -> np.ndarray:
             x = np.clip(np.asarray(d, dtype=float), 0.0, None)
@@ -166,8 +209,44 @@ def _dose_response_fn(model: str, params: dict[str, Any]) -> Callable[[np.ndarra
     if model == "threshold_linear":
         slope = float(params["slope"])
         threshold = float(params.get("threshold", 0.0))
+        # The output clip(..., 0, 1) only sanitizes a finite argument -- clip() does not launder NaN
+        # (any comparison with NaN is False, so a NaN slope/threshold passes straight through), and
+        # slope == +/-inf can hit an inf*0 == NaN the moment dose == threshold exactly.
+        if not np.isfinite(slope):
+            raise ValueError(f"threshold_linear dose-response requires a finite 'slope'; got {slope!r}")
+        if not np.isfinite(threshold):
+            raise ValueError(f"threshold_linear dose-response requires a finite 'threshold'; got {threshold!r}")
         return lambda d: np.clip(slope * (np.asarray(d, dtype=float) - threshold), 0.0, 1.0)
     raise ValueError(f"unknown dose-response model {model!r}; expected one of {DOSE_RESPONSE_MODELS}")
+
+
+def _validated_response_fn(fn: Callable[[np.ndarray], np.ndarray], model: str) -> Callable[[np.ndarray], np.ndarray]:
+    """Wrap a dose-response elementwise function with the final finite-``[0, 1]`` output gate (MXR-080-0094).
+
+    Per-model parameter validation in `_dose_response_fn` rejects bad coefficients before the closure
+    is even built; this is the second, independent line of defense the finding demands: whatever the
+    (already-validated) coefficients and whatever dose values a caller supplies, an array is only ever
+    labeled an outcome-probability `DerivedQuantity` sample once it is confirmed finite and in
+    ``[0, 1]`` here -- catching, in particular, a non-finite *dose* input that no amount of parameter
+    validation alone could rule out.
+    """
+
+    def _wrapped(d: np.ndarray) -> np.ndarray:
+        out = np.asarray(fn(d), dtype=float)
+        if not np.isfinite(out).all():
+            raise ValueError(
+                f"{model} dose-response pushforward produced non-finite output (NaN/Inf); refusing to "
+                "label it an outcome-probability DerivedQuantity"
+            )
+        if np.any(out < 0.0) or np.any(out > 1.0):
+            raise ValueError(
+                f"{model} dose-response pushforward produced output outside [0, 1] "
+                f"(min={float(out.min())!r}, max={float(out.max())!r}); refusing to label it an "
+                "outcome-probability DerivedQuantity"
+            )
+        return out
+
+    return _wrapped
 
 
 def _as_dose_samples(dose: Any, n: int, rng: np.random.Generator) -> np.ndarray:
@@ -210,10 +289,13 @@ class DoseResponse:
     def __post_init__(self) -> None:
         if self.model not in DOSE_RESPONSE_MODELS:
             raise ValueError(f"unknown dose-response model {self.model!r}; expected one of {DOSE_RESPONSE_MODELS}")
+        # Eager parameter-domain validation (MXR-080-0094): fail at construction, not at first use --
+        # `_dose_response_fn` raises a clear, model-specific error for an out-of-domain coefficient.
+        _dose_response_fn(self.model, self.params)
 
     def response_fn(self) -> Callable[[np.ndarray], np.ndarray]:
         """The elementwise dose -> outcome-probability function for this model + params."""
-        return _dose_response_fn(self.model, self.params)
+        return _validated_response_fn(_dose_response_fn(self.model, self.params), self.model)
 
     def probability(self, dose: Any, *, n: int = 2000, rng: np.random.Generator) -> DerivedQuantity:
         """Push ``dose`` through the dose-response model into an outcome-probability `DerivedQuantity`.

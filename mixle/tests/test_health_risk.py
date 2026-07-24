@@ -15,6 +15,7 @@ convention -- see ``pyproject.toml``) because this exact path + node id is the f
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from mixle.analysis.health_risk import DoseResponse
 from mixle.reason.posterior_protocol import Posterior
@@ -82,3 +83,54 @@ def test_dose_response_calibrated():
     dq_wide = dr.probability(wide_posterior, n=5000, rng=np.random.default_rng(2))
     lo_wide, hi_wide = dq_wide.credible_interval(0.9)
     assert (hi_wide - lo_wide) > (hi - lo)
+
+
+def test_dose_response_rejects_invalid_parameters():
+    """MXR-080-0094: each model's coefficients are validated against their own domain at construction,
+    since a negative/non-finite beta, an invalid Hill ec50/exponent/emax, or a non-finite logit/
+    threshold parameter can otherwise produce a negative, above-one, or NaN "probability"."""
+    invalid = [
+        ("loglinear", {"beta": -0.1}),  # negative beta -> P < 0 for any dose > 0
+        ("loglinear", {"beta": float("nan")}),
+        ("loglinear", {"beta": float("inf")}),
+        ("hill", {"ec50": 0.0}),  # ec50 == 0 -> 0/0 at dose == 0
+        ("hill", {"ec50": -5.0}),  # negative ec50 with non-integer n -> complex, not just non-finite
+        ("hill", {"ec50": 1.0, "n": -1.0}),  # negative Hill exponent -> divide by zero at dose == 0
+        ("hill", {"ec50": 1.0, "n": 0.0}),  # zero exponent collapses to a dose-independent constant
+        ("hill", {"ec50": 1.0, "emax": 1.5}),  # emax > 1 -> P > 1 well before infinite dose
+        ("hill", {"ec50": 1.0, "emax": -0.1}),
+        ("logit", {"a": float("nan")}),
+        ("logit", {"b": float("inf")}),
+        ("threshold_linear", {"slope": float("inf")}),
+        ("threshold_linear", {"slope": 1.0, "threshold": float("nan")}),
+    ]
+    for model, params in invalid:
+        with pytest.raises(ValueError):
+            DoseResponse(model=model, params=params)
+
+
+def test_dose_response_valid_parameters_still_produce_probabilities():
+    """Negative control for MXR-080-0094: legitimate parameters for every model keep producing finite,
+    in-range output -- the new per-model domain checks reject only genuinely invalid coefficients."""
+    cases = [
+        ("loglinear", {"beta": 0.05}),
+        ("loglinear", {"beta": 0.0}),  # boundary: a flat zero-response curve is still valid
+        ("logit", {"a": 1.0, "b": 0.0}),
+        ("hill", {"ec50": 10.0, "emax": 1.0, "n": 2.0}),
+        ("threshold_linear", {"slope": 0.1, "threshold": 5.0}),
+        ("threshold_linear", {"slope": -0.1, "threshold": 5.0}),  # a negative slope is still finite
+    ]
+    doses = np.linspace(0.0, 50.0, 25)
+    for model, params in cases:
+        dr = DoseResponse(model=model, params=params)
+        dq = dr.probability(doses, n=25, rng=np.random.default_rng(7))
+        assert np.isfinite(dq.samples).all(), (model, params)
+        assert (dq.samples >= 0.0).all() and (dq.samples <= 1.0).all(), (model, params)
+
+
+def test_dose_response_output_gate_rejects_non_finite_dose():
+    """MXR-080-0094: the final pushforward gate is defense-in-depth against a bad *dose*, independent
+    of parameter validation -- valid coefficients cannot rescue a non-finite dose input."""
+    dr = DoseResponse(model="loglinear", params={"beta": 0.05})
+    with pytest.raises(ValueError):
+        dr.probability(np.array([1.0, float("nan"), 3.0]), n=3, rng=np.random.default_rng(0))
