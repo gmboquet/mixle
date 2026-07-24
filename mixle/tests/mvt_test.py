@@ -67,6 +67,20 @@ class MultivariateStudentTTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             MultivariateStudentTDistribution(3.0, [0.0, 0.0], [[1.0, 0.0]])
 
+    def test_invalid_shape_raises_instead_of_scoring_finite_with_a_broken_sampler(self):
+        # Before the fix, __init__ only checked shape's dimensions; a non-PD or asymmetric shape
+        # was silently accepted, log_density/density returned a FINITE (bogus) value, and only
+        # sampler() -- via np.linalg.cholesky -- discovered the matrix was invalid, raising
+        # LinAlgError. Density scoring and sampling silently disagreed about the same instance.
+        with self.assertRaises(ValueError):  # symmetric, indefinite (eigenvalues 1, -1)
+            MultivariateStudentTDistribution(5.0, [0.0, 0.0], [[1.0, 0.0], [0.0, -1.0]])
+        # symmetric, negative definite: det(-I_2) = +1 > 0, so a determinant-sign check alone
+        # (what this class used pre-fix) would have accepted this as "valid".
+        with self.assertRaises(ValueError):
+            MultivariateStudentTDistribution(5.0, [0.0, 0.0], [[-1.0, 0.0], [0.0, -1.0]])
+        with self.assertRaises(ValueError):  # asymmetric
+            MultivariateStudentTDistribution(5.0, [0.0, 0.0], [[2.0, 1.0], [0.0, 1.0]])
+
     def test_pseudo_count_raises_rather_than_silently_ignored(self):
         # The EM/IRLS fit reweights the sufficient statistic by a latent factor with no simple
         # closed-form expectation under the model, so pseudo_count cannot be cleanly blended in the
