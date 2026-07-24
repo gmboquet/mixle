@@ -22,6 +22,12 @@ Composes with existing machinery rather than duplicating it:
   ``mixle.models.language_model._forward_all_positions`` / ``LM.fit_pairs`` already consume (as opposed to
   ``mixle.data.stream_token_source``'s one-target-per-window shape, which is the right shape for a single
   unbounded sliding stream but wastes a factor of ``block`` of compute once sequences are packed).
+- Padding is structural, not training signal. The final packed row may be padded with ``pad_id`` to fill
+  out ``block + 1`` tokens once the stream runs out -- bounded waste of at most one row, ever, never more.
+  :func:`pack_documents` returns a per-position ``loss_mask`` alongside the rows, and
+  :meth:`StreamingCorpus.epoch_batches` threads it through every micro-batch. Callers MUST apply that mask
+  (or otherwise exclude its ``False`` positions) before averaging next-token loss -- otherwise the
+  fabricated pad targets are silently trained on as if they were real observed labels.
 """
 
 from __future__ import annotations
@@ -90,15 +96,18 @@ def shard_documents_for_rank(order: np.ndarray, rank: int, world_size: int) -> n
 
 
 class PackedCorpus:
-    """Result of :func:`pack_documents`: the packed rows plus the measured packing efficiency."""
+    """Result of :func:`pack_documents`: the packed rows, the measured packing efficiency, and a per-target
+    ``loss_mask`` marking which target positions are real observed next-token labels vs. fabricated
+    padding (see :func:`pack_documents` for the exact boundary policy)."""
 
-    __slots__ = ("rows", "packing_efficiency", "real_tokens", "total_tokens")
+    __slots__ = ("rows", "packing_efficiency", "real_tokens", "total_tokens", "loss_mask")
 
-    def __init__(self, rows: np.ndarray, real_tokens: int, total_tokens: int) -> None:
+    def __init__(self, rows: np.ndarray, *, real_tokens: int, total_tokens: int, loss_mask: np.ndarray) -> None:
         self.rows = rows
         self.real_tokens = int(real_tokens)
         self.total_tokens = int(total_tokens)
         self.packing_efficiency = (self.real_tokens / self.total_tokens) if self.total_tokens else 1.0
+        self.loss_mask = loss_mask
 
     def __len__(self) -> int:
         return int(self.rows.shape[0])
@@ -122,6 +131,17 @@ def pack_documents(
     document -- packing efficiency (the real-token fraction) climbs toward 1.0 as the corpus grows relative
     to ``block``. ``boundary_id`` (e.g. an EOS id), if given, is inserted between consecutive documents so
     the model can see document edges within a packed row; it counts as a real (non-pad) token.
+
+    Returns a :class:`PackedCorpus` whose ``loss_mask`` (shape ``(n_rows, block)``, boolean) marks which
+    TARGET positions (``row[1:]``) are real observed next-token labels vs. fabricated padding. Boundary
+    policy, decided explicitly here: padding never appears anywhere but the tail of the FINAL row (see
+    above), so ``loss_mask`` is ``True`` everywhere except possibly that one tail; a ``boundary_id`` token
+    is real signal like any other token and is never masked out. This function does not implement
+    SFT-style prompt masking (weight-0 on prompt tokens) -- that is an orthogonal concern this codebase
+    already handles elsewhere via per-sample weights; ``loss_mask`` here answers exactly one question, "is
+    this target a fabricated pad position." Callers MUST apply this mask (or otherwise exclude its
+    ``False`` positions) before averaging next-token loss, or the fabricated pad targets are silently
+    trained on as if they were real labels (MXR-080-0061).
     """
     if block <= 0:
         raise ValueError("block must be positive")
@@ -134,7 +154,8 @@ def pack_documents(
         if boundary_id is not None:
             pieces.append(np.asarray([boundary_id]))
     if not pieces:
-        return PackedCorpus(np.zeros((0, unit), dtype=np.int64), real_tokens=0, total_tokens=0)
+        empty_mask = np.ones((0, unit - 1), dtype=bool)
+        return PackedCorpus(np.zeros((0, unit), dtype=np.int64), real_tokens=0, total_tokens=0, loss_mask=empty_mask)
 
     flat = np.concatenate(pieces).astype(np.int64)
     n_full = flat.size // unit
@@ -152,7 +173,20 @@ def pack_documents(
 
     total_tokens = int(rows.size)
     real_tokens = total_tokens - pad_count
-    return PackedCorpus(rows, real_tokens=real_tokens, total_tokens=total_tokens)
+
+    # loss_mask over TARGET positions (row[1:] of each row): True where the target is a real observed
+    # next-token label, False where it is fabricated padding. Padding is only ever added to the tail of the
+    # FINAL row (never mid-stream, never any other row -- see docstring), so every row except possibly the
+    # last is entirely real. In the last row, target[i] = row[i+1] is real iff i+1 < remainder, i.e. the
+    # real target run has length `remainder - 1` (a remainder of exactly 1 real token in the row means ZERO
+    # real targets: the sole real token has no successor to predict, so its own target position is pad).
+    n_rows = rows.shape[0]
+    loss_mask = np.ones((n_rows, unit - 1), dtype=bool)
+    if remainder > 0:
+        valid_targets = max(remainder - 1, 0)
+        loss_mask[-1, valid_targets:] = False
+
+    return PackedCorpus(rows, real_tokens=real_tokens, total_tokens=total_tokens, loss_mask=loss_mask)
 
 
 class StreamingCorpus:
@@ -196,8 +230,17 @@ class StreamingCorpus:
         )
         return shard_documents_for_rank(order, self.rank, self.world_size)
 
-    def epoch_batches(self, epoch: int) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-        """Yield ``(context (b, block) float32, targets (b, block) int64)`` micro-batches for this rank.
+    def epoch_batches(self, epoch: int) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Yield ``(context (b, block) float32, targets (b, block) int64, loss_mask (b, block) bool)``
+        micro-batches for this rank.
+
+        ``loss_mask[i, j]`` is True iff ``targets[i, j]`` is a real observed next-token label, and False
+        only for fabricated padding introduced to fill out the final row of the packed stream once real
+        tokens run out (see :func:`pack_documents` for the exact boundary policy) -- at most one row per
+        call carries any ``False`` at all, regardless of corpus size. Callers MUST multiply the
+        per-position loss by this mask (or otherwise exclude ``False`` positions) rather than average the
+        raw per-position loss unconditionally: doing so silently teaches the model that ``pad_id`` is a
+        real next-token target (MXR-080-0061).
 
         Deterministic given ``(seed, epoch, rank, world_size)``: re-running with the same inputs yields
         bitwise-identical batches. Sets :attr:`last_packing_efficiency` as a side effect (the real-token
@@ -207,6 +250,8 @@ class StreamingCorpus:
         packed = pack_documents(self.documents, indices, self.block, pad_id=self.pad_id, boundary_id=self.boundary_id)
         self.last_packing_efficiency = packed.packing_efficiency
         rows = packed.rows
+        mask = packed.loss_mask
         for start in range(0, rows.shape[0], self.batch_size):
             chunk = rows[start : start + self.batch_size]
-            yield chunk[:, :-1].astype(np.float32), chunk[:, 1:].astype(np.int64)
+            mask_chunk = mask[start : start + self.batch_size]
+            yield chunk[:, :-1].astype(np.float32), chunk[:, 1:].astype(np.int64), mask_chunk.copy()
