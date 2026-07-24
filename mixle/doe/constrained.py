@@ -40,15 +40,48 @@ class ConstrainedBayesOptResult(BayesOptResult):
     feasible: np.ndarray
 
 
+def _as_feasibility_matrix(name: str, arr: Any) -> np.ndarray:
+    """Reshape a feasibility moment array to ``(n_points, n_constraints)``.
+
+    A scalar or 1-D array of length ``n`` means ``n`` points under a *single* constraint, so it is
+    reshaped to ``(n, 1)`` -- never to ``(1, n)`` via ``np.atleast_2d``, which would silently
+    misinterpret it as one point under ``n`` constraints. Already-2-D input passes through unchanged.
+    """
+    a = np.asarray(arr, dtype=np.float64)
+    if a.ndim >= 3:
+        raise ValueError(f"{name} must be 0-, 1-, or 2-dimensional (points x constraints), got {a.ndim} dimensions.")
+    if a.ndim < 2:
+        a = a.reshape(-1, 1)
+    return a
+
+
 def probability_of_feasibility(mean: Any, std: Any) -> np.ndarray:
     """Return the per-point probability that all constraints are satisfied (``c_k <= 0``).
 
     ``mean`` and ``std`` are ``(n, K)`` posterior predictive moments of the ``K`` constraint
-    surrogates. Returns an ``(n,)`` array, the product over constraints of ``Phi(-mean_k / std_k)``.
-    Where a constraint's ``std`` is zero the feasibility is deterministic (1.0 if ``mean <= 0``).
+    surrogates: row ``i`` holds the ``K`` constraint moments at point ``i``. A scalar or 1-D input of
+    length ``n`` is treated as ``n`` points under a single constraint and reshaped to ``(n, 1)`` -- it
+    is never reinterpreted as one point under ``n`` constraints. Returns an ``(n,)`` array, the product
+    over constraints of ``Phi(-mean_k / std_k)``. Where a constraint's ``std`` is zero the feasibility
+    is deterministic (1.0 if ``mean <= 0``).
+
+    Raises:
+        ValueError: ``mean`` and ``std`` do not have identical shape once normalized, either is not
+            finite, ``std`` is negative anywhere, or there are zero constraint columns.
     """
-    mean = np.atleast_2d(np.asarray(mean, dtype=np.float64))
-    std = np.atleast_2d(np.asarray(std, dtype=np.float64))
+    mean = _as_feasibility_matrix("mean", mean)
+    std = _as_feasibility_matrix("std", std)
+    if mean.shape != std.shape:
+        raise ValueError(f"mean and std must have identical shape, got {mean.shape} and {std.shape}.")
+    if mean.shape[1] == 0:
+        raise ValueError("probability_of_feasibility requires at least one constraint column.")
+    if not np.all(np.isfinite(mean)):
+        raise ValueError("mean must be finite.")
+    if not np.all(np.isfinite(std)):
+        raise ValueError("std must be finite.")
+    if np.any(std < 0.0):
+        raise ValueError(f"std must be nonnegative, got a minimum of {float(std.min())!r}.")
+
     pf = np.ones(mean.shape[0], dtype=np.float64)
     for k in range(mean.shape[1]):
         mk = mean[:, k]

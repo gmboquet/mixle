@@ -36,6 +36,46 @@ class ProbabilityOfFeasibilityTest(unittest.TestCase):
         pf = probability_of_feasibility(mean=np.zeros((1, 2)), std=np.ones((1, 2)))
         np.testing.assert_allclose(pf, [0.25], atol=1e-9)
 
+    def test_one_dimensional_input_is_n_points_not_n_constraints(self):
+        # Regression test for MXR-080-0173: a length-N mean/std used to be reshaped to (1, N) via
+        # np.atleast_2d -- one point under N constraints -- silently returning a single joint
+        # probability (0.13348 for this exact input) instead of N per-point probabilities under one
+        # constraint. It must now be reshaped to (N, 1): N points, one constraint each.
+        pf = probability_of_feasibility(mean=[-1.0, 1.0], std=[1.0, 1.0])
+        self.assertEqual(pf.shape, (2,))
+        # Phi(1) for the point with mean=-1 (comfortably feasible), Phi(-1) for mean=+1 (unlikely).
+        np.testing.assert_allclose(pf, [0.8413447460685429, 0.15865525393145707], atol=1e-9)
+
+    def test_two_dimensional_multi_point_multi_constraint_unaffected(self):
+        # Negative control: a genuine (n_points, n_constraints) array with BOTH n_points > 1 and
+        # n_constraints > 1 must keep computing correctly -- the 1-D reinterpretation fix must not
+        # disturb already-2-D input.
+        mean = np.array([[-1.0, 0.0], [1.0, -2.0]])
+        std = np.ones((2, 2))
+        pf = probability_of_feasibility(mean, std)
+        # point 0: Phi(1) * Phi(0); point 1: Phi(-1) * Phi(2).
+        np.testing.assert_allclose(pf, [0.42067237303427146, 0.15504582597024455], atol=1e-9)
+
+    def test_mismatched_mean_std_shapes_raise(self):
+        with self.assertRaises(ValueError):
+            probability_of_feasibility(mean=np.zeros((3, 1)), std=np.ones((4, 1)))
+        with self.assertRaises(ValueError):
+            probability_of_feasibility(mean=np.zeros((3, 2)), std=np.ones((3, 1)))
+
+    def test_negative_std_raises(self):
+        with self.assertRaises(ValueError):
+            probability_of_feasibility(mean=np.zeros((2, 1)), std=np.array([[1.0], [-0.1]]))
+
+    def test_nan_raises(self):
+        with self.assertRaises(ValueError):
+            probability_of_feasibility(mean=np.array([[np.nan], [0.0]]), std=np.ones((2, 1)))
+        with self.assertRaises(ValueError):
+            probability_of_feasibility(mean=np.zeros((2, 1)), std=np.array([[1.0], [np.nan]]))
+
+    def test_zero_constraint_columns_raise(self):
+        with self.assertRaises(ValueError):
+            probability_of_feasibility(mean=np.zeros((3, 0)), std=np.zeros((3, 0)))
+
 
 @unittest.skipUnless(HAS_TORCH, "torch is not installed")
 class ConstrainedLoopTest(unittest.TestCase):
