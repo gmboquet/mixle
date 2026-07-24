@@ -559,9 +559,38 @@ SymbolicExpression.__pysp_engine__ = SYMBOLIC_ENGINE
 
 
 def is_symbolic_payload(x: Any) -> bool:
-    """Return True for a symbolic node or a NumPy object array of symbolic nodes."""
+    """Return True for a symbolic node or a NumPy object array of ALL-symbolic nodes.
+
+    Every element of an object array is checked, not just the first: classifying the whole
+    array from a single element lets a mixed-ownership payload -- some elements genuine
+    ``SymbolicExpression`` nodes, others unrelated plain objects -- be misrouted based on
+    whichever kind happens to occupy index 0 (numeric-first routes the symbolic elements
+    through NumPy, which was never built to handle them; symbolic-first routes the unrelated
+    elements through the symbolic engine instead). Mixed ownership is rejected outright rather
+    than silently guessed at from one element.
+
+    Scans left to right and stops at the first element whose kind disagrees with the first
+    element's, so a genuinely uniform array (the overwhelmingly common case) still only pays for
+    a single early-exit scan, while a mixed one is still caught regardless of which kind happens
+    to sit at index 0.
+    """
     if isinstance(x, SymbolicExpression):
         return True
     if isinstance(x, np.ndarray) and x.dtype == object and x.size:
-        return isinstance(x.flat[0], SymbolicExpression)
+        flat = x.reshape(-1)
+        first_is_symbolic = isinstance(flat[0], SymbolicExpression)
+        for value in flat:
+            if isinstance(value, SymbolicExpression) != first_is_symbolic:
+                raise TypeError(
+                    "object array has mixed ownership: element %r is %ssymbolic while element %r is "
+                    "%ssymbolic; a payload must be entirely SymbolicExpression nodes or entirely "
+                    "non-symbolic, not a mix of the two."
+                    % (
+                        flat[0],
+                        "" if first_is_symbolic else "not ",
+                        value,
+                        "" if not first_is_symbolic else "not ",
+                    )
+                )
+        return first_is_symbolic
     return False
