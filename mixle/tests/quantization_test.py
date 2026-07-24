@@ -8,11 +8,14 @@ order).
 """
 
 import math
+import threading
 import unittest
+from unittest import mock
 
 import numpy as np
 
 from mixle.enumeration.algorithms import freeze
+from mixle.enumeration.quantization import parallel as quantization_parallel
 from mixle.enumeration.quantization.core import (
     CountHistogram,
     Quantizer,
@@ -603,6 +606,150 @@ class ParallelValidationTestCase(unittest.TestCase):
             self.assertEqual(exe.num_workers, 2)
         finally:
             exe.close()
+
+
+class ParallelStartMethodTestCase(unittest.TestCase):
+    """MXR-080-0210: worker pools must use a safe, explicit multiprocessing start method instead of
+    unconditionally preferring 'fork'. fork() clones the parent's entire memory image at the instant
+    it is called, including whatever lock/mutex state belongs to OTHER threads in the parent (a
+    NumPy/BLAS/logging/accelerator background thread, in the notebook/ML hosts this API targets); if
+    a fork lands while one of those threads holds a lock, the child inherits that lock already held
+    with no thread left to release it (only the forking thread survives into the child), which can
+    deadlock or otherwise corrupt process-pool startup before any worker function runs. "Worker
+    arithmetic is pure" does not defend against this -- the hazard is in the fork itself, before the
+    worker body ever executes.
+    """
+
+    def setUp(self):
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2, "d": 0.05, "e": 0.05})
+        self.seq = SequenceDistribution(cat, len_dist=GeometricDistribution(0.5))
+
+    def test_mp_context_defaults_to_spawn_and_validates_start_method(self):
+        """The module's own context resolver: 'spawn' by default, rejects unrecognized spellings."""
+        self.assertEqual(quantization_parallel._resolve_start_method(None), "spawn")
+        self.assertEqual(quantization_parallel._mp_context().get_start_method(), "spawn")
+        self.assertEqual(quantization_parallel._mp_context("fork").get_start_method(), "fork")
+        self.assertEqual(quantization_parallel._mp_context("forkserver").get_start_method(), "forkserver")
+        for bad in ("bogus", "Spawn", "SPAWN", "", "thread"):
+            with self.subTest(start_method=bad):
+                with self.assertRaises(ValueError):
+                    quantization_parallel._resolve_start_method(bad)
+
+    def test_convolution_executor_pool_actually_uses_spawn_by_default(self):
+        """Not just 'does not crash': inspect the real pool's context object, as the actual fix."""
+        with ConvolutionExecutor(num_workers=2, min_parallel_width=0) as executor:
+            self.assertEqual(executor.start_method, "spawn")
+            self.assertIsNotNone(executor._pool)
+            self.assertEqual(executor._pool._ctx.get_start_method(), "spawn")
+            result = executor.convolve(CountHistogram(0, [1, 2, 3, 4]), CountHistogram(0, [1, 1, 1]))
+        self.assertEqual(result.base, 0)
+        self.assertEqual(result.data, [1, 3, 6, 9, 7, 4])  # correctness, not just a safe start method
+
+    def test_distributed_unrank_local_pool_actually_uses_spawn_by_default(self):
+        """Same guarantee for `distributed_unrank`'s function-local pool, spied through the choke
+        point both entry points share (`_mp_context`) -- confirms the wiring end to end, not just
+        the resolver helper in isolation.
+        """
+        with mock.patch.object(quantization_parallel, "_mp_context", wraps=quantization_parallel._mp_context) as spy:
+            items = distributed_unrank(self.seq, budget_bits=32, start=0, count=50, num_workers=2, backend="local")
+        spy.assert_called_once_with("spawn")
+        self.assertEqual(len(items), 50)
+
+    def test_start_method_is_configurable(self):
+        """A caller who has vetted their environment can still opt into 'fork'/'forkserver'."""
+        with ConvolutionExecutor(num_workers=2, min_parallel_width=0, start_method="fork") as executor:
+            self.assertEqual(executor.start_method, "fork")
+            self.assertEqual(executor._pool._ctx.get_start_method(), "fork")
+
+        with mock.patch.object(quantization_parallel, "_mp_context", wraps=quantization_parallel._mp_context) as spy:
+            distributed_unrank(
+                self.seq,
+                budget_bits=32,
+                start=0,
+                count=20,
+                num_workers=2,
+                backend="local",
+                start_method="forkserver",
+            )
+        spy.assert_called_once_with("forkserver")
+
+    def test_unrecognized_start_method_rejected_not_silently_ignored(self):
+        with self.assertRaises(ValueError):
+            ConvolutionExecutor(num_workers=2, start_method="bogus")
+        with self.assertRaises(ValueError):
+            distributed_unrank(self.seq, budget_bits=32, count=10, num_workers=2, backend="local", start_method="bogus")
+        # Validated even for backend='spark', where it has no effect (no local pool is started) --
+        # a typo must not be silently ignored just because this backend never reaches `_mp_context`.
+        with self.assertRaises(ValueError):
+            distributed_unrank(self.seq, budget_bits=32, count=10, num_workers=2, backend="spark", start_method="bogus")
+
+    def test_pool_starts_cleanly_under_background_thread_lock_contention(self):
+        """Regression for the actual hazard (MXR-080-0210): some OTHER thread in this process
+        repeatedly acquiring/releasing a real OS-backed lock, concurrently with several worker-pool
+        startup/teardown cycles, must not hang or corrupt startup. Under the old unconditional
+        'fork' default this is exactly the scenario that can deadlock a child -- a fork landing
+        while the contending thread holds the lock clones it already locked, but only the forking
+        thread (not the contending thread) survives into the child, so nothing can ever release it.
+        The fixed 'spawn' default starts each worker from a fresh interpreter with no inherited lock
+        state at all, so this must complete promptly regardless of what the background thread is
+        doing. A watchdog `join(timeout=...)` turns an actual hang into an ordinary test failure
+        instead of blocking the suite forever, so this test cannot itself become a source of a hung
+        CI run.
+        """
+        contended_lock = threading.Lock()
+        stop = threading.Event()
+        contended_iterations = {"n": 0}
+
+        def _contend():
+            while not stop.is_set():
+                with contended_lock:
+                    contended_iterations["n"] += 1
+
+        contender = threading.Thread(target=_contend, daemon=True)
+        contender.start()
+
+        outcome = {}
+
+        def _run_pool_cycles():
+            try:
+                results = []
+                for _ in range(5):
+                    with ConvolutionExecutor(num_workers=2, min_parallel_width=0) as executor:
+                        if executor._pool._ctx.get_start_method() != "spawn":
+                            raise AssertionError("pool did not use the safe default start method")
+                        h = executor.convolve(CountHistogram(0, [1, 2, 3, 4]), CountHistogram(0, [1, 1, 1]))
+                        results.append(h.data)
+                outcome["results"] = results
+            except BaseException as exc:  # noqa: BLE001 -- captured across a thread boundary, re-raised below
+                outcome["error"] = exc
+
+        runner = threading.Thread(target=_run_pool_cycles, daemon=True)
+        runner.start()
+        runner.join(timeout=30)
+        stop.set()
+        contender.join(timeout=5)
+
+        self.assertFalse(runner.is_alive(), "worker-pool startup hung under background lock contention")
+        if "error" in outcome:
+            raise outcome["error"]
+        self.assertEqual(outcome.get("results"), [[1, 3, 6, 9, 7, 4]] * 5)
+        self.assertGreater(contended_iterations["n"], 0)  # the contending thread genuinely ran concurrently
+
+    def test_negative_control_no_contention_still_correct(self):
+        """No artificial contention: the new default still gives correct, serial-matching results,
+        not just a safe startup (MXR-080-0210 must not regress MXR-080-0209's correctness guarantees
+        or the pre-existing parallel/distributed correctness contract).
+        """
+        serial = self.seq.count_budget_index(budget_bits=96, oversample=8)
+        parallel = self.seq.count_budget_index(budget_bits=96, oversample=8, num_workers=4)
+        self.assertEqual(serial.counts, parallel.counts)
+        self.assertEqual(serial.total_count, parallel.total_count)
+
+        want = [serial.get(i) for i in range(40)]
+        got = distributed_unrank(
+            self.seq, budget_bits=96, start=0, count=40, oversample=8, num_workers=3, backend="local"
+        )
+        self.assertEqual([(freeze(v), round(lp, 9)) for v, lp in want], [(freeze(v), round(lp, 9)) for v, lp in got])
 
 
 class CanonicalDedupCompletenessTestCase(unittest.TestCase):
