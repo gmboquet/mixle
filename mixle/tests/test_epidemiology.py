@@ -18,6 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import mixle.analysis.epidemiology as epidemiology_module
 from mixle.analysis.epidemiology import CohortAttribution, cohort_attribution
 from mixle.reason.posterior_protocol import DerivedQuantity
 
@@ -75,10 +76,17 @@ def test_af_distribution_is_ic1_derived_quantity_shaped():
     assert dq.prior_dominated is False
     lo, hi = dq.credible_interval(0.95)
     assert lo <= hi
-    assert dq.samples.shape == (80,)
+    # `.samples` holds exactly the draws that converged -- not necessarily all `n_boot` of them (a clean
+    # simulated cohort like this one should converge every time, but the *invariant* being tested is the
+    # count matching `n_boot_valid`, not happening to equal the requested `n_boot`; see MXR-080-0089).
+    assert np.all(np.isfinite(dq.samples))
+    assert dq.samples.shape == (result.provenance["n_boot_valid"],)
+    assert dq.samples.shape[0] <= 80
 
-    # every number attributes to the fit + seed
-    assert result.provenance["seed"] == 1
+    # every number attributes to the fit + the RNG's full reproducible state (not just a seed -- see
+    # MXR-080-0089: a bare seed cannot replay draws from a generator already advanced before this call)
+    assert isinstance(result.provenance["rng_state"], dict)
+    assert result.provenance["rng_state"]["bit_generator"] == "PCG64"
     assert result.provenance["n"] == covariates.shape[0]
     assert result.provenance["ties"] == "efron"
 
@@ -234,3 +242,95 @@ def test_well_formed_cohort_still_fits_normally_after_validation():
     assert isinstance(result, CohortAttribution)
     assert np.isfinite(result.hazard_ratio)
     assert np.isfinite(result.attributable_fraction)
+
+
+# --------------------------------------------------------------------------- MXR-080-0089: bootstrap evidence
+# A failed draw stayed NaN in the published `_AFDistribution.samples`, one converged draw was enough to
+# report a full interval, and the recorded "seed" could not actually reproduce the bootstrap.
+
+
+def test_failed_bootstrap_draws_are_excluded_from_samples_not_nan_filled(monkeypatch):
+    covariates, time, event = _simulate_cohort(seed=24, n=200)
+    real_fit_lagged = epidemiology_module._fit_lagged
+    state = {"calls": 0}
+
+    def _partially_flaky_fit_lagged(x, t, e, latency):
+        state["calls"] += 1
+        # Call 1 is the main-cohort fit (must succeed, or `cohort_attribution` never reaches the
+        # bootstrap loop); of the bootstrap draws that follow, every 3rd one fails -- a controlled,
+        # deterministic ~33% failure rate that still clears the adequate-evidence threshold at
+        # n_boot=100 (~67 valid draws expected), isolating NaN-exclusion (0089 part A) from the separate
+        # insufficient-evidence threshold (0089 part B, exercised below).
+        if state["calls"] > 1 and state["calls"] % 3 == 0:
+            raise np.linalg.LinAlgError("simulated degenerate resample")
+        return real_fit_lagged(x, t, e, latency)
+
+    monkeypatch.setattr(epidemiology_module, "_fit_lagged", _partially_flaky_fit_lagged)
+
+    result = cohort_attribution(covariates, time, event, n_boot=100, rng=24)
+
+    dq = result.provenance["af_distribution"]
+    assert isinstance(dq, DerivedQuantity), "partial failures should still clear the adequate-evidence threshold"
+    assert np.all(np.isfinite(dq.samples)), "failed draws must be excluded, never carried through as NaN"
+    assert 0 < dq.samples.shape[0] < result.provenance["n_boot"]
+    assert dq.samples.shape[0] == result.provenance["n_boot_valid"]
+
+
+def test_mostly_failing_bootstrap_returns_insufficient_evidence_not_a_spurious_interval(monkeypatch):
+    covariates, time, event = _simulate_cohort(seed=21, n=200)
+    real_fit_lagged = epidemiology_module._fit_lagged
+    state = {"calls": 0}
+
+    def _flaky_fit_lagged(x, t, e, latency):
+        state["calls"] += 1
+        # Call 1 (the main-cohort fit) and every 25th bootstrap draw after it succeed -- a ~4% bootstrap
+        # convergence rate, deterministic regardless of the exact adequacy threshold chosen.
+        if state["calls"] % 25 == 1:
+            return real_fit_lagged(x, t, e, latency)
+        raise np.linalg.LinAlgError("simulated degenerate resample")
+
+    monkeypatch.setattr(epidemiology_module, "_fit_lagged", _flaky_fit_lagged)
+
+    result = cohort_attribution(covariates, time, event, n_boot=100, rng=21)
+
+    dq = result.provenance["af_distribution"]
+    assert not isinstance(dq, DerivedQuantity), "an insufficient-evidence result must not pass as a real interval"
+    assert dq.n_boot == 100
+    assert dq.n_boot_valid < 40
+    assert dq.reason
+    assert all(np.isnan(v) for v in result.af_ci), "af_ci must not report a spuriously precise interval"
+
+    # the point estimate (from the ONE always-succeeding main-cohort fit) is unaffected -- the HR fit and
+    # the bootstrap evidence for its interval are separable failure modes.
+    assert np.isfinite(result.hazard_ratio)
+
+
+def test_rng_state_reproduces_the_exact_bootstrap_draws_even_from_a_pre_advanced_generator():
+    # The bug this closes: recording only `bit_generator.seed_seq.entropy` reflects a generator's
+    # ORIGINAL construction seed. If the caller had already advanced the generator before passing it in
+    # (as here), entropy-based replay would silently restart from scratch and reproduce the WRONG
+    # sequence. `rng_state`, captured the moment `cohort_attribution` receives the generator, must
+    # reproduce the actual draws regardless.
+    covariates, time, event = _simulate_cohort(seed=22, n=150)
+
+    caller_rng = np.random.default_rng(999)
+    _ = caller_rng.integers(0, 1_000_000, size=37)  # the caller already used this generator elsewhere
+
+    result = cohort_attribution(covariates, time, event, n_boot=50, rng=caller_rng)
+    rng_state = result.provenance["rng_state"]
+
+    # A naive "just replay the original construction seed" approach would get this wrong.
+    assert np.random.default_rng(999).bit_generator.state != rng_state
+
+    # Reconstructing a fresh Generator purely from the recorded state and rerunning must reproduce the
+    # exact same bootstrap AF draws -- the actual proof `rng_state` is usable, not just non-None.
+    bit_generator_cls = getattr(np.random, rng_state["bit_generator"])
+    replayed_bit_generator = bit_generator_cls()
+    replayed_bit_generator.state = rng_state
+    replayed = cohort_attribution(covariates, time, event, n_boot=50, rng=np.random.Generator(replayed_bit_generator))
+
+    np.testing.assert_array_equal(
+        result.provenance["af_distribution"].samples, replayed.provenance["af_distribution"].samples
+    )
+    assert result.af_ci == replayed.af_ci
+    assert result.hazard_ratio == replayed.hazard_ratio
