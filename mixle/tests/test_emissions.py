@@ -90,6 +90,74 @@ def test_invalid_scope_raises():
         emissions_footprint(ACTIVITY, FACTORS, scopes=(1, 4))
 
 
+def test_duplicate_scope_raises():
+    # Regression for MXR-080-0085: a duplicate scope used to be counted once in the dict-keyed point
+    # total but once per occurrence in the Monte-Carlo loop (which iterates the raw `scopes` tuple),
+    # so the point estimate and the credible interval silently described two different footprints.
+    # A duplicate is now rejected outright rather than being aggregated (silently or otherwise).
+    with pytest.raises(ValueError, match="duplicate"):
+        emissions_footprint(ACTIVITY, FACTORS, scopes=(1, 1, 2))
+    # Rejected eagerly regardless of whether a Monte-Carlo interval is even requested.
+    with pytest.raises(ValueError, match="duplicate"):
+        emissions_footprint(ACTIVITY, FACTORS, scopes=(2, 3, 3), n=0)
+
+
+def test_point_total_and_ci_describe_the_same_footprint():
+    # Negative control for MXR-080-0085: with a unique (if reordered) scope set, the Monte-Carlo CI
+    # must bracket the exact same point total that is reported alongside it -- the two paths must
+    # describe one footprint, not two.
+    fp = emissions_footprint(ACTIVITY, FACTORS, scopes=(3, 1, 2), n=20_000, rng=np.random.default_rng(0))
+    assert fp.total == pytest.approx(REF_TOTAL)
+    lo, hi = fp.ci
+    assert lo <= fp.total <= hi
+
+
+def test_negative_sigma_raises():
+    # Regression for MXR-080-0085: a negative sigma used to silently take the `std > 0` else-branch
+    # (an exactly-known, zero-uncertainty factor) instead of being rejected as a physically
+    # meaningless "negative standard deviation".
+    bad_factors = EmissionFactors(
+        scope1=FACTORS.scope1, scope2=FACTORS.scope2, scope3=FACTORS.scope3, sigma={"diesel_L": -0.05}
+    )
+    with pytest.raises(ValueError, match="sigma"):
+        emissions_footprint(ACTIVITY, bad_factors, n=100)
+
+
+def test_non_finite_sigma_raises():
+    bad_factors = EmissionFactors(
+        scope1=FACTORS.scope1, scope2=FACTORS.scope2, scope3=FACTORS.scope3, sigma={"diesel_L": float("nan")}
+    )
+    with pytest.raises(ValueError, match="sigma"):
+        emissions_footprint(ACTIVITY, bad_factors, n=100)
+
+
+def test_negative_activity_raises():
+    bad_activity = dict(ACTIVITY, diesel_L=-1.0)
+    with pytest.raises(ValueError, match="activity"):
+        emissions_footprint(bad_activity, FACTORS)
+
+
+def test_non_finite_activity_raises():
+    for bad_value in (float("nan"), float("inf")):
+        bad_activity = dict(ACTIVITY, diesel_L=bad_value)
+        with pytest.raises(ValueError, match="activity"):
+            emissions_footprint(bad_activity, FACTORS)
+
+
+def test_non_finite_factor_raises():
+    bad_factors = EmissionFactors(scope1={"diesel_L": float("inf")}, scope2=FACTORS.scope2, scope3=FACTORS.scope3)
+    with pytest.raises(ValueError, match="scope1"):
+        emissions_footprint(ACTIVITY, bad_factors)
+
+
+def test_negative_factor_is_allowed():
+    # Sign is NOT constrained for emission factors themselves (unlike activity/sigma): a documented
+    # carbon-negative feedstock factor is a legitimate finite negative number.
+    factors_with_credit = EmissionFactors(scope1={"biochar_kg": -1.5}, scope2={}, scope3={})
+    fp = emissions_footprint({"biochar_kg": 10.0}, factors_with_credit)
+    assert fp.total == pytest.approx(-15.0)
+
+
 def test_climate_terms_type_hints_are_resolvable():
     # climate_terms's `water` parameter used to be a bare forward-reference string naming an import
     # that never happened, so any runtime introspection (typing.get_type_hints, some doc generators,
