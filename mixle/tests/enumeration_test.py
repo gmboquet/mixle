@@ -455,6 +455,36 @@ class BruteForceCrossCheckTestCase(unittest.TestCase):
         self.assert_matches_brute(dist, support, "intsetdist")
 
 
+class SoundTopKCertificateTestCase(unittest.TestCase):
+    """Regression coverage for MXR-080-0211: sound_top_k must never present a truncated prefix
+    as though it were the proven-complete top-k."""
+
+    def test_geometric_infinite_support_deepens_instead_of_false_exhaustion(self):
+        # MXR-080-0211 repro: GeometricDistribution has infinite support, so no finite prefix is
+        # ever "the complete answer". A small initial budget_bits builds a heavily truncated
+        # count-budget index; the prior implementation inferred "support exhausted" straight from
+        # `len(seen) < need` without first checking `index.truncated`, so it returned that
+        # truncated handful as though it were the true (complete) top 10. At these exact
+        # parameters it used to silently return only the first 2 values instead of 10.
+        geo = GeometricDistribution(0.5)
+        result = sound_top_k(geo, 10, budget_bits=1.0)
+        exact = geo.enumerator().top_k(10)
+
+        self.assertEqual(len(result), 10)
+        self.assertEqual([v for v, _ in result], [v for v, _ in exact])
+        for (_, lp), (_, elp) in zip(result, exact):
+            self.assertAlmostEqual(lp, float(elp), places=9)
+
+    def test_finite_support_reports_true_exhaustion_without_overcorrecting(self):
+        # Negative control: a distribution with a genuinely small, FINITE support (3 outcomes)
+        # must still promptly return fewer than `k` items when that is the honest answer -- the
+        # fix must not overcorrect into deepening forever regardless.
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
+        result = sound_top_k(cat, 10, budget_bits=1.0)
+        self.assertEqual(len(result), 3)
+        self.assertEqual({v for v, _ in result}, {"a", "b", "c"})
+
+
 class InfiniteSupportMassDominanceTestCase(unittest.TestCase):
     """The first N items of an infinite enumeration must contain every value that is
     strictly more probable than the N-th item."""

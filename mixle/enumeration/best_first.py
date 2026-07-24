@@ -598,7 +598,11 @@ def sound_top_k(
     the best ``start+k`` by probability. Since every unpulled item's probability is at most the
     remaining mass ``total_mass - accumulated``, once ``remaining`` drops below the (start+k)-th best
     probability the heap is exactly the true top ``start+k``; return ``sorted_desc[start:start+k]``.
-    If the in-budget stream is exhausted first, the budget is doubled (up to ``max_budget_bits``).
+
+    Running out of the in-budget stream is NOT by itself proof the support is exhausted: only a
+    non-truncated index has genuinely covered the entire support. A TRUNCATED index only proves
+    "nothing more is visible to this bounded build", so running out of one deepens the budget
+    (doubling up to ``max_budget_bits``) instead of returning the partial prefix as the answer.
     ``total_mass`` (default 1.0) may be a known upper bound for sub-normalized models.
 
     Cost is ``O(number pulled)`` -- small for peaked distributions, large for flat ones, so for
@@ -643,8 +647,19 @@ def sound_top_k(
                     break
         ordered = sorted(heap, key=lambda t: -t[0])
         # Certified sound; or the whole in-budget index was consumed and it was NOT truncated, so
-        # the full support was seen and the heap is exact; or fewer than `need` distinct values exist.
-        if certified or not index.truncated or len(seen) < need:
+        # the full support was seen and the heap is exact (including the case where fewer than
+        # `need` distinct values exist -- that conclusion is only honest when the index that
+        # reported it was itself exhaustive).
+        #
+        # MXR-080-0211: this used to also return early whenever `len(seen) < need`, WITHOUT
+        # checking `index.truncated` first. A TRUNCATED index only proves "nothing more is visible
+        # to this bounded build", not "nothing more exists" -- so a small bounded build of an
+        # infinite-support distribution (e.g. requesting ten values from a geometric with a tiny
+        # initial budget) could see only a couple of distinct values from a truncated index and
+        # silently return that partial prefix as though it were the complete top-k. Exhaustion may
+        # only be inferred from a genuinely non-truncated index; a truncated one just hasn't looked
+        # far enough yet and must fall through to the deepen-or-budget-cap logic below instead.
+        if certified or not index.truncated:
             return [(v, lp) for lp, _, v in ordered][start:need]
         if budget >= max_budget_bits:
             return [(v, lp) for lp, _, v in ordered][start:need]  # best effort at the budget cap
