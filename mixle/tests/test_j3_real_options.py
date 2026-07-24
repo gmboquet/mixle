@@ -18,12 +18,14 @@ rather than importing a class that doesn't exist yet on this branch.
 
 from __future__ import annotations
 
+import warnings
 from typing import NamedTuple
 
 import numpy as np
 import pytest
 
 from mixle.analysis.real_options import (
+    GaussianObservationModel,
     OptionValue,
     VoiEstimate,
     real_option_value,
@@ -235,6 +237,140 @@ def test_voi_dollars_matches_voi_estimate_value():
     direct = voi_dollars(posterior, _decision_value, drill_info, rng=np.random.default_rng(3))
     est = voi_estimate(posterior, _decision_value, drill_info, rng=np.random.default_rng(3))
     assert direct == est.value
+
+
+# --- MXR-080-0109: genuine sample-then-condition EVSI under a declared GaussianObservationModel ---
+
+
+class _BimodalToyPosterior:
+    """A genuinely bimodal (two well-separated Gaussian bumps) belief -- clearly not the Gaussian,
+    unimodal regime the variance-rescaling heuristic (and the Gaussian-conjugate observation_model path)
+    both assume; used to exercise the honest regime warning."""
+
+    def __init__(self, separation: float = 12.0, bump_std: float = 1.0):
+        self._separation = separation
+        self._bump_std = bump_std
+
+    def samples(self, n, rng):
+        which = rng.integers(0, 2, size=n)
+        half = self._separation / 2.0
+        out = np.where(
+            which == 0,
+            rng.normal(-half, self._bump_std, size=n),
+            rng.normal(half, self._bump_std, size=n),
+        )
+        return out[:, None]
+
+    @property
+    def mean(self):
+        return np.array([0.0])
+
+    @property
+    def cov(self):
+        return np.array([[(self._separation / 2.0) ** 2 + self._bump_std**2]])
+
+    def credible_interval(self, level):
+        raise NotImplementedError
+
+    def derived_quantity(self, fn, n, rng):
+        raise NotImplementedError
+
+
+def test_observation_model_zero_information_is_exactly_zero_across_seeds():
+    """The same zero-information exactness property as the heuristic path (MXR-080-0108's
+    common-random-numbers fix), now for the genuine EVSI path: an all-zero obs_matrix declares a
+    literally uninformative experiment, so VOI must come back exactly 0.0, not just approximately."""
+    posterior = _ToyPosterior(mean=0.5, std=3.0)
+    uninformative = GaussianObservationModel(obs_matrix=np.array([[0.0]]), obs_cov=np.array([[1.0]]))
+    for seed in range(10):
+        rng = np.random.default_rng(seed)
+        voi = voi_dollars(posterior, _decision_value, {}, rng=rng, observation_model=uninformative)
+        assert voi == 0.0, f"seed={seed}: expected exactly 0.0 for an uninformative observation, got {voi!r}"
+
+
+def test_observation_model_reports_gaussian_conjugate_evsi_method():
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    om = GaussianObservationModel(obs_matrix=np.array([[1.0]]), obs_cov=np.array([[4.0]]))
+    est = voi_estimate(posterior, _decision_value, {}, rng=np.random.default_rng(0), observation_model=om)
+    assert est.method == "gaussian_conjugate_evsi"
+    assert est.standard_error > 0.0
+
+
+def test_observation_model_matches_closed_form_gaussian_conjugate_voi():
+    """Verified against a known closed form: for a normal-normal conjugate pair (prior N(mu0, tau0^2),
+    a single noisy observation of variance sigma^2) and a go/no-go decision "invest iff the posterior
+    mean is positive", the expected with-info value is E[max(mu1(Y), 0)] for mu1(Y) ~ N(mu0, tau0^2 -
+    tau1^2) (tau1^2 the posterior variance; Var(mu1(Y)) = tau0^2 - tau1^2 is the standard law-of-total-
+    variance identity). E[max(X, 0)] for X ~ N(m, v) has the closed form m*Phi(m/s) + s*phi(m/s), s =
+    sqrt(v) (the Bachelier/rectified-normal formula) -- so VOI = that minus max(mu0, 0), independent of
+    this module's own Monte Carlo machinery entirely."""
+    from scipy.stats import norm
+
+    mu0, tau0, sigma = 0.5, 3.0, 2.0
+    tau1_sq = 1.0 / (1.0 / tau0**2 + 1.0 / sigma**2)
+    spread = float(np.sqrt(tau0**2 - tau1_sq))
+    closed_form = (mu0 * norm.cdf(mu0 / spread) + spread * norm.pdf(mu0 / spread)) - max(mu0, 0.0)
+
+    posterior = _ToyPosterior(mean=mu0, std=tau0)
+    om = GaussianObservationModel(obs_matrix=np.array([[1.0]]), obs_cov=np.array([[sigma**2]]))
+    est = voi_estimate(
+        posterior, _decision_value, {}, rng=np.random.default_rng(42), n_outer=4000, n_inner=4000, observation_model=om
+    )
+    # Generous multiple of the reported standard error plus a small slack for decision_fn's own residual
+    # finite-n_inner bias (it estimates max(posterior mean, 0) via a sample mean, not the exact mean).
+    assert abs(est.value - closed_form) < 4.0 * est.standard_error + 0.02
+
+
+def test_observation_model_rejects_mismatched_obs_matrix_shape():
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    bad = GaussianObservationModel(obs_matrix=np.array([[1.0, 1.0]]), obs_cov=np.array([[1.0]]))
+    with pytest.raises(ValueError, match="obs_matrix"):
+        voi_dollars(posterior, _decision_value, {}, rng=np.random.default_rng(0), observation_model=bad)
+
+
+def test_observation_model_rejects_non_finite_obs_cov():
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    bad = GaussianObservationModel(obs_matrix=np.array([[1.0]]), obs_cov=np.array([[float("nan")]]))
+    with pytest.raises(ValueError, match="finite"):
+        voi_dollars(posterior, _decision_value, {}, rng=np.random.default_rng(0), observation_model=bad)
+
+
+def test_observation_model_rejects_matrix_free_covariance():
+    from scipy.sparse.linalg import LinearOperator
+
+    class _LinOpPosterior(_ToyPosterior):
+        @property
+        def cov(self):
+            dense = super().cov
+            return LinearOperator(dense.shape, matvec=lambda x: dense @ x)
+
+    posterior = _LinOpPosterior(mean=1.0, std=5.0)
+    om = GaussianObservationModel(obs_matrix=np.array([[1.0]]), obs_cov=np.array([[1.0]]))
+    with pytest.raises(TypeError, match="dense"):
+        voi_dollars(posterior, _decision_value, {}, rng=np.random.default_rng(0), observation_model=om)
+
+
+def test_heuristic_warns_on_a_clearly_non_gaussian_posterior():
+    posterior = _BimodalToyPosterior()
+    with pytest.warns(UserWarning, match="non-Gaussian"):
+        voi_dollars(posterior, _decision_value, {"variance_reduction": 0.5}, rng=np.random.default_rng(0))
+
+
+def test_observation_model_warns_on_a_clearly_non_gaussian_posterior():
+    posterior = _BimodalToyPosterior()
+    om = GaussianObservationModel(obs_matrix=np.array([[1.0]]), obs_cov=np.array([[1.0]]))
+    with pytest.warns(UserWarning, match="non-Gaussian"):
+        voi_dollars(posterior, _decision_value, {}, rng=np.random.default_rng(0), observation_model=om)
+
+
+def test_heuristic_does_not_warn_on_a_genuinely_gaussian_posterior():
+    """Negative control: the regime screen must not cry wolf on the exact regime it is meant to allow --
+    checked across several seeds since it is itself a (generous-threshold) statistical test."""
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    for seed in range(10):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            voi_dollars(posterior, _decision_value, {"variance_reduction": 0.5}, rng=np.random.default_rng(seed))
 
 
 def test_real_option_value_type_hints_are_resolvable():
