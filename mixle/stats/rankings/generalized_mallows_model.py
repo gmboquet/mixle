@@ -132,8 +132,25 @@ class GeneralizedMallowsModelDistribution(SequenceEncodableProbabilityDistributi
         return float(self.seq_log_density(np.asarray(x, dtype=np.int64)[None, :])[0])
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
-        """Return vectorized log-probabilities for encoded orderings."""
-        j = seq_rim_code(x, self.sigma0)  # (N, n-1)
+        """Return vectorized log-probabilities for encoded orderings.
+
+        Raises:
+            ValueError: If any row of x is not a permutation of 0,...,n-1 (wrong length, a
+                repeated element, or an element outside that range). A malformed row is not
+                merely an unlikely ordering -- it isn't an ordering at all, so it is rejected
+                here rather than silently scored (e.g. a repeated index would otherwise still
+                produce a finite, meaningless log-density, and an out-of-range or negative index
+                reaches the numba RIM kernel below, which has no bounds checking of its own and
+                does not raise -- it silently scores too, rather than failing loudly).
+
+        """
+        xa = np.asarray(x, dtype=np.int64)
+        expected = np.arange(self.dim)
+        if xa.ndim != 2 or xa.shape[1] != self.dim or not all(np.array_equal(np.sort(row), expected) for row in xa):
+            raise ValueError(
+                "GeneralizedMallowsModelDistribution requires each row of x to be a permutation of 0,...,n-1."
+            )
+        j = seq_rim_code(xa, self.sigma0)  # (N, n-1)
         return -(j @ self.theta) - self.log_z
 
     def sampler(self, seed: int | None = None) -> GeneralizedMallowsModelSampler:
