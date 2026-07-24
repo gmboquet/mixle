@@ -6,9 +6,12 @@ import numpy as np
 import pytest
 
 from mixle.analysis.sdm import (
+    _RATE_CLIP,
     HabitatModel,
     SpeciesObservation,
     _bin_cell_counts,
+    _clipped_rates_and_mask,
+    _fit_beta,
     _nll_and_grad,
     _penalized_hessian,
     _validate_locations,
@@ -328,3 +331,131 @@ def test_nll_and_grad_data_term_matches_numerical_differentiation():
         numerical_grad[j] = (nll_at(bp) - nll_at(bm)) / (2.0 * eps)
 
     assert np.allclose(analytic_grad, numerical_grad, atol=1e-3, rtol=1e-4)
+
+
+# -- MXR-080-0113: gradient/Hessian must stay the exact derivative of the CLIPPED objective, and a
+# non-converged fit must not be treated as a valid posterior --
+
+
+def _make_saturating_fixture():
+    """One cell (index 0) has eta deep past `_RATE_CLIP`; the rest are ordinary, unsaturated cells."""
+    design = np.array([[1.0, 800.0], [1.0, 0.0], [1.0, -0.5], [1.0, 0.3]])
+    counts = np.array([2.0, 1.0, 0.0, 3.0])
+    log_offset = np.zeros(4)
+    edges = np.arange(5, dtype=np.float64)
+    beta = np.array([0.1, 1.0])  # eta[0] = 0.1 + 800*1.0 = 800.1, far past +-_RATE_CLIP (700)
+    return design, counts, log_offset, edges, beta
+
+
+def test_clipped_rates_and_mask_saturates_and_masks_outside_clip_range():
+    design, _, log_offset, _, beta = _make_saturating_fixture()
+    rates, mask = _clipped_rates_and_mask(beta, design, log_offset)
+    assert mask.tolist() == [0.0, 1.0, 1.0, 1.0]
+    assert rates[0] == pytest.approx(np.exp(_RATE_CLIP))  # pinned at the clip boundary, not inf
+    assert np.all(np.isfinite(rates))
+
+
+def _make_small_clip_saturating_fixture():
+    """Like `_make_saturating_fixture`, but sized for use under a monkeypatched, much smaller
+    `_RATE_CLIP` (see the two tests below): cell 0's eta sits just past the *patched* clip."""
+    design = np.array([[1.0, 8.0], [1.0, 0.0], [1.0, -0.5], [1.0, 0.3]])
+    counts = np.array([2.0, 1.0, 0.0, 3.0])
+    log_offset = np.zeros(4)
+    edges = np.arange(5, dtype=np.float64)
+    beta = np.array([0.1, 1.0])  # eta[0] = 0.1 + 8*1.0 = 8.1
+    return design, counts, log_offset, edges, beta
+
+
+def test_nll_and_grad_gradient_matches_numerical_differentiation_when_clip_is_active(monkeypatch):
+    """The gradient must be the exact derivative of the CLIPPED nll value even with an active clip, not
+    the derivative of the unclipped objective (the pre-fix bug put the saturated cell's analytic gradient
+    component around 10**304 against a true numerical gradient of ~0 there).
+
+    `_RATE_CLIP` is monkeypatched down to 5.0 for this test only: at the real clip (700), the saturated
+    cell's rate is exp(700) ~ 1e304, which so completely dominates float64 precision in the *summed* nll
+    that finite-differencing could not detect the other cells' O(1) contributions at all -- a pure
+    precision artifact of the test, not a property of the fix (`_RATE_CLIP` is a bare module global that
+    `_clipped_rates_and_mask`/`_nll_and_grad` look up dynamically at call time, so patching the module
+    attribute changes what those functions see without needing to touch the module's source)."""
+    import mixle.analysis.sdm as sdm_mod
+
+    monkeypatch.setattr(sdm_mod, "_RATE_CLIP", 5.0)
+    design, counts, log_offset, edges, beta = _make_small_clip_saturating_fixture()
+    ridge = 0.05
+
+    _, mask = _clipped_rates_and_mask(beta, design, log_offset)
+    assert mask[0] == 0.0  # sanity: cell 0 really is saturated under the patched clip
+
+    def nll_at(b: np.ndarray) -> float:
+        val, _ = _nll_and_grad(b, design, counts, log_offset, ridge, edges)
+        return val
+
+    _, analytic_grad = _nll_and_grad(beta, design, counts, log_offset, ridge, edges)
+
+    eps = 1e-6
+    numerical_grad = np.zeros(2)
+    for j in range(2):
+        bp, bm = beta.copy(), beta.copy()
+        bp[j] += eps
+        bm[j] -= eps
+        numerical_grad[j] = (nll_at(bp) - nll_at(bm)) / (2.0 * eps)
+
+    assert np.allclose(analytic_grad, numerical_grad, atol=1e-4, rtol=1e-4)
+
+
+def test_penalized_hessian_matches_numerical_differentiation_when_clip_is_active(monkeypatch):
+    """The Hessian must likewise stay consistent with the (masked) gradient when the clip is active
+    (see the preceding test for why `_RATE_CLIP` is monkeypatched down for this check)."""
+    import mixle.analysis.sdm as sdm_mod
+
+    monkeypatch.setattr(sdm_mod, "_RATE_CLIP", 5.0)
+    design, counts, log_offset, edges, beta = _make_small_clip_saturating_fixture()
+    ridge = 0.05
+
+    def grad_at(b: np.ndarray) -> np.ndarray:
+        _, g = _nll_and_grad(b, design, counts, log_offset, ridge, edges)
+        return g
+
+    analytic_hessian = _penalized_hessian(beta, design, log_offset, ridge)
+
+    eps = 1e-6
+    numerical_hessian = np.zeros((2, 2))
+    for j in range(2):
+        bp, bm = beta.copy(), beta.copy()
+        bp[j] += eps
+        bm[j] -= eps
+        numerical_hessian[:, j] = (grad_at(bp) - grad_at(bm)) / (2.0 * eps)
+
+    assert np.allclose(analytic_hessian, numerical_hessian, atol=1e-4, rtol=1e-4)
+
+
+def test_fit_beta_rejects_non_convergence(monkeypatch):
+    """An optimizer that reports failure must not be silently treated as a fitted posterior."""
+    from scipy.optimize import OptimizeResult
+
+    import mixle.analysis.sdm as sdm_mod
+
+    def fake_minimize(fun, x0, **kwargs):
+        return OptimizeResult(x=x0, success=False, message="forced non-convergence for test")
+
+    monkeypatch.setattr(sdm_mod, "minimize", fake_minimize)
+
+    rng = np.random.default_rng(3)
+    design, counts, log_offset, _ = _make_glm_fixture(rng, num_cells=10, p=2)
+    with pytest.raises(ValueError, match=r"did not converge"):
+        _fit_beta(design, counts, log_offset, ridge=1e-3)
+
+
+def test_fit_beta_still_converges_and_fits_normally():
+    """Negative control: an ordinary, well-posed fit still converges and returns a usable Laplace fit."""
+    rng = np.random.default_rng(5)
+    design, counts, log_offset, _ = _make_glm_fixture(rng, num_cells=60, p=3)
+
+    beta_hat, beta_cov, rates_hat = _fit_beta(design, counts, log_offset, ridge=1e-2)
+
+    assert beta_hat.shape == (3,)
+    assert np.all(np.isfinite(beta_hat))
+    assert beta_cov.shape == (3, 3)
+    assert np.all(np.isfinite(beta_cov))
+    assert rates_hat.shape == (60,)
+    assert np.all(rates_hat > 0.0)
