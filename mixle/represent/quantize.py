@@ -28,7 +28,13 @@ class VectorQuantizer:
         self.codebook: np.ndarray | None = None  # (num_codes, dim)
 
     def fit(self, vectors: np.ndarray, *, iters: int = 25) -> VectorQuantizer:
-        """Fit the codebook by k-means (Lloyd) on ``vectors`` ``(n, dim)`` -- the vocabulary is learned, not assumed."""
+        """Fit the codebook by k-means (Lloyd) on ``vectors`` ``(n, dim)`` -- the vocabulary is learned, not assumed.
+
+        ``num_codes`` is a cap, not a guarantee: fitting on fewer than ``num_codes`` samples yields one
+        center per sample, and ``num_codes`` is updated in place to that actual count so it -- and every
+        bounds check derived from it (``dequantize``, a caller building a one-hot over the vocabulary) --
+        stays honest about the codebook's real capacity instead of quietly overstating it.
+        """
         x = np.asarray(vectors, dtype=np.float64)
         rng = np.random.RandomState(self.seed)
         k = min(self.num_codes, len(x))
@@ -41,6 +47,7 @@ class VectorQuantizer:
                 break
             centers = new
         self.codebook = centers
+        self.num_codes = len(centers)  # honest post-fit count; may be < the originally requested cap
         return self
 
     @staticmethod
@@ -59,7 +66,12 @@ class VectorQuantizer:
         """Codebook vectors for token ids ``(n,)`` -> ``(n, dim)`` (the reconstruction / de-tokenization)."""
         if self.codebook is None:
             raise RuntimeError("call fit(...) before dequantize(...)")
-        return self.codebook[np.asarray(ids, dtype=np.int64)]
+        ids_arr = np.asarray(ids, dtype=np.int64)
+        bad = (ids_arr < 0) | (ids_arr >= len(self.codebook))
+        if np.any(bad):
+            bad_id = int(np.asarray(ids_arr[bad]).flat[0])
+            raise IndexError(f"code id {bad_id} out of range for a {len(self.codebook)}-code codebook.")
+        return self.codebook[ids_arr]
 
     def reconstruction_error(self, vectors: np.ndarray) -> float:
         """Mean squared quantization error -- the codebook's fidelity (a codebook-size / bitrate knob)."""
