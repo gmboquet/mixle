@@ -26,6 +26,20 @@ import numpy as np
 
 _LN2 = math.log(2.0)
 
+# How far a value is allowed to sit outside its mathematically valid range ([0, 1] for a probability
+# mass or CDF) before it is treated as a real defect (duplicate counting, a normalization bug, an
+# unaccounted truncation) rather than ordinary floating-point roundoff. Deliberately generous relative
+# to float64 epsilon (~2.2e-16): a sum over many terms (a large composite/sequence support) can
+# accumulate roundoff well beyond one ULP, but a genuine defect is typically orders of magnitude larger
+# still. Shared so every roundoff-vs-defect judgment in this module uses one consistent budget.
+_ROUNDOFF_TOL = 1.0e-6
+
+# The tie-tolerance convention `count_dp_rank`/`count_dp_seek`/`marginal_seek` already document ("must
+# match the 1e-12 convention the true rank is defined by"): two log-probabilities within this of each
+# other are a tie. `density_rank` and `cumulative_probability` now default to the SAME convention
+# (previously 1e-9), so "exact" means the same thing everywhere in this module by default.
+_EXACT_TIE_TOL = 1.0e-12
+
 
 @dataclass
 class DensityRankResult:
@@ -35,9 +49,12 @@ class DensityRankResult:
         cumulative_probability: ``G(x) = sum_{y: p(y) >= p(x)} p(y)`` (the descending-order CDF at x).
         rank: number of observations strictly more probable than x (0-based position). Exact when the
             head enumeration resolved it; in ``"sampling"`` mode it is the rounded unbiased Monte-Carlo
-            estimate (see ``rank_stderr``); ``None`` only when ``log p(x) = -inf`` or an exact-analytic
-            CDF (no count) was used.
-        exact: True when the head enumeration resolved the query exactly; False for a sampling estimate.
+            estimate (see ``rank_stderr``); ``None`` when ``log p(x) = -inf``, an exact-analytic CDF (no
+            count) was used, or the sampling estimate itself overflowed (see ``rank_stderr``, which is
+            still finite -- or ``inf`` -- even when ``rank`` is ``None``).
+        exact: True when the head enumeration resolved the query exactly WITH RESPECT TO the ``tol``-
+            equivalence relation ties are defined by (see ``density_rank``'s ``tol`` parameter); False
+            for a sampling estimate.
         stderr: standard error of ``cumulative_probability`` (0.0 when exact).
         log_prob: ``log p(x)``.
         method: ``"exact-head"``, ``"exact-exhausted"``, ``"exact-analytic"``, or ``"sampling"``.
@@ -61,7 +78,7 @@ def density_rank(
     max_exact: int = 100_000,
     n_samples: int = 20_000,
     seed: int = 0,
-    tol: float = 1.0e-9,
+    tol: float = _EXACT_TIE_TOL,
 ) -> DensityRankResult:
     """Rank and cumulative probability of ``value`` under ``dist``'s descending-probability order.
 
@@ -78,13 +95,22 @@ def density_rank(
         dist: A distribution exposing ``log_density`` and ``sampler``; optionally ``enumerator``.
         value: The observation to locate.
         max_exact: Cap on items pulled from the exact enumerator before falling back to sampling.
-        n_samples: Monte-Carlo sample count for the fallback.
+        n_samples: Monte-Carlo sample count for the fallback; must be a positive integer (validated
+            eagerly, even on a call that never reaches the sampling path -- a bad ``n_samples`` is a
+            caller bug regardless of whether this particular query happens to exercise it).
         seed: Sampler seed for the fallback (reproducible).
-        tol: Log-probability tolerance for the ``>=`` comparison (ties).
+        tol: Log-probability tolerance for the ``>=``/``>`` comparisons (ties). Defaults to this
+            module's ``1e-12`` "true rank" convention (also used by ``count_dp_rank``/``count_dp_seek``/
+            ``marginal_seek``). ``exact=True`` is exact WITH RESPECT TO this tolerance's equivalence
+            relation: two scores within ``tol`` of each other are treated as tied. Widening ``tol``
+            trades a stricter mathematical comparison for robustness against floating-point jitter in
+            ``log_density`` -- know that a wide ``tol`` can change which values compare as tied.
 
     Returns:
         DensityRankResult.
     """
+    if not isinstance(n_samples, (int, np.integer)) or isinstance(n_samples, bool) or n_samples < 1:
+        raise ValueError(f"n_samples must be a positive integer, got {n_samples!r}")
     t = float(dist.log_density(value))
     if t == -np.inf:
         return DensityRankResult(0.0, None, True, 0.0, t, "exact-head")
@@ -115,6 +141,16 @@ def density_rank(
     exact_cumulative = getattr(dist, "density_cumulative", None)
     if callable(exact_cumulative):
         g = float(exact_cumulative(value))
+        # A CDF must lie in [0, 1]; clamping unconditionally would silently paper over a broken
+        # `density_cumulative` implementation and still call the (wrong) result exact. Only a
+        # roundoff-scale excursion is clamped-and-blessed; anything larger is a real defect and is
+        # surfaced instead of hidden.
+        if g < -_ROUNDOFF_TOL or g > 1.0 + _ROUNDOFF_TOL:
+            raise ValueError(
+                "%s.density_cumulative(value) returned %.17g, which is outside [0, 1] by more than the "
+                "%.1e roundoff budget -- this is a defect in density_cumulative, not floating-point "
+                "roundoff, so it is not silently clamped" % (type(dist).__name__, g, _ROUNDOFF_TOL)
+            )
         return DensityRankResult(min(1.0, max(0.0, g)), None, True, 0.0, t, "exact-analytic")
 
     # Sampling fallback. Two unbiased Monte-Carlo estimators from the SAME draws Y_i ~ dist:
@@ -127,18 +163,49 @@ def density_rank(
     # is provably hard. Its variance is driven by the least-probable counted point (~1/p(x)), so the
     # estimate is reliable in the body and noisy in the deep tail (reported via rank_stderr).
     samples = dist.sampler(seed).sample(n_samples)
+    n_drawn = len(samples)
+    if n_drawn != n_samples:
+        raise ValueError(
+            "sampler produced %d samples for n_samples=%d -- sampler cardinality does not match the "
+            "request" % (n_drawn, n_samples)
+        )
     try:
         # vectorized: one seq_log_density pass instead of n_samples per-sample log_density calls
         lp = np.asarray(dist.seq_log_density(dist.dist_to_encoder().seq_encode(samples)), dtype=float)
     except Exception:  # noqa: BLE001
         lp = np.asarray([float(dist.log_density(y)) for y in samples], dtype=float)
+    if lp.shape != (n_samples,):
+        raise ValueError(
+            "encoded log-density scores have shape %r, expected (%d,) -- one score per drawn sample"
+            % (lp.shape, n_samples)
+        )
     g = float(np.count_nonzero(lp >= t - tol)) / n_samples
     stderr = math.sqrt(max(g * (1.0 - g), 0.0) / n_samples)
-    # rank weights: 1/p(y) for the strictly-more-probable draws (matching the exact path's `> t`), else 0
-    weights = np.where(lp > t + tol, np.exp(-lp), 0.0)
-    rank_mean = float(weights.mean())
-    rank_stderr = float(weights.std(ddof=1) / math.sqrt(n_samples)) if n_samples > 1 else float("inf")
-    rank_est = int(round(rank_mean))
+
+    # rank weights: 1/p(y) for the strictly-more-probable draws (matching the exact path's `> t`), else 0.
+    # Computed in LOG-SPACE via a stable logsumexp rather than materializing exp(-lp) per sample: for an
+    # ordinary deep-tail query (t a few hundred nats or more -- unremarkable for a long sequence or a
+    # many-factor composite) some strictly-more-probable draws already push -lp past float64's ~709.78
+    # exp overflow threshold, long before anything about the samples is actually malformed.
+    from mixle.utils.vector import log_sum
+
+    neg_lp = -lp[lp > t + tol]
+    if neg_lp.size == 0:
+        rank_mean, rank_var = 0.0, 0.0
+    else:
+        log_n = math.log(n_samples)
+        log_mean = float(log_sum(neg_lp)) - log_n
+        log_second_moment = float(log_sum(2.0 * neg_lp)) - log_n
+        # exp() overflows float64 past ~709.78; a mean/second-moment that large is a genuine property
+        # of an astronomically deep rank, not a numerical artifact of the accumulation -- report it as
+        # inf (a legitimate value for these fields) instead of letting int(round(...)) raise below.
+        rank_mean = math.exp(log_mean) if log_mean < 709.0 else float("inf")
+        second_moment = math.exp(log_second_moment) if log_second_moment < 709.0 else float("inf")
+        rank_var = max(second_moment - rank_mean * rank_mean, 0.0) if math.isfinite(second_moment) else float("inf")
+    # sqrt(rank_var / (n-1)) is algebraically weights.std(ddof=1)/sqrt(n) (the previous convention),
+    # just accumulated in log-space above instead of building `weights` in linear scale first.
+    rank_stderr = math.sqrt(rank_var / (n_samples - 1)) if n_samples > 1 and math.isfinite(rank_var) else float("inf")
+    rank_est = int(round(rank_mean)) if math.isfinite(rank_mean) else None
     return DensityRankResult(g, rank_est, False, stderr, t, "sampling", rank_stderr=rank_stderr)
 
 
@@ -202,6 +269,26 @@ def truncated_sum_bound(dist: Any, k: int) -> TruncatedSumBound:
     enumerator = _try_enumerator(dist)
     if enumerator is None:
         raise EnumerationError(dist, reason="truncated_sum_bound requires an enumerable support")
+
+    if k == 0:
+        # An explicit zero-prefix bound WITHOUT consuming the stream: `k=0` means "enumerate nothing",
+        # not "enumerate one item and stop" (the previous behavior -- the loop below always pulled at
+        # least one value before checking `n >= k`). Every item's log-probability is <= 0.0 (a
+        # probability is <= 1), so 0.0 is the tightest universally-valid `last_log_prob` when nothing
+        # has actually been enumerated, giving the loosest-but-still-sound `exp(0.0) == 1.0` per-item
+        # cap on the (entirely un-enumerated) tail.
+        support_size = dist.support_size()
+        exhausted = support_size == 0
+        tail_upper = None if support_size is None else float(support_size)
+        return TruncatedSumBound(
+            num_enumerated=0,
+            enumerated_mass=0.0,
+            last_log_prob=0.0,
+            support_size=support_size,
+            exhausted=exhausted,
+            tail_upper_bound=tail_upper,
+            total_upper_bound=tail_upper,
+        )
 
     mass = 0.0
     last_lp = float("inf")

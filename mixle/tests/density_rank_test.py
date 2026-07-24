@@ -78,6 +78,93 @@ class DensityRankTestCase(unittest.TestCase):
         self.assertGreaterEqual(deep.cumulative_probability, 0.0)
         self.assertLessEqual(deep.cumulative_probability, 1.0)
 
+    def test_default_tie_tolerance_matches_true_rank_convention(self):
+        # MXR-080-0213: `tol` now defaults to this module's 1e-12 "true rank" convention (was 1e-9).
+        # A gap strictly inside (1e-12, 1e-9) must NOT be treated as a tie by the default.
+        from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
+
+        gap = 2e-10  # strictly inside (1e-12, 1e-9)
+        p0 = 0.2
+        p1 = p0 * math.exp(gap)
+        rest = (1 - p0 - p1) / 2
+        cat = CategoricalDistribution({"a": p0, "b": p1, "c": rest, "d": rest})
+        r_default = density_rank(cat, "b")
+        self.assertEqual(r_default.rank, 2)  # c, d strictly above; a is NOT tied with b by the default tol
+        self.assertAlmostEqual(r_default.cumulative_probability, rest + rest + p1, places=9)
+        # widening tol past the gap pulls the strictly-less-probable `a` into G(b) as if tied -- the
+        # exact behavior the old hardcoded 1e-9 default risked whenever a gap fell inside (1e-12, 1e-9).
+        r_loose = density_rank(cat, "b", tol=1e-9)
+        self.assertAlmostEqual(r_loose.cumulative_probability, rest + rest + p1 + p0, places=9)
+
+    def test_n_samples_must_be_a_positive_integer(self):
+        # MXR-080-0214: validated eagerly, even here where the query resolves exactly and never reaches
+        # the sampling path -- a bad n_samples is a caller bug regardless of whether it's exercised.
+        for bad in (0, -5, 3.5, "20000", True):
+            with self.assertRaises(ValueError):
+                density_rank(self.mix, 0, n_samples=bad)
+
+    def test_sampler_cardinality_mismatch_raises(self):
+        # MXR-080-0214: a sampler that silently draws a different count than requested is a model bug,
+        # not something to accept and mis-average over.
+        class _BadSampler:
+            def sample(self, n):
+                return list(range(n - 1))  # off by one
+
+        class _BadSamplerDist:
+            def log_density(self, value):
+                return -1.0
+
+            def sampler(self, seed):
+                return _BadSampler()
+
+        with self.assertRaises(ValueError):
+            density_rank(_BadSamplerDist(), 0, n_samples=10)
+
+    def test_encoded_score_shape_mismatch_raises(self):
+        # MXR-080-0214: seq_log_density returning the wrong number of scores must not be silently
+        # zipped against the wrong samples.
+        class _FixedSampler:
+            def sample(self, n):
+                return list(range(n))
+
+        class _BadEncoder:
+            def seq_encode(self, samples):
+                return samples
+
+        class _BadShapeDist:
+            def log_density(self, value):
+                return -1.0
+
+            def sampler(self, seed):
+                return _FixedSampler()
+
+            def seq_log_density(self, encoded):
+                return np.zeros(len(encoded) + 1)  # one too many
+
+            def dist_to_encoder(self):
+                return _BadEncoder()
+
+        with self.assertRaises(ValueError):
+            density_rank(_BadShapeDist(), 0, n_samples=10)
+
+    def test_deep_tail_sampling_overflow_is_handled_not_crashed(self):
+        # MXR-080-0214: a genuinely deep-tail query can push the importance-weight rank estimator's
+        # exp(-lp) past float64's ~709.78 overflow threshold long before anything is actually malformed
+        # (unremarkable for an ~800-symbol sequence). The log-space estimator must report this honestly
+        # (rank=None, a finite/inf rank_stderr) rather than crash converting an inf mean to an int.
+        from mixle.stats.univariate.discrete.point_mass import PointMassDistribution
+
+        seq = SequenceDistribution(
+            IntegerCategoricalDistribution(0, [0.4, 0.3, 0.2, 0.1]), len_dist=PointMassDistribution(800)
+        )
+        deep_value = [3] * 800  # the least-likely symbol repeated: far in the tail
+        r = density_rank(seq, deep_value, max_exact=0, n_samples=200, seed=0)
+        self.assertEqual(r.method, "sampling")
+        self.assertIsNone(r.rank)  # honestly None (overflowed), not a crash and not a wrapped/garbage int
+        self.assertTrue(math.isfinite(r.rank_stderr) or r.rank_stderr == float("inf"))
+        self.assertGreaterEqual(r.cumulative_probability, 0.0)
+        self.assertLessEqual(r.cumulative_probability, 1.0)
+
 
 class CountDPRankTestCase(unittest.TestCase):
     def test_exact_rank_matches_brute_force_for_composite(self):

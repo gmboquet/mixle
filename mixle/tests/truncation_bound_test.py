@@ -74,6 +74,36 @@ class TruncatedSumBoundTestCase(unittest.TestCase):
         self.assertIsNone(b.total_upper_bound)
         self.assertGreater(b.enumerated_mass, 0.0)  # lower bound still available
 
+    def test_zero_k_bounds_without_enumerating_anything(self):
+        # MXR-080-0215: k=0 must mean "enumerate nothing", not "pull one item and stop" -- the old code
+        # always drew at least one value from the stream before checking n >= k.
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.15, "d": 0.05})
+        b = truncated_sum_bound(cat, 0)
+        self.assertEqual(b.num_enumerated, 0)
+        self.assertEqual(b.enumerated_mass, 0.0)
+        self.assertEqual(b.last_log_prob, 0.0)  # exp(0.0) == 1.0: the loosest sound per-item cap
+        self.assertFalse(b.exhausted)
+        self.assertEqual(b.support_size, 4)
+        self.assertAlmostEqual(b.tail_upper_bound, 4.0, delta=TOL)  # (4 - 0) * exp(0.0)
+        self.assertAlmostEqual(b.total_upper_bound, 4.0, delta=TOL)
+
+    def test_zero_k_on_empty_support_is_exhausted(self):
+        # a genuinely empty (zero-item) support at k=0 is vacuously exhausted -- exhausted should track
+        # the true state of the support, not just "we didn't pull anything because k said not to".
+        from mixle.stats.univariate.discrete.categorical import CategoricalDistribution as _Cat
+
+        empty = _Cat({})
+        b = truncated_sum_bound(empty, 0)
+        self.assertEqual(b.num_enumerated, 0)
+        self.assertTrue(b.exhausted)
+        self.assertEqual(b.support_size, 0)
+        self.assertEqual(b.tail_upper_bound, 0.0)
+
+    def test_negative_k_raises(self):
+        cat = CategoricalDistribution({"a": 1.0})
+        with self.assertRaises(ValueError):
+            truncated_sum_bound(cat, -1)
+
     def test_composite_tail_bound_vs_brute_force(self):
         cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
         intc = IntegerCategoricalDistribution(0, [0.6, 0.4])
