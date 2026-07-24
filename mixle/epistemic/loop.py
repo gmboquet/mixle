@@ -75,8 +75,19 @@ def _portfolio_eig_nmc(
     hypotheses from the (renormalized active) portfolio, simulating one observation each via
     ``simulate_fn``, and estimating the log-evidence denominator from ``n_inner`` further draws --
     the discrete-portfolio analogue of :func:`mixle.doe.active.expected_information_gain_nmc`.
+
+    The "in play" set is hypotheses that are both ``active`` *and* carry positive weight, not
+    ``active`` alone: :class:`~mixle.epistemic.portfolio.HypothesisPortfolio`'s constructor only
+    forces weight ``0.0`` for *inactive* hypotheses, so an ``active=True`` hypothesis with weight
+    exactly ``0.0`` is legal (e.g. right after :meth:`~HypothesisPortfolio.reweight` collapses every
+    likelihood and moves all mass to ``w_open``, per that method's own documented "honest ...
+    outcome"). Filtering by ``active`` alone would let such a hypothesis through, its lone weight of
+    ``0.0`` would renormalize as ``0 / 0``, and the resulting NaN sampling distribution would blow up
+    ``rng.choice``. When nothing is both active and positively weighted -- including that
+    all-mass-in-``w_open`` case -- there is nothing left to discriminate between, so this returns
+    ``0.0``: the same "nothing to compare" contract already used below for an empty ``active`` set.
     """
-    active = [(w, h) for w, h in zip(portfolio.weights, portfolio.hypotheses) if h.active]
+    active = [(w, h) for w, h in zip(portfolio.weights, portfolio.hypotheses) if h.active and w > 0.0]
     if not active:
         return 0.0
     weights = np.array([w for w, _ in active], dtype=np.float64)

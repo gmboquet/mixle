@@ -1,6 +1,8 @@
 """mixle.epistemic.loop: one step of OBSERVE -> UPDATE -> ABDUCE -> ACT (Card E4)."""
 
+import math
 import unittest
+import warnings
 
 import numpy as np
 
@@ -72,6 +74,103 @@ class ActionSelectionTest(unittest.TestCase):
         portfolio = _toy_portfolio()
         with self.assertRaises(ValueError):
             step(portfolio, 2.0, _gaussian_likelihood, action_space=[1.0, 2.0])
+
+
+class ZeroWeightActiveHypothesisEIGTest(unittest.TestCase):
+    """An ``active=True`` hypothesis may legally carry weight exactly ``0.0`` --
+    :class:`~mixle.epistemic.portfolio.HypothesisPortfolio`'s constructor only forces weight ``0.0``
+    onto *inactive* hypotheses, not the reverse (e.g. right after
+    :meth:`~mixle.epistemic.portfolio.HypothesisPortfolio.reweight` collapses every likelihood and
+    moves all mass to ``w_open``). Filtering the EIG routine's "in play" set by ``active`` alone let
+    such a hypothesis through: its lone weight renormalized as ``0 / 0``, and the resulting NaN
+    sampling distribution crashed ``numpy``'s categorical sampler with ``ValueError: probabilities
+    contain NaN``.
+    """
+
+    @staticmethod
+    def _likelihood(hypothesis, observation):
+        return float(np.exp(-0.5 * (observation - hypothesis.payload) ** 2))
+
+    @staticmethod
+    def _simulate_fn(hypothesis, action, rng):
+        return float(hypothesis.payload + rng.normal(scale=0.2))
+
+    def test_one_active_zero_weight_hypothesis_with_full_open_world_mass_does_not_crash(self):
+        # The exact reported shape: a valid portfolio (passes its own constructor validation) with
+        # exactly one active hypothesis whose weight is 0.0, and w_open=1.0 (all mass reserved for
+        # "none of the above"). Before the fix, this raised ValueError: probabilities contain NaN
+        # from inside rng.choice.
+        portfolio = HypothesisPortfolio([Hypothesis("h0", 0.0, active=True)], np.array([0.0]), w_open=1.0)
+
+        with warnings.catch_warnings():
+            # A 0/0 divide must not even warn -- the fix excludes the zero-weight hypothesis before
+            # the sum is taken, removing the NaN at its source rather than just catching the eventual
+            # crash it causes.
+            warnings.simplefilter("error")
+            outcome = step(
+                portfolio,
+                0.0,
+                self._likelihood,
+                action_space=[1.0, -1.0],
+                simulate_fn=self._simulate_fn,
+                n_outer=16,
+                n_inner=8,
+                rng=0,
+            )
+
+        # Nothing tracked is credible (no active hypothesis carries positive weight), so there is
+        # nothing to discriminate between: EIG abstains to a clean 0.0 -- the same "nothing to
+        # compare" contract _portfolio_eig_nmc already used for an empty active set -- instead of a
+        # NaN or a crash.
+        self.assertEqual(outcome.next_action_eig, 0.0)
+        self.assertFalse(math.isnan(outcome.next_action_eig))
+        # ACT still completes and picks a (degenerate but well-defined) action.
+        self.assertIn(outcome.next_action, [1.0, -1.0])
+
+    def test_two_active_zero_weight_hypotheses_with_full_open_world_mass_does_not_crash(self):
+        # Same degenerate shape with two zero-weight active hypotheses rather than one, so the fix
+        # isn't accidentally keyed to "exactly one hypothesis in the portfolio".
+        hyps = [Hypothesis("h0", 0.0, active=True), Hypothesis("h1", 5.0, active=True)]
+        portfolio = HypothesisPortfolio(hyps, np.array([0.0, 0.0]), w_open=1.0)
+
+        outcome = step(
+            portfolio,
+            0.0,
+            self._likelihood,
+            action_space=[1.0],
+            simulate_fn=self._simulate_fn,
+            n_outer=16,
+            n_inner=8,
+            rng=1,
+        )
+        self.assertEqual(outcome.next_action_eig, 0.0)
+
+    def test_normal_positive_weight_case_still_computes_informative_eig(self):
+        # Regression guard: two ACTIVE hypotheses that both keep positive weight through the UPDATE
+        # step (observation 1.5 is equidistant from payloads 0.0 and 3.0, so the symmetric Gaussian
+        # likelihood leaves the prior 0.5/0.5 split untouched) must still yield a real, clearly
+        # positive EIG -- the fix must not turn every case into the degenerate 0.0 abstain value.
+        hyps = [Hypothesis("h0", 0.0), Hypothesis("h1", 3.0)]
+        portfolio = HypothesisPortfolio(hyps, np.array([0.5, 0.5]), w_open=0.0)
+
+        outcome = step(
+            portfolio,
+            1.5,
+            self._likelihood,
+            action_space=[0.0],
+            simulate_fn=self._simulate_fn,
+            n_outer=64,
+            n_inner=32,
+            rng=0,
+        )
+        # Both hypotheses are still genuinely "in play" post-update -- this is exercising the normal
+        # (unaffected) path, not a collapsed one.
+        self.assertTrue(np.allclose(outcome.portfolio_after.weights, [0.5, 0.5]))
+        # A well-separated, well-sampled two-hypothesis case should land near log(2) ~= 0.693 nats;
+        # a generous margin absorbs Monte Carlo noise without accepting the degenerate 0.0/NaN values
+        # this test guards against.
+        self.assertGreater(outcome.next_action_eig, 0.4)
+        self.assertFalse(math.isnan(outcome.next_action_eig))
 
 
 class SurpriseAbductionTest(unittest.TestCase):
