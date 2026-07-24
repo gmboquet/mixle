@@ -98,7 +98,20 @@ class BirthDeathSamplingDistribution(SequenceEncodableProbabilityDistribution):
             horizon (float): Observation window ``[0, horizon]`` used when sampling.
             name, keys: optional object name / parameter key.
         """
-        for label, value in (("birth_rate", birth_rate), ("death_rate", death_rate), ("sampling_rate", sampling_rate)):
+        # horizon is folded into the same finite/non-negative check as the three rates: it bounds the
+        # observation window `[0, horizon]` used by the sampler and is the upper integration limit in
+        # _trajectory_stats(). Before this, a NaN horizon constructed silently and made
+        # `t >= d.horizon` in BirthDeathSamplingSampler._sample_one() always False (`x >= nan` is
+        # always False in IEEE 754), dropping the loop's only time-based stop condition and leaving
+        # population hitting zero as the sole remaining exit -- effectively unbounded for any
+        # supercritical (birth_rate > death_rate) process. A negative horizon constructed silently too
+        # and produced a negative population-time integral, silently corrupting log_density().
+        for label, value in (
+            ("birth_rate", birth_rate),
+            ("death_rate", death_rate),
+            ("sampling_rate", sampling_rate),
+            ("horizon", horizon),
+        ):
             if value < 0.0 or not np.isfinite(value):
                 raise ValueError(f"BirthDeathSamplingDistribution requires finite {label} >= 0.")
         self.birth_rate = float(birth_rate)
