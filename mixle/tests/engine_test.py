@@ -215,6 +215,26 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(engine.with_precision("float64").dtype, torch.float64)
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_torch_engine_accepts_concrete_non_floating_dtype_as_no_override(self):
+        # Regression (MXR-080-0122): a concrete non-floating torch.dtype (as engine discovery
+        # reads off an integer/Boolean tensor's own storage) must fall back to the engine's
+        # default float policy rather than raising.
+        engine = TorchEngine(dtype=torch.int64)
+        self.assertTrue(engine.dtype.is_floating_point)
+        self.assertFalse(engine.dtype_explicit)
+        engine_bool = TorchEngine(dtype=torch.bool)
+        self.assertTrue(engine_bool.dtype.is_floating_point)
+        self.assertFalse(engine_bool.dtype_explicit)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_torch_engine_rejects_invalid_named_precision(self):
+        # Negative control: only a concrete non-floating *dtype object* is treated as "no
+        # override" above -- an invalid named precision string is still a genuine caller
+        # mistake and must still raise (unchanged from before the fix).
+        with self.assertRaises(ValueError):
+            TorchEngine(dtype="int64")
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_mps_engine_falls_back_to_float32(self):
         # MPS has no float64; the engine must downgrade so torch-ready families run on Apple-silicon GPUs.
         # torch.device("mps") is constructible regardless of whether MPS is actually available, so this
@@ -297,6 +317,59 @@ class EngineTestCase(unittest.TestCase):
         eng = engine_of(payload)
         self.assertIsInstance(eng, TorchEngine)
         self.assertEqual(str(eng.device), "cpu")
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_boolean_mask_with_float_data_does_not_falsely_conflict(self):
+        # Interaction between MXR-080-0121 and MXR-080-0122: a Boolean mask tensor alongside
+        # explicit float32 data (the ar.where(mask, a, b) shape, extremely common) must NOT be
+        # treated as a precision-policy conflict -- the mask's engine carries no real dtype
+        # opinion of its own, so it must not clash with the data arrays' genuine float32 policy.
+        mask = torch.tensor([True, False, True])
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
+        b = torch.tensor([10.0, 20.0, 30.0], dtype=torch.float32)
+        out = ar.where(mask, a, b)
+        self.assertTrue(torch.equal(out, torch.tensor([1.0, 20.0, 3.0], dtype=torch.float32)))
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_engine_of_integer_tensor_no_longer_raises(self):
+        # Regression (MXR-080-0122), exact audit repro: engine_of(torch.tensor([1])) used to
+        # construct TorchEngine(dtype=torch.int64), whose constructor only accepted floating
+        # dtypes, raising ValueError and breaking indexing, masks, and categorical dispatch.
+        eng = engine_of(torch.tensor([1, 2, 3]))
+        self.assertIsInstance(eng, TorchEngine)
+        self.assertTrue(eng.dtype.is_floating_point)  # engine keeps its own float POLICY...
+        self.assertFalse(eng.dtype_explicit)  # ...but it is a default, not the tensor's own dtype
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_engine_of_bool_tensor_no_longer_raises(self):
+        # Regression (MXR-080-0122), Boolean equivalent of the audit repro.
+        eng = engine_of(torch.tensor([True, False, True]))
+        self.assertIsInstance(eng, TorchEngine)
+        self.assertFalse(eng.dtype_explicit)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_engine_of_floating_tensor_dtype_policy_unchanged(self):
+        # Negative control: discovery from a genuinely floating tensor keeps tracking that
+        # tensor's own dtype exactly as before the fix.
+        eng32 = engine_of(torch.tensor([1.0], dtype=torch.float32))
+        self.assertEqual(eng32.dtype, torch.float32)
+        self.assertTrue(eng32.dtype_explicit)
+        eng64 = engine_of(torch.tensor([1.0], dtype=torch.float64))
+        self.assertEqual(eng64.dtype, torch.float64)
+        self.assertTrue(eng64.dtype_explicit)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_indexing_and_masking_dispatch_through_fixed_discovery(self):
+        # Regression (MXR-080-0122): integer index tensors and Boolean masks are ordinary,
+        # extremely common Torch usage that engine_of used to break entirely.
+        values = torch.tensor([10.0, 20.0, 30.0])
+        idx = torch.as_tensor([0, 2])
+        self.assertIsInstance(engine_of(idx), TorchEngine)  # discovery on the index itself
+        self.assertTrue(torch.equal(values[idx], torch.tensor([10.0, 30.0])))
+
+        mask = torch.tensor([True, False, True])
+        self.assertIsInstance(engine_of(mask), TorchEngine)  # discovery on the mask itself
+        self.assertTrue(torch.equal(values[mask], torch.tensor([10.0, 30.0])))
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_torch_engine_mesh_replicates_and_component_shards(self):

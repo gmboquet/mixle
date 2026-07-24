@@ -138,10 +138,16 @@ def _direct_engine(x: Any) -> ComputeEngine | None:
         return None
     cls, engine = resolved
     if torch is not None and cls is torch.Tensor and isinstance(engine, TorchEngine):
-        return TorchEngine(device=str(x.device), dtype=x.dtype)
+        # A tensor's own storage dtype is only a meaningful *floating-point policy* when
+        # it actually is floating -- forwarding an integer/Boolean dtype as the engine's
+        # float policy makes TorchEngine's constructor reject it outright, so fall back to
+        # the engine's default float policy for those instead of failing discovery.
+        dt = x.dtype if x.dtype.is_floating_point else None
+        return TorchEngine(device=str(x.device), dtype=dt)
     if DTensor is not None and cls is DTensor and isinstance(engine, TorchEngine):
         local = x.to_local()
-        return TorchEngine(device=str(local.device), dtype=x.dtype, mesh=x.device_mesh)
+        dt = x.dtype if x.dtype.is_floating_point else None
+        return TorchEngine(device=str(local.device), dtype=dt, mesh=x.device_mesh)
     if _jax is not None and cls is _jax.Array and isinstance(engine, JaxEngine):
         return JaxEngine(dtype=x.dtype)
     return engine
