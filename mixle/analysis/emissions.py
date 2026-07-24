@@ -316,6 +316,52 @@ def _coerce_price_paths(carbon_price_paths: np.ndarray) -> np.ndarray:
     raise ValueError(f"transition_risk: carbon_price_paths must be 1-D (k,) or 2-D (k, t); got shape {prices.shape}")
 
 
+def _validate_scenario_prices(prices: np.ndarray) -> None:
+    """``prices`` is the already-coerced ``(k, t)`` scenario matrix from :func:`_coerce_price_paths`.
+
+    Rejects an empty scenario set, an empty period axis, and any non-finite or negative price -- a
+    carbon price is a $/tCO2e cost and has no documented meaning as negative or non-finite here.
+    """
+    n_scenarios, n_periods = prices.shape
+    if n_scenarios == 0:
+        raise ValueError("transition_risk: carbon_price_paths must have at least one scenario, got 0")
+    if n_periods == 0:
+        raise ValueError("transition_risk: carbon_price_paths must have at least one period, got 0")
+    if not np.all(np.isfinite(prices)):
+        raise ValueError("transition_risk: carbon_price_paths must be finite")
+    if np.any(prices < 0.0):
+        raise ValueError("transition_risk: carbon_price_paths must be nonnegative ($/tCO2e)")
+
+
+def _validate_discount_weights(weights: np.ndarray) -> None:
+    """Discount weights (e.g. ``1 / (1 + r) ** t``) must be finite and nonnegative."""
+    if not np.all(np.isfinite(weights)):
+        raise ValueError("transition_risk: discount must be finite")
+    if np.any(weights < 0.0):
+        raise ValueError("transition_risk: discount must be nonnegative")
+
+
+def _validate_npv_samples(npv: np.ndarray) -> None:
+    """``npv`` must be the 1-D ``(n,)`` baseline NPV distribution the docstring documents -- a single
+    draw set shared across every carbon-price scenario, matching J2's `NPVDistribution.samples`
+    contract. A 2-D (or higher) array is REJECTED rather than silently flattened: a caller passing a
+    meaningfully-shaped ``(n_scenarios, n_draws)`` matrix (e.g. mistakenly expecting one NPV draw set
+    per scenario) used to have it collapsed by ``.reshape(-1)`` into one long, structure-free pool of
+    draws with no error -- exactly the kind of silent shape mistake this guards against.
+    """
+    if npv.ndim != 1:
+        raise ValueError(
+            "transition_risk: npv_samples must be 1-D (n,) -- a single baseline NPV distribution shared "
+            f"across every carbon-price scenario (see the NPVDistribution.samples contract); got shape "
+            f"{npv.shape}. It is not silently flattened, since that would collapse any real per-scenario "
+            "structure into one long, meaningless pool of draws."
+        )
+    if npv.size == 0:
+        raise ValueError("transition_risk: npv_samples must be nonempty")
+    if not np.all(np.isfinite(npv)):
+        raise ValueError("transition_risk: npv_samples must be finite")
+
+
 def transition_risk(
     footprint: Footprint,
     carbon_price_paths: np.ndarray,
@@ -341,8 +387,20 @@ def transition_risk(
     :class:`TransitionRiskResult` satisfies IC-1's `DerivedQuantity` protocol so the re-ranking is
     always inspectable with a credible interval, not just a point estimate; it feeds J5 tail risk and
     J2 re-valuation directly.
+
+    Validated before any ranking happens: ``carbon_price_paths`` must have at least one scenario and
+    at least one period, with every price finite and nonnegative; ``discount``, when supplied, must be
+    finite and nonnegative; ``footprint.total`` must be finite; and ``npv_samples`` must be a
+    non-empty, finite, one-dimensional ``(n,)`` array (a multi-dimensional array is rejected, not
+    silently flattened). Letting any of these through used to allow NaN scenario means and a
+    meaningless ranking to construct successfully, failing only later when a caller requested a
+    credible interval.
     """
+    if not np.isfinite(footprint.total):
+        raise ValueError(f"transition_risk: footprint.total must be finite, got {footprint.total!r}")
+
     prices = _coerce_price_paths(carbon_price_paths)
+    _validate_scenario_prices(prices)
     n_scenarios, n_periods = prices.shape
 
     if discount is None:
@@ -354,10 +412,12 @@ def transition_risk(
                 f"transition_risk: discount must have shape ({n_periods},) to match carbon_price_paths' "
                 f"period axis; got {weights.shape}"
             )
+        _validate_discount_weights(weights)
+
+    npv = np.asarray(npv_samples, dtype=np.float64)
+    _validate_npv_samples(npv)
 
     carbon_cost = footprint.total * (prices * weights[None, :]).sum(axis=1)  # (k,)
-
-    npv = np.asarray(npv_samples, dtype=np.float64).reshape(-1)  # (n,)
     adjusted = npv[:, None] - carbon_cost[None, :]  # (n, k)
 
     scenario_mean = adjusted.mean(axis=0)

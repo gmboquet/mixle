@@ -90,3 +90,67 @@ def test_undiscounted_matches_explicit_flat_discount():
         _footprint(500.0), carbon_price_paths, npv_samples=npv_samples, discount=np.ones(10)
     )
     assert no_discount.scenario_mean == pytest.approx(flat_discount.scenario_mean)
+
+
+# --- MXR-080-0086: empty/malformed scenarios and NPV samples must be rejected, not silently ranked. ---
+
+
+def test_empty_npv_samples_raises():
+    # Regression: construction used to succeed with a NaN scenario_mean/ranking and only fail later,
+    # when a caller asked for credible_interval().
+    with pytest.raises(ValueError, match="npv_samples"):
+        transition_risk(_footprint(100.0), _price_paths(), npv_samples=np.array([]))
+
+
+def test_empty_scenario_set_raises():
+    with pytest.raises(ValueError, match="scenario"):
+        transition_risk(_footprint(100.0), np.array([]), npv_samples=np.array([1.0, 2.0, 3.0]))
+
+
+def test_empty_period_axis_raises():
+    with pytest.raises(ValueError, match="period"):
+        transition_risk(_footprint(100.0), np.zeros((3, 0)), npv_samples=np.array([1.0, 2.0, 3.0]))
+
+
+def test_negative_or_non_finite_prices_raise():
+    for bad_prices in (np.array([-50.0, 20.0]), np.array([np.nan, 20.0]), np.array([np.inf, 20.0])):
+        with pytest.raises(ValueError, match="carbon_price_paths"):
+            transition_risk(_footprint(100.0), bad_prices, npv_samples=np.array([1.0, 2.0, 3.0]))
+
+
+def test_negative_or_non_finite_discount_raises():
+    carbon_price_paths = np.array([20.0, 120.0])  # (k,) -> 1 period each
+    for bad_discount in (np.array([-1.0]), np.array([np.nan]), np.array([np.inf])):
+        with pytest.raises(ValueError, match="discount"):
+            transition_risk(
+                _footprint(100.0), carbon_price_paths, npv_samples=np.array([1.0, 2.0, 3.0]), discount=bad_discount
+            )
+
+
+def test_non_finite_footprint_total_raises():
+    for bad_total in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="footprint.total"):
+            transition_risk(_footprint(bad_total), _price_paths(), npv_samples=np.array([1.0, 2.0, 3.0]))
+
+
+def test_multi_dimensional_npv_samples_raises_instead_of_flattening():
+    # Regression: `npv_samples` used to be coerced with `.reshape(-1)`, so a meaningfully-shaped
+    # (n_scenarios, n_draws) matrix was silently flattened into one long, structure-free set of
+    # draws instead of being rejected. The documented contract is a single 1-D (n,) baseline
+    # distribution shared across every scenario, not one draw set per scenario.
+    rng = np.random.default_rng(3)
+    npv_2d = rng.normal(loc=1_000_000.0, scale=50_000.0, size=(2, 5_000))  # (n_scenarios, n_draws)
+    with pytest.raises(ValueError, match="npv_samples"):
+        transition_risk(_footprint(1_000.0), _price_paths(), npv_samples=npv_2d)
+
+
+def test_well_shaped_multi_scenario_input_still_ranks_correctly():
+    # Negative control for MXR-080-0086: a properly-shaped 1-D npv_samples array against a
+    # nonempty, finite, nonnegative scenario matrix must still construct and rank normally.
+    rng = np.random.default_rng(4)
+    npv_samples = rng.normal(loc=1_000_000.0, scale=50_000.0, size=5_000)
+    result = transition_risk(_footprint(1_000.0), _price_paths(), npv_samples=npv_samples)
+    assert result.samples.shape == (5_000, 2)
+    assert result.scenario_mean[HIGH_IDX] < result.scenario_mean[LOW_IDX]
+    lo, hi = result.credible_interval(0.9)
+    assert np.all(lo <= hi)
