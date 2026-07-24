@@ -356,6 +356,31 @@ def hill_numbers(counts: np.ndarray, q: float | np.ndarray = (0.0, 1.0, 2.0)) ->
     return out
 
 
+def _rarefaction_sizes(sizes: np.ndarray, n: int) -> np.ndarray:
+    """Validate rarefaction subsample sizes as exact integers in ``[0, n]``, preserving caller order.
+
+    Sizes used to be cast with a bare ``dtype=int``: a fractional size (``1.9``) silently truncated
+    instead of raising, a negative size (``-1``) silently returned a "plausible" richness via negative
+    array indexing instead of raising, and a size above the sample count ``n`` raised an internal
+    ``IndexError`` deep inside the routine instead of a clear domain error naming the valid range
+    (MXR-080-0080). No sorting or deduplication happens here -- the returned array has the same length
+    and order as ``sizes``.
+    """
+    arr = np.asarray(sizes)
+    if np.issubdtype(arr.dtype, np.integer) or arr.dtype == np.bool_:
+        arr = arr.astype(np.int64)
+    else:
+        farr = arr.astype(np.float64)
+        if farr.size and not np.all(np.isfinite(farr)):
+            raise ValueError("rarefaction sizes must be finite (no NaN or Inf).")
+        if farr.size and not np.array_equal(farr, np.trunc(farr)):
+            raise ValueError("rarefaction sizes must be exact integers (fractional sizes are not supported).")
+        arr = farr.astype(np.int64)
+    if arr.size and (arr.min() < 0 or arr.max() > n):
+        raise ValueError(f"rarefaction sizes must be within [0, {n}] (the sample size), got {arr.tolist()!r}.")
+    return arr
+
+
 def rarefaction_curve(counts: np.ndarray, sizes: np.ndarray | None = None) -> dict[str, np.ndarray]:
     """Individual-based rarefaction: expected richness when subsampling ``m`` individuals (Hurlbert).
 
@@ -365,16 +390,16 @@ def rarefaction_curve(counts: np.ndarray, sizes: np.ndarray | None = None) -> di
 
     Args:
         counts: per-species abundances.
-        sizes: subsample sizes ``m`` to evaluate; defaults to ``1 .. n``.
+        sizes: subsample sizes ``m`` to evaluate; defaults to ``1 .. n``. Must be exact integers in
+            ``[0, n]`` (validated by :func:`_rarefaction_sizes`); the result is returned in the same
+            order as ``sizes`` (not sorted or deduplicated).
 
     Returns:
         ``{'sizes', 'expected_richness'}``.
     """
-    c = _abund(counts).astype(int)
+    c = _abund(counts)
     n = int(c.sum())
-    if sizes is None:
-        sizes = np.arange(1, n + 1)
-    sizes = np.asarray(sizes, dtype=int)
+    sizes = np.arange(1, n + 1) if sizes is None else _rarefaction_sizes(sizes, n)
     ln_choose_n = gammaln(n + 1) - gammaln(np.arange(n + 1) + 1) - gammaln(n - np.arange(n + 1) + 1)
 
     def log_choose(a: int, m: int) -> float:
