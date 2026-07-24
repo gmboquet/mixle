@@ -93,6 +93,52 @@ class OrderingTest(unittest.TestCase):
         self.assertLess(any_reject / 500, 0.05)
 
 
+class AlphaValidationTest(unittest.TestCase):
+    """``adjusted <= alpha`` is a bare boolean comparison, so an out-of-range or NaN alpha never raised
+    on its own: alpha=nan silently rejected nothing (a NaN comparison is always False) and alpha=1.5
+    silently rejected everything -- both a plausible-looking but meaningless reject/n_reject instead of
+    an error."""
+
+    CORRECTIONS = (bonferroni, holm, hochberg, benjamini_hochberg, benjamini_yekutieli)
+
+    def test_negative_alpha_raises(self):
+        for fn in self.CORRECTIONS:
+            with self.assertRaises(ValueError):
+                fn(P, alpha=-0.5)
+
+    def test_alpha_above_one_raises(self):
+        for fn in self.CORRECTIONS:
+            with self.assertRaises(ValueError):
+                fn(P, alpha=1.5)
+
+    def test_nan_alpha_raises(self):
+        # `alpha <= x` alone would miss this silently (a NaN comparison is always False, so it looked
+        # like a legitimate "reject nothing" result); the explicit `0.0 < alpha < 1.0` guard catches it.
+        for fn in self.CORRECTIONS:
+            with self.assertRaises(ValueError):
+                fn(P, alpha=float("nan"))
+
+    def test_alpha_boundary_zero_and_one_raise(self):
+        # (0, 1) is open here (matching risk.py/scoring.py/select.py's significance-level convention,
+        # not conformal.py's inclusive [0.0, 1.0] miscoverage-level convention): 0 only ever rejects an
+        # exactly-zero adjusted p-value and 1 trivially rejects everything, neither a meaningful target
+        # error rate.
+        for fn in self.CORRECTIONS:
+            with self.assertRaises(ValueError):
+                fn(P, alpha=0.0)
+            with self.assertRaises(ValueError):
+                fn(P, alpha=1.0)
+
+    def test_dispatcher_inherits_alpha_validation(self):
+        with self.assertRaises(ValueError):
+            adjust_pvalues(P, method="bh", alpha=float("nan"))
+
+    def test_valid_alpha_unaffected(self):
+        for fn in self.CORRECTIONS:
+            res = fn(P, alpha=0.05)
+            self.assertIn("n_reject", res)
+
+
 class CombineTest(unittest.TestCase):
     def test_fisher_known_value(self):
         res = fisher_combine(np.array([0.1, 0.2, 0.05]))
@@ -114,6 +160,42 @@ class CombineTest(unittest.TestCase):
         res = tippett_combine(np.array([0.01, 0.5, 0.8]))
         self.assertAlmostEqual(res["min_p"], 0.01)
         self.assertAlmostEqual(res["pvalue"], 1 - (1 - 0.01) ** 3)
+
+
+class StoufferWeightValidationTest(unittest.TestCase):
+    """A zero/negative/NaN Stouffer weight used to silently produce a combined z/p-value instead of
+    raising: a negative weight gave a plausible-looking but meaningless result (it subtracts that
+    study's evidence rather than combining it); an all-zero weight vector divided sqrt(sum(w*w)) == 0
+    into a bare 0/0 = NaN with an unraised RuntimeWarning instead of a clear error."""
+
+    P3 = np.array([0.1, 0.2, 0.05])
+
+    def test_negative_weight_raises(self):
+        with self.assertRaises(ValueError):
+            stouffer_combine(self.P3, weights=np.array([-1.0, 1.0, 1.0]))
+
+    def test_nan_weight_raises(self):
+        with self.assertRaises(ValueError):
+            stouffer_combine(self.P3, weights=np.array([float("nan"), 1.0, 1.0]))
+
+    def test_all_zero_weights_raise(self):
+        with self.assertRaises(ValueError):
+            stouffer_combine(self.P3, weights=np.array([0.0, 0.0, 0.0]))
+
+    def test_single_zero_weight_among_positive_still_valid(self):
+        # A legitimate "exclude this study" case -- mirrors weighted_conformal's zero-weight
+        # convention (individual weights may be zero; only an all-zero/non-positive total is
+        # rejected) -- so weighting one study to 0 while the others stay positive must equal simply
+        # dropping that study from the input.
+        weighted = stouffer_combine(self.P3, weights=np.array([0.0, 1.0, 1.0]))
+        excluded = stouffer_combine(self.P3[1:])
+        self.assertAlmostEqual(weighted["z"], excluded["z"])
+        self.assertAlmostEqual(weighted["pvalue"], excluded["pvalue"])
+
+    def test_positive_weights_still_work(self):
+        res = stouffer_combine(self.P3, weights=np.array([2.0, 3.0, 1.5]))
+        self.assertTrue(np.isfinite(res["z"]))
+        self.assertTrue(0.0 <= res["pvalue"] <= 1.0)
 
 
 if __name__ == "__main__":

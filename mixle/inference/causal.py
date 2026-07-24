@@ -31,10 +31,19 @@ class InterventionalNetwork:
     def __init__(self, net: Any, interventions: dict[int, Any]) -> None:
         self.net = net
         self.interventions = dict(interventions)
-        n_fields = len(net.factors)
+        # Validate by *membership* against the network's actual (int) node ids -- NOT by coercing
+        # each key through int(k), which would silently accept e.g. "0" (a str) as if it were the
+        # node id 0. dict/`in` lookups elsewhere in this class (e.g. `sample`'s `i in
+        # self.interventions`) use the real int field ids from `net.order`, so a str key that merely
+        # *looks* like a valid id would never match there and the intervention would be silently
+        # dropped instead of applied -- this must be a loud error, not a no-op.
+        valid_fields = set(net.order)
         for k in self.interventions:
-            if not (0 <= int(k) < n_fields):
-                raise ValueError(f"intervened field {k} is out of range (network has {n_fields} fields)")
+            if k not in valid_fields:
+                raise ValueError(
+                    f"intervened field {k!r} is not a valid node id of this network "
+                    f"(expected an int in {sorted(valid_fields)})"
+                )
 
     def sample(self, size: int = 1, *, seed: int | None = None) -> list[tuple]:
         """Ancestral sampling with the intervened fields clamped (their factors are never consulted)."""

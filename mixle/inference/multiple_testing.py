@@ -37,6 +37,18 @@ def _prep(pvals: np.ndarray) -> np.ndarray:
     return p
 
 
+def _check_alpha(alpha: float) -> None:
+    """Validate a target error-rate threshold (FWER for bonferroni/holm/hochberg, FDR for bh/by).
+
+    An out-of-range or NaN ``alpha`` does not raise inside any of the correction routines below --
+    ``adjusted <= alpha`` is just a boolean comparison, so e.g. ``alpha=nan`` silently rejects nothing
+    (a NaN comparison is always False) and ``alpha=1.5`` silently rejects everything -- both a
+    plausible-looking but meaningless ``reject``/``n_reject`` instead of an error.
+    """
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be in (0, 1), got {alpha!r}.")
+
+
 def _result(pvals: np.ndarray, adjusted: np.ndarray, alpha: float) -> dict[str, np.ndarray | int | float]:
     """Package adjusted p-values + rejection mask in the input order."""
     reject = adjusted <= alpha
@@ -55,11 +67,12 @@ def bonferroni(pvals: np.ndarray, *, alpha: float = 0.05) -> dict:
 
     Args:
         pvals: ``(m,)`` raw p-values.
-        alpha: target family-wise error rate.
+        alpha: target family-wise error rate, in ``(0, 1)``.
 
     Returns:
         ``{'reject', 'pvals_adjusted', 'n_reject', 'alpha'}``.
     """
+    _check_alpha(alpha)
     p = _prep(pvals)
     adjusted = np.minimum(1.0, p * p.size)
     return _result(p, adjusted, alpha)
@@ -71,6 +84,7 @@ def holm(pvals: np.ndarray, *, alpha: float = 0.05) -> dict:
     Sorts p-values ascending and applies the running factor ``m - k`` with a cumulative maximum so the
     adjusted values stay monotone.
     """
+    _check_alpha(alpha)
     p = _prep(pvals)
     m = p.size
     order = np.argsort(p)
@@ -89,6 +103,7 @@ def hochberg(pvals: np.ndarray, *, alpha: float = 0.05) -> dict:
     Same per-step factor as Holm but applied step-up (from the largest p-value down), giving more
     rejections; requires the independence/PRDS assumption that Holm does not.
     """
+    _check_alpha(alpha)
     p = _prep(pvals)
     m = p.size
     order = np.argsort(p)
@@ -108,6 +123,7 @@ def benjamini_hochberg(pvals: np.ndarray, *, alpha: float = 0.05) -> dict:
     Controls the expected false-discovery proportion at ``alpha`` under independence or positive
     regression dependence (PRDS). The standard choice for screening many hypotheses.
     """
+    _check_alpha(alpha)
     p = _prep(pvals)
     m = p.size
     order = np.argsort(p)
@@ -127,6 +143,7 @@ def benjamini_yekutieli(pvals: np.ndarray, *, alpha: float = 0.05) -> dict:
     Like :func:`benjamini_hochberg` but inflated by the harmonic factor ``c(m) = sum_{i=1}^m 1/i``, so
     it holds for any dependence structure at the cost of power.
     """
+    _check_alpha(alpha)
     p = _prep(pvals)
     m = p.size
     order = np.argsort(p)
@@ -147,7 +164,7 @@ def adjust_pvalues(pvals: np.ndarray, *, method: str = "bh", alpha: float = 0.05
         pvals: ``(m,)`` raw p-values.
         method: one of ``"bonferroni"``, ``"holm"``, ``"hochberg"``, ``"bh"`` (Benjamini--Hochberg),
             ``"by"`` (Benjamini--Yekutieli).
-        alpha: target error rate (FWER for the first three, FDR for the last two).
+        alpha: target error rate (FWER for the first three, FDR for the last two), in ``(0, 1)``.
 
     Returns:
         ``{'reject', 'pvals_adjusted', 'n_reject', 'alpha'}``.
@@ -184,7 +201,15 @@ def stouffer_combine(pvals: np.ndarray, *, weights: np.ndarray | None = None) ->
     """Stouffer's Z method: combine p-values on the z-scale, optionally weighted.
 
     ``Z = sum w_i Phi^{-1}(1 - p_i) / sqrt(sum w_i^2)``. Weights let more-precise studies (e.g. larger
-    samples) count more; equal weights recover the unweighted combination.
+    samples) count more; equal weights recover the unweighted combination. A weight of exactly ``0``
+    for one study while the others are positive is a legitimate "exclude this study" case (mirrors
+    :func:`weighted_conformal`'s zero-weight convention) and stays valid; every weight being
+    non-positive or non-finite together is degenerate and raises.
+
+    Args:
+        pvals: ``(k,)`` raw p-values from independent studies/strata.
+        weights: optional ``(k,)`` weights, non-negative with a positive total; ``None`` weights every
+            study equally.
 
     Returns:
         ``{'z', 'pvalue'}`` (one-sided combined p-value).
@@ -194,6 +219,20 @@ def stouffer_combine(pvals: np.ndarray, *, weights: np.ndarray | None = None) ->
     w = np.ones_like(p) if weights is None else np.asarray(weights, dtype=float).ravel()
     if w.shape != p.shape:
         raise ValueError("weights must match pvals in length.")
+    if not np.isfinite(w).all():
+        # checked before the sign check below: a NaN comparison is always False, so `NaN < 0.0` would
+        # otherwise silently pass as "non-negative" and propagate straight through the sum below into
+        # a silent nan z/pvalue instead of raising.
+        raise ValueError(f"weights must be finite, got {w!r}.")
+    if np.any(w < 0.0):
+        raise ValueError(f"weights must be non-negative, got {w!r}.")
+    total_weight = float(np.sum(w))
+    if total_weight <= 0.0:
+        # w is already known finite and non-negative here, so the only way to land here is every
+        # weight being exactly zero -- no study actually contributing evidence -- which used to divide
+        # sqrt(sum(w*w)) == 0 into 0/0 = NaN below instead of raising. A single zero weight among
+        # otherwise-positive weights is fine (see the docstring); only ALL-zero is rejected.
+        raise ValueError(f"stouffer_combine requires at least one positive weight, got total {total_weight!r}.")
     z = float(np.sum(w * norm.isf(p)) / np.sqrt(np.sum(w * w)))
     return {"z": z, "pvalue": float(norm.sf(z))}
 
