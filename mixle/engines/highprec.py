@@ -17,6 +17,7 @@ With neither installed, :func:`available` returns False and any call requiring f
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import numpy as np
@@ -47,16 +48,65 @@ def _require() -> None:
         )
 
 
-def hp_array(x: Any, bits: int) -> np.ndarray:
-    """Convert a float array to an object array of ``bits``-bit arbitrary-precision numbers."""
-    _require()
-    flat = np.asarray(x, dtype=np.float64).ravel()
+def _scalar_to_hp(v: Any, bits: int) -> Any:
+    """Convert one scalar to a ``bits``-bit backend-native high-precision number.
+
+    Dispatches on the *input's own type* so callers keep whatever precision they actually brought:
+    strings and :class:`~decimal.Decimal` are parsed directly by the backend's own arbitrary-precision
+    parser (exact decimal -> binary conversion, correctly rounded to ``bits`` bits -- no float64 stop
+    along the way), Python/numpy integers hand off directly (already arbitrary precision, and correctly
+    rounded by the backend if ``bits`` is narrower than the integer's own bit length), and an existing
+    backend-native number (``gmpy2.mpfr`` / ``mpmath.mpf``) is re-rounded -- widened or narrowed --
+    straight to ``bits`` without any intermediate stop.
+
+    The one input that *does* go through ``float()`` is an ordinary Python/numpy float: it never had more
+    than float64 precision to begin with, so the conversion preserves its exact dyadic value bit-for-bit
+    (verified in the test suite against ``Decimal(float_value)``) rather than "fixing it up" to the
+    nearest tidy decimal -- that fix-up is exactly what a naive ``Decimal(str(x))`` round-trip would do,
+    and would be wrong: it changes the value being represented instead of just extending its precision.
+    """
     if _BACKEND == "gmpy2":
-        out = np.array([gmpy2.mpfr(float(v), bits) for v in flat], dtype=object)
-    else:  # pragma: no cover - fallback path
-        with mpmath.workprec(bits):
-            out = np.array([mpmath.mpf(float(v)) for v in flat], dtype=object)
-    return out.reshape(np.asarray(x).shape)
+        if isinstance(v, (gmpy2.mpfr, gmpy2.mpz)):
+            return gmpy2.mpfr(v, precision=bits)
+        if isinstance(v, (int, np.integer)):
+            return gmpy2.mpfr(int(v), precision=bits)
+        if isinstance(v, Decimal):
+            return gmpy2.mpfr(str(v), precision=bits)  # exact string round-trip, no float64 detour
+        if isinstance(v, str):
+            return gmpy2.mpfr(v, precision=bits)
+        if isinstance(v, (float, np.floating)):
+            return gmpy2.mpfr(float(v), precision=bits)  # exact: float64 -> MPFR never loses bits
+        raise TypeError(f"cannot convert {type(v).__name__!r} to a high-precision number")
+    # pragma: no cover - mpmath fallback path
+    with mpmath.workprec(bits):
+        if isinstance(v, mpmath.mpf):
+            return mpmath.mpf(v)
+        if isinstance(v, (int, np.integer)):
+            return mpmath.mpf(int(v))
+        if isinstance(v, Decimal):
+            return mpmath.mpf(str(v))
+        if isinstance(v, str):
+            return mpmath.mpf(v)
+        if isinstance(v, (float, np.floating)):
+            return mpmath.mpf(float(v))
+        raise TypeError(f"cannot convert {type(v).__name__!r} to a high-precision number")
+
+
+def hp_array(x: Any, bits: int) -> np.ndarray:
+    """Convert values to an object array of ``bits``-bit arbitrary-precision numbers.
+
+    Accepts float/int/str/:class:`~decimal.Decimal`/backend-native (MPFR) scalars, arrays, or nested
+    sequences of them -- each element is converted straight into the high-precision backend via
+    :func:`_scalar_to_hp`, without ever routing through a float64 intermediary first. That matters: a
+    ``Decimal`` or numeric string can carry far more significant digits than float64's ~15-17, and an
+    integer beyond ``2**53`` is not exactly representable as float64 either -- casting the whole input to
+    float64 up front (the previous bug here) would throw that precision away before it ever reached the
+    high-precision backend, no matter how many ``bits`` were then requested.
+    """
+    _require()
+    arr = np.asarray(x, dtype=object)
+    flat = [_scalar_to_hp(v, bits) for v in arr.ravel()]
+    return np.array(flat, dtype=object).reshape(arr.shape)
 
 
 def hp_to_float(obj: Any) -> np.ndarray:
@@ -66,21 +116,27 @@ def hp_to_float(obj: Any) -> np.ndarray:
 
 
 def hp_sum(x: Any, bits: int) -> float:
-    """Sum a float array at ``bits`` mantissa precision (correct beyond what float64 / double-double give).
+    """Sum values at ``bits`` mantissa precision (correct beyond what float64 / double-double give).
+
+    Accepts the same input types as :func:`hp_array` (float/int/str/``Decimal``/backend-native scalars,
+    arrays, or nested sequences) -- each element is converted via :func:`_scalar_to_hp`, without a float64
+    detour, and the accumulation itself runs in ``bits``-bit backend arithmetic (``gmpy2`` context / MPFR
+    adds, or ``mpmath.fsum`` under ``workprec``), not float64 -- so a catastrophic cancellation that would
+    erase a value's distinguishing digits under naive float64 summation is preserved all the way through.
 
     O(N) per-object MPFR adds -- correct but not vectorized; for large N below fp256 prefer
     :func:`mixle.engines.extended.dd_sum`. Returns the float64-rounded result.
     """
     _require()
-    flat = np.asarray(x, dtype=np.float64).ravel()
+    flat = np.asarray(x, dtype=object).ravel()
     if _BACKEND == "gmpy2":
         with gmpy2.context(precision=bits):
-            acc = gmpy2.mpfr(0)
+            acc = gmpy2.mpfr(0, precision=bits)
             for v in flat:
-                acc = acc + gmpy2.mpfr(float(v))
+                acc = acc + _scalar_to_hp(v, bits)
             return float(acc)
     with mpmath.workprec(bits):  # pragma: no cover - fallback path
-        return float(mpmath.fsum(mpmath.mpf(float(v)) for v in flat))
+        return float(mpmath.fsum(_scalar_to_hp(v, bits) for v in flat))
 
 
 class HighPrecisionFormat:
