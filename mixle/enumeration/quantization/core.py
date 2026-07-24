@@ -655,12 +655,27 @@ def leaf_count_index(
     until that many items have been taken). Efficient for closed-form or small-support leaves (a
     geometric/Poisson has ~depth items within a depth bound); the ``max_items`` cap is the brake for
     the enumerate-and-bin fallback over exponential-support families that cannot count structurally.
-    Returns ``(index, truncated)`` where ``truncated`` is True if in-bound items were left untaken.
+
+    ``max_items``, when given, must be a non-negative integer and is checked BEFORE each pull from
+    ``enum`` -- so ``max_items=0`` takes nothing from the enumerator and returns an empty index,
+    rather than consuming one item past the requested bound. Returns ``(index, truncated)`` where
+    ``truncated`` is True if in-bound items were left untaken, including when the item cap -- rather
+    than the depth bound or the enumerator's own exhaustion -- is what stopped collection.
     """
+    if max_items is not None and (
+        isinstance(max_items, bool) or not isinstance(max_items, (int, np.integer)) or max_items < 0
+    ):
+        raise ValueError(f"max_items must be a non-negative integer or None, got {max_items!r}")
+
     by_bucket: dict[int, list[tuple[Any, float]]] = {}
     truncated = False
     taken = 0
-    for value, log_prob in enum:
+    it = iter(enum)
+    while max_items is None or taken < max_items:
+        try:
+            value, log_prob = next(it)
+        except StopIteration:
+            break
         if log_prob == -math.inf:
             continue
         fb = quantizer.fine_bucket(log_prob)
@@ -669,9 +684,8 @@ def leaf_count_index(
             break
         by_bucket.setdefault(fb, []).append((value, float(log_prob)))
         taken += 1
-        if max_items is not None and taken >= max_items:
-            truncated = True
-            break
+    if max_items is not None and taken >= max_items:
+        truncated = True
 
     if not by_bucket:
         return CountIndex(CountHistogram.empty(), lambda fb, off: (_ for _ in ()).throw(IndexError())), truncated
@@ -681,7 +695,7 @@ def leaf_count_index(
     data = [0] * (hi - lo + 1)
     for fb, items in by_bucket.items():
         data[fb - lo] = len(items)
-    hist = CountHistogram(lo, data)
+    hist = CountHistogram(lo, data, exact=True)
 
     def getter(fb: int, off: int) -> tuple[Any, float]:
         return by_bucket[fb][off]
