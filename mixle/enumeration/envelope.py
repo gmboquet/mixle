@@ -40,6 +40,46 @@ __all__ = ["AREnvelopeIndex", "LatticeEnvelopeIndex"]
 _LOG2 = math.log(2.0)
 
 
+def _require_positive_int(value: Any, *, label: str) -> int:
+    """Validate ``value`` is an exact positive integer sample/cluster count (MXR-080-0231).
+
+    Accepts a Python/numpy integer, or a float that is exactly integer-valued (e.g. ``4.0``) --
+    never silently truncated with ``int()`` (a fractional ``n_paths=2.9`` used to become ``2``
+    with no error). Zero/negative are rejected too: a non-positive ``n_paths`` used to sail
+    through and make mean-field calibration silently produce empty envelope levels at every depth
+    past the root (the ``prefixes`` list comprehension it feeds is simply vacuous, so no division
+    ever raises), and made lattice calibration index the now-empty ``prefixes[0]`` outright. A
+    non-positive ``n_clusters`` used to build a ``lambda t: int(t) % m`` that only raised
+    ``ZeroDivisionError`` later, deep inside calibration, far from the actual bad input.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError(f"{label} must be a positive integer, got {value!r}")
+    if isinstance(value, (float, np.floating)):
+        if not math.isfinite(value) or value != math.floor(value):
+            raise ValueError(f"{label} must be a whole number, not a fractional value, got {value!r}")
+    ivalue = int(value)
+    if ivalue < 1:
+        raise ValueError(f"{label} must be a positive integer, got {ivalue}")
+    return ivalue
+
+
+def _require_finite(value: Any, *, label: str) -> float:
+    """Validate ``value`` is a finite bit budget (MXR-080-0231).
+
+    A non-finite ``budget_bits``/``depth_bits`` (NaN or +/-inf) used to reach ``math.ceil`` inside
+    the constructor or ``ensure_bits`` and raise an ``OverflowError`` (infinity) or a bare
+    ``ValueError`` that names neither the parameter nor the offending value (NaN) -- both far less
+    clear than rejecting it here, at the one entry point every budget passes through.
+    """
+    try:
+        fvalue = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{label} must be a real number, got {value!r}") from e
+    if not math.isfinite(fvalue):
+        raise ValueError(f"{label} must be finite, got {fvalue!r}")
+    return fvalue
+
+
 class AREnvelopeIndex:
     """Envelope (mean-field) seek index over a fixed-length :class:`AutoregressiveEnumerable`.
 
@@ -73,9 +113,14 @@ class AREnvelopeIndex:
         self.model = model
         self.length = int(model._depth)
         self.quantizer = model._quantizer()
-        self.n_paths = int(n_paths)
+        # MXR-080-0231: n_paths must be an exact positive integer (a zero/negative/fractional value
+        # used to silently produce an empty envelope at every depth past the root -- see _calibrate)
+        # and budget_bits must be finite (a NaN/inf value used to raise an unclear OverflowError/
+        # ValueError out of math.ceil below instead of naming the bad parameter).
+        self.n_paths = _require_positive_int(n_paths, label="n_paths")
         self.seed = int(seed)
-        self._budget_fb = max(1, int(math.ceil(float(budget_bits) * self.quantizer.fine_per_bit())))
+        budget_bits = _require_finite(budget_bits, label="budget_bits")
+        self._budget_fb = max(1, int(math.ceil(budget_bits * self.quantizer.fine_per_bit())))
         self._envelopes: list[CountHistogram] = []
         self._suffix: list[CountHistogram] = []
         if calibration_sequences is not None:
@@ -121,6 +166,16 @@ class AREnvelopeIndex:
                 break  # no need to extend the sampled paths past the last scored depth
             for j in range(self.n_paths):
                 tokens, lps = self.model._steps_np(prefixes[j])
+                if tokens.size == 0:
+                    # MXR-080-0231: a genuinely empty step distribution cannot be ancestrally
+                    # sampled from -- np.exp(lps - lps.max()) on a zero-size array raises an
+                    # opaque numpy ValueError ("zero-size array to reduction operation..."); name
+                    # the actual prefix and depth instead.
+                    raise ValueError(
+                        "model has no valid next tokens at prefix %r (depth %d); envelope "
+                        "calibration requires a non-empty step distribution at every sampled "
+                        "prefix" % (prefixes[j], d)
+                    )
                 p = np.exp(lps - lps.max())
                 p /= p.sum()
                 prefixes[j] = prefixes[j] + (tokens[int(rng.choice(tokens.size, p=p))].item(),)
@@ -166,7 +221,8 @@ class AREnvelopeIndex:
 
     def ensure_bits(self, depth_bits: float) -> AREnvelopeIndex:
         """Deepen the suffix tables to cover ``depth_bits`` (geometric, low-overhead: L capped convolutions)."""
-        needed = max(1, int(math.ceil(float(depth_bits) * self.quantizer.fine_per_bit())))
+        depth_bits = _require_finite(depth_bits, label="depth_bits")
+        needed = max(1, int(math.ceil(depth_bits * self.quantizer.fine_per_bit())))
         if needed > self._budget_fb:
             self._budget_fb = max(needed, self._budget_fb * 2)
             self._rebuild_suffix()
@@ -343,15 +399,22 @@ class LatticeEnvelopeIndex:
         if cluster_fn is None:
             if n_clusters is None:
                 raise ValueError("give cluster_fn (token -> cluster id) or n_clusters (int tokens hashed mod m)")
-            m = int(n_clusters)
+            # MXR-080-0231: n_clusters must be an exact positive integer -- n_clusters=0 used to
+            # build a `lambda t: int(t) % 0` that only raised ZeroDivisionError later, the first
+            # time calibration actually called it, far from this constructor.
+            m = _require_positive_int(n_clusters, label="n_clusters")
             cluster_fn = lambda t: int(t) % m  # noqa: E731 - the documented default for integer tokens
         self.model = model
         self.length = int(model._depth)
         self.quantizer = model._quantizer()
         self.cluster_fn = cluster_fn
-        self.n_paths = int(n_paths)
+        # MXR-080-0231: n_paths must be an exact positive integer (a zero/negative/fractional value
+        # used to leave `prefixes` empty and crash on `prefixes[0]` inside _calibrate) and
+        # budget_bits must be finite (see AREnvelopeIndex.__init__).
+        self.n_paths = _require_positive_int(n_paths, label="n_paths")
         self.seed = int(seed)
-        self._budget_fb = max(1, int(math.ceil(float(budget_bits) * self.quantizer.fine_per_bit())))
+        budget_bits = _require_finite(budget_bits, label="budget_bits")
+        self._budget_fb = max(1, int(math.ceil(budget_bits * self.quantizer.fine_per_bit())))
         self._split: dict[tuple[int, Any], dict[Any, CountHistogram]] = {}  # (depth, cluster) -> c' -> hist
         self._agg: list[dict[Any, CountHistogram]] = []  # depth -> c' -> hist (fallback for unseen clusters)
         self._suffix: list[dict[Any, CountHistogram]] = []  # depth -> cluster -> completion histogram
@@ -423,6 +486,15 @@ class LatticeEnvelopeIndex:
                 break
             for j in range(self.n_paths):
                 tokens, lps = self.model._steps_np(prefixes[j])
+                if tokens.size == 0:
+                    # MXR-080-0231: see AREnvelopeIndex._calibrate -- an empty step distribution
+                    # cannot be ancestrally sampled from; name the prefix and depth instead of
+                    # letting np.exp(lps - lps.max()) raise an opaque zero-size-array error.
+                    raise ValueError(
+                        "model has no valid next tokens at prefix %r (depth %d); envelope "
+                        "calibration requires a non-empty step distribution at every sampled "
+                        "prefix" % (prefixes[j], d)
+                    )
                 p = np.exp(lps - lps.max())
                 p /= p.sum()
                 tok = tokens[int(rng.choice(tokens.size, p=p))].item()
@@ -471,7 +543,8 @@ class LatticeEnvelopeIndex:
 
     def ensure_bits(self, depth_bits: float) -> LatticeEnvelopeIndex:
         """Ensure suffix envelopes are deep enough for the requested bit depth."""
-        needed = max(1, int(math.ceil(float(depth_bits) * self.quantizer.fine_per_bit())))
+        depth_bits = _require_finite(depth_bits, label="depth_bits")
+        needed = max(1, int(math.ceil(depth_bits * self.quantizer.fine_per_bit())))
         if needed > self._budget_fb:
             self._budget_fb = max(needed, self._budget_fb * 2)
             self._rebuild_suffix()

@@ -111,5 +111,58 @@ class BehaviorTest(unittest.TestCase):
         self.assertEqual(len(seqs), 5)
 
 
+class LatticeCalibrationValidationTest(unittest.TestCase):
+    """MXR-080-0231: LatticeEnvelopeIndex calibration must reject impossible sampling
+    configurations instead of silently indexing an empty prefixes[0], dividing by zero in the
+    default cluster function, or crashing deep inside _calibrate with an unclear numpy error."""
+
+    def _ar(self, V=4, L=3, seed=0):
+        return AutoregressiveEnumerable(_markov_model(V, L, seed=seed), max_len=L)
+
+    def test_zero_n_clusters_rejected_not_a_delayed_zerodivisionerror(self):
+        with self.assertRaises(ValueError):
+            LatticeEnvelopeIndex(self._ar(), n_clusters=0, n_paths=4, seed=0)
+
+    def test_negative_n_clusters_rejected(self):
+        with self.assertRaises(ValueError):
+            LatticeEnvelopeIndex(self._ar(), n_clusters=-1, n_paths=4, seed=0)
+
+    def test_fractional_n_clusters_rejected(self):
+        with self.assertRaises(ValueError):
+            LatticeEnvelopeIndex(self._ar(), n_clusters=2.5, n_paths=4, seed=0)
+
+    def test_zero_n_paths_rejected_not_a_prefixes_indexerror(self):
+        with self.assertRaises(ValueError):
+            LatticeEnvelopeIndex(self._ar(), n_clusters=2, n_paths=0, seed=0)
+
+    def test_fractional_n_paths_rejected(self):
+        with self.assertRaises(ValueError):
+            LatticeEnvelopeIndex(self._ar(), n_clusters=2, n_paths=2.9, seed=0)
+
+    def test_non_finite_budget_bits_rejected(self):
+        with self.assertRaises(ValueError):
+            LatticeEnvelopeIndex(self._ar(), n_clusters=2, n_paths=4, seed=0, budget_bits=float("inf"))
+
+    def test_non_finite_depth_bits_rejected_by_ensure_bits(self):
+        lat = LatticeEnvelopeIndex(self._ar(), n_clusters=2, n_paths=4, seed=0)
+        with self.assertRaises(ValueError):
+            lat.ensure_bits(float("nan"))
+
+    def test_empty_step_distribution_raises_clear_error(self):
+        def empty_branch_model(prefix):
+            if len(prefix) > 0 and prefix[-1] == 1:
+                return np.array([], dtype=np.int64), np.array([], dtype=np.float64)
+            return np.array([0, 1]), np.log(np.array([0.5, 0.5]))
+
+        ar = AutoregressiveEnumerable(empty_branch_model, max_len=3)
+        with self.assertRaises(ValueError) as ctx:
+            LatticeEnvelopeIndex(ar, n_clusters=2, n_paths=8, seed=0)
+        self.assertIn("non-empty step distribution", str(ctx.exception))
+
+    def test_well_formed_construction_still_works(self):
+        lat = LatticeEnvelopeIndex(self._ar(), n_clusters=2, n_paths=4, seed=0)
+        self.assertGreater(lat.total(), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
