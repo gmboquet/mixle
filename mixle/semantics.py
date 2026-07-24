@@ -94,6 +94,22 @@ def _require_id(value: str, label: str) -> None:
         raise ValueError(f"{label} must be a portable non-empty identifier")
 
 
+def _coerce_enum(value: Any, enum_cls: type[StrEnum], label: str) -> StrEnum:
+    """Coerce ``value`` into a member of ``enum_cls``, as every ``from_record`` already does.
+
+    Constructors below branch on these fields with identity checks against specific members
+    (e.g. ``self.kind is TransformKind.LOG``), which a plain string never matches. Without this,
+    direct construction (bypassing ``from_record``) silently falls through to a default branch
+    instead of the requested behavior or a clear error.
+    """
+    if isinstance(value, enum_cls):
+        return value
+    try:
+        return enum_cls(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{label} must be a valid {enum_cls.__name__} value, got {value!r}") from exc
+
+
 class ValueRole(StrEnum):
     FIXED = "fixed"
     FREE = "free"
@@ -163,6 +179,7 @@ class TransformSpec:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", _coerce_enum(self.kind, TransformKind, "transform kind"))
         if not all(math.isfinite(item) for item in (self.scale, self.offset, self.lower, self.upper)):
             raise ValueError("transform parameters must be finite")
         if self.kind is TransformKind.AFFINE and self.scale == 0:
@@ -220,7 +237,7 @@ class TransformSpec:
 
     @classmethod
     def from_record(cls, value: Mapping[str, Any]) -> TransformSpec:
-        return cls(**{**value, "kind": TransformKind(value.get("kind", "identity"))})
+        return cls(**{**value, "kind": _coerce_enum(value.get("kind", "identity"), TransformKind, "transform kind")})
 
 
 @dataclass(frozen=True)
@@ -265,6 +282,7 @@ class ValueSpec:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "role", _coerce_enum(self.role, ValueRole, "value role"))
         _require_id(self.id, "value id")
         if not self.unit:
             raise ValueError("value unit is required; use '1' for dimensionless")
@@ -293,7 +311,7 @@ class ValueSpec:
         return cls(
             **{
                 **value,
-                "role": ValueRole(value["role"]),
+                "role": _coerce_enum(value["role"], ValueRole, "value role"),
                 "shape": tuple(value.get("shape", ())),
                 "dependencies": tuple(value.get("dependencies", ())),
                 "transform": TransformSpec.from_record(value.get("transform", {})),
@@ -363,6 +381,7 @@ class UncertaintyComponent:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", _coerce_enum(self.kind, UncertaintyKind, "uncertainty kind"))
         _require_id(self.id, "uncertainty id")
         if (self.value is None) == (self.artifact_digest is None):
             raise ValueError("uncertainty requires exactly one scalar value or artifact digest")
@@ -373,7 +392,7 @@ class UncertaintyComponent:
 
     @classmethod
     def from_record(cls, value: Mapping[str, Any]) -> UncertaintyComponent:
-        return cls(**{**value, "kind": UncertaintyKind(value["kind"])})
+        return cls(**{**value, "kind": _coerce_enum(value["kind"], UncertaintyKind, "uncertainty kind")})
 
 
 @dataclass(frozen=True)

@@ -84,6 +84,29 @@ def test_fixed_controlled_derived_and_observed_states_cannot_smuggle_priors():
         ValueSpec("derived", ValueRole.DERIVED, "1")
 
 
+def test_value_spec_direct_construction_rejects_unrecognized_role_strings():
+    with pytest.raises(ValueError, match="value role"):
+        ValueSpec("bogus", "bogus", "1")
+
+
+def test_value_spec_direct_construction_enforces_role_rules_for_plain_string_roles():
+    # Regression guard: before the fix, a plain string role skipped every role-specific check
+    # below via identity comparisons that never matched (e.g. "derived" is not ValueRole.DERIVED),
+    # and the FREE/FIXED cases crashed with an incidental AttributeError (`str` has no `.value`)
+    # instead of raising the intended ValueError.
+    with pytest.raises(ValueError, match="expression and dependencies"):
+        ValueSpec("derived", "derived", "1")
+    with pytest.raises(ValueError, match="require a prior"):
+        ValueSpec("free", "free", "1")
+    with pytest.raises(ValueError, match="require a value"):
+        ValueSpec("fixed", "fixed", "1")
+    derived = ValueSpec("derived", "derived", "1", expression="a + b", dependencies=("a", "b"))
+    assert derived.role is ValueRole.DERIVED
+    assert derived == ValueSpec.from_record(to_record(derived))
+    with pytest.raises(ValueError, match="value role"):
+        ValueSpec.from_record({"id": "bogus", "role": "bogus", "unit": "1"})
+
+
 def test_constraints_reject_invalid_bounds_and_values():
     with pytest.raises(ValueError, match="exceeds"):
         ConstraintSpec(lower=2, upper=1)
@@ -118,6 +141,21 @@ def test_transform_domains_and_parameters_fail_loudly():
         TransformSpec(TransformKind.LOGIT).forward(1)
     with pytest.raises(ValueError, match="cannot be zero"):
         TransformSpec(TransformKind.AFFINE, scale=0)
+
+
+def test_transform_spec_direct_construction_matches_from_record_coercion():
+    # Regression guard: before the fix, kind="log" never identity-matched TransformKind.LOG
+    # (a plain string is never `is` an enum member), so forward() silently fell through to the
+    # affine fallback (scale * value + offset) instead of dispatching to log, and a nonsense
+    # string like "bogus" took the same silent fallback instead of being rejected.
+    coerced = TransformSpec(kind="log", scale=2, offset=3)
+    assert coerced.kind is TransformKind.LOG
+    assert coerced.forward(2) == pytest.approx(math.log(2))
+    assert coerced == TransformSpec.from_record({"kind": "log", "scale": 2, "offset": 3})
+    with pytest.raises(ValueError, match="transform kind"):
+        TransformSpec(kind="bogus")
+    with pytest.raises(ValueError, match="transform kind"):
+        TransformSpec.from_record({"kind": "bogus"})
 
 
 def test_posterior_semantic_identity_ignores_backend_job_and_location_only():
@@ -156,6 +194,15 @@ def test_uncertainty_components_are_typed_and_have_exactly_one_payload():
         UncertaintyComponent("u", UncertaintyKind.NUMERICAL, "error", value=-1)
     artifact = UncertaintyComponent("u", UncertaintyKind.NUMERICAL, "field", artifact_digest="f" * 64)
     assert artifact.kind is UncertaintyKind.NUMERICAL
+
+
+def test_uncertainty_component_direct_construction_rejects_unrecognized_kind_strings():
+    # UncertaintyComponent.__post_init__ never inspected `kind` at all, so a plain string sailed
+    # through direct construction with no validation while from_record already rejected it.
+    with pytest.raises(ValueError, match="uncertainty kind"):
+        UncertaintyComponent("u", "bogus", "variance", value=1)
+    coerced = UncertaintyComponent("u", "epistemic", "variance", value=1)
+    assert coerced.kind is UncertaintyKind.EPISTEMIC
 
 
 def test_predictive_calibration_and_decision_artifacts_retain_posterior_closure():
