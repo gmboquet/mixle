@@ -113,6 +113,90 @@ def test_min_cost_flow_unbalanced_supply_raises_value_error():
         pass
 
 
+def test_min_cost_flow_cancels_a_negative_cycle_outside_the_supply_route():
+    # A feasible unit flow 0 -> 1, satisfiable entirely by the direct 0->1 arc (cost 0), PLUS an
+    # independent, disjoint capacity-1 cycle 1 -> 2 -> 1 whose net cost is -5 (1->2 costs -5, 2->1 costs
+    # 0). Successive-shortest-path stops the instant the required supply is fully routed -- it never
+    # revisits the residual graph to look for a leftover profitable cycle -- so a solver that is only
+    # SSP would return 0 (just the 0->1 leg) instead of the true minimum, -5 (also push a unit around the
+    # cycle to bank its cost). Nodes 1 and 2 form a genuine antiparallel arc pair (arcs run both 1->2 and
+    # 2->1), which is the specific shape that makes canceling this cycle correctly non-trivial: a cancel
+    # pass that treats `residual[u, v]` as a single scalar cost can find, "cancel", and then immediately
+    # re-find the same cycle forever instead of converging.
+    cap = np.zeros((3, 3))
+    cost = np.zeros((3, 3))
+    cap[0, 1], cost[0, 1] = 1.0, 0.0
+    cap[1, 2], cost[1, 2] = 1.0, -5.0
+    cap[2, 1], cost[2, 1] = 1.0, 0.0
+    supply = np.array([1.0, -1.0, 0.0])
+
+    result = min_cost_flow(cap, cost, supply)
+
+    assert abs(result.value - (-5.0)) < 1.0e-9
+    net = result.flow.sum(axis=1) - result.flow.sum(axis=0)
+    assert np.allclose(net, supply, atol=1.0e-6)  # still a feasible flow, not just a lower number
+    assert np.all(result.flow <= cap + 1.0e-6)
+    assert np.all(result.flow >= -1.0e-9)
+
+
+def test_min_cost_flow_leaves_a_positive_cost_cycle_untouched():
+    # Same shape as the negative-cycle case above, but the 1->2->1 cycle nets +5 (2->1 now costs 10, not
+    # 0): pushing flow around it would only raise cost, so the post-SSP flow (the required unit routed
+    # 0->1 directly, nothing on the 1<->2 arcs) is already optimal and cycle-canceling must be a no-op.
+    # Regression guard: confirms the fix does not change answers on instances SSP alone already solved
+    # correctly (min_cost_flow is used elsewhere, e.g. mixle.fulfillment.route_distribution and
+    # mixle.pipeline_twin's per-period re-solve).
+    cap = np.zeros((3, 3))
+    cost = np.zeros((3, 3))
+    cap[0, 1], cost[0, 1] = 1.0, 0.0
+    cap[1, 2], cost[1, 2] = 1.0, -5.0
+    cap[2, 1], cost[2, 1] = 1.0, 10.0
+    supply = np.array([1.0, -1.0, 0.0])
+
+    result = min_cost_flow(cap, cost, supply)
+
+    assert abs(result.value - 0.0) < 1.0e-9
+    assert result.flow[1, 2] == 0.0
+    assert result.flow[2, 1] == 0.0
+
+
+def test_min_cost_flow_cancels_two_independent_negative_cycles():
+    # Two disjoint negative cycles that don't touch the required supply route at all: -4 net on nodes
+    # 2<->3 and -6 net on nodes 4<->5. Both must be found and canceled -- not just the first one the
+    # search happens to hit -- so this guards the cancellation loop actually loops.
+    n = 6
+    cap = np.zeros((n, n))
+    cost = np.zeros((n, n))
+    cap[0, 1], cost[0, 1] = 1.0, 0.0
+    cap[2, 3], cost[2, 3] = 1.0, -4.0
+    cap[3, 2], cost[3, 2] = 1.0, 0.0
+    cap[4, 5], cost[4, 5] = 1.0, -7.0
+    cap[5, 4], cost[5, 4] = 1.0, 1.0
+    supply = np.array([1.0, -1.0, 0.0, 0.0, 0.0, 0.0])
+
+    result = min_cost_flow(cap, cost, supply)
+
+    assert abs(result.value - (-10.0)) < 1.0e-6  # base 0 + (-4) + (-6)
+
+
+def test_min_cost_flow_unbounded_negative_cycle_raises():
+    # An infinite-capacity negative cycle admits no finite minimum -- cost drops without bound as more
+    # flow is pushed around it -- so this must raise a clear error rather than loop forever or silently
+    # return some arbitrarily-negative flow.
+    cap = np.zeros((3, 3))
+    cost = np.zeros((3, 3))
+    cap[0, 1], cost[0, 1] = 1.0, 0.0
+    cap[1, 2], cost[1, 2] = np.inf, -1.0
+    cap[2, 1], cost[2, 1] = np.inf, 0.0
+    supply = np.array([1.0, -1.0, 0.0])
+
+    try:
+        min_cost_flow(cap, cost, supply)
+        raise AssertionError("expected a ValueError for an unbounded negative cycle")
+    except ValueError as e:
+        assert "unbounded" in str(e)
+
+
 def test_multicommodity_flow_respects_shared_capacity_and_cost():
     # nodes: 0 srcA, 1 srcB, 2 trunk-in, 3 trunk-out, 4 sinkA, 5 sinkB
     n = 6
