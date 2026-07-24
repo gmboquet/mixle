@@ -303,5 +303,76 @@ class LossMaskTestCase(unittest.TestCase):
         self.assertTrue(saw_any_false)  # this corpus/block combination does produce a padded remainder row
 
 
+class TokenValidationTestCase(unittest.TestCase):
+    """MXR-080-0062: token ids entering pack_documents/StreamingCorpus are validated -- finite,
+    exact-integer, in a lossless int64 range -- instead of silently cast, and stay int64 (never downcast to
+    float32) all the way through epoch_batches."""
+
+    def test_fractional_document_tokens_are_rejected(self):
+        doc = np.array([1.2, 2.8, 3.9])
+        with self.assertRaises(ValueError):
+            pack_documents([doc], [0], block=4)
+
+    def test_nan_and_inf_document_tokens_are_rejected(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            doc = np.array([1.0, 2.0, bad])
+            with self.assertRaises(ValueError):
+                pack_documents([doc], [0], block=4)
+
+    def test_non_1d_document_is_rejected_not_silently_flattened(self):
+        doc = np.arange(6).reshape(2, 3)
+        with self.assertRaises(ValueError):
+            pack_documents([doc], [0], block=4)
+
+    def test_out_of_int64_range_document_tokens_are_rejected(self):
+        doc = np.array([1.0, 2.0**64])
+        with self.assertRaises(ValueError):
+            pack_documents([doc], [0], block=4)
+
+    def test_exact_integer_valued_floats_are_accepted(self):
+        # 3.0 is an exact integer even though it happens to be stored as a float -- must NOT be rejected.
+        doc = np.array([3.0, 4.0, 5.0])
+        packed = pack_documents([doc], [0], block=2)
+        self.assertEqual(packed.rows.dtype, np.int64)
+        np.testing.assert_array_equal(packed.rows[0][:3], [3, 4, 5])
+
+    def test_fractional_pad_id_is_rejected(self):
+        doc = np.array([1, 2])
+        with self.assertRaises(ValueError):
+            pack_documents([doc], [0], block=4, pad_id=0.5)
+
+    def test_fractional_boundary_id_is_rejected(self):
+        docs = [np.array([1, 2]), np.array([3, 4])]
+        with self.assertRaises(ValueError):
+            pack_documents(docs, [0, 1], block=4, boundary_id=1.5)
+
+    def test_epoch_batches_context_and_targets_stay_int64_not_float32(self):
+        doc = np.array([11, 22])
+        corpus = StreamingCorpus([doc], rank=0, world_size=1, block=4, batch_size=8, seed=0)
+        for ctx, tgt, _mask in corpus.epoch_batches(epoch=0):
+            self.assertEqual(ctx.dtype, np.int64)
+            self.assertEqual(tgt.dtype, np.int64)
+
+    def test_token_identity_preserved_above_2_pow_24(self):
+        # A float32 context would collide 2**24 and 2**24+1 (both round to the same float32 value); int64
+        # must not.
+        big = 2**24
+        doc = np.array([big, big + 1, big + 2, big + 3, big + 4])
+        corpus = StreamingCorpus([doc], rank=0, world_size=1, block=4, batch_size=8, seed=0)
+        ctx, _tgt, _mask = next(iter(corpus.epoch_batches(epoch=0)))
+        np.testing.assert_array_equal(ctx[0], [big, big + 1, big + 2, big + 3])
+        self.assertEqual(len(set(ctx[0].tolist())), 4)  # all four values distinguishable, no collision
+
+    def test_context_and_target_arrays_do_not_alias_rows_or_each_other(self):
+        # context/targets are column-shifted, overlapping slices of the same packed rows array -- epoch_batches
+        # must copy, not view, or mutating one in place would corrupt the other.
+        doc = np.arange(1, 10)
+        corpus = StreamingCorpus([doc], rank=0, world_size=1, block=4, batch_size=8, seed=0)
+        ctx, tgt, _mask = next(iter(corpus.epoch_batches(epoch=0)))
+        tgt_before = tgt.copy()
+        ctx[:] = -1
+        np.testing.assert_array_equal(tgt, tgt_before)  # unaffected by mutating ctx in place
+
+
 if __name__ == "__main__":
     unittest.main()

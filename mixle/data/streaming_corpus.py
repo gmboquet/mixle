@@ -28,6 +28,10 @@ Composes with existing machinery rather than duplicating it:
   :meth:`StreamingCorpus.epoch_batches` threads it through every micro-batch. Callers MUST apply that mask
   (or otherwise exclude its ``False`` positions) before averaging next-token loss -- otherwise the
   fabricated pad targets are silently trained on as if they were real observed labels.
+- Document tokens are validated before packing -- finite, exact-integer values in a lossless ``int64``
+  range -- and stay ``int64`` throughout: :func:`pack_documents`/:meth:`StreamingCorpus.epoch_batches`
+  never downcast context to ``float32``, which would silently lose integer identity for ids at or above
+  ``2**24``.
 """
 
 from __future__ import annotations
@@ -46,6 +50,64 @@ __all__ = [
 ]
 
 SequenceSelector = Callable[[np.ndarray, int, int], np.ndarray]
+
+_INT64_MIN = int(np.iinfo(np.int64).min)
+_INT64_MAX = int(np.iinfo(np.int64).max)
+
+
+def _require_exact_int(value: Any, name: str) -> int:
+    """Coerce ``value`` to a plain ``int``, rejecting bools, non-numeric types, non-finite floats, and any
+    value with a fractional part.
+
+    A blind ``int(value)`` truncation (e.g. ``pad_id=0.5`` -> ``0``) silently changes behavior instead of
+    failing loudly, which is exactly the MXR-080-0062/MXR-080-0063 failure mode this guards against.
+    """
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an int, got bool {value!r}")
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite, got {value!r}")
+        truncated = int(value)
+        if value != truncated:
+            raise ValueError(f"{name} must be an exact integer, got {value!r}")
+        return truncated
+    raise TypeError(f"{name} must be an int, got {value!r} ({type(value).__name__})")
+
+
+def _validate_document_tokens(doc: Any, *, doc_index: Any = None) -> np.ndarray:
+    """Validate and coerce one document's tokens to a 1-D, lossless-integer (``int64``) array.
+
+    Rejects a non-1-D document, non-finite values, fractional values, and anything outside the ``int64``
+    range -- the same lossless-integer contract
+    :func:`~mixle.data.stream_token_source._validate_token_ids` enforces for the sliding-window path,
+    applied per document here since documents are validated and concatenated one at a time (MXR-080-0062).
+    Finiteness is checked before any equality/comparison against the array so a NaN never reaches a
+    comparison it would silently lose.
+    """
+    label = "documents" if doc_index is None else f"documents[{doc_index!r}]"
+    arr = np.asarray(doc)
+    if arr.ndim > 1:
+        raise ValueError(f"{label} must be a 1-D array of token ids, got shape {arr.shape}")
+    arr = arr.reshape(-1)
+    if arr.size == 0:
+        return arr.astype(np.int64)
+    if np.issubdtype(arr.dtype, np.integer):
+        if not np.can_cast(arr.dtype, np.int64, casting="safe"):
+            lo, hi = int(arr.min()), int(arr.max())
+            if lo < _INT64_MIN or hi > _INT64_MAX:
+                raise ValueError(f"{label} contains values outside the int64 range: min={lo}, max={hi}")
+        return arr.astype(np.int64)
+    if not np.issubdtype(arr.dtype, np.floating):
+        raise TypeError(f"{label} must be an integer or floating array of token ids, got dtype {arr.dtype}")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{label} contains non-finite values (NaN/inf); token ids must be finite integers.")
+    if not np.array_equal(arr, np.trunc(arr)):
+        raise ValueError(f"{label} contains non-integer (fractional) values; token ids must be exact integers.")
+    if bool(np.any(arr < _INT64_MIN)) or bool(np.any(arr > _INT64_MAX)):
+        raise ValueError(f"{label} contains values outside the int64 range.")
+    return arr.astype(np.int64)
 
 
 def _epoch_seed(seed: int, epoch: int) -> int:
@@ -142,22 +204,31 @@ def pack_documents(
     this target a fabricated pad position." Callers MUST apply this mask (or otherwise exclude its
     ``False`` positions) before averaging next-token loss, or the fabricated pad targets are silently
     trained on as if they were real labels (MXR-080-0061).
+
+    Every document's tokens are validated before packing -- finite, exact-integer values in a lossless
+    ``int64`` range; fractional, non-finite, or out-of-range ids raise rather than being silently cast
+    (MXR-080-0062). ``pad_id`` and ``boundary_id`` are validated the same way, since both become real
+    token-stream values.
     """
     if block <= 0:
         raise ValueError("block must be positive")
+    pad_id = _require_exact_int(pad_id, "pad_id")
+    if boundary_id is not None:
+        boundary_id = _require_exact_int(boundary_id, "boundary_id")
+
     unit = int(block) + 1
     pieces: list[np.ndarray] = []
     for idx in indices:
-        doc = np.asarray(documents[idx]).reshape(-1)
+        doc = _validate_document_tokens(documents[idx], doc_index=idx)
         if doc.size:
             pieces.append(doc)
         if boundary_id is not None:
-            pieces.append(np.asarray([boundary_id]))
+            pieces.append(np.asarray([boundary_id], dtype=np.int64))
     if not pieces:
         empty_mask = np.ones((0, unit - 1), dtype=bool)
         return PackedCorpus(np.zeros((0, unit), dtype=np.int64), real_tokens=0, total_tokens=0, loss_mask=empty_mask)
 
-    flat = np.concatenate(pieces).astype(np.int64)
+    flat = np.concatenate(pieces)  # every piece already validated int64 -- no blind whole-corpus cast needed
     n_full = flat.size // unit
     remainder = flat.size - n_full * unit
 
@@ -231,7 +302,7 @@ class StreamingCorpus:
         return shard_documents_for_rank(order, self.rank, self.world_size)
 
     def epoch_batches(self, epoch: int) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        """Yield ``(context (b, block) float32, targets (b, block) int64, loss_mask (b, block) bool)``
+        """Yield ``(context (b, block) int64, targets (b, block) int64, loss_mask (b, block) bool)``
         micro-batches for this rank.
 
         ``loss_mask[i, j]`` is True iff ``targets[i, j]`` is a real observed next-token label, and False
@@ -240,7 +311,9 @@ class StreamingCorpus:
         call carries any ``False`` at all, regardless of corpus size. Callers MUST multiply the
         per-position loss by this mask (or otherwise exclude ``False`` positions) rather than average the
         raw per-position loss unconditionally: doing so silently teaches the model that ``pad_id`` is a
-        real next-token target (MXR-080-0061).
+        real next-token target (MXR-080-0061). ``context``/``targets`` stay ``int64`` -- never downcast to
+        ``float32`` here, which would silently lose integer identity for ids at or above ``2**24``
+        (MXR-080-0062); a consumer that wants float input casts explicitly on its own side.
 
         Deterministic given ``(seed, epoch, rank, world_size)``: re-running with the same inputs yields
         bitwise-identical batches. Sets :attr:`last_packing_efficiency` as a side effect (the real-token
@@ -254,4 +327,7 @@ class StreamingCorpus:
         for start in range(0, rows.shape[0], self.batch_size):
             chunk = rows[start : start + self.batch_size]
             mask_chunk = mask[start : start + self.batch_size]
-            yield chunk[:, :-1].astype(np.float32), chunk[:, 1:].astype(np.int64), mask_chunk.copy()
+            # .copy(): context/targets are overlapping column-shifted views of the SAME `rows` array (and
+            # of each other) -- copy so a caller mutating one batch in place can never corrupt `rows`,
+            # another already-yielded batch, or (via the context/targets overlap) each other.
+            yield chunk[:, :-1].copy(), chunk[:, 1:].copy(), mask_chunk.copy()
