@@ -131,6 +131,134 @@ def test_non_positive_n_steps_raises_a_clear_error(bad_n_steps):
         real_option_value(npv_dist, volatility=0.3, horizon=5, kind="defer", rate=0.05, n_steps=bad_n_steps)
 
 
+# --- MXR-080-0110: exact-finite controls + expansion/salvage exercise economics ---
+
+
+@pytest.mark.parametrize("bad_rate", [float("nan"), float("inf"), float("-inf")])
+def test_real_option_value_rejects_non_finite_rate(bad_rate):
+    npv_dist = _npv_dist(mean=10.0)
+    with pytest.raises(ValueError, match="rate"):
+        real_option_value(npv_dist, volatility=0.3, horizon=5, kind="defer", rate=bad_rate)
+
+
+@pytest.mark.parametrize("bad_volatility", [float("nan"), float("inf")])
+def test_real_option_value_rejects_non_finite_volatility(bad_volatility):
+    npv_dist = _npv_dist(mean=10.0)
+    with pytest.raises(ValueError, match="volatility"):
+        real_option_value(npv_dist, volatility=bad_volatility, horizon=5, kind="defer", rate=0.05)
+
+
+@pytest.mark.parametrize("bad_horizon", [float("nan"), float("inf")])
+def test_real_option_value_rejects_non_finite_horizon(bad_horizon):
+    npv_dist = _npv_dist(mean=10.0)
+    with pytest.raises(ValueError, match="horizon"):
+        real_option_value(npv_dist, volatility=0.3, horizon=bad_horizon, kind="defer", rate=0.05)
+
+
+@pytest.mark.parametrize("bad_mean", [float("nan"), float("inf"), float("-inf")])
+def test_real_option_value_rejects_non_finite_npv_mean(bad_mean):
+    npv_dist = _FakeNPVDistribution(samples=np.array([]), mean=bad_mean)
+    with pytest.raises(ValueError, match="npv_dist.mean"):
+        real_option_value(npv_dist, volatility=0.3, horizon=5, kind="defer", rate=0.05)
+
+
+@pytest.mark.parametrize("bad_expand_fraction", [float("nan"), float("inf")])
+def test_real_option_value_rejects_non_finite_expand_fraction(bad_expand_fraction):
+    npv_dist = _npv_dist(mean=10.0)
+    with pytest.raises(ValueError, match="expand_fraction"):
+        real_option_value(
+            npv_dist, volatility=0.3, horizon=5, kind="expand", rate=0.05, expand_fraction=bad_expand_fraction
+        )
+
+
+@pytest.mark.parametrize("bad_cost", [float("nan"), float("inf")])
+def test_real_option_value_rejects_non_finite_expansion_cost(bad_cost):
+    npv_dist = _npv_dist(mean=10.0)
+    with pytest.raises(ValueError, match="expansion_cost"):
+        real_option_value(npv_dist, volatility=0.3, horizon=5, kind="expand", rate=0.05, expansion_cost=bad_cost)
+
+
+@pytest.mark.parametrize("bad_salvage", [float("nan"), float("inf")])
+def test_real_option_value_rejects_non_finite_salvage_value(bad_salvage):
+    npv_dist = _npv_dist(mean=10.0)
+    with pytest.raises(ValueError, match="salvage_value"):
+        real_option_value(npv_dist, volatility=0.3, horizon=5, kind="abandon", rate=0.05, salvage_value=bad_salvage)
+
+
+@pytest.mark.parametrize("bad_horizon", [5.5, 2.1])
+def test_real_option_value_rejects_fractional_horizon(bad_horizon):
+    """Fractional horizons used to be silently truncated via int(...); they must now be rejected --
+    the caller has to decide whether they meant e.g. 5 or 6 periods, not have it picked for them."""
+    npv_dist = _npv_dist(mean=10.0)
+    with pytest.raises(ValueError, match="horizon must be an exact integer"):
+        real_option_value(npv_dist, volatility=0.3, horizon=bad_horizon, kind="defer", rate=0.05)
+
+
+def test_real_option_value_rejects_fractional_n_steps():
+    npv_dist = _npv_dist(mean=10.0)
+    with pytest.raises(ValueError, match="n_steps must be an exact integer"):
+        real_option_value(npv_dist, volatility=0.3, horizon=5, kind="defer", rate=0.05, n_steps=5.5)
+
+
+def test_real_option_value_accepts_a_whole_number_float_horizon():
+    """Negative control: a whole-number float (e.g. 5.0) is not the silently-truncated fraction the fix
+    targets, so it must still be accepted and price identically to the equivalent int."""
+    npv_dist = _npv_dist(mean=10.0)
+    as_int = real_option_value(npv_dist, volatility=0.3, horizon=5, kind="defer", rate=0.05)
+    as_float = real_option_value(npv_dist, volatility=0.3, horizon=5.0, kind="defer", rate=0.05)
+    assert as_int.value == as_float.value
+
+
+def test_expansion_cost_prevents_the_capacity_bonus_when_it_exceeds_the_gain():
+    """Without an expansion investment cost, a positive-NPV project always got the capacity bonus for
+    free -- there was no actual exercise decision being priced. A cost that exceeds the bonus (0.3 * 100
+    = 30) must suppress it entirely: the option collapses back to just the base project value."""
+    npv_dist = _npv_dist(mean=100.0)
+    free_bonus = real_option_value(
+        npv_dist, volatility=1e-9, horizon=5, kind="expand", rate=0.05, expand_fraction=0.3, expansion_cost=0.0
+    )
+    suppressed = real_option_value(
+        npv_dist, volatility=1e-9, horizon=5, kind="expand", rate=0.05, expand_fraction=0.3, expansion_cost=50.0
+    )
+    assert free_bonus.value == pytest.approx(130.0, abs=1e-6)
+    assert suppressed.value == pytest.approx(100.0, abs=1e-6)
+    assert suppressed.value < free_bonus.value
+
+
+def test_expansion_cost_also_suppresses_the_bonus_under_real_volatility():
+    """Same suppression, now through the actual lattice (not just the zero-volatility intrinsic
+    shortcut) -- an expansion too expensive to ever be worth exercising must not trivially pay off
+    through American-exercise backward induction either."""
+    npv_dist = _npv_dist(mean=100.0)
+    free_bonus = real_option_value(
+        npv_dist, volatility=0.4, horizon=5, kind="expand", rate=0.05, expand_fraction=0.3, expansion_cost=0.0
+    )
+    suppressed = real_option_value(
+        npv_dist, volatility=0.4, horizon=5, kind="expand", rate=0.05, expand_fraction=0.3, expansion_cost=1000.0
+    )
+    assert suppressed.value < free_bonus.value
+
+
+def test_expansion_cost_defaults_to_zero_matching_previous_behavior():
+    """Negative control: a legitimate finite setup left at the new parameters' defaults
+    (expansion_cost=0.0) must still price exactly as it did before this fix existed."""
+    npv_dist = _npv_dist(mean=100.0)
+    opt = real_option_value(npv_dist, volatility=1e-9, horizon=5, kind="expand", rate=0.05, expand_fraction=0.3)
+    assert opt.value == pytest.approx(130.0, abs=1e-6)
+
+
+def test_salvage_value_raises_the_abandon_floor_above_the_previous_hardcoded_zero():
+    """'abandon' previously hardcoded a total write-off (payoff exactly 0 when walking away from a
+    negative-NPV project). A caller who can recover salvage should see the option value reflect that."""
+    npv_dist = _npv_dist(mean=-40.0)
+    write_off = real_option_value(npv_dist, volatility=1e-9, horizon=5, kind="abandon", rate=0.05, salvage_value=0.0)
+    with_salvage = real_option_value(
+        npv_dist, volatility=1e-9, horizon=5, kind="abandon", rate=0.05, salvage_value=15.0
+    )
+    assert write_off.value == pytest.approx(0.0, abs=1e-6)
+    assert with_salvage.value == pytest.approx(15.0, abs=1e-6)
+
+
 class _ToyPosterior:
     """A minimal IC-1-conforming posterior: an independent Gaussian belief over one grade parameter."""
 
@@ -430,3 +558,30 @@ def test_voi_stopping_decision_is_consistent_with_voi_dollars_directly():
         posterior, _decision_value, drill_info, sample_cost=0.0, rng=np.random.default_rng(7)
     )
     assert decision.voi_dollars == pytest.approx(direct)
+
+
+@pytest.mark.parametrize("bad_sample_cost", [float("nan"), float("inf"), float("-inf")])
+def test_voi_stopping_decision_rejects_non_finite_sample_cost(bad_sample_cost):
+    """A NaN sample_cost previously compared as False against everything (NaN > x and NaN < x are both
+    False), so keep_sampling silently came back False regardless of the actual VOI -- must be a clear
+    error instead."""
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    with pytest.raises(ValueError, match="sample_cost"):
+        voi_stopping_decision(
+            posterior,
+            _decision_value,
+            {"variance_reduction": 0.5},
+            sample_cost=bad_sample_cost,
+            rng=np.random.default_rng(0),
+        )
+
+
+def test_voi_stopping_decision_reports_standard_error():
+    """Negative control alongside the rejection test above: a legitimate finite sample_cost still prices
+    a real decision, now carrying the VOI estimate's own Monte Carlo standard error."""
+    posterior = _ToyPosterior(mean=1.0, std=5.0)
+    decision = voi_stopping_decision(
+        posterior, _decision_value, {"variance_reduction": 0.5}, sample_cost=0.01, rng=np.random.default_rng(0)
+    )
+    assert decision.standard_error > 0.0
+    assert np.isfinite(decision.voi_dollars)

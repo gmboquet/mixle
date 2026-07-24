@@ -14,7 +14,10 @@ more is known?" Two tools close that gap:
     kink that gives the option its value. Volatility is what makes the option valuable: by Jensen's
     inequality, an American option on a driftless process is worth strictly more than the naive point NPV
     whenever there is dispersion wide enough to reach the kink, and it collapses to the naive
-    ``max(NPV, 0)`` as volatility falls to zero (no dispersion, nothing to wait for).
+    ``max(NPV, 0)`` as volatility falls to zero (no dispersion, nothing to wait for). Each ``kind`` carries
+    its own exercise economics: ``expand`` nets the capacity bonus against an ``expansion_cost``
+    investment, so expanding is a genuine trade-off rather than a bonus every positive-NPV project gets
+    for free, and ``abandon`` recovers an optional ``salvage_value`` instead of assuming a total write-off.
   * :func:`voi_dollars` -- the dollar value of a piece of information (e.g. a delineation drillhole): the
     expected value of the best decision *with* that information, minus the expected value of the best
     decision *without* it. By default this is a Gaussian-dispersion HEURISTIC approximation, not the
@@ -87,17 +90,47 @@ class OptionValue(NamedTuple):
     premium_over_npv: float
 
 
-def _intrinsic(v: np.ndarray, kind: str, expand_fraction: float) -> np.ndarray:
+def _require_finite(value: Any, name: str, *, context: str = "real_option_value") -> float:
+    """Reject NaN/+-inf, which silently poison downstream arithmetic rather than raising (MXR-080-0110):
+    e.g. ``float("nan") < 0`` is ``False``, so a naive ``< 0`` guard lets a NaN control straight through
+    to contaminate the whole lattice, and ``rate``/``expand_fraction`` have no such guard at all today."""
+    fvalue = float(value)
+    if not np.isfinite(fvalue):
+        raise ValueError(f"{context}: {name} must be finite, got {value!r}")
+    return fvalue
+
+
+def _require_finite_int(value: Any, name: str, *, context: str = "real_option_value") -> int:
+    """Reject NaN/+-inf AND non-integral values (e.g. ``5.5``) instead of silently truncating them via
+    ``int(...)`` (MXR-080-0110: fractional horizons/steps were truncated despite an integer contract)."""
+    fvalue = _require_finite(value, name, context=context)
+    if fvalue != int(fvalue):
+        raise ValueError(f"{context}: {name} must be an exact integer, got {value!r}")
+    return int(fvalue)
+
+
+def _intrinsic(
+    v: np.ndarray,
+    kind: str,
+    expand_fraction: float,
+    expansion_cost: float = 0.0,
+    salvage_value: float = 0.0,
+) -> np.ndarray:
     """Exercise payoff at underlying value(s) ``v`` for the given option ``kind``."""
     if kind == "defer":
         # Option to wait, then invest only if the project is worth it: invest for max(V, 0), else walk.
+        # V is already an NPV (net of the initial investment), so no separate exercise cost applies here.
         return np.maximum(v, 0.0)
     if kind == "abandon":
-        # Already committed; option to abandon for salvage (assumed 0) rather than ride a negative NPV.
-        return np.maximum(v, 0.0)
+        # Already committed; option to abandon for `salvage_value` (default 0) rather than ride the NPV.
+        return np.maximum(v, salvage_value)
     if kind == "expand":
-        # Option to scale up capacity by `expand_fraction` whenever doing so is profitable.
-        return v + expand_fraction * np.maximum(v, 0.0)
+        # Option to scale up capacity by `expand_fraction`, net of the expansion's own investment cost
+        # (MXR-080-0110: without this, the bonus was free, so a positive project always "expanded" for
+        # no cost and there was no actual exercise decision to price). Exercise only when the bonus net
+        # of that cost is positive; otherwise just run the base (unexpanded) project for `v`.
+        expansion_gain = np.maximum(expand_fraction * np.maximum(v, 0.0) - expansion_cost, 0.0)
+        return v + expansion_gain
     raise ValueError(f"real_option_value: kind must be one of {_KINDS}, got {kind!r}")
 
 
@@ -110,6 +143,8 @@ def real_option_value(
     rate: float,
     n_steps: int | None = None,
     expand_fraction: float = 0.3,
+    expansion_cost: float = 0.0,
+    salvage_value: float = 0.0,
 ) -> OptionValue:
     """Price the defer/expand/abandon option on a project via an additive binomial lattice on NPV.
 
@@ -129,36 +164,54 @@ def real_option_value(
     Args:
         npv_dist: anything exposing ``.mean`` (a float) -- typically J2's ``NPVDistribution``. Only the
             mean is used; ``real_option_value`` prices the *option on top of* the point estimate, not a
-            re-derivation of the distribution itself.
-        volatility: fractional (per-sqrt-period) dispersion of NPV around its mean. Must be ``>= 0``;
-            ``0`` means no dispersion and the option collapses to immediate exercise of ``kind``'s own
-            payoff on ``npv_dist.mean`` (:func:`_intrinsic`) -- ``max(npv_dist.mean, 0)`` for
-            ``"defer"``/``"abandon"``, ``npv_dist.mean + expand_fraction * max(npv_dist.mean, 0)`` for
-            ``"expand"``.
-        horizon: number of periods over which the option may be exercised. ``0`` means "decide now".
+            re-derivation of the distribution itself. Must be finite.
+        volatility: fractional (per-sqrt-period) dispersion of NPV around its mean. Must be finite and
+            ``>= 0``; ``0`` means no dispersion and the option collapses to immediate exercise of
+            ``kind``'s own payoff on ``npv_dist.mean`` (:func:`_intrinsic`) -- ``max(npv_dist.mean, 0)``
+            for ``"defer"``, ``max(npv_dist.mean, salvage_value)`` for ``"abandon"``, ``npv_dist.mean +
+            max(expand_fraction * max(npv_dist.mean, 0) - expansion_cost, 0)`` for ``"expand"``.
+        horizon: number of periods over which the option may be exercised. ``0`` means "decide now". Must
+            be a finite, exact (non-fractional) integer ``>= 0``.
         kind: one of ``"defer"``, ``"expand"``, ``"abandon"``.
-        rate: per-period discount rate applied to the continuation value.
+        rate: per-period discount rate applied to the continuation value. Must be finite.
         n_steps: lattice steps (defaults to ``max(horizon, 1)``, i.e. one step per period). Must be a
-            positive integer when given explicitly.
+            finite, exact (non-fractional) positive integer when given explicitly.
         expand_fraction: for ``kind="expand"``, the fractional capacity bonus applied to a positive
-            underlying value when the expansion is exercised.
+            underlying value when the expansion is exercised. Must be finite.
+        expansion_cost: for ``kind="expand"``, the investment cost of actually exercising the expansion,
+            netted against ``expand_fraction``'s capacity bonus -- without it, a positive-NPV project
+            always "expands" for free and there is no real exercise decision being priced (see
+            :func:`_intrinsic`). Ignored for other kinds. Must be finite; default ``0.0`` (no cost,
+            matching this function's behavior before ``expansion_cost`` existed).
+        salvage_value: for ``kind="abandon"``, the value recovered by abandoning the project instead of
+            riding out its NPV, replacing the previous hardcoded assumption of a total write-off. Ignored
+            for other kinds. Must be finite; default ``0.0`` (total write-off, matching this function's
+            behavior before ``salvage_value`` existed).
 
     Returns:
         An :class:`OptionValue`.
     """
     if kind not in _KINDS:
         raise ValueError(f"real_option_value: kind must be one of {_KINDS}, got {kind!r}")
+    volatility = _require_finite(volatility, "volatility")
     if volatility < 0.0:
         raise ValueError("real_option_value: volatility must be non-negative")
+    horizon = _require_finite_int(horizon, "horizon")
     if horizon < 0:
         raise ValueError("real_option_value: horizon must be non-negative")
-    if n_steps is not None and n_steps <= 0:
-        # n_steps=0 with horizon>0 divides by zero below; n_steps<0 builds an EMPTY lattice and then
-        # indexes boundary[n] == boundary[-1] on it, raising a confusing IndexError three lines later.
-        # One clear error at the boundary instead of two different internal crashes downstream.
-        raise ValueError(f"real_option_value: n_steps must be a positive integer, got {n_steps}")
+    if n_steps is not None:
+        n_steps = _require_finite_int(n_steps, "n_steps")
+        if n_steps <= 0:
+            # n_steps=0 with horizon>0 divides by zero below; n_steps<0 builds an EMPTY lattice and then
+            # indexes boundary[n] == boundary[-1] on it, raising a confusing IndexError three lines later.
+            # One clear error at the boundary instead of two different internal crashes downstream.
+            raise ValueError(f"real_option_value: n_steps must be a positive integer, got {n_steps}")
+    rate = _require_finite(rate, "rate")
+    expand_fraction = _require_finite(expand_fraction, "expand_fraction")
+    expansion_cost = _require_finite(expansion_cost, "expansion_cost")
+    salvage_value = _require_finite(salvage_value, "salvage_value")
 
-    npv_mean = float(npv_dist.mean)
+    npv_mean = _require_finite(npv_dist.mean, "npv_dist.mean")
     n = int(n_steps) if n_steps is not None else max(int(horizon), 1)
     dt = float(horizon) / n if horizon > 0 else 0.0
     scale = abs(npv_mean) if npv_mean != 0.0 else 1.0
@@ -169,7 +222,7 @@ def real_option_value(
         # it worse, so the optimal policy is immediate exercise -- the SAME payoff _intrinsic gives
         # every node of the lattice below, not a hardcoded max(npv_mean, 0.0) (which happens to match
         # _intrinsic for "defer"/"abandon" but silently ignores "expand"'s expand_fraction bonus).
-        value = float(_intrinsic(np.array([npv_mean]), kind, expand_fraction)[0])
+        value = float(_intrinsic(np.array([npv_mean]), kind, expand_fraction, expansion_cost, salvage_value)[0])
         boundary = np.full(n + 1, np.nan)
         return OptionValue(value=value, exercise_boundary=boundary, premium_over_npv=value - npv_mean)
 
@@ -178,14 +231,14 @@ def real_option_value(
 
     j = np.arange(n + 1)
     v = npv_mean + (2 * j - n) * h  # j up-moves, (n - j) down-moves out of n steps
-    option = _intrinsic(v, kind, expand_fraction)
+    option = _intrinsic(v, kind, expand_fraction, expansion_cost, salvage_value)
     boundary[n] = 0.0  # at maturity, exercise iff the underlying is non-negative (kind-independent here)
 
     for step in range(n - 1, -1, -1):
         j = np.arange(step + 1)
         v = npv_mean + (2 * j - step) * h
         continuation = disc * 0.5 * (option[1 : step + 2] + option[0 : step + 1])
-        intrinsic = _intrinsic(v, kind, expand_fraction)
+        intrinsic = _intrinsic(v, kind, expand_fraction, expansion_cost, salvage_value)
         exercise = intrinsic > continuation
         option = np.where(exercise, intrinsic, continuation)
         if np.any(exercise):
@@ -593,12 +646,18 @@ def voi_dollars(
 
 class VoiStoppingDecision(NamedTuple):
     """A real decision-theoretic answer to "should we sample again?": compare the value of one more
-    sample against its cost, rather than an arbitrary uncertainty threshold picked by hand."""
+    sample against its cost, rather than an arbitrary uncertainty threshold picked by hand.
+
+    ``standard_error`` is the underlying :class:`VoiEstimate`'s Monte Carlo standard error, carried
+    through so a caller can tell a close-to-the-cost ``net_value`` (statistical noise) apart from a real,
+    larger gap -- the same honesty :func:`voi_estimate` reports at the VOI level (MXR-080-0108/0110).
+    """
 
     voi_dollars: float
     sample_cost: float
     net_value: float
     keep_sampling: bool
+    standard_error: float
 
 
 def voi_stopping_decision(
@@ -610,6 +669,7 @@ def voi_stopping_decision(
     rng: np.random.Generator,
     n_outer: int = 64,
     n_inner: int = 256,
+    observation_model: GaussianObservationModel | None = None,
 ) -> VoiStoppingDecision:
     """Should the next sample (drillhole, monitoring well, survey station, ...) actually be taken?
 
@@ -624,18 +684,31 @@ def voi_stopping_decision(
     arbitrary uncertainty width.
 
     Args:
-        posterior, decision_fn, drill_info, rng, n_outer, n_inner: forwarded to :func:`voi_dollars`
-            unchanged -- see its docstring for what each means.
-        sample_cost: the real dollar cost of taking the next sample.
+        posterior, decision_fn, drill_info, rng, n_outer, n_inner, observation_model: forwarded to
+            :func:`voi_estimate` unchanged -- see its docstring for what each means.
+        sample_cost: the real dollar cost of taking the next sample. Must be finite (MXR-080-0110: an
+            unvalidated NaN cost previously compared as ``False`` against everything, silently forcing
+            ``keep_sampling=False`` regardless of the actual VOI).
 
     Returns:
-        A :class:`VoiStoppingDecision`: the computed VOI, the cost it was compared against, their
-        difference, and whether sampling should continue (``voi_dollars > sample_cost``).
+        A :class:`VoiStoppingDecision`: the computed VOI (with its standard error), the cost it was
+        compared against, their difference, and whether sampling should continue (``voi_dollars >
+        sample_cost``).
     """
-    voi = voi_dollars(posterior, decision_fn, drill_info, rng=rng, n_outer=n_outer, n_inner=n_inner)
+    sample_cost = _require_finite(sample_cost, "sample_cost", context="voi_stopping_decision")
+    est = voi_estimate(
+        posterior,
+        decision_fn,
+        drill_info,
+        rng=rng,
+        n_outer=n_outer,
+        n_inner=n_inner,
+        observation_model=observation_model,
+    )
     return VoiStoppingDecision(
-        voi_dollars=voi,
-        sample_cost=float(sample_cost),
-        net_value=voi - float(sample_cost),
-        keep_sampling=voi > float(sample_cost),
+        voi_dollars=est.value,
+        sample_cost=sample_cost,
+        net_value=est.value - sample_cost,
+        keep_sampling=est.value > sample_cost,
+        standard_error=est.standard_error,
     )
