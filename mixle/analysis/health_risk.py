@@ -62,14 +62,20 @@ the health & safety pillar. It answers a monitoring-shift question -- "is this r
 toward, or past, a regulatory/occupational exposure limit, and can I trust the alert?" -- without
 pretending a single noisy reading settles it:
 
-  * :func:`exposure_exceedance_monitor` -- per-timestep ``P(exposure > limit)`` from a local predictive
-    fit around each reading (the same *distribution-over-a-threshold* idea as IC-8's
+  * :func:`exposure_exceedance_monitor` -- per-timestep ``P(exposure > limit)`` treating the OBSERVED
+    reading itself as a noisy measurement of the true exposure level, scaled by a causal (strictly
+    past-only) local predictive fit around it (the same *distribution-over-a-threshold* idea as IC-8's
     ``mixle_pde.decision_quantities.prob_exceed``, here applied to a scalar monitoring series rather
-    than a spatial posterior field, since a live sensor stream is not itself an IC-1 ``Posterior``).
-    The raw probability is then run through :func:`mixle.inference.conformal.split_conformal` against a
-    held-out ``calib`` reference (known-safe, sub-limit history) so the alert threshold is
-    distribution-free calibrated: under exchangeability with ``calib``, the empirical false-alarm rate
-    is bounded by ``alpha``, not just "probably fine" from an untested normal-theory cutoff.
+    than a spatial posterior field, since a live sensor stream is not itself an IC-1 ``Posterior``) --
+    a sudden extreme reading enters its own score and can trigger at the timestep it happens, not only
+    once later readings drag a lagging rolling mean toward it. The raw probability is then run through
+    :func:`mixle.inference.conformal.split_conformal` against a held-out ``calib`` reference (known-safe,
+    sub-limit history, drawn from a stable reference period and scored by the same past-only rule) so
+    the alert threshold is distribution-free calibrated: under exchangeability with an adequately-sized
+    ``calib``, the empirical false-alarm rate is bounded by ``alpha``, not just "probably fine" from an
+    untested normal-theory cutoff. When ``calib`` is omitted or too small for ``alpha`` to have real
+    resolution, the monitored series scores itself as a graceful degradation, but the report comes back
+    explicitly ``calibrated=False`` rather than silently implying the bound holds.
 
 An alert firing (``ExceedanceReport.alerts.any()``) is the hook the mlops drift/retrain half (G7,
 ``mixle_mlops.drift_retrain``) watches for a re-check/retrain trigger -- that wiring is a *signal*
@@ -615,42 +621,69 @@ _LOCAL_WINDOW = 30
 _MIN_LOCAL_HISTORY = 5
 _MIN_SCALE = 1e-9
 
+# MXR-080-0097: the smallest calibration size for which the finite-sample conformal quantile's own
+# resolution, ``1 / (n + 1)``, sits at least ``_MIN_CALIB_MARGIN``-fold below the target ``alpha`` --
+# so a calibrated threshold reflects the target false-alarm rate with real resolution, rather than
+# merely being finite (``n ~ 1/alpha`` already gives a finite quantile -- see `_conformal_quantile` in
+# ``mixle.inference.conformal`` -- but that quantile is then just the single loosest calibration score,
+# which does not meaningfully approximate ``alpha``).
+_MIN_CALIB_MARGIN = 5.0
+
+
+def _min_adequate_calib_size(alpha: float) -> int:
+    """Smallest calibration sample count (see ``_MIN_CALIB_MARGIN``) for a meaningful ``alpha`` bound."""
+    return max(1, int(np.ceil(_MIN_CALIB_MARGIN / alpha)) - 1)
+
 
 @dataclass
 class ExceedanceReport:
     """Per-timestep exceedance call: which points alert, their raw probability, and the target rate.
 
-    ``alerts`` is the boolean array the caller (or the mlops drift/retrain wiring) acts on; it is
-    already conformal-calibrated -- do not re-threshold ``prob_exceed`` again downstream.
+    ``alerts`` is the boolean array the caller (or the mlops drift/retrain wiring) acts on; when
+    ``calibrated`` is True it is already conformal-calibrated -- do not re-threshold ``prob_exceed``
+    again downstream.
+
+    ``calibrated`` (MXR-080-0097) is False whenever the returned alerts do NOT carry the
+    distribution-free false-alarm-rate guarantee: ``calib`` was omitted (the monitored series --
+    including any anomalies it contains -- scored itself, which is neither independent of nor
+    exchangeable with what it is calibrating), or the effective calibration set was too small to give
+    ``false_alarm_target`` real resolution (see ``_min_adequate_calib_size``). The alerts are still
+    computed on a best-effort basis in that case, but the caller must treat them as a heuristic, not a
+    proven bound.
+
+    ``warmed_up`` (MXR-080-0096) marks which timesteps had enough strictly-prior history to be scored
+    at all; an unwarmed timestep always reports ``prob_exceed == 0.0`` and never alerts -- an explicit
+    "not yet evaluated", never a confident "safe".
     """
 
     alerts: np.ndarray
     prob_exceed: np.ndarray
     false_alarm_target: float
+    calibrated: bool = True
+    warmed_up: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))
 
 
-def _causal_local_stats(x: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:
-    """Causal (past-only) rolling mean/std per index, falling back to the global fit while warming up.
+def _causal_local_scale(x: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:
+    """Causal (strictly-past-only) rolling scale per index, plus which indices are warmed up.
 
-    ``x[t]`` never looks at itself or the future: the local predictive at ``t`` is built from
-    ``x[max(0, t - window):t]``. Early indices (fewer than ``_MIN_LOCAL_HISTORY`` prior points) fall
-    back to the series' global mean/std so the predictive is never built from a near-empty window.
+    ``std[t]`` is fit ONLY from ``x[max(0, t - window):t]`` -- never ``x[t]`` itself, and never
+    anything at or after ``t`` -- so it cannot leak future information into the predictive state at
+    ``t``. ``warmed_up[t]`` is False whenever fewer than ``_MIN_LOCAL_HISTORY`` strictly-prior points
+    are available (the earliest indices in any series); those entries carry a placeholder scale the
+    caller must not use (:func:`exposure_exceedance_monitor` never scores an unwarmed index) rather
+    than this function reaching past the causal window into a global -- and, for an early index,
+    necessarily partly-future -- statistic the way the pre-fix implementation did (MXR-080-0096).
     """
     x = np.asarray(x, dtype=float)
     n = x.shape[0]
-    mean = np.empty(n)
-    std = np.empty(n)
-    global_mean = float(x.mean()) if n > 0 else 0.0
-    global_std = max(float(x.std(ddof=1)), _MIN_SCALE) if n > 1 else _MIN_SCALE
+    std = np.full(n, _MIN_SCALE)
+    warmed_up = np.zeros(n, dtype=bool)
     for t in range(n):
         hist = x[max(0, t - window) : t]
         if hist.shape[0] >= _MIN_LOCAL_HISTORY:
-            mean[t] = hist.mean()
             std[t] = max(float(hist.std(ddof=1)), _MIN_SCALE)
-        else:
-            mean[t] = global_mean
-            std[t] = global_std
-    return mean, std
+            warmed_up[t] = True
+    return std, warmed_up
 
 
 def exposure_exceedance_monitor(
@@ -663,47 +696,100 @@ def exposure_exceedance_monitor(
     """Flag exceedance excursions in ``series`` against ``limit`` at a calibrated false-alarm rate.
 
     Args:
-        series: ``(n,)`` monitoring readings (e.g. silica PM4 concentration over time).
-        limit: the occupational/community exposure limit being monitored against.
+        series: ``(n,)`` monitoring readings (e.g. silica PM4 concentration over time). Must be finite.
+        limit: the occupational/community exposure limit being monitored against. Must be finite.
         alpha: target false-alarm rate (``ExceedanceReport.false_alarm_target``); the empirical alert
-            rate on exchangeable, non-exceeding data is bounded by this via conformal calibration.
-        calib: ``(m,)`` held-out reference readings known to be exposure-compliant (sub-limit). When
-            omitted, ``series`` calibrates itself -- a graceful degradation for callers with no
-            separate holdout, at the cost of a slightly less independent calibration set.
+            rate on exchangeable, non-exceeding data is bounded by this via conformal calibration --
+            but only when the returned ``calibrated`` is True (see ``calib`` below). Must be in
+            ``(0, 1)``.
+        calib: ``(m,)`` held-out reference readings known to be exposure-compliant (sub-limit), drawn
+            from a stable, anomaly-free reference period and scored by the same past-only rule as
+            ``series`` -- the temporal-exchangeability scheme this monitor's false-alarm-rate guarantee
+            depends on. When omitted, ``series`` scores itself (a graceful degradation for callers with
+            no separate holdout) -- but the monitored series, including any anomalies it contains, is
+            neither independent of nor exchangeable with what it is calibrating, so the returned report
+            is explicitly marked ``calibrated=False`` and the ``alpha`` bound is NOT guaranteed
+            (MXR-080-0097). An explicitly-supplied ``calib`` that is too small to give ``alpha`` real
+            resolution (fewer than roughly ``_min_adequate_calib_size(alpha)`` usable, warmed-up
+            points) is likewise reported uncalibrated rather than silently accepted.
 
     Returns:
-        An :class:`ExceedanceReport`.
+        An :class:`ExceedanceReport`. When ``calibrated`` is False the alerts are still a best-effort
+        heuristic, not a proven distribution-free bound.
 
     Algorithm:
-        1. Fit a causal local Gaussian predictive at every timestep of ``series`` (and, separately, of
-           ``calib``) via :func:`_causal_local_stats`, then read off ``P(reading > limit)`` under that
-           predictive with :func:`scipy.stats.norm.sf` -- the IC-8 ``prob_exceed`` idea (probability
-           mass of a distribution above a threshold) applied pointwise instead of over a spatial
-           posterior region.
-        2. Calibrate the alert threshold: treat each calibration timestep's ``prob_exceed`` value as a
-           one-sided conformal nonconformity score (:func:`mixle.inference.conformal.split_conformal`,
-           ``side="upper"``, against a constant zero "prediction") on the *known-safe* ``calib`` set.
-           The returned upper bound is the smallest cutoff such that, under exchangeability with
-           ``calib``, at most an ``alpha`` fraction of non-exceeding timesteps would clear it --
-           a distribution-free false-alarm-rate guarantee, not a normal-theory approximation.
-        3. Alert wherever ``series``'s ``prob_exceed`` clears that calibrated threshold.
+        1. At every timestep ``t`` of ``series`` (and, separately, of ``calib``), fit a causal
+           (strictly past-only) local Gaussian SCALE ``std[t]`` from ``series[max(0, t-window):t]`` --
+           never ``series[t]`` itself, never anything at or after ``t`` -- via
+           :func:`_causal_local_scale`. Timesteps with too little prior history are not "warmed up"
+           (``ExceedanceReport.warmed_up``) and are reported as an explicit not-yet-evaluated state
+           (``prob_exceed=0.0``, never alerting) instead of reaching past the window into a global --
+           and, for an early index, necessarily partly-future -- statistic (MXR-080-0096).
+        2. Score ``prob_exceed[t]`` as the probability that the TRUE exposure level exceeds ``limit``,
+           treating the OBSERVED ``series[t]`` itself as a noisy measurement of that level with scale
+           ``std[t]``: ``P(X > limit)`` for ``X ~ Normal(series[t], std[t])``
+           (:func:`scipy.stats.norm.sf`). Centering on the observation itself -- rather than on the
+           local mean of *prior* readings alone, which is blind to what was actually just measured --
+           is what lets a single sudden extreme reading enter its own score and trigger at the exact
+           timestep it happens, instead of only once later readings drag a lagging rolling mean toward
+           it (MXR-080-0096).
+        3. Calibrate the alert threshold: treat each WARMED-UP calibration timestep's ``prob_exceed``
+           (scored by the identical observed-value rule) as a one-sided conformal nonconformity score
+           (:func:`mixle.inference.conformal.split_conformal`, ``side="upper"``, against a constant
+           zero "prediction") on the known-safe ``calib`` set. The returned upper bound is the
+           smallest cutoff such that, under exchangeability with ``calib``, at most an ``alpha``
+           fraction of non-exceeding timesteps would clear it -- a distribution-free false-alarm-rate
+           guarantee, not a normal-theory approximation, PROVIDED ``calib`` genuinely satisfies that
+           exchangeability and is large enough (see ``calib`` above and ``calibrated``).
+        4. Alert wherever a warmed-up ``series`` timestep's ``prob_exceed`` clears that threshold.
     """
     series = np.asarray(series, dtype=float)
-    calib_arr = np.asarray(calib, dtype=float) if calib is not None else series
+    if series.ndim != 1:
+        raise ValueError(f"series must be a 1-D (n,) monitoring array, got shape {series.shape}")
+    if not np.isfinite(series).all():
+        raise ValueError("series must be finite (no NaN/Inf)")
+    limit = float(limit)
+    if not np.isfinite(limit):
+        raise ValueError(f"limit must be finite, got {limit!r}")
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be in (0, 1), got {alpha!r}")
 
-    mean, std = _causal_local_stats(series, _LOCAL_WINDOW)
-    prob_exceed = stats.norm.sf(limit, loc=mean, scale=std)
+    explicit_calib = calib is not None
+    calib_arr = np.asarray(calib, dtype=float) if explicit_calib else series
+    if calib_arr.ndim != 1:
+        raise ValueError(f"calib must be a 1-D (m,) reference array, got shape {calib_arr.shape}")
+    if not np.isfinite(calib_arr).all():
+        raise ValueError("calib must be finite (no NaN/Inf)")
 
-    cal_mean, cal_std = _causal_local_stats(calib_arr, _LOCAL_WINDOW)
-    prob_exceed_calib = stats.norm.sf(limit, loc=cal_mean, scale=cal_std)
+    std, warmed_up = _causal_local_scale(series, _LOCAL_WINDOW)
+    prob_exceed = np.where(warmed_up, stats.norm.sf(limit, loc=series, scale=std), 0.0)
 
-    zero_calib_pred = np.zeros_like(prob_exceed_calib)
-    zero_test_pred = np.zeros_like(prob_exceed)
-    _, calibrated_upper = split_conformal(zero_calib_pred, prob_exceed_calib, zero_test_pred, alpha=alpha, side="upper")
-    threshold = float(calibrated_upper[0]) if calibrated_upper.size else float("inf")
+    cal_std, cal_warmed_up = _causal_local_scale(calib_arr, _LOCAL_WINDOW)
+    # Only genuinely-scored (warmed-up) calibration points enter the reference distribution -- a
+    # placeholder "not yet evaluated" score is not a real nonconformity score.
+    prob_exceed_calib = stats.norm.sf(limit, loc=calib_arr, scale=cal_std)[cal_warmed_up]
 
-    alerts = prob_exceed > threshold
-    return ExceedanceReport(alerts=alerts, prob_exceed=prob_exceed, false_alarm_target=alpha)
+    n_eff = int(prob_exceed_calib.shape[0])
+    calibrated = explicit_calib and n_eff >= _min_adequate_calib_size(alpha)
+
+    if n_eff == 0:
+        threshold = float("inf")
+    else:
+        zero_calib_pred = np.zeros_like(prob_exceed_calib)
+        zero_test_pred = np.zeros_like(prob_exceed)
+        _, calibrated_upper = split_conformal(
+            zero_calib_pred, prob_exceed_calib, zero_test_pred, alpha=alpha, side="upper"
+        )
+        threshold = float(calibrated_upper[0]) if calibrated_upper.size else float("inf")
+
+    alerts = warmed_up & (prob_exceed > threshold)
+    return ExceedanceReport(
+        alerts=alerts,
+        prob_exceed=prob_exceed,
+        false_alarm_target=alpha,
+        calibrated=calibrated,
+        warmed_up=warmed_up,
+    )
 
 
 __all__ = [
