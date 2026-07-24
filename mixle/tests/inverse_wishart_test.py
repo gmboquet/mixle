@@ -53,6 +53,18 @@ class InverseWishartTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             InverseWishartDistribution(2, np.eye(3))  # df must be > p-1 = 2
 
+    def test_df_nan_raises(self):
+        with self.assertRaises(ValueError):
+            InverseWishartDistribution(np.nan, self.P)
+
+    def test_df_pos_inf_raises(self):
+        with self.assertRaises(ValueError):
+            InverseWishartDistribution(np.inf, self.P)
+
+    def test_df_neg_inf_raises(self):
+        with self.assertRaises(ValueError):
+            InverseWishartDistribution(-np.inf, self.P)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,8 +40,8 @@ class InverseWishartDistribution(SequenceEncodableProbabilityDistribution):
         if v.ndim != 2 or v.shape[0] != v.shape[1]:
             raise ValueError("scale must be a square matrix")
         self.dim = v.shape[0]
-        if df <= self.dim - 1:
-            raise ValueError("df must be > p - 1")
+        if df <= self.dim - 1 or not np.isfinite(df):
+            raise ValueError("df must be a finite value > p - 1")
         logdet = cholesky_logdet(v)
         if logdet is None:
             raise ValueError("scale must be positive definite")

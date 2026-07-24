@@ -44,8 +44,8 @@ class WishartDistribution(SequenceEncodableProbabilityDistribution):
         if v.ndim != 2 or v.shape[0] != v.shape[1]:
             raise ValueError("scale must be a square matrix")
         self.dim = v.shape[0]
-        if df < self.dim:
-            raise ValueError("df must be >= the matrix dimension p")
+        if df < self.dim or not np.isfinite(df):
+            raise ValueError("df must be a finite value >= the matrix dimension p")
         logdet = cholesky_logdet(v)
         if logdet is None:
             raise ValueError("scale must be positive definite")

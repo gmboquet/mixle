@@ -111,3 +111,26 @@ class WishartAccumulatorLogdetTest(unittest.TestCase):
         _, count, sum_logdet = acc.value()
         self.assertEqual(count, 2.0)
         self.assertEqual(sum_logdet, -np.inf)  # one -inf term poisons the weighted sum, as intended
+
+
+class WishartValidationTest(unittest.TestCase):
+    """df must be a finite real satisfying df >= p; nan and +/-inf all satisfy no useful ordering
+    (a nan comparison is always False, and +inf passes a `< dim` check meant to exclude it) and must
+    be rejected explicitly rather than silently accepted into a nan-poisoned distribution."""
+
+    def setUp(self):
+        self.V = np.array([[2.0, 0.3], [0.3, 1.0]])
+        self.df = 6
+        self.d = WishartDistribution(self.df, self.V)
+
+    def test_df_nan_raises(self):
+        with self.assertRaises(ValueError):
+            WishartDistribution(np.nan, self.V)
+
+    def test_df_pos_inf_raises(self):
+        with self.assertRaises(ValueError):
+            WishartDistribution(np.inf, self.V)
+
+    def test_df_neg_inf_raises(self):
+        with self.assertRaises(ValueError):
+            WishartDistribution(-np.inf, self.V)
