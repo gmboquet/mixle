@@ -17,6 +17,62 @@ import numpy as np
 _SUPPORTED = (1, 2, 4, 8)
 
 
+def _require_exact_int(value: Any, name: str) -> int:
+    """Coerce ``value`` to a plain ``int``, rejecting bools, non-numeric types, non-finite floats, and any
+    value with a fractional part.
+
+    A blind ``int(value)`` truncation would silently change behavior instead of failing loudly.
+    """
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an int, got bool {value!r}")
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite, got {value!r}")
+        truncated = int(value)
+        if value != truncated:
+            raise ValueError(f"{name} must be an exact integer, got {value!r}")
+        return truncated
+    raise TypeError(f"{name} must be an int, got {value!r} ({type(value).__name__})")
+
+
+def _require_nonnegative_int(value: Any, name: str) -> int:
+    v = _require_exact_int(value, name)
+    if v < 0:
+        raise ValueError(f"{name} must be nonnegative, got {v}")
+    return v
+
+
+def _require_exact_nonneg_int_array(values: Any, name: str) -> np.ndarray:
+    """Validate ``values`` are exact, finite, nonnegative integers and return them as ``uint64``.
+
+    Casting straight to ``uint64`` (the previous behavior) silently truncates fractional codes
+    (``1.9`` -> ``1``) and wraps negative codes into huge unsigned values instead of failing loudly.
+    """
+    arr = np.asarray(values)
+    if arr.dtype == np.bool_:
+        return arr.astype(np.uint64)
+    if np.issubdtype(arr.dtype, np.integer):
+        if arr.size and np.any(arr < 0):
+            raise ValueError(f"{name} must be nonnegative, got a negative value")
+        return arr.astype(np.uint64)
+    if np.issubdtype(arr.dtype, np.floating):
+        if arr.size and not np.all(np.isfinite(arr)):
+            raise ValueError(f"{name} must be finite, got NaN/Inf")
+        if arr.size and not np.array_equal(arr, np.trunc(arr)):
+            raise ValueError(f"{name} must be exact integers, got a fractional value")
+        if arr.size and np.any(arr < 0):
+            raise ValueError(f"{name} must be nonnegative, got a negative value")
+        return arr.astype(np.uint64)
+    # object / mixed dtype -- fall back to an elementwise check so no exotic input silently coerces.
+    flat = arr.ravel()
+    checked = np.empty(flat.size, dtype=np.uint64)
+    for i, v in enumerate(flat):
+        checked[i] = _require_nonnegative_int(v, name)
+    return checked.reshape(arr.shape)
+
+
 def pack_bits(codes: Any, bits: int) -> np.ndarray:
     """Pack unsigned ``codes`` (each ``< 2**bits``) into a ``uint8`` array, ``8//bits`` per byte.
 
@@ -25,7 +81,7 @@ def pack_bits(codes: Any, bits: int) -> np.ndarray:
     """
     if bits not in _SUPPORTED:
         raise ValueError("pack_bits supports bit widths %r, got %d" % (_SUPPORTED, bits))
-    c = np.asarray(codes, dtype=np.uint64).ravel()
+    c = _require_exact_nonneg_int_array(codes, "codes").ravel()
     if np.any(c >= (1 << bits)):
         raise ValueError("a code does not fit in %d bits" % bits)
     if bits == 8:
@@ -42,13 +98,23 @@ def pack_bits(codes: Any, bits: int) -> np.ndarray:
 
 
 def unpack_bits(packed: Any, bits: int, count: int) -> np.ndarray:
-    """Inverse of :func:`pack_bits`: recover the first ``count`` codes as a ``uint64`` array."""
+    """Inverse of :func:`pack_bits`: recover the first ``count`` codes as a ``uint64`` array.
+
+    ``count`` must be an exact nonnegative integer that fits within the packed payload's capacity; a
+    negative ``count`` is rejected rather than falling through to Python's negative-slice semantics
+    (``arr[:-3]``), and a ``count`` beyond the payload's actual capacity is rejected rather than silently
+    returning fewer values than requested.
+    """
     if bits not in _SUPPORTED:
         raise ValueError("unpack_bits supports bit widths %r, got %d" % (_SUPPORTED, bits))
+    count = _require_nonnegative_int(count, "count")
     p = np.asarray(packed, dtype=np.uint8).ravel()
+    per_byte = 1 if bits == 8 else 8 // bits
+    capacity = p.size * per_byte
+    if count > capacity:
+        raise ValueError("count %d exceeds packed capacity %d (short by %d)" % (count, capacity, count - capacity))
     if bits == 8:
         return p.astype(np.uint64)[:count]
-    per_byte = 8 // bits
     mask = np.uint8((1 << bits) - 1)
     out = np.empty((p.size, per_byte), dtype=np.uint8)
     for j in range(per_byte):
@@ -60,5 +126,6 @@ def packed_nbytes(count: int, bits: int) -> int:
     """Number of bytes :func:`pack_bits` produces for ``count`` codes of width ``bits``."""
     if bits not in _SUPPORTED:
         raise ValueError("packed_nbytes supports bit widths %r, got %d" % (_SUPPORTED, bits))
+    count = _require_nonnegative_int(count, "count")
     per_byte = 8 // bits
     return (count + per_byte - 1) // per_byte
