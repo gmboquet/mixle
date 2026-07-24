@@ -1,4 +1,4 @@
-"""Regression tests for three fixed defects in mixle.inference.production.registry.Registry.
+"""Regression tests for four fixed defects in mixle.inference.production.registry.Registry.
 
 1. ``register`` numbered the next version from ``len(versions())``, not the highest existing version
    number -- so a registry missing a version (deleted out of band, or a future ``delete()``) reused
@@ -11,6 +11,15 @@
    number, and both write it -- one write silently clobbered the other, with no error to either
    caller. Fixed with an ``fcntl.flock`` serializing allocation+write per model name, plus an
    ``O_CREAT | O_EXCL`` write as an independent conflict-detection guard.
+4. ``register``'s version-file write, even after (3)'s fix, still wrote the payload directly into the
+   ``O_CREAT | O_EXCL``-opened file at the final ``<version>.json`` path: a SINGLE writer failing
+   partway through -- serialization raising mid ``json.dump``, the disk filling up, the process
+   crashing -- left that exact path holding truncated/invalid JSON, permanently: a later ``register``
+   sees the (corrupt) file already exists and silently moves on to the next version number, orphaning
+   the corrupt one, and the ``O_CREAT | O_EXCL`` guard then refuses forever to let anything overwrite
+   it. Fixed by writing to a private, fsynced temp file first and publishing it with ``os.link``
+   (which -- like the ``O_CREAT | O_EXCL`` it replaces -- atomically creates the destination only if
+   absent, unlike ``os.replace``), so a failed write leaves nothing at the final path at all.
 """
 
 import json
@@ -208,3 +217,43 @@ def test_register_raises_instead_of_silently_overwriting_an_existing_version_fil
         # the pre-existing version file must be left completely untouched
         with open(os.path.join(d, "v1.json")) as f:
             assert json.load(f) == sentinel
+
+
+def test_register_write_failure_leaves_no_corrupt_version_file_and_stays_retriable(monkeypatch):
+    """A single writer failing partway through the version-file write -- serialization raising mid
+    ``json.dump``, disk full, a crash -- must never leave a truncated/corrupt ``<version>.json`` on
+    disk. Before the fix, ``register`` wrote the payload directly into the ``O_CREAT | O_EXCL``-opened
+    file at the FINAL path: a failure after some bytes were already flushed left that exact path
+    holding invalid JSON, permanently -- a later ``register`` call sees the (corrupt) file already
+    exists and silently allocates the next number instead, orphaning the corrupt one forever, and the
+    ``O_CREAT | O_EXCL`` guard then refuses any future write to that same path, so it can never
+    self-heal. This simulates that failure by making ``json.dump`` write a real partial chunk to the
+    file handle -- so, pre-fix, actual truncated bytes land on disk -- and then raise, mirroring a
+    disk-full ``OSError`` mid-write.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        reg = Registry(os.path.join(tmp, "root"))
+        d = reg._dir("m")
+
+        def _crash_mid_dump(obj, fp, *_a, **_kw):
+            fp.write('{"version": "v1", "registered_at": "trunc')  # real bytes hit the file handle
+            fp.flush()
+            raise OSError("simulated: No space left on device")
+
+        monkeypatch.setattr(json, "dump", _crash_mid_dump)
+        with pytest.raises(OSError, match="No space left on device"):
+            reg.register(st.GaussianDistribution(0.0, 1.0), "m")
+        monkeypatch.undo()  # restore the real json.dump before the clean retry below
+
+        # the failed write must leave NOTHING at the final path -- not a truncated file
+        v1_path = os.path.join(d, "v1.json")
+        assert not os.path.exists(v1_path), "a failed write left a corrupt version file behind"
+        # ...and no temp-file debris either
+        leftovers = [f for f in os.listdir(d) if f != ".register.lock"]
+        assert leftovers == [], f"a failed write leaked temp files: {leftovers}"
+
+        # the version number must stay cleanly retriable, not permanently stranded behind a corrupt file
+        ver = reg.register(st.GaussianDistribution(5.0, 1.0), "m")
+        assert ver == "v1", "a failed write must not permanently consume its version number"
+        model, _ = reg.get("m", "v1")
+        assert model.mu == 5.0
