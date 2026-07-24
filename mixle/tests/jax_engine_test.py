@@ -4,7 +4,11 @@ Skipped unless ``jax`` is installed (it is an optional extra). Exercised in CI's
 """
 
 import importlib.util
+import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -12,6 +16,32 @@ from mixle.engines import NUMPY_ENGINE, JaxEngine, engine_of, to_numpy
 from mixle.engines.base import ComputeEngine
 
 _HAS_JAX = importlib.util.find_spec("jax") is not None
+
+# Repo root (the directory *containing* the `mixle` package), used to PYTHONPATH-pin the fresh
+# subprocesses below to this checkout instead of whatever an editable install happens to resolve to.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+
+
+def setUpModule():
+    # MXR-080-0147: JaxEngine no longer forces `jax_enable_x64` on at import (see jax_engine.py's
+    # module docstring) -- it reads whatever the caller already set. Every test below that assumes
+    # float64 (e.g. test_float64_and_accumulator) needs that ambient state, so THIS test file explicitly
+    # opts in for its own run, the same way any other x64-wanting application would, and restores
+    # whatever was there before once the file is done (tearDownModule) so it doesn't leak into other
+    # test files sharing the same xdist worker process.
+    if _HAS_JAX:
+        import jax
+
+        global _PRE_MODULE_X64
+        _PRE_MODULE_X64 = bool(jax.config.jax_enable_x64)
+        jax.config.update("jax_enable_x64", True)
+
+
+def tearDownModule():
+    if _HAS_JAX:
+        import jax
+
+        jax.config.update("jax_enable_x64", _PRE_MODULE_X64)
 
 
 def _cases():
@@ -63,7 +93,9 @@ class JaxEngineTest(unittest.TestCase):
             self.assertTrue(np.allclose(got, exp, equal_nan=True), f"op {name} diverged: {got} vs {exp}")
 
     def test_float64_and_accumulator(self):
-        self.assertEqual(np.asarray(self.je.asarray([1.0, 2.0])).dtype, np.float64)  # x64 enabled
+        # x64 enabled via this file's setUpModule -- JaxEngine itself only adapts to the ambient
+        # setting rather than forcing it (MXR-080-0147); see JaxEngineX64ConfigTest for that contract.
+        self.assertEqual(np.asarray(self.je.asarray([1.0, 2.0])).dtype, np.float64)
         self.assertEqual(self.je.accumulator_dtype, np.float64)
 
     def test_index_add_is_functional(self):
@@ -94,6 +126,82 @@ class JaxEngineTest(unittest.TestCase):
 
         grad = jax.grad(lambda x: self.je.sum(x**2))(self.je.asarray([1.0, 2.0, 3.0]))
         self.assertTrue(np.allclose(self.je.to_numpy(grad), [2.0, 4.0, 6.0]))
+
+
+@unittest.skipUnless(_HAS_JAX, "jax is not installed")
+class JaxEngineX64ConfigTest(unittest.TestCase):
+    """MXR-080-0147: JaxEngine must not mutate global JAX config on import, and must instead adapt its
+    own dtype/accumulator policy to whatever ambient ``jax_enable_x64`` the caller has (or has not)
+    set -- never claim a precision the runtime cannot actually deliver."""
+
+    def setUp(self):
+        import jax
+
+        self._orig_x64 = bool(jax.config.jax_enable_x64)
+
+    def tearDown(self):
+        import jax
+
+        jax.config.update("jax_enable_x64", self._orig_x64)
+
+    def test_import_does_not_mutate_global_x64_config(self):
+        # A fresh subprocess, not importlib.reload: reload() re-executes jax_engine.py's top level
+        # but does NOT re-run mixle.engines' `from mixle.engines.jax_engine import JaxEngine`, so the
+        # rest of this file's already-bound JaxEngine/jax names would silently drift out of sync with
+        # a reloaded module -- a real fresh interpreter is the only clean way to observe "does
+        # importing this module change process-wide state" without risking cross-test pollution.
+        script = (
+            "import jax\n"
+            "assert jax.config.jax_enable_x64 is False, 'ambient x64 unexpectedly on before import'\n"
+            "import mixle.engines.jax_engine\n"
+            "assert jax.config.jax_enable_x64 is False, ("
+            "    'mixle.engines.jax_engine import mutated global jax_enable_x64'"
+            ")\n"
+            "print('OK')\n"
+        )
+        env = dict(os.environ)
+        env["PYTHONPATH"] = _REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("OK", result.stdout)
+
+    def test_engine_adapts_to_ambient_x64_disabled(self):
+        import jax
+
+        jax.config.update("jax_enable_x64", False)
+        eng = JaxEngine()
+        self.assertEqual(np.asarray(eng.asarray([1.0, 2.0])).dtype, np.float32)
+        self.assertEqual(eng.accumulator_dtype, np.float32)
+
+    def test_engine_adapts_to_ambient_x64_enabled(self):
+        import jax
+
+        jax.config.update("jax_enable_x64", True)
+        eng = JaxEngine()
+        self.assertEqual(np.asarray(eng.asarray([1.0, 2.0])).dtype, np.float64)
+        self.assertEqual(eng.accumulator_dtype, np.float64)
+
+    def test_explicit_float32_override_honored_even_when_ambient_x64_enabled(self):
+        import jax
+
+        jax.config.update("jax_enable_x64", True)
+        eng = JaxEngine(dtype="float32")
+        self.assertEqual(np.asarray(eng.asarray([1.0])).dtype, np.float32)
+
+    def test_explicit_float64_request_demoted_when_ambient_x64_disabled(self):
+        # A caller asking for dtype="float64" while x64 is ambient-off still cannot get real float64
+        # out of JAX (it would silently truncate), so the engine must not claim it either.
+        import jax
+
+        jax.config.update("jax_enable_x64", False)
+        eng = JaxEngine(dtype="float64")
+        self.assertEqual(np.asarray(eng.asarray([1.0])).dtype, np.float32)
 
 
 @unittest.skipUnless(_HAS_JAX, "jax not installed")

@@ -3,8 +3,17 @@
 JAX's ``jax.numpy`` mirrors the NumPy API, so most ops alias straight through (no ``axis``->``dim``
 translation as Torch needs). Two JAX-isms are handled here:
 
-* **float64 is opt-in.** JAX defaults to float32; mixle accumulates in float64, so this module enables
-  ``jax_enable_x64`` at import (and the engine's :attr:`accumulator_dtype` is float64).
+* **float64 is opt-in, and it is the caller's global setting, not this module's.** JAX defaults to
+  float32 and treats ``jax_enable_x64`` as a process-wide flag that JAX itself only documents as
+  reliable when set before any JAX computation runs -- so this module never calls
+  ``jax.config.update(...)`` itself; doing that on import would silently reconfigure unrelated JAX
+  code sharing the process, including code that already initialized JAX before Mixle was imported.
+  Instead the engine reads the ambient ``jax.config.jax_enable_x64`` at construction: when the caller
+  enabled it themselves (e.g. ``jax.config.update("jax_enable_x64", True)`` at application start,
+  before touching JAX), the engine's default dtype and :attr:`accumulator_dtype` are float64 as
+  before; when it is off, both fall back to float32 -- the precision JAX would silently truncate a
+  float64 request to anyway -- so the engine never claims a precision the runtime cannot deliver.
+  Pass ``dtype=`` explicitly to override either way.
 * **arrays are immutable.** ``index_add`` uses the functional ``arr.at[idx].add(...)`` update and returns
   the new array (return-value-only, like the Torch engine).
 
@@ -29,8 +38,9 @@ try:
     import jax
     import jax.numpy as jnp
     import jax.scipy.special as jsp
-
-    jax.config.update("jax_enable_x64", True)  # mixle accumulates in float64; JAX is float32 by default
+    # Deliberately no `jax.config.update("jax_enable_x64", True)` here -- see the module docstring:
+    # jax_enable_x64 is a process-wide, caller-owned setting, so JaxEngine reads it instead of forcing
+    # it (MXR-080-0147). Do not reintroduce a global config write at import time.
 except ImportError:  # pragma: no cover - exercised when optional extra is absent
     jax = None
     jnp = None
@@ -47,13 +57,27 @@ class JaxEngine(ComputeEngine):
         if jnp is None:
             require("jax", "jax")
         self.device = device or "cpu"
-        self.dtype = normalize_numpy_dtype(dtype) if dtype is not None else np.float64
+        # jax_enable_x64 is process-wide and caller-owned (see module docstring): float64 is only
+        # actually available when the caller enabled it themselves, so an unenabled runtime demotes
+        # the engine's default dtype and accumulator to float32 -- the same precision JAX would
+        # silently truncate to anyway -- rather than claiming float64 and lying about it. Mirrors
+        # TorchEngine's `_no_f64` MPS handling (no float64 hardware there either).
+        self._no_f64 = not bool(getattr(jax.config, "jax_enable_x64", False))
+        if dtype is not None:
+            self.dtype = normalize_numpy_dtype(dtype)
+            if self._no_f64 and self.dtype == np.float64:
+                self.dtype = np.float32
+        else:
+            self.dtype = np.float32 if self._no_f64 else np.float64
         self.compile_enabled = bool(compile)
 
     @property
     def accumulator_dtype(self) -> Any:
-        """High-precision dtype for sufficient-statistic reductions (always float64)."""
-        return np.float64
+        """High-precision dtype for sufficient-statistic reductions (float64, or float32 when the
+        ambient ``jax_enable_x64`` is off -- see the module docstring; JAX would silently truncate a
+        float64 accumulator request to float32 there anyway, so this avoids claiming a precision the
+        runtime cannot actually give)."""
+        return np.float32 if self._no_f64 else np.float64
 
     def with_precision(self, precision: Any) -> JaxEngine:
         """Return a JAX engine with the same placement and a new dtype policy."""
