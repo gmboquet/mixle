@@ -36,6 +36,18 @@ class InverseWishartTest(unittest.TestCase):
         self.assertEqual(seq[0], -np.inf)
         self.assertAlmostEqual(seq[1], self.d.log_density(self.P), places=9)
 
+    def test_asymmetric_observation_is_minus_inf(self):
+        # an inverse-Wishart RV is by definition a symmetric matrix, so an asymmetric observation
+        # is not a member of the support at all. batched_pd_logdet reads one triangle only (like
+        # np.linalg.eigvalsh, which it wraps, defaults to UPLO='L'), so this used to be silently
+        # read as np.eye(2) (is_pd=True, logdet=0) and scored a finite density instead of -inf.
+        asym = np.array([[1.0, 100.0], [0.0, 1.0]])
+        self.assertFalse(np.allclose(asym, asym.T))
+        self.assertEqual(self.d.log_density(asym), -np.inf)
+        seq = self.d.seq_log_density(np.array([asym, self.P]))
+        self.assertEqual(seq[0], -np.inf)
+        self.assertAlmostEqual(seq[1], self.d.log_density(self.P), places=9)
+
     def test_negative_definite_scale_with_positive_determinant_raises(self):
         with self.assertRaises(ValueError):
             InverseWishartDistribution(self.df, -np.eye(2))
@@ -111,6 +123,45 @@ class InverseWishartScalarVectorizedAgreementTest(unittest.TestCase):
         seq = np.asarray(d.seq_log_density(enc), dtype=float)
         scalar = np.array([float(d.log_density(x)) for x in data])
         np.testing.assert_allclose(seq, scalar, atol=1e-8, err_msg="scalar != vectorized")
+
+
+class InverseWishartBatchedSingularTest(unittest.TestCase):
+    """External review: seq_log_density crashed with an uncaught LinAlgError when a single row in
+    the batch was singular, instead of scoring that row -inf like the rest of the batch.
+
+    Inverse-Wishart's density needs X^-1, so seq_log_density calls np.linalg.inv on the whole
+    stack; np.linalg.inv, like np.linalg.cholesky (see batched_pd_logdet's docstring), raises
+    LinAlgError for the WHOLE batch if even one matrix is singular. A singular matrix has zero
+    density under a continuous inverse-Wishart -- the same not-positive-definite category as any
+    other boundary/degenerate matrix -- so it should degrade to -inf for that row only, the same
+    way the scalar log_density path already handles it (is_pd is False for a singular matrix, so
+    it returns -inf before ever calling inv).
+    """
+
+    def setUp(self):
+        self.P = np.array([[2.0, 0.3], [0.3, 1.0]])
+        self.d = InverseWishartDistribution(8, self.P)
+
+    def test_singular_row_does_not_crash_the_batch(self):
+        singular = np.array([[1.0, 0.0], [0.0, 0.0]])
+        valid1 = np.array([[2.0, 0.1], [0.1, 1.5]])
+        valid2 = np.array([[3.0, -0.2], [-0.2, 2.0]])
+        batch = np.array([valid1, singular, valid2])
+        seq = self.d.seq_log_density(batch)  # must not raise LinAlgError
+        self.assertEqual(seq[1], -np.inf)
+        self.assertAlmostEqual(seq[0], self.d.log_density(valid1), places=9)
+        self.assertAlmostEqual(seq[2], self.d.log_density(valid2), places=9)
+
+    def test_scalar_path_already_handles_the_singular_row(self):
+        # documents that the bug was isolated to the batched path -- the scalar path already
+        # short-circuits on is_pd before ever calling np.linalg.inv on the observation.
+        singular = np.array([[1.0, 0.0], [0.0, 0.0]])
+        self.assertEqual(self.d.log_density(singular), -np.inf)
+
+    def test_all_singular_batch_does_not_crash(self):
+        singular = np.array([[1.0, 0.0], [0.0, 0.0]])
+        seq = self.d.seq_log_density(np.array([singular, singular]))
+        np.testing.assert_array_equal(seq, [-np.inf, -np.inf])
 
 
 class InverseWishartEstimatorUsesDataTest(unittest.TestCase):

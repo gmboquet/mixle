@@ -36,6 +36,29 @@ from mixle.stats.compute.pdist import (
 from mixle.utils.vector import batched_pd_logdet, cholesky_logdet
 
 
+def _is_symmetric(x: np.ndarray) -> bool:
+    """True iff ``x`` is a symmetric matrix.
+
+    A Wishart/inverse-Wishart random variable is by definition a symmetric positive-definite
+    matrix, so an asymmetric observation is not a member of the support at all.
+    ``batched_pd_logdet`` (like ``np.linalg.eigvalsh``, which it wraps) reads one triangle only
+    (``UPLO='L'`` by default) and never inspects the other, so an asymmetric matrix with a
+    positive-definite-looking triangle would otherwise pass straight through
+    ``log_density``/``seq_log_density`` and receive a finite score instead of being rejected.
+    """
+    return bool(np.allclose(x, x.T))
+
+
+def _batched_is_symmetric(x: np.ndarray) -> np.ndarray:
+    """Vectorized symmetry check for a stack of matrices, shape ``(..., p, p)`` -- see
+    :func:`_is_symmetric`. Folded into the same validity mask as the positive-definite check in
+    ``seq_log_density`` (rather than raising), matching the pattern already used for correlation
+    matrices in ``mixle.stats.matrix.lkj._batched_is_corr_like``: a structurally invalid row in a
+    batch scores ``-inf`` without disturbing the rest.
+    """
+    return np.all(np.isclose(x, np.swapaxes(x, -1, -2)), axis=(-1, -2))
+
+
 class WishartDistribution(SequenceEncodableProbabilityDistribution):
     """Wishart distribution with ``df`` degrees of freedom and scale matrix ``scale`` (p, p)."""
 
@@ -80,7 +103,8 @@ class WishartDistribution(SequenceEncodableProbabilityDistribution):
         return math.exp(self.log_density(x))
 
     def log_density(self, x: np.ndarray) -> float:
-        """Return the log-density at a single ``(p, p)`` SPD matrix (``-inf`` if not positive definite).
+        """Return the log-density at a single ``(p, p)`` SPD matrix (``-inf`` if not symmetric or
+        not positive definite).
 
         Mirrors :meth:`seq_log_density`'s routines exactly rather than merely approximately: uses
         :func:`batched_pd_logdet` (the same eigenvalue-based check) instead of :func:`cholesky_logdet`
@@ -93,18 +117,20 @@ class WishartDistribution(SequenceEncodableProbabilityDistribution):
         """
         xx = np.asarray(x, dtype=np.float64)
         is_pd, logdet = batched_pd_logdet(xx)
-        if not is_pd:
+        if not is_pd or not _is_symmetric(xx):
             return -np.inf
         tr = np.einsum("ab,ba->", self._scale_inv, xx, optimize=True)
         return float(self._log_norm + (self.df - self.dim - 1.0) / 2.0 * logdet - 0.5 * tr)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
-        """Vectorized log-density for a stack of SPD matrices, shape ``(N, p, p)``."""
+        """Vectorized log-density for a stack of SPD matrices, shape ``(N, p, p)`` (``-inf`` per
+        row that is not symmetric or not positive definite)."""
         xx = np.asarray(x, dtype=np.float64)
         is_pd, logdet = batched_pd_logdet(xx)
+        is_valid = is_pd & _batched_is_symmetric(xx)
         tr = np.einsum("ab,nba->n", self._scale_inv, xx, optimize=True)
         rv = self._log_norm + (self.df - self.dim - 1.0) / 2.0 * logdet - 0.5 * tr
-        return np.where(is_pd, rv, -np.inf)
+        return np.where(is_valid, rv, -np.inf)
 
     def sampler(self, seed: int | None = None) -> "WishartSampler":
         """Return a sampler for drawing SPD matrices from this distribution."""
