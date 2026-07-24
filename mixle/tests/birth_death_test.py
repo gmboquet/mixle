@@ -53,5 +53,41 @@ class BirthDeathSamplingTest(unittest.TestCase):
         self.assertAlmostEqual(fit.birth_rate, 0.7, delta=0.12)
 
 
+class BirthDeathSamplingValidationTestCase(unittest.TestCase):
+    """Regression coverage for BirthDeathSamplingDistribution.__init__ parameter validation.
+
+    An external review flagged this constructor's `horizon` (the `[0, horizon]` observation window
+    used by the sampler and the upper integration limit in log_density()) as unvalidated, unlike its
+    sibling rate parameters just above it in the same constructor. Before this fix, a NaN horizon
+    constructed silently and made `t >= d.horizon` in BirthDeathSamplingSampler._sample_one() always
+    False (`x >= nan` is always False), dropping the Gillespie loop's only time-based stop condition;
+    a negative horizon constructed silently too and produced a negative population-time integral,
+    silently corrupting log_density().
+    """
+
+    def test_nan_horizon_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            BirthDeathSamplingDistribution(0.5, 0.3, 0.2, horizon=float("nan"))
+
+    def test_negative_horizon_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            BirthDeathSamplingDistribution(0.5, 0.3, 0.2, horizon=-5.0)
+
+    def test_infinite_horizon_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            BirthDeathSamplingDistribution(0.5, 0.3, 0.2, horizon=float("inf"))
+
+    def test_zero_horizon_still_constructs(self):
+        # Matches the >= 0 boundary already used for birth_rate/death_rate/sampling_rate in the same
+        # validation loop: a zero-length window is a degenerate but valid empty observation, not an
+        # error.
+        d = BirthDeathSamplingDistribution(0.5, 0.3, 0.2, horizon=0.0)
+        self.assertEqual(d.horizon, 0.0)
+
+    def test_valid_horizon_still_constructs(self):
+        d = BirthDeathSamplingDistribution(0.5, 0.3, 0.2, horizon=4.0)
+        self.assertEqual(d.horizon, 4.0)
+
+
 if __name__ == "__main__":
     unittest.main()
