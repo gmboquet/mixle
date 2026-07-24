@@ -12,6 +12,7 @@ from mixle.evolve import (
     Recompose,
     SearchResult,
     Space,
+    auto_select,
     challenger_beats_champion,
     default_operators,
     nll_objective,
@@ -84,6 +85,56 @@ def test_search_evolutionary_finds_variance():
     )
     assert isinstance(res, SearchResult)
     assert 2.5 < res.best_config["sigma2"] < 6.0  # recovers the true ~4
+
+
+def test_auto_select_challenger_is_independent_of_val_split():
+    # Finding-1 regression: auto_select's challenger used to be refit on `rows` (train+val) and then
+    # scored on that SAME val -- so the challenger's own fit depended on val, which is not a held-out
+    # comparison at all. `_split`'s permutation is a pure function of (n, seed), independent of the
+    # data VALUES, so for a fixed (n, holdout, seed) we know in advance which positions land in train
+    # vs val; perturbing ONLY the val-assigned positions must never move the gate's decision, since the
+    # champion and challenger are both fit purely from the (untouched) train-assigned positions.
+    from mixle.evolve.improve import _split
+
+    n, holdout, seed = 200, 0.25, 0
+    base_data = list(np.random.RandomState(123).normal(0.0, 1.0, n))
+
+    rng = np.random.RandomState(seed)
+    perm = rng.permutation(n)
+    n_verify = min(max(1, int(round(holdout * n))), n - 1)
+    verify_idx = set(perm[:n_verify].tolist())
+
+    shifted_data = list(base_data)
+    for i in verify_idx:
+        shifted_data[i] += 6.0  # perturb ONLY the positions _split will assign to val
+
+    t0, v0 = _split(base_data, holdout, seed)
+    t1, v1 = _split(shifted_data, holdout, seed)
+    assert t0 == t1  # sanity: train split is byte-identical between the two datasets
+    assert v0 != v1  # sanity: val split really did change
+
+    obj = nll_objective()
+    res_orig = auto_select(base_data, criterion=obj, verify=True, holdout=holdout, seed=seed)
+    res_shift = auto_select(shifted_data, criterion=obj, verify=True, holdout=holdout, seed=seed)
+
+    # the pre-fix bug produced verified=True with an artificially huge delta (~15) on the shifted val,
+    # purely because the challenger had already fit those exact (shifted) observations. The gate
+    # decision must now be immune to a perturbation that only ever touches val-assigned rows.
+    assert res_orig.verified is False
+    assert res_shift.verified is False
+    assert res_orig.delta == pytest.approx(0.0, abs=1e-6)
+    assert res_shift.delta == pytest.approx(0.0, abs=1e-6)
+
+
+def test_auto_select_verify_gate_negative_control_normal_data():
+    # negative control for Finding 1: the ordinary (non-adversarial) verify path must still run to
+    # completion and return a real, usable result -- the leak fix must not have made the gate inert.
+    rng = np.random.RandomState(9)
+    data = list(rng.normal(2.0, 1.5, 400))
+    res = auto_select(data, criterion=nll_objective(), verify=True, seed=0)
+    assert res.model is not None
+    assert "family" in res.evidence
+    assert isinstance(res.verified, bool)
 
 
 def test_operator_bandit_concentrates_on_winner():
