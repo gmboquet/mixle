@@ -85,6 +85,27 @@ def _raise_index(fb: int, off: int) -> tuple[Any, float]:
     raise IndexError("empty autoregressive count index")
 
 
+def _require_positive_int(value: Any, name: str, *, allow_none: bool = False) -> int | None:
+    """Validate ``value`` is an EXACT positive integer for a size/cap constructor parameter (MXR-080-0224).
+
+    Accepts a Python/numpy integer, or a float that is exactly integer-valued (e.g. ``2.0``) -- never
+    silently truncated with ``int()`` (a fractional ``2.9`` used to become ``2`` with no error at all).
+    ``allow_none`` lets ``None`` through unchanged (this file's spelling of "no explicit cap", used by
+    ``max_len``/``branch_cap``). Raises ``ValueError`` naming the parameter otherwise.
+    """
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError("%s must be a positive integer (got %r)." % (name, value))
+    if isinstance(value, (float, np.floating)):
+        if not math.isfinite(value) or value != math.floor(value):
+            raise ValueError("%s must be a whole number, not a fractional value (got %r)." % (name, value))
+    ivalue = int(value)
+    if ivalue < 1:
+        raise ValueError("%s must be a positive integer (got %d)." % (name, ivalue))
+    return ivalue
+
+
 def _require_exact_cardinality(actual: int, expected: int, source: str) -> None:
     """Raise a clear error if a callback returned the wrong number of results (MXR-080-0223).
 
@@ -366,11 +387,13 @@ class AutoregressiveEnumerable:
             For a terminating model ``eos`` must be one of the tokens it can return.
         max_len: for a fixed-length model, the sequence length (the support is all length-``max_len`` sequences).
             Omit for a terminating model (or pass it as a hard length cap, but un-terminated truncations are
-            still dropped).
+            still dropped). An exact positive integer (or ``None``) -- a fractional value raises rather than
+            silently truncating.
         eos: end-of-sequence token. When given, the model is terminating: only sequences ending in ``eos`` are
             in the support.
         max_depth: safety bound on recursion depth for a terminating model (the probability budget is the real
-            bound). Raise it if a tight model legitimately produces very long sequences.
+            bound). Raise it if a tight model legitimately produces very long sequences. An exact positive
+            integer -- a fractional or non-positive value raises.
         bin_width_bits, oversample: quantization resolution of the count index (finer = exacter ordering,
             more memory). The defaults match the distribution count-DP. Ordering from ``unrank``/``slice``
             (via :meth:`seek_index`) is exact between fine buckets (width ``bin_width_bits / oversample``
@@ -378,13 +401,15 @@ class AutoregressiveEnumerable:
             Sequences whose ``log_density`` differs by less than one bucket's width can surface in either
             relative order; this is most visible when several near-tied candidates cluster at the head of
             a small/short-sequence model. Raise ``oversample`` or lower ``bin_width_bits`` to shrink it.
+            ``oversample`` is an exact positive integer -- a fractional or non-positive value raises.
         batch_next_logprobs: optional ``batch_next_logprobs([prefix, ...]) -> [result, ...]`` scoring many
             prefixes in one (padded) forward. When given, the count index warms its forward cache breadth-first
             in ``batch_size`` chunks -- the large speed-up for transformers, where one-at-a-time forwards
             dominate (e.g. distilGPT-2 length-2 to rank 1e5: ~25 s one-at-a-time -> ~1 s batched). Each
             chunk's results must exactly match the chunk's own size -- a short or long result raises rather
             than silently dropping/ignoring the mismatch (MXR-080-0223).
-        batch_size: prefixes per batched forward.
+        batch_size: prefixes per batched forward. An exact positive integer -- a fractional or non-positive
+            value raises.
         count_mode: how counts are carried past the int64-exact regime (budgets over ~2**60 sequences).
             ``'auto'`` (default) switches the numpy fast path to float64 there -- **approximate** counts
             (exact below 2**53, ~1e-16 relative error per pooling beyond) at full numpy speed. ``'exact'``
@@ -394,7 +419,8 @@ class AutoregressiveEnumerable:
             approximation for wide (LLM-sized) vocabularies, shrinking the tree by ~V/cap per level. The
             skipped remainder is soundly bounded (``count_bracket``/``dropped_upper``: a skipped subtree
             with ``r`` remaining budget bits holds at most ``2**r`` completions); enumeration covers the
-            sub-support of sequences whose every token is among its context's top-``branch_cap``.
+            sub-support of sequences whose every token is among its context's top-``branch_cap``. An exact
+            positive integer (or ``None``) -- a fractional value raises rather than silently truncating.
         batch_score_sequences: optional teacher-forcing scorer ``[sequence, ...] -> array of total log-probs``
             -- ONE forward per sequence (all positions score in parallel) instead of one forward per token.
             Used by :meth:`score_sequences` and, when a sequence's prefixes are not already cached, by
@@ -429,26 +455,30 @@ class AutoregressiveEnumerable:
     ) -> None:
         if eos is None and max_len is None:
             raise ValueError("give max_len (a fixed-length model) or eos (a terminating model).")
-        if max_len is not None and int(max_len) < 1:
-            raise ValueError("max_len must be a positive integer.")
+        # Exact positive integers, not silently int()-truncated (MXR-080-0224): a fractional max_len=2.9 used
+        # to become max_len=2 with no error, and max_depth had no validation at all (a negative value was
+        # silently accepted and stored, later producing a degenerate always-empty/truncated index).
+        max_len = _require_positive_int(max_len, "max_len", allow_none=True)
+        max_depth = _require_positive_int(max_depth, "max_depth")
+        oversample = _require_positive_int(oversample, "oversample")
+        batch_size = _require_positive_int(batch_size, "batch_size")
+        branch_cap = _require_positive_int(branch_cap, "branch_cap", allow_none=True)
         if count_mode not in ("auto", "exact", "float"):
             raise ValueError("count_mode must be 'auto', 'exact', or 'float'")
-        if branch_cap is not None and int(branch_cap) < 1:
-            raise ValueError("branch_cap must be a positive integer (or None for no cap)")
         self.next_logprobs = next_logprobs
         self.eos = eos
         self.terminating = eos is not None
-        self.max_len = None if max_len is None else int(max_len)
-        self.max_depth = int(max_depth)
+        self.max_len = max_len
+        self.max_depth = max_depth
         # depth bound passed to the recursion: a fixed-length model completes at max_len; a terminating model
         # completes only at eos and uses max_len (if given) or max_depth purely as a safety cap.
         self._depth = self.max_len if not self.terminating else (self.max_len or self.max_depth)
         self.bin_width_bits = float(bin_width_bits)
-        self.oversample = int(oversample)
+        self.oversample = oversample
         self.batch_next_logprobs = batch_next_logprobs
-        self.batch_size = int(batch_size)
+        self.batch_size = batch_size
         self.count_mode = count_mode
-        self.branch_cap = None if branch_cap is None else int(branch_cap)
+        self.branch_cap = branch_cap
         self.batch_score_sequences = batch_score_sequences
         self.all_position_logprobs = all_position_logprobs
         self._cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}  # prefix -> (tokens, log_probs), desc by lp
@@ -742,6 +772,15 @@ class AutoregressiveEnumerable:
         ``threshold`` / ``mass_above``), deepening in place when a query needs more depth -- so a sweep of
         a thousand unranks pays for one tree build, not a thousand. The forward cache is shared with it,
         so deepening only runs new forwards for newly-live prefixes.
+
+        ``max_depth_bits`` is reconciled on every call, not just honored on the first (MXR-080-0225): a
+        later call requesting a GENUINELY DEEPER cap raises the cached index's own ceiling in place --
+        ``SeekIndex`` already deepens its build lazily on demand, so widening the ceiling is enough; nothing
+        already built is discarded or rebuilt. A later call requesting a smaller-or-equal cap is a no-op:
+        the cached index already satisfies it, and lowering an already-built ceiling would only forbid
+        further deepening the index could otherwise still do, for no benefit. Previously the FIRST call's
+        cap was silently permanent -- a later, larger cap returned the same object with the old, too-small
+        ceiling still in effect, so query results silently depended on unrelated call order.
         """
         if self._seek is None:
             from mixle.enumeration.seek_index import SeekIndex
@@ -752,6 +791,8 @@ class AutoregressiveEnumerable:
                 oversample=self.oversample,
                 max_depth_bits=max_depth_bits,
             )
+        elif float(max_depth_bits) > self._seek.max_depth_bits:
+            self._seek.max_depth_bits = float(max_depth_bits)
         return self._seek
 
     def budget_index(self, budget_bits: float, max_depth_bits: float = 4096.0):
@@ -773,8 +814,15 @@ class AutoregressiveEnumerable:
         return AREnvelopeIndex(self, n_paths=n_paths, seed=seed, budget_bits=budget_bits)
 
     def top_k(self, k: int) -> list[tuple[tuple, float]]:
-        """The ``k`` most probable sequences, exact, by best-first listing (use for small ``k``)."""
-        out = []
+        """The ``k`` most probable sequences, exact, by best-first listing (use for small ``k``).
+
+        ``k <= 0`` returns ``[]`` without starting the best-first listing at all (MXR-080-0224 -- checked
+        before any iteration, not after the loop body has already appended one item and only THEN noticed
+        the bound was already satisfied, which used to make ``top_k(0)`` return one item instead of none).
+        """
+        out: list[tuple[tuple, float]] = []
+        if k <= 0:
+            return out
         for seq, lp in self.enumerator():
             out.append((seq, lp))
             if len(out) >= k:

@@ -636,6 +636,98 @@ class AutoregressiveEnumerableTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "batch_score_sequences"):
             ar.score_sequences([self.brute[0][0], self.brute[1][0]])
 
+    # -- MXR-080-0224: max_len/max_depth/oversample/batch_size/branch_cap were silently int()-truncated
+    # (2.9 -> 2) instead of rejected, and max_depth had NO validation at all (even a negative value was
+    # silently accepted and stored); top_k(0) appended one best-first result before checking the bound. ----
+
+    def test_constructor_rejects_fractional_config_values(self):
+        fractional_kwargs = [
+            {"max_len": 2.9},
+            {"max_len": _LEN, "max_depth": 5.7},
+            {"max_len": _LEN, "oversample": 8.9},
+            {"max_len": _LEN, "batch_size": 3.4},
+            {"max_len": _LEN, "branch_cap": 2.9},
+        ]
+        for kwargs in fractional_kwargs:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                AutoregressiveEnumerable(self.next_logprobs, **kwargs)
+
+    def test_constructor_rejects_non_positive_config_values(self):
+        # max_depth in particular had NO validation at all -- a negative value was silently accepted and
+        # stored, later producing a degenerate always-empty/truncated index instead of a clear error.
+        non_positive_kwargs = [
+            {"max_len": 0},
+            {"max_len": -1},
+            {"max_len": _LEN, "max_depth": -3},
+            {"max_len": _LEN, "max_depth": 0},
+            {"max_len": _LEN, "oversample": 0},
+            {"max_len": _LEN, "oversample": -8},
+            {"max_len": _LEN, "batch_size": 0},
+            {"max_len": _LEN, "batch_size": -1},
+            {"max_len": _LEN, "branch_cap": 0},
+            {"max_len": _LEN, "branch_cap": -2},
+        ]
+        for kwargs in non_positive_kwargs:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                AutoregressiveEnumerable(self.next_logprobs, **kwargs)
+
+    def test_constructor_accepts_whole_number_floats_and_none_caps(self):
+        # Negative control: an exactly-integer-valued float (2.0) is NOT "fractional" and must still work;
+        # None still means "no explicit cap" for max_len/branch_cap.
+        ar = AutoregressiveEnumerable(
+            self.next_logprobs,
+            max_len=float(_LEN),
+            max_depth=1024.0,
+            oversample=64.0,
+            batch_size=256.0,
+            branch_cap=None,
+        )
+        self.assertEqual(ar.max_len, _LEN)
+        self.assertEqual(ar.max_depth, 1024)
+        self.assertEqual(ar.oversample, 64)
+        self.assertEqual(ar.batch_size, 256)
+        self.assertIsNone(ar.branch_cap)
+
+    def test_top_k_zero_returns_empty_list_without_iterating(self):
+        # Reproduce the audit's exact bug: top_k(0) appended the first best-first result BEFORE checking
+        # the bound, so it returned a list of ONE item instead of an empty list.
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN)
+        self.assertEqual(ar.top_k(0), [])
+        self.assertEqual(ar.top_k(-3), [])
+        self.assertEqual(len(ar._cache), 0)  # never even started the best-first listing
+
+    # -- MXR-080-0225: the FIRST seek_index(max_depth_bits=...) call fixed the cached index's ceiling
+    # forever -- a later call requesting a larger cap silently returned the SAME object with the OLD,
+    # too-small ceiling still in effect, so behavior depended on unrelated call order. ------------------------
+
+    def test_seek_index_widens_cached_ceiling_on_later_deeper_request(self):
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, oversample=64)
+        shallow = ar.seek_index(max_depth_bits=0.5)
+        self.assertEqual(shallow.count(-1e9), 0)  # nowhere near enough depth to cover the full support
+
+        deeper = ar.seek_index(max_depth_bits=30.0)
+        self.assertIs(deeper, shallow)  # reconciled the SAME cached object, not silently ignored
+        self.assertEqual(deeper.max_depth_bits, 30.0)
+        self.assertEqual(deeper.count(-1e9), self.N)  # now reaches the true, full support
+
+    def test_seek_index_smaller_later_request_is_a_no_op(self):
+        # A later SMALLER cap must not shrink an already-built index's ceiling -- there is nothing to gain,
+        # and it would only forbid further deepening the index could otherwise still do.
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, oversample=64)
+        wide = ar.seek_index(max_depth_bits=4096.0)
+        same = ar.seek_index(max_depth_bits=0.5)
+        self.assertIs(same, wide)
+        self.assertEqual(same.max_depth_bits, 4096.0)
+
+    def test_seek_index_first_call_still_sets_the_initial_ceiling(self):
+        # Negative control: a single call still behaves as documented -- the ceiling it requests is honored,
+        # and a later bare re-call (default max_depth_bits=4096.0, smaller here) is then a no-op.
+        ar = AutoregressiveEnumerable(self.next_logprobs, max_len=_LEN, oversample=64)
+        si = ar.seek_index(max_depth_bits=5000.0)
+        self.assertEqual(si.max_depth_bits, 5000.0)
+        self.assertIs(ar.seek_index(), si)
+        self.assertEqual(si.max_depth_bits, 5000.0)
+
 
 if __name__ == "__main__":
     unittest.main()
