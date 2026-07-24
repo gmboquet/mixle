@@ -164,5 +164,59 @@ class LatticeCalibrationValidationTest(unittest.TestCase):
         self.assertGreater(lat.total(), 0.0)
 
 
+class LatticeRankPrecisionTest(unittest.TestCase):
+    """MXR-080-0232: same exact-rank-arithmetic and fixed-length-support requirements as
+    AREnvelopeIndex (see envelope_index_test.RankPrecisionTest), checked against
+    LatticeEnvelopeIndex's own unrank/threshold/rank_bracket."""
+
+    def _tied_bucket_index(self, V=2, L=60, n_paths=2):
+        # scale=0.0: every logit is exactly 0, so the distribution is uniform regardless of
+        # context -- every one of the 2**L sequences quantizes into the SAME fine bucket, an exact
+        # combinatorial count of 2**60 (verified: lattice.total() == float(2**60) exactly).
+        ar = AutoregressiveEnumerable(_markov_model(V, L, seed=0, scale=0.0), max_len=L)
+        return LatticeEnvelopeIndex(ar, cluster_fn=lambda t: t, n_paths=n_paths, seed=0, budget_bits=64.0)
+
+    def test_total_and_unrank_agree_past_2_pow_53(self):
+        lat = self._tied_bucket_index()
+        self.assertEqual(lat.total(), float(2**60))
+        seq, lp = lat.unrank(2**60 - 1)
+        self.assertEqual(len(seq), 60)
+        self.assertTrue(np.isfinite(lp))
+        with self.assertRaises(IndexError):
+            lat.unrank(2**60)
+
+    def test_adjacent_deep_ranks_never_alias_to_the_same_sequence(self):
+        lat = self._tied_bucket_index()
+        probes = [2**53 - 2, 2**53 - 1, 2**53, 2**53 + 1, 2**59, 2**60 - 2, 2**60 - 1]
+        seqs = [lat.unrank(p)[0] for p in probes]
+        self.assertEqual(len(set(seqs)), len(probes), "adjacent deep ranks collapsed onto the same sequence")
+
+    def test_unrank_rejects_non_integer_rank(self):
+        lat = LatticeEnvelopeIndex(
+            AutoregressiveEnumerable(_markov_model(4, 2, seed=0), max_len=2), n_clusters=2, n_paths=4, seed=0
+        )
+        for bad in (1.5, "5", None):
+            with self.assertRaises(TypeError):
+                lat.unrank(bad)
+
+    def test_threshold_rejects_non_integer_rank(self):
+        lat = LatticeEnvelopeIndex(
+            AutoregressiveEnumerable(_markov_model(4, 2, seed=0), max_len=2), n_clusters=2, n_paths=4, seed=0
+        )
+        with self.assertRaises(TypeError):
+            lat.threshold(1.5)
+
+    def test_rank_bracket_rejects_wrong_length_sequence(self):
+        ar = AutoregressiveEnumerable(_markov_model(4, 5, seed=0), max_len=5)
+        lat = LatticeEnvelopeIndex(ar, cluster_fn=lambda t: t, n_paths=4, seed=0)
+        full_seq, _lp = lat.unrank(0)
+        with self.assertRaises(ValueError):
+            lat.rank_bracket(full_seq[:2])
+        with self.assertRaises(ValueError):
+            lat.rank_bracket(full_seq + (0,))
+        lo, hi = lat.rank_bracket(full_seq)  # negative control: the right length still works
+        self.assertLessEqual(lo, hi)
+
+
 if __name__ == "__main__":
     unittest.main()

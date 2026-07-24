@@ -34,6 +34,7 @@ from typing import Any
 import numpy as np
 
 from mixle.enumeration.quantization.core import _TOL, CountHistogram
+from mixle.enumeration.quantization.seek import _require_index
 
 __all__ = ["AREnvelopeIndex", "LatticeEnvelopeIndex"]
 
@@ -276,24 +277,41 @@ class AREnvelopeIndex:
         Costs one model forward per step (L total, memoized) -- never a tree expansion. The rank
         coordinate inherits the envelope approximation; the returned sequence and its log-probability
         are exact model quantities. Raises ``IndexError`` past the estimated support size.
+
+        ``i`` is kept as an exact Python/numpy integer throughout the offset-consumption walk below
+        (MXR-080-0232): the envelope's bucket counts are themselves an inherently approximate float64
+        mean-field carrier (see the module docstring and ``CountHistogram``'s ``exact=False`` mode),
+        so they cannot be made exact -- but ``i`` need not be rounded on top of that. The previous
+        ``target = float(i)`` silently rounded any rank at or past 2**53 to the nearest representable
+        float64 (e.g. ``float(2**60 - 1) == float(2**60)`` exactly), which could reject the last valid
+        rank of a huge support as "beyond the estimated support", or misroute the offset walk below.
+        Comparing the ORIGINAL exact ``i`` against a running float cumulative sum is precise
+        regardless of magnitude (CPython's int/float ``<`` never rounds the int operand); only the
+        cumulative-so-far -- already an approximate quantity -- is floored to an int at each bucket
+        boundary, so the offset within the chosen bucket is exact int subtraction, never a fresh
+        float rounding of ``i``.
         """
+        i = _require_index(i, label="rank")
         if i < 0:
             raise IndexError("rank must be >= 0")
         self.ensure_bits(math.log2(float(i) + 2.0) + 1.0)
         hist = self._suffix[0]
-        target = float(i)
         bucket = None
+        offset = i
+        cumulative = 0.0
+        prior_floor = 0
         for j, c in enumerate(hist.data):
-            if target < c:
+            cumulative += c
+            if i < cumulative:
                 bucket = hist.base + j
+                offset = i - prior_floor
                 break
-            target -= c
+            prior_floor = int(math.floor(cumulative + _TOL))
         if bucket is None:
             raise IndexError("rank %d beyond the estimated support (size %.6g)" % (i, self.total()))
 
         prefix: tuple = ()
         remaining = int(bucket)
-        offset = target
         for d in range(self.length):
             tokens, lps = self.model._steps_np(prefix)
             scale = self.quantizer.oversample / self.quantizer.bin_width_bits
@@ -311,23 +329,28 @@ class AREnvelopeIndex:
                 break
             nxt = self._suffix[d + 1]
             chosen = None
+            cumulative = 0.0
+            prior_floor = 0
             for t_idx in range(tokens.size):  # model order (descending lp): deterministic apportioning
                 c = nxt.count_at(remaining - int(sb[t_idx]))
-                if offset < c:
+                cumulative += c
+                if offset < cumulative:
                     chosen = t_idx
+                    offset = offset - prior_floor
                     break
-                offset -= c
+                prior_floor = int(math.floor(cumulative + _TOL))
             if chosen is None:
                 # envelope over-estimated this bucket: fall into the most probable viable branch
                 viable = [t for t in range(tokens.size) if nxt.count_at(remaining - int(sb[t])) > 0]
                 chosen = viable[-1] if viable else 0
-                offset = 0.0
+                offset = 0
             remaining -= int(sb[chosen])
             prefix = prefix + (tokens[chosen].item(),)
         return prefix, float(self.model.log_density(prefix))
 
     def threshold(self, rank: int) -> float:
         """Exact log-probability of the sequence the envelope places at ``rank`` (approximate boundary)."""
+        rank = _require_index(rank, label="rank")
         if rank < 1:
             raise ValueError("rank must be >= 1")
         _seq, lp = self.unrank(rank - 1)
@@ -338,8 +361,20 @@ class AREnvelopeIndex:
 
         ``lo`` counts the estimated sequences in strictly shallower buckets; ``hi`` adds the sequence's
         own bucket. Exact for iid-step models; otherwise a mean-field estimate (floats, not certificates).
+
+        ``sequence`` must have exactly the model's fixed support length (MXR-080-0232): the suffix
+        tables this walks are built over complete length-``self.length`` outcomes, so a shorter (a
+        locally-valid prefix) or longer sequence is not an outcome the envelope has a rank for at
+        all, even when every individual token transition is locally valid -- silently walking it
+        anyway would return a rank-bracket-shaped answer for something that was never a real
+        candidate.
         """
         seq = tuple(sequence)
+        if len(seq) != self.length:
+            raise ValueError(
+                "sequence has length %d but the model's fixed support length is %d; rank_bracket "
+                "only scores complete outcomes" % (len(seq), self.length)
+            )
         fb_total = 0
         prefix: tuple = ()
         scale = self.quantizer.oversample / self.quantizer.bin_width_bits
@@ -572,24 +607,34 @@ class LatticeEnvelopeIndex:
         return float(total)
 
     def unrank(self, i: int) -> tuple[tuple, float]:
-        """The approximately-``i``-th most probable sequence with its **exact** log-probability."""
+        """The approximately-``i``-th most probable sequence with its **exact** log-probability.
+
+        ``i`` is kept as an exact Python/numpy integer throughout the offset-consumption walk below
+        (MXR-080-0232) -- see :meth:`AREnvelopeIndex.unrank` for why: the underlying bucket counts
+        are an inherently approximate float64 carrier, but ``i`` itself need not be rounded on top
+        of that by an early ``float(i)`` cast, which silently loses unit resolution past 2**53.
+        """
+        i = _require_index(i, label="rank")
         if i < 0:
             raise IndexError("rank must be >= 0")
         self.ensure_bits(math.log2(float(i) + 2.0) + 1.0)
         hist = self._root()
-        target = float(i)
         bucket = None
+        offset = i
+        cumulative = 0.0
+        prior_floor = 0
         for j, c in enumerate(hist.data):
-            if target < c:
+            cumulative += c
+            if i < cumulative:
                 bucket = hist.base + j
+                offset = i - prior_floor
                 break
-            target -= c
+            prior_floor = int(math.floor(cumulative + _TOL))
         if bucket is None:
             raise IndexError("rank %d beyond the estimated support (size %.6g)" % (i, self.total()))
 
         prefix: tuple = ()
         remaining = int(bucket)
-        offset = target
         scale = self.quantizer.oversample / self.quantizer.bin_width_bits
         for d in range(self.length):
             tokens, lps = self.model._steps_np(prefix)
@@ -605,14 +650,18 @@ class LatticeEnvelopeIndex:
                 break
             nxt = self._suffix[d + 1]
             chosen = None
+            cumulative = 0.0
+            prior_floor = 0
             for t_idx in range(tokens.size):
                 c2 = self.cluster_fn(tokens[t_idx].item())
                 tail = nxt.get(c2)
                 c = tail.count_at(remaining - int(sb[t_idx])) if tail is not None else 0.0
-                if offset < c:
+                cumulative += c
+                if offset < cumulative:
                     chosen = t_idx
+                    offset = offset - prior_floor
                     break
-                offset -= c
+                prior_floor = int(math.floor(cumulative + _TOL))
             if chosen is None:
                 viable = [
                     t
@@ -623,21 +672,31 @@ class LatticeEnvelopeIndex:
                     > 0
                 ]
                 chosen = viable[-1] if viable else 0
-                offset = 0.0
+                offset = 0
             remaining -= int(sb[chosen])
             prefix = prefix + (tokens[chosen].item(),)
         return prefix, float(self.model.log_density(prefix))
 
     def threshold(self, rank: int) -> float:
         """Return the log-density threshold at a one-based rank."""
+        rank = _require_index(rank, label="rank")
         if rank < 1:
             raise ValueError("rank must be >= 1")
         _seq, lp = self.unrank(rank - 1)
         return lp
 
     def rank_bracket(self, sequence: Any) -> tuple[float, float]:
-        """Estimated ``[lo, hi]`` rank bracket -- exact for depth+last-cluster Markov models."""
+        """Estimated ``[lo, hi]`` rank bracket -- exact for depth+last-cluster Markov models.
+
+        ``sequence`` must have exactly the model's fixed support length (MXR-080-0232) -- see
+        :meth:`AREnvelopeIndex.rank_bracket`.
+        """
         seq = tuple(sequence)
+        if len(seq) != self.length:
+            raise ValueError(
+                "sequence has length %d but the model's fixed support length is %d; rank_bracket "
+                "only scores complete outcomes" % (len(seq), self.length)
+            )
         fb_total = 0
         prefix: tuple = ()
         scale = self.quantizer.oversample / self.quantizer.bin_width_bits
