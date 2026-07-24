@@ -32,10 +32,13 @@ from mixle.relations import min_cost_flow
 
 __all__ = ["build_twin", "PipelineTwin"]
 
-# Penalty terms for the slack node that keeps every period's flow problem feasible even when the
-# real subnetwork cannot fully satisfy conservation (a saturated arc, a plant outage, ...). Slack
-# capacity is large enough to never itself bind; slack cost is large enough to never be preferred
-# over any real route, so it only carries what the real network genuinely could not.
+# Fallback/minimum penalty terms for the slack node that keeps every period's flow problem feasible
+# even when the real subnetwork cannot fully satisfy conservation (a saturated arc, a plant outage,
+# ...). These are only a floor: a fixed constant cannot universally keep the "slack capacity never
+# binds, slack cost never beats a real route" promise for an arbitrary caller-supplied network whose
+# own supply or arc costs exceed these numbers, so :func:`_augment_with_slack` derives the actual
+# per-problem values from the real ``cap``/``cost``/``supply`` it is given and takes the larger of
+# that derivation and these fallbacks -- these only matter for small/degenerate problems.
 _SLACK_CAPACITY = 1.0e6
 _SLACK_COST = 1.0e4
 
@@ -74,16 +77,38 @@ def _augment_with_slack(
     The slack node supplies whatever a deficit node is short, and absorbs whatever a surplus node
     cannot push through the real arcs, at a heavy per-unit penalty -- so real capacity is always
     preferred, and only the genuinely-unroutable remainder ever touches it.
+
+    Both the slack capacity and slack cost are derived from THIS call's actual ``cap``/``cost``/
+    ``supply`` (falling back to the module-level ``_SLACK_CAPACITY``/``_SLACK_COST`` only as a floor
+    for small/degenerate problems), rather than trusting a fixed constant to dominate an arbitrary
+    caller-supplied network:
+
+    * Capacity: no single node's own edge to the slack node ever needs to carry more than the
+      period's total supply/demand magnitude (conservatively, no node can source or sink more flow
+      than exists in the whole system), so ``sum(|supply|)`` -- plus a margin -- is a safe bound that
+      keeps slack capacity from ever itself being the binding constraint, regardless of how large
+      this period's supply is relative to the fixed default.
+    * Cost: a real simple path uses each arc at most once, so its cost magnitude can never exceed the
+      sum of ``|cost|`` over every real (``cap > 0``) arc -- summing magnitudes bounds it regardless
+      of arc-cost sign. Pricing the slack round-trip (one edge in, one out, ``2 * slack_cost``) above
+      that ceiling guarantees a real route is always strictly preferred whenever one can satisfy
+      demand at all; slack only ever carries the genuinely-unroutable remainder.
     """
     n = cap.shape[0]
+    real_arcs = cap > 0.0
+    total_supply_magnitude = float(np.abs(supply).sum())
+    slack_capacity = max(_SLACK_CAPACITY, total_supply_magnitude + 1.0)
+    real_cost_ceiling = float(np.abs(cost[real_arcs]).sum()) if real_arcs.any() else 0.0
+    slack_cost = max(_SLACK_COST, real_cost_ceiling + 1.0)
+
     cap_ext = np.zeros((n + 1, n + 1))
     cost_ext = np.zeros((n + 1, n + 1))
     cap_ext[:n, :n] = cap
     cost_ext[:n, :n] = cost
-    cap_ext[:n, n] = _SLACK_CAPACITY
-    cap_ext[n, :n] = _SLACK_CAPACITY
-    cost_ext[:n, n] = _SLACK_COST
-    cost_ext[n, :n] = _SLACK_COST
+    cap_ext[:n, n] = slack_capacity
+    cap_ext[n, :n] = slack_capacity
+    cost_ext[:n, n] = slack_cost
+    cost_ext[n, :n] = slack_cost
     supply_ext = np.append(supply, -float(supply.sum()))
     return cap_ext, cost_ext, supply_ext
 
@@ -176,7 +201,17 @@ class PipelineTwin:
         ``queue`` (cumulative unmet demand), ``utilization`` (per-period ``(n, n)`` arc
         flow/capacity ratios), ``bottleneck_arc`` (the ``(u, v)`` with highest utilization in the
         final period), and ``bottleneck_utilization`` (that arc's utilization series).
+
+        Raises :class:`ValueError` for ``n_periods < 1`` -- matching this class's other invalid-input
+        conventions (an unregistered ``scenario`` name or intervention ``kind`` raises rather than
+        returning a degraded result), a zero/negative period count has no meaningful per-period
+        diagnostics to report, and silently returning empty series would only move today's crash (an
+        unconditional ``bottleneck_arcs[-1]`` index) to whatever code reads the result instead of
+        surfacing it here at the call that actually got the invalid count.
         """
+        if int(n_periods) < 1:
+            raise ValueError(f"n_periods must be >= 1, got {n_periods!r}")
+
         cap = self._cap.copy()
         cost = self._cost.copy()
         supply = self._supply.copy()
