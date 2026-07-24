@@ -513,6 +513,36 @@ def _clip_value(x: Any, a_min: Any, a_max: Any) -> Any:
     return x
 
 
+def _is_vector_valued(x: Any) -> bool:
+    """Return whether ``x`` is an array with at least one axis (as opposed to a Python scalar
+    or a 0-d array), i.e. a value ``bool(x)`` cannot always convert unambiguously."""
+    return isinstance(x, np.ndarray) and x.ndim > 0
+
+
+def _eval_and(x: Any, y: Any) -> Any:
+    if _is_vector_valued(x) or _is_vector_valued(y):
+        return np.logical_and(x, y)
+    return bool(x) and bool(y)
+
+
+def _eval_or(x: Any, y: Any) -> Any:
+    if _is_vector_valued(x) or _is_vector_valued(y):
+        return np.logical_or(x, y)
+    return bool(x) or bool(y)
+
+
+def _eval_invert(x: Any) -> Any:
+    if _is_vector_valued(x):
+        return np.logical_not(x)
+    return not bool(x)
+
+
+def _eval_where(cond: Any, x: Any, y: Any) -> Any:
+    if _is_vector_valued(cond) or _is_vector_valued(x) or _is_vector_valued(y):
+        return np.where(cond, x, y)
+    return x if bool(cond) else y
+
+
 _EVAL_OPS: dict[str, Callable[..., Any]] = {
     "add": lambda x, y: x + y,
     "sub": lambda x, y: x - y,
@@ -526,16 +556,22 @@ _EVAL_OPS: dict[str, Callable[..., Any]] = {
     "ge": lambda x, y: x >= y,
     "eq": lambda x, y: x == y,
     "ne": lambda x, y: x != y,
-    "and": lambda x, y: bool(x) and bool(y),
-    "or": lambda x, y: bool(x) or bool(y),
-    "invert": lambda x: not bool(x),
+    # Symbol values may be bound to vector (array) data at evaluate() time, not just scalars, so
+    # these must not force a scalar bool() conversion: numpy raises "the truth value of an array
+    # with more than one element is ambiguous" for any >1-element array, which broke every
+    # vector-valued and/or/not/where evaluation outright (MXR-080-0152). The scalar/0-d path keeps
+    # the exact original bool()-based logic (byte-identical behavior); only genuine ndim>0 arrays
+    # take the array-aware numpy path.
+    "and": _eval_and,
+    "or": _eval_or,
+    "invert": _eval_invert,
     "log": math.log,
     "exp": math.exp,
     "sqrt": math.sqrt,
     "abs": abs,
     "floor": math.floor,
     "max": lambda *xs: max(xs),
-    "where": lambda cond, x, y: x if bool(cond) else y,
+    "where": _eval_where,
     "clip": _clip_value,
     "gammaln": math.lgamma,
     "digamma": scipy.special.digamma,
