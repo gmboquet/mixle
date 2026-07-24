@@ -538,5 +538,79 @@ class CanonicalDedupCompletenessTestCase(unittest.TestCase):
         self._assert_complete(hmm, 24, "hmm-composite-emissions")
 
 
+class QuantizerConstructionValidationTestCase(unittest.TestCase):
+    """MXR-080-0203: Quantizer construction must reject non-finite/fractional configuration."""
+
+    def test_rejects_nan_bin_width_bits(self):
+        # The original bug: `if bin_width_bits <= 0` is False for NaN (every NaN comparison is
+        # False), so NaN silently passed the positivity check.
+        with self.assertRaises(ValueError):
+            Quantizer(bin_width_bits=float("nan"), oversample=8)
+
+    def test_rejects_infinite_bin_width_bits(self):
+        with self.assertRaises(ValueError):
+            Quantizer(bin_width_bits=float("inf"), oversample=8)
+        with self.assertRaises(ValueError):
+            Quantizer(bin_width_bits=float("-inf"), oversample=8)
+
+    def test_rejects_nonpositive_bin_width_bits(self):
+        with self.assertRaises(ValueError):
+            Quantizer(bin_width_bits=0.0, oversample=8)
+        with self.assertRaises(ValueError):
+            Quantizer(bin_width_bits=-1.0, oversample=8)
+
+    def test_rejects_fractional_oversample(self):
+        # The original bug: int(2.9) == 2 truncated silently instead of rejecting.
+        with self.assertRaises(ValueError):
+            Quantizer(bin_width_bits=1.0, oversample=2.9)
+
+    def test_rejects_nonpositive_oversample(self):
+        with self.assertRaises(ValueError):
+            Quantizer(bin_width_bits=1.0, oversample=0)
+        with self.assertRaises(ValueError):
+            Quantizer(bin_width_bits=1.0, oversample=-3)
+
+    def test_rejects_bool_oversample(self):
+        with self.assertRaises(ValueError):
+            Quantizer(bin_width_bits=1.0, oversample=True)
+
+    def test_accepts_valid_construction(self):
+        # Negative control: finite positive width + exact positive integer oversample still works.
+        q = Quantizer(bin_width_bits=1.0, oversample=8)
+        self.assertEqual(q.bin_width_bits, 1.0)
+        self.assertEqual(q.oversample, 8)
+        # A numpy integer counts as an exact integer.
+        q2 = Quantizer(bin_width_bits=0.5, oversample=np.int64(4))
+        self.assertEqual(q2.oversample, 4)
+
+    def test_bits_rejects_nan_log_prob(self):
+        q = Quantizer(bin_width_bits=1.0, oversample=8)
+        with self.assertRaises(ValueError):
+            q.bits(float("nan"))
+
+    def test_bits_rejects_positive_log_prob(self):
+        # A positive log-probability implies probability > 1: invalid, not "very likely".
+        q = Quantizer(bin_width_bits=1.0, oversample=8)
+        with self.assertRaises(ValueError):
+            q.bits(0.5)
+        with self.assertRaises(ValueError):
+            q.bits(1e-12)  # even a tiny positive value is rejected outright, not clamped
+
+    def test_bits_accepts_valid_log_prob(self):
+        # Negative control: log_prob <= 0 (including the -inf sentinel for probability 0) is valid.
+        q = Quantizer(bin_width_bits=1.0, oversample=8)
+        self.assertEqual(q.bits(0.0), 0.0)  # probability exactly 1 -> 0 bits
+        self.assertGreater(q.bits(-1.0), 0.0)
+        self.assertEqual(q.bits(float("-inf")), float("inf"))
+
+    def test_fine_bucket_propagates_log_prob_validation(self):
+        q = Quantizer(bin_width_bits=1.0, oversample=8)
+        with self.assertRaises(ValueError):
+            q.fine_bucket(float("nan"))
+        with self.assertRaises(ValueError):
+            q.fine_bucket(0.25)
+        self.assertIsInstance(q.fine_bucket(-2.0), int)  # still works for valid input
+
+
 if __name__ == "__main__":
     unittest.main()
