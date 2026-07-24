@@ -34,6 +34,32 @@ class LogScoreTest(unittest.TestCase):
         losses = [log_score(np.where(y == 1, q, 1 - q)) for q in grid]
         self.assertAlmostEqual(grid[int(np.argmin(losses))], 0.7, delta=0.06)
 
+    def test_negative_probability_raises_instead_of_clipping_like_zero(self):
+        # np.clip(p, tiny, None) used to pull a negative value up to `tiny` exactly like the
+        # legitimate zero-probability edge case, so an invalid prob of -1 silently scored the same
+        # large-but-finite 708.3964... as a real (if terrible) forecast of p=0, instead of being
+        # rejected as outside the [0, inf) domain of a probability/density.
+        with self.assertRaises(ValueError):
+            log_score(np.array([-1.0]))
+
+    def test_nan_probability_raises_instead_of_propagating_nan(self):
+        with self.assertRaises(ValueError):
+            log_score(np.array([np.nan]))
+
+    def test_infinite_probability_raises_instead_of_scoring_as_the_best_possible(self):
+        # log_score is lower-is-better (see the module docstring); -log(inf) == -inf, which would
+        # silently look like the single best achievable score, letting a broken/degenerate upstream
+        # density (e.g. an overflowing log-density in mixle.evolve.objective.log_score_objective)
+        # win any comparison instead of being rejected.
+        with self.assertRaises(ValueError):
+            log_score(np.array([np.inf]))
+        with self.assertRaises(ValueError):
+            log_score(np.array([-np.inf]))
+
+    def test_negative_probability_among_valid_ones_still_raises(self):
+        with self.assertRaises(ValueError):
+            log_score(np.array([0.2, 0.5, -0.01, 0.9]))
+
 
 class BrierScoreTest(unittest.TestCase):
     def test_binary_known_value(self):

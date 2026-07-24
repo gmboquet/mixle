@@ -46,15 +46,28 @@ def log_score(prob: np.ndarray, *, mean: bool = True) -> np.ndarray | float:
     proper. Pass the predictive probability/density evaluated at the observed outcome.
 
     Args:
-        prob: array of predictive probabilities (or densities) at the realised outcomes. Values are
-            clipped away from zero before the log so a single zero-probability event yields a large
-            but finite penalty rather than ``inf``.
+        prob: array of predictive probabilities (or densities) at the realised outcomes. Must be
+            finite and non-negative -- a probability or density can never be negative, NaN, or
+            infinite. Zero is a legitimate (if poor) forecast, and is clipped away from zero before
+            the log so it yields a large but finite penalty rather than ``inf``.
         mean: if True (default) return the mean log loss; otherwise the per-observation vector.
 
     Returns:
         Mean log loss (float) or the per-observation array.
+
+    Raises:
+        ValueError: if any entry of ``prob`` is negative, NaN, or infinite. Clipping a negative
+            value the same way as the legitimate zero-probability edge case would let an invalid
+            input (e.g. ``-1``) silently masquerade as a valid, if poor, forecast; and an infinite
+            input would silently become the score ``-inf`` -- which, this module being
+            lower-is-better, looks like the single best score achievable, letting a broken upstream
+            density silently win any comparison instead of being rejected.
     """
     p = np.asarray(prob, dtype=float)
+    if not np.isfinite(p).all():
+        raise ValueError("log_score requires prob to be finite (no NaN/Inf).")
+    if np.any(p < 0.0):
+        raise ValueError("log_score requires prob to be non-negative (a probability or density cannot be negative).")
     p = np.clip(p, np.finfo(float).tiny, None)
     return _reduce(-np.log(p), mean)
 
