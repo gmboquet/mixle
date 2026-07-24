@@ -47,6 +47,32 @@ def _listed_species(*, critical_habitat: bool) -> ListedSpecies:
     )
 
 
+def _reference_network() -> dict[str, np.ndarray]:
+    """A 4-node reference network: 0 = source, 3 = sink; two parallel paths from 0 to 3, a cheap one
+    through node 1 and an expensive detour through node 2 -- the same fixture
+    test_apply_habitat_constraints_removes_exactly_enclosed_blocks_and_raises_cost uses, factored out for
+    the MXR-080-0092 validation tests below, which need a fresh network dict per case."""
+    quantity = 10.0
+    cap = np.array(
+        [
+            [0.0, quantity, quantity, 0.0],
+            [0.0, 0.0, 0.0, quantity],
+            [0.0, 0.0, 0.0, quantity],
+            [0.0, 0.0, 0.0, 0.0],
+        ]
+    )
+    cost = np.array(
+        [
+            [0.0, 1.0, 5.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 5.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ]
+    )
+    supply = np.array([quantity, 0.0, 0.0, -quantity])
+    return {"cap": cap, "cost": cost, "supply": supply}
+
+
 def test_critical_habitat_exclusion_flags_exactly_the_high_suitability_block():
     habitat = _habitat_model(np.array([0.1, 5.0, 0.1, 0.1]))
     listed = [_listed_species(critical_habitat=True)]
@@ -129,6 +155,107 @@ def test_apply_habitat_constraints_removes_exactly_enclosed_blocks_and_raises_co
     assert constrained.value > baseline.value  # strictly higher cost ...
     assert constrained.value == pytest.approx(10.0 * quantity)  # ... forced onto the detour via node 2
     assert constrained.flow[2, 3] == pytest.approx(quantity)  # ... still feasible: full demand routed
+
+
+# MXR-080-0092: network['block_nodes'] used to be cast with a bare `dtype=int` before any validation, so
+# a fractional id silently truncated to the wrong node, a negative id silently exercised NumPy's
+# from-the-end indexing instead of raising, and an out-of-range id raised a bare, internal IndexError only
+# after an earlier, in-range id in the *same* call had already been applied to the local cap copy.
+# network['supply'] and network['cap']/network['cost'] were not validated for shape or finiteness either.
+# Every case below reproduces one of those failure modes against the fixed apply_habitat_constraints
+# and confirms it is now rejected up front, before any exclusion is applied.
+
+
+def test_apply_habitat_constraints_rejects_fractional_block_node_id():
+    network = _reference_network()
+    network["block_nodes"] = np.array([0.0, 2.7, 2.0, 3.0])  # block 1 claims node "2.7"
+    mask = np.array([False, True, False, False])
+
+    with pytest.raises(ValueError, match="exact integers"):
+        apply_habitat_constraints(network, mask)
+
+
+def test_apply_habitat_constraints_rejects_negative_block_node_id():
+    network = _reference_network()
+    network["block_nodes"] = np.array([0, -1, 2, 3])  # block 1 claims node "-1"
+    mask = np.array([False, True, False, False])
+
+    with pytest.raises(ValueError, match=r"\[0, 4\)"):
+        apply_habitat_constraints(network, mask)
+
+
+def test_apply_habitat_constraints_rejects_out_of_range_block_node_id_before_any_mutation():
+    network = _reference_network()
+    # block 0 -> node 1 (in-range, would have been applied first under the old sorted-loop behavior);
+    # block 1 -> node 1000 (out of range for this 4-node network).
+    network["block_nodes"] = np.array([1, 1000, 2, 3])
+    mask = np.array([True, True, False, False])
+    cap_before = np.array(network["cap"], copy=True)
+
+    with pytest.raises(ValueError, match=r"\[0, 4\)"):
+        apply_habitat_constraints(network, mask)
+
+    # atomic: the caller's own cap array is completely untouched by the rejected call.
+    np.testing.assert_array_equal(network["cap"], cap_before)
+
+
+def test_apply_habitat_constraints_rejects_duplicate_block_node_ids():
+    network = _reference_network()
+    network["block_nodes"] = np.array([1, 1, 2, 3])  # blocks 0 and 1 both alias node 1
+    mask = np.array([True, True, False, False])
+
+    with pytest.raises(ValueError, match="duplicate"):
+        apply_habitat_constraints(network, mask)
+
+
+def test_apply_habitat_constraints_rejects_wrong_length_supply():
+    network = _reference_network()
+    network["supply"] = np.array([10.0, 0.0, -10.0])  # length 3; this network has 4 nodes
+    mask = np.array([False, True, False, False])
+
+    with pytest.raises(ValueError, match="length-4"):
+        apply_habitat_constraints(network, mask)
+
+
+def test_apply_habitat_constraints_rejects_non_finite_cap():
+    network = _reference_network()
+    network["cap"][0, 1] = np.nan
+    mask = np.array([False, True, False, False])
+
+    with pytest.raises(ValueError, match="finite"):
+        apply_habitat_constraints(network, mask)
+
+
+def test_apply_habitat_constraints_rejects_non_finite_cost():
+    network = _reference_network()
+    network["cost"][0, 1] = np.inf
+    mask = np.array([False, True, False, False])
+
+    with pytest.raises(ValueError, match="finite"):
+        apply_habitat_constraints(network, mask)
+
+
+def test_apply_habitat_constraints_rejects_negative_cap():
+    network = _reference_network()
+    network["cap"][0, 1] = -5.0
+    mask = np.array([False, True, False, False])
+
+    with pytest.raises(ValueError, match="nonnegative"):
+        apply_habitat_constraints(network, mask)
+
+
+def test_apply_habitat_constraints_accepts_exact_integer_valued_float_block_node_ids():
+    # negative control: exact-integer-valued floats (2.0, not 2.7) are legitimate, and legitimate
+    # unique in-range ids still correctly exclude exactly the intended node.
+    network = _reference_network()
+    network["block_nodes"] = np.array([0.0, 1.0, 2.0, 3.0])
+    mask = np.array([False, True, False, False])
+
+    payload = apply_habitat_constraints(network, mask)
+
+    assert payload["forbidden_nodes"] == [1]
+    assert np.all(payload["cap"][1, :] == 0.0)
+    assert np.all(payload["cap"][:, 1] == 0.0)
 
 
 def test_critical_habitat_designation_and_species_carry_source_provenance():

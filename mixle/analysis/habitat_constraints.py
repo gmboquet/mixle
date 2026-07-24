@@ -116,6 +116,59 @@ def critical_habitat_exclusion(
     return _dilate_conservatively(mask, buffer_cells)
 
 
+def _validate_block_nodes(raw_block_nodes: Any, *, n_blocks: int, n_nodes: int) -> np.ndarray:
+    """Validate ``network['block_nodes']`` as exact, in-range, duplicate-free node ids (MXR-080-0092).
+
+    ``block_nodes[i]`` is the network-node index block ``i`` maps onto -- a *positional* array, not a
+    set. A bare ``dtype=int`` cast used to run here before any validation: a fractional id (e.g. ``2.7``)
+    silently truncated to the wrong node, a negative id (e.g. ``-1``) silently exercised NumPy's
+    from-the-end indexing instead of raising, and an out-of-range id only failed once
+    :func:`apply_habitat_constraints`'s mutation loop reached it -- after every earlier id in the same
+    call had already been applied to the local ``cap`` copy.
+
+    Every id must be an exact integer (an exact-integer-valued float such as ``2.0`` is accepted, a
+    fractional one such as ``2.7`` is not -- matching :func:`mixle.analysis.coverage._rarefaction_sizes`'s
+    convention for a caller-supplied id/size array) and lie in ``[0, n_nodes)``, the network's own node
+    range. Two blocks aliasing the same network node can only arise from a caller mistake (e.g. a
+    mis-sized ``block_nodes`` array), so duplicates are rejected rather than silently double-processing
+    one node.
+    """
+    arr = np.asarray(raw_block_nodes)
+    if arr.ndim != 1 or arr.shape[0] != n_blocks:
+        raise ValueError(
+            f"network['block_nodes'] must be a 1-D array with one entry per block ({n_blocks}), got "
+            f"shape {arr.shape!r}."
+        )
+    if np.issubdtype(arr.dtype, np.integer) or arr.dtype == np.bool_:
+        ids = arr.astype(np.int64)
+    else:
+        farr = arr.astype(np.float64)
+        if not np.all(np.isfinite(farr)):
+            raise ValueError("network['block_nodes'] must be finite (no NaN or Inf).")
+        if not np.array_equal(farr, np.trunc(farr)):
+            raise ValueError("network['block_nodes'] must be exact integers (fractional ids are not supported).")
+        ids = farr.astype(np.int64)
+
+    if ids.size and (ids.min() < 0 or ids.max() >= n_nodes):
+        raise ValueError(
+            f"network['block_nodes'] must be within [0, {n_nodes}) (the network's node count), got {ids.tolist()!r}."
+        )
+
+    seen: set[int] = set()
+    duplicates: set[int] = set()
+    for node_id in ids.tolist():
+        if node_id in seen:
+            duplicates.add(node_id)
+        seen.add(node_id)
+    if duplicates:
+        raise ValueError(
+            f"network['block_nodes'] must not contain duplicate node ids, got {ids.tolist()!r} "
+            f"(duplicated: {sorted(duplicates)})"
+        )
+
+    return ids
+
+
 def apply_habitat_constraints(network: dict[str, Any], exclusion_mask: np.ndarray) -> dict[str, Any]:
     """Fold a critical-habitat exclusion mask into an IC-9-shaped network payload (work-plan algorithm
     step 3); H1/H4 read this, this module never calls the solver.
@@ -133,6 +186,13 @@ def apply_habitat_constraints(network: dict[str, Any], exclusion_mask: np.ndarra
     passed through unchanged alongside ``forbidden_nodes``, so a fixed-charge caller can exclude the same
     nodes from its own arc set.
 
+    Every input is validated *before* any exclusion is applied, so a rejected call never leaves a
+    partially-mutated result (MXR-080-0092): ``cap``/``cost`` must be equal-shape, square, and finite, and
+    ``cap`` must additionally be nonnegative (a negative arc capacity has no meaning); ``supply``, when
+    supplied, must be a finite length-``n`` vector; and ``block_nodes`` must be exact, unique node ids in
+    ``[0, n)`` (see :func:`_validate_block_nodes` for the fractional/negative/out-of-range failure modes
+    this replaces).
+
     Args:
         network: the reference network payload (``cap``/``cost``/``supply``/``block_nodes``, plus any
             ``network_design``-shaped pass-through fields).
@@ -141,6 +201,11 @@ def apply_habitat_constraints(network: dict[str, Any], exclusion_mask: np.ndarra
     Returns:
         A new dict: ``cap``/``cost`` (habitat-adjusted), ``forbidden_nodes`` (sorted node-id list), and
         ``supply`` when the caller provided one, plus any pass-through fields.
+
+    Raises:
+        ValueError: if ``cap``/``cost`` are not equal-shape finite square arrays, if ``cap`` contains a
+            negative entry, if ``supply`` is not a finite length-``n`` vector, or if ``block_nodes`` is not
+            a length-matched array of exact, unique, in-range node ids.
     """
     exclusion_mask = np.asarray(exclusion_mask, dtype=bool)
 
@@ -148,19 +213,40 @@ def apply_habitat_constraints(network: dict[str, Any], exclusion_mask: np.ndarra
     cost = np.array(network["cost"], dtype=float, copy=True)
     if cap.shape != cost.shape or cap.ndim != 2 or cap.shape[0] != cap.shape[1]:
         raise ValueError("network['cap'] and network['cost'] must be equal-shape square (n, n) arrays.")
+    if not np.all(np.isfinite(cap)):
+        raise ValueError("network['cap'] must be finite (no NaN or Inf).")
+    if np.any(cap < 0.0):
+        raise ValueError("network['cap'] must be nonnegative (a negative arc capacity is not meaningful).")
+    if not np.all(np.isfinite(cost)):
+        raise ValueError("network['cost'] must be finite (no NaN or Inf).")
+    n_nodes = cap.shape[0]
 
-    block_nodes = np.asarray(network.get("block_nodes", np.arange(exclusion_mask.shape[0])), dtype=int)
-    if block_nodes.shape[0] != exclusion_mask.shape[0]:
-        raise ValueError("network['block_nodes'] must have one entry per block.")
+    block_nodes = _validate_block_nodes(
+        network.get("block_nodes", np.arange(exclusion_mask.shape[0])),
+        n_blocks=exclusion_mask.shape[0],
+        n_nodes=n_nodes,
+    )
 
+    supply: np.ndarray | None = None
+    if "supply" in network:
+        supply = np.array(network["supply"], dtype=float, copy=True)
+        if supply.shape != (n_nodes,):
+            raise ValueError(
+                f"network['supply'] must be a length-{n_nodes} vector matching the network's node count, "
+                f"got shape {supply.shape!r}."
+            )
+        if not np.all(np.isfinite(supply)):
+            raise ValueError("network['supply'] must be finite (no NaN or Inf).")
+
+    # Every check above must pass before any exclusion is applied below -- a rejected call must not leave
+    # `cap`/`supply` partially mutated (MXR-080-0092).
     forbidden_nodes = sorted(int(node) for node, excluded in zip(block_nodes, exclusion_mask) if excluded)
     for node in forbidden_nodes:
         cap[node, :] = 0.0
         cap[:, node] = 0.0
 
     result: dict[str, Any] = {"cap": cap, "cost": cost, "forbidden_nodes": forbidden_nodes}
-    if "supply" in network:
-        supply = np.array(network["supply"], dtype=float, copy=True)
+    if supply is not None:
         if forbidden_nodes:
             supply[forbidden_nodes] = 0.0
         result["supply"] = supply
