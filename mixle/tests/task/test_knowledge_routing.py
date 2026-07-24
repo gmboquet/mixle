@@ -4,6 +4,9 @@ explicit, and never lets a tool's free text become a canonical delta item."""
 
 from __future__ import annotations
 
+import numpy as np
+
+from mixle.inference.calibration_gate import CalibrationVerifier, posterior_predictive_calibration
 from mixle.task.catalog_router import CatalogEntry
 from mixle.task.knowledge_routing import research_proposal_to_gap, route_task
 from mixle.task.task_decomposition import init_decomposition_proposer
@@ -359,3 +362,92 @@ def test_a_transient_tool_failure_is_retried_in_place_not_desynced_onto_later_ga
     # exactly one add_items entry per gap -- no gap produced a duplicate item
     domains_produced = [item["metadata"]["domain"] for item in result.delta["add_items"]]
     assert sorted(domains_produced) == ["climate", "economic", "geology", "physics"]
+
+
+# --- a low-power calibration verdict must not resolve a knowledge gap ---
+#
+# CalibrationVerdict.passed reads True for a low_power result BY DESIGN (a check that had no
+# statistical power to catch a problem should not itself block on that account alone -- see
+# mixle.inference.calibration_gate.CalibrationVerdict's docstring); CalibrationVerdict.low_power
+# distinguishes "undetectable with this little data" from a real, well-powered pass. route_task must
+# honor that distinction: a bare duck-typed `.passed` is not sufficient resolving evidence for an
+# epistemic knowledge gap if the same verdict also reports `low_power=True`.
+
+
+def _predictive_ensemble(truth_sd: float, ensemble_sd: float, *, k: int, m: int = 500, seed: int = 0):
+    """Held-out truths drawn N(0, truth_sd^2); a predictive ensemble centered at 0 with ensemble_sd.
+    Mirrors mixle/tests/calibration_gate_test.py's fixture of the same name."""
+    rng = np.random.default_rng(seed)
+    y = rng.normal(0.0, truth_sd, size=k)
+    ensemble = rng.normal(0.0, ensemble_sd, size=(k, m))
+    return ensemble, y
+
+
+def _low_power_calibration_tool(gap):
+    # k=6, ensemble_sd=0.3 vs truth_sd=1.0: deliberately overconfident, but so few held-out points
+    # that even gross miscalibration is within the finite-sample null noise -- the exact fixture
+    # calibration_gate_test.py::test_tiny_holdout_is_flagged_low_power_not_false_alarmed uses.
+    ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=0.3, k=6)
+    return {"ensemble": ensemble.tolist(), "held_out_y": y.tolist()}
+
+
+def _well_powered_calibration_tool(gap):
+    # k=400, ensemble_sd == truth_sd: genuinely calibrated with ample power to have failed.
+    ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=1.0, k=400)
+    return {"ensemble": ensemble.tolist(), "held_out_y": y.tolist()}
+
+
+def test_low_power_calibration_verdict_does_not_resolve_the_knowledge_gap():
+    """The reported bug, reproduced end to end: a low-power (undetectable-with-this-data)
+    calibration result must not close out a knowledge gap. Confirm the fixture really is in the
+    low-power-but-nominally-passed regime at the calibration_gate level, then confirm route_task
+    leaves the gap open rather than treating that bare pass as resolving evidence."""
+    direct_verdict = posterior_predictive_calibration(*_predictive_ensemble(truth_sd=1.0, ensemble_sd=0.3, k=6))
+    assert direct_verdict.calibration_status == "low_power"
+    assert direct_verdict.passed  # by design -- see CalibrationVerdict's docstring
+    assert direct_verdict.low_power
+
+    catalog = [
+        CatalogEntry(
+            id="calibration_probe",
+            schema={"invoke": _low_power_calibration_tool, "output": {}},
+            owner="physics",
+            cost=0.1,
+            reliability=0.9,
+            verifier=CalibrationVerifier(),
+        )
+    ]
+    proposer = init_decomposition_proposer([["physics"]] * 20)
+    result = route_task("is this posterior calibrated?", catalog, proposer=proposer, budget=3)
+
+    assert result.answer["resolved_gap_ids"] == []
+    assert result.answer["unresolved_gap_ids"] == ["gap-0-physics"]
+    assert result.delta["add_items"] == []  # no item was promoted to canonical evidence
+    assert result.delta["gap_updates"] == []
+
+    gap = next(g for g in result.remaining_gaps if g["id"] == "gap-0-physics")
+    assert gap["status"] == "open"
+    assert gap["resolved_by_item_ids"] == []
+    assert gap["attempts"][-1]["status"] == "low_power"  # distinct from a genuine "failed" rejection
+
+
+def test_well_powered_calibration_verdict_still_resolves_the_knowledge_gap():
+    """Companion to the low-power regression above: the fix must not over-correct into blocking a
+    genuine, well-powered calibration pass from resolving its gap."""
+    catalog = [
+        CatalogEntry(
+            id="calibration_probe",
+            schema={"invoke": _well_powered_calibration_tool, "output": {}},
+            owner="physics",
+            cost=0.1,
+            reliability=0.9,
+            verifier=CalibrationVerifier(),
+        )
+    ]
+    proposer = init_decomposition_proposer([["physics"]] * 20)
+    result = route_task("is this posterior calibrated?", catalog, proposer=proposer, budget=3)
+
+    assert result.answer["resolved_gap_ids"] == ["gap-0-physics"]
+    assert result.answer["unresolved_gap_ids"] == []
+    assert result.delta["add_items"]
+    assert result.delta["gap_updates"][0]["status"] == "resolved"

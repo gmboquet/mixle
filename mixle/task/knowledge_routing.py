@@ -175,6 +175,32 @@ def _verdict_passed(verdict: Any) -> bool:
     return bool(getattr(verdict, "passed", False))
 
 
+def _verdict_low_power(verdict: Any) -> bool:
+    """Whether the verdict itself flags that it had no statistical power to distinguish a real pass
+    from a real failure (e.g. :attr:`~mixle.inference.calibration_gate.CalibrationVerdict.low_power`,
+    surfaced on the ``"low_power"`` key of :meth:`~mixle.inference.calibration_gate.CalibrationVerifier
+    .verify`'s dict). A ``passed=True, low_power=True`` verdict means "undetectable with this little
+    data," not "calibrated" -- see ``CalibrationVerdict``'s docstring -- so it must not read as
+    resolving evidence for a knowledge gap here, even though ``.passed`` alone reads True for the
+    routing-layer promotion predicate. Verifiers that never report this concept (the common case --
+    most IC-6 verifiers here are structural, not statistical) read as False, so this only changes
+    behaviour for verifiers that explicitly opt into it."""
+    if verdict is None:
+        return False
+    if isinstance(verdict, dict):
+        return bool(verdict.get("low_power"))
+    return bool(getattr(verdict, "low_power", False))
+
+
+def _verdict_resolves_gap(verdict: Any) -> bool:
+    """Whether this verdict is real resolving evidence for a knowledge gap: a pass that also had the
+    statistical power to have failed. A check with no power to fail (``low_power=True``) must not
+    close out an epistemic gap on the strength of its ``passed=True`` alone -- the gap stays open,
+    exactly as if the check had not run, so a later attempt with more evidence still gets a chance to
+    genuinely confirm or refute it."""
+    return _verdict_passed(verdict) and not _verdict_low_power(verdict)
+
+
 def _attempt(*, tool_or_model: str | None, query: str, status: str, produced_item_ids: list[str]) -> dict[str, Any]:
     return {
         "actor": "mixle.task.knowledge_routing.route_task",
@@ -227,7 +253,10 @@ def _invoke_tool(invoke: Any, gap: dict[str, Any], known_items: list[dict[str, A
 
 def _resolve_gap(gap: dict[str, Any], known_items: list[dict[str, Any]], catalog: list[CatalogEntry]) -> dict[str, Any]:
     """Resolve one gap: prefer evidence already in the bundle, else route to the cheapest matching,
-    reliable, verifiable catalog entry and verify its result before ever treating it as canonical."""
+    reliable, verifiable catalog entry and verify its result before ever treating it as canonical --
+    a verdict that only passed because the check had no power to fail (``low_power=True``, e.g. too
+    few held-out points for a calibration gate) does not count either; the gap stays open rather than
+    being closed on undetectable-with-this-data evidence (see :func:`_verdict_resolves_gap`)."""
     existing = _match_existing_item(gap, known_items)
     if existing is not None:
         return {"resolved": True, "item_ids": [existing["id"]], "item": None, "attempt": None}
@@ -258,7 +287,7 @@ def _resolve_gap(gap: dict[str, Any], known_items: list[dict[str, Any]], catalog
     raw = _invoke_tool(invoke, gap, known_items)
     item = _to_knowledge_item(gap, entry, raw)
     verdict = entry.verifier.verify(claim={"payload": item["payload"]}, context={"gap": gap, "entry": entry.id})
-    if _verdict_passed(verdict):
+    if _verdict_resolves_gap(verdict):
         return {
             "resolved": True,
             "item_ids": [item["id"]],
@@ -267,11 +296,15 @@ def _resolve_gap(gap: dict[str, Any], known_items: list[dict[str, Any]], catalog
                 tool_or_model=entry.id, query=gap["question"], status="resolved", produced_item_ids=[item["id"]]
             ),
         }
+    # A low-power pass is not a failure of the evidence (the direction/failed reasoning does not
+    # apply) -- it is a distinct "undetectable with this little data" outcome, so it gets its own
+    # honest attempt status rather than being folded into "failed" and looking like a rejection.
+    status = "low_power" if _verdict_low_power(verdict) else "failed"
     return {
         "resolved": False,
         "item_ids": [],
         "item": None,
-        "attempt": _attempt(tool_or_model=entry.id, query=gap["question"], status="failed", produced_item_ids=[]),
+        "attempt": _attempt(tool_or_model=entry.id, query=gap["question"], status=status, produced_item_ids=[]),
     }
 
 
