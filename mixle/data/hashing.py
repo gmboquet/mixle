@@ -64,11 +64,22 @@ def _canonical(obj: Any) -> bytes:
         return b"s" + _len_prefixed(obj.encode("utf-8"))
     if isinstance(obj, np.ndarray):
         arr = np.ascontiguousarray(obj)
+        if arr.dtype.hasobject:
+            # object-dtype (or object-field-containing structured) arrays store PyObject* pointers in
+            # their buffer, not the elements' own bytes -- arr.tobytes() would serialize those pointers
+            # (process-specific memory addresses), so the identical logical array hashes differently
+            # from one process/run to the next. Recurse into each element's actual value instead, the
+            # same way list/tuple elements are handled below; each _canonical(v) call is already
+            # self-delimiting, so wrapping their concatenation in the same _len_prefixed used for the
+            # tobytes() fast path keeps the outer "a" framing identical either way.
+            payload = b"".join(_canonical(v) for v in arr.flat)
+        else:
+            payload = arr.tobytes()
         return (
             b"a"
             + _len_prefixed(str(arr.dtype).encode())
             + _len_prefixed(str(arr.shape).encode())
-            + _len_prefixed(arr.tobytes())
+            + _len_prefixed(payload)
         )
     if isinstance(obj, Mapping):
         # sort by each key's own canonical bytes (not repr of the (k, v) pair): well-defined since dict
@@ -115,14 +126,17 @@ def dataset_hash(data: Any, *, sort: bool = False, max_records: int | None = Non
     """Hex SHA-256 fingerprint of ``data`` (a sequence of records or a ``DataSource``).
 
     ``sort=False`` (default) is order-sensitive (exact training sequence). ``sort=True`` combines per-record
-    hashes commutatively for an order-insensitive fingerprint. ``max_records`` truncates (the count is mixed
-    in, so a truncated hash never collides with a full one)."""
+    hashes commutatively for an order-insensitive fingerprint. ``max_records`` truncates (the count *and*
+    whether truncation actually happened are both mixed in, so a hash of a truncated prefix never collides
+    with a hash of a genuinely complete dataset of that same visible length)."""
     recs = _records(data)
     if sort:
         acc = 0
         n = 0
+        truncated = False
         for i, r in enumerate(recs):
             if max_records is not None and i >= max_records:
+                truncated = True
                 break
             d = int.from_bytes(hashlib.sha256(_canonical(r)).digest(), "big")
             acc = (acc + d) % (1 << 256)  # commutative -> order-insensitive
@@ -130,15 +144,22 @@ def dataset_hash(data: Any, *, sort: bool = False, max_records: int | None = Non
         h = hashlib.sha256()
         h.update(b"sorted")
         h.update(acc.to_bytes(32, "big"))
+        # "T"/"#" marks whether max_records actually cut off further records, not just how many were
+        # hashed -- otherwise dataset_hash([1, 2, 3], max_records=2) and dataset_hash([1, 2]) hash the
+        # same records with the same count and collide despite one being a truncated prefix of a larger
+        # dataset and the other genuinely complete.
+        h.update(b"T" if truncated else b"#")
         h.update(str(n).encode())
         return h.hexdigest()
     h = hashlib.sha256()
     n = 0
+    truncated = False
     for i, r in enumerate(recs):
         if max_records is not None and i >= max_records:
+            truncated = True
             break
         h.update(_canonical(r))  # self-delimiting (see _canonical) -- no inter-record separator needed
         n += 1
-    h.update(b"#")
+    h.update(b"T" if truncated else b"#")  # see the sort=True branch above for why this isn't just b"#"
     h.update(str(n).encode())
     return h.hexdigest()
