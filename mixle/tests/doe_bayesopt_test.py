@@ -19,6 +19,7 @@ from mixle.doe import (
     propose_batch,
     propose_next,
     register_acquisition,
+    thompson_sampling,
     upper_confidence_bound,
 )
 from mixle.doe.bayesopt import _get_acquisition
@@ -166,6 +167,90 @@ class UpperConfidenceBoundTest(unittest.TestCase):
     def test_maximization_uses_optimistic_upper_bound(self):
         merit = upper_confidence_bound(mean=np.array([0.0, 1.0]), std=np.array([1.0, 1.0]), kappa=2.0, maximize=True)
         self.assertGreater(merit[1], merit[0])
+
+
+class AcquisitionInputValidationTest(unittest.TestCase):
+    """MXR-080-0169: every built-in acquisition validates the common posterior-moment / parameter
+    contract up front, instead of accepting or silently broadcasting a malformed input.
+    """
+
+    _ACQUISITIONS = (
+        ("ei", expected_improvement, {}),
+        ("log_ei", log_expected_improvement, {}),
+        ("pi", probability_of_improvement, {}),
+        ("ucb", upper_confidence_bound, {}),
+        ("thompson", thompson_sampling, {}),
+    )
+
+    def test_probability_of_improvement_rejects_negative_std_as_invalid_not_deterministic(self):
+        # The specific historical bug: PI tested `std <= threshold`, so a NEGATIVE std (an upstream
+        # error, never a legitimate input) fell into the same branch as the deterministic std==0 case
+        # and was silently scored as if certain. It must now be rejected outright.
+        with self.assertRaises(ValueError):
+            probability_of_improvement(mean=np.array([0.0]), std=np.array([-5.0]), best=2.0)
+
+    def test_negative_std_rejected_by_every_builtin_acquisition(self):
+        for name, fn, kw in self._ACQUISITIONS:
+            with self.subTest(acquisition=name), self.assertRaises(ValueError):
+                fn(mean=np.array([0.0]), std=np.array([-1.0]), best=0.0, **kw)
+
+    def test_nonfinite_std_rejected(self):
+        for value in (np.nan, np.inf, -np.inf):
+            with self.subTest(std=value), self.assertRaises(ValueError):
+                expected_improvement(mean=np.array([0.0]), std=np.array([value]), best=0.0)
+
+    def test_nonfinite_mean_rejected(self):
+        with self.assertRaises(ValueError):
+            expected_improvement(mean=np.array([np.nan]), std=np.array([1.0]), best=0.0)
+
+    def test_nonfinite_best_rejected(self):
+        for value in (float("nan"), float("inf")):
+            with self.subTest(best=value), self.assertRaises(ValueError):
+                expected_improvement(mean=np.array([0.0]), std=np.array([1.0]), best=value)
+
+    def test_mismatched_mean_std_shapes_rejected(self):
+        # mean/std are per-candidate arrays that must line up one-to-one; this is not an intentionally
+        # broadcastable pair (unlike best/xi/kappa, which are genuine scalars broadcast against them).
+        with self.assertRaises(ValueError):
+            expected_improvement(mean=np.array([0.0, 1.0]), std=np.array([1.0]), best=0.0)
+
+    def test_negative_xi_rejected(self):
+        for fn in (expected_improvement, log_expected_improvement, probability_of_improvement):
+            with self.subTest(fn=fn.__name__), self.assertRaises(ValueError):
+                fn(mean=np.array([0.0]), std=np.array([1.0]), best=0.0, xi=-0.1)
+
+    def test_nonfinite_xi_rejected(self):
+        with self.assertRaises(ValueError):
+            expected_improvement(mean=np.array([0.0]), std=np.array([1.0]), best=0.0, xi=float("nan"))
+
+    def test_negative_kappa_rejected(self):
+        with self.assertRaises(ValueError):
+            upper_confidence_bound(mean=np.array([0.0]), std=np.array([1.0]), best=0.0, kappa=-0.1)
+
+    def test_invalid_rng_rejected(self):
+        for bad_rng in ("banana", 42, object()):
+            with self.subTest(rng=bad_rng), self.assertRaises(ValueError):
+                thompson_sampling(mean=np.array([0.0]), std=np.array([1.0]), best=0.0, rng=bad_rng)
+
+    def test_valid_rng_types_accepted(self):
+        # Negative control: both the legacy RandomState and the modern Generator are genuine RNGs.
+        for rng in (np.random.RandomState(0), np.random.default_rng(0)):
+            with self.subTest(rng=type(rng).__name__):
+                out = thompson_sampling(mean=np.array([0.0]), std=np.array([1.0]), best=0.0, rng=rng)
+                self.assertEqual(out.shape, (1,))
+                self.assertTrue(np.all(np.isfinite(out)))
+
+    def test_negative_control_well_formed_calls_are_unaffected(self):
+        # Ordinary, valid calls to every built-in acquisition keep computing exactly as before.
+        mean, std, best = np.array([-1.0, 0.0, 1.0]), np.array([1.0, 1.0, 1.0]), 0.0
+        for name, fn, kw in self._ACQUISITIONS:
+            with self.subTest(acquisition=name):
+                out = fn(mean=mean, std=std, best=best, **kw)
+                self.assertEqual(out.shape, (3,))
+                self.assertTrue(np.all(np.isfinite(out)))
+        # PI's own legitimate deterministic case (std == 0, not negative) is untouched by the fix.
+        pi = probability_of_improvement(mean=np.array([-1.0, 1.0]), std=np.array([0.0, 0.0]), best=0.0)
+        np.testing.assert_array_equal(pi, np.array([1.0, 0.0]))
 
 
 class AcquisitionRegistryTest(unittest.TestCase):
