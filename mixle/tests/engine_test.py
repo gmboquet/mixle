@@ -264,6 +264,45 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(engine.with_precision("float64").dtype, torch.float64)
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_asarray_rejects_complex_input(self):
+        # Regression (MXR-080-0148), exact audit repro: complex NumPy input used to fall through the
+        # non-floating/non-Boolean fallback straight to torch.int64 -- engine.asarray([1+2j]) silently
+        # returned tensor([1]), destroying the imaginary component AND collapsing the real part to an
+        # integer, with only Torch's own internal cast warning (never a mixle-raised error) along the way.
+        engine = TorchEngine(dtype="float64")
+        with self.assertRaises(ValueError):
+            engine.asarray([1 + 2j])
+        with self.assertRaises(ValueError):
+            engine.asarray(np.asarray([1 + 2j], dtype=np.complex128))
+        with self.assertRaises(ValueError):
+            engine.asarray(np.asarray([1 + 2j], dtype=np.complex64))
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_asarray_accepts_complex_input_with_explicit_dtype(self):
+        # A caller that passes dtype= explicitly is opting into a specific policy with full knowledge --
+        # that path already bypasses the kind-based inference entirely (dtype is not None short-circuits
+        # before any arr.dtype.kind check), so it must keep working and round-trip both components exactly.
+        engine = TorchEngine(dtype="float64")
+        out = engine.asarray([1 + 2j], dtype=torch.complex128)
+        self.assertEqual(out.dtype, torch.complex128)
+        self.assertEqual(complex(out[0]), 1 + 2j)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_asarray_real_int_float_bool_input_unaffected(self):
+        # Negative control: ordinary real-valued NumPy kinds (the vast majority of callers) must still
+        # convert exactly as before -- the complex rejection must not touch any other kind's dispatch.
+        engine = TorchEngine(dtype="float64")
+        ints = engine.asarray([1, 2, 3])
+        self.assertEqual(ints.dtype, torch.int64)
+        self.assertTrue(torch.equal(ints, torch.tensor([1, 2, 3], dtype=torch.int64)))
+        floats = engine.asarray([1.0, 2.5])
+        self.assertEqual(floats.dtype, torch.float64)
+        self.assertTrue(torch.allclose(floats, torch.tensor([1.0, 2.5], dtype=torch.float64)))
+        bools = engine.asarray([True, False])
+        self.assertEqual(bools.dtype, torch.bool)
+        self.assertTrue(torch.equal(bools, torch.tensor([True, False])))
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_torch_engine_accepts_concrete_non_floating_dtype_as_no_override(self):
         # Regression (MXR-080-0122): a concrete non-floating torch.dtype (as engine discovery
         # reads off an integer/Boolean tensor's own storage) must fall back to the engine's

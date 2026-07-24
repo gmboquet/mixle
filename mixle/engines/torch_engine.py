@@ -110,7 +110,12 @@ class TorchEngine(ComputeEngine):
 
         Contract: float inputs are force-cast to the engine's float dtype (e.g. a
         float32 numpy array becomes the engine's float64) unless ``dtype`` is given;
-        this differs from numpy's ``asarray``, which preserves the input dtype.
+        this differs from numpy's ``asarray``, which preserves the input dtype. Complex
+        NumPy input is rejected when ``dtype`` is not given explicitly: the dtype
+        inference below has no complex-precision policy of its own, and letting it fall
+        through to the generic non-floating/non-Boolean case would silently discard the
+        imaginary component and collapse the real part to an integer. Pass an explicit
+        ``dtype=torch.complex64``/``torch.complex128`` for a genuine complex tensor.
         """
         if torch is None:
             require("torch", "torch")
@@ -129,6 +134,14 @@ class TorchEngine(ComputeEngine):
             dt = self.dtype
         elif arr.dtype.kind == "b":
             dt = torch.bool
+        elif arr.dtype.kind == "c":
+            raise ValueError(
+                f"TorchEngine.asarray received complex-valued input (NumPy dtype {arr.dtype}) with no "
+                "explicit dtype= override. This engine's dtype policy has no complex-precision concept, "
+                "so the generic non-floating/non-Boolean fallback (torch.int64) would silently discard "
+                "the imaginary component and collapse the real part to an integer. Pass "
+                "dtype=torch.complex64 or dtype=torch.complex128 explicitly for a genuine complex tensor."
+            )
         else:
             dt = torch.int64
         return self._replicate_tensor(torch.as_tensor(arr, dtype=dt, device=self.device))
