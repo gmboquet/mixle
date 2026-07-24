@@ -344,6 +344,77 @@ class SystemColdStartCaptureTest(unittest.TestCase):
         self.assertEqual(calls["n"], 2)
 
 
+class SystemImproveBudgetTest(unittest.TestCase):
+    """HIGH: improve() must actually spend its stated budget -- promoting every harvested pair
+    regardless of budget makes the parameter a no-op and silently defeats any caller trying to cap
+    improvement cost."""
+
+    def _harvest_distinct(self, system, n):
+        for i in range(n):
+            system.answer(Query(f"q{i}"))
+
+    def test_budget_smaller_than_the_harvest_promotes_only_what_it_affords(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        self._harvest_distinct(system, 5)
+        self.assertEqual(len(system._harvest), 5)
+
+        report = system.improve(2)
+
+        self.assertEqual(report["n_captured"], 2)
+        self.assertEqual(len(system._captured), 2)
+        self.assertEqual(len(system._harvest), 3)  # the rest stay harvested for a later, funded call
+        self.assertEqual(report["realized_spend"], 2)
+        self.assertEqual(report["budget"], 2)
+        # documented priority order: harvest (answer) order, oldest first
+        self.assertEqual({k[0] for k in system._captured}, {"q0", "q1"})
+
+    def test_zero_budget_promotes_nothing(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        self._harvest_distinct(system, 1)
+
+        report = system.improve(0)
+
+        self.assertEqual(report["n_captured"], 0)
+        self.assertEqual(report["status"], "insufficient_budget")
+        self.assertEqual(system._captured, {})
+        self.assertEqual(len(system._harvest), 1)  # untouched, not silently dropped
+
+    def test_negative_budget_is_rejected_outright(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        self._harvest_distinct(system, 1)
+
+        with self.assertRaises(ValueError):
+            system.improve(-1)
+        # rejected outright -- no partial/implicit promotion happened on the way to raising
+        self.assertEqual(system._captured, {})
+        self.assertEqual(len(system._harvest), 1)
+
+    def test_a_second_improve_call_can_finish_what_the_first_could_not_afford(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        self._harvest_distinct(system, 3)
+
+        system.improve(1)
+        self.assertEqual(len(system._captured), 1)
+        report2 = system.improve(10)
+        self.assertEqual(report2["n_captured"], 2)
+        self.assertEqual(len(system._captured), 3)
+        self.assertEqual(system._harvest, {})
+
+    # negative control: a budget that comfortably covers the whole harvest still promotes everything,
+    # exactly as the pre-fix behavior did in the common case -- the fix must not become more
+    # restrictive than necessary when the budget was never actually a binding constraint
+    def test_ample_budget_still_promotes_everything(self):
+        system = System(SystemConfig(teacher=_fake_teacher))
+        self._harvest_distinct(system, 3)
+
+        report = system.improve(1000)
+
+        self.assertEqual(report["status"], "captured")
+        self.assertEqual(report["n_captured"], 3)
+        self.assertEqual(len(system._captured), 3)
+        self.assertEqual(system._harvest, {})
+
+
 class SystemConfigFromEnvTest(unittest.TestCase):
     def test_from_env_requires_base_url_and_model(self):
         with self.assertRaises(ValueError) as ctx:

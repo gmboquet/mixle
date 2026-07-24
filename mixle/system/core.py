@@ -114,6 +114,13 @@ def _complete(teacher: LLM | Callable[..., str], prompt: str) -> str:
     return teacher(prompt)
 
 
+# System.improve()'s cost model: one flat unit per (query, reply) pair promoted from the harvest into
+# the captured cache. Promoting a pair is a pure cache write, not an external call, so this is
+# deliberately a separate, simpler ledger than Spend (which counts real frontier/oracle calls); replace
+# this constant with a real per-item cost function if promotion ever needs a richer model.
+_PROMOTE_COST_PER_ITEM = 1
+
+
 class System:
     """Constructed from a :class:`SystemConfig`; exposes ``answer``/``ingest``/``improve``."""
 
@@ -277,25 +284,55 @@ class System:
         return {"status": "ok_fallback", "assimilated": False, "item_id": item.id}
 
     def improve(self, budget: int) -> dict[str, Any]:
-        """Promote every harvested (query, reply) pair from :meth:`answer` into the captured cache.
+        """Promote harvested (query, reply) pairs from :meth:`answer` into the captured cache, up to
+        ``budget``.
 
-        Reports that there is nothing to improve when nothing has been
-        harvested yet. Otherwise this is the cold-start capture step: after
-        this call, a repeat of a captured query is answered from the local cache
-        (see :meth:`answer`).
+        Promotion is costed at a flat :data:`_PROMOTE_COST_PER_ITEM` (currently 1) unit per (query,
+        reply) pair -- the only cost model defined for this step, since promoting a harvested pair is a
+        pure cache write, not an external call like the frontier/oracle spend :meth:`answer` meters.
+        ``budget`` is a hard ceiling on how many pairs THIS call may promote, the same hard-ceiling
+        spirit as ``answer``'s budget: a negative budget is a caller error and raises ``ValueError``
+        rather than being silently treated as zero or unlimited.
+
+        Candidates are promoted in harvest order (the order :meth:`answer` first harvested them --
+        harvested pairs carry no other recency or confidence signal to rank by, so this is the simplest
+        available, documented priority). Whatever does not fit the budget is left in the harvest for a
+        later, better-funded call rather than being discarded.
+
+        Reports that there is nothing to improve when nothing has been harvested yet. Otherwise this is
+        the cold-start capture step: after this call, a repeat of a captured query is answered from the
+        local cache (see :meth:`answer`). The return value reports both the requested ceiling
+        (``budget``) and the realized spend (``realized_spend``) so a caller can tell a fully-funded
+        round from a partial one.
         """
+        budget = int(budget)
+        if budget < 0:
+            raise ValueError(f"improve budget must be >= 0, got {budget}")
         if not self._harvest:
             return {
                 "status": "nothing_to_improve",
                 "reason": "no improvement subsystem registered yet",
-                "budget": int(budget),
+                "budget": budget,
+                "realized_spend": 0,
+                "n_captured": 0,
+                "n_skipped": 0,
             }
-        n_captured = len(self._harvest)
-        self._captured.update(self._harvest)
-        self._harvest.clear()
+        affordable = budget // _PROMOTE_COST_PER_ITEM
+        candidates = list(self._harvest.items())[:affordable]
+        for key, _value in candidates:
+            self._captured[key] = self._harvest.pop(key)
+        n_captured = len(candidates)
+        realized_spend = n_captured * _PROMOTE_COST_PER_ITEM
+        n_skipped = len(self._harvest)
+        if n_captured:
+            reason = f"promoted {n_captured} harvested (query, reply) pair(s) into the captured cache"
+        else:
+            reason = f"budget {budget} affords 0 of {n_skipped} harvested pair(s) at {_PROMOTE_COST_PER_ITEM} unit/pair"
         return {
-            "status": "captured",
-            "reason": f"promoted {n_captured} harvested (query, reply) pair(s) into the captured cache",
-            "budget": int(budget),
+            "status": "captured" if n_captured else "insufficient_budget",
+            "reason": reason,
+            "budget": budget,
+            "realized_spend": realized_spend,
             "n_captured": n_captured,
+            "n_skipped": n_skipped,
         }
