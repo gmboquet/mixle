@@ -48,8 +48,12 @@ class TorchEngine(ComputeEngine):
                 "torch), or upgrade torch."
             )
         self.device = torch.device(device or "cpu")
-        # MPS (Apple-silicon GPU) has no float64 — fall back to its highest supported precision (float32),
-        # both for the default dtype and for an explicit float64 request (which would otherwise crash on MPS).
+        # MPS (Apple-silicon GPU) has no float64. An unset/default dtype silently settles for MPS's
+        # highest supported precision (float32) below -- a low-stakes accommodation, since the caller
+        # never asked for a specific precision. An EXPLICIT float64 request is different: MPS genuinely
+        # cannot honor it, and a caller relying on it for precision allocation or a scientific tolerance
+        # must not receive a silently-downgraded policy with no infeasibility signal, so that case fails
+        # closed instead (see the `dtype is not None` branch below).
         self._no_f64 = self.device.type == "mps"
         if isinstance(dtype, torch.dtype) and not dtype.is_floating_point:
             # A concrete non-floating torch dtype (e.g. torch.int64/torch.bool, as surfaced
@@ -70,7 +74,15 @@ class TorchEngine(ComputeEngine):
         if dtype is not None:
             self.dtype = normalize_torch_dtype(dtype, torch)
             if self._no_f64 and self.dtype == torch.float64:
-                self.dtype = torch.float32
+                raise ValueError(
+                    f"TorchEngine device 'mps' has no float64 support, but dtype={dtype!r} explicitly "
+                    "requested it. MPS's highest supported floating precision is float32, which cannot "
+                    "meet a float64 accuracy requirement -- silently downgrading would let a caller "
+                    "relying on float64 for precision allocation or a scientific tolerance receive a "
+                    "policy that cannot honor it, with no signal the request went unmet. Pass "
+                    "device='cpu' (or another float64-capable device), or explicitly accept the reduced "
+                    "precision by passing dtype='float32' instead."
+                )
         else:
             self.dtype = torch.float32 if self._no_f64 else torch.float64
         self.compile_enabled = bool(compile)
