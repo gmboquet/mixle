@@ -200,7 +200,11 @@ class _RecalibratedModel:
     ``c`` (the predictive mean) *without* refitting the base parameters. It is exact: under the
     change of variables ``u = c + (y - c) / T`` the density is
     ``p_T(y) = p_base(u) / T`` and a sample ``y = c + T (s - c)`` for a base draw ``s``. Scoring and
-    encoding delegate to the base model, so this stays family-agnostic for scalar continuous leaves.
+    encoding delegate to the base model, so this stays family-agnostic for scalar continuous leaves --
+    ``dist_to_encoder()`` returns a :class:`_RecalibratedEncoder` that applies the ``u`` transform at
+    encode time (rather than the base's own encoder unmodified), so the public
+    ``dist_to_encoder().seq_encode(...)`` -> ``seq_log_density(...)`` route scores the same value the
+    scalar ``log_density`` path does.
     """
 
     def __init__(self, base: Any, temperature: float, center: float) -> None:
@@ -219,7 +223,14 @@ class _RecalibratedModel:
         return float(self.base.log_density(u) - np.log(self.temperature))
 
     def dist_to_encoder(self):
-        return self.base.dist_to_encoder()
+        # NOT self.base.dist_to_encoder(): that would hand out an encoder whose seq_encode(raw) encodes
+        # the UNTRANSFORMED raw observation, so seq_log_density(enc) below -- which only ever adds the
+        # Jacobian term -- would silently score log p_base(raw) - log T instead of the correct
+        # log p_base(transform(raw)) - log T. _RecalibratedEncoder applies the same transform this
+        # class's own log_density/seq_log_density_raw apply, so the public encoded/batch route
+        # (dist_to_encoder().seq_encode(...) -> seq_log_density(...), the contract every other
+        # distribution in this codebase honors) agrees with the scalar path for the same observation.
+        return _RecalibratedEncoder(self)
 
     def seq_log_density_raw(self, rows: Any) -> np.ndarray:
         """Exact per-observation log density on *raw* rows (the stateless, split-safe path).
@@ -232,9 +243,10 @@ class _RecalibratedModel:
         return np.asarray(self.base.seq_log_density(enc_u), dtype=float) - float(np.log(self.temperature))
 
     def seq_log_density(self, enc: Any) -> np.ndarray:
-        # The encoded handle does not expose raw y, so the change-of-variables transform cannot be
-        # applied here in general. The split-safe path is ``seq_log_density_raw``; the objective bridge
-        # routes recalibrated models through it. This delegating fallback applies only the Jacobian.
+        # `enc` is assumed to have come from THIS model's own dist_to_encoder() (_RecalibratedEncoder),
+        # which already applied the center/temperature transform at encode time -- so, unlike a plain
+        # delegating fallback, adding the Jacobian here on top of the base's density at the (already
+        # transformed) encoded value is the complete, correct computation, not an approximation of it.
         base_ld = np.asarray(self.base.seq_log_density(enc), dtype=float)
         return base_ld - float(np.log(self.temperature))
 
@@ -248,6 +260,45 @@ class _RecalibratedModel:
 
     def __repr__(self) -> str:
         return f"_RecalibratedModel(T={self.temperature:.4g}, base={type(self.base).__name__})"
+
+
+class _RecalibratedEncoder:
+    """Encoder companion for :class:`_RecalibratedModel`.
+
+    Applies the SAME ``u = c + (y - c) / T`` transform ``log_density``/``seq_log_density_raw`` apply,
+    at encode time, before delegating to the base family's own encoder -- so a caller using the normal
+    ``model.dist_to_encoder().seq_encode(raw)`` -> ``model.seq_log_density(enc)`` contract (the one every
+    other distribution in this codebase honors) gets a density consistent with the scalar
+    ``model.log_density(raw)`` path, instead of one that silently skipped the value transform and only
+    carried the Jacobian forward.
+
+    Duck-types the ``DataSequenceEncoder`` contract (``seq_encode``, ``nbytes``, ``__eq__``, ``__str__``)
+    without importing it, matching :class:`_RecalibratedModel`'s own dependency-light, family-agnostic
+    style.
+    """
+
+    def __init__(self, model: _RecalibratedModel) -> None:
+        self._model = model
+        self._base_encoder = model.base.dist_to_encoder()
+
+    def __str__(self) -> str:
+        return f"_RecalibratedEncoder(T={self._model.temperature:.4g}, base={self._base_encoder})"
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, _RecalibratedEncoder)
+            and self._model.center == other._model.center
+            and self._model.temperature == other._model.temperature
+            and self._base_encoder == other._base_encoder
+        )
+
+    def seq_encode(self, x: Any) -> Any:
+        """Transform ``x`` by the recalibration map, then encode it through the base encoder."""
+        return self._base_encoder.seq_encode(self._model._transform(x))
+
+    def nbytes(self, x: Any) -> int:
+        """Delegate to the base encoder: ``x`` here is already-encoded, same shape either way."""
+        return self._base_encoder.nbytes(x)
 
 
 class _RecalibratedSampler:
