@@ -15,11 +15,14 @@ the calibration no-regression rule, multiplicity) and never edits the underlying
 5. **ELPD band** -- when LOO/WAIC pointwise arrays are supplied, :func:`compare_elpd`'s 2-SE band is the
    conservative tie rule.
 6. **Calibration no-regression** -- a more-accurate-but-less-calibrated challenger is refused: its
-   calibration scalar must not exceed the champion's by ``calib_tol``. Best-effort: :attr:`Verdict.
-   calibration_status` is ``'unavailable'`` (not ``'failed'``) when the comparison could not even be
-   computed -- e.g. the calibration objective is PIT-based and needs a continuous predictive
-   distribution, so it does not apply to a categorical/discrete model -- since that is not itself
-   evidence of a regression.
+   calibration scalar must not exceed the champion's by ``calib_tol``. :attr:`Verdict.
+   calibration_status` is ``'unavailable'`` only for an explicit, checked applicability decision --
+   e.g. the calibration objective is PIT-based and needs a continuous predictive distribution, so it
+   does not apply to a categorical/discrete model -- since that is not itself evidence of a
+   regression. An *unexpected* failure inside the computation itself (applicability was confirmed,
+   yet it still raised) is ``'error'``, not ``'unavailable'``: an implementation defect must not
+   silently read as calibrated, so ``'error'`` blocks promotion the same as ``'failed'`` -- see
+   :func:`_calibration_no_regression` and :attr:`Verdict.calibrated`.
 7. **Multiplicity** -- comparing one champion/challenger pair produces exactly one p-value, so this
    function cannot correct it for multiplicity by itself: every method in
    :mod:`mixle.inference.multiple_testing` is the identity transform at family size 1 (bonferroni
@@ -34,12 +37,20 @@ the calibration no-regression rule, multiplicity) and never edits the underlying
 8. **Scalar-only objectives** -- an objective whose ``pointwise`` returns ``None`` (e.g.
    :func:`~mixle.evolve.objective.calibration_objective`,
    :func:`~mixle.evolve.objective.decision_regret_objective`) has no per-observation vector to pair, so
-   no paired test can run: the verdict is decided from a bare scalar-delta-vs-``min_effect`` comparison
-   instead, and :attr:`Verdict.p_value`/``ci`` are set to ``nan`` as an explicit "not applicable"
-   sentinel (there being no null hypothesis test to report a p-value or CI *for*) -- not a failure to
-   compute one. Downstream code that pools p-values across many verdicts (point 7 above) must treat
-   this ``nan`` as "exclude from the pool", not "coerce to 0 (very significant)" or "coerce to 1 (never
-   significant)": both would misrepresent a comparison that was never run as one that was.
+   no paired test can run: :attr:`Verdict.favored` is still decided from a bare
+   scalar-delta-vs-``min_effect`` comparison (reported for a human to review), but :attr:`Verdict.
+   p_value`/``ci`` are set to ``nan`` as an explicit "not applicable" sentinel (there being no null
+   hypothesis test to report a p-value or CI *for*) -- not a failure to compute one. Downstream code
+   that pools p-values across many verdicts (point 7 above) must treat this ``nan`` as "exclude from
+   the pool", not "coerce to 0 (very significant)" or "coerce to 1 (never significant)": both would
+   misrepresent a comparison that was never run as one that was. A bare scalar delta alone carries no
+   sampling-uncertainty estimate -- no replication, bootstrap, or resampling evidence backs it -- so it
+   cannot support the same evidence-bearing promotion guarantee a paired p-value gives:
+   :attr:`Verdict.promote` is ``False`` for every scalar-only verdict regardless of ``favored`` (see
+   :attr:`Verdict.has_statistical_evidence`). A scalar objective that gains its own documented
+   resampling/replication contract (e.g. multiple independent fit replicates, or a bootstrap over the
+   held-out data) would be a legitimate way to earn auto-promotion eligibility in the future; none
+   does today, so a scalar-only win is flagged in evidence for a human to act on, not auto-promoted.
 """
 
 from __future__ import annotations
@@ -66,26 +77,44 @@ class Verdict:
     delta: float  # objective improvement, champion_scalar - challenger_scalar (>0 == challenger better)
     p_value: float  # nan for a scalar-only objective (no paired test exists) -- see module docstring point 8
     ci: tuple[float, float]  # (nan, nan) alongside a nan p_value, for the same reason
-    calibration_status: str  # 'passed' | 'failed' | 'unavailable' -- see _calibration_no_regression
+    calibration_status: str  # 'passed'|'failed'|'unavailable'|'error' -- see _calibration_no_regression
     evidence: dict = field(default_factory=dict)
 
     @property
     def calibrated(self) -> bool:
-        """True unless calibration was actually computed and found to have regressed.
+        """True unless calibration regressed, or its computation broke unexpectedly.
 
         Kept for callers that only need the promotion-relevant boolean; ``calibration_status``
-        carries the more precise three-way state a bare bool cannot: 'unavailable' (calibration
-        wasn't requested, or couldn't be computed for this model/objective -- not itself evidence
-        of a regression, so it does not block promotion, the same as 'passed') is distinct from
-        'failed' (calibration was computed for both models and the challenger's is worse by more
-        than ``calib_tol`` -- the only status that blocks promotion).
+        carries the more precise state a bare bool cannot: 'unavailable' (calibration wasn't
+        requested, or is genuinely inapplicable to this model/data -- an explicit, checked
+        applicability decision, not itself evidence of a regression, so it does not block
+        promotion, the same as 'passed') is distinct from both 'failed' (calibration was computed
+        for both models and the challenger's is worse by more than ``calib_tol``) and 'error' (the
+        computation raised unexpectedly despite looking applicable -- an implementation defect, not
+        a legitimate skip). 'failed' and 'error' are the only statuses that block promotion; an
+        'error' must not silently read the same as a pass.
         """
-        return self.calibration_status != "failed"
+        return self.calibration_status in ("passed", "unavailable")
+
+    @property
+    def has_statistical_evidence(self) -> bool:
+        """True unless this verdict came from a scalar-only objective with no paired test to run.
+
+        A scalar-only objective (module docstring point 8) has no per-observation vector to pair,
+        so ``p_value``/``ci`` are the explicit ``nan`` "not applicable" sentinel: there is no
+        sampling-uncertainty estimate -- no p-value, CI, replication, or bootstrap -- behind the raw
+        scalar delta at all. Automatic promotion requires this to be True; a scalar-only win is
+        still reported (``favored``/``delta``/``evidence['scalar_only']``) for a human to review,
+        but it can never auto-promote on its own -- see :attr:`promote`.
+        """
+        return not np.isnan(self.p_value)
 
     @property
     def promote(self) -> bool:
-        """True iff the challenger is favored *and* calibration didn't fail -- the promotion predicate."""
-        return self.favored == "challenger" and self.calibrated
+        """True iff the challenger is favored, calibration didn't fail or error, and the verdict is
+        backed by an actual statistical test (see :attr:`has_statistical_evidence`) -- the single
+        promotion predicate."""
+        return self.favored == "challenger" and self.calibrated and self.has_statistical_evidence
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize the verdict into JSON-compatible primitive fields."""
@@ -96,6 +125,7 @@ class Verdict:
             "ci": list(self.ci),
             "calibrated": self.calibrated,
             "calibration_status": self.calibration_status,
+            "has_statistical_evidence": self.has_statistical_evidence,
             "evidence": self.evidence,
         }
 
@@ -110,22 +140,47 @@ def _calibration_no_regression(
 ) -> tuple[str, dict]:
     """Challenger calibration must not be worse than the champion's by more than ``calib_tol``.
 
-    Returns ('passed' | 'failed' | 'unavailable', evidence). 'unavailable' covers both "this
-    objective doesn't apply to this model" (e.g. calibration_objective is PIT-based and needs a
-    numeric, continuous predictive distribution -- a categorical/discrete model has no such thing)
-    and any other failure to even compute the comparison; there is no exception type that reliably
-    tells those apart (a missing .sampler() raises AttributeError, but a categorical model's labels
-    failing float conversion raises ValueError -- the same exception a genuine bug in the
-    calibration computation itself could raise), so this is deliberately best-effort and does not
-    block promotion on its own, the same as 'passed'. Only 'failed' -- calibration was actually
-    computed for both models, and the challenger's is worse -- blocks promotion.
+    Returns ('passed' | 'failed' | 'unavailable' | 'error', evidence).
+
+    'unavailable' is an explicit, checked applicability decision -- calibration genuinely does not
+    apply to this champion/challenger/data triple -- never a guess from whatever exception a broken
+    computation happens to raise. Two checked cases land here: ``data`` cannot be interpreted as a
+    continuous numeric response (calibration_objective is PIT-based; a categorical/discrete model's
+    class labels are not a valid PIT input -- e.g. a self-evolution loop fitting categorical
+    models), or the computation raises ``AttributeError`` -- Python's own structural signal that
+    some required capability (e.g. ``.sampler()``) is genuinely missing from a model, as opposed to
+    the ambiguous ``ValueError`` the non-numeric-data case above could equally be mistaken for.
+    Neither is evidence of a regression, so neither blocks promotion, matching 'passed'.
+
+    'error' is the opposite: the applicability checks above passed (numeric data, no missing-
+    capability ``AttributeError``), yet the computation still raised. That is not "doesn't apply",
+    it is an unexpected failure inside the calibration computation itself -- an implementation
+    defect must not silently read as calibrated, so 'error' blocks promotion the same as 'failed'
+    (see :attr:`Verdict.calibrated`).
+
+    Only 'failed' (calibration was actually computed for both models, and the challenger's is
+    worse) and 'error' block promotion.
     """
+    try:
+        np.asarray(data, dtype=float)
+    except (TypeError, ValueError) as exc:
+        # explicit applicability check: PIT calibration needs a continuous numeric response, so
+        # categorical/discrete `data` genuinely cannot be scored by this objective.
+        return "unavailable", {"calibration": "unavailable", "reason": f"data is not numeric: {exc}"}
     try:
         obj = calibration_objective(seed=seed)
         champ_cal = obj.scalar(champion, data)
         chal_cal = obj.scalar(challenger, data)
-    except Exception as exc:  # noqa: BLE001
+    except AttributeError as exc:
+        # a genuinely missing model capability (e.g. no .sampler()): AttributeError is Python's own
+        # structural signal that the referenced attribute does not exist -- "this objective does not
+        # apply to this model", not a guess from an inherently ambiguous exception type.
         return "unavailable", {"calibration": "unavailable", "reason": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        # applicability was already confirmed above (numeric data, and not a missing-capability
+        # AttributeError): this is an unexpected failure in the computation itself, not a legitimate
+        # "doesn't apply" case -- must not silently pass as calibrated, unlike 'unavailable' above.
+        return "error", {"calibration": "error", "reason": str(exc)}
     ok = bool(chal_cal <= champ_cal + calib_tol)
     status = "passed" if ok else "failed"
     return status, {"champion_calib": champ_cal, "challenger_calib": chal_cal, "calib_tol": calib_tol, "ok": ok}
@@ -169,7 +224,9 @@ def challenger_beats_champion(
             given, the :func:`compare_elpd` 2-SE band is required to also favor the challenger.
 
     Returns:
-        A :class:`Verdict`. ``verdict.promote`` is the single promotion predicate.
+        A :class:`Verdict`. ``verdict.promote`` is the single promotion predicate; it is always
+        ``False`` for a scalar-only objective, regardless of ``favored`` -- see module docstring
+        point 8 and :attr:`Verdict.has_statistical_evidence`.
     """
     champ_vec = objective.pointwise(champion, data)
     chal_vec = objective.pointwise(challenger, data)
@@ -178,7 +235,14 @@ def challenger_beats_champion(
 
     if champ_vec is None or chal_vec is None:
         # scalar-only objective (e.g. calibration / decision regret): compare scalars directly, no
-        # paired test available -- favor the challenger only on a clear scalar improvement.
+        # paired test available. `favored` still reports which side the raw scalar delta favors (for
+        # evidence/telemetry -- e.g. a caller logging "gate verdict: favored=... promote=..."), but
+        # p_value/ci stay the nan "not applicable" sentinel, so Verdict.promote can never fire from
+        # this branch alone: a bare scalar comparison carries no sampling-uncertainty estimate -- no
+        # replication, bootstrap, or resampling evidence -- so it cannot support the same evidence-
+        # bearing promotion guarantee a paired p-value gives (see Verdict.has_statistical_evidence and
+        # module docstring point 8). A clear scalar win is reported for a human to review, not
+        # auto-promoted.
         champ_s = objective.scalar(champion, data)
         chal_s = objective.scalar(challenger, data)
         delta = (champ_s - chal_s) if objective.lower_is_better else (chal_s - champ_s)
