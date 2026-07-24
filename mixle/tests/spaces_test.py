@@ -241,6 +241,19 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(stored.payload["k"], 1)
         self.assertNotIn("MUTATED-LINK", stored.links)
 
+    def test_publish_preserves_derived_from(self):
+        """Regression test: publish() rebuilds the re-scoped item field-by-field and, added after
+        MXR-080-0261 introduced SubstrateItem.derived_from as the typed provenance-edge list, silently
+        omitted it -- so a published item's real ancestry (what mixle.substrate.trust.verify_lineage
+        traverses) was dropped the moment it was shared, even though tags/links/payload all survived."""
+        s = Substrate()
+        parent = s.add(kind="text", text="source measurement", scope="teamA")
+        child = s.add(kind="text", text="derived summary", scope="teamA", derived_from=[parent])
+
+        publish(s, [child], to=PUBLIC, by="alice", policy=_staffed_policy())
+
+        self.assertEqual(s.get(child).derived_from, [parent])
+
 
 class RevisionTest(unittest.TestCase):
     """MXR-080-0265: publish persists an immutable, content-addressed snapshot of the state it is
@@ -457,6 +470,22 @@ class MergeAuthorizationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             merge_versions(s, a, b, by="alice", policy=policy)  # confirm defaults to False
         self.assertIsNotNone(s.get(b))  # NOT deleted -- the destructive step never ran
+
+    def test_merge_unions_derived_from_like_tags_and_links(self):
+        """Regression test: the merged item is rebuilt field-by-field and, added after MXR-080-0261
+        introduced SubstrateItem.derived_from, silently dropped both parents' ancestry instead of
+        unioning it the same way tags/links already are -- so a merge could erase real provenance
+        edges while claiming 'no silent loss'."""
+        s = Substrate()
+        p1 = s.add(kind="text", text="source one", scope="teamA")
+        p2 = s.add(kind="text", text="source two", scope="teamA")
+        keep = s.add(kind="text", text="keep", scope="teamA", derived_from=[p1])
+        other = s.add(kind="text", text="other", scope="teamA", derived_from=[p2])
+        policy = AccessPolicy().grant("alice", "teamA")
+
+        merge_versions(s, keep, other, by="alice", policy=policy, confirm=True)
+
+        self.assertEqual(sorted(s.get(keep).derived_from), sorted([p1, p2]))
 
     def test_merge_rejects_an_unrecognized_strategy(self):
         s = Substrate()
