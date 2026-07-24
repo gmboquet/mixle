@@ -6,6 +6,8 @@ import unittest
 import numpy as np
 
 from mixle.stats.combinator.truncated import TruncatedDistribution
+from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+from mixle.stats.univariate.discrete.bernoulli import BernoulliDistribution
 from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
 from mixle.stats.univariate.discrete.poisson import PoissonDistribution
 
@@ -72,6 +74,41 @@ class TruncatedDistributionTestCase(unittest.TestCase):
             TruncatedDistribution(self.cat)  # neither allowed nor forbidden
         with self.assertRaises(ValueError):
             TruncatedDistribution(self.cat, allowed=["a"], forbidden=["b"])  # both
+
+    def test_forbidding_single_point_on_continuous_base_is_a_no_op(self):
+        # A continuous base has zero measure at any single point: forbidding one must not change the
+        # normalizing constant (only exclude that exact point from the retained support).
+        base = GaussianDistribution(0.0, 1.0)
+        t = TruncatedDistribution(base, forbidden=[0.0])
+        self.assertEqual(t.log_z, 0.0)
+        for x in (-1.3, 0.37, 2.0):
+            self.assertAlmostEqual(t.log_density(x), base.log_density(x), delta=TOL)
+        self.assertEqual(t.log_density(0.0), -np.inf)  # the forbidden point itself is still excluded
+
+    def test_allowing_only_individual_points_on_continuous_base_retains_no_mass(self):
+        # The mirror image: a finite list of individual points on a continuous base retains zero
+        # measure (each point has probability zero), so there is no positive-measure "allowed"
+        # subset to renormalize onto -- this is the pre-existing "retains no probability mass" error,
+        # not a special case.
+        base = GaussianDistribution(0.0, 1.0)
+        with self.assertRaises(ValueError):
+            TruncatedDistribution(base, allowed=[0.0, 1.0])
+
+    def test_allowed_duplicates_are_deduplicated(self):
+        # A duplicate entry in `allowed` must not be double-counted into the normalizing constant.
+        base = BernoulliDistribution(0.25)  # P(0) = 0.75, P(1) = 0.25
+        t = TruncatedDistribution(base, allowed=[0, 0])
+        self.assertEqual(t.support_size(), 1)
+        self.assertAlmostEqual(math.exp(t.log_density(0)), 1.0, delta=TOL)
+        self.assertEqual(t.log_density(1), -np.inf)
+
+    def test_forbidden_duplicates_are_deduplicated(self):
+        # Same double-counting bug, mirrored onto `forbidden`: a repeated entry must not subtract its
+        # mass twice (which would otherwise push the retained probability above 1).
+        base = BernoulliDistribution(0.25)
+        t = TruncatedDistribution(base, forbidden=[1, 1])
+        self.assertAlmostEqual(math.exp(t.log_density(0)), 1.0, delta=TOL)
+        self.assertEqual(t.log_density(1), -np.inf)
 
 
 if __name__ == "__main__":

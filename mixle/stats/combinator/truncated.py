@@ -8,6 +8,13 @@ where ``Z = sum_{y allowed} p_base(y)`` is the retained mass.  The restriction i
 finite ``forbidden`` set to exclude (``Z = 1 - sum_f p_base(f)`` -- works for an infinite base) or a
 finite ``allowed`` set to keep (``Z = sum_a p_base(a)``).  It pairs with the Phase-1c support tools:
 the renormalizer is exactly the truncated tail/total the enumeration bounds reason about.
+
+``allowed``/``forbidden`` are deduplicated (by value, not by position), so a repeated entry cannot
+double-count its mass.  The point-mass sums above assume a *discrete* (enumerable) base, where
+``p_base(v)`` at a single value ``v`` is itself a probability.  For a *continuous* base, any single
+point has zero measure, so a finite point list can only ever remove or retain zero mass: forbidding
+one is therefore a no-op (``Z = 1``) and allowing one necessarily retains nothing (``Z = 0``, which
+raises -- see below).
 """
 
 import math
@@ -35,6 +42,42 @@ from mixle.utils.special import log1mexp
 _REJECTION_BUDGET = 1_000_000  # max base draws before a rejection sampler gives up
 
 
+def _is_discrete_base(base: Any) -> bool:
+    """Return whether ``base`` has enumerable (discrete/atomic) support.
+
+    Probes :meth:`~mixle.stats.compute.pdist.SequenceEncodableProbabilityDistribution.enumerator`
+    the same way :class:`TruncatedEnumerator` already does: a distribution with atomic support
+    implements it, while a continuous one raises :class:`EnumerationError`. A ``base`` that does not
+    even expose ``enumerator`` (e.g. a minimal duck-typed stub) is likewise treated as continuous,
+    matching the base class's own default. This is how the normalizing-constant computation below
+    tells apart a ``base.log_density(v)`` that is itself a probability (an atom, for a discrete
+    base) from one that is a density (zero-measure at any single point, for a continuous base).
+    """
+    if not hasattr(base, "enumerator"):
+        return False
+    try:
+        base.enumerator()
+    except EnumerationError:
+        return False
+    return True
+
+
+def _dedupe(values: Sequence[Any]) -> list[Any]:
+    """Deduplicate ``values`` by :func:`~mixle.enumeration.algorithms.freeze` key.
+
+    Keeps the first occurrence and the input order, so a repeated ``allowed``/``forbidden`` entry
+    (e.g. ``[0, 0]``) cannot be counted twice into the normalizing constant.
+    """
+    seen: set = set()
+    out: list[Any] = []
+    for v in values:
+        k = freeze(v)
+        if k not in seen:
+            seen.add(k)
+            out.append(v)
+    return out
+
+
 class TruncatedDistribution(SequenceEncodableProbabilityDistribution):
     """A base distribution restricted to an allowed support and renormalized."""
 
@@ -59,23 +102,35 @@ class TruncatedDistribution(SequenceEncodableProbabilityDistribution):
         self.base = base
         self.name = name
         self.keys = keys
-        self._allowed_values = None if allowed is None else list(allowed)
-        self._forbidden_values = None if forbidden is None else list(forbidden)
-        self._allowed_keys = None if allowed is None else {freeze(v) for v in allowed}
-        self._forbidden_keys = None if forbidden is None else {freeze(v) for v in forbidden}
+        # Deduplicated up front (by `freeze` key): a repeated entry (e.g. `allowed=[0, 0]`) must not
+        # be counted twice into the normalizing constant below, nor into `support_size`.
+        self._allowed_values = None if allowed is None else _dedupe(list(allowed))
+        self._forbidden_values = None if forbidden is None else _dedupe(list(forbidden))
+        self._allowed_keys = None if allowed is None else set(map(freeze, self._allowed_values))
+        self._forbidden_keys = None if forbidden is None else set(map(freeze, self._forbidden_values))
         # The retained log-mass ``log Z`` is formed in log space so it survives the tail-censoring
         # regime: an ``allowed`` set whose atoms are individually tiny is summed by ``logsumexp``, and
         # a ``forbidden`` set whose mass is ~1 uses a stable ``log(1 - p_forbidden)`` instead of the
-        # catastrophically cancelling ``1 - sum(exp(...))``.
+        # catastrophically cancelling ``1 - sum(exp(...))``. That point-mass accounting is only valid
+        # for a discrete base, where `log_density(v)` at a single value is itself a log-probability;
+        # for a continuous base a finite point list has zero measure, so `forbidden` is a mass-1 no-op
+        # and `allowed` necessarily retains nothing (handled by the `log_z > -inf` check below).
+        discrete = _is_discrete_base(base)
         if self._allowed_values is not None:
-            log_probs = [float(base.log_density(v)) for v in self._allowed_values]
-            finite = [lp for lp in log_probs if lp > -math.inf]
-            log_z = float(logsumexp(finite)) if finite else -math.inf
+            if discrete:
+                log_probs = [float(base.log_density(v)) for v in self._allowed_values]
+                finite = [lp for lp in log_probs if lp > -math.inf]
+                log_z = float(logsumexp(finite)) if finite else -math.inf
+            else:
+                log_z = -math.inf
         else:
-            log_forbidden = [float(base.log_density(v)) for v in self._forbidden_values]
-            finite = [lp for lp in log_forbidden if lp > -math.inf]
-            log_p_forbidden = float(logsumexp(finite)) if finite else -math.inf
-            log_z = log1mexp(log_p_forbidden)
+            if discrete:
+                log_forbidden = [float(base.log_density(v)) for v in self._forbidden_values]
+                finite = [lp for lp in log_forbidden if lp > -math.inf]
+                log_p_forbidden = float(logsumexp(finite)) if finite else -math.inf
+                log_z = log1mexp(log_p_forbidden)
+            else:
+                log_z = 0.0
         if not (log_z > -math.inf):
             raise ValueError("Truncation retains no probability mass.")
         self.log_z = log_z
