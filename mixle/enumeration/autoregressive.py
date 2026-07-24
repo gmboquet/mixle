@@ -85,6 +85,21 @@ def _raise_index(fb: int, off: int) -> tuple[Any, float]:
     raise IndexError("empty autoregressive count index")
 
 
+def _require_exact_cardinality(actual: int, expected: int, source: str) -> None:
+    """Raise a clear error if a callback returned the wrong number of results (MXR-080-0223).
+
+    Positional pairing (``zip``, index assignment) between a batch of requests and a batch of results is
+    only safe when the counts match exactly: a short result would otherwise silently drop or misalign the
+    tail, and a long one would silently ignore the extra -- either way masking what is likely a caller-side
+    bug, and risking writing a result into the shared forward cache under the WRONG prefix/sequence key.
+    """
+    if actual != expected:
+        raise ValueError(
+            "%s returned %d result(s) for %d input(s); exact cardinality is required (a mismatch would "
+            "silently drop, ignore, or misalign results)." % (source, actual, expected)
+        )
+
+
 def autoregressive_count_index(
     steps: Callable[[tuple], list[tuple[Any, float]]],
     prefix: tuple,
@@ -366,7 +381,9 @@ class AutoregressiveEnumerable:
         batch_next_logprobs: optional ``batch_next_logprobs([prefix, ...]) -> [result, ...]`` scoring many
             prefixes in one (padded) forward. When given, the count index warms its forward cache breadth-first
             in ``batch_size`` chunks -- the large speed-up for transformers, where one-at-a-time forwards
-            dominate (e.g. distilGPT-2 length-2 to rank 1e5: ~25 s one-at-a-time -> ~1 s batched).
+            dominate (e.g. distilGPT-2 length-2 to rank 1e5: ~25 s one-at-a-time -> ~1 s batched). Each
+            chunk's results must exactly match the chunk's own size -- a short or long result raises rather
+            than silently dropping/ignoring the mismatch (MXR-080-0223).
         batch_size: prefixes per batched forward.
         count_mode: how counts are carried past the int64-exact regime (budgets over ~2**60 sequences).
             ``'auto'`` (default) switches the numpy fast path to float64 there -- **approximate** counts
@@ -381,10 +398,14 @@ class AutoregressiveEnumerable:
         batch_score_sequences: optional teacher-forcing scorer ``[sequence, ...] -> array of total log-probs``
             -- ONE forward per sequence (all positions score in parallel) instead of one forward per token.
             Used by :meth:`score_sequences` and, when a sequence's prefixes are not already cached, by
-            :meth:`log_density`; the substrate for draft-rescored (speculative) enumeration.
+            :meth:`log_density`; the substrate for draft-rescored (speculative) enumeration. Must return
+            exactly one score per (in-support) sequence requested -- a short or long result raises
+            (MXR-080-0223).
         all_position_logprobs: optional ``sequence -> [next_logprobs result for seq[:d], d in 0..len-1]`` --
             one forward yields the full next-token distribution at EVERY position; harvested into the
-            forward cache by :meth:`harvest`. Makes corpus-calibrated envelopes ~L-times cheaper.
+            forward cache by :meth:`harvest`. Makes corpus-calibrated envelopes ~L-times cheaper. Must
+            return exactly one result per position -- a short result raises rather than silently leaving
+            some positions uncached (MXR-080-0223).
 
     The model is queried lazily and **memoized by prefix**, so deepening the index (or recomputing a
     log-density) never re-runs a forward pass it has already seen. With integer tokens the histogram build
@@ -530,6 +551,12 @@ class AutoregressiveEnumerable:
         ``batch_size`` chunks (one padded forward each), pruning to prefixes whose cumulative bits stay within
         ``max_fine_bucket``. If a level grows past ``frontier_cap`` we stop prefetching and let the recursion
         fetch the deep remainder lazily -- so deep/wide trees degrade gracefully instead of materializing.
+
+        Each chunk's result count is validated against the chunk's own size before anything is cached
+        (MXR-080-0223): ``zip(chunk, results)`` alone would silently drop the tail of ``chunk`` on a short
+        result (leaving those prefixes to the lazy per-prefix path with no warning) or silently ignore the
+        extra on a long one -- either way masking a caller-side ``batch_next_logprobs`` bug instead of
+        surfacing it.
         """
         if self.batch_next_logprobs is None:
             return
@@ -545,7 +572,9 @@ class AutoregressiveEnumerable:
                 break  # budget pruned the frontier to nothing -- no deeper forwards needed
             for i in range(0, len(need), self.batch_size):
                 chunk = need[i : i + self.batch_size]
-                for pfx, raw in zip(chunk, self.batch_next_logprobs(chunk)):
+                raw_results = list(self.batch_next_logprobs(chunk))
+                _require_exact_cardinality(len(raw_results), len(chunk), "batch_next_logprobs")
+                for pfx, raw in zip(chunk, raw_results):
                     if pfx not in self._cache:
                         self._cache[pfx] = self._parse_steps(raw)
             if length == self._depth - 1:
@@ -617,12 +646,16 @@ class AutoregressiveEnumerable:
 
         When a ``batch_score_sequences`` scorer is configured and any of the sequence's prefixes is not
         already cached, the score comes from ONE teacher-forcing forward instead of one forward per token.
+        The scorer's returned cardinality is validated (exactly one score for the one sequence requested)
+        before it is trusted -- see :meth:`score_sequences`' own note (MXR-080-0223).
         """
         seq = tuple(sequence)
         if not self._in_declared_support(seq):
             return _NEG_INF
         if self.batch_score_sequences is not None and any(seq[:d] not in self._cache for d in range(len(seq))):
-            return float(np.asarray(self.batch_score_sequences([seq]), dtype=float).reshape(-1)[0])
+            scored = np.asarray(self.batch_score_sequences([seq]), dtype=float).reshape(-1)
+            _require_exact_cardinality(scored.size, 1, "batch_score_sequences")
+            return float(scored[0])
         lp = 0.0
         prefix: tuple = ()
         for token in seq:
@@ -639,8 +672,11 @@ class AutoregressiveEnumerable:
         With ``batch_score_sequences`` this is one call scoring every structurally in-support sequence (one
         forward per sequence, all positions in parallel); a sequence off the declared support (see
         :meth:`_in_declared_support`) scores ``-inf`` directly, without ever reaching the external scorer.
-        Otherwise falls back to per-sequence :meth:`log_density` over the cached walk, which applies the
-        identical structural check. The rescoring primitive for draft-based (speculative) enumeration.
+        The scorer's returned cardinality is then validated -- exactly one score per in-support sequence
+        sent to it -- before it is trusted (MXR-080-0223); a short or long result raises rather than
+        silently misaligning or dropping scores. Otherwise falls back to per-sequence :meth:`log_density`
+        over the cached walk, which applies the identical structural check. The rescoring primitive for
+        draft-based (speculative) enumeration.
         """
         seqs = [tuple(s) for s in sequences]
         if not seqs:
@@ -649,8 +685,9 @@ class AutoregressiveEnumerable:
             out = np.full(len(seqs), _NEG_INF, dtype=float)
             idx = [i for i, s in enumerate(seqs) if self._in_declared_support(s)]
             if idx:
-                scored = self.batch_score_sequences([seqs[i] for i in idx])
-                out[idx] = np.asarray(scored, dtype=float).reshape(len(idx))
+                scored = np.asarray(self.batch_score_sequences([seqs[i] for i in idx]), dtype=float).reshape(-1)
+                _require_exact_cardinality(scored.size, len(idx), "batch_score_sequences")
+                out[idx] = scored
             return out
         return np.array([self.log_density(s) for s in seqs], dtype=float)
 
@@ -660,6 +697,11 @@ class AutoregressiveEnumerable:
         Requires ``all_position_logprobs``; a no-op without it. Feeding typical sequences (a corpus, a
         provider's fast generations) through this warms the same memo cache the count index and the
         envelope read -- L cache entries per model call.
+
+        The result must carry exactly one entry per position (MXR-080-0223): a short result used to be
+        silently accepted by slicing to ``results[:len(seq)]``, leaving the un-covered tail of prefixes
+        uncached with no signal that coverage was incomplete. That is validated -- and any cache mutation
+        withheld -- before anything is written.
         """
         if self.all_position_logprobs is None:
             return
@@ -667,8 +709,9 @@ class AutoregressiveEnumerable:
         need = [d for d in range(len(seq)) if seq[:d] not in self._cache]
         if not need:
             return
-        results = self.all_position_logprobs(seq)
-        for d, raw in enumerate(results[: len(seq)]):
+        results = list(self.all_position_logprobs(seq))
+        _require_exact_cardinality(len(results), len(seq), "all_position_logprobs")
+        for d, raw in enumerate(results):
             prefix = seq[:d]
             if prefix not in self._cache:
                 self._cache[prefix] = self._parse_steps(raw)
