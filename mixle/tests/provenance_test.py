@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 
 from mixle.data import check_dataset, dataset_hash, load_encoded, save_encoded
+from mixle.data.hashing import _canonical
 from mixle.inference.production import Header, fit_with_provenance
 from mixle.stats import CategoricalDistribution, CompositeDistribution, GaussianDistribution
 from mixle.stats.multivariate.diagonal_gaussian import DiagonalGaussianDistribution
@@ -28,6 +29,64 @@ class DatasetHashTest(unittest.TestCase):
         a = [(1.0, "x"), (2.0, "y")]
         self.assertEqual(dataset_hash(a), dataset_hash([(1.0, "x"), (2.0, "y")]))
         self.assertNotEqual(dataset_hash(a), dataset_hash([(1.0, "x"), (2.0, "z")]))
+
+    def test_distinct_records_do_not_collide_across_separator_bytes(self):
+        # Audit finding: _canonical used to join list/dict elements with a bare "," / ":" and encode
+        # strings/bytes as a tag plus raw, un-length-prefixed content. A string, key, or record
+        # containing those separator bytes could then make one structure's join land on exactly the
+        # same bytes as a different structure's join -- so genuinely distinct data (different values
+        # and different shapes, not just different metadata) could get identical provenance hashes.
+        # Three independent shapes of the same bug, all now must produce distinct hashes:
+        self.assertNotEqual(
+            dataset_hash(["x", "|sy"]),  # two records: "x" and "|sy"
+            dataset_hash(["x|s", "y"]),  # two records: "x|s" and "y" -- used to both hash to 1d0c57ad...
+        )
+        self.assertNotEqual(
+            dataset_hash([["X", "Y"]]),  # one record: a 2-element list
+            dataset_hash([["X,sY"]]),  # one record: a 1-element list -- used to both hash to 1be84588...
+        )
+        self.assertNotEqual(
+            dataset_hash([{"a": 1, "b": 2}]),  # one record: two named columns
+            dataset_hash([{"a:i1,sb": 2}]),  # one record: one named column -- used to both hash to 497ea36c...
+        )
+
+    def test_identical_datasets_still_hash_identically(self):
+        # The fix for the collisions above must not turn genuinely equal data into a false mismatch.
+        self.assertEqual(dataset_hash(["x", "|sy"]), dataset_hash(["x", "|sy"]))
+        self.assertEqual(dataset_hash([["X", "Y"]]), dataset_hash([["X", "Y"]]))
+        self.assertEqual(dataset_hash([{"a": 1, "b": 2}]), dataset_hash([{"b": 2, "a": 1}]))  # key order-free
+        self.assertEqual(dataset_hash([np.array([1.0, 2.0])]), dataset_hash([np.array([1.0, 2.0])]))
+
+    def test_arrays_are_distinguished_by_value_not_just_shape_or_dtype(self):
+        self.assertNotEqual(dataset_hash([np.array([1.0, 2.0])]), dataset_hash([np.array([1.0, 3.0])]))
+        self.assertNotEqual(
+            dataset_hash([np.array([1.0, 2.0, 3.0, 4.0]).reshape(2, 2)]),
+            dataset_hash([np.array([1.0, 2.0, 3.0, 4.0]).reshape(4, 1)]),
+        )
+
+    def test_nan_normalizes_but_is_never_confused_with_a_real_float(self):
+        self.assertEqual(dataset_hash([float("nan")]), dataset_hash([float("nan")]))  # normalizes consistently
+        self.assertNotEqual(dataset_hash([float("nan")]), dataset_hash([0.0]))
+
+
+class CanonicalEncodingTest(unittest.TestCase):
+    """Unit-level pin on ``_canonical`` itself (imported directly by ``mixle.analysis.emissions`` too),
+    not just observed indirectly through ``dataset_hash``."""
+
+    def test_list_join_no_longer_ambiguous(self):
+        self.assertNotEqual(_canonical(["X", "Y"]), _canonical(["X,sY"]))
+        self.assertNotEqual(_canonical(["x", "|sy"]), _canonical(["x|s", "y"]))
+
+    def test_dict_join_no_longer_ambiguous(self):
+        self.assertNotEqual(_canonical({"a": 1, "b": 2}), _canonical({"a:i1,sb": 2}))
+
+    def test_string_encoding_carries_an_explicit_length_prefix(self):
+        # The fix: a tag byte, then an 8-byte big-endian length, then exactly that many content bytes --
+        # the length is stated, not inferred by scanning content for an unescaped separator.
+        encoded = _canonical("ab")
+        self.assertEqual(encoded[:1], b"s")
+        self.assertEqual(int.from_bytes(encoded[1:9], "big"), 2)
+        self.assertEqual(encoded[9:], b"ab")
 
 
 class ProvenanceHeaderTest(unittest.TestCase):
