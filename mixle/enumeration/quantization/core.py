@@ -319,13 +319,19 @@ class Quantizer:
     def __init__(
         self, bin_width_bits: float = 1.0, oversample: int = 8, executor=None, count_mode: str = "exact"
     ) -> None:
-        if bin_width_bits <= 0:
-            raise ValueError("bin_width_bits must be positive.")
-        if int(oversample) < 1:
-            raise ValueError("oversample must be a positive integer.")
+        bin_width_bits = float(bin_width_bits)
+        # math.isfinite rejects NaN and +/-inf; plain ``<= 0`` alone does not, since every NaN
+        # comparison (including ``nan <= 0``) is False and would otherwise pass silently through.
+        if not math.isfinite(bin_width_bits) or bin_width_bits <= 0:
+            raise ValueError(f"bin_width_bits must be finite and positive, got {bin_width_bits!r}")
+        # Require an exact positive integer rather than truncating a fractional value through
+        # int(): a caller passing e.g. oversample=2.9 almost certainly has a bug, and silently
+        # rounding it down to 2 would hide that bug instead of surfacing it.
+        if isinstance(oversample, bool) or not isinstance(oversample, (int, np.integer)) or oversample < 1:
+            raise ValueError(f"oversample must be a positive integer, got {oversample!r}")
         if count_mode not in ("exact", "float"):
             raise ValueError("count_mode must be 'exact' or 'float'")
-        self.bin_width_bits = float(bin_width_bits)
+        self.bin_width_bits = bin_width_bits
         self.oversample = int(oversample)
         # Optional convolution executor (see mixle.enumeration.quantization.parallel). Lives only in the
         # building process; the count-DP routes its heavy convolutions through it when present.
@@ -346,8 +352,22 @@ class Quantizer:
         return a.convolve(b, max_fine_bucket=max_fine_bucket, bucket_delta_bits=self.bin_width_bits / self.oversample)
 
     def bits(self, log_prob: float) -> float:
-        """Information content -log2 p in bits (>= 0)."""
-        return max(0.0, -float(log_prob) / _LOG2)
+        """Information content -log2 p in bits (>= 0).
+
+        ``log_prob`` must be a valid log probability: a probability in (0, 1] has a log <= 0, and
+        -inf is accepted as the exact-zero-probability sentinel (mapping to +inf bits). NaN and
+        positive log-probabilities (which would imply a probability > 1) are invalid inputs and are
+        REJECTED outright rather than silently clamped to 0 bits -- the highest-probability bucket.
+        Clamping would turn a caller's bug (a malformed or unnormalized score) into a confident but
+        wrong claim that the item is the single most likely outcome, which is worse than a loud
+        failure at the source.
+        """
+        lp = float(log_prob)
+        if math.isnan(lp):
+            raise ValueError("log_prob must not be NaN.")
+        if lp > 0.0:
+            raise ValueError(f"log_prob must be <= 0 (a probability > 1 is invalid), got {lp!r}")
+        return max(0.0, -lp / _LOG2)
 
     def fine_bucket(self, log_prob: float) -> int:
         """Fine integer bucket of a log probability."""
