@@ -167,6 +167,75 @@ class CodebookFormatTest(unittest.TestCase):
         self.assertEqual(fmt.bits_per_value, 8.0)
         self.assertEqual(fmt.compression_ratio(), 8.0)  # 64-bit float -> 8-bit index
 
+    # -- MXR-080-0128: codebooks above 256 entries need 16/32-bit indices (see _idx_dtype), but
+    # _pack_bits capped the packing width at 8 regardless, so compress() raised for any code >= 256
+    # even though quantize() produced it successfully (a 300-code format's code 299 needs 9 bits).
+    # Fixed by making _pack_bits follow the full declared index width (16 or 32 bits, byte-aligned
+    # little-endian) instead of capping at 8; also added construction-time validation for the codebook
+    # itself (finite, nonempty) and for fit()'s n_codes/iters (positive exact integers), none of which
+    # had a coherent contract before.
+    def test_large_codebook_compress_succeeds_for_high_codes(self):
+        cb = CodebookFormat(np.linspace(-10.0, 10.0, 300))
+        x = np.array([10.0, -10.0, 0.0, 3.3])
+        idx = cb.quantize(x)
+        self.assertEqual(int(idx.max()), 299)  # code 299 -- exactly the audit's previously-failing case
+        self.assertEqual(idx.dtype, np.uint16)
+        packed, n = cb.compress(x)  # used to raise ValueError: "a code does not fit in 8 bits"
+        self.assertEqual(n, x.size)
+        self.assertEqual(packed.nbytes, 2 * n)  # 16-bit index per value, not capped at 8
+        back = cb.decompress(packed, n)
+        self.assertTrue(np.array_equal(back, cb.round_trip(x)))
+
+    def test_very_large_codebook_uses_32_bit_index_path(self):
+        # Beyond 65536 codes, quantize's indices step up to uint32; compress must follow with a
+        # matching 32-bit-per-code packed width rather than staying capped at 8 or 16 bits.
+        cb = CodebookFormat(np.linspace(-1.0, 1.0, 70000))
+        x = np.linspace(-1.0, 1.0, 50)
+        self.assertEqual(cb.quantize(x).dtype, np.uint32)
+        packed, n = cb.compress(x)
+        self.assertEqual(packed.nbytes, 4 * n)  # 32-bit index per value, byte-aligned (not sub-byte)
+        back = cb.decompress(packed, n)
+        self.assertTrue(np.array_equal(back, cb.round_trip(x)))
+
+    def test_empty_codebook_rejected(self):
+        with self.assertRaises(ValueError):
+            CodebookFormat(np.array([]))
+
+    def test_non_finite_codebook_rejected(self):
+        for bad in (np.array([1.0, np.nan, 3.0]), np.array([1.0, np.inf, 3.0]), np.array([1.0, -np.inf, 3.0])):
+            with self.assertRaises(ValueError):
+                CodebookFormat(bad)
+
+    def test_duplicate_codebook_entries_are_allowed_and_round_trip_correctly(self):
+        # Documented design decision (class docstring): duplicates cost a wasted index but do not break
+        # nearest-code assignment or decoding -- both duplicate entries decode to the same, correct
+        # value, and fit()'s Lloyd iteration can legitimately produce them on degenerate data.
+        cb = CodebookFormat(np.array([1.0, 1.0, 3.0, 3.0, 5.0]))
+        rt = cb.round_trip(np.array([1.0, 3.0, 5.0, 0.5, 6.0]))
+        self.assertTrue(np.array_equal(rt, np.array([1.0, 3.0, 5.0, 1.0, 5.0])))
+
+    def test_fit_rejects_nonpositive_or_non_integer_n_codes(self):
+        data = np.random.RandomState(10).randn(200)
+        for bad in (0, -3, 2.5):
+            with self.assertRaises(ValueError):
+                CodebookFormat.fit(data, bad)
+
+    def test_fit_rejects_nonpositive_or_non_integer_iters(self):
+        data = np.random.RandomState(11).randn(200)
+        for bad in (0, -1, 1.5):
+            with self.assertRaises(ValueError):
+                CodebookFormat.fit(data, 8, iters=bad)
+
+    def test_negative_control_well_formed_codebook_still_compresses_round_trip(self):
+        # Negative control: an ordinary, valid codebook must keep working exactly as before.
+        rng = np.random.RandomState(12)
+        data = np.concatenate([rng.normal(-2, 0.5, 3000), rng.normal(2, 0.5, 3000)])
+        fmt = CodebookFormat.fit(data, 32)
+        packed, n = fmt.compress(data)
+        back = fmt.decompress(packed, n)
+        self.assertTrue(np.array_equal(back, fmt.round_trip(data)))
+        self.assertLess(fmt.measured_max_abs_error(data), 1.0)
+
 
 class ErrorTracingTest(unittest.TestCase):
     def test_min_float_mantissa_bits_meets_target(self):
