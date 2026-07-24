@@ -52,14 +52,34 @@ class DiscrepancyLikelihood:
 
     def __init__(self, predict_fn: Callable[[Hypothesis], Any], *, tier: str, temperature: float = 1.0) -> None:
         _check_tier(tier)
+        temperature = float(temperature)
+        if not math.isfinite(temperature) or temperature <= 0:
+            # Caught here, at construction, rather than left to surface later inside exp(-discrepancy /
+            # temperature): 0 divides by zero at scoring time, far from this mistake; negative flips the
+            # sign in the exponent and silently reverses the discrepancy ordering (a worse match would
+            # score a *higher* likelihood); NaN/inf propagate into a NaN or a discrepancy-blind constant
+            # likelihood instead of failing loudly.
+            raise ValueError(
+                f"DiscrepancyLikelihood temperature must be a finite, strictly positive number, got {temperature!r}."
+            )
         self.predict_fn = predict_fn
         self.tier = tier
-        self.temperature = float(temperature)
+        self.temperature = temperature
 
     def __call__(self, hypothesis: Hypothesis, observation: Any) -> float:
         predicted = self.predict_fn(hypothesis)
         result = discrepancy_report(predicted, observation)
-        return math.exp(-result.value / self.temperature)
+        likelihood = math.exp(-result.value / self.temperature)
+        if not math.isfinite(likelihood) or likelihood < 0:
+            # Internal-consistency check on our own output before it reaches portfolio reweighting/
+            # normalization: a NaN or infinite discrepancy value (e.g. NaN/inf leaking in from
+            # predict_fn or the observation) would otherwise pass through exp() as a NaN or infinite
+            # "likelihood" silently, rather than failing where the bad input actually originated.
+            raise ValueError(
+                f"DiscrepancyLikelihood produced a non-finite or negative likelihood {likelihood!r} from "
+                f"discrepancy value {result.value!r} (metric={result.metric!r}); refusing to return it."
+            )
+        return likelihood
 
 
 class CallableLikelihood:
