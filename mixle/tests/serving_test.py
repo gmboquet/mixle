@@ -58,6 +58,35 @@ class _FlakyModel:
         return -0.5
 
 
+class _BatchDownModel:
+    """A model whose batch endpoint always fails, but whose per-record endpoint always succeeds: the
+    batch path specifically is degraded, but the fallback recovers every record and no data is lost."""
+
+    def dist_to_encoder(self):
+        return _IdentityEncoder()
+
+    def seq_log_density(self, enc):
+        raise ConnectionError("simulated batch endpoint outage")
+
+    def log_density(self, r):
+        return -0.5
+
+
+class _BatchOKModel:
+    """Control for _BatchDownModel: the batch endpoint succeeds on the first try, returning the exact
+    same values _BatchDownModel's per-record fallback recovers -- so the two Services' returned arrays
+    and unscorable/unavailable signals are identical, and only batch_unavailable_rate tells them apart."""
+
+    def dist_to_encoder(self):
+        return _IdentityEncoder()
+
+    def seq_log_density(self, enc):
+        return np.full(len(enc), -0.5, dtype=float)
+
+    def log_density(self, r):
+        return -0.5
+
+
 class ModelRegistryTest(unittest.TestCase):
     def _fit(self, mu, seed):
         data = np.random.RandomState(seed).normal(mu, 1.0, 300).tolist()
@@ -206,6 +235,65 @@ class ModelServiceOutageTest(unittest.TestCase):
         svc = Service(GaussianDistribution(0.0, 1.0), name="g")
         h = svc.health()
         self.assertEqual(h, {"events": 0, "drift_events": 0})
+
+
+class ModelServiceBatchFallbackTest(unittest.TestCase):
+    """The batch call itself failing (``seq_log_density`` raising) must be visible even when every
+    per-record retry recovers a real score -- otherwise a batch endpoint that fails over to per-record
+    scoring on every call, but never actually loses a record, is completely invisible to health()."""
+
+    def test_batch_fallback_is_counted_even_when_every_retry_recovers(self):
+        svc = Service(_BatchDownModel(), name="batch-down")
+        lp = svc.score([1.0, 2.0, 3.0])
+        # every record recovered a real score through the per-record retry -- nothing was lost ...
+        self.assertTrue(np.all(np.isfinite(lp)))
+        self.assertEqual(svc.activity[-1]["n_unscorable"], 0)
+        self.assertEqual(svc.activity[-1]["n_unavailable"], 0)
+        # ... but the batch call itself failed for every record, and that must not be silently dropped.
+        self.assertEqual(svc.activity[-1]["n_batch_unavailable"], 3)
+        self.assertEqual(svc.health()["batch_unavailable_rate"], 1.0)
+
+    def test_batch_fallback_is_indistinguishable_from_first_try_success_without_the_new_signal(self):
+        # a batch call that succeeds on the first try and one that fails-then-fully-recovers return the
+        # identical array and the identical unscorable/unavailable signals; only batch_unavailable_rate
+        # tells the two apart -- the same "equal everywhere except the one signal that matters" shape as
+        # ModelServiceOutageTest.test_outage_is_distinguishable_from_a_genuine_low_probability_score.
+        svc_ok = Service(_BatchOKModel(), name="batch-ok")
+        lp_ok = svc_ok.score([1.0, 2.0, 3.0])
+
+        svc_fallback = Service(_BatchDownModel(), name="batch-down")
+        lp_fallback = svc_fallback.score([1.0, 2.0, 3.0])
+
+        self.assertTrue(np.array_equal(lp_ok, lp_fallback))
+        self.assertEqual(svc_ok.health()["unscorable_rate"], svc_fallback.health()["unscorable_rate"])
+        self.assertEqual(svc_ok.health()["unavailable_rate"], svc_fallback.health()["unavailable_rate"])
+        self.assertEqual(svc_ok.health()["batch_unavailable_rate"], 0.0)
+        self.assertNotEqual(svc_ok.health()["batch_unavailable_rate"], svc_fallback.health()["batch_unavailable_rate"])
+
+    def test_batch_unavailable_still_counts_records_that_also_fail_their_own_retry(self):
+        # _FlakyModel: batch always fails; the per-record retry fails only for the r == 2.0 sentinel.
+        # Every record in the batch went through the degraded batch-fallback path (n_batch_unavailable
+        # == 3), even though only one of them additionally failed its own retry (n_unavailable == 1) --
+        # the two counters answer different questions and neither subsumes the other.
+        svc = Service(_FlakyModel(), name="flaky")
+        svc.score([1.0, 2.0, 3.0])
+        self.assertEqual(svc.activity[-1]["n_batch_unavailable"], 3)
+        self.assertEqual(svc.activity[-1]["n_unavailable"], 1)
+
+    def test_cardinality_mismatch_is_not_treated_as_batch_unavailable(self):
+        # a batch call that *succeeds* but returns the wrong shape is a contract violation to raise on,
+        # not an exception to catch and silently retry per-record.
+        svc = Service(_WrongCardinalityModel(), name="bad-cardinality")
+        with self.assertRaises(ValueError):
+            svc.score([1.0, 2.0, 3.0, 4.0, 5.0])
+        self.assertEqual(len(svc.activity), 0)  # score() raised before logging anything
+
+    def test_healthy_batch_call_reports_zero_batch_unavailable_rate(self):
+        model = GaussianDistribution(0.0, 1.0)
+        svc = Service(model, name="g")
+        svc.score([0.0, 0.5, 1.0])
+        self.assertEqual(svc.activity[-1]["n_batch_unavailable"], 0)
+        self.assertEqual(svc.health()["batch_unavailable_rate"], 0.0)
 
 
 if __name__ == "__main__":
