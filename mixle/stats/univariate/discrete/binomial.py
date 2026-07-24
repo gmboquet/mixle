@@ -174,12 +174,12 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
             name: Optional distribution name.
             keys: Optional merge key.
         """
-        if p <= 0.0 or p >= 1.0:
+        if not math.isfinite(p) or p <= 0.0 or p >= 1.0:
             raise ValueError("Binomial distribution requires p in (0, 1).")
         else:
             self.p = float(p)
 
-        if n < 0 or np.isinf(n) or int(n) != n:
+        if n < 0 or np.isnan(n) or np.isinf(n) or int(n) != n:
             raise ValueError("Binomial distribution requires a non-negative integer n.")
         else:
             self.n = int(n)

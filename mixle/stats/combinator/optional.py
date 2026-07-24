@@ -82,6 +82,8 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             name (Optional[str]): Optional distribution name.
 
         """
+        if p is not None and (not np.isfinite(p) or p < 0.0 or p > 1.0):
+            raise ValueError("OptionalDistribution requires p in [0, 1].")
         self.dist = dist
         self.p = p if p is not None else 0.0
         self.has_p = p is not None

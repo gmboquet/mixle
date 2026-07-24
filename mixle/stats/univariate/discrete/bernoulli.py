@@ -96,7 +96,7 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
     ) -> None:
-        if p <= 0.0 or p >= 1.0:
+        if not math.isfinite(p) or p <= 0.0 or p >= 1.0:
             raise ValueError("BernoulliDistribution requires p in (0, 1).")
         self.p = float(p)
         self.log_p = math.log(self.p)
