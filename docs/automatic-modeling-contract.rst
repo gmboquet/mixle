@@ -80,7 +80,9 @@ Selection and validation
   out-of-sample, not a guess. One candidate is the no-estimator structure search itself (see "Dependence
   between fields"), so the copula/Bayesian-network upgrade competes on held-out data alongside every other
   candidate rather than needing a separate ``optimize(data)`` call. The frontier search is bounded by
-  ``max_candidates`` / ``timeout`` (worklist I6.5).
+  ``max_candidates`` / ``timeout`` (worklist I6.5) — except at ``max_candidates=0`` / ``timeout=0.0``, which
+  skip verification entirely and fall back to the raw heuristic recommendation, disclosed (not hidden) via
+  ``Model.notes``/``Model.frontier``.
 
 What it will *not* do
 ---------------------
