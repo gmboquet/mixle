@@ -156,27 +156,73 @@ def sum_certificate(x: Any) -> dict[str, float]:
     }
 
 
-def cast(x: Any, precision: Any) -> Any:
-    """Cast ``x`` onto the spectrum: a native dtype name, ``"dd"``/``"fp128"``, or an integer bit width.
+_DD_MAX_BITS = 128  # "fp128" is DoubleDouble's own label (~106 mantissa bits + labelled overhead);
+# mixle.engines.extended has no wider error-free-transform format yet (its module docstring names
+# quad-double/fp256 as unimplemented future work), so this is where MPFR actually takes over today.
+_NATIVE_DTYPE_BITS = (16, 32, 64)
 
-    Returns a numpy array (native), a :class:`~mixle.engines.extended.DoubleDouble` (``dd``/``fp128``),
-    or an MPFR object array (>= ~fp256 / explicit bit width).
+
+def _precision_bits(precision: str | int) -> int:
+    """Resolve a precision spelling to its canonical *total* bit width (sign + exponent + mantissa,
+    IEEE-754-style -- matching :class:`~mixle.engines.formats.FloatFormat` and
+    :class:`~mixle.engines.highprec.HighPrecisionFormat`'s own ``"fpN"`` naming).
+
+    Accepts ``"dd"`` (an alias for ``"fp128"``), a ``"fp<bits>"`` string, or a bare integer bit count --
+    the single source of truth every spelling normalizes through before :func:`cast` picks a
+    representation, so ``"fp96"`` and the integer ``96`` always mean the identical width.
+
+    Raises ``ValueError`` if the spelling does not resolve to a positive integer bit count.
     """
-    if isinstance(precision, str) and precision in ("dd", "fp128"):
+    if precision == "dd":
+        bits = _DD_MAX_BITS
+    elif isinstance(precision, str):  # "fp<bits>", e.g. "fp96"
+        digits = precision[2:]
+        try:
+            bits = int(digits)
+        except ValueError:
+            raise ValueError(
+                "precision string %r is not a valid 'fp<bits>' spelling (e.g. 'fp96')." % (precision,)
+            ) from None
+    else:
+        bits = precision
+    if bits < 1:
+        raise ValueError("precision must resolve to a positive bit width; %r resolved to %d bits." % (precision, bits))
+    return bits
+
+
+def _cast_by_bits(x: Any, bits: int) -> Any:
+    """Route a canonical total bit width to the one tiering policy every precision spelling shares:
+    a native numpy float for ``bits in (16, 32, 64)``; a simulated low-bit float
+    (:class:`~mixle.engines.formats.FloatFormat`) for any other ``bits <= 64``; a
+    :class:`~mixle.engines.extended.DoubleDouble` for ``bits <= _DD_MAX_BITS``; an MPFR object array
+    (:class:`~mixle.engines.highprec.HighPrecisionFormat`) beyond that.
+    """
+    if bits in _NATIVE_DTYPE_BITS:
+        return np.asarray(x, dtype="float%d" % bits)
+    if bits <= 64:
+        return _native_round(x, bits)
+    if bits <= _DD_MAX_BITS:
         return DoubleDouble.from_float(np.asarray(x, dtype=np.float64))
-    if isinstance(precision, str) and precision.startswith("fp"):
-        bits = int(precision[2:])
-        if bits <= 64:
-            return np.asarray(x, dtype="float%d" % bits) if bits in (16, 32, 64) else _native_round(x, bits)
-        return _mpfr_cast(x, bits)
+    return _mpfr_cast(x, bits)
+
+
+def cast(x: Any, precision: Any) -> Any:
+    """Cast ``x`` onto the spectrum: a native dtype name, ``"dd"``/``"fp<bits>"``, or an integer bit width.
+
+    ``"dd"``, ``"fp128"``, and the integer ``128`` are the same request (:class:`DoubleDouble`); ``"fp96"``
+    and the integer ``96`` are likewise the same request (both resolve to 96 total bits via
+    :func:`_precision_bits`) and route to the identical representation via :func:`_cast_by_bits`,
+    regardless of which spelling the caller used. A nonpositive bit width (e.g. ``"fp0"``, ``-5``) raises
+    ``ValueError`` rather than reaching format construction. Anything else (e.g. ``"float64"``,
+    ``np.float32``) is handed straight to :func:`numpy.dtype`.
+
+    Returns a numpy array (native / simulated low-bit), a :class:`~mixle.engines.extended.DoubleDouble`,
+    or an MPFR object array -- see :func:`_cast_by_bits` for the exact tiering.
+    """
+    if isinstance(precision, str) and (precision == "dd" or precision.startswith("fp")):
+        return _cast_by_bits(x, _precision_bits(precision))
     if isinstance(precision, int):
-        if precision in (16, 32, 64):
-            return np.asarray(x, dtype="float%d" % precision)
-        if precision <= 64:
-            return _native_round(x, precision)
-        if precision <= 128:
-            return DoubleDouble.from_float(np.asarray(x, dtype=np.float64))
-        return _mpfr_cast(x, precision)
+        return _cast_by_bits(x, _precision_bits(precision))
     return np.asarray(x, dtype=np.dtype(precision))
 
 

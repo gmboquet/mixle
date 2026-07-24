@@ -162,5 +162,84 @@ class CastTest(unittest.TestCase):
         self.assertTrue(np.allclose([float(v) for v in hp], x))
 
 
+class CastPrecisionSpellingTest(unittest.TestCase):
+    """MXR-080-0137: a string spelling ("fp96") and the equivalent integer spelling (96) used to select
+    different representation types (MPFR vs. DoubleDouble) for what is supposed to be the identical
+    request, and nonpositive integer widths reached malformed native-format construction instead of
+    being rejected."""
+
+    def _values(self, cast_result):
+        if isinstance(cast_result, DoubleDouble):
+            return np.asarray(cast_result.to_float(), dtype=np.float64)
+        if isinstance(cast_result, np.ndarray) and cast_result.dtype == object:
+            return np.array([float(v) for v in cast_result], dtype=np.float64)
+        return np.asarray(cast_result, dtype=np.float64)
+
+    def test_fp96_string_and_96_int_now_select_the_same_representation(self):
+        """The audit's exact repro: 'fp96' used to select an MPFR object array while 96 selected a
+        DoubleDouble -- incompatible types, costs, and semantics for the identical 96-bit request."""
+        x = np.array([1.0, 2.0, 3.0])
+        by_string = cast(x, "fp96")
+        by_int = cast(x, 96)
+        self.assertIs(type(by_string), type(by_int))
+        self.assertIsInstance(by_string, DoubleDouble)  # <= 128 total bits: DoubleDouble's own tier
+        self.assertTrue(np.allclose(self._values(by_string), self._values(by_int)))
+
+    def test_equivalent_spellings_agree_on_type_and_value_across_every_tier(self):
+        """Negative control, swept across the full tiering: native dtype, simulated low-bit float,
+        DoubleDouble, and MPFR all agree between the 'fp<bits>' and bare-int spellings of the same
+        width, not just at the one width the audit happened to name."""
+        x = np.array([1.0, 2.0, 3.0])
+        widths = (8, 16, 32, 48, 64, 65, 96, 100, 128, 129, 200, 256, 512, 1024)
+        for bits in widths:
+            with self.subTest(bits=bits):
+                by_string = cast(x, "fp%d" % bits)
+                by_int = cast(x, bits)
+                self.assertIs(type(by_string), type(by_int), msg="type mismatch at %d bits" % bits)
+                self.assertEqual(
+                    getattr(by_string, "dtype", None),
+                    getattr(by_int, "dtype", None),
+                    msg="dtype mismatch at %d bits" % bits,
+                )
+                self.assertTrue(np.allclose(self._values(by_string), self._values(by_int)))
+
+    def test_dd_fp128_and_128_are_the_same_request(self):
+        x = np.array([1.0, 2.0, 3.0])
+        by_dd = cast(x, "dd")
+        by_fp128 = cast(x, "fp128")
+        by_int = cast(x, 128)
+        self.assertIs(type(by_dd), type(by_fp128))
+        self.assertIs(type(by_fp128), type(by_int))
+        self.assertTrue(np.allclose(self._values(by_dd), self._values(by_fp128)))
+        self.assertTrue(np.allclose(self._values(by_fp128), self._values(by_int)))
+
+    def test_nonpositive_integer_width_rejected(self):
+        """Before the fix, -5 and 0 reached FloatFormat.fp's exponent-bits formula and crashed with an
+        opaque 'math domain error' (math.log2 of a nonpositive number) instead of a clear rejection."""
+        x = np.array([1.0, 2.0, 3.0])
+        for bad in (-5, 0, -1):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError) as ctx:
+                    cast(x, bad)
+                self.assertNotIn("math domain error", str(ctx.exception))
+                self.assertIn("positive", str(ctx.exception))
+
+    def test_nonpositive_fp_string_width_rejected(self):
+        x = np.array([1.0, 2.0, 3.0])
+        for bad in ("fp-5", "fp0", "fp-1"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError) as ctx:
+                    cast(x, bad)
+                self.assertNotIn("math domain error", str(ctx.exception))
+                self.assertIn("positive", str(ctx.exception))
+
+    def test_malformed_fp_string_rejected_cleanly(self):
+        x = np.array([1.0, 2.0, 3.0])
+        for bad in ("fp", "fpabc", "fp9.5"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    cast(x, bad)
+
+
 if __name__ == "__main__":
     unittest.main()
